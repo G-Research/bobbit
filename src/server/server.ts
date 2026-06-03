@@ -28,8 +28,8 @@ import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
-import { MarketplaceService, ConflictError as MarketplaceConflictError } from "./marketplace/service.js";
-import type { ConflictMode, EntityRef, InstallScope, SourceRecord } from "./marketplace/types.js";
+import { MarketplaceService, ConflictError as MarketplaceConflictError, parseInstallScope } from "./marketplace/service.js";
+import type { ConflictMode, EntityRef, SourceRecord } from "./marketplace/types.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
 import {
@@ -4469,7 +4469,10 @@ async function handleApiRoute(
 	// install scope is system|project, landing in the exact dirs the cascade
 	// and skill discovery already read.
 
-	const parseMarketScope = (raw: unknown): InstallScope => (raw === "project" ? "project" : "system");
+	// Validate the install scope + projectId from a request via the shared
+	// `parseInstallScope` helper (unit-tested): only system|project, project
+	// requires projectId, a misspelled scope is a 400.
+	const resolveMarketScope = parseInstallScope;
 
 	// GET /api/marketplace/sources
 	if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
@@ -4534,9 +4537,9 @@ async function handleApiRoute(
 
 	// GET /api/marketplace/packs?scope=&projectId=
 	if (url.pathname === "/api/marketplace/packs" && req.method === "GET") {
-		const scope = parseMarketScope(url.searchParams.get("scope"));
-		const projectId = url.searchParams.get("projectId") || null;
-		json({ packs: marketplace.listPacks(scope, scope === "project" ? projectId : null) });
+		const parsed = resolveMarketScope(url.searchParams.get("scope"), url.searchParams.get("projectId"));
+		if ("error" in parsed) { json({ error: parsed.error }, 400); return; }
+		json({ packs: marketplace.listPacks(parsed.scope, parsed.projectId) });
 		return;
 	}
 
@@ -4545,9 +4548,9 @@ async function handleApiRoute(
 	if (marketPackMatch && req.method === "GET") {
 		const sourceId = decodeURIComponent(marketPackMatch[1]);
 		const packId = decodeURIComponent(marketPackMatch[2]);
-		const scope = parseMarketScope(url.searchParams.get("scope"));
-		const projectId = url.searchParams.get("projectId") || null;
-		const result = marketplace.getPackDetail(sourceId, packId, scope, scope === "project" ? projectId : null);
+		const parsed = resolveMarketScope(url.searchParams.get("scope"), url.searchParams.get("projectId"));
+		if ("error" in parsed) { json({ error: parsed.error }, 400); return; }
+		const result = marketplace.getPackDetail(sourceId, packId, parsed.scope, parsed.projectId);
 		if (!result) { json({ error: "Pack not found" }, 404); return; }
 		json(result);
 		return;
@@ -4557,9 +4560,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/marketplace/install" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body || !body.sourceId || !body.packId) { json({ error: "Missing sourceId/packId" }, 400); return; }
-		const scope = parseMarketScope(body.scope);
-		const projectId = scope === "project" ? (body.projectId || null) : null;
-		if (scope === "project" && !projectId) { json({ error: "project scope requires projectId" }, 400); return; }
+		const parsed = resolveMarketScope(body.scope, body.projectId);
+		if ("error" in parsed) { json({ error: parsed.error }, 400); return; }
+		const { scope, projectId } = parsed;
 		const entities: EntityRef[] | null = Array.isArray(body.entities) ? body.entities : null;
 		const conflict: ConflictMode = ["fail", "overwrite", "skip"].includes(body.conflict) ? body.conflict : "fail";
 		try {
@@ -4579,9 +4582,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/marketplace/update" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body || !body.sourceId || !body.packId) { json({ error: "Missing sourceId/packId" }, 400); return; }
-		const scope = parseMarketScope(body.scope);
-		const projectId = scope === "project" ? (body.projectId || null) : null;
-		if (scope === "project" && !projectId) { json({ error: "project scope requires projectId" }, 400); return; }
+		const parsed = resolveMarketScope(body.scope, body.projectId);
+		if ("error" in parsed) { json({ error: parsed.error }, 400); return; }
+		const { scope, projectId } = parsed;
 		try {
 			const outcome = await marketplace.updatePack({ sourceId: body.sourceId, packId: body.packId, scope, projectId });
 			json(outcome);
@@ -4595,9 +4598,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/marketplace/uninstall" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body || !body.sourceId || !body.packId) { json({ error: "Missing sourceId/packId" }, 400); return; }
-		const scope = parseMarketScope(body.scope);
-		const projectId = scope === "project" ? (body.projectId || null) : null;
-		if (scope === "project" && !projectId) { json({ error: "project scope requires projectId" }, 400); return; }
+		const parsed = resolveMarketScope(body.scope, body.projectId);
+		if ("error" in parsed) { json({ error: parsed.error }, 400); return; }
+		const { scope, projectId } = parsed;
 		try {
 			const result = marketplace.uninstallPack({ sourceId: body.sourceId, packId: body.packId, scope, projectId });
 			json(result);

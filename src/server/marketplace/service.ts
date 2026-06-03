@@ -26,6 +26,29 @@ import type {
 	SourceRecord,
 } from "./types.js";
 
+/**
+ * Validate an install scope + projectId from a request (REST routes). Only
+ * "system" and "project" are accepted — a missing/empty scope defaults to
+ * "system", a misspelled scope is rejected, and "project" requires a non-empty
+ * projectId. Returns the normalised pair or an `error` string for a 400.
+ */
+export function parseInstallScope(
+	rawScope: unknown,
+	rawProjectId: unknown,
+): { scope: InstallScope; projectId: string | null } | { error: string } {
+	const scopeVal = rawScope == null || rawScope === "" ? "system" : rawScope;
+	if (scopeVal !== "system" && scopeVal !== "project") {
+		return { error: `scope must be "system" or "project", got: ${JSON.stringify(rawScope)}` };
+	}
+	const projectId = scopeVal === "project"
+		? (typeof rawProjectId === "string" && rawProjectId.trim() ? rawProjectId : null)
+		: null;
+	if (scopeVal === "project" && !projectId) {
+		return { error: "project scope requires projectId" };
+	}
+	return { scope: scopeVal, projectId };
+}
+
 /** Per-project resolution result the host supplies. */
 export interface ResolvedProject {
 	configDir: string;

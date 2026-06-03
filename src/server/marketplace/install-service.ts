@@ -190,6 +190,14 @@ export class InstallService {
 			reconcileSkillDirRegistration(ctx);
 		}
 
+		// When the updated pack no longer declares any TRACKED entity, nothing
+		// remains installed for this pack: REMOVE the provenance record rather than
+		// upserting an empty one (an empty record is a phantom "installed" pack).
+		if (installed.length === 0) {
+			provenance.remove(source.id, pack.packId);
+			return { record: null, results: [], skipped: [] };
+		}
+
 		// Preserve the original install intent — update never flips pack↔subset.
 		const record = this.buildRecord(scope, projectId, source, pack, installed, existing.installMode);
 		provenance.upsert(record);
@@ -325,6 +333,11 @@ export class InstallService {
 		// copying so a mid-install failure can restore it. Deleting up-front (the
 		// old behaviour) made rollback unable to recover a clobbered entity.
 		const backups: { dest: string; backup: string }[] = [];
+		// Destination of the entity currently being written — cleared once its
+		// install returns. If install() throws mid-write it leaves a partial dest
+		// that is NOT yet in `installed`, so the rollback loop below can't reach it;
+		// we remove it explicitly first.
+		let failingDest: string | null = null;
 		try {
 			for (const t of toInstall) {
 				const handler = ENTITY_HANDLERS[t.type];
@@ -334,9 +347,17 @@ export class InstallService {
 					fs.renameSync(dest, backup);
 					backups.push({ dest, backup });
 				}
+				failingDest = handler.destPath(ctx, t.name);
 				installed.push(withContentHash(handler.install(ctx, packDir, t.name)));
+				failingDest = null;
 			}
 		} catch (err) {
+			// Clean up the partially-written dest of the entity that failed mid-copy
+			// (it never made it into `installed`), so rollback can restore a backup
+			// to that path and no half-written entity is left behind.
+			if (failingDest) {
+				try { fs.rmSync(failingDest, { recursive: true, force: true }); } catch { /* best-effort */ }
+			}
 			// Roll back this install's writes (best-effort), then restore backups so
 			// the system is left exactly as it was before the install began.
 			for (const e of installed) {

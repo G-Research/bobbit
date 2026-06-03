@@ -105,7 +105,9 @@ export function computeInstallStatus(
 	record: ProvenanceRecord | undefined,
 	currentContentHash: string | null,
 ): InstallStatus {
-	if (!record) return "not-installed";
+	// No record — or a record that tracks zero entities (e.g. a stale empty
+	// record) — means nothing is installed for this pack.
+	if (!record || record.entities.length === 0) return "not-installed";
 
 	for (const entity of record.entities) {
 		for (const p of entity.installedPaths) {

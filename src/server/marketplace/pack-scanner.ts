@@ -129,6 +129,19 @@ export function scanSource(sourceId: string, root: string): ScannedPack[] {
 		if (!fs.existsSync(path.join(dir, "pack.yaml"))) continue; // not a pack
 		packs.push(scanPackDir(sourceId, dir));
 	}
+
+	// Reject duplicate pack ids within one source. install/uninstall key on
+	// (sourceId, packId), so two packs claiming the same id are ambiguous — mark
+	// every pack in a colliding id group invalid rather than silently picking one.
+	const idCounts = new Map<string, number>();
+	for (const p of packs) idCounts.set(p.packId, (idCounts.get(p.packId) ?? 0) + 1);
+	for (const p of packs) {
+		if ((idCounts.get(p.packId) ?? 0) > 1) {
+			const dupMsg = `duplicate pack id "${p.packId}" declared by multiple pack directories in this source`;
+			p.valid = false;
+			p.error = p.error ? `${p.error}; ${dupMsg}` : dupMsg;
+		}
+	}
 	return packs;
 }
 

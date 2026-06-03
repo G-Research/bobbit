@@ -184,7 +184,10 @@ export class SourceRegistry {
 			url = (input.url ?? "").trim();
 			if (!url) throw new SourceRegistryError("git source requires a non-empty url");
 			validateGitUrl(url);
-			defaultLabel = basenameFromGitUrl(url);
+			// Derive the default label from the REDACTED url so a credential
+			// embedded in the url (userinfo / ?token= / #token=) never leaks into
+			// the surfaced label.
+			defaultLabel = basenameFromGitUrl(redactGitUrl(url));
 		} else {
 			srcPath = (input.path ?? "").trim();
 			if (!srcPath) throw new SourceRegistryError("local source requires a path");
