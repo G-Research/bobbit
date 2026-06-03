@@ -192,6 +192,42 @@ test.describe("Marketplace MVP", () => {
 		await selectScopeTab(page, ".roles-container", projectName);
 		await expect(page.locator(".role-row").filter({ hasText: "researcher" })).toHaveCount(1, { timeout: 10_000 });
 
+		// ── 6b. Pack drill-down: open the pack card → detail route renders the
+		//        flat manifest meta + per-entity rows with install controls ──
+		await navigateToHash(page, "#/market");
+		await expect(page.locator(".market-container")).toBeVisible({ timeout: 10_000 });
+		await selectScopeTab(page, ".market-container", projectName);
+		const researchCardDrill = page.locator(RESEARCH_CARD);
+		await expect(researchCardDrill).toBeVisible({ timeout: 10_000 });
+
+		// Clicking the card body (not an action button) opens the drill-down.
+		await researchCardDrill.locator(".market-pack-name").click();
+		await expect(page).toHaveURL(/#\/market\/[^/]+\/research-pack$/, { timeout: 10_000 });
+
+		// Manifest meta renders from the flat fields (name / version / description).
+		await expect(page.locator(".market-detail-name")).toHaveText("Research Pack", { timeout: 10_000 });
+		await expect(page.locator(".market-detail .market-pack-version")).toContainText("1.2.0");
+		await expect(page.locator(".market-detail-desc")).toContainText("Research-focused");
+		// research-pack ships a tool → the executable-code notice is shown.
+		await expect(page.locator('[data-testid="market-code-notice"]')).toBeVisible();
+
+		// Per-entity rows render with the declared contents (role / tool / skill).
+		const entityRows = page.locator('[data-testid="market-entity-row"]');
+		await expect(entityRows).toHaveCount(3, { timeout: 10_000 });
+		// The tool entity carries the per-row "code" badge (drives the warning).
+		const toolRow = page.locator('[data-testid="market-entity-row"][data-entity-type="tool"]');
+		await expect(toolRow.locator(".market-code-badge")).toBeVisible();
+		// The pack is installed at project scope, so each entity reports installed
+		// (per-entity `installed` boolean) and exposes no per-entity install button.
+		const researcherRowDetail = page.locator('[data-testid="market-entity-row"][data-entity-name="researcher"]');
+		await expect(researcherRowDetail).toHaveAttribute("data-installed", "true", { timeout: 10_000 });
+		await expect(researcherRowDetail.locator('[data-testid="market-entity-installed"]')).toBeVisible();
+		await expect(researcherRowDetail.locator('[data-testid="market-entity-install"]')).toHaveCount(0);
+
+		// Back to the marketplace list to finish the lifecycle from the cards.
+		await page.locator(".market-breadcrumb").first().click();
+		await expect(page.locator(".market-pack-grid")).toBeVisible({ timeout: 10_000 });
+
 		// ── 7. Uninstall removes exactly what it installed ──
 		await navigateToHash(page, "#/market");
 		await expect(page.locator(".market-container")).toBeVisible({ timeout: 10_000 });

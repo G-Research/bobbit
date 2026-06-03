@@ -1579,8 +1579,6 @@ export interface MarketSource {
 export interface MarketPackEntity {
 	type: "role" | "tool" | "skill";
 	name: string;
-	/** present on drill-down responses */
-	installStatus?: MarketInstallStatus;
 }
 
 export interface MarketPack {
@@ -1599,12 +1597,39 @@ export interface MarketPack {
 	installedCommit?: string | null;
 }
 
-export interface MarketPackDetail extends MarketPack {
-	author?: string;
-	homepage?: string;
-	license?: string;
-	minBobbit?: string;
-	manifest?: Record<string, any>;
+/**
+ * A single entity row in a pack drill-down. Flat contract: per-entity install
+ * state is a plain `installed` boolean (see GET /api/marketplace/packs/:s/:p).
+ */
+export interface MarketPackDetailEntity {
+	type: "role" | "tool" | "skill";
+	name: string;
+	installed: boolean;
+}
+
+/**
+ * Pack drill-down response — a FLAT shape returned directly by
+ * GET /api/marketplace/packs/:sourceId/:packId (no nesting). Optional manifest
+ * fields are `null` (not absent) so the renderer can treat them uniformly.
+ */
+export interface MarketPackDetail {
+	sourceId: string;
+	packId: string;
+	name: string;
+	description: string;
+	version: string;
+	sourceLabel: string;
+	author: string | null;
+	homepage: string | null;
+	license: string | null;
+	minBobbit: string | null;
+	hasTools: boolean;
+	valid: boolean;
+	error: string | null;
+	installStatus: MarketInstallStatus;
+	installedVersion: string | null;
+	installedCommit: string | null;
+	entities: MarketPackDetailEntity[];
 }
 
 export interface MarketActionResult {
