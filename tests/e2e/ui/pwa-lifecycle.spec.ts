@@ -223,6 +223,33 @@ test.describe("PWA lifecycle recovery", () => {
 		expect(mountedAfter).toBe(true);
 	});
 
+	test("document freeze/resume events drive the resume probe (listeners are on document, not window)", async ({ page }) => {
+		await injectStandaloneAndReloadSeam(page);
+		await openApp(page);
+
+		const probesBefore = await page.evaluate(() => (window as any).__bobbitResumeProbes ?? 0);
+
+		// Per the Page Lifecycle spec, `freeze`/`resume` are dispatched AT
+		// `document` and do NOT bubble — so the handlers must be registered on
+		// `document`. Dispatching here on `document` must reach them: freeze marks
+		// hidden, resume schedules the liveness probe. If the listeners were on
+		// `window` (the bug) these dispatches would never reach a handler and the
+		// resume probe counter would never advance → this test FAILS.
+		await page.evaluate(() => {
+			document.dispatchEvent(new Event("freeze"));
+			document.dispatchEvent(new Event("resume"));
+		});
+
+		// Event-driven wait: the resume path ran iff the probe counter advances.
+		await page.waitForFunction(
+			(before) => ((window as any).__bobbitResumeProbes ?? 0) > before,
+			probesBefore,
+			{ timeout: 10_000 },
+		);
+		// Short gap + live heartbeat → the probe must NOT reload a live page.
+		expect(await reloadCount(page)).toBe(0);
+	});
+
 	test("healthy boot clears the inline boot watchdog", async ({ page }) => {
 		await injectStandaloneAndReloadSeam(page);
 		await openApp(page);

@@ -293,13 +293,17 @@ export function installPwaLifecycleRecovery(): void {
 
 	// §3.2 — suspend/resume tracking. Redundantly driven by pagehide, freeze,
 	// resume and visibilitychange to cover iOS's partial Page Lifecycle support.
+	// `pageshow`/`pagehide` are window events; per the Page Lifecycle spec
+	// `freeze`/`resume` are dispatched AT `document` and do NOT bubble, so they
+	// must be registered on `document` (a window listener would never fire);
+	// `visibilitychange` is likewise a document event.
 	window.addEventListener("pagehide", () => {
 		if (isStandalone()) markHidden();
 	});
-	window.addEventListener("freeze", () => {
+	document.addEventListener("freeze", () => {
 		if (isStandalone()) markHidden();
 	});
-	window.addEventListener("resume", () => {
+	document.addEventListener("resume", () => {
 		if (isStandalone()) onResume();
 	});
 	document.addEventListener("visibilitychange", () => {
