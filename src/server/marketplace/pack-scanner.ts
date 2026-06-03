@@ -86,7 +86,14 @@ export function scanPackDir(sourceId: string, packDir: string): ScannedPack {
 	for (const [key, listRaw] of Object.entries(manifest.contents)) {
 		const handler = handlerForManifestKey(key);
 		if (!handler) continue; // unknown contents key — preserved, ignored
-		const list = Array.isArray(listRaw) ? listRaw : [];
+		// A SUPPORTED contents key whose value is not an array is malformed: reject
+		// the pack rather than silently coercing to [] (which would hide declared
+		// entities the author intended to ship).
+		if (!Array.isArray(listRaw)) {
+			errors.push(`${key}: contents value must be an array of entity names`);
+			continue;
+		}
+		const list = listRaw;
 		for (const name of list) {
 			if (typeof name !== "string" || !name.trim()) {
 				errors.push(`${key}: entry must be a non-empty string`);

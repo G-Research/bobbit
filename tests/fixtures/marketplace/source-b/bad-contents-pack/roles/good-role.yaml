@@ -1,0 +1,8 @@
+name: good-role
+label: Good Role
+accessory: none
+createdAt: 0
+updatedAt: 0
+promptTemplate: |-
+  A role whose declaration is fine; the pack is invalid only because the
+  sibling `tools` contents key is a string instead of an array.

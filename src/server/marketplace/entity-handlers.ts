@@ -232,6 +232,13 @@ const roleHandler: EntityTypeHandler = {
 			if (!parsed || typeof parsed !== "object" || typeof parsed.name !== "string" || !parsed.name.trim()) {
 				return { ok: false, error: `role roles/${name}.yaml has no valid name field` };
 			}
+			// The role's YAML `name` is the key ConfigCascade resolves it under, so it
+			// must equal the declared entity name (= the filename). A mismatch would
+			// install roles/<name>.yaml yet resolve under a different role name,
+			// breaking provenance/uninstall symmetry and origin badges.
+			if (parsed.name.trim() !== name) {
+				return { ok: false, error: `role roles/${name}.yaml declares name "${parsed.name.trim()}" but must match entity name "${name}"` };
+			}
 		} catch (err) {
 			return { ok: false, error: `role roles/${name}.yaml failed to parse: ${(err as Error).message}` };
 		}

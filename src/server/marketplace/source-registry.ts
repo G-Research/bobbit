@@ -10,49 +10,12 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { stripTokenFromGitUrl } from "../skills/git.js";
+import { redactGitUrl } from "./git-url-redact.js";
 import type { SourceKind, SourceRecord } from "./types.js";
 
-/**
- * Query-param / fragment keys that may carry a credential and must be redacted
- * from any surfaced/logged git URL (case-insensitive).
- */
-const SENSITIVE_URL_KEYS = /^(?:token|access_token|private_token|personal_access_token|oauth_token|api[_-]?key|key|auth|authorization|password|passwd|secret)$/i;
-
-/**
- * Fully redact credentials from a git URL for display/logging:
- *  - userinfo (`user:token@host`) via the shared `stripTokenFromGitUrl` helper;
- *  - sensitive query-string params (`?token=…`, `?access_token=…`, …);
- *  - a fragment that carries a token assignment (`#access_token=…`).
- * Non-URL forms (scp-like `git@host:path`, local paths) are returned unchanged.
- */
-export function redactGitUrl(url: string): string {
-	const stripped = stripTokenFromGitUrl(url);
-	let parsed: URL;
-	try {
-		parsed = new URL(stripped);
-	} catch {
-		return stripped; // not a parseable URL (ssh shorthand / local path)
-	}
-	let changed = false;
-	for (const key of [...parsed.searchParams.keys()]) {
-		if (SENSITIVE_URL_KEYS.test(key)) {
-			parsed.searchParams.delete(key);
-			changed = true;
-		}
-	}
-	// Fragments are meaningless to git remotes; drop one that looks like it
-	// smuggles a credential (`#token=…`, `#access_token=…`, …).
-	if (parsed.hash) {
-		const frag = parsed.hash.replace(/^#/, "");
-		const fragKey = frag.split("=")[0];
-		if (SENSITIVE_URL_KEYS.test(fragKey)) {
-			parsed.hash = "";
-			changed = true;
-		}
-	}
-	return changed ? parsed.toString() : stripped;
-}
+// redactGitUrl lives in its own module so the sync service can redact identically
+// without importing the whole registry. Re-exported here for existing callers.
+export { redactGitUrl } from "./git-url-redact.js";
 
 /**
  * Return a copy of a source record with any embedded git credentials stripped

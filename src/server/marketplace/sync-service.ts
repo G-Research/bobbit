@@ -11,7 +11,7 @@ import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { stripTokenFromGitUrl } from "../skills/git.js";
+import { redactGitUrlInText } from "./git-url-redact.js";
 import { validateGitRef, validateGitUrl } from "./source-registry.js";
 import type { SourceRecord } from "./types.js";
 
@@ -73,8 +73,10 @@ export class GitSourceBackend implements SourceBackend {
 			const commit = (await git(["rev-parse", "HEAD"], cacheDir)).trim();
 			return { root: cacheDir, commit: commit || null, contentHash: null, error: null };
 		} catch (err) {
-			// Surface a token-stripped message; leave any previous good cache intact.
-			const msg = (err as Error).message.split(url).join(stripTokenFromGitUrl(url));
+			// Surface a fully-redacted message: the url is redacted AND its secret
+			// substrings (userinfo + ?token=/#token= values) are scrubbed wherever git
+			// reformatted them, so no credential can leak into lastSyncError.
+			const msg = redactGitUrlInText((err as Error).message, url);
 			return { root: cacheDir, commit: null, contentHash: null, error: msg };
 		}
 	}

@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { hashInstalledEntity } from "./pack-scanner.js";
-import type { EntityType, InstallStatus, ProvenanceRecord, ScannedPack, SourceRecord } from "./types.js";
+import type { EntityRef, EntityType, InstallStatus, ProvenanceRecord, ScannedPack, SourceRecord } from "./types.js";
 
 const ENTITY_TYPES: EntityType[] = ["role", "tool", "skill"];
 
@@ -88,6 +88,43 @@ export class ProvenanceStore {
 		const before = this.records.length;
 		this.records = this.records.filter((r) => !(r.sourceId === sourceId && r.packId === packId));
 		if (this.records.length !== before) this.save();
+	}
+
+	/**
+	 * Transfer ownership of the given (type, name) entities to the installing pack
+	 * by dropping them from every OTHER pack record in this (same-scope) store.
+	 *
+	 * Called after an `overwrite` install/update rewrites the bytes of an entity
+	 * another pack previously installed: the destination path is now the new
+	 * pack's, so the prior pack must no longer claim it — otherwise uninstalling
+	 * the prior pack would delete an entity it no longer owns (asymmetry). A record
+	 * emptied by the removal is dropped entirely so it never lingers as a phantom
+	 * "installed" pack. The (keepSourceId, keepPackId) record is never touched
+	 * (the caller upserts it separately).
+	 */
+	supersedeEntities(entities: EntityRef[], keepSourceId: string, keepPackId: string): void {
+		if (entities.length === 0) return;
+		const keys = new Set(entities.map((e) => `${e.type}/${e.name}`));
+		let changed = false;
+		const next: ProvenanceRecord[] = [];
+		for (const r of this.records) {
+			if (r.sourceId === keepSourceId && r.packId === keepPackId) {
+				next.push(r);
+				continue;
+			}
+			const filtered = r.entities.filter((e) => !keys.has(`${e.type}/${e.name}`));
+			if (filtered.length === r.entities.length) {
+				next.push(r);
+				continue;
+			}
+			changed = true;
+			if (filtered.length > 0) next.push({ ...r, entities: filtered });
+			// else: drop the now-empty record entirely.
+		}
+		if (changed) {
+			this.records = next;
+			this.save();
+		}
 	}
 }
 
