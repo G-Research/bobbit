@@ -8,7 +8,7 @@ import { repeat } from "lit/directives/repeat.js";
 import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, ShoppingBag, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -437,6 +437,7 @@ function renderMobileLanding() {
 						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit")
 							|| (route.view === "settings" && (route as any).settingsTab === "workflows");
 						const isSkillsActive = isRouteActive("skills");
+						const isMarketActive = isRouteActive("market");
 						return html`
 					<div class="flex items-center gap-1">
 						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
@@ -465,6 +466,12 @@ function renderMobileLanding() {
 								setHashRoute("settings", `${projectId}/workflows`, true);
 							}}>
 							${icon(WorkflowIcon, "xs")} Workflows
+						</button>
+						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+							data-testid="market-nav-button-mobile"
+							title="Marketplace"
+							@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}>
+							${icon(ShoppingBag, "xs")} Market
 						</button>
 						<button
 							data-new-goal-trigger
@@ -2412,6 +2419,9 @@ export function doRenderApp(): void {
 		}
 		if (route.view === "skills") {
 			return lazyPage("skills", () => import("./skills-page.js"), "renderSkillsPage");
+		}
+		if (route.view === "market") {
+			return lazyPage("marketplace", () => import("./marketplace-page.js"), "renderMarketplacePage");
 		}
 		if (route.view === "settings") {
 			return lazyPage("settings", () => import("./settings-page.js"), "renderSettingsPage");

@@ -2,7 +2,7 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search" | "walkthrough";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "settings" | "search" | "walkthrough";
 
 export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
@@ -100,6 +100,9 @@ export function getRouteFromHash(): AppRoute {
 	if (hash === "#/skills") {
 		return { view: "skills" };
 	}
+	if (hash === "#/market") {
+		return { view: "market" };
+	}
 	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z0-9-]+))?(?:\/([a-z]+))?$/);
 	if (settingsMatch) {
 		const first = settingsMatch[1] as string | undefined;
@@ -180,6 +183,8 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = "#/staff";
 	} else if (view === "skills") {
 		newHash = "#/skills";
+	} else if (view === "market") {
+		newHash = "#/market";
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
 	} else if (view === "walkthrough") {
@@ -213,7 +218,7 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 /** Config page route views (not landing, session, or goal-dashboard). */
 const CONFIG_VIEWS: Set<RouteView> = new Set([
 	"roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
-	"skills", "settings", "staff", "staff-edit",
+	"skills", "market", "settings", "staff", "staff-edit",
 	"search",
 ]);
 
@@ -226,6 +231,11 @@ export function isConfigPageRoute(): boolean {
 export function isRouteActive(...views: RouteView[]): boolean {
 	const current = getRouteFromHash().view;
 	return views.some(v => v === current);
+}
+
+/** Returns true if the marketplace surface is the active route. */
+export function isMarketActive(): boolean {
+	return isRouteActive("market");
 }
 
 /** Shared previous-hash for all config page toggle buttons. */

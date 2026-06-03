@@ -8,7 +8,7 @@ import { setHashRoute } from "./routing.js";
 import { getConfigScope, setConfigScope, getConfigProjectId, renderConfigScopeRow } from "./config-scope.js";
 
 // Module-level state
-let slashSkills: Array<{ name: string; description: string; source: string; filePath: string; content: string }> = [];
+let slashSkills: Array<{ name: string; description: string; source: string; filePath: string; content: string; originPackName?: string | null }> = [];
 let loading = true;
 let error = "";
 let expandedSkill: string | null = null;
@@ -126,6 +126,7 @@ function renderSkillCard(skill: typeof slashSkills[0]): TemplateResult {
 					<div class="flex items-center gap-2">
 						<span class="text-sm font-medium">/${skill.name}</span>
 						${sourceLabel(skill.source)}
+						${skill.originPackName ? html`<span class="config-origin-pack" data-testid="origin-pack-chip" title="From pack: ${skill.originPackName}">${skill.originPackName}</span>` : ""}
 					</div>
 					<div class="text-xs text-muted-foreground mt-0.5 truncate">${skill.description}</div>
 				</div>

@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
+import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, ShoppingBag, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -1347,6 +1347,7 @@ export function renderSidebar() {
 	const isToolsActive = isRouteActive("tools", "tool-edit");
 	const isWorkflowsActive = isRouteActive("workflows", "workflow-edit");
 	const isSkillsActive = isRouteActive("skills");
+	const isMarketActive = isRouteActive("market");
 
 	return html`
 		<div class="shrink-0 h-full flex flex-col sidebar-edge sidebar-root relative" data-testid="sidebar-expanded" data-project-reordering=${isProjectReordering() ? "true" : "false"} style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
@@ -1387,6 +1388,15 @@ export function renderSidebar() {
 					>
 						${icon(Workflow, "xs", "!w-3.5 !h-3.5")}
 						<span>Workflows</span>
+					</button>
+					<button
+						data-testid="market-nav-button"
+						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
+						@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); import("./routing.js").then((m) => m.setHashRoute("market")); })}
+						title="Marketplace"
+					>
+						${icon(ShoppingBag, "xs", "!w-3.5 !h-3.5")}
+						<span>Market</span>
 					</button>
 					<button
 						data-new-goal-trigger

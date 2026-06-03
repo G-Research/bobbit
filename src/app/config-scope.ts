@@ -6,7 +6,7 @@ import { html, type TemplateResult } from "lit";
 import { state } from "./state.js";
 import { gatewayFetch } from "./api.js";
 
-export type ConfigOrigin = "builtin" | "server" | "project";
+export type ConfigOrigin = "builtin" | "server" | "user" | "project";
 
 // ============================================================================
 // SCOPE STATE
@@ -35,15 +35,19 @@ export function getConfigProjectId(): string | undefined {
 const BADGE_CLASSES: Record<ConfigOrigin, string> = {
 	builtin: "bg-muted text-muted-foreground",
 	server: "config-origin-server",
+	user: "config-origin-user",
 	project: "config-origin-project",
 };
 
-/** Render origin badge for a config item. Returns empty string if origin is undefined (backward compat). */
-export function renderOriginBadge(origin?: ConfigOrigin, overrides?: ConfigOrigin): TemplateResult | string {
+/** Render origin badge for a config item. Returns empty string if origin is undefined (backward compat).
+ *  When `originPackName` is provided (market-pack-originated entity, §5.2), an additional pack chip
+ *  is rendered next to the scope badge so the entity is visibly tied to the pack it came from. */
+export function renderOriginBadge(origin?: ConfigOrigin, overrides?: ConfigOrigin, originPackName?: string | null): TemplateResult | string {
 	if (!origin) return "";
 	return html`
 		<span class="inline-flex items-center gap-1 shrink-0">
 			<span class="config-origin-badge ${BADGE_CLASSES[origin]}">${origin}</span>
+			${originPackName ? html`<span class="config-origin-pack" data-testid="origin-pack-chip" title="From pack: ${originPackName}">${originPackName}</span>` : ""}
 			${overrides ? html`<span class="config-origin-overrides">overrides ${overrides}</span>` : ""}
 		</span>
 	`;

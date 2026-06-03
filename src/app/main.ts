@@ -10,6 +10,7 @@ import "./app.css";
 import "./workflow-page.css";
 import "./role-manager.css";
 import "./tool-manager.css";
+import "./marketplace.css";
 import "./storage.js"; // must initialize before anything else
 // Eagerly register <bg-process-pill> so it's available the moment the chat
 // view mounts. Lazy-loading via `ensureBgProcessPill()` (lazy-widgets.ts) was
