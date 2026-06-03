@@ -7,9 +7,8 @@
  * gives full browser fidelity: real DOM, real CSS, real reload.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "../fixtures/build-bundle";
 
 const FIXTURE = path.resolve("tests/fixtures/bash-renderer.html");
 const BUNDLE = path.resolve("tests/fixtures/bash-renderer-bundle.js");
@@ -17,22 +16,11 @@ const ENTRY = path.resolve("tests/fixtures/bash-renderer-entry.ts");
 const RENDERER_SRC = path.resolve("src/ui/tools/renderers/BashRenderer.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(fs.statSync(ENTRY).mtimeMs, fs.statSync(RENDERER_SRC).mtimeMs);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				'--alias:pdfjs-dist=./tests/fixtures/empty-shim',
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({
+		entry: ENTRY,
+		outfile: BUNDLE,
+		deps: [ENTRY, RENDERER_SRC],
+	});
 });
 
 const PAGE = `file://${FIXTURE}`;
