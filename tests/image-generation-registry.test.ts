@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, getImageModelByPref, imageModelMentionedInText, parseImageModelPref } from "../src/server/agent/image-generation.js";
+import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, getImageModelByPref, parseImageModelPref } from "../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 
 function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
@@ -169,23 +169,6 @@ test("OpenAI image generation can use Codex OAuth backend", async () => {
 	}
 });
 
-test("image model override detection requires a user-visible model mention", () => {
-	withPrefs((prefs) => {
-		assert.equal(
-			imageModelMentionedInText(prefs, "google/gemini-2.5-flash-image", "Generate a diagram with the selected model"),
-			false,
-		);
-		assert.equal(
-			imageModelMentionedInText(prefs, "google/gemini-2.5-flash-image", "Generate it with Nano Banana"),
-			true,
-		);
-		assert.equal(
-			imageModelMentionedInText(prefs, "openai/gpt-image-2", "Could you please use gpt-image-2?"),
-			true,
-		);
-	});
-});
-
 test("Google image model aliases resolve to API model IDs", () => {
 	withPrefs((prefs) => {
 		assert.equal(canonicalImageModelPref("google/nano-banana-2"), "google/gemini-3-pro-image-preview");
@@ -195,13 +178,5 @@ test("Google image model aliases resolve to API model IDs", () => {
 		assert.equal(canonicalImageModelPref("google/imagen-4-standard"), "google/imagen-4.0-generate-001");
 		assert.equal(canonicalImageModelPref("google/imagen-4-fast"), "google/imagen-4.0-fast-generate-001");
 		assert.equal(getImageModelByPref(prefs, "google/gemini-3-pro-image")?.id, "gemini-3-pro-image-preview");
-		assert.equal(
-			imageModelMentionedInText(prefs, "google/gemini-3-pro-image", "Could you generate one nano banana 2 for comparison?"),
-			true,
-		);
-		assert.equal(
-			imageModelMentionedInText(prefs, "google/imagen-4-ultra", "Please use Imagen 4 Ultra"),
-			true,
-		);
 	});
 });

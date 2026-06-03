@@ -1,17 +1,17 @@
 name: generate_image
 description: "Generate images via configured provider; uses session image model"
 summary: "Generate images via GPT Image, DALL-E, Gemini, etc."
-params: [prompt, model?, n?, size?, imageSize?, aspectRatio?, quality?, format?, background?, outputPath?]
+params: [prompt, n?, size?, imageSize?, aspectRatio?, quality?, format?, background?, outputPath?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Images
 docs: |-
-  Generates images through Bobbit's configured image provider. Routing rules and provider/model id reference live in the system prompt; this tool only documents parameters and examples. If the selected or requested model fails due to auth/provider availability, report the failure and ask before switching providers.
+  Generates images through Bobbit's configured image provider. The model is controlled by the session image-model selector / settings default and is not selectable via this tool. Routing rules and provider/model id reference live in the system prompt; this tool only documents parameters and examples. If the configured model fails due to auth/provider availability, report the failure and ask before switching providers.
 detail_docs: |-
   ## Purpose
 
-  Generate raster images from a text prompt using the configured image model. Provider/model id reference and routing rules (when to override `model`, how user-facing aliases map to ids) are documented in the system prompt — this file is not a duplicate source of truth.
+  Generate raster images from a text prompt using the configured image model. The model comes from the session image-model selector / settings default and cannot be chosen via this tool. Provider/model id reference and routing rules (how user-facing aliases map to ids) are documented in the system prompt — this file is not a duplicate source of truth.
 
   ## Parameters
 
@@ -19,7 +19,6 @@ detail_docs: |-
   |------|------|----------|-------------|
   | `prompt` | string | Yes | Detailed prompt describing the desired image. |
   | `outputPath` | string | No | File path (relative to the session worktree) to save the image. Multiple images add `-1`, `-2`, etc. Paths that escape the worktree are rejected. |
-  | `model` | string | No | Override model as `provider/modelId`; otherwise uses the session image model. |
   | `size` | string | No | OpenAI image size, e.g. `1024x1024`, `1536x1024`, `1024x1536`, or `auto`. |
   | `quality` | string | No | OpenAI quality, e.g. `auto`, `low`, `medium`, `high`, `standard`, or `hd`. |
   | `background` | string | No | GPT Image background: `auto`, `transparent`, or `opaque`. |
@@ -32,7 +31,7 @@ detail_docs: |-
 
   ```
   generate_image(prompt="A product photo of a matte black desk lamp on a walnut desk", outputPath="assets/lamp.png", size="1024x1024")
-  generate_image(prompt="Clean technical architecture diagram comparing two I/O paths", model="openai/gpt-image-2", size="1536x1024", outputPath="assets/io-diagram.png")
+  generate_image(prompt="Clean technical architecture diagram comparing two I/O paths", size="1536x1024", outputPath="assets/io-diagram.png")
   generate_image(prompt="Wide editorial illustration of a city at sunrise", aspectRatio="16:9")
   generate_image(prompt="Transparent sticker of a smiling robot", background="transparent", format="png")
   ```

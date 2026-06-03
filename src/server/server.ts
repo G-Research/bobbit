@@ -189,7 +189,7 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import { testModelPreference } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
-import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
+import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
@@ -4807,20 +4807,10 @@ async function handleApiRoute(
 		}
 		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
 		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
-		// Canonicalise both sides so equality compares apples-to-apples (e.g. user
-		// pref "google/nano-banana" vs requested "google/gemini-2.5-flash-image").
 		const selectedModelRaw = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
-		const selectedModel = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
-		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
-		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
-		const model = requestedModel
-			&& (
-				!sessionId
-				|| requestedModel === selectedModel
-				|| imageModelMentionedInText(preferencesStore, requestedModel, lastUserPrompt)
-			)
-			? requestedModel
-			: selectedModel;
+		// Selector / settings default is the single source of truth. body.model is ignored
+		// on purpose — never reintroduce a tool- or prompt-driven model override.
+		const model = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
 		try {
 			const result = await generateImage(preferencesStore, {
 				prompt: body.prompt,
