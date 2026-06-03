@@ -239,6 +239,15 @@ function entitiesCarryCode(entities: { type: string }[]): boolean {
 	return entities.some((e) => e.type === "tool");
 }
 
+/**
+ * Number of upstream-declared entities not yet installed at the active scope.
+ * The server omits this on older responses, so treat missing/invalid as 0.
+ */
+function newEntitiesCount(pack: { newEntitiesAvailable?: number }): number {
+	const n = pack.newEntitiesAvailable;
+	return typeof n === "number" && n > 0 ? n : 0;
+}
+
 async function handleInstall(pack: PackActionTarget, entities?: PackEntityRef[]): Promise<void> {
 	const toInstall = entities ?? pack.entities;
 	if (entitiesCarryCode(toInstall)) {
@@ -288,6 +297,14 @@ async function doInstall(pack: PackActionTarget, entities?: PackEntityRef[], con
 }
 
 async function handleUpdate(pack: PackActionTarget): Promise<void> {
+	// Update re-syncs and re-copies the pack's entities. If any carry executable
+	// code (tools), gate the action behind the same exec-code confirmation as
+	// install so the user re-acknowledges running un-sandboxed pack code.
+	if (entitiesCarryCode(pack.entities)) {
+		const { confirmAction } = await import("./dialogs.js");
+		const ok = await confirmAction("Update executable code", EXEC_CODE_WARNING, "Update", false);
+		if (!ok) return;
+	}
 	busyPackKey = packKey(pack.sourceId, pack.packId);
 	renderApp();
 	const result = await updatePack({
@@ -520,6 +537,9 @@ function renderPackCard(pack: MarketPack): TemplateResult {
 			<div class="market-pack-foot">
 				<span class="market-pack-source">${pack.sourceLabel || pack.sourceId}</span>
 				<div class="market-pack-foot-right">
+					${newEntitiesCount(pack) > 0
+						? html`<span class="market-status-badge market-status-update-available market-new-entities-badge" data-testid="market-new-entities-badge" title="Re-install this pack to add the new entities" data-count="${newEntitiesCount(pack)}">+${newEntitiesCount(pack)} new</span>`
+						: nothing}
 					${renderStatusBadge(pack.installStatus)}
 					${renderPackPrimaryAction(pack, busy, true)}
 				</div>
@@ -662,6 +682,13 @@ function renderPackDetailView(): TemplateResult {
 				<div class="market-code-notice" data-testid="market-code-notice" role="note">
 					${icon(AlertTriangle, "sm")}
 					<span>${EXEC_CODE_WARNING}</span>
+				</div>
+			` : nothing}
+
+			${newEntitiesCount(pack) > 0 ? html`
+				<div class="market-code-notice market-new-entities-notice" data-testid="market-new-entities-notice" role="note" data-count="${newEntitiesCount(pack)}">
+					${icon(Plus, "sm")}
+					<span>${newEntitiesCount(pack)} new ${newEntitiesCount(pack) === 1 ? "entity" : "entities"} available — re-install pack to add.</span>
 				</div>
 			` : nothing}
 

@@ -1595,6 +1595,12 @@ export interface MarketPack {
 	installStatus: MarketInstallStatus;
 	installedVersion?: string | null;
 	installedCommit?: string | null;
+	/**
+	 * Count of entities declared by the upstream pack that are NOT yet installed
+	 * at the active scope. >0 means re-installing would add new entities. Absent
+	 * on older server responses — treat missing as 0.
+	 */
+	newEntitiesAvailable?: number;
 }
 
 /**
@@ -1629,6 +1635,12 @@ export interface MarketPackDetail {
 	installStatus: MarketInstallStatus;
 	installedVersion: string | null;
 	installedCommit: string | null;
+	/**
+	 * Count of entities declared by the upstream pack that are NOT yet installed
+	 * at the active scope. >0 means re-installing would add new entities. Absent
+	 * on older server responses — treat missing as 0.
+	 */
+	newEntitiesAvailable?: number;
 	entities: MarketPackDetailEntity[];
 }
 
