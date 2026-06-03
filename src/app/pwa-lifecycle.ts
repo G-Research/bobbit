@@ -72,6 +72,8 @@ const LIVENESS_PROBE_MS = 1500;
 let installed = false;
 let reloaded = false;
 let booted = false;
+/** Active MutationObserver waiting for the first #app child, or null. */
+let bootObserver: MutationObserver | null = null;
 /** When the page was last hidden/frozen (epoch ms), or null. */
 let hiddenAtMs: number | null = null;
 /** Last liveness-heartbeat tick (epoch ms), or null before the first tick. */
@@ -312,14 +314,18 @@ export function installPwaLifecycleRecovery(): void {
 	}
 }
 
-/**
- * Record that the app has mounted content into #app and clear the inline boot
- * watchdog scheduled in index.html. Idempotent — safe to call once after the
- * first renderApp() regardless of standalone mode.
- */
-export function markAppBooted(): void {
+/** Finalize the boot: mark booted, clear the inline watchdog, drop observer. */
+function finalizeBoot(): void {
 	if (booted) return;
 	booted = true;
+	if (bootObserver) {
+		try {
+			bootObserver.disconnect();
+		} catch {
+			/* ignore */
+		}
+		bootObserver = null;
+	}
 	try {
 		if (typeof window !== "undefined" && window.__bobbitBootWatchdog != null) {
 			clearTimeout(window.__bobbitBootWatchdog as ReturnType<typeof setTimeout>);
@@ -328,4 +334,65 @@ export function markAppBooted(): void {
 	} catch {
 		/* ignore */
 	}
+}
+
+/**
+ * Record that the app is mounting and clear the inline boot watchdog scheduled
+ * in index.html — but ONLY once #app ACTUALLY has child content. Idempotent.
+ *
+ * renderApp() defers the real Lit render to a requestAnimationFrame (see
+ * src/app/state.ts), so the call site in main.ts fires markAppBooted()
+ * synchronously while #app is still EMPTY. Clearing the watchdog on that timing
+ * assumption would disable the grey-screen backstop if iOS froze the page
+ * between this call and the deferred render. So we never finalize on a timing
+ * assumption: if #app already has children we finalize immediately; otherwise
+ * we attach a MutationObserver and finalize on the first child insertion.
+ *
+ * Crucially, in the true grey-screen case where #app NEVER populates, the
+ * observer never fires, so the watchdog stays armed and fires after its timeout
+ * → reload. Safe to call regardless of standalone mode.
+ */
+export function markAppBooted(): void {
+	if (booted) return;
+
+	// No DOM / no #app element to observe — nothing to guard, finalize now.
+	if (typeof document === "undefined") {
+		finalizeBoot();
+		return;
+	}
+	const app = document.getElementById("app");
+	if (!app) {
+		finalizeBoot();
+		return;
+	}
+
+	// Already painted — finalize immediately.
+	if (app.children.length > 0) {
+		finalizeBoot();
+		return;
+	}
+
+	// Not yet painted. Without MutationObserver support (jsdom-less envs) we
+	// cannot reliably wait, so finalize now rather than leak — production
+	// browsers all support it.
+	if (typeof MutationObserver === "undefined") {
+		finalizeBoot();
+		return;
+	}
+
+	// Wait for the first child insertion before finalizing. Don't leak: a
+	// previously-attached observer (re-entrant call) is replaced.
+	if (bootObserver) {
+		try {
+			bootObserver.disconnect();
+		} catch {
+			/* ignore */
+		}
+		bootObserver = null;
+	}
+	bootObserver = new MutationObserver(() => {
+		const el = document.getElementById("app");
+		if (el && el.children.length > 0) finalizeBoot();
+	});
+	bootObserver.observe(app, { childList: true });
 }

@@ -424,8 +424,10 @@ async function initApp() {
 		state.appView = "gateway-starting";
 	}
 	renderApp();
-	// First paint into #app means JS executed and Lit mounted — clear the
-	// index.html boot watchdog and mark the app booted. See pwa-lifecycle.ts.
+	// Signal boot intent. renderApp() defers the real Lit render to a rAF, so
+	// #app may still be empty right now — markAppBooted() does NOT clear the
+	// index.html boot watchdog until #app ACTUALLY paints (via MutationObserver).
+	// See pwa-lifecycle.ts.
 	markAppBooted();
 
 	// Listen for browser back/forward navigation — register early so hash changes
