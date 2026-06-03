@@ -42,6 +42,7 @@ import {
 	type MarketPack,
 	type MarketPackDetail,
 	type MarketPackEntity,
+	type MarketPackDetailEntity,
 	type MarketScope,
 	type MarketInstallStatus,
 } from "./api.js";
@@ -54,6 +55,20 @@ import { getConfigScope, setConfigScope, getConfigProjectId, getCurrentProjectNa
 // ============================================================================
 
 type View = "list" | "pack";
+
+// Minimal entity ref the install engine needs (type + name). Both list-card
+// entities (MarketPackEntity) and drill-down entities (MarketPackDetailEntity)
+// satisfy it, so install/update/uninstall handlers work from either surface.
+type PackEntityRef = { type: "role" | "tool" | "skill"; name: string };
+// Structural shape the install/update/uninstall handlers operate on. Both
+// MarketPack (cards) and MarketPackDetail (drill-down) are assignable to it.
+type PackActionTarget = {
+	sourceId: string;
+	packId: string;
+	name: string;
+	installStatus: MarketInstallStatus;
+	entities: PackEntityRef[];
+};
 
 let currentView: View = "list";
 let sources: MarketSource[] = [];
@@ -224,7 +239,7 @@ function entitiesCarryCode(entities: { type: string }[]): boolean {
 	return entities.some((e) => e.type === "tool");
 }
 
-async function handleInstall(pack: MarketPack, entities?: MarketPackEntity[]): Promise<void> {
+async function handleInstall(pack: PackActionTarget, entities?: PackEntityRef[]): Promise<void> {
 	const toInstall = entities ?? pack.entities;
 	if (entitiesCarryCode(toInstall)) {
 		const { confirmAction } = await import("./dialogs.js");
@@ -234,7 +249,7 @@ async function handleInstall(pack: MarketPack, entities?: MarketPackEntity[]): P
 	await doInstall(pack, entities);
 }
 
-async function doInstall(pack: MarketPack, entities?: MarketPackEntity[], conflict?: "fail" | "overwrite" | "skip"): Promise<void> {
+async function doInstall(pack: PackActionTarget, entities?: PackEntityRef[], conflict?: "fail" | "overwrite" | "skip"): Promise<void> {
 	busyPackKey = packKey(pack.sourceId, pack.packId);
 	renderApp();
 	const result = await installPack({
@@ -272,7 +287,7 @@ async function doInstall(pack: MarketPack, entities?: MarketPackEntity[], confli
 	}
 }
 
-async function handleUpdate(pack: MarketPack): Promise<void> {
+async function handleUpdate(pack: PackActionTarget): Promise<void> {
 	busyPackKey = packKey(pack.sourceId, pack.packId);
 	renderApp();
 	const result = await updatePack({
@@ -291,7 +306,7 @@ async function handleUpdate(pack: MarketPack): Promise<void> {
 	}
 }
 
-async function handleUninstall(pack: MarketPack): Promise<void> {
+async function handleUninstall(pack: PackActionTarget): Promise<void> {
 	const { confirmAction } = await import("./dialogs.js");
 	const ok = await confirmAction(
 		"Uninstall pack",
@@ -339,6 +354,21 @@ function sourceDisplayName(source: MarketSource): string {
 		return parts[parts.length - 1] || source.path;
 	}
 	return source.id;
+}
+
+/**
+ * Return the URL only when it is a safe clickable scheme (http/https), else
+ * null. A pack manifest's `homepage` is attacker-controlled, so we never render
+ * `javascript:`, `data:`, `file:` etc. as an anchor href.
+ */
+function safeHttpUrl(raw: string | null | undefined): string | null {
+	if (!raw) return null;
+	try {
+		const scheme = new URL(raw).protocol;
+		return scheme === "http:" || scheme === "https:" ? raw : null;
+	} catch {
+		return null;
+	}
 }
 
 function entityIcon(type: string): typeof Users {
@@ -499,7 +529,7 @@ function renderPackCard(pack: MarketPack): TemplateResult {
 }
 
 /** Primary install/update/uninstall control for a pack, used on cards + detail. */
-function renderPackPrimaryAction(pack: MarketPack, busy: boolean, compact: boolean): TemplateResult {
+function renderPackPrimaryAction(pack: PackActionTarget, busy: boolean, compact: boolean): TemplateResult {
 	const stop = (fn: () => void) => (e: Event) => { e.stopPropagation(); fn(); };
 	const size = compact ? "sm" : undefined;
 	if (pack.installStatus === "not-installed") {
@@ -570,18 +600,17 @@ function renderMetaRow(label: string, value: string | TemplateResult): TemplateR
 	return html`<div class="market-meta-row"><span class="market-meta-label">${label}</span><span class="market-meta-value">${value}</span></div>`;
 }
 
-function renderEntityDetailRow(pack: MarketPackDetail, entity: MarketPackEntity): TemplateResult {
-	const status = entity.installStatus;
+function renderEntityDetailRow(pack: MarketPackDetail, entity: MarketPackDetailEntity): TemplateResult {
 	const busy = busyPackKey === packKey(pack.sourceId, pack.packId);
 	return html`
-		<div class="market-entity-row" data-testid="market-entity-row" data-entity-type="${entity.type}" data-entity-name="${entity.name}">
+		<div class="market-entity-row" data-testid="market-entity-row" data-entity-type="${entity.type}" data-entity-name="${entity.name}" data-installed="${entity.installed ? "true" : "false"}">
 			<span class="market-entity-icon">${icon(entityIcon(entity.type), "sm")}</span>
 			<span class="market-entity-type">${entity.type}</span>
 			<span class="market-entity-name">${entity.name}</span>
 			${entity.type === "tool" ? html`<span class="market-code-badge market-code-badge--sm" title=${EXEC_CODE_WARNING}>${icon(AlertTriangle, "sm")} code</span>` : nothing}
 			<span class="market-entity-spacer"></span>
-			${status && status !== "not-installed"
-				? html`<span class="market-installed-check" data-testid="market-entity-installed">${icon(Check, "sm")} ${STATUS_LABELS[status]}</span>`
+			${entity.installed
+				? html`<span class="market-installed-check" data-testid="market-entity-installed">${icon(Check, "sm")} Installed</span>`
 				: Button({
 					variant: "ghost",
 					size: "sm" as any,
@@ -650,7 +679,14 @@ function renderPackDetailView(): TemplateResult {
 						${renderMetaRow("Source", pack.sourceLabel || pack.sourceId)}
 						${renderMetaRow("Pack ID", pack.packId)}
 						${pack.author ? renderMetaRow("Author", pack.author) : nothing}
-						${pack.homepage ? renderMetaRow("Homepage", html`<a class="market-link" href=${pack.homepage} target="_blank" rel="noreferrer noopener">${pack.homepage}</a>`) : nothing}
+						${pack.homepage
+							? renderMetaRow(
+								"Homepage",
+								safeHttpUrl(pack.homepage)
+									? html`<a class="market-link" href=${safeHttpUrl(pack.homepage)!} target="_blank" rel="noreferrer noopener">${pack.homepage}</a>`
+									: pack.homepage,
+							)
+							: nothing}
 						${pack.license ? renderMetaRow("License", pack.license) : nothing}
 						${pack.minBobbit ? renderMetaRow("Min Bobbit", pack.minBobbit) : nothing}
 						${pack.installedVersion ? renderMetaRow("Installed version", pack.installedVersion) : nothing}
