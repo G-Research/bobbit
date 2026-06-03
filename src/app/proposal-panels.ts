@@ -176,8 +176,15 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 	if (_workflowsLoadingByProject.has(projectId)) return;
 	_workflowsLoadingByProject.add(projectId);
 	fetchWorkflows(projectId).then((wfs) => {
+		// Always cache the per-project result, even if the active project changed
+		// while this request was in flight.
 		_workflowCacheByProject.set(projectId, wfs);
 		_workflowsLoadingByProject.delete(projectId);
+		// Only apply to the shared _cachedWorkflows / normalize / re-render if this
+		// response is still for the active preview project. A stale response for a
+		// project the user has navigated away from must not clobber the current
+		// dropdown state.
+		if (projectId !== (state.previewProjectId || undefined)) return;
 		_cachedWorkflows = wfs;
 		// Seed/normalize the workflow selections to a valid id once the list arrives.
 		// This fixes both empty selections AND phantom ids (a proposed workflow that
