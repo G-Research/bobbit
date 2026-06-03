@@ -1,0 +1,8 @@
+apiVersion: 1
+id: notes-pack
+name: Notes Pack
+description: A standalone note-taking skill, used to prove sibling skill packs coexist under one shared skills dir.
+version: 1.0.0
+contents:
+  skills:
+    - note-taker

@@ -29,7 +29,7 @@ import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { MarketplaceService, ConflictError as MarketplaceConflictError } from "./marketplace/service.js";
-import type { ConflictMode, EntityRef, InstallScope } from "./marketplace/types.js";
+import type { ConflictMode, EntityRef, InstallScope, SourceRecord } from "./marketplace/types.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
 import {
@@ -4481,15 +4481,26 @@ async function handleApiRoute(
 	if (url.pathname === "/api/marketplace/sources" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body) { json({ error: "Missing body" }, 400); return; }
-		let record;
+		let record: SourceRecord;
 		try {
 			record = marketplace.addSource({ kind: body.kind, url: body.url, ref: body.ref, path: body.path, label: body.label });
 		} catch (err) {
 			json({ error: (err as Error).message }, 400);
 			return;
 		}
-		// Kick a first sync asynchronously; the record is already persisted.
-		marketplace.syncSource(record.id).catch((err) => console.warn(`[marketplace] initial sync failed for ${record.id}: ${err}`));
+		// Initial sync. For git sources AWAIT it so the first packs reload reflects
+		// real cache state (populated lastSyncedAt/lastSyncCommit/lastSyncError) and
+		// sync errors surface immediately rather than later. Local sources are read
+		// in place, so their (cheap, validating) sync can stay fire-and-forget.
+		if (record.kind === "git") {
+			try {
+				record = await marketplace.syncSource(record.id);
+			} catch (err) {
+				console.warn(`[marketplace] initial sync failed for ${record.id}: ${err}`);
+			}
+		} else {
+			marketplace.syncSource(record.id).catch((err) => console.warn(`[marketplace] initial sync failed for ${record.id}: ${err}`));
+		}
 		json({ source: record }, 201);
 		return;
 	}

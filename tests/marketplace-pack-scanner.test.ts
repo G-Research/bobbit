@@ -19,7 +19,7 @@ describe("marketplace pack scanner", () => {
 	it("scans only dirs with pack.yaml and ignores non-pack dirs", () => {
 		const packs = scanSource("src-a", SOURCE_A);
 		const ids = packs.map((p) => p.packId).sort();
-		assert.deepEqual(ids, ["invalid-pack", "research-pack", "roles-only-pack"]);
+		assert.deepEqual(ids, ["invalid-pack", "notes-pack", "research-pack", "roles-only-pack"]);
 		// not-a-pack/ has no pack.yaml → ignored
 		assert.ok(!ids.includes("not-a-pack"));
 	});

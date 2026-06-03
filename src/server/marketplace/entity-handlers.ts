@@ -159,9 +159,8 @@ function ensureCustomSkillDir(store: ProjectConfigWriter, dir: string): void {
  * Drop only the "skills" type registration for `dir` from config_directories,
  * preserving any other types (mcp/tools/agents) configured on the same path.
  * The dir entry is removed entirely only when "skills" was its sole type.
- * Returns whether `dir` is still referenced by config_directories afterwards.
  */
-function removeCustomSkillType(store: ProjectConfigWriter, dir: string): boolean {
+function removeCustomSkillType(store: ProjectConfigWriter, dir: string): void {
 	const resolved = path.resolve(dir);
 	const dirs = parseCustomDirectories(store);
 	let changed = false;
@@ -177,7 +176,45 @@ function removeCustomSkillType(store: ProjectConfigWriter, dir: string): boolean
 		// else: drop the entry — "skills" was its only type.
 	}
 	if (changed) saveCustomDirectories(store, next);
-	return next.some((d) => path.resolve(d.path) === resolved);
+}
+
+/** True iff `dir` directly contains ≥1 skill subdir (a subdir with a SKILL.md). */
+function skillDirHasSkills(dir: string): boolean {
+	let entries: fs.Dirent[];
+	try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
+	for (const e of entries) {
+		if (e.isDirectory() && fs.existsSync(path.join(dir, e.name, "SKILL.md"))) return true;
+	}
+	return false;
+}
+
+/**
+ * Authoritative, idempotent reconciliation of the project-scope skills custom
+ * dir registration against on-disk reality. The `config_directories` "skills"
+ * registration for `ctx.skillInstallDir` must exist **iff** that dir currently
+ * holds ≥1 skill subdir. This is the single invariant every install / uninstall
+ * / update / rollback settles on as its final step, so the registration can
+ * never drift (e.g. uninstalling one skill pack must not break sibling packs
+ * that still live under the shared dir).
+ *
+ * System scope is always scanned by discoverSlashSkills, so this is a no-op
+ * there. When the dir is empty AND no longer registered, it is removed.
+ */
+export function reconcileSkillDirRegistration(ctx: InstallCtx): void {
+	if (ctx.scope !== "project" || !ctx.projectConfigStore) return;
+	const dir = ctx.skillInstallDir;
+	if (skillDirHasSkills(dir)) {
+		ensureCustomSkillDir(ctx.projectConfigStore, dir);
+		return;
+	}
+	// No skills remain → drop only the "skills" registration (preserve other
+	// types on the same path) and delete the now-empty dir if nothing else uses it.
+	removeCustomSkillType(ctx.projectConfigStore, dir);
+	try {
+		if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	} catch { /* best-effort */ }
 }
 
 const roleHandler: EntityTypeHandler = {
@@ -279,30 +316,25 @@ const skillHandler: EntityTypeHandler = {
 		const dest = this.destPath(ctx, name);
 		assertWithin(path.join(packDir, "skills"), src);
 		assertWithin(ctx.skillInstallDir, dest);
+		// Ensure the shared skills dir exists, copy this skill's files, then let
+		// reconcile (the authoritative step) own the config_directories registration.
+		fs.mkdirSync(ctx.skillInstallDir, { recursive: true });
 		copyNoSymlinks(src, dest);
 		const entity: InstalledEntity = { type: "skill", name, installedPaths: [dest] };
-		// Project scope: register the (absolute) skills dir so discoverSlashSkills
-		// resolves it cross-worktree. System scope (~/.bobbit/skills) is always scanned.
+		// Project scope: discoverSlashSkills resolves the (absolute) skills dir via
+		// config_directories. Record the dir for provenance; reconcile keeps the
+		// registration in sync with on-disk reality. System scope is always scanned.
 		if (ctx.scope === "project" && ctx.projectConfigStore) {
-			ensureCustomSkillDir(ctx.projectConfigStore, ctx.skillInstallDir);
 			entity.customDirRegistered = path.resolve(ctx.skillInstallDir);
 		}
+		reconcileSkillDirRegistration(ctx);
 		return entity;
 	},
 	uninstall(ctx, entity) {
+		// Remove only THIS skill's files, then reconcile: the registration survives
+		// iff a sibling skill pack still lives under the shared dir.
 		removeContainedPaths(ctx.skillInstallDir, entity.installedPaths, true);
-		// Drop only the "skills" registration for this dir, preserving any other
-		// config types registered on the same path. Delete the dir only if it is
-		// now empty AND no longer referenced by config_directories.
-		if (ctx.scope === "project" && ctx.projectConfigStore && entity.customDirRegistered) {
-			const dir = entity.customDirRegistered;
-			const stillReferenced = removeCustomSkillType(ctx.projectConfigStore, dir);
-			let empty = true;
-			try { empty = fs.readdirSync(dir).length === 0; } catch { empty = true; }
-			if (empty && !stillReferenced) {
-				try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
-			}
-		}
+		reconcileSkillDirRegistration(ctx);
 	},
 };
 

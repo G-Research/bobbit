@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { stripTokenFromGitUrl } from "../skills/git.js";
-import { ENTITY_HANDLERS, isWithin } from "./entity-handlers.js";
+import { ENTITY_HANDLERS, isWithin, reconcileSkillDirRegistration } from "./entity-handlers.js";
 import { hashPackPayload } from "./pack-scanner.js";
 import { ProvenanceStore } from "./provenance-store.js";
 import type {
@@ -90,7 +90,16 @@ export class InstallService {
 		const targets = this.resolveTargets(pack, entities);
 		if (targets.length === 0) throw new Error("no installable entities matched the request");
 
-		const { installed, skipped } = this.doCopy(ctx, targets, pack.dir, conflict);
+		// reconcile is the authoritative final step: whatever doCopy leaves on
+		// disk (full success, conflict abort, or rolled-back failure), the skills
+		// registration is settled against on-disk reality afterwards.
+		let installed: InstalledEntity[];
+		let skipped: EntityRef[];
+		try {
+			({ installed, skipped } = this.doCopy(ctx, targets, pack.dir, conflict));
+		} finally {
+			reconcileSkillDirRegistration(ctx);
+		}
 
 		const isWholePack = entities === null;
 		// Subset install into an already-installed pack MERGES (union by type/name,
@@ -158,7 +167,14 @@ export class InstallService {
 		const finalKeys = new Set(finalTargets.map((t) => `${t.type}/${t.name}`));
 		const toRemove = existing.entities.filter((e) => !finalKeys.has(`${e.type}/${e.name}`));
 
-		const installed = this.applyUpdateTransactional(ctx, pack.dir, finalTargets, toRemove);
+		let installed: InstalledEntity[];
+		try {
+			installed = this.applyUpdateTransactional(ctx, pack.dir, finalTargets, toRemove);
+		} finally {
+			// Authoritative final step: settle the skills registration against
+			// on-disk reality regardless of success or rolled-back failure.
+			reconcileSkillDirRegistration(ctx);
+		}
 
 		const installMode = this.resolveInstallMode(mode === "pack", pack, installed);
 		const record = this.buildRecord(scope, projectId, source, pack, installed, installMode);
@@ -226,14 +242,10 @@ export class InstallService {
 		for (const b of backups) {
 			try { fs.rmSync(b.backup, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
-		// Removed skills: paths are already gone; drop the config_directories "skills"
-		// registration only when no skill remains installed (else a surviving skill
-		// would lose its dir registration).
-		if (toRemove.some((e) => e.type === "skill") && !installed.some((e) => e.type === "skill")) {
-			for (const e of toRemove.filter((e) => e.type === "skill")) {
-				try { ENTITY_HANDLERS.skill.uninstall(ctx, { ...e, installedPaths: [] }); } catch { /* best-effort */ }
-			}
-		}
+		// Removed skills: their files are already gone (backups discarded above);
+		// the shared config_directories "skills" registration is settled by the
+		// authoritative reconcile in update()'s finally — never dropped here, so a
+		// surviving sibling skill can't lose its dir registration.
 		if (toRemove.some((e) => e.type === "role")) ctx.invalidateRoles?.();
 		if (toRemove.some((e) => e.type === "tool")) ctx.invalidateTools?.();
 		return installed;
@@ -250,8 +262,14 @@ export class InstallService {
 		const ctx = this.deps.resolveCtx(scope, projectId);
 		if (!ctx) throw new Error(`could not resolve install context for scope=${scope}`);
 
-		for (const entity of record.entities) {
-			ENTITY_HANDLERS[entity.type].uninstall(ctx, entity);
+		try {
+			for (const entity of record.entities) {
+				ENTITY_HANDLERS[entity.type].uninstall(ctx, entity);
+			}
+		} finally {
+			// Authoritative final step — keep the skills registration iff any skill
+			// (e.g. from a sibling pack) still lives under the shared dir.
+			reconcileSkillDirRegistration(ctx);
 		}
 		provenance.remove(sourceId, packId);
 		return { removed: record.entities };
