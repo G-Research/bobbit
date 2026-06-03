@@ -440,6 +440,12 @@ This is on top of the existing live `_checkToolProposals` path — both paths
 fire the same callback shape, so the UI receives the streaming partials AND
 the final canonical file-derived projection.
 
+> **Update (post-ship):** the goal seed handler now validates the proposed
+> `workflow` and `options` against the project's workflows before writing, and
+> `propose_goal` surfaces a rejection as an `isError` result instead of a false
+> ack. See [goals-workflows-tasks.md — Validating a proposed workflow at
+> proposal time](../goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time).
+
 ## 7. Client refactor
 
 ### 7.1 Types

@@ -7506,6 +7506,23 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
+			// Validate workflow + optional steps for goal proposals BEFORE persisting,
+			// so a stale/hallucinated workflow never produces a broken draft. Skipped
+			// when the session has no resolvable project or the project has zero
+			// workflows (empty-state behaviour preserved).
+			if (proposalType === "goal") {
+				const projectId = sessionManager.getSession(sessionId)?.projectId;
+				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
+				if (projectId) {
+					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
+					if (workflows.length === 0) {
+						const ctx = projectContextManager.getOrCreate(projectId);
+						if (ctx) workflows = ctx.workflowStore.getAll();
+					}
+				}
+				const wfErr = validateGoalProposalWorkflow(args as Record<string, unknown>, workflows);
+				if (wfErr) { json(wfErr, 400); return; }
+			}
 			try {
 				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
@@ -10382,6 +10399,67 @@ async function handleApiRoute(
 	}
 
 	json({ error: "Not found" }, 404);
+}
+
+/**
+ * Validate a goal proposal's `workflow` / `options` args against the project's
+ * configured workflows. Returns a structured error object to send as 400, or
+ * null if valid. Pure — caller resolves the workflow list (see seed handler).
+ *
+ * Rules (see docs/design — Validate goal workflow):
+ * - Zero workflows ⇒ no validation (UI supplies a default; empty-state preserved).
+ * - Empty/omitted `workflow` is NOT an error (UI dropdown supplies the default).
+ * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
+ * - `options` (comma-separated optional-step names) validated against the chosen
+ *   workflow (named, else first) — matched ONLY by the canonical step.name of
+ *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
+ *   the UI both key on step.name, so accepting optionalLabel/label here would be a
+ *   false-success path that later fails to enable the step.
+ */
+function validateGoalProposalWorkflow(
+	args: Record<string, unknown>,
+	workflows: import("./agent/workflow-store.js").Workflow[],
+): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null {
+	if (workflows.length === 0) return null;
+
+	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
+	const available = workflows.map(w => ({ id: w.id, name: w.name }));
+
+	// 1. Unknown explicit workflow id.
+	if (wfArg && !workflows.some(w => w.id === wfArg)) {
+		return {
+			ok: false,
+			code: "UNKNOWN_WORKFLOW",
+			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${available.map(w => w.id).join(", ")}. Re-call propose_goal with one of these IDs (or omit workflow to use the default).`,
+			availableWorkflows: available,
+		};
+	}
+
+	// 2. Validate optional-step names against the chosen workflow (or default = first).
+	const chosen = wfArg ? workflows.find(w => w.id === wfArg)! : workflows[0];
+	const optsArg = typeof args.options === "string" ? args.options : "";
+	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
+	if (requested.length > 0) {
+		const validNames = new Set<string>();
+		for (const g of chosen.gates) {
+			for (const s of (g.verify ?? [])) {
+				// Only the canonical step.name is a valid enable key (runtime + UI both
+				// match on name); accepting optionalLabel/label would be a false success.
+				if (s.optional === true) validNames.add(s.name);
+			}
+		}
+		const validList = [...validNames];
+		const unknown = requested.filter(n => !validNames.has(n));
+		if (unknown.length > 0) {
+			return {
+				ok: false,
+				code: "UNKNOWN_OPTIONAL_STEP",
+				message: `Unknown optional step(s) [${unknown.join(", ")}] for workflow "${chosen.id}". Valid optional steps: ${validList.length ? validList.join(", ") : "(none)"}.`,
+				validOptionalSteps: validList,
+			};
+		}
+	}
+	return null;
 }
 
 /** Return a gate plus every transitive dependent in workflow-DAG order. */
