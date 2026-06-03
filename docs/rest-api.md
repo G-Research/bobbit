@@ -674,14 +674,15 @@ Unauthenticated rows (`authenticated: false`) still appear so the Settings → M
 |---|---|---|---|
 | `prompt` | `string` | yes | Free-form prompt. Capped at 8192 chars. |
 | `n` | `integer` | no | Number of images. Must be an integer in `[1, 4]`. Defaults to `1`. |
-| `model` | `string` | no | Override id in `provider/modelId` form. Both sides are canonicalised before comparison. If unrecognised, the request silently falls back to the session's selected image model rather than rejecting. |
 | `size` | `string` | no | Provider-specific size token (e.g. `1024x1024`). |
 | `quality` | `string` | no | Provider-specific quality token (e.g. `auto`, `hd`). |
 | `background` | `string` | no | One of `transparent`, `opaque`, `auto` (OpenAI-only). |
 | `format` | `string` | no | One of `png`, `jpeg`, `webp`. |
 | `aspectRatio` | `string` | no | Gemini/Imagen aspect ratio (e.g. `16:9`). |
 | `imageSize` | `string` | no | Alternative size token validated against the registry entry's `sizes`. |
-| `sessionId` | `string` | no | Used to resolve the session's selected image model when `model` is omitted. |
+| `sessionId` | `string` | no | Resolves the session's selected image model (the single source of truth for the model). |
+
+There is no `model` field: the image model is controlled solely by the session image-model selector / `default.imageModel` settings default. A `body.model` is ignored if sent (regression-guarded), so neither an agent tool argument nor a human's prompt can change the model.
 
 Response on success (HTTP `200`):
 
@@ -700,7 +701,7 @@ Response on success (HTTP `200`):
 }
 ```
 
-The `model` object echoes the resolved provider/id/name/api so the caller can confirm which model actually served the request (the request `model` may have been canonicalised or fallen back to the session default). Each image carries `data` (base64-encoded bytes) and `mimeType`; some OpenAI calls also include a `revisedPrompt` when the provider rewrote the prompt. The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
+The `model` object echoes the resolved provider/id/name/api so the caller can confirm which model actually served the request (always the session selector / `default.imageModel` / `defaultImageModelPref()`, canonicalised). Each image carries `data` (base64-encoded bytes) and `mimeType`; some OpenAI calls also include a `revisedPrompt` when the provider rewrote the prompt. The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
 
 Error responses:
 
@@ -709,9 +710,9 @@ Error responses:
 - `400 { error: "n must be 1..4" }` — `n` is not an integer or is outside `[1, 4]`.
 - `500 { error: "<provider message>" }` — provider helper threw. The message comes straight from `err.message` (typically prefixed with the upstream HTTP status, never `[object Object]`). Provider-specific failure modes (Codex `n=1` clamp, `remote image exceeds 25 MB cap`, missing credentials) all surface here as `500`.
 
-The gateway does **not** return `502` or `503` from this endpoint, and there is no separate `400 { error: "unknown image model" }` path — unknown `model` values silently fall back to the session default (the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md)).
+The gateway does **not** return `502` or `503` from this endpoint. The model is never taken from the request body, so there is no "unknown image model" rejection here (the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md)).
 
-Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
+Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing canonical model-ID reference (gpt-image-2 / Google IDs) lives in `defaults/system-prompt.md`; the model itself is chosen only via the session image-model selector / settings default, not the tool call. The per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
 
 ### MCP Servers
 

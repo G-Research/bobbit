@@ -5081,11 +5081,6 @@ export class SessionManager {
 		return parseImageModelPref(pref);
 	}
 
-	/** Latest user turn text for request-scoped policy checks such as model override gating. */
-	getLastPromptText(sessionId: string): string | undefined {
-		return this.sessions.get(sessionId)?.lastPromptText;
-	}
-
 	async terminateSession(id: string): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;

@@ -56,20 +56,17 @@ const extension: ExtensionFactory = (pi) => {
 		name: "generate_image",
 		label: "Generate Image",
 		description: "Generate images via the configured image model (GPT Image, DALL-E, Gemini, etc.).",
-		promptSnippet: "generate_image: Generate raster images. Supports GPT Image 2 via model=\"openai/gpt-image-2\" and uses the configured session image model by default.",
+		promptSnippet: "generate_image: Generate raster images. Uses the configured session image model.",
 		promptGuidelines: [
 			"Use generate_image when the user asks for AI image generation or bitmap visual assets.",
 			"Do not call MCP image tools such as mcp__nano-banana__generate_image; this tool owns image generation routing.",
-			"If the user asks for GPT Image 2, ChatGPT Images 2.0, or gpt-image-2, call generate_image with model=\"openai/gpt-image-2\".",
-			"Use exact Google image model ids: Gemini 3.1 Flash Image is google/gemini-3.1-flash-image-preview, Gemini 3 Pro Image is google/gemini-3-pro-image-preview, Gemini 2.5 Flash Image is google/gemini-2.5-flash-image, Imagen 4 Ultra is google/imagen-4.0-ultra-generate-001, Imagen 4 Standard is google/imagen-4.0-generate-001, Imagen 4 Fast is google/imagen-4.0-fast-generate-001. Google also refers to Gemini 2.5 Flash Image as Nano Banana and Gemini 3 Pro Image as Nano Banana Pro. If the user asks for Nano Banana 2, use Gemini 3 Pro Image unless they explicitly provide another Google model id.",
+			"The image model is controlled by the session image-model selector / settings default and cannot be chosen via this tool.",
 			"Use outputPath when the generated image should become a project asset.",
-			"Prefer the configured session image model. Omit model unless the user explicitly names a non-default provider/model in the prompt.",
-			"If the selected or requested model fails because of auth or provider availability, report the failure and ask before switching to another provider.",
+			"If the configured model fails because of auth or provider availability, report the failure and ask before switching to another provider.",
 		],
 		parameters: Type.Object({
 			prompt: Type.String(),
 			outputPath: Type.Optional(Type.String({ description: "Path to save the image." })),
-			model: Type.Optional(Type.String({ description: "Override as provider/modelId." })),
 			size: Type.Optional(Type.String({ description: "OpenAI size, e.g. 1024x1024 or auto." })),
 			quality: Type.Optional(Type.String({ description: "OpenAI quality, e.g. auto, low, high, hd." })),
 			background: Type.Optional(Type.Union([
@@ -110,7 +107,6 @@ const extension: ExtensionFactory = (pi) => {
 					body: JSON.stringify({
 						sessionId: process.env.BOBBIT_SESSION_ID,
 						prompt: params.prompt,
-						model: params.model,
 						size: params.size,
 						quality: params.quality,
 						background: params.background,

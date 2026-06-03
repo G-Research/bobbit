@@ -1824,7 +1824,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(ImageIcon, "sm")}
-					${this._isNarrow ? "" : html`<span class="ml-0.5">${imageModel.id}</span>`}
+					<span class="ml-0.5 ${this._isNarrow ? "sr-only" : ""}" data-testid="footer-image-model-id">${imageModel.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
