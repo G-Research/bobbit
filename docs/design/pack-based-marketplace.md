@@ -63,24 +63,39 @@ A source is a git repo (or local dir) whose **top level is a collection of pack 
 
 Installing copies a pack subtree verbatim into the chosen scope's `market-packs/<pack-name>/`, adding a generated `.pack-meta.yaml`. Each scope's own `roles/ tools/ skills/` IS that scope's **user pack**.
 
+Every scope's **user-pack root is `<base>/.bobbit/config/`** and its **market-packs root is the sibling `<base>/.bobbit/config/market-packs/`**, where `base` is the homedir / server cwd / project root. This is *normalized across all three scopes* so install and resolution always derive the same root (see §1.3.1). `base` per scope: global-user = `~`, server = `<server-cwd>`, project = `<project>`.
+
 ```
-dist/server/defaults/               # BUILTIN PACK (read-only, lowest priority)
+dist/server/defaults/                       # BUILTIN PACK (read-only, lowest priority)
   roles/  tools/  skills/
 
-~/.bobbit/                          # GLOBAL-USER scope
-  roles/  tools/  skills/            #   ← user pack (created/customized entities)
-  market-packs/<pack-name>/...       #   ← installed market packs
+~/.bobbit/config/                           # GLOBAL-USER scope
+  roles/  tools/  skills/                    #   ← user pack (created/customized entities)
+  market-packs/<pack-name>/...               #   ← installed market packs
 
-<server-cwd>/.bobbit/               # SERVER scope
-  roles/  tools/  skills/            #   ← user pack
+<server-cwd>/.bobbit/config/                # SERVER scope
+  roles/  tools/  skills/                    #   ← user pack
   market-packs/<pack-name>/...
 
-<project>/.bobbit/config/           # PROJECT scope (highest priority)
-  roles/  tools/  skills/            #   ← user pack
+<project>/.bobbit/config/                   # PROJECT scope (highest priority)
+  roles/  tools/  skills/                    #   ← user pack
   market-packs/<pack-name>/...
 ```
 
-> NOTE: today, `RoleStore` / `ToolManager` write to `<scope>/.bobbit/config/{roles,tools}` for project scope, and the server-scope stores write to `<server-cwd>/.bobbit/config/...`. The "user pack" for a scope is exactly the directory those stores already use. The pack model **does not move any files** — it points the resolver at the same dirs.
+#### 1.3.1 `scopeRoot` vs `userPackRoot` (resolved consistently)
+
+To avoid install/resolution scanning different roots, the data model defines two derived paths **per scope** from a single `base`:
+
+```ts
+function scopePaths(scope, base): { userPackRoot: string; marketPacksRoot: string } {
+  const cfg = path.join(base, ".bobbit", "config");      // = bobbit-dir.ts configDir(base)
+  return { userPackRoot: cfg, marketPacksRoot: path.join(cfg, "market-packs") };
+}
+// global-user base = os.homedir(); server base = <server-cwd>; project base = <project root>
+```
+
+- `userPackRoot` is **exactly** the dir `RoleStore`/`ToolManager` already use today (`<base>/.bobbit/config`) for project and server scopes — so byte-identical roles/tools resolution holds (global-user is empty today). `buildPackList()` and `installPack()` both derive paths via `scopePaths`, never independently.
+- **Reconciliation with the goal spec's illustrative layout:** the goal spec sketched server/global-user roots without the `/config` segment (`<server-cwd>/.bobbit/`, `~/.bobbit/`). We deliberately normalize to `<base>/.bobbit/config/` for all scopes because that is where the existing stores read/write; using the spec's bare paths would split install vs resolution roots and break byte-identical resolution. The Claude-compatible **skill** dirs (`~/.bobbit/skills`, `~/.claude/skills`, `<project>/.bobbit/skills`, `<project>/.claude/skills`, `<project>/.claude/commands`) are unaffected — they remain referenced in place as legacy-implicit entries (§6.2), not under `config/`.
 
 ### 1.4 `pack.yaml` schema
 
@@ -299,14 +314,20 @@ Rationale and rules:
 
 **MVP ships exactly ONE configured conflict-resolution mechanism: `pack_order`** — per-scope ordering of market packs. Persisted in **project config (`project.yaml`) for project scope**, and in **server config (`<server-cwd>/.bobbit/config/project.yaml`)** for server/global scope (reusing the existing `ProjectConfigStore` surface):
 
+**Persistence shape (scoped, not flat).** `pack_order` is a map keyed by scope so independent scopes never collide — critical because **server and global-user both persist in the server config file** and could otherwise not be represented separately:
+
 ```yaml
-# project.yaml additions (native YAML; see ProjectConfigStore migrated-fields pattern)
-pack_order:                       # per-scope ordering of MARKET packs (highest last)
-  - research-pack
-  - qa-pack
+# Persisted as a migrated native-YAML field (mirror config_directories side-table).
+# Each scope's market-pack order, highest priority LAST. Unknown/uninstalled names ignored.
+pack_order:
+  server:      [shared-pack]
+  global-user: [research-pack, qa-pack]
+  project:     [research-pack]
 ```
 
-- `pack_order` is the **sole** mechanism: reorder market packs within a scope (mirrors the existing project drag-reorder pattern). Implemented as a new migrated field on `ProjectConfigStore` (follow the `config_directories` native-YAML side-table precedent — see `project-config-store.ts`). The last entry has highest priority within the scope's market-pack band.
+- **Where each scope's order lives:** the `project` key persists in `<project>/.bobbit/config/project.yaml`; the `server` and `global-user` keys persist in the **server config** (`<server-cwd>/.bobbit/config/project.yaml`) under the same `pack_order` map but distinct keys, so the two share a file yet stay independent. `buildPackList()` reads each scope's order from the correct store.
+- `pack_order[scope]` is the **sole** conflict mechanism: reorder market packs within a scope (mirrors the existing project drag-reorder pattern). Implemented as a new migrated field on `ProjectConfigStore` (follow the `config_directories` native-YAML side-table precedent — see `project-config-store.ts`). The last entry has highest priority within the scope's market-pack band. A name present in `market-packs/` but absent from `pack_order[scope]` defaults to lowest priority (sorted before listed entries, by install order); a name in `pack_order[scope]` not on disk is ignored.
+- Read/write over REST via `GET/PUT /api/marketplace/pack-order` (§9.2).
 - Resolution of a same-name conflict is therefore deterministic from the ordered list alone — no per-conflict override pass exists in MVP. The UI's only conflict-resolution affordance is **reorder** (drag market packs). Customizing (writing into the user pack, which sits above market packs — §3.2) is the other way a user can force a winner.
 - **Per-conflict pinning (`pack_conflicts`) is explicitly DEFERRED** (see §11 Deferred). It is NOT in the MVP schema, resolver, API, UI, or tests. The `PackResolver` performs no pin post-pass. The deferred section sketches the future schema so it is additive.
 
@@ -339,21 +360,19 @@ A **conflict** exists for `(type, name)` whenever `resolve(type)` returns a `Res
 
 ### 5.2 User packs
 
-- Each scope's existing config dir is its user pack:
-  - project: `<project>/.bobbit/config/` (path used by `ProjectContext`'s `roleStore`/`toolManager`).
-  - server: `<server-cwd>/.bobbit/config/`.
-  - global-user: `~/.bobbit/` (NEW for roles/tools — see §3.1 note; harmless because nothing reads it today).
+- Each scope's user pack is its `userPackRoot` (§1.3.1): project `<project>/.bobbit/config/`, server `<server-cwd>/.bobbit/config/`, global-user `~/.bobbit/config/` (NEW for roles/tools — §3.1 note; harmless because nothing reads it today).
 - **Create/customize** = write the entity file into the scope's user-pack dir (exactly what `RoleStore.put` / `ToolManager` / the `customize` endpoints do today). **Revert** = delete it (`RoleStore.remove` / the `override` DELETE endpoints). No new file operations — the customize/override endpoints keep their current bodies (see `server.ts` `/api/roles/:name/customize` and `/override`).
-- `origin`/`overrides` badge mapping: the API maps `ResolvedEntity.origin.scope` → the existing `ConfigOrigin` wire value, and the topmost shadowed scope → `overrides`:
+- **Origin wire contract (LOCKED — option (b)).** The `ConfigOrigin` enum gains a `user` value. The API maps `ResolvedEntity.origin.scope` → wire `origin`, and the topmost shadowed scope → `overrides`:
 
   | `origin.scope` (winner) | wire `origin` |
   |---|---|
   | `builtin` | `builtin` |
   | `server` | `server` |
-  | `global-user` | `server` *(see note)* or new `user` value |
+  | `global-user` | `user` |
   | `project` | `project` |
 
-  > The current UI only knows `builtin | server | project` (see `config-scope.ts::ConfigOrigin`). MVP options: (a) collapse `global-user` onto `server` for the badge to avoid UI churn, or (b) extend the badge enum with `user` and add a badge class. **Recommended: (b)** — add a `user` origin + badge so global-user installs are distinguishable; it's a small additive UI change and the config pages already render badges generically. Pin the chosen mapping with a test (§12).
+  > `config-scope.ts::ConfigOrigin` is extended to `"builtin" | "server" | "user" | "project"` with a matching badge class. This is a small additive UI change (config pages render badges generically). A test pins the mapping (§12). Because global-user is empty for roles/tools today, no *existing* response value changes — `user` only ever appears for newly-installed global-user packs.
+- **Pack-origin tagging (acceptance: entities tagged with the *specific pack*).** Beyond the scope badge, `/api/roles|tools|skills` responses carry, for market-pack-originated entities, `originPackId` (`PackEntry.id`, e.g. `market:project:research-pack`) and `originPackName` (the pack's `name`). For builtin/user-pack entities these are `null`. The config pages render `originPackName` as a chip/tooltip next to the scope badge so an installed entity is visibly and contractually tied to its pack (not just its scope). Pinned by an E2E assertion (§12.3 #4).
 
 ---
 
@@ -414,7 +433,12 @@ Critical correctness notes:
 
 ### 6.3 `disabled_config_directories`
 
-When a path appears in `disabled_config_directories` (read via the legacy key, see `removeBuiltinDirectory`), the matching legacy-implicit `PackEntry` is **omitted** from the ordered list before resolution. Path comparison uses the same normalization (`expandPath` / `path.resolve`) as today. Effect: nothing from that dir resolves — identical to `slash-skills.ts` skipping it. (Note: today the *scanning* code doesn't actually consult `disabled_config_directories` for skills — only `getAllConfigDirectories` reports it; the unified list makes disablement actually take effect uniformly, which is a superset that the per-project-config-dirs tests must continue to accept. Verify against `per-project-config-dirs.spec.ts` and add a test if disablement-of-skills wasn't previously pinned.)
+**Status of `disabled_config_directories` today (verified in source):** it is only *written* (`removeBuiltinDirectory`) and *cleared* (`resetConfigDirectories`); **no resolution code path reads it to omit a directory.** `discoverSlashSkills`, `getSkillDirectories`, and `getAllConfigDirectories` do **not** filter by it — so disabling a built-in skill dir today is an **inert no-op for resolution** (the dir still resolves). The goal spec's worked example #3 ("`slash-skills.ts` skips it") describes *intended* behavior, not current behavior.
+
+**Decision (explicit — NOT framed as byte-identical):** the unified resolver **honors** `disabled_config_directories` — a matching legacy-implicit `PackEntry` is **omitted** from the ordered list before resolution (path comparison via the same `expandPath`/`path.resolve` normalization). This is a **deliberate, documented fix** of a currently-inert setting, scoped to skills' legacy dirs.
+
+- **Why this does not break the byte-identical invariant:** that invariant covers all *currently-resolved* inputs. No existing test pins "a disabled dir still resolves" (it can't — disablement was inert and the dir resolved regardless). The only behavior that changes is the previously-impossible case where a dir is *both* disabled *and* present — not exercised by any existing test — so `skill-resolve.test.ts` / `validate-skill-discovery.test.ts` / `per-project-config-dirs.spec.ts` continue to pass unchanged.
+- **New coverage required:** add a unit test asserting a disabled skill dir is now omitted from resolution (unit #6), and a compatibility note in the changelog/docs. The acceptance/tests do **not** claim byte-identical for this case — they claim "deliberate enforcement, newly tested."
 
 ### 6.4 Refactor of `slash-skills.ts`
 
@@ -431,23 +455,26 @@ When a path appears in `disabled_config_directories` (read via the legacy key, s
 ```ts
 /** Build the one ordered list for a given resolution context, low→high priority. */
 export function buildPackList(opts: {
-  builtinsDir: string;
-  serverConfigDir: string;          // <server-cwd>/.bobbit/config
-  globalUserDir: string;            // ~/.bobbit
-  projectConfigDir?: string;        // <project>/.bobbit/config
-  cwd: string;                      // project rootPath (for .claude/* skill dirs)
-  configStore: ProjectConfigReader; // reads config_directories + disabled_config_directories (legacy keys)
+  builtinsDir: string;              // dist/server/defaults
+  // Per-scope roots derived via scopePaths() (§1.3.1). Each yields
+  // { userPackRoot=<base>/.bobbit/config, marketPacksRoot=<base>/.bobbit/config/market-packs }.
+  serverBase: string;               // <server-cwd>
+  globalUserBase: string;           // os.homedir()
+  projectBase?: string;             // <project root>  (omitted in system scope)
+  cwd: string;                      // project rootPath (for legacy .claude/*, .bobbit/* skill dirs)
+  serverConfigStore: ProjectConfigReader;   // reads pack_order.{server,global-user} + legacy keys
+  projectConfigStore?: ProjectConfigReader; // reads pack_order.project + legacy keys (project scope)
 }): PackEntry[];
 ```
 
-Steps:
-1. Push `builtin`.
-2. For each scope in `[server, global-user, project]` (in that order):
-   a. push the scope's `market-packs/*` (each dir with a `pack.yaml`), ordered by that scope's `pack_order`.
-   b. push the scope's user-pack entry.
+Steps (low→high):
+1. Push `builtin` (`builtinsDir`).
+2. For each scope in `[server, global-user, project]` (in that order), using `scopePaths(scope, base)`:
+   a. push the scope's `market-packs/*` entries — each `<marketPacksRoot>/*` dir that has **both** a valid `pack.yaml` and a valid `.pack-meta.yaml` (§8.1 corrupt-guard; `.tmp-*` skipped) — ordered by that scope's `pack_order[scope]`.
+   b. push the scope's user-pack entry (`userPackRoot`).
    c. push the scope's legacy-implicit skill entries (rows from §6.2 that belong to this scope).
-3. Apply within-scope ordering rules (§3.2): user pack below market packs; legacy skill entries placed to reproduce §6.2's exact order.
-4. Remove any entry whose path is in `disabled_config_directories`.
+3. Apply within-scope ordering rules (§3.2): market packs lowest, then user pack, then legacy skill entries — reproducing §6.2's exact order for skills.
+4. Remove any entry whose path is in `disabled_config_directories` (§6.3, deliberate enforcement).
 5. Read `config_directories` (legacy key, via `parseCustomDirectories`) and insert skills entries as `legacy:custom:<path>` at the position from §6.2 row 3.
 
 > **Back-compat invariant:** the legacy keys `config_directories`, `skill_directories`, `disabled_config_directories` keep being **read** (via the existing `config-directories.ts` helpers) **only** to construct this list. After construction, no roles/tools/skills code path scans dirs on its own.
@@ -462,9 +489,9 @@ Steps:
 - Today: `config_directories: [{ path: "~/dev/my-skills", types: ["skills"] }]`; `slash-skills.ts` scans it at the `custom` precedence slot.
 - Unified: on `buildPackList`, that entry → `legacy:custom:/home/u/dev/my-skills`, `layout: skills-flat`, `onlyTypes:["skills"]`, inserted at §6.2 row 3. Its `SKILL.md`s load via `SkillLoader`. Same skills, same precedence (above builtin-file, below legacy/personal/project). ✅ identical.
 
-**3. Disabled built-in scan location.**
-- Today: `disabled_config_directories` contains `<project>/.claude/skills`; reported as disabled.
-- Unified: the `legacy:.claude/skills` entry is omitted from the list (§6.3) ⇒ nothing from it resolves. ✅ same effect (and now uniformly enforced for skills).
+**3. Disabled built-in scan location.** *(Deliberate behavior fix — see §6.3; not byte-identical.)*
+- Today: `disabled_config_directories` contains `<project>/.claude/skills`. This is currently **inert for resolution** — the dir's skills still resolve (no code reads the disable list to omit it).
+- Unified: the `legacy:.claude/skills` entry is omitted from the list (§6.3) ⇒ nothing from it resolves. This **matches the goal spec's intended behavior** and is the one place the reframe deliberately changes (previously-inert) behavior, covered by new unit test #6. All currently-pinned skill resolution is unchanged.
 
 **4. Claude-compatible personal skills (`~/.claude/skills`, `~/.bobbit/skills`).**
 - Today: scanned at personal scope by `slash-skills.ts`.
@@ -531,9 +558,9 @@ All operations are plain directory copies/deletes (no per-entity bookkeeping).
 `installPack(sourceId, packName, scope)` — **atomic**: build a complete staged dir, then a single rename publishes it.
 1. Sync source cache (§7.2).
 2. Resolve `src = <cache>/<packName>` (must contain a valid `pack.yaml` — else 422).
-3. Resolve `dest = <scopeRoot>/market-packs/<packName>` where `scopeRoot` is `~/.bobbit` | `<server-cwd>/.bobbit` | `<project>/.bobbit/config`. Reject unsafe `packName` (path-traversal guard) before any fs op.
+3. Resolve `dest = <marketPacksRoot>/<packName>` where `marketPacksRoot = scopePaths(scope, base).marketPacksRoot` (§1.3.1) — i.e. `<base>/.bobbit/config/market-packs` with `base` = `~` | `<server-cwd>` | `<project root>`. Same derivation `buildPackList` uses, so install and resolution never diverge. Reject unsafe `packName` (path-traversal guard) before any fs op.
 4. Reject if `dest` already exists (require explicit update/uninstall) → 409.
-5. **Copy `src` → a staging dir** `<scopeRoot>/market-packs/.tmp-<packName>-<rand>` verbatim (entire subtree: `pack.yaml`, `roles/`, `tools/` incl. `extension.ts` + `_shared`, `skills/`). Skip `.git`.
+5. **Copy `src` → a staging dir** `<marketPacksRoot>/.tmp-<packName>-<rand>` verbatim (entire subtree: `pack.yaml`, `roles/`, `tools/` incl. `extension.ts` + `_shared`, `skills/`). Skip `.git`.
 6. Write `<staging>/.pack-meta.yaml` (§1.5) with `sourceUrl`, `sourceRef`, resolved `commit`, `version` from manifest, `installedAt = updatedAt = now`, `scope`.
 7. **Atomically rename** staging → `dest` (`fs.rename`). Only after the meta is written does the pack become visible at its final path. On any failure before the rename, `fs.rm` the staging dir and surface the error — `dest` never half-exists.
 8. Append `packName` to that scope's `pack_order`.
@@ -544,7 +571,7 @@ All operations are plain directory copies/deletes (no per-entity bookkeeping).
 ### 8.2 Uninstall
 
 `uninstallPack(scope, packName)`:
-1. `dest = <scopeRoot>/market-packs/<packName>`.
+1. `dest = scopePaths(scope, base).marketPacksRoot + "/" + packName` (§1.3.1).
 2. **`fs.rm(dest, { recursive: true })`** — deletes exactly what install added.
 3. Remove `packName` from that scope's `pack_order`.
 4. Reload resolver. Uninstalling removes precisely the installed entities (no orphan ledger to reconcile).
@@ -580,7 +607,10 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 | `GET /api/packs/conflicts?projectId=` | List `(type, name, winner, shadowed[])` conflicts for the resolved list. |
 
 - `scope` ∈ `"global-user" | "server" | "project"`; `projectId` required when `scope === "project"`.
-- Existing endpoints unchanged in shape: `/api/roles`, `/api/tools`, `/api/skills` keep returning `origin`/`overrides` — now sourced from `PackResolver` instead of `ConfigCascade`/`discoverSlashSkills` (§6). The `origin` field gains `user` if mapping (b) in §5.2 is chosen.
+| `GET /api/marketplace/pack-order?scope=&projectId=` | — → read a scope's market-pack order (§9.2). |
+| `PUT /api/marketplace/pack-order` | Body `{ scope, projectId?, order: string[] }` → replace a scope's order (§9.2). |
+
+- Existing endpoints unchanged in shape: `/api/roles`, `/api/tools`, `/api/skills` keep returning `origin`/`overrides` — now sourced from `PackResolver` instead of `ConfigCascade`/`discoverSlashSkills` (§6). The `origin` field gains the locked `user` value (§5.2, option (b)) and entities carry `originPackId`/`originPackName` (null for builtin/user).
 - `/api/config-directories` (GET/DELETE/reset) is retained for back-compat (it still reports the legacy dirs + disablement), now reflecting the unified list's legacy entries. Its tests (`per-project-config-dirs.spec.ts`) must still pass.
 
 ### 9.1 Request/response contracts
@@ -623,6 +653,21 @@ interface ConflictWire {
 - **Tool-bearing confirmation** is a UI-side gate (§10): the client only POSTs `install` after the user accepts the executable-code warning, which it derives from `hasTools`/`contents.tools` in the browse payload. The server does not require a confirmation flag, but install of a tool-bearing pack is otherwise unrestricted.
 - **Reload/cache behavior:** install/update/uninstall invalidate the affected scope's resolver cache (and the `slash-skills.ts` TTL cache) synchronously before returning, so a subsequent `GET /api/roles|tools|skills` reflects the change immediately (no client reload required). `pack_order` mutations do the same.
 - **Idempotency / concurrency:** install is rejected (`409`) if `dest` exists; the atomic-rename (§8.1) makes concurrent installs of the same `(scope, packName)` safe — the loser sees `EEXIST`/`409`.
+
+### 9.2 `pack-order` contract (the sole conflict-resolution wire path)
+
+```ts
+// GET /api/marketplace/pack-order?scope=project&projectId=p1
+// 200 → { scope, order: string[] }   // order = current pack_order[scope], highest LAST
+// PUT /api/marketplace/pack-order
+// body: { scope: "global-user"|"server"|"project", projectId?: string, order: string[] }
+// 200 → { scope, order: string[] }   // normalized: unknown names dropped, on-disk-but-absent appended lowest
+```
+
+- **Routing of persistence:** `project` reads/writes `pack_order.project` in `<project>/.bobbit/config/project.yaml`; `server` / `global-user` read/write `pack_order.server` / `pack_order["global-user"]` in the **server** config store (§3.3). The handler picks the store from `scope`.
+- **Errors:** `400` unknown scope, missing `projectId` for `scope=project`, or `order` not a string array; `404` project not found. Names in `order` that aren't installed at that scope are **dropped** (not an error) and the normalized result is returned.
+- **Cache invalidation:** a successful `PUT` invalidates the affected scope's resolver cache + the `slash-skills.ts` TTL cache synchronously, so the next `GET /api/roles|tools|skills` and `/api/packs/conflicts` reflect the new order. This is the mechanism the marketplace UI's drag-reorder calls; covered by E2E #9.
+- The drag-reorder UI mirrors the existing project drag-reorder component; reordering is the only conflict-resolution affordance in MVP (no pin).
 
 ---
 
@@ -703,7 +748,7 @@ The design is additive along three axes:
 | `tests/e2e/config-cascade-api.spec.ts` | `/api/roles` `/api/tools` origin/overrides over HTTP | §6.1 + §5.2 badge mapping |
 | `tests/e2e/ui/config-scope.spec.ts` | scope rows, customize/revert UX, badges | §5.2 customize/override endpoints unchanged |
 | `tests/config-directories.test.ts` | `parseCustomDirectories`, `getAllConfigDirectories` (13 builtin), `saveCustomDirectories` | legacy helpers retained, only consumed by `buildPackList` |
-| `tests/e2e/per-project-config-dirs.spec.ts` | per-project config_directories behaviour incl. disablement | §6.3 (verify skills-disablement superset; add test if newly enforced) |
+| `tests/e2e/per-project-config-dirs.spec.ts` | per-project config_directories behaviour | §6.5 step 5 (config_directories still read to build list). NB: disablement was inert for resolution (§6.3) — this suite does not pin "disabled dir still resolves", so the new enforcement (unit #6) doesn't conflict with it. |
 | `tests/e2e/tools-cascade.spec.ts` | tool group customize/override cascade | §6.1 tool loader + endpoints |
 | `tests/skill-resolve.test.ts` | byte-equal slash expansion + precedence | §6.2 order identical, adapter reuses parse/sort/cache |
 | `tests/validate-skill-discovery.test.ts` | skill discovery across dirs | §6.2 + §6.4 |
@@ -721,7 +766,7 @@ Point at fixture pack trees under a tmp dir.
 3. **Per-type loaders** — RoleLoader/ToolLoader (`defaults-tree`, grouped+flat tools), SkillLoader (all three layouts).
 4. **Three-scope resolution** — builtin/user/market across builtin<server<global-user<project; verify project wins, global-user beats server, **within-scope user pack > market packs** (customize wins locally), and `pack_order` reordering of market-vs-market.
 5. **Legacy→unified mapping equivalence** — build the list from fixtures mirroring §6.1/§6.2 and assert resolution **equals** the legacy `ConfigCascade`/`discoverSlashSkills` output for the same inputs (a direct A/B harness, like `skill-resolve.test.ts`'s `legacy()` fixture).
-6. **`disabled_config_directories`** omits the matching entry.
+6. **`disabled_config_directories` enforcement (new behavior, §6.3)** — assert a present-AND-disabled skill dir is now **omitted** from resolution (was inert before). Also assert a present-but-not-disabled dir still resolves (guards against over-omission).
 7. **File ops** — `installPack` copies subtree + writes meta + appends `pack_order`; `uninstallPack` deletes exactly the added dir + cleans order; `updatePack` replaces contents + rewrites meta (preserves `installedAt`). Path-traversal guards reject unsafe names.
 8. **Source store** — `MarketplaceSourceStore` CRUD + YAML persistence; local-dir vs git-url branching (mock git or use a local bare repo fixture).
 
@@ -731,12 +776,12 @@ Point at fixture pack trees under a tmp dir.
 1. **Market button** visible and positioned **between Workflows and New Goal**; opens the marketplace surface.
 2. **Register source** (use a local-dir or fixture-repo source) → it appears in the sources list.
 3. **Browse packs** → packs show description + declared entities.
-4. **Install** a pack to a scope → its entities appear and resolve on `#/roles` / `#/tools` / `#/skills` with the pack as `origin` (badge present).
+4. **Install** a pack to a scope → its entities appear and resolve on `#/roles` / `#/tools` / `#/skills`, each tagged with the **specific pack**: scope badge present (`user` for global-user) AND `originPackName` chip/tooltip matches the installed pack (§5.2).
 5. **Persists across reload.**
 6. **Provenance** shown (source + version/commit + date).
 7. **Update** (re-sync after upstream change reflected) and **Uninstall** (entities disappear; exactly what install added is removed).
 8. **Executable-code warning** shown for a tool-bearing pack before install.
-9. **Conflict warning icon** appears when two installed packs define the same entity name; **reorder** (`pack_order`) resolves it.
+9. **Conflict warning icon** appears when two installed packs define the same entity name; **drag-reorder** (which calls `PUT /api/marketplace/pack-order`) flips the winner and the warning/`origin` updates after re-resolve. Persists across reload.
 
 ### 12.4 Acceptance-criterion → test map
 
@@ -747,7 +792,9 @@ Point at fixture pack trees under a tmp dir.
 | Install copies dir; entities resolve via single resolver tagged with pack origin | E2E #4 + unit #4,#7 |
 | Existing overrides resolve identically | §12.1 suite + unit #5 |
 | Provenance + update + uninstall (removes exactly what was added) | E2E #6–7 + unit #7 |
-| Same-name conflicts → warning + configured precedence | E2E #9 + unit #2 |
+| Same-name conflicts → warning + configured precedence (`pack_order` reorder) | E2E #9 + unit #2,#4 (pack_order reordering) |
+| Entities tagged with the specific pack as origin | E2E #4 (originPackName) |
+| `disabled_config_directories` now enforced for skills | unit #6 |
 | Tool-bearing packs show executable-code warning | E2E #8 |
 | Re-sync + re-install reflects upstream | E2E #7 + unit #8 |
 
@@ -769,8 +816,8 @@ Concrete ownership boundaries for the high-blast-radius refactor. **New** module
 - `src/server/agent/config-cascade.ts` — `resolveRoles`/`resolveTools` become adapters over `PackResolver`; **`resolveWorkflows`/`resolveToolGroupPolicies` untouched** (§2.2 note).
 - `src/server/skills/slash-skills.ts` — `discoverSlashSkills`/`getSkillDirectories` become adapters over `PackResolver` (§6.4); keep TTL cache, `userInvocable` filter, sort, `source` derivation.
 - `src/server/agent/builtin-config.ts` — extract shared `parseRoleYaml` / `parseToolsDir` (used by builtin entry + loaders); builtin pack entry creation.
-- `src/server/agent/project-config-store.ts` — add `pack_order` migrated native-YAML field (mirror `config_directories`); keep reading legacy keys.
-- `src/server/server.ts` — add `/api/marketplace/*` and `/api/packs/conflicts` routes (§9); wire resolver-cache invalidation on install/uninstall/update; `/api/roles|tools|skills` now read from `PackResolver`.
+- `src/server/agent/project-config-store.ts` — add scoped `pack_order` map migrated native-YAML field (mirror `config_directories`); project store holds `pack_order.project`, server store holds `pack_order.{server,global-user}` (§3.3); keep reading legacy keys.
+- `src/server/server.ts` — add `/api/marketplace/*`, `/api/marketplace/pack-order` (GET/PUT, §9.2), and `/api/packs/conflicts` routes (§9); wire resolver-cache + slash-skills TTL invalidation on install/uninstall/update/reorder; `/api/roles|tools|skills` now read from `PackResolver` and emit `originPackId`/`originPackName` + `user` origin.
 - `src/server/agent/config-directories.ts` — **unchanged behaviour**; its helpers are now consumed by `buildPackList` (legacy keys still read).
 
 **Untouched (explicit non-goals):** `src/server/mcp/mcp-manager.ts`, `src/server/agent/system-prompt.ts`.
@@ -781,8 +828,9 @@ Concrete ownership boundaries for the high-blast-radius refactor. **New** module
 **Edited (UI):**
 - `src/app/sidebar.ts` — Market button between Workflows and New Goal.
 - `src/app/routing.ts` — register `market` route + `isMarketActive`.
-- `src/app/api.ts` — marketplace fetch wrappers.
-- Roles/Tools/Skills pages — no structural change (badges already generic; §10.3).
+- `src/app/api.ts` — marketplace fetch wrappers (incl. pack-order GET/PUT).
+- `src/app/config-scope.ts` — extend `ConfigOrigin` to include `user` + badge class; render `originPackName` chip/tooltip.
+- Roles/Tools/Skills pages — no structural change beyond the pack chip (badges already generic; §10.3).
 
 **Tests:** new unit specs (§12.2), new `tests/e2e/ui/marketplace.spec.ts` (§12.3); existing regression suite (§12.1) must stay green.
 
