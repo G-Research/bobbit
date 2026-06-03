@@ -234,26 +234,6 @@ export function canonicalImageModelPref(pref: string | undefined | null): string
 	return fallback;
 }
 
-export function imageModelMentionedInText(prefs: PreferencesStore, pref: string | undefined | null, text: string | undefined | null): boolean {
-	const parsed = parseImageModelPref(canonicalImageModelPref(pref));
-	if (!parsed || !text) return false;
-	const haystack = normalizeModelText(text);
-	if (!haystack) return false;
-
-	const model = getImageModelByPref(prefs, `${parsed.provider}/${parsed.id}`);
-	const aliases = [
-		`${parsed.provider}/${parsed.id}`,
-		parsed.provider,
-		parsed.id,
-		model?.name,
-		...wellKnownModelAliases(parsed.provider, parsed.id),
-	];
-	return aliases.some((alias) => {
-		const normalized = normalizeModelText(alias);
-		return normalized.length > 0 && haystack.includes(normalized);
-	});
-}
-
 export async function generateImage(prefs: PreferencesStore, request: ImageGenerationRequest): Promise<{ model: ApiImageModel; images: GeneratedImage[] }> {
 	if (!request.prompt || typeof request.prompt !== "string") {
 		throw new Error("prompt is required");
@@ -639,40 +619,6 @@ function firstNonEmpty(...values: Array<unknown>): string | undefined {
 
 function normalizeModelText(value: unknown): string {
 	return typeof value === "string" ? value.toLowerCase().replace(/[^a-z0-9]+/g, "") : "";
-}
-
-function wellKnownModelAliases(provider: string, id: string): string[] {
-	if (provider === "openai" && id === "gpt-image-2") {
-		return ["gpt image 2", "chatgpt image 2", "chatgpt images 2", "chatgpt images 2.0", "openai image 2"];
-	}
-	if (provider === "openai" && id.startsWith("gpt-image")) {
-		return ["gpt image", "chatgpt image", "chatgpt images"];
-	}
-	if (provider === "openai" && id.startsWith("dall-e")) {
-		return ["dall e", "dalle"];
-	}
-	if (provider === "google" && id === "gemini-3.1-flash-image-preview") {
-		// NOTE: do NOT include the bare provider token "gemini" here — it would match
-		// any prompt mentioning Gemini (e.g. "use Gemini Pro") and gate-open the
-		// model-override path for ALL Google image models.
-		return ["gemini 3.1 flash image", "gemini 3 flash image", "gemini image"];
-	}
-	if (provider === "google" && id === "gemini-3-pro-image-preview") {
-		return ["nano banana pro", "nano banana 2", "gemini 3 pro image", "gemini pro image"];
-	}
-	if (provider === "google" && id === "gemini-2.5-flash-image") {
-		return ["nano banana", "gemini 2.5 flash image", "gemini image"];
-	}
-	if (provider === "google" && id === "imagen-4.0-ultra-generate-001") {
-		return ["imagen 4 ultra", "imagen ultra"];
-	}
-	if (provider === "google" && id === "imagen-4.0-generate-001") {
-		return ["imagen 4 standard", "imagen 4", "imagen standard"];
-	}
-	if (provider === "google" && id === "imagen-4.0-fast-generate-001") {
-		return ["imagen 4 fast", "imagen fast"];
-	}
-	return [];
 }
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
