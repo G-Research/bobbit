@@ -95,6 +95,12 @@ export interface InstalledEntity {
 	name: string;
 	/** exact paths install wrote — uninstall removes exactly these. */
 	installedPaths: string[];
+	/**
+	 * Content hash of the bytes install wrote (recorded at install/update). Lets
+	 * computeInstallStatus detect local *edits* as drift, not just missing files.
+	 * Absent on legacy records → drift detection falls back to existence-only.
+	 */
+	contentHash?: string;
 	/** project-scope skills only: the custom dir registered in config_directories. */
 	customDirRegistered?: string;
 }

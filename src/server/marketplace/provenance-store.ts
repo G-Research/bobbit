@@ -12,6 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { hashInstalledEntity } from "./pack-scanner.js";
 import type { EntityType, InstallStatus, ProvenanceRecord, ScannedPack, SourceRecord } from "./types.js";
 
 const ENTITY_TYPES: EntityType[] = ["role", "tool", "skill"];
@@ -93,7 +94,9 @@ export class ProvenanceStore {
 /**
  * Compute install status for a scanned pack against its provenance record (§5).
  * - not-installed: no record.
- * - drifted: a recorded installed path is missing on disk (best-effort).
+ * - drifted: a recorded installed path is missing OR its bytes were edited
+ *   locally (per-entity contentHash mismatch). Records that predate the
+ *   contentHash field fall back to existence-only drift detection.
  * - update-available: source commit (git) / content hash (local) differs from recorded.
  * - installed: otherwise.
  */
@@ -107,6 +110,12 @@ export function computeInstallStatus(
 	for (const entity of record.entities) {
 		for (const p of entity.installedPaths) {
 			if (!fs.existsSync(p)) return "drifted";
+		}
+		// Edit drift: recompute the on-disk hash and compare to what install
+		// recorded. Skipped for legacy records lacking a contentHash (existence
+		// check above is the only signal then).
+		if (entity.contentHash && hashInstalledEntity(entity.installedPaths) !== entity.contentHash) {
+			return "drifted";
 		}
 	}
 

@@ -14,6 +14,47 @@ import { stripTokenFromGitUrl } from "../skills/git.js";
 import type { SourceKind, SourceRecord } from "./types.js";
 
 /**
+ * Query-param / fragment keys that may carry a credential and must be redacted
+ * from any surfaced/logged git URL (case-insensitive).
+ */
+const SENSITIVE_URL_KEYS = /^(?:token|access_token|private_token|personal_access_token|oauth_token|api[_-]?key|key|auth|authorization|password|passwd|secret)$/i;
+
+/**
+ * Fully redact credentials from a git URL for display/logging:
+ *  - userinfo (`user:token@host`) via the shared `stripTokenFromGitUrl` helper;
+ *  - sensitive query-string params (`?token=…`, `?access_token=…`, …);
+ *  - a fragment that carries a token assignment (`#access_token=…`).
+ * Non-URL forms (scp-like `git@host:path`, local paths) are returned unchanged.
+ */
+export function redactGitUrl(url: string): string {
+	const stripped = stripTokenFromGitUrl(url);
+	let parsed: URL;
+	try {
+		parsed = new URL(stripped);
+	} catch {
+		return stripped; // not a parseable URL (ssh shorthand / local path)
+	}
+	let changed = false;
+	for (const key of [...parsed.searchParams.keys()]) {
+		if (SENSITIVE_URL_KEYS.test(key)) {
+			parsed.searchParams.delete(key);
+			changed = true;
+		}
+	}
+	// Fragments are meaningless to git remotes; drop one that looks like it
+	// smuggles a credential (`#token=…`, `#access_token=…`, …).
+	if (parsed.hash) {
+		const frag = parsed.hash.replace(/^#/, "");
+		const fragKey = frag.split("=")[0];
+		if (SENSITIVE_URL_KEYS.test(fragKey)) {
+			parsed.hash = "";
+			changed = true;
+		}
+	}
+	return changed ? parsed.toString() : stripped;
+}
+
+/**
  * Return a copy of a source record with any embedded git credentials stripped
  * from `url`. Storage keeps the credential-bearing URL (the git backend needs
  * it to authenticate); every API DTO must pass through here so tokens never
@@ -21,7 +62,7 @@ import type { SourceKind, SourceRecord } from "./types.js";
  */
 export function redactSourceUrl(record: SourceRecord): SourceRecord {
 	if (!record.url) return record;
-	return { ...record, url: stripTokenFromGitUrl(record.url) };
+	return { ...record, url: redactGitUrl(record.url) };
 }
 
 export interface AddSourceInput {

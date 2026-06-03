@@ -218,7 +218,7 @@ describe("marketplace fix: uninstall path containment", () => {
 // ── Fix 4: update transactionality + pack/subset semantics ───────────────────
 
 describe("marketplace fix: update semantics + transactionality", () => {
-	it("whole-pack update installs an upstream-added entity", () => {
+	it("whole-pack update refreshes tracked entities only and does NOT auto-add upstream-added entities", () => {
 		const h = makeHarness();
 		// Initial whole-pack install of a pack that (at the time) declares only the role.
 		const initial = pack("research-pack");
@@ -228,12 +228,14 @@ describe("marketplace fix: update semantics + transactionality", () => {
 		assert.equal(rec.installMode, "pack");
 		assert.deepEqual(rec.entities.map((e) => e.type), ["role"]);
 
-		// Upstream now declares all three entities. A whole-pack update adds them.
+		// Upstream now declares all three entities. Update refreshes the tracked
+		// role only — the newly-declared tool + skill are NOT auto-added (design §7.3).
 		h.service.update({ scope: "project", projectId: "p1", source: localSource(), pack: pack("research-pack") });
 		rec = h.projectProvenance().find("src-a", "research-pack")!;
-		assert.deepEqual(rec.entities.map((e) => e.type).sort(), ["role", "skill", "tool"]);
-		assert.ok(fs.existsSync(path.join(h.projectConfigDir, "tools", "research", "web_dig.yaml")));
-		assert.ok(fs.existsSync(path.join(h.projectConfigDir, "skills", "deep-research", "SKILL.md")));
+		assert.deepEqual(rec.entities.map((e) => e.type), ["role"]);
+		assert.equal(rec.installMode, "pack", "install intent preserved across update");
+		assert.ok(!fs.existsSync(path.join(h.projectConfigDir, "tools", "research")));
+		assert.ok(!fs.existsSync(path.join(h.projectConfigDir, "skills", "deep-research")));
 	});
 
 	it("subset update does NOT auto-add a newly-declared entity", () => {
@@ -253,30 +255,30 @@ describe("marketplace fix: update semantics + transactionality", () => {
 
 	it("a mid-update failure restores the prior state intact (no orphaned deletes, no leftover backups)", () => {
 		const h = makeHarness();
-		// Install role + skill (whole-pack of a pack that, at the time, omits the tool).
+		// Install role + tool (whole-pack of a pack that, at the time, omits the skill).
 		const initial = pack("research-pack");
-		initial.entities = initial.entities.filter((e) => e.type !== "tool");
+		initial.entities = initial.entities.filter((e) => e.type !== "skill");
 		h.service.install({ scope: "project", projectId: "p1", source: localSource(), pack: initial, entities: null, conflict: "fail" });
 
 		// Mark the on-disk role so we can prove it was RESTORED (not freshly re-copied).
 		const roleDest = path.join(h.projectConfigDir, "roles", "researcher.yaml");
 		fs.appendFileSync(roleDest, "\n# SENTINEL-KEEP\n");
 
-		// Force the tool copy to fail: plant a FILE where the tools group dir must be created.
+		// Sabotage the TRACKED tool's refresh: drop its installed dir and plant a
+		// FILE where the tools group dir must be re-created so the copy throws.
+		fs.rmSync(path.join(h.projectConfigDir, "tools"), { recursive: true, force: true });
 		fs.writeFileSync(path.join(h.projectConfigDir, "tools"), "not a dir");
 
-		// Whole-pack update now declares the tool too → role refresh succeeds, tool copy fails.
+		// Update refreshes tracked entities (role then tool) → role refresh succeeds, tool copy fails.
 		assert.throws(() => h.service.update({
 			scope: "project", projectId: "p1", source: localSource(), pack: pack("research-pack"),
 		}));
 
 		// Role restored to the exact pre-update bytes (sentinel survives).
 		assert.match(fs.readFileSync(roleDest, "utf-8"), /SENTINEL-KEEP/);
-		// Skill untouched.
-		assert.ok(fs.existsSync(path.join(h.projectConfigDir, "skills", "deep-research", "SKILL.md")));
-		// Provenance unchanged: still role + skill, mode pack.
+		// Provenance unchanged: still role + tool, mode pack.
 		const rec = h.projectProvenance().find("src-a", "research-pack")!;
-		assert.deepEqual(rec.entities.map((e) => e.type).sort(), ["role", "skill"]);
+		assert.deepEqual(rec.entities.map((e) => e.type).sort(), ["role", "tool"]);
 		assert.equal(rec.installMode, "pack");
 		// No leftover backup files.
 		const leftovers = fs.readdirSync(path.join(h.projectConfigDir, "roles")).filter((f) => f.includes(".mp-bak-"));
