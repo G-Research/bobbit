@@ -46,16 +46,27 @@ function sessionId(): string | undefined {
 }
 
 /**
- * Seed a proposal file by POSTing to /api/sessions/:id/proposal/:type/seed.
- * Failures are non-fatal — the existing in-flight `_checkToolProposals`
- * streaming path still delivers the partial to the UI. We log to stderr
- * so a regression is visible in the agent log without breaking the turn.
+ * Result of seeding a proposal. `rev` is set on success; `errorMessage` carries
+ * a server-provided validation message (e.g. unknown workflow) on a structured
+ * 4xx. Most propose_* tools ignore `errorMessage` (log-and-ack), but propose_goal
+ * surfaces it so the agent SEES the rejection and the corrective list.
  */
-async function seedProposal(type: ProposalType, args: unknown): Promise<number | undefined> {
+export interface SeedProposalResult {
+	rev?: number;
+	errorMessage?: string;
+}
+
+/**
+ * Seed a proposal file by POSTing to /api/sessions/:id/proposal/:type/seed.
+ * On non-2xx we return a structured `errorMessage` (the server's `message` when
+ * present) AND log to stderr. The existing in-flight `_checkToolProposals`
+ * streaming path still delivers any partial to the UI.
+ */
+export async function seedProposal(type: ProposalType, args: unknown): Promise<SeedProposalResult> {
 	const sid = sessionId();
 	if (!sid) {
 		console.error(`[proposal-tools] BOBBIT_SESSION_ID not set; cannot seed ${type} proposal`);
-		return undefined;
+		return {};
 	}
 	try {
 		const { status, bodyText, bodyJson } = await callGateway(
@@ -64,16 +75,19 @@ async function seedProposal(type: ProposalType, args: unknown): Promise<number |
 			{ args },
 		);
 		if (status < 200 || status >= 300) {
+			const msg = (bodyJson && typeof bodyJson === "object" && "message" in bodyJson)
+				? String((bodyJson as { message?: unknown }).message)
+				: `seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`;
 			console.error(`[proposal-tools] seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`);
-			return undefined;
+			return { errorMessage: msg };
 		}
 		if (bodyJson && typeof bodyJson === "object" && typeof (bodyJson as any).rev === "number") {
-			return (bodyJson as any).rev as number;
+			return { rev: (bodyJson as any).rev as number };
 		}
-		return undefined;
+		return {};
 	} catch (err) {
 		console.error(`[proposal-tools] seed ${type} threw:`, (err as Error)?.message ?? err);
-		return undefined;
+		return {};
 	}
 }
 
@@ -109,7 +123,13 @@ export default function (pi: ExtensionAPI) {
 			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("goal", args); return ack(rev); },
+		async execute(_id, args) {
+			const r = await seedProposal("goal", args);
+			if (r.errorMessage) {
+				return { content: [{ type: "text" as const, text: r.errorMessage }], isError: true } as any;
+			}
+			return ack(r.rev);
+		},
 	});
 
 	// ── propose_role ──────────────────────────────────────────────────
@@ -125,7 +145,7 @@ export default function (pi: ExtensionAPI) {
 			tools: Type.Optional(Type.String({ description: "Comma-separated allowed tools." })),
 			accessory: Type.Optional(Type.String()),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("role", args); return ack(rev); },
+		async execute(_id, args) { const r = await seedProposal("role", args); return ack(r.rev); },
 	});
 
 	// ── propose_tool ──────────────────────────────────────────────────
@@ -139,7 +159,7 @@ export default function (pi: ExtensionAPI) {
 			action: Type.String({ description: "e.g. create, update." }),
 			content: Type.String({ description: "Tool definition YAML." }),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("tool", args); return ack(rev); },
+		async execute(_id, args) { const r = await seedProposal("tool", args); return ack(r.rev); },
 	});
 
 	// ── propose_staff ─────────────────────────────────────────────────
@@ -155,7 +175,7 @@ export default function (pi: ExtensionAPI) {
 			triggers: Type.Optional(Type.String()),
 			cwd: Type.Optional(Type.String()),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("staff", args); return ack(rev); },
+		async execute(_id, args) { const r = await seedProposal("staff", args); return ack(r.rev); },
 	});
 
 	// ── propose_project ───────────────────────────────────────────────
@@ -197,7 +217,7 @@ export default function (pi: ExtensionAPI) {
 				value: Type.Optional(Type.String()),
 			}), { description: "Server strips value to SecretsStore on PUT." })),
 		}),
-		async execute(_id, args) { const rev = await seedProposal("project", args); return ack(rev); },
+		async execute(_id, args) { const r = await seedProposal("project", args); return ack(r.rev); },
 	});
 
 	// ── view_proposal ─────────────────────────────────────────────────
