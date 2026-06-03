@@ -16,8 +16,9 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge, synthesizeAttachmentText, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import {
@@ -144,6 +145,20 @@ export function isUserVisibleActivity(event: any): boolean {
 function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
 	const snippet = (errMsg || "unknown error").slice(0, 200);
 	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
+}
+
+/**
+ * Detect the model-API "blank ContentBlock text" validation error — the
+ * signature of an image/attachment-only prompt whose blank text was committed
+ * to the agent's history before the synthesizeAttachmentText fix. Such a turn
+ * poisons the in-memory transcript: every later prompt re-sends the blank
+ * block, so re-prompting the SAME live process re-fails. The only cure for a
+ * live-poisoned session is to respawn the agent so it rehydrates from the
+ * now-sanitized `.jsonl` (see transcript-sanitizer.ts).
+ */
+function isBlankContentBlockError(errMsg: string | undefined): boolean {
+	if (!errMsg) return false;
+	return /text field in the ContentBlock/i.test(errMsg) && /is blank/i.test(errMsg);
 }
 
 /** Provenance of a prompt enqueued into a session. Read by TeamManager on
@@ -1722,7 +1737,15 @@ export class SessionManager {
 
 		// modelText is what the model sees; text is the user's verbatim input.
 		// When no expansions, both are equal and dispatch is byte-equal to today.
-		const dispatchText = opts?.modelText ?? text;
+		// Synthesize a non-blank body for attachment-only prompts (image-only OR
+		// non-image-attachment-only) so the model never receives a blank
+		// ContentBlock. Applied here at the single dispatch boundary so EVERY
+		// downstream path inherits valid text: direct dispatch, the persisted
+		// queue row (drainQueue), the error-recovery prefix, and retry (via
+		// dispatchDirectPrompt → session.lastPromptText). Non-blank text and
+		// no-attachment prompts pass through unchanged. See
+		// synthesizeAttachmentText for the exact rule.
+		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
 		const hasExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
 		if (hasExpansions) {
 			appendSkillSidecarEntry(session.id, {
@@ -2539,6 +2562,11 @@ export class SessionManager {
 
 		const isAuto = opts?.auto === true;
 		const hadToolCalls = session.turnHadToolCalls;
+		// Capture before clearing — used to route a live blank-text-poisoned
+		// session through respawn so it rehydrates from the sanitized transcript.
+		const poisonedByBlankText = isBlankContentBlockError(session.lastTurnErrorMessage);
+		const savedPromptText = session.lastPromptText;
+		const savedPromptImages = session.lastPromptImages;
 		session.lastTurnErrored = false;
 		session.turnHadToolCalls = false;
 		// Explicit retry resets the cap — human intervention gets a fresh budget.
@@ -2554,6 +2582,29 @@ export class SessionManager {
 		// In the explicit path it tears down any in-flight pending banner.
 		this.cancelPendingAutoRetry(session, "explicit-retry");
 
+		// Live blank-text-poisoned recovery: re-prompting the same process would
+		// replay the committed blank ContentBlock and re-fail. Respawn the agent
+		// so it rehydrates from the sanitized `.jsonl` (un-poisoned at the
+		// switch_session boundary), then re-dispatch the synthesized prompt with
+		// its image preserved. Skipped when there's no persisted transcript file
+		// (e.g. unit harness) — the normal branch below already synthesizes text.
+		if (poisonedByBlankText) {
+			let ps: PersistedSession | undefined;
+			try { ps = this.resolveStoreForSession(session.id).get(session.id); }
+			catch { ps = undefined; }
+			if (ps?.agentSessionFile) {
+				const restored = await this._respawnAgentInPlace(session, ps);
+				const target = restored ?? this.sessions.get(sessionId);
+				if (target) {
+					const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+					target.lastPromptText = retryText;
+					target.lastPromptImages = savedPromptImages;
+					await target.rpcClient.prompt(retryText, savedPromptImages);
+				}
+				return;
+			}
+		}
+
 		if (hadToolCalls) {
 			// Agent was mid-work — send a system continuation prompt
 			await session.rpcClient.prompt(
@@ -2561,9 +2612,15 @@ export class SessionManager {
 				"Your previous work has been preserved. Please continue where you left off. " +
 				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"
 			);
-		} else if (session.lastPromptText) {
-			// Fresh response error — re-send the original prompt
-			await session.rpcClient.prompt(session.lastPromptText, session.lastPromptImages);
+		} else if (session.lastPromptText || session.lastPromptImages?.length) {
+			// Fresh response error — re-send the original prompt. Run the text
+			// through synthesizeAttachmentText so an already-stuck session whose
+			// last prompt was image/attachment-only (lastPromptText blank or
+			// whitespace) re-dispatches with a valid non-blank body AND preserves
+			// the image, instead of replaying blank text or falling through to the
+			// generic fallback branch (which drops the image).
+			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
+			await session.rpcClient.prompt(retryText, session.lastPromptImages);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			await session.rpcClient.prompt(
@@ -3463,6 +3520,14 @@ export class SessionManager {
 		// Session files are now stored on the host via bind-mounted state dir.
 		// No path translation needed — the agent session file is always a host path.
 		const switchSessionPath = ps.agentSessionFile;
+		// Un-poison any blank-text user messages persisted before the
+		// attachment-only fix, so the agent doesn't re-send an invalid blank
+		// ContentBlock on resume (best-effort, non-fatal).
+		await sanitizeAgentTranscriptFile(
+			{ sandboxed: ps.sandboxed, projectId: ps.projectId },
+			switchSessionPath,
+			this.sandboxManager,
+		);
 		const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: switchSessionPath },
@@ -4732,6 +4797,7 @@ export class SessionManager {
 		// Restore conversation from session file — path is already in agent coordinate system.
 		const roleFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
 		if (agentSessionFile && await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
+			await sanitizeAgentTranscriptFile(roleFileCtx, agentSessionFile, this.sandboxManager);
 			const switchResp = await rpcClient.sendCommand(
 				{ type: "switch_session", sessionPath: agentSessionFile },
 				15_000,
@@ -5818,6 +5884,10 @@ export class SessionManager {
 			// Resume session if we have the session file — path in agent coordinate system
 			const abortFileCtx: SessionFsContext = { sandboxed: session.sandboxed, projectId: session.projectId };
 			if (agentSessionFile && await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
+				// Un-poison blank-text user messages before rehydrating — this is
+				// the route a live already-stuck session takes (forceAbort →
+				// respawn), so the re-spawned agent reads a sanitized transcript.
+				await sanitizeAgentTranscriptFile(abortFileCtx, agentSessionFile, this.sandboxManager);
 				const switchResp = await rpcClient.sendCommand(
 					{ type: "switch_session", sessionPath: agentSessionFile },
 					15_000,

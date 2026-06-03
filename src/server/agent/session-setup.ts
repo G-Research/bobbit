@@ -17,6 +17,7 @@ import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
+import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import type { SessionStore } from "./session-store.js";
@@ -937,6 +938,13 @@ export async function executeWorktreeAsync(
 			ctx.store.update(session.id, { agentSessionFile: correctPath });
 		}
 
+		// Un-poison any blank-text user messages in the cloned transcript before
+		// the agent rehydrates from it (best-effort, non-fatal).
+		await sanitizeAgentTranscriptFile(
+			{ sandboxed: !!plan.sandboxed, projectId: plan.projectId },
+			plan.preExistingAgentSessionFile,
+			ctx.sandboxManager,
+		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
@@ -1053,6 +1061,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
+		await sanitizeAgentTranscriptFile(
+			{ sandboxed: !!plan.sandboxed, projectId: plan.projectId },
+			plan.preExistingAgentSessionFile,
+			ctx.sandboxManager,
+		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
