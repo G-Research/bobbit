@@ -12,7 +12,7 @@ import path from "node:path";
 import { ConflictError, InstallService, type InstallArgs } from "./install-service.js";
 import { hashPackPayload, scanSource } from "./pack-scanner.js";
 import { ProvenanceStore, computeInstallStatus } from "./provenance-store.js";
-import { SourceRegistry, type AddSourceInput } from "./source-registry.js";
+import { SourceRegistry, redactSourceUrl, type AddSourceInput } from "./source-registry.js";
 import { MarketplaceSyncService } from "./sync-service.js";
 import type { ProjectConfigWriter } from "../agent/config-directories.js";
 import type {
@@ -63,6 +63,27 @@ export interface PackSummary {
 	installedCommit: string | null;
 }
 
+/** Flat drill-down DTO the Market UI consumes (one pack, annotated for a scope). */
+export interface PackDetail {
+	sourceId: string;
+	packId: string;
+	name: string;
+	description: string;
+	version: string;
+	sourceLabel: string | null;
+	author: string | null;
+	homepage: string | null;
+	license: string | null;
+	minBobbit: string | null;
+	hasTools: boolean;
+	valid: boolean;
+	error: string | null;
+	installStatus: InstallStatus;
+	installedVersion: string | null;
+	installedCommit: string | null;
+	entities: Array<{ type: EntityRef["type"]; name: string; installed: boolean }>;
+}
+
 export class MarketplaceService {
 	readonly registry: SourceRegistry;
 	readonly sync: MarketplaceSyncService;
@@ -84,11 +105,12 @@ export class MarketplaceService {
 	// ── Sources ────────────────────────────────────────────────
 
 	listSources(): SourceRecord[] {
-		return this.registry.list();
+		// Redact credentials from every DTO leaving the service (§3, security).
+		return this.registry.list().map(redactSourceUrl);
 	}
 
 	addSource(input: AddSourceInput): SourceRecord {
-		return this.registry.add(input);
+		return redactSourceUrl(this.registry.add(input));
 	}
 
 	/** Sync a source (clone/pull git; validate local) and persist sync status. */
@@ -96,11 +118,12 @@ export class MarketplaceService {
 		const source = this.registry.get(id);
 		if (!source) throw new Error(`source not found: ${id}`);
 		const result = await this.sync.sync(source);
-		return this.registry.update(id, {
+		const updated = this.registry.update(id, {
 			lastSyncedAt: Date.now(),
 			lastSyncCommit: result.commit,
 			lastSyncError: result.error,
 		});
+		return redactSourceUrl(updated);
 	}
 
 	removeSource(id: string): void {
@@ -138,6 +161,42 @@ export class MarketplaceService {
 		return { summary: this.summarize(source, pack, provenance), pack, installedEntities };
 	}
 
+	/** Drill-down (flat): the Market UI's per-pack DTO, annotated for the scope. */
+	getPackDetail(sourceId: string, packId: string, scope: InstallScope, projectId: string | null): PackDetail | null {
+		const found = this.findPack(sourceId, packId);
+		if (!found) return null;
+		const { source, pack } = found;
+		const provenance = this.resolveProvenance(scope, projectId);
+		const record = provenance?.find(sourceId, packId);
+		const installedSet = new Set((record?.entities ?? []).map((e) => `${e.type}/${e.name}`));
+		const summary = this.summarize(source, pack, provenance);
+		const m = pack.manifest;
+		const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
+		return {
+			sourceId: source.id,
+			packId: pack.packId,
+			name: summary.name,
+			description: summary.description,
+			version: summary.version,
+			sourceLabel: source.label,
+			author: str(m?.author),
+			homepage: str(m?.homepage),
+			license: str(m?.license),
+			minBobbit: str(m?.minBobbit),
+			hasTools: pack.hasTools,
+			valid: pack.valid,
+			error: pack.error ?? null,
+			installStatus: summary.installStatus,
+			installedVersion: summary.installedVersion,
+			installedCommit: summary.installedCommit,
+			entities: pack.entities.map((e) => ({
+				type: e.type,
+				name: e.name,
+				installed: installedSet.has(`${e.type}/${e.name}`),
+			})),
+		};
+	}
+
 	// ── Install / update / uninstall ───────────────────────────
 
 	installPack(opts: {
@@ -161,8 +220,13 @@ export class MarketplaceService {
 	}
 
 	async updatePack(opts: { sourceId: string; packId: string; scope: InstallScope; projectId: string | null }): Promise<InstallOutcome> {
-		// Re-sync first so the re-copy reflects upstream changes.
-		await this.syncSource(opts.sourceId);
+		// Re-sync first so the re-copy reflects upstream changes. If the sync
+		// failed, ABORT: the cache is stale and re-copying / rewriting provenance
+		// would record a null/stale commit and possibly clobber a good install.
+		const synced = await this.syncSource(opts.sourceId);
+		if (synced.lastSyncError) {
+			throw new Error(`cannot update pack ${opts.packId}: source ${opts.sourceId} failed to sync: ${synced.lastSyncError}`);
+		}
 		const found = this.requirePack(opts.sourceId, opts.packId);
 		return this.install.update({ scope: opts.scope, projectId: opts.projectId, source: found.source, pack: found.pack });
 	}

@@ -4536,7 +4536,7 @@ async function handleApiRoute(
 		const packId = decodeURIComponent(marketPackMatch[2]);
 		const scope = parseMarketScope(url.searchParams.get("scope"));
 		const projectId = url.searchParams.get("projectId") || null;
-		const result = marketplace.getPack(sourceId, packId, scope, scope === "project" ? projectId : null);
+		const result = marketplace.getPackDetail(sourceId, packId, scope, scope === "project" ? projectId : null);
 		if (!result) { json({ error: "Pack not found" }, 404); return; }
 		json(result);
 		return;

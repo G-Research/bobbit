@@ -24,6 +24,31 @@ export interface ValidationResult {
 	error?: string;
 }
 
+/**
+ * Safe entity-name grammar. Entity names from a pack manifest are joined into
+ * filesystem paths, so they must never contain path separators, `..`, drive
+ * letters, or leading dots. Anything outside this grammar makes the declaring
+ * pack invalid and is rejected during scan — it must never reach `path.join`.
+ */
+export const ENTITY_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+
+export function isSafeEntityName(name: unknown): name is string {
+	return typeof name === "string" && ENTITY_NAME_PATTERN.test(name);
+}
+
+/**
+ * Defence-in-depth: assert that a resolved path stays under `root`. The scanner
+ * already rejects unsafe names, but install/uninstall re-check so a future
+ * code path that bypasses the scanner can never write/delete outside scope.
+ */
+export function assertWithin(root: string, target: string): void {
+	const r = path.resolve(root);
+	const t = path.resolve(target);
+	if (t !== r && !t.startsWith(r + path.sep)) {
+		throw new Error(`marketplace: path escapes ${root}: ${target}`);
+	}
+}
+
 export interface EntityTypeHandler {
 	type: EntityType;
 	/** key under pack.yaml `contents`. */
@@ -66,12 +91,29 @@ function ensureCustomSkillDir(store: ProjectConfigWriter, dir: string): void {
 	saveCustomDirectories(store, dirs);
 }
 
-/** Remove `dir` from config_directories if it carries only the "skills" type. */
-function removeCustomSkillDir(store: ProjectConfigWriter, dir: string): void {
+/**
+ * Drop only the "skills" type registration for `dir` from config_directories,
+ * preserving any other types (mcp/tools/agents) configured on the same path.
+ * The dir entry is removed entirely only when "skills" was its sole type.
+ * Returns whether `dir` is still referenced by config_directories afterwards.
+ */
+function removeCustomSkillType(store: ProjectConfigWriter, dir: string): boolean {
 	const resolved = path.resolve(dir);
 	const dirs = parseCustomDirectories(store);
-	const next = dirs.filter((d) => path.resolve(d.path) !== resolved);
-	if (next.length !== dirs.length) saveCustomDirectories(store, next);
+	let changed = false;
+	const next = [];
+	for (const d of dirs) {
+		if (path.resolve(d.path) !== resolved) {
+			next.push(d);
+			continue;
+		}
+		const types = d.types.filter((t) => t !== "skills");
+		changed = changed || types.length !== d.types.length;
+		if (types.length > 0) next.push({ ...d, types });
+		// else: drop the entry — "skills" was its only type.
+	}
+	if (changed) saveCustomDirectories(store, next);
+	return next.some((d) => path.resolve(d.path) === resolved);
 }
 
 const roleHandler: EntityTypeHandler = {
@@ -94,8 +136,11 @@ const roleHandler: EntityTypeHandler = {
 	},
 	destPath: (ctx, name) => path.join(roleConfigDir(ctx), `${name}.yaml`),
 	install(ctx, packDir, name) {
+		if (!isSafeEntityName(name)) throw new Error(`marketplace: unsafe role name: ${name}`);
 		const src = this.payloadPath(packDir, name);
 		const dest = this.destPath(ctx, name);
+		assertWithin(path.join(packDir, "roles"), src);
+		assertWithin(roleConfigDir(ctx), dest);
 		fs.mkdirSync(path.dirname(dest), { recursive: true });
 		fs.copyFileSync(src, dest);
 		ctx.invalidateRoles?.();
@@ -134,8 +179,11 @@ const toolHandler: EntityTypeHandler = {
 	},
 	destPath: (ctx, name) => path.join(toolConfigDir(ctx), name),
 	install(ctx, packDir, name) {
+		if (!isSafeEntityName(name)) throw new Error(`marketplace: unsafe tool group name: ${name}`);
 		const src = this.payloadPath(packDir, name);
 		const dest = this.destPath(ctx, name);
+		assertWithin(path.join(packDir, "tools"), src);
+		assertWithin(toolConfigDir(ctx), dest);
 		copyDirRecursive(src, dest);
 		ctx.invalidateTools?.();
 		return { type: "tool", name, installedPaths: [dest] };
@@ -160,8 +208,11 @@ const skillHandler: EntityTypeHandler = {
 	},
 	destPath: (ctx, name) => path.join(ctx.skillInstallDir, name),
 	install(ctx, packDir, name) {
+		if (!isSafeEntityName(name)) throw new Error(`marketplace: unsafe skill name: ${name}`);
 		const src = this.payloadPath(packDir, name);
 		const dest = this.destPath(ctx, name);
+		assertWithin(path.join(packDir, "skills"), src);
+		assertWithin(ctx.skillInstallDir, dest);
 		copyDirRecursive(src, dest);
 		const entity: InstalledEntity = { type: "skill", name, installedPaths: [dest] };
 		// Project scope: register the (absolute) skills dir so discoverSlashSkills
@@ -176,13 +227,15 @@ const skillHandler: EntityTypeHandler = {
 		for (const p of entity.installedPaths) {
 			try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
-		// Deregister the custom skill dir if it is now empty.
+		// Drop only the "skills" registration for this dir, preserving any other
+		// config types registered on the same path. Delete the dir only if it is
+		// now empty AND no longer referenced by config_directories.
 		if (ctx.scope === "project" && ctx.projectConfigStore && entity.customDirRegistered) {
 			const dir = entity.customDirRegistered;
+			const stillReferenced = removeCustomSkillType(ctx.projectConfigStore, dir);
 			let empty = true;
 			try { empty = fs.readdirSync(dir).length === 0; } catch { empty = true; }
-			if (empty) {
-				removeCustomSkillDir(ctx.projectConfigStore, dir);
+			if (empty && !stillReferenced) {
 				try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
 			}
 		}

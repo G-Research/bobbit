@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { ENTITY_HANDLERS, handlerForManifestKey } from "./entity-handlers.js";
+import { ENTITY_HANDLERS, ENTITY_NAME_PATTERN, handlerForManifestKey, isSafeEntityName } from "./entity-handlers.js";
 import type { PackManifest, ScannedEntity, ScannedPack } from "./types.js";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -90,6 +90,12 @@ export function scanPackDir(sourceId: string, packDir: string): ScannedPack {
 		for (const name of list) {
 			if (typeof name !== "string" || !name.trim()) {
 				errors.push(`${key}: entry must be a non-empty string`);
+				continue;
+			}
+			// Reject path-traversal / unsafe names BEFORE any path.join. An unsafe
+			// name makes the whole pack invalid; it never becomes a ScannedEntity.
+			if (!isSafeEntityName(name)) {
+				errors.push(`${key}/${name}: invalid entity name (must match ${ENTITY_NAME_PATTERN})`);
 				continue;
 			}
 			const res = handler.validate(packDir, name);

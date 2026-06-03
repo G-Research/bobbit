@@ -8,6 +8,7 @@
  * call site exists from day one.
  */
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { stripTokenFromGitUrl } from "../skills/git.js";
 import { ENTITY_HANDLERS } from "./entity-handlers.js";
@@ -184,23 +185,38 @@ export class InstallService {
 		const skipped = conflict === "skip" ? conflicting : [];
 
 		const installed: InstalledEntity[] = [];
+		// Overwrite mode: MOVE each existing destination to a temp backup before
+		// copying so a mid-install failure can restore it. Deleting up-front (the
+		// old behaviour) made rollback unable to recover a clobbered entity.
+		const backups: { dest: string; backup: string }[] = [];
 		try {
 			for (const t of toInstall) {
 				const handler = ENTITY_HANDLERS[t.type];
-				// Overwrite: remove the existing destination first so a dir copy
-				// can't leave stale files behind from a previous version.
 				if (conflict === "overwrite" && conflictKeys.has(`${t.type}/${t.name}`)) {
 					const dest = handler.destPath(ctx, t.name);
-					try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* best-effort */ }
+					const backup = `${dest}.mp-bak-${randomUUID().slice(0, 8)}`;
+					fs.renameSync(dest, backup);
+					backups.push({ dest, backup });
 				}
 				installed.push(handler.install(ctx, packDir, t.name));
 			}
 		} catch (err) {
-			// Roll back this install's writes (best-effort).
+			// Roll back this install's writes (best-effort), then restore backups so
+			// the system is left exactly as it was before the install began.
 			for (const e of installed) {
 				try { ENTITY_HANDLERS[e.type].uninstall(ctx, e); } catch { /* best-effort */ }
 			}
+			for (const b of backups) {
+				try {
+					if (fs.existsSync(b.dest)) fs.rmSync(b.dest, { recursive: true, force: true });
+					fs.renameSync(b.backup, b.dest);
+				} catch { /* best-effort */ }
+			}
 			throw err;
+		}
+		// Success: discard the backups of overwritten entities.
+		for (const b of backups) {
+			try { fs.rmSync(b.backup, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 		return { installed, skipped };
 	}

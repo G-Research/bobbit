@@ -10,7 +10,19 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { stripTokenFromGitUrl } from "../skills/git.js";
 import type { SourceKind, SourceRecord } from "./types.js";
+
+/**
+ * Return a copy of a source record with any embedded git credentials stripped
+ * from `url`. Storage keeps the credential-bearing URL (the git backend needs
+ * it to authenticate); every API DTO must pass through here so tokens never
+ * leave the server.
+ */
+export function redactSourceUrl(record: SourceRecord): SourceRecord {
+	if (!record.url) return record;
+	return { ...record, url: stripTokenFromGitUrl(record.url) };
+}
 
 export interface AddSourceInput {
 	kind: SourceKind;
