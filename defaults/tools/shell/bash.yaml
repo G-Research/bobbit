@@ -156,11 +156,10 @@ detail_docs: >-
   bash(command="npm run check")
 
 
-  # Run E2E tests with filtered output
+  # Run E2E tests (line reporter — readable, gate_inspect-friendly)
 
   bash(command="npm run build:server && npx playwright test --config
-  playwright-e2e.config.ts --reporter=json 2>/dev/null | node
-  scripts/test-filter.mjs")
+  playwright-e2e.config.ts --reporter=line")
 
 
   # Search for all usages of a function across the codebase
@@ -186,8 +185,7 @@ detail_docs: >-
 
   # Run a specific test file with timeout
 
-  bash(command="npx playwright test tests/e2e/tools-api.spec.ts --reporter=json
-  2>/dev/null | node scripts/test-filter.mjs", timeout=120)
+  bash(command="npx playwright test tests/e2e/tools-api.spec.ts --reporter=line", timeout=120)
 
   ```
 

@@ -8,7 +8,7 @@
  * Prerequisites: `npm run build` (both server and UI).
  *
  * Run:
- *   npm run build && npx playwright test --config playwright-fullstack.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+ *   npm run build && npx playwright test --config playwright-fullstack.config.ts --reporter=line
  */
 import { defineConfig } from "@playwright/test";
 import path from "node:path";
