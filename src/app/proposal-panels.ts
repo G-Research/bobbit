@@ -129,10 +129,36 @@ let _goalAutoStartTeam = true;
 let _staffSandboxed = false;
 let _assistantEnabledOptionalSteps: string[] = [];
 
-/** Set the selected workflow ID from outside the render module (e.g. from a goal proposal). */
+/** Set the selected workflow ID from outside the render module (e.g. from a goal proposal).
+ *  Normalizes against the loaded workflow cache: a proposed id that isn't a configured
+ *  workflow falls back to the first available id so the dropdown's displayed option and
+ *  the underlying state always agree. The post-load `normalizeWorkflowSelections()` is the
+ *  safety net for the case where the cache hadn't loaded yet when this was called. */
 export function setSelectedWorkflowId(id: string): void {
-	_selectedWorkflowId = id;
+	_selectedWorkflowId = (_cachedWorkflows.length > 0 && !_cachedWorkflows.some(w => w.id === id))
+		? (_cachedWorkflows[0]?.id ?? "")
+		: id;
 }
+
+/** Normalize the workflow form selections against the loaded workflow cache.
+ *  Whenever the list is available, any empty or phantom (not-in-list) selection is
+ *  reset to the first available id so the rendered <select> option and the form state
+ *  always agree. A value already present in the list is never clobbered. */
+function normalizeWorkflowSelections(): void {
+	if (_cachedWorkflows.length === 0) return;
+	const ids = new Set(_cachedWorkflows.map(w => w.id));
+	const first = _cachedWorkflows[0].id;
+	if (!ids.has(_selectedWorkflowId)) _selectedWorkflowId = first;
+	if (!ids.has(_proposalWorkflowId)) _proposalWorkflowId = first;
+}
+
+// Test affordance (mirrors main.ts's `__bobbitState` / `__bobbitRenderApp`):
+// expose the assistant-panel workflow setter so browser E2E can simulate a
+// goal proposal naming a workflow the project doesn't have. Carries no secrets
+// and the setter is already an exported cross-module API.
+try {
+	(window as unknown as Record<string, unknown>).__bobbitSetSelectedWorkflowId = setSelectedWorkflowId;
+} catch { /* non-window environment */ }
 
 function ensureWorkflowsLoaded(projectId?: string): void {
 	// Workflows are project-scoped (no system layer). Without a project we can't
@@ -144,6 +170,7 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 	const cached = _workflowCacheByProject.get(projectId);
 	if (cached) {
 		_cachedWorkflows = cached;
+		normalizeWorkflowSelections();
 		return;
 	}
 	if (_workflowsLoadingByProject.has(projectId)) return;
@@ -152,16 +179,12 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 		_workflowCacheByProject.set(projectId, wfs);
 		_workflowsLoadingByProject.delete(projectId);
 		_cachedWorkflows = wfs;
-		// Seed default workflow selection to the first available id when no
-		// explicit choice has been made. The server now requires a real id
-		// (no "general" magic default), so the dropdown must show a valid
-		// option from the moment it renders.
-		if (!_selectedWorkflowId && wfs.length > 0) {
-			_selectedWorkflowId = wfs[0].id;
-		}
-		if (!_proposalWorkflowId && wfs.length > 0) {
-			_proposalWorkflowId = wfs[0].id;
-		}
+		// Seed/normalize the workflow selections to a valid id once the list arrives.
+		// This fixes both empty selections AND phantom ids (a proposed workflow that
+		// isn't configured) that were present before the async load completed. The
+		// server requires a real id (no "general" magic default), so the dropdown must
+		// show a valid option from the moment it renders.
+		normalizeWorkflowSelections();
 		renderApp();
 	});
 }
@@ -1977,6 +2000,9 @@ function syncProposalFormState(): void {
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
 	_proposalWorkflowId = proposal.workflow || "";
+	// Correct a phantom/empty proposed workflow immediately when the cache is already
+	// loaded, so the rendered option and form state agree on the same render.
+	normalizeWorkflowSelections();
 	_proposalSpecEditMode = false;
 	_proposalEnabledOptionalSteps = proposal.options
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
