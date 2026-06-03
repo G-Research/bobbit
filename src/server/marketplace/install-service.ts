@@ -112,7 +112,7 @@ export class InstallService {
 			for (const e of installed) byKey.set(`${e.type}/${e.name}`, e);
 			recordEntities = [...byKey.values()];
 		}
-		const installMode = this.resolveInstallMode(isWholePack, pack, recordEntities);
+		const installMode = this.resolveInstallMode(pack, recordEntities);
 		const record = this.buildRecord(scope, projectId, source, pack, recordEntities, installMode);
 		provenance.upsert(record);
 
@@ -123,9 +123,15 @@ export class InstallService {
 		return { record, results, skipped };
 	}
 
-	/** subset install becomes "pack" once its record covers every declared entity. */
-	private resolveInstallMode(isWholePack: boolean, pack: ScannedPack, recordEntities: InstalledEntity[]): InstallMode {
-		if (isWholePack) return "pack";
+	/**
+	 * installMode is "pack" iff the FINAL recorded entity set covers every
+	 * declared entity — derived from on-disk reality, never from whether the
+	 * caller requested a whole-pack install. This matters for a whole-pack
+	 * install that skipped a conflict (conflict="skip"): the record then omits
+	 * the skipped entity, so it is correctly "subset" and a later whole-pack
+	 * update won't clobber the entity the user deliberately kept.
+	 */
+	private resolveInstallMode(pack: ScannedPack, recordEntities: InstalledEntity[]): InstallMode {
 		const declared = pack.entities.map((e) => `${e.type}/${e.name}`);
 		const have = new Set(recordEntities.map((e) => `${e.type}/${e.name}`));
 		const coversAll = declared.length > 0 && declared.every((k) => have.has(k));
@@ -176,7 +182,7 @@ export class InstallService {
 			reconcileSkillDirRegistration(ctx);
 		}
 
-		const installMode = this.resolveInstallMode(mode === "pack", pack, installed);
+		const installMode = this.resolveInstallMode(pack, installed);
 		const record = this.buildRecord(scope, projectId, source, pack, installed, installMode);
 		provenance.upsert(record);
 

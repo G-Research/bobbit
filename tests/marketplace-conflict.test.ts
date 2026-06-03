@@ -71,6 +71,54 @@ describe("marketplace conflict handling", () => {
 		assert.ok(fs.existsSync(path.join(h.projectConfigDir, "roles", "analyst.yaml")));
 	});
 
+	it("a whole-pack install that SKIPS a conflict is recorded as \"subset\", not \"pack\"", () => {
+		const h = makeHarness();
+		// A pre-existing, hand-authored role at the same scope.
+		fs.mkdirSync(path.join(h.projectConfigDir, "roles"), { recursive: true });
+		const roleDest = path.join(h.projectConfigDir, "roles", "researcher.yaml");
+		fs.writeFileSync(roleDest, "name: researcher\n# hand-authored\n");
+
+		installResearch(h, "skip");
+
+		const rec = h.projectProvenance().find("src-a", "research-pack")!;
+		// installMode derives from COVERAGE, not the whole-pack request shape:
+		// the skipped role is absent, so the record does not cover all declared.
+		assert.equal(rec.installMode, "subset");
+		assert.ok(!rec.entities.some((e) => `${e.type}/${e.name}` === "role/researcher"), "skipped entity is not in the record");
+		assert.deepEqual(rec.entities.map((e) => `${e.type}/${e.name}`).sort(), ["skill/deep-research", "tool/research"]);
+	});
+
+	it("update() after a skip-install does NOT clobber the user's skipped entity", () => {
+		const h = makeHarness();
+		fs.mkdirSync(path.join(h.projectConfigDir, "roles"), { recursive: true });
+		const roleDest = path.join(h.projectConfigDir, "roles", "researcher.yaml");
+		fs.writeFileSync(roleDest, "name: researcher\n# SENTINEL-USER\n");
+
+		installResearch(h, "skip");
+		// Because the record is "subset", a whole-pack update must touch only the
+		// tracked (installed) entities — never the user's deliberately-kept role.
+		h.service.update({ scope: "project", projectId: "p1", source: localSource(), pack: pack("research-pack") });
+
+		assert.match(fs.readFileSync(roleDest, "utf-8"), /SENTINEL-USER/, "user's role untouched by update");
+		const rec = h.projectProvenance().find("src-a", "research-pack")!;
+		assert.equal(rec.installMode, "subset");
+		assert.ok(!rec.entities.some((e) => `${e.type}/${e.name}` === "role/researcher"), "skipped entity still not tracked after update");
+	});
+
+	it("a whole-pack install with no conflicts (and overwrite) records \"pack\" (regression guard)", () => {
+		// No conflicts → covers all declared → "pack".
+		const clean = makeHarness();
+		installResearch(clean, "fail");
+		assert.equal(clean.projectProvenance().find("src-a", "research-pack")!.installMode, "pack");
+
+		// Overwrite of a conflicting entity still covers all declared → "pack".
+		const h = makeHarness();
+		fs.mkdirSync(path.join(h.projectConfigDir, "roles"), { recursive: true });
+		fs.writeFileSync(path.join(h.projectConfigDir, "roles", "researcher.yaml"), "name: researcher\n# stale\n");
+		installResearch(h, "overwrite");
+		assert.equal(h.projectProvenance().find("src-a", "research-pack")!.installMode, "pack");
+	});
+
 	it("rolls back partial writes when a copy fails mid-transaction", () => {
 		const h = makeHarness();
 		// Plant a FILE at <configDir>/tools so creating the tools/research group
