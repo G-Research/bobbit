@@ -31,6 +31,7 @@ import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
+import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
 import { doRenderApp, workspaceSessionId } from "./render.js";
 import { PROPOSAL_TYPES } from "./proposal-registry.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
@@ -423,6 +424,9 @@ async function initApp() {
 		state.appView = "gateway-starting";
 	}
 	renderApp();
+	// First paint into #app means JS executed and Lit mounted — clear the
+	// index.html boot watchdog and mark the app booted. See pwa-lifecycle.ts.
+	markAppBooted();
 
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
@@ -808,6 +812,22 @@ initApp();
 if ('serviceWorker' in navigator) {
 	navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+
+// iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).
+// All paths are gated on standalone display mode, so a normal browser tab and
+// the dev server are unaffected. Division of labor: this recovers a DEAD/FROZEN
+// page (force reload to re-bootstrap); the existing `visibilitychange` handler
+// above and `_onVisibilityChange` in remote-agent.ts recover a dead WebSocket on
+// a LIVE page. The two are disjoint and must not be conflated. See
+// src/app/pwa-lifecycle.ts.
+if (import.meta.hot) {
+	// Never let the inline boot watchdog fight Vite HMR full-reloads in dev.
+	if (typeof window !== "undefined" && window.__bobbitBootWatchdog != null) {
+		clearTimeout(window.__bobbitBootWatchdog as ReturnType<typeof setTimeout>);
+		window.__bobbitBootWatchdog = undefined;
+	}
+}
+installPwaLifecycleRecovery();
 
 // Vite HMR hot-reload detection
 if (import.meta.hot) {

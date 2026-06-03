@@ -34,6 +34,47 @@
 					if (p && p !== "forest") document.documentElement.dataset.palette = p;
 				} catch (e) { /* ignore */ }
 			})();
+
+			/*
+			 * iOS PWA boot watchdog. Inline (not in the module) so the timer
+			 * exists even if the module chunk is slow or frozen on resume. A
+			 * setTimeout scheduled before an iOS freeze is paused and RESUMES
+			 * firing after unfreeze — so if iOS brings forward a page that was
+			 * frozen mid-bootstrap, this fires shortly after resume, sees nothing
+			 * painted into #app, and forces one reload to re-bootstrap.
+			 *
+			 * markAppBooted() in src/app/main.ts clears this the moment the first
+			 * render mounts content into #app. Gated on standalone display mode
+			 * so normal browser tabs / the dev server never reload. The shared
+			 * cooldown guard (sessionStorage 'bobbit-pwa-reload-at', mirrored by
+			 * src/app/pwa-lifecycle.ts) prevents reload loops.
+			 */
+			(function () {
+				try {
+					window.__bobbitBootStart = Date.now();
+					var BOOT_WATCHDOG_MS = 8000;
+					var RELOAD_GUARD_KEY = "bobbit-pwa-reload-at";
+					var RELOAD_COOLDOWN_MS = 10000;
+					window.__bobbitBootWatchdog = setTimeout(function () {
+						try {
+							var standalone =
+								(window.matchMedia &&
+									window.matchMedia("(display-mode: standalone)").matches) ||
+								navigator.standalone === true;
+							if (!standalone) return;
+							if (document.visibilityState === "hidden") return;
+							var app = document.getElementById("app");
+							if (app && app.children.length > 0) return; // already painted
+							var lastRaw = sessionStorage.getItem(RELOAD_GUARD_KEY);
+							var last = lastRaw ? Number(lastRaw) : NaN;
+							var now = Date.now();
+							if (isFinite(last) && now - last < RELOAD_COOLDOWN_MS) return;
+							sessionStorage.setItem(RELOAD_GUARD_KEY, String(now));
+							location.reload();
+						} catch (e) { /* ignore */ }
+					}, BOOT_WATCHDOG_MS);
+				} catch (e) { /* ignore */ }
+			})();
 		</script>
 		<style>
 			/* ─────────────────────────────────────────────────────────────────
