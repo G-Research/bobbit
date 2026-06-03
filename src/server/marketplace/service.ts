@@ -61,6 +61,8 @@ export interface PackSummary {
 	installStatus: InstallStatus;
 	installedVersion: string | null;
 	installedCommit: string | null;
+	/** declared entities not present in the install record (0 when not installed). */
+	newEntitiesAvailable: number;
 }
 
 /** Flat drill-down DTO the Market UI consumes (one pack, annotated for a scope). */
@@ -81,6 +83,8 @@ export interface PackDetail {
 	installStatus: InstallStatus;
 	installedVersion: string | null;
 	installedCommit: string | null;
+	/** declared entities not present in the install record (0 when not installed). */
+	newEntitiesAvailable: number;
 	entities: Array<{ type: EntityRef["type"]; name: string; installed: boolean }>;
 }
 
@@ -189,6 +193,7 @@ export class MarketplaceService {
 			installStatus: summary.installStatus,
 			installedVersion: summary.installedVersion,
 			installedCommit: summary.installedCommit,
+			newEntitiesAvailable: summary.newEntitiesAvailable,
 			entities: pack.entities.map((e) => ({
 				type: e.type,
 				name: e.name,
@@ -257,6 +262,12 @@ export class MarketplaceService {
 		const record = provenance?.find(source.id, pack.packId);
 		const contentHash = source.kind === "local" && pack.valid ? hashPackPayload(pack) : null;
 		const installStatus = computeInstallStatus(source, record, contentHash);
+		// Declared entities the install record does not yet track. Only meaningful
+		// once installed (update never auto-adds these — see InstallService.update).
+		const installedKeys = new Set((record?.entities ?? []).map((e) => `${e.type}/${e.name}`));
+		const newEntitiesAvailable = record
+			? pack.entities.filter((e) => !installedKeys.has(`${e.type}/${e.name}`)).length
+			: 0;
 		return {
 			sourceId: source.id,
 			packId: pack.packId,
@@ -271,6 +282,7 @@ export class MarketplaceService {
 			installStatus,
 			installedVersion: record?.packVersion ?? null,
 			installedCommit: record?.sourceCommit ?? null,
+			newEntitiesAvailable,
 		};
 	}
 

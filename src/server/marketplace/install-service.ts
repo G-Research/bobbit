@@ -11,10 +11,10 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { stripTokenFromGitUrl } from "../skills/git.js";
 import { ENTITY_HANDLERS, isWithin, reconcileSkillDirRegistration } from "./entity-handlers.js";
-import { hashPackPayload } from "./pack-scanner.js";
+import { hashInstalledEntity, hashPackPayload } from "./pack-scanner.js";
 import { ProvenanceStore } from "./provenance-store.js";
+import { redactGitUrl } from "./source-registry.js";
 import type {
 	ConflictMode,
 	EntityRef,
@@ -42,6 +42,12 @@ export interface TrustPolicy {
 	check(source: SourceRecord, pack: ScannedPack): void;
 }
 const NOOP_TRUST: TrustPolicy = { check: () => { /* no-op in MVP */ } };
+
+/** Stamp the content hash of what was just written onto a freshly-installed entity. */
+function withContentHash(entity: InstalledEntity): InstalledEntity {
+	entity.contentHash = hashInstalledEntity(entity.installedPaths);
+	return entity;
+}
 
 export interface InstallServiceDeps {
 	resolveCtx: (scope: InstallScope, projectId: string | null) => InstallCtx | null;
@@ -141,11 +147,13 @@ export class InstallService {
 	/**
 	 * Re-sync-then-refresh, fully transactional across removals AND copies.
 	 *
-	 * - installMode "pack"   → install everything the updated pack now declares
-	 *   (add newly-declared, refresh existing, remove no-longer-declared), so a
-	 *   whole-pack update truly reflects upstream.
-	 * - installMode "subset" → refresh only tracked entities still declared and
-	 *   remove tracked entities no longer declared; never auto-add new ones.
+	 * Update is "refresh what I have" for BOTH pack and subset installs (design
+	 * §7.3): re-copy every TRACKED entity the updated pack still declares, and
+	 * remove tracked entities the pack no longer declares (so update never
+	 * leaves orphans). Newly-declared entities are **never** auto-added — the UI
+	 * surfaces them via `newEntitiesAvailable` so the user can re-install the
+	 * pack to add them. The original install intent (pack vs subset) is
+	 * preserved on the rewritten record.
 	 *
 	 * A mid-update failure restores the system exactly as it was: every removed
 	 * and every overwritten entity is backed up first, and on failure newly
@@ -164,12 +172,12 @@ export class InstallService {
 		if (!ctx) throw new Error(`could not resolve install context for scope=${scope}`);
 		this.trust.check(source, pack);
 
-		const mode: InstallMode = existing.installMode === "subset" ? "subset" : "pack";
+		// Refresh only tracked entities still declared; drop tracked entities the
+		// pack no longer declares. No auto-add of newly-declared entities.
 		const declaredNow = new Set(pack.entities.map((e) => `${e.type}/${e.name}`));
-
-		const finalTargets: EntityRef[] = mode === "pack"
-			? pack.entities.map((e) => ({ type: e.type, name: e.name }))
-			: existing.entities.filter((e) => declaredNow.has(`${e.type}/${e.name}`)).map((e) => ({ type: e.type, name: e.name }));
+		const finalTargets: EntityRef[] = existing.entities
+			.filter((e) => declaredNow.has(`${e.type}/${e.name}`))
+			.map((e) => ({ type: e.type, name: e.name }));
 		const finalKeys = new Set(finalTargets.map((t) => `${t.type}/${t.name}`));
 		const toRemove = existing.entities.filter((e) => !finalKeys.has(`${e.type}/${e.name}`));
 
@@ -182,8 +190,8 @@ export class InstallService {
 			reconcileSkillDirRegistration(ctx);
 		}
 
-		const installMode = this.resolveInstallMode(pack, installed);
-		const record = this.buildRecord(scope, projectId, source, pack, installed, installMode);
+		// Preserve the original install intent — update never flips pack↔subset.
+		const record = this.buildRecord(scope, projectId, source, pack, installed, existing.installMode);
 		provenance.upsert(record);
 
 		const results: InstallEntityResult[] = installed.map((e): InstallEntityResult => ({
@@ -230,7 +238,7 @@ export class InstallService {
 			// 2. Back up overwrite targets, then copy every target fresh.
 			for (const t of targets) {
 				backup(ENTITY_HANDLERS[t.type].destPath(ctx, t.name));
-				installed.push(ENTITY_HANDLERS[t.type].install(ctx, packDir, t.name));
+				installed.push(withContentHash(ENTITY_HANDLERS[t.type].install(ctx, packDir, t.name)));
 			}
 		} catch (err) {
 			for (const e of installed) {
@@ -326,7 +334,7 @@ export class InstallService {
 					fs.renameSync(dest, backup);
 					backups.push({ dest, backup });
 				}
-				installed.push(handler.install(ctx, packDir, t.name));
+				installed.push(withContentHash(handler.install(ctx, packDir, t.name)));
 			}
 		} catch (err) {
 			// Roll back this install's writes (best-effort), then restore backups so
@@ -365,7 +373,7 @@ export class InstallService {
 			packName: pack.manifest?.name ?? pack.packId,
 			packVersion: pack.manifest?.version ?? "",
 			sourceKind: source.kind,
-			sourceUrl: source.url ? stripTokenFromGitUrl(source.url) : null,
+			sourceUrl: source.url ? redactGitUrl(source.url) : null,
 			sourceCommit: source.lastSyncCommit ?? null,
 			sourceContentHash: source.kind === "local" ? hashPackPayload(pack) : null,
 			installedAt: Date.now(),

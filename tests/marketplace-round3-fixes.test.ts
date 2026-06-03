@@ -117,20 +117,22 @@ describe("marketplace fix: shared project skills registration is reconciled", ()
 // ── Fix 2: rolled-back skill-bearing update keeps the registration ───────────
 
 describe("marketplace fix: rollback keeps the skills registration", () => {
-	it("a rolled-back whole-pack update restores the skill AND keeps it registered", () => {
+	it("a rolled-back update restores the skill AND keeps it registered", () => {
 		const h = makeHarness();
 		const skillsDir = path.join(h.projectConfigDir, "skills");
 
-		// Install role + skill (whole-pack of a pack that, at the time, omits the tool).
-		const initial = pack("research-pack");
-		initial.entities = initial.entities.filter((e) => e.type !== "tool");
-		h.service.install({ scope: "project", projectId: "p1", source: localSource(), pack: initial, entities: null, conflict: "fail" });
+		// Install skill + tool (as a subset) so the skill is refreshed — and
+		// intermediately uninstalled during rollback — BEFORE the failing tool.
+		h.service.install({ scope: "project", projectId: "p1", source: localSource(), pack: pack("research-pack"), entities: [{ type: "skill", name: "deep-research" }], conflict: "fail" });
+		h.service.install({ scope: "project", projectId: "p1", source: localSource(), pack: pack("research-pack"), entities: [{ type: "tool", name: "research" }], conflict: "fail" });
 		assert.ok(skillReg(h.projectConfigStore, skillsDir)?.types.includes("skills"));
 
-		// Force the tool copy to fail mid-update: plant a FILE where the tools group dir must go.
+		// Sabotage the tool refresh: drop its installed dir and plant a FILE where
+		// the tools group dir must be re-created so the copy throws mid-update.
+		fs.rmSync(path.join(h.projectConfigDir, "tools"), { recursive: true, force: true });
 		fs.writeFileSync(path.join(h.projectConfigDir, "tools"), "not a dir");
 
-		// Whole-pack update now declares the tool too → skill refresh + tool copy fails.
+		// Update refreshes tracked entities (skill then tool) → skill refresh succeeds, tool fails.
 		assert.throws(() => h.service.update({
 			scope: "project", projectId: "p1", source: localSource(), pack: pack("research-pack"),
 		}));
@@ -140,9 +142,9 @@ describe("marketplace fix: rollback keeps the skills registration", () => {
 		assert.ok(fs.existsSync(path.join(skillsDir, "deep-research", "SKILL.md")), "skill restored after rollback");
 		assert.ok(skillReg(h.projectConfigStore, skillsDir)?.types.includes("skills"), "registration survives a rolled-back update");
 
-		// Provenance unchanged: still role + skill.
+		// Provenance unchanged: still skill + tool.
 		const rec = h.projectProvenance().find("src-a", "research-pack")!;
-		assert.deepEqual(rec.entities.map((e) => e.type).sort(), ["role", "skill"]);
+		assert.deepEqual(rec.entities.map((e) => e.type).sort(), ["skill", "tool"]);
 	});
 });
 

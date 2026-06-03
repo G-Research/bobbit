@@ -147,6 +147,22 @@ export function hashPackPayload(pack: ScannedPack): string {
 	return hash.digest("hex");
 }
 
+/**
+ * Stable content hash over the bytes an install actually wrote (its
+ * `installedPaths`). Recorded per entity at install/update time and recomputed
+ * by computeInstallStatus to detect local edits as drift. Each path is hashed
+ * relative to itself, so the digest is machine-independent (absolute install
+ * dirs differ per machine but the payload bytes + intra-entity layout don't).
+ */
+export function hashInstalledEntity(installedPaths: string[]): string {
+	const hash = crypto.createHash("sha256");
+	for (const p of [...installedPaths].sort()) {
+		hash.update(`\u0000${p.replace(/\\/g, "/").split("/").pop() ?? ""}\u0000`);
+		hashPath(hash, p, p);
+	}
+	return hash.digest("hex");
+}
+
 function hashPath(hash: crypto.Hash, root: string, p: string): void {
 	let stat: fs.Stats;
 	// lstat (not stat) so a symlink is never followed/read while hashing — a
