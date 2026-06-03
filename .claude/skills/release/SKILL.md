@@ -12,16 +12,30 @@ behind their back.
 Single source of truth for release mechanics: [`docs/releasing.md`](../../../docs/releasing.md).
 This skill orchestrates that doc + version bump + notes + GitHub release.
 
+**Where this runs — read this first.** Never cut the release from the **primary
+worktree**: the dev server runs there, and `npm ci` / `npm run build` would wipe
+its `node_modules` / overwrite its `dist/` and break the running server
+mid-release. Never cut it from a **session worktree** either — that's on a
+session branch, not `master`, and git won't let you check out `master` in a
+second worktree while the primary already has it. Instead, §1.5 creates a
+dedicated **detached-HEAD worktree off `origin/master`** (a sibling of the
+primary, *not* under `*-wt/`), and every mutating step runs there. This is
+why the release commit is pushed with `git push origin HEAD:master` (§8)
+rather than assuming `master` is checked out locally. The E2E harness binds
+port 0 and uses ephemeral `BOBBIT_DIR`s, so `test:e2e` won't collide with the
+running dev server.
+
 ## 0. Sanity check the environment
 
-Run these in parallel; report results before doing anything mutating:
+These are location-independent (the `.git` is shared across worktrees), so run
+them from wherever the skill was activated. Report results before doing
+anything mutating:
 
 ```bash
-git rev-parse --abbrev-ref HEAD          # must be master
-git status --porcelain                   # must be empty
 git fetch origin --tags
-git rev-list --left-right --count HEAD...origin/master  # must be 0 0
+git rev-parse origin/master              # sha we'll release from
 git tag --sort=-v:refname | head -5      # find previous tag
+git log --oneline <prev-tag>..origin/master | head    # must be non-empty (something to release)
 node -v                                  # must satisfy engines.node (>=22.19.0)
 npm whoami                               # must succeed; if not -> ask user to `npm login`
 gh auth status                           # must be authed for SuuBro/bobbit
@@ -29,8 +43,13 @@ git config --get user.signingkey || echo "NO_SIGNING_KEY"
 git config --get commit.gpgsign || echo "commit.gpgsign=unset"
 ```
 
+Note: do **not** gate on the current worktree's branch or cleanliness — the
+release is cut from a fresh detached worktree at `origin/master`'s tip (§1.5),
+so the session/primary worktree state is irrelevant. What matters is that
+`origin/master` is the intended release point.
+
 **Stop and ask the user** if any of:
-- Branch is not `master`, working tree dirty, or behind/ahead of `origin/master`.
+- `origin/master` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
 - `npm whoami` fails — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for publishes on this scope).
 - `gh auth status` not logged in — ask them to run `gh auth login`.
 - No GPG/SSH signing key configured — confirm whether to proceed with **unsigned** tag or wait until they set one up. Default to waiting.
@@ -44,6 +63,33 @@ shown and recent commit summary so they can pick.
 Read current version from `package.json`. Compute next version. Confirm
 with the user before bumping. Use `ask_user_choices` for the confirmation
 so it's one click.
+
+## 1.5 Create the isolated release worktree
+
+All mutating steps (§2 onward) run inside a dedicated detached-HEAD worktree
+so the running dev server in the primary worktree is never disturbed. Create
+it as a sibling of the primary worktree, **outside** the `*-wt/` pool dir (so
+the gateway never mistakes it for a session worktree):
+
+```bash
+# The main working tree is always the FIRST entry of `git worktree list`,
+# regardless of which worktree the skill was activated in.
+PRIMARY=$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')
+RELDIR="$(dirname "$PRIMARY")/bobbit-release-<new-version>"
+git fetch origin --tags
+git worktree add --detach "$RELDIR" origin/master
+cd "$RELDIR"
+git rev-parse --short HEAD            # confirm == origin/master tip
+git status --porcelain               # must be empty (fresh checkout)
+```
+
+Detached HEAD is deliberate: `master` is already checked out in the primary
+worktree and git forbids the same branch in two worktrees. The release commit
+(§4) lands on this detached HEAD and is published to `master` via
+`git push origin HEAD:master` in §8.
+
+**Run every remaining step from inside `$RELDIR`.** Its `node_modules` and
+`dist/` are independent of the dev server's.
 
 ## 2. Pre-flight quality gates
 
@@ -86,19 +132,9 @@ git diff v<prev>..HEAD -- binaries.versions.json
 npm version <new-version> --no-git-tag-version
 ```
 
-`--no-git-tag-version` because we want a signed tag, not the unsigned one `npm version` would otherwise create. Stage and commit:
+`--no-git-tag-version` because we want a signed tag, not the unsigned one `npm version` would otherwise create. **Don't commit yet** — the release notes (§5) are a tracked file and ship in the *same* `chore(release)` commit as the version bump (that's how prior releases do it, e.g. v0.11.0 bundled `RELEASE_NOTES_v0.11.0.md` with `package.json`). Leave the bumped `package.json` / `package-lock.json` (and any `binaries/*` edits from §3) staged-but-uncommitted until §5.
 
-```bash
-git add package.json package-lock.json
-# include binaries/* package.json edits if step 3 changed them
-git commit -m "chore(release): v<new-version>" \
-  --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>" \
-  -S    # GPG/SSH-sign the commit if a signing key is configured
-```
-
-If no signing key is set, drop `-S` (you already confirmed with the user in step 0).
-
-## 5. Generate release notes
+## 5. Generate release notes — then commit
 
 Write `RELEASE_NOTES_v<new-version>.md`. Match the format of the most recent existing `RELEASE_NOTES_v*.md` — short intro, then `## ✨ New Features` and `## 🐛 Bug Fixes` sections, emoji-prefixed bullets with bold lead-ins, friendly tone, no marketing fluff. End with the standard Bobbit footer.
 
@@ -112,7 +148,21 @@ gh pr list --state merged --search "merged:>=<v_prev_date>" --limit 200 \
 
 Group commits/PRs into features vs fixes by message prefix (`feat`, `fix`, `refactor`, `chore`, etc.) and PR labels. Drop chores, version bumps, and pure-internal refactors. For each kept item, write one user-facing bullet — what changed from the user's POV, not the implementation. Look at the actual diff for anything ambiguous.
 
-Show the draft to the user via `review_open` before tagging. Iterate until they're happy. Do **not** tag with provisional notes.
+Show the draft to the user via `review_open` before committing. Iterate until they're happy. Do **not** commit or tag with provisional notes.
+
+Once the user approves the notes, commit the version bump and the notes together as a single `chore(release)` commit:
+
+```bash
+git add package.json package-lock.json RELEASE_NOTES_v<new-version>.md
+# include binaries/* package.json edits if §3 changed them
+git commit -m "chore(release): v<new-version>" \
+  --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>" \
+  -S    # GPG/SSH-sign the commit if a signing key is configured
+```
+
+If no signing key is set, drop `-S` (you already confirmed with the user in step 0).
+
+The commit lands on this worktree's detached HEAD — that's expected. It becomes a real commit on `master` once §8 runs `git push origin HEAD:master`, so `npm install bobbit@<version>`, `git checkout v<version>`, and the GitHub release notes all agree.
 
 ## 6. Tag the release (signed)
 
@@ -156,9 +206,32 @@ Notes:
 
 ## 8. Push the tag and the release commit
 
+From inside `$RELDIR` (detached HEAD), publish the release commit to `master`
+and push the tag:
+
 ```bash
-git push origin master
+git push origin HEAD:master       # detached HEAD -> remote master (fast-forward)
 git push origin v<new-version>
+```
+
+`HEAD:master` (not plain `master`) because this worktree is on a detached
+HEAD, not a local `master` branch. The push fast-forwards remote `master`
+to the release commit.
+
+If the push is **rejected as non-fast-forward**, someone pushed to `master`
+between §1.5 and now. Do **not** force-push. The clean recovery: tear down
+this worktree (§10.5), re-create it off the new `origin/master` tip, and
+re-run from §2. The version number isn't burned until §7 (`npm publish`), so
+as long as you haven't published yet you can safely start over; if you've
+already tagged locally, delete the *local* tag first (`git tag -d v<new-version>`)
+— never delete a tag that's been pushed.
+
+**Refresh the running dev server** so it picks up the release commit (its
+local `master` is now behind remote):
+
+```bash
+cd "$PRIMARY" && git pull origin master    # fast-forward the primary worktree on master
+# then restart the dev server if needed (npm run restart-server)
 ```
 
 ## 9. Create the GitHub release
@@ -186,6 +259,20 @@ node -e "import('bobbit/dist/server/binaries.js').then(m => console.log(m.getFdP
 ```
 
 Both paths should print a real file. If they're `undefined`, the platform sub-package didn't install — investigate before announcing the release.
+
+## 10.5 Tear down the release worktree
+
+Once the smoke test passes, remove the throwaway release worktree (from the
+primary, since you can't remove the worktree you're standing in):
+
+```bash
+cd "$PRIMARY"
+git worktree remove "$RELDIR"      # add --force only if it refuses on untracked build output
+git worktree prune
+```
+
+Leave it in place only if a publish step failed and you need to re-run from
+the same checkout.
 
 ## 11. Announce
 
