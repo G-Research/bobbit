@@ -172,10 +172,12 @@ async function showPack(pack: MarketPack): Promise<void> {
 async function handleScopeChange(scope: string): Promise<void> {
 	setConfigScope(scope);
 	loading = true;
+	if (currentView === "pack") loadingPack = true;
 	renderApp();
 	await refreshPacks();
 	if (currentView === "pack") await refreshSelectedPack();
 	loading = false;
+	loadingPack = false;
 	renderApp();
 }
 
@@ -558,7 +560,7 @@ function renderPackPrimaryAction(pack: PackActionTarget, busy: boolean, compact:
 			size: size as any,
 			disabled: busy,
 			onClick: stop(() => handleInstall(pack)),
-			children: html`<span class="inline-flex items-center gap-1.5" data-testid="market-install-btn">${icon(Download, "sm")} ${busy ? "Installing\u2026" : `Install`}</span>`,
+			children: html`<span class="inline-flex items-center gap-1.5" data-testid="market-install-btn">${icon(Download, "sm")} ${busy ? "Installing\u2026" : `Install to ${scopeLabel()}`}</span>`,
 		});
 	}
 	// installed / update-available / drifted → offer update (when available) + uninstall
@@ -733,7 +735,7 @@ export function renderMarketPage(): TemplateResult {
 	return html`
 		<div class="market-container">
 			${renderNavBar()}
-			${currentView === "list" ? renderConfigScopeRow(getConfigScope(), handleScopeChange) : ""}
+			${renderConfigScopeRow(getConfigScope(), handleScopeChange)}
 			<div class="market-body">
 				${currentView === "list" ? renderListView() : renderPackDetailView()}
 			</div>
