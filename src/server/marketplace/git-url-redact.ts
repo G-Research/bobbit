@@ -53,10 +53,13 @@ export function redactGitUrl(url: string): string {
 }
 
 /**
- * Secret substrings embedded in a git url: the userinfo password/token, and the
- * values of sensitive query-string params / a sensitive fragment assignment.
- * Both the raw and percent-decoded forms are returned so a value can be matched
- * however it happens to appear in a tool's output.
+ * Secret substrings embedded in a git url: the userinfo username AND password/
+ * token, and the values of sensitive query-string params / a sensitive fragment
+ * assignment. The username is included because the token-as-username form
+ * (`https://ghp_xxx@host/repo.git`) is common and would otherwise survive in
+ * `lastSyncError`/logs when git reformats the url in its stderr. Both the raw
+ * and percent-decoded forms are returned so a value can be matched however it
+ * happens to appear in a tool's output.
  */
 export function gitUrlSecrets(url: string): string[] {
 	const secrets = new Set<string>();
@@ -71,6 +74,7 @@ export function gitUrlSecrets(url: string): string[] {
 	} catch {
 		return [];
 	}
+	add(parsed.username);
 	add(parsed.password);
 	for (const [key, value] of parsed.searchParams.entries()) {
 		if (SENSITIVE_URL_KEYS.test(key)) add(value);

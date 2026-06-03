@@ -117,8 +117,15 @@ export class SourceRegistry {
 		const dir = path.dirname(this.storePath);
 		fs.mkdirSync(dir, { recursive: true });
 		const tmp = this.storePath + ".tmp";
-		fs.writeFileSync(tmp, JSON.stringify({ version: 1, sources: this.list() }, null, 2), "utf-8");
+		// sources.json stores original git URLs WITH embedded credentials (git
+		// needs them to authenticate), so restrict it to owner-only. mode on the
+		// open + an explicit chmod (belt-and-suspenders against a pre-existing
+		// file / lenient umask); guarded because Windows/some filesystems ignore
+		// POSIX modes and chmod can throw there.
+		fs.writeFileSync(tmp, JSON.stringify({ version: 1, sources: this.list() }, null, 2), { encoding: "utf-8", mode: 0o600 });
+		try { fs.chmodSync(tmp, 0o600); } catch { /* platform/filesystem ignores POSIX modes */ }
 		fs.renameSync(tmp, this.storePath);
+		try { fs.chmodSync(this.storePath, 0o600); } catch { /* platform/filesystem ignores POSIX modes */ }
 	}
 
 	list(): SourceRecord[] {
