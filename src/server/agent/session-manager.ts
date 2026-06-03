@@ -1793,6 +1793,9 @@ export class SessionManager {
 
 			// Implicit unstick — new intent supersedes the failed turn.
 			const errSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
+			// Capture BEFORE clearing — decides whether the prior turn poisoned
+			// the live history with a blank ContentBlock (image/attachment-only).
+			const poisonedByBlankText = isBlankContentBlockError(session.lastTurnErrorMessage);
 			console.log(
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
@@ -1804,12 +1807,28 @@ export class SessionManager {
 			session.turnHadToolCalls = false;
 			session.transientRetryAttempts = 0;
 
+			// Title generation uses the user-visible original text (better UX).
+			this.tryGenerateTitleFromPrompt(sessionId, text);
+
+			// Blank-text poison: the live process's in-memory history still holds
+			// the committed blank ContentBlock, so dispatching this follow-up to
+			// the SAME process would replay it and re-fail. Respawn so the agent
+			// rehydrates from the sanitized transcript, then dispatch the
+			// follow-up against clean history (no recovery prefix needed — the
+			// poisoned turn is gone). Falls through to the normal prefixed path
+			// when there's no persisted transcript to rehydrate from.
+			if (poisonedByBlankText) {
+				const recovered = await this._recoverBlankTextPoison(session);
+				if (recovered) {
+					await this.dispatchDirectPrompt(recovered, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered);
+					return { status: "dispatched" };
+				}
+			}
+
 			// Dispatch the prefixed new message immediately, ahead of any parked
 			// items. After agent_end the normal drainQueue path picks up parked
 			// items in FIFO order, unprefixed (since lastTurnErrorMessage is now
 			// cleared).
-			// Title generation uses the user-visible original text (better UX).
-			this.tryGenerateTitleFromPrompt(sessionId, text);
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
 			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered);
@@ -2552,6 +2571,30 @@ export class SessionManager {
 	}
 
 	/**
+	 * Recover a session whose previous turn errored on the blank-ContentBlock
+	 * validation error (image/attachment-only prompt poison). The live process's
+	 * in-memory history still holds the committed blank block, so re-prompting it
+	 * would re-fail; respawn it in place so it rehydrates from the sanitized
+	 * `.jsonl` (the switch_session boundary runs sanitizeAgentTranscriptFile).
+	 *
+	 * Returns the restored session when a respawn happened, or `undefined` when
+	 * no respawn was performed — there is no persisted transcript file to
+	 * rehydrate from (e.g. the unit harness), so the caller should fall back to
+	 * its normal (synthesized-text) dispatch against the existing process.
+	 *
+	 * Shared by both recovery entry points: explicit `retryLastPrompt` and the
+	 * implicit-unstick follow-up prompt path in `enqueuePrompt`.
+	 */
+	private async _recoverBlankTextPoison(session: SessionInfo): Promise<SessionInfo | undefined> {
+		let ps: PersistedSession | undefined;
+		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
+		catch { ps = undefined; }
+		if (!ps?.agentSessionFile) return undefined;
+		const restored = await this._respawnAgentInPlace(session, ps);
+		return restored ?? this.sessions.get(session.id);
+	}
+
+	/**
 	 * Retry after a model/API error. Behaviour depends on context:
 	 * - Fresh response error (no tool calls): re-sends the original user prompt
 	 * - Mid-work error (tool calls already executed): sends a system continuation
@@ -2586,21 +2629,16 @@ export class SessionManager {
 		// replay the committed blank ContentBlock and re-fail. Respawn the agent
 		// so it rehydrates from the sanitized `.jsonl` (un-poisoned at the
 		// switch_session boundary), then re-dispatch the synthesized prompt with
-		// its image preserved. Skipped when there's no persisted transcript file
-		// (e.g. unit harness) — the normal branch below already synthesizes text.
+		// its image preserved. Returns undefined (no respawn) when there's no
+		// persisted transcript file (e.g. unit harness) — the normal branch below
+		// already synthesizes text.
 		if (poisonedByBlankText) {
-			let ps: PersistedSession | undefined;
-			try { ps = this.resolveStoreForSession(session.id).get(session.id); }
-			catch { ps = undefined; }
-			if (ps?.agentSessionFile) {
-				const restored = await this._respawnAgentInPlace(session, ps);
-				const target = restored ?? this.sessions.get(sessionId);
-				if (target) {
-					const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
-					target.lastPromptText = retryText;
-					target.lastPromptImages = savedPromptImages;
-					await target.rpcClient.prompt(retryText, savedPromptImages);
-				}
+			const target = await this._recoverBlankTextPoison(session);
+			if (target) {
+				const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+				target.lastPromptText = retryText;
+				target.lastPromptImages = savedPromptImages;
+				await target.rpcClient.prompt(retryText, savedPromptImages);
 				return;
 			}
 		}

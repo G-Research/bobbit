@@ -24,8 +24,10 @@
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
 import { sessionFileRead, type SessionFsContext } from "./session-fs.js";
 import { containerPathToHost } from "./rpc-bridge.js";
+import { globalAgentDir } from "../bobbit-dir.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
+import path from "node:path";
 
 /**
  * Compute the effective text of a pi-coding-agent message `content`.
@@ -124,6 +126,30 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 }
 
 /**
+ * Guard the write target: a transcript file may only ever be written back
+ * inside the agent's sessions directory (`globalAgentDir()/sessions`). This
+ * prevents a malformed/hostile `agentSessionFile` value (path traversal, an
+ * absolute path elsewhere, a different drive) from causing the sanitizer to
+ * clobber an arbitrary file. Returns true only when `hostPath` resolves to a
+ * location strictly inside the sessions root.
+ */
+export function isWithinAgentSessionsDir(hostPath: string): boolean {
+	if (!hostPath) return false;
+	// Reject explicit upward-traversal segments outright (defence in depth on
+	// top of the resolved-prefix check below).
+	const segments = hostPath.replace(/\\/g, "/").split("/");
+	if (segments.includes("..")) return false;
+
+	const sessionsRoot = path.resolve(globalAgentDir(), "sessions");
+	const resolved = path.resolve(hostPath);
+	const rel = path.relative(sessionsRoot, resolved);
+	// Inside the root iff `rel` is non-empty, does not climb out (`..`), and is
+	// not itself absolute (path.relative returns an absolute path across drives
+	// on Windows).
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
  * Read, sanitize, and (if changed) write back an agent `.jsonl` transcript file
  * at the rehydration boundary, just before `switch_session`. Best-effort and
  * non-fatal: any read/write failure is swallowed so restore/respawn proceeds.
@@ -151,6 +177,17 @@ export async function sanitizeAgentTranscriptFile(
 		// a host path. Sandboxed: translate container path → host path (the agent
 		// sessions dir is bind-mounted, so the container sees the write).
 		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
+
+		// Security: only ever write back inside the agent sessions directory.
+		// A malformed/hostile agentSessionFile (traversal, foreign absolute path)
+		// must not let us clobber an arbitrary file — skip the write (no-op).
+		if (!isWithinAgentSessionsDir(hostPath)) {
+			console.warn(
+				`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`,
+			);
+			return 0;
+		}
+
 		fs.writeFileSync(hostPath, result.content, "utf-8");
 		console.log(
 			`[transcript-sanitizer] Un-poisoned ${result.rewritten} blank-text user message(s) in ${filePath}`,

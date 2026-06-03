@@ -15,10 +15,17 @@
  *   npx tsx --test --test-force-exit tests/transcript-sanitizer.test.ts
  */
 
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { sanitizeTranscriptContent } from "../src/server/agent/transcript-sanitizer.ts";
+import {
+	sanitizeTranscriptContent,
+	sanitizeAgentTranscriptFile,
+	isWithinAgentSessionsDir,
+} from "../src/server/agent/transcript-sanitizer.ts";
 
 function msg(role: string, content: unknown, id = "x"): string {
 	return JSON.stringify({ type: "message", id, ts: "2026-01-01T00-00-00-000Z", message: { role, content } });
@@ -117,5 +124,65 @@ describe("sanitizeTranscriptContent", () => {
 		const { content, changed } = sanitizeTranscriptContent("");
 		assert.equal(changed, false);
 		assert.equal(content, "");
+	});
+});
+
+describe("transcript write path validation", () => {
+	let agentDir: string;
+	let sessionsRoot: string;
+	let prevAgentDir: string | undefined;
+
+	before(() => {
+		agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "transcript-sanitizer-agentdir-"));
+		sessionsRoot = path.join(agentDir, "sessions");
+		fs.mkdirSync(sessionsRoot, { recursive: true });
+		prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+		process.env.BOBBIT_AGENT_DIR = agentDir;
+	});
+
+	after(() => {
+		if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+		else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+		try { fs.rmSync(agentDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+	});
+
+	const POISONED = JSON.stringify({
+		type: "message",
+		id: "p",
+		message: { role: "user", content: [{ type: "text", text: "" }, { type: "image", source: { data: "AAAA" } }] },
+	});
+
+	it("isWithinAgentSessionsDir accepts a path inside the sessions root", () => {
+		const inside = path.join(sessionsRoot, "--slug--", "2026_x.jsonl");
+		assert.equal(isWithinAgentSessionsDir(inside), true);
+	});
+
+	it("isWithinAgentSessionsDir rejects paths outside the root, traversal, and empty", () => {
+		assert.equal(isWithinAgentSessionsDir(path.join(agentDir, "evil.jsonl")), false);
+		assert.equal(isWithinAgentSessionsDir(path.join(sessionsRoot, "..", "escape.jsonl")), false);
+		assert.equal(isWithinAgentSessionsDir(path.join(os.tmpdir(), "elsewhere.jsonl")), false);
+		assert.equal(isWithinAgentSessionsDir(""), false);
+	});
+
+	it("sanitizeAgentTranscriptFile rewrites a poisoned file inside the sessions root", async () => {
+		const dir = path.join(sessionsRoot, "--cwd--");
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, "2026-01-01T00-00-00-000Z_abc.jsonl");
+		fs.writeFileSync(file, POISONED, "utf-8");
+
+		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, file, null);
+		assert.equal(rewritten, 1);
+		assert.equal(JSON.parse(fs.readFileSync(file, "utf-8")).message.content[0].text, "Attachments:");
+	});
+
+	it("sanitizeAgentTranscriptFile refuses to clobber a file OUTSIDE the sessions root", async () => {
+		// A poisoned transcript whose path escapes the sessions dir must be left
+		// byte-identical (no write) rather than rewritten.
+		const outside = path.join(agentDir, "outside-the-root.jsonl");
+		fs.writeFileSync(outside, POISONED, "utf-8");
+
+		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, outside, null);
+		assert.equal(rewritten, 0, "write outside sessions root must be skipped");
+		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED, "file must remain untouched");
 	});
 });

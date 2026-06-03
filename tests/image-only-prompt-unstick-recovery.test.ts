@@ -1,0 +1,182 @@
+/**
+ * Regression test — a follow-up prompt sent via enqueuePrompt (NOT
+ * retryLastPrompt) after a blank-ContentBlock validation error must recover
+ * against CLEAN history.
+ *
+ * Bug: the blank-text-poison recovery (respawn + sanitized rehydrate) was wired
+ * only into retryLastPrompt(). A normal follow-up prompt routed through
+ * enqueuePrompt's implicit-unstick branch re-used the same poisoned live agent
+ * process (in-memory history still holds the committed blank ContentBlock) and
+ * re-failed. This test asserts the follow-up prompt instead triggers the
+ * sanitize+respawn recovery and dispatches to the freshly-rehydrated process.
+ *
+ * Harness mirrors tests/image-only-prompt-dispatch.test.ts. `_respawnAgentInPlace`
+ * is stubbed (no real restore infra in unit land) — it swaps in a fresh
+ * recording bridge to stand in for the rehydrated, un-poisoned process.
+ */
+import { afterEach, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "image-only-unstick-test-"));
+process.env.BOBBIT_DIR = tmpRoot;
+
+const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+const { PromptQueue } = await import("../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../src/server/agent/event-buffer.ts");
+const { registerRpcBridgeFactory } = await import("../src/server/agent/rpc-bridge.ts");
+
+type RecordedPrompt = { text: string; images?: unknown };
+
+const FAKE_IMAGE = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+const BLANK_TEXT_ERROR =
+	"Validation error: the text field in the ContentBlock at messages.0.content.0 is blank. Add text to the text field and try again.";
+
+const managers: any[] = [];
+afterEach(() => {
+	registerRpcBridgeFactory(null);
+	while (managers.length > 0) {
+		const m = managers.pop();
+		if (m._statusHeartbeatTimer) clearInterval(m._statusHeartbeatTimer);
+		m.sessions?.clear();
+	}
+});
+
+function makeBridge(recorded: RecordedPrompt[]): any {
+	return {
+		running: true,
+		async start() {},
+		async stop() {},
+		prompt(text: string, images?: unknown) { recorded.push({ text, images }); return Promise.resolve({ success: true }); },
+		steer() { return Promise.resolve({ success: true }); },
+		abort() { return Promise.resolve({ success: true }); },
+		getState() { return Promise.resolve({ success: true }); },
+		getMessages() { return Promise.resolve({ success: true, data: { messages: [] } }); },
+		setModel() { return Promise.resolve({ success: true }); },
+		setThinkingLevel() { return Promise.resolve({ success: true }); },
+		compact() { return Promise.resolve({ success: true }); },
+		async waitForReady() {},
+		sendCommand() { return Promise.resolve({ success: true }); },
+		onEvent() { return () => {}; },
+	};
+}
+
+describe("blank-text poison: follow-up prompt via enqueuePrompt recovers against clean history", () => {
+	it("routes the implicit-unstick follow-up through respawn (sanitized rehydrate), not the poisoned process", async () => {
+		const oldRecorded: RecordedPrompt[] = [];
+		const newRecorded: RecordedPrompt[] = [];
+		const oldBridge = makeBridge(oldRecorded);
+
+		registerRpcBridgeFactory(() => oldBridge);
+
+		const manager: any = new SessionManager();
+		// Store returns a persisted record WITH an agentSessionFile so the
+		// recovery path has a transcript to rehydrate from.
+		manager._testStore = {
+			update: () => {},
+			get: (id: string) => ({ id, agentSessionFile: "/fake/sessions/--cwd--/x.jsonl" }),
+		};
+		managers.push(manager);
+
+		const sessionId = "s-unstick";
+		const session: any = {
+			id: sessionId,
+			title: "Image only",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: oldBridge,
+			// Stuck error state: previous image-only turn failed on blank-text.
+			lastTurnErrored: true,
+			lastTurnErrorMessage: BLANK_TEXT_ERROR,
+			turnHadToolCalls: false,
+			consecutiveErrorTurns: 1,
+			lastPromptText: "Attachments:",
+			lastPromptImages: [FAKE_IMAGE],
+		};
+		manager.sessions.set(sessionId, session);
+
+		// Stub respawn: stand in for restoreSession by swapping in a fresh
+		// recording bridge (the rehydrated, un-poisoned process) and clearing the
+		// poisoned error state, exactly as a real respawn would.
+		let respawnCalled = 0;
+		manager._respawnAgentInPlace = async (sess: any) => {
+			respawnCalled++;
+			sess.rpcClient = makeBridge(newRecorded);
+			sess.lastTurnErrored = false;
+			sess.lastTurnErrorMessage = undefined;
+			return sess;
+		};
+
+		// A plain follow-up prompt (with text) — the user just types something new.
+		await manager.enqueuePrompt(sessionId, "please continue", {});
+
+		assert.equal(respawnCalled, 1, "follow-up prompt must trigger the sanitize+respawn recovery");
+		assert.equal(oldRecorded.length, 0, "the poisoned process must NOT receive the follow-up prompt");
+		assert.equal(newRecorded.length, 1, "the follow-up must be dispatched to the rehydrated process");
+		assert.equal(
+			newRecorded[0].text,
+			"please continue",
+			"follow-up dispatched against clean history with no error-recovery prefix",
+		);
+	});
+
+	it("non-poison errored turn is unaffected (no respawn; normal prefixed unstick)", async () => {
+		const oldRecorded: RecordedPrompt[] = [];
+		const oldBridge = makeBridge(oldRecorded);
+		registerRpcBridgeFactory(() => oldBridge);
+
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			update: () => {},
+			get: (id: string) => ({ id, agentSessionFile: "/fake/sessions/--cwd--/x.jsonl" }),
+		};
+		managers.push(manager);
+
+		const sessionId = "s-unstick-2";
+		const session: any = {
+			id: sessionId,
+			title: "Normal",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: oldBridge,
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "overloaded_error: the model is overloaded",
+			turnHadToolCalls: false,
+			consecutiveErrorTurns: 1,
+		};
+		manager.sessions.set(sessionId, session);
+
+		let respawnCalled = 0;
+		manager._respawnAgentInPlace = async (sess: any) => { respawnCalled++; return sess; };
+
+		await manager.enqueuePrompt(sessionId, "carry on", {});
+
+		assert.equal(respawnCalled, 0, "non-poison error must NOT respawn");
+		assert.equal(oldRecorded.length, 1, "follow-up dispatched to the same process");
+		assert.match(
+			oldRecorded[0].text,
+			/\[SYSTEM: previous turn failed with/,
+			"non-poison unstick keeps the error-recovery prefix",
+		);
+	});
+});
