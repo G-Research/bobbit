@@ -10411,8 +10411,10 @@ async function handleApiRoute(
  * - Empty/omitted `workflow` is NOT an error (UI dropdown supplies the default).
  * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
  * - `options` (comma-separated optional-step names) validated against the chosen
- *   workflow (named, else first) — matched by step.name (also accepting
- *   optionalLabel/label) of `verify` steps with `optional: true`.
+ *   workflow (named, else first) — matched ONLY by the canonical step.name of
+ *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
+ *   the UI both key on step.name, so accepting optionalLabel/label here would be a
+ *   false-success path that later fails to enable the step.
  */
 function validateGoalProposalWorkflow(
 	args: Record<string, unknown>,
@@ -10441,11 +10443,9 @@ function validateGoalProposalWorkflow(
 		const validNames = new Set<string>();
 		for (const g of chosen.gates) {
 			for (const s of (g.verify ?? [])) {
-				if (s.optional === true) {
-					validNames.add(s.name);
-					if (s.optionalLabel) validNames.add(s.optionalLabel);
-					if (s.label) validNames.add(s.label);
-				}
+				// Only the canonical step.name is a valid enable key (runtime + UI both
+				// match on name); accepting optionalLabel/label would be a false success.
+				if (s.optional === true) validNames.add(s.name);
 			}
 		}
 		const validList = [...validNames];
