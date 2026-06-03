@@ -95,9 +95,11 @@ description: >                   # REQUIRED. One-paragraph human summary (shown 
 version: 1.2.0                   # REQUIRED. Semver string. Informational + shown in provenance.
 author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
-# Declared contents — what the pack ADVERTISES it ships. Used for the browse
-# UI and the "installs executable code" warning. The resolver still loads
-# whatever is physically present; `contents` is advisory + drives UX badges.
+# Declared contents — what the pack ships. REQUIRED. Drives the browse UI
+# (declared-entity chips) and the "installs executable code" warning
+# (tools[] non-empty). All three keys MUST be present; each is an array that
+# MAY be empty. The resolver loads whatever is physically present, but
+# `contents` is the authoritative advertised manifest the UI renders.
 contents:
   roles:  [researcher]
   tools:  [research]             # tool GROUP names (dir names under tools/)
@@ -113,16 +115,19 @@ export interface PackManifest {
   version: string;
   author?: string;
   homepage?: string;
-  contents?: {
-    roles?: string[];
-    tools?: string[];   // tool group dir names
-    skills?: string[];
-    mcp?: string[];     // reserved; ignored in MVP
+  // REQUIRED object; all three array keys REQUIRED but MAY be empty.
+  // NO `mcp` key in a publishable manifest — packs may NOT ship/install MCP
+  // configs (goal MVP boundary). `mcp` exists only as a reserved code-level
+  // EntityType (§2.2) for the future loader seam, never in a published pack.yaml.
+  contents: {
+    roles: string[];
+    tools: string[];   // tool group dir names
+    skills: string[];
   };
 }
 ```
 
-Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name; reject path separators, `..`, leading dot — reuse `isSafeRelPath`-style guarding). `description` and `version` non-empty. Unknown keys ignored (forward-compat). A pack whose `pack.yaml` is missing/invalid is **skipped with a warning**, not fatal.
+Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name; reject path separators, `..`, leading dot — reuse `isSafeRelPath`-style guarding). `description` and `version` non-empty. `contents` REQUIRED with all three array keys present (each may be empty). A `contents.mcp` key in a published manifest is **rejected** in MVP (MCP installs out of scope). Other unknown top-level keys ignored (forward-compat). A pack whose `pack.yaml` is missing or fails validation is **skipped with a warning**, not fatal.
 
 ### 1.5 `.pack-meta.yaml` schema
 
@@ -211,6 +216,8 @@ export interface EntityLoader<T> {
 }
 ```
 
+> **Non-installable `ConfigCascade` types stay on the existing path.** `ConfigCascade` today resolves four things: roles, tools, **workflows**, and **tool-group policies**. Only **roles and tools** are migrated to route through `PackResolver` (via the loaders below). `ConfigCascade.resolveWorkflows` and `ConfigCascade.resolveToolGroupPolicies` are **left untouched** — they keep their current implementations and are NOT routed through the pack resolver (there are no workflow/policy loaders). Practically, `ConfigCascade` retains those two methods unchanged while `resolveRoles`/`resolveTools` become adapters over `PackResolver`. This prevents accidentally routing a type that has no loader into the resolver, and preserves byte-identical workflow/policy resolution.
+
 Concrete loaders (MVP):
 - `RoleLoader` — reads `<path>/roles/*.yaml` (only `defaults-tree`). Parsing reuses the YAML→`Role` logic currently in `BuiltinConfigProvider.loadRoles` / `RoleStore` (factor into a shared `parseRoleYaml`).
 - `ToolLoader` — reads `<path>/tools/<group>/*.yaml` + flat `<path>/tools/*.yaml` (only `defaults-tree`). Reuses `BuiltinConfigProvider.loadTools` grouped+flat two-pass logic into a shared `parseToolsDir`. Tool **extension.ts / _shared** code travels with the dir on install but is loaded by the existing tool-execution machinery, not the resolver.
@@ -257,7 +264,7 @@ export class PackResolver {
 Key properties:
 - **One traversal, all types.** Same ordered list, same shadow rule, for roles/tools/skills (and future types).
 - A later (higher-priority) entry **shadows** an earlier same-name entry. The shadowed entries are retained in `shadows[]` so the marketplace manager can render conflict warnings (§4) and the config pages can render `origin`/`overrides` badges (§5).
-- This is the **single** resolver. `ConfigCascade.resolve*` and `discoverSlashSkills` become thin adapters over it (§6), then are removed once callers migrate.
+- This is the **single** resolver. `ConfigCascade.resolveRoles`/`resolveTools` and `discoverSlashSkills` become thin adapters over it (§6). `ConfigCascade.resolveWorkflows`/`resolveToolGroupPolicies` are **not** adapted — those non-installable types keep their existing implementations (§2.2 note); there are no workflow/policy loaders.
 
 ---
 
@@ -278,34 +285,30 @@ Lowest → highest priority. Project wins; a user's machine-wide (global-user) p
 Within a single scope segment, entries are ordered low→high as:
 
 ```
-[ user pack ]  <  [ market packs, in source-registry install order ]
+[ market packs, in pack_order ]  <  [ user pack ]  <  [ legacy-implicit skill dirs (skills only) ]
 ```
 
 Rationale and rules:
-- **User pack is the LOWEST within its scope** so an explicitly installed market pack can shadow the scope's baseline — but a higher *scope* still wins overall (project user pack beats a server market pack, because the whole project segment is above the whole server segment).
+- **User-authored content is the HIGHEST writable layer within its scope.** The user pack sits **above** market packs in the same scope. This is required to keep customize/revert reliable: customizing an entity writes into the scope's user pack, which then shadows any market pack in that scope; reverting deletes the user-pack file and the market entity reappears. (Cross-scope, a higher scope still wins overall — a project user pack beats a server market pack because the whole project segment is above the whole server segment.)
 
-  > This preserves the customize/revert UX: customizing writes to the scope's user pack; within that scope a market pack could still shadow it, surfaced as a conflict. Cross-scope, project customizations always win (project segment is top).
-- **Market vs market within a scope:** ordered by the scope's **pack order list** (§3.3) — default is install order (oldest first ⇒ lowest priority; newest install shadows older). The order is user-configurable.
-- **Legacy-implicit entries** slot into the scope segment that matches their physical location (§6.2): project-scoped legacy dirs into the project segment, personal/home dirs into global-user. Within that segment they are placed **above the user pack and above market packs** for skills only, to preserve today's "project/personal skills beat everything" precedence (see the exact placement table in §6.2).
+  > Worked: a project-scope market pack ships role `researcher`. The user customizes it → a file is written to `<project>/.bobbit/config/roles/researcher.yaml` (the project user pack), which is above the market pack in the project segment → the customization wins. Revert deletes that file → the market pack's `researcher` resolves again. No precedence ambiguity.
+- **Market vs market within a scope:** ordered by the scope's **`pack_order`** list (§3.3) — default is install order (oldest first ⇒ lowest priority; newest install shadows older). User-reorderable; this is the sole configured conflict-resolution mechanism in MVP.
+- **Legacy-implicit entries** slot into the scope segment that matches their physical location (§6.2): project-scoped legacy dirs into the project segment, personal/home dirs into global-user. They are skills-only (`onlyTypes:["skills"]`) and placed **above** the user pack within their segment, exactly reproducing today's "project/personal skills beat everything" precedence (see the exact placement table in §6.2). For skills there is no separate writable "user pack" today — the legacy skill dirs *are* the user-authored skill content, so their §6.2 order is authoritative and unchanged.
 
 ### 3.3 Precedence-config persistence
 
-Two mechanisms, both persisted in **project config (`project.yaml`) for project scope**, and in **server config (`<server-cwd>/.bobbit/config/project.yaml`)** for server/global scope (reusing the existing `ProjectConfigStore` surface):
+**MVP ships exactly ONE configured conflict-resolution mechanism: `pack_order`** — per-scope ordering of market packs. Persisted in **project config (`project.yaml`) for project scope**, and in **server config (`<server-cwd>/.bobbit/config/project.yaml`)** for server/global scope (reusing the existing `ProjectConfigStore` surface):
 
 ```yaml
 # project.yaml additions (native YAML; see ProjectConfigStore migrated-fields pattern)
 pack_order:                       # per-scope ordering of MARKET packs (highest last)
   - research-pack
   - qa-pack
-pack_conflicts:                   # OPTIONAL per-conflict explicit winner overrides
-  - type: roles
-    name: researcher
-    winner: market:project:research-pack   # PackEntry.id
 ```
 
-- `pack_order` is the primary mechanism: reorder market packs within a scope (mirrors the existing project drag-reorder pattern). Implemented as a new migrated field on `ProjectConfigStore` (follow the `config_directories` native-YAML side-table precedent — see `project-config-store.ts`).
-- `pack_conflicts` is the escape hatch: pin a specific entity name to a specific pack regardless of order. Applied as a post-pass in `PackResolver.resolve` (after the ordered merge, re-point `byName.get(name)` to the pinned entry if present).
-- MVP may ship `pack_order` only and defer `pack_conflicts` to a follow-up; the schema slot is reserved so it's additive.
+- `pack_order` is the **sole** mechanism: reorder market packs within a scope (mirrors the existing project drag-reorder pattern). Implemented as a new migrated field on `ProjectConfigStore` (follow the `config_directories` native-YAML side-table precedent — see `project-config-store.ts`). The last entry has highest priority within the scope's market-pack band.
+- Resolution of a same-name conflict is therefore deterministic from the ordered list alone — no per-conflict override pass exists in MVP. The UI's only conflict-resolution affordance is **reorder** (drag market packs). Customizing (writing into the user pack, which sits above market packs — §3.2) is the other way a user can force a winner.
+- **Per-conflict pinning (`pack_conflicts`) is explicitly DEFERRED** (see §11 Deferred). It is NOT in the MVP schema, resolver, API, UI, or tests. The `PackResolver` performs no pin post-pass. The deferred section sketches the future schema so it is additive.
 
 ---
 
@@ -315,7 +318,7 @@ A **conflict** exists for `(type, name)` whenever `resolve(type)` returns a `Res
 
 - The marketplace manager renders a **warning icon** next to any installed pack that participates in a conflict (it either shadows, or is shadowed by, another pack). Hover/expand shows: entity type + name, winner pack, shadowed pack(s).
 - The config pages (Roles/Tools/Skills) already show `origin`/`overrides` badges; the same data drives a conflict affordance there (the `overrides` badge already communicates a shadow).
-- Resolution mechanism: the user adjusts `pack_order` (drag-reorder market packs within a scope) or sets a `pack_conflicts` pin. After either, re-resolve and the warning clears or moves.
+- Resolution mechanism (MVP): the user adjusts `pack_order` (drag-reorder market packs within a scope), or customizes the entity (writes into the scope's user pack, which sits above market packs — §3.2). After either, re-resolve and the warning clears or moves. Per-conflict pinning is deferred (§11).
 - A new endpoint `GET /api/packs/conflicts?projectId=` returns the conflict list for the UI (§9).
 
 > Builtin-vs-user "conflicts" are NOT flagged as warnings — that's the normal customize/override flow (a user pack intentionally shadowing builtin). Only **market-pack-involved** shadows raise the warning icon, to avoid noise on every customized role.
@@ -525,22 +528,25 @@ All operations are plain directory copies/deletes (no per-entity bookkeeping).
 
 ### 8.1 Install
 
-`installPack(sourceId, packName, scope)`:
+`installPack(sourceId, packName, scope)` — **atomic**: build a complete staged dir, then a single rename publishes it.
 1. Sync source cache (§7.2).
-2. Resolve `src = <cache>/<packName>` (must contain `pack.yaml`).
-3. Resolve `dest = <scopeRoot>/market-packs/<packName>` where `scopeRoot` is `~/.bobbit` | `<server-cwd>/.bobbit` | `<project>/.bobbit/config`.
-4. Reject if `dest` already exists (require explicit update/uninstall). Reject unsafe `packName` (path traversal guard).
-5. **Copy `src` → `dest` verbatim** (entire subtree: `pack.yaml`, `roles/`, `tools/` incl. `extension.ts` + `_shared`, `skills/`). Skip `.git`.
-6. Write `dest/.pack-meta.yaml` (§1.5) with `sourceUrl`, `sourceRef`, resolved `commit`, `version` from manifest, `installedAt = updatedAt = now`, `scope`.
-7. Append `packName` to that scope's `pack_order`.
-8. Trigger a resolver reload for the affected scope so entities appear immediately.
+2. Resolve `src = <cache>/<packName>` (must contain a valid `pack.yaml` — else 422).
+3. Resolve `dest = <scopeRoot>/market-packs/<packName>` where `scopeRoot` is `~/.bobbit` | `<server-cwd>/.bobbit` | `<project>/.bobbit/config`. Reject unsafe `packName` (path-traversal guard) before any fs op.
+4. Reject if `dest` already exists (require explicit update/uninstall) → 409.
+5. **Copy `src` → a staging dir** `<scopeRoot>/market-packs/.tmp-<packName>-<rand>` verbatim (entire subtree: `pack.yaml`, `roles/`, `tools/` incl. `extension.ts` + `_shared`, `skills/`). Skip `.git`.
+6. Write `<staging>/.pack-meta.yaml` (§1.5) with `sourceUrl`, `sourceRef`, resolved `commit`, `version` from manifest, `installedAt = updatedAt = now`, `scope`.
+7. **Atomically rename** staging → `dest` (`fs.rename`). Only after the meta is written does the pack become visible at its final path. On any failure before the rename, `fs.rm` the staging dir and surface the error — `dest` never half-exists.
+8. Append `packName` to that scope's `pack_order`.
+9. Trigger a resolver reload for the affected scope so entities appear immediately.
+
+> **Partial-install / corruption guard.** The resolver treats a `market-packs/<name>/` dir as an installed market pack **only if** it contains BOTH a valid `pack.yaml` and a valid `.pack-meta.yaml`. A dir missing/with-invalid `.pack-meta.yaml` (e.g. a crash mid-copy, or a stray `.tmp-*` staging dir) is **ignored for resolution** and reported as `corrupt` in `GET /api/marketplace/installed` so the UI can offer re-install/cleanup. `.tmp-*` staging dirs are never scanned as packs.
 
 ### 8.2 Uninstall
 
 `uninstallPack(scope, packName)`:
 1. `dest = <scopeRoot>/market-packs/<packName>`.
 2. **`fs.rm(dest, { recursive: true })`** — deletes exactly what install added.
-3. Remove `packName` from `pack_order` and drop any `pack_conflicts` referencing it.
+3. Remove `packName` from that scope's `pack_order`.
 4. Reload resolver. Uninstalling removes precisely the installed entities (no orphan ledger to reconcile).
 
 ### 8.3 Update
@@ -548,8 +554,8 @@ All operations are plain directory copies/deletes (no per-entity bookkeeping).
 `updatePack(scope, packName)`:
 1. Read `dest/.pack-meta.yaml` for `sourceUrl`/`sourceRef`.
 2. Re-sync the source cache; re-resolve `commit`.
-3. **Replace** `dest` contents with the fresh `src` subtree (delete-then-copy, or copy to temp + atomic swap). Preserve nothing stale.
-4. Rewrite `.pack-meta.yaml` with new `commit`/`version` and `updatedAt = now` (keep original `installedAt`).
+3. **Replace** `dest` atomically: copy the fresh `src` subtree into a `.tmp-*` staging dir, write the updated `.pack-meta.yaml` into staging, then swap (rename old `dest` aside → rename staging → `dest` → `fs.rm` the old). Preserve nothing stale; on failure the original `dest` is left intact.
+4. Updated `.pack-meta.yaml` carries new `commit`/`version` and `updatedAt = now` (keep original `installedAt`, copied from the old meta).
 5. Reload resolver. Re-syncing + re-installing reflects upstream changes.
 
 > Implement copy via a shared recursive copy helper (reuse/extend whatever `continue-archived.ts`'s copy utilities or a `fs.cp(src, dest, {recursive:true})` wrapper provides). Guard all destination paths with `isSafeRelPath`-style checks against `..`/absolute/UNC.
@@ -576,6 +582,47 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 - `scope` ∈ `"global-user" | "server" | "project"`; `projectId` required when `scope === "project"`.
 - Existing endpoints unchanged in shape: `/api/roles`, `/api/tools`, `/api/skills` keep returning `origin`/`overrides` — now sourced from `PackResolver` instead of `ConfigCascade`/`discoverSlashSkills` (§6). The `origin` field gains `user` if mapping (b) in §5.2 is chosen.
 - `/api/config-directories` (GET/DELETE/reset) is retained for back-compat (it still reports the legacy dirs + disablement), now reflecting the unified list's legacy entries. Its tests (`per-project-config-dirs.spec.ts`) must still pass.
+
+### 9.1 Request/response contracts
+
+All responses are JSON. `scope` values use the wire form `"global-user" | "server" | "project"`. **Installed-pack addressing** is the tuple `(scope, packName)` — there is no separate install id; `packName` is unique within a scope's `market-packs/`.
+
+```ts
+// Shared wire types
+interface SourceWire { id: string; url: string; ref?: string; addedAt: string;
+                       lastSyncedAt?: string; lastCommit?: string; }
+interface BrowsePackWire extends PackManifest { dirName: string; hasTools: boolean; }
+interface InstalledPackWire {
+  scope: "global-user" | "server" | "project";
+  packName: string;
+  manifest: PackManifest;          // from pack.yaml
+  meta: PackMeta;                  // from .pack-meta.yaml
+  status: "ok" | "corrupt";        // corrupt = missing/invalid meta (§8.1 guard)
+}
+interface ConflictWire {
+  type: "roles" | "tools" | "skills";
+  name: string;
+  winner:   { packEntryId: string; scope: string; label: string };
+  shadowed: { packEntryId: string; scope: string; label: string }[];
+}
+```
+
+| Endpoint | Request body | Success | Errors |
+|---|---|---|---|
+| `GET /api/marketplace/sources` | — | `200 { sources: SourceWire[] }` | — |
+| `POST /api/marketplace/sources` | `{ url: string, ref?: string }` | `201 { source: SourceWire }` (sync runs; `lastCommit` populated) | `400` missing/invalid url; `409` duplicate url; `502 { error }` git sync failed (verbatim git stderr) |
+| `DELETE /api/marketplace/sources/:id` | — | `204` (also removes cache dir) | `404` unknown id |
+| `POST /api/marketplace/sources/:id/sync` | — | `200 { source: SourceWire }` | `404` unknown id; `502 { error }` git failure |
+| `GET /api/marketplace/sources/:id/packs` | — | `200 { packs: BrowsePackWire[] }` (dirs without valid `pack.yaml` omitted) | `404` unknown id; `502` sync failure |
+| `POST /api/marketplace/install` | `{ sourceId, packName, scope, projectId? }` | `201 { installed: InstalledPackWire }` | `400` bad scope / missing `projectId` for project scope / unsafe `packName`; `404` unknown source or pack; `409` already installed at that scope; `422` invalid `pack.yaml` (or `contents.mcp` present); `502` sync failure |
+| `POST /api/marketplace/update` | `{ scope, packName, projectId? }` | `200 { installed: InstalledPackWire }` | `400`/`404` as above; `409` not installed; `502` sync failure |
+| `DELETE /api/marketplace/installed` | `{ scope, packName, projectId? }` | `204` | `400` bad scope/missing projectId; `404` not installed |
+| `GET /api/marketplace/installed?projectId=` | — | `200 { installed: InstalledPackWire[] }` (all scopes; `corrupt` entries included) | `400` project scope requested without projectId |
+| `GET /api/packs/conflicts?projectId=` | — | `200 { conflicts: ConflictWire[] }` | `400` as above |
+
+- **Tool-bearing confirmation** is a UI-side gate (§10): the client only POSTs `install` after the user accepts the executable-code warning, which it derives from `hasTools`/`contents.tools` in the browse payload. The server does not require a confirmation flag, but install of a tool-bearing pack is otherwise unrestricted.
+- **Reload/cache behavior:** install/update/uninstall invalidate the affected scope's resolver cache (and the `slash-skills.ts` TTL cache) synchronously before returning, so a subsequent `GET /api/roles|tools|skills` reflects the change immediately (no client reload required). `pack_order` mutations do the same.
+- **Idempotency / concurrency:** install is rejected (`409`) if `dest` exists; the atomic-rename (§8.1) makes concurrent installs of the same `(scope, packName)` safe — the loser sees `EEXIST`/`409`.
 
 ---
 
@@ -609,7 +656,7 @@ Reuse config-page conventions (`config-scope.ts`: `renderConfigScopeRow`, `rende
 - **Browse panel:** select a source → list its packs (name, version, description, declared entities as chips). Each pack has an **Install** button with a **scope picker** (System/server, Global-user, or a project — reuse `renderConfigScopeRow` semantics).
 - **Executable-code warning:** if a pack ships tools (`hasTools` / `contents.tools` non-empty), show an explicit confirm dialog **"This pack installs executable code that runs on your machine"** before install.
 - **Installed panel:** list installed packs grouped by scope with provenance (source URL, version, commit short SHA, install/updated dates from `.pack-meta.yaml`); per-pack **Update** and **Uninstall**.
-- **Conflict warnings:** packs participating in a same-name conflict show a warning icon (from `GET /api/packs/conflicts`); expand to see entity/type/winner; offer reorder (adjust `pack_order`) and/or pin.
+- **Conflict warnings:** packs participating in a same-name conflict show a warning icon (from `GET /api/packs/conflicts`); expand to see entity/type/winner/shadowed; the only resolution affordance is **reorder** (adjust `pack_order` via drag) — no per-conflict pin in MVP.
 - After install/uninstall/update, refresh the Roles/Tools/Skills page data so installed entities appear with the pack as `origin` and the existing badge styling.
 
 ### 10.3 Config-page integration
@@ -621,7 +668,7 @@ Roles (`#/roles`), Tools (`#/tools`), Skills (`#/skills`) pages need no structur
 ## 11. Extensibility seams
 
 The design is additive along three axes:
-- **Entity-type set:** add an `EntityLoader<T>` and register it; the pipeline (`PackResolver`) is type-agnostic. `mcp/` and `panels/` slot in here. Reserve `mcp` in `EntityType` and `PackManifest.contents` (ignored in MVP).
+- **Entity-type set:** add an `EntityLoader<T>` and register it; the pipeline (`PackResolver`) is type-agnostic. `mcp/` and `panels/` slot in here. `mcp` is reserved only as a code-level `EntityType` for the future loader — it is **not** a publishable `PackManifest.contents` key in MVP (a manifest declaring `contents.mcp` is rejected, §1.4).
 - **Pack/source format:** `pack.yaml`/`.pack-meta.yaml` parsers ignore unknown keys; new layouts add a `PackEntry.layout` variant + loader support.
 - **Install pipeline:** `installPack`/`updatePack` are source-backend-agnostic (git or local dir today); a hosted-registry backend implements the same sync→copy contract.
 
@@ -635,6 +682,14 @@ The design is additive along three axes:
 - **Staff templates** as exportable packs — gap noted.
 - **Trust / sandboxing / signing** of code-bearing packs — MVP copies tool code as-is with a UI warning; sketch where a permission/trust gate slots into `installPack`.
 - **Hosted/remote registry with search** — `MarketplaceSource` abstraction kept open to a registry backend.
+- **Per-conflict pinning (`pack_conflicts`)** — deferred; MVP resolves same-name conflicts solely via `pack_order` (§3.3) plus user-pack customization (§3.2). The future schema (additive, no migration needed) would be a `pack_conflicts` list in `project.yaml`/server config:
+  ```yaml
+  pack_conflicts:
+    - type: roles
+      name: researcher
+      winner: market:project:research-pack   # PackEntry.id
+  ```
+  applied as a post-pass in `PackResolver.resolve` (after the ordered merge, re-point `byName.get(name)` to the pinned entry). Not implemented, surfaced, or tested in MVP.
 
 ---
 
@@ -662,9 +717,9 @@ The design is additive along three axes:
 Point at fixture pack trees under a tmp dir.
 
 1. **Pack discovery & manifest parsing** — dir with/without `pack.yaml`; valid/invalid/forward-compat `pack.yaml`; `.pack-meta.yaml` round-trip.
-2. **PackResolver core** — ordered list low→high; same-name shadow; `shadows[]` accumulation; `onlyTypes` filtering; `pack_conflicts` pin override.
+2. **PackResolver core** — ordered list low→high; same-name shadow; `shadows[]` accumulation; `onlyTypes` filtering. (No `pack_conflicts` pin — deferred.)
 3. **Per-type loaders** — RoleLoader/ToolLoader (`defaults-tree`, grouped+flat tools), SkillLoader (all three layouts).
-4. **Three-scope resolution** — builtin/user/market across builtin<server<global-user<project; verify project wins, global-user beats server, within-scope user<market and `pack_order` reordering.
+4. **Three-scope resolution** — builtin/user/market across builtin<server<global-user<project; verify project wins, global-user beats server, **within-scope user pack > market packs** (customize wins locally), and `pack_order` reordering of market-vs-market.
 5. **Legacy→unified mapping equivalence** — build the list from fixtures mirroring §6.1/§6.2 and assert resolution **equals** the legacy `ConfigCascade`/`discoverSlashSkills` output for the same inputs (a direct A/B harness, like `skill-resolve.test.ts`'s `legacy()` fixture).
 6. **`disabled_config_directories`** omits the matching entry.
 7. **File ops** — `installPack` copies subtree + writes meta + appends `pack_order`; `uninstallPack` deletes exactly the added dir + cleans order; `updatePack` replaces contents + rewrites meta (preserves `installedAt`). Path-traversal guards reject unsafe names.
@@ -681,7 +736,7 @@ Point at fixture pack trees under a tmp dir.
 6. **Provenance** shown (source + version/commit + date).
 7. **Update** (re-sync after upstream change reflected) and **Uninstall** (entities disappear; exactly what install added is removed).
 8. **Executable-code warning** shown for a tool-bearing pack before install.
-9. **Conflict warning icon** appears when two installed packs define the same entity name; reorder/pin resolves it.
+9. **Conflict warning icon** appears when two installed packs define the same entity name; **reorder** (`pack_order`) resolves it.
 
 ### 12.4 Acceptance-criterion → test map
 
@@ -698,6 +753,39 @@ Point at fixture pack trees under a tmp dir.
 
 ---
 
+## 12.5 File / module change list
+
+Concrete ownership boundaries for the high-blast-radius refactor. **New** modules vs **edited** modules:
+
+**New (server):**
+- `src/server/agent/pack-types.ts` — `PackManifest`, `PackMeta`, `PackEntry`, `EntityType`, `EntityLoader<T>`, `LoadedEntity<T>`, `ResolvedEntity<T>` interfaces.
+- `src/server/agent/pack-manifest.ts` — `pack.yaml` / `.pack-meta.yaml` read + write + validation (incl. `contents.mcp` rejection, name guard).
+- `src/server/agent/pack-resolver.ts` — `PackResolver` pipeline + the Role/Tool/Skill `EntityLoader`s (delegating parse to extracted helpers below).
+- `src/server/agent/pack-list.ts` — `buildPackList(opts)` (§6.5): the legacy→unified mapping (cascade layers + skill scan dirs + `config_directories` + `disabled_config_directories`).
+- `src/server/agent/marketplace-source-store.ts` — `MarketplaceSourceStore` (sources YAML CRUD).
+- `src/server/agent/marketplace-install.ts` — git sync, `installPack`/`uninstallPack`/`updatePack`, atomic staging, recursive copy helper.
+
+**Edited (server):**
+- `src/server/agent/config-cascade.ts` — `resolveRoles`/`resolveTools` become adapters over `PackResolver`; **`resolveWorkflows`/`resolveToolGroupPolicies` untouched** (§2.2 note).
+- `src/server/skills/slash-skills.ts` — `discoverSlashSkills`/`getSkillDirectories` become adapters over `PackResolver` (§6.4); keep TTL cache, `userInvocable` filter, sort, `source` derivation.
+- `src/server/agent/builtin-config.ts` — extract shared `parseRoleYaml` / `parseToolsDir` (used by builtin entry + loaders); builtin pack entry creation.
+- `src/server/agent/project-config-store.ts` — add `pack_order` migrated native-YAML field (mirror `config_directories`); keep reading legacy keys.
+- `src/server/server.ts` — add `/api/marketplace/*` and `/api/packs/conflicts` routes (§9); wire resolver-cache invalidation on install/uninstall/update; `/api/roles|tools|skills` now read from `PackResolver`.
+- `src/server/agent/config-directories.ts` — **unchanged behaviour**; its helpers are now consumed by `buildPackList` (legacy keys still read).
+
+**Untouched (explicit non-goals):** `src/server/mcp/mcp-manager.ts`, `src/server/agent/system-prompt.ts`.
+
+**New (UI):**
+- `src/app/marketplace-page.ts` — the Market surface (sources / browse / installed / conflicts), reusing `config-scope.ts` helpers.
+
+**Edited (UI):**
+- `src/app/sidebar.ts` — Market button between Workflows and New Goal.
+- `src/app/routing.ts` — register `market` route + `isMarketActive`.
+- `src/app/api.ts` — marketplace fetch wrappers.
+- Roles/Tools/Skills pages — no structural change (badges already generic; §10.3).
+
+**Tests:** new unit specs (§12.2), new `tests/e2e/ui/marketplace.spec.ts` (§12.3); existing regression suite (§12.1) must stay green.
+
 ## 13. Implementation order (suggested)
 
 1. **Types + parsers** — `PackManifest`/`PackMeta`/`PackEntry`/loader interfaces; `pack.yaml`/`.pack-meta.yaml` read-write; unit tests #1.
@@ -706,6 +794,6 @@ Point at fixture pack trees under a tmp dir.
 4. **Source store + git sync + file ops** — install/uninstall/update; unit tests #7–8.
 5. **REST endpoints** (§9).
 6. **UI** — Market button + marketplace page reusing config-scope conventions; E2E suite #12.3.
-7. **Conflict surfacing + `pack_order`/`pack_conflicts`** persistence.
+7. **Conflict surfacing + `pack_order`** persistence (per-conflict pinning deferred).
 
 Each step lands behind passing tests; step 3 is the high-blast-radius gate — do not proceed to UI until the full existing suite is green on the resolver swap.
