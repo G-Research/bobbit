@@ -12,8 +12,25 @@ import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import type { BuiltinConfigProvider } from "./builtin-config.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-types.js";
+import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
 
-export type ConfigOrigin = "builtin" | "server" | "project";
+/**
+ * `user` corresponds to the global-user scope. It is additive: global-user is
+ * empty for roles/tools today, so no existing response value changes — `user`
+ * only appears for newly-installed global-user packs (design §5.2).
+ */
+export type ConfigOrigin = "builtin" | "server" | "user" | "project";
+
+/** Map a resolver pack scope to the wire `ConfigOrigin` (design §5.2). */
+function scopeToOrigin(scope: PackScope): ConfigOrigin {
+	switch (scope) {
+		case "builtin": return "builtin";
+		case "server": return "server";
+		case "global-user": return "user";
+		case "project": return "project";
+	}
+}
 
 export interface ResolvedItem<T> {
 	item: T;
@@ -51,7 +68,9 @@ export class ConfigCascade {
 	// ── Roles ────────────────────────────────────────────────────
 
 	resolveRoles(projectId?: string): ResolvedItem<Role>[] {
-		return this.resolve<Role>(
+		return this.resolveViaPacks<Role>(
+			"roles",
+			[new RoleLoader()],
 			this.builtins.getRoles(),
 			r => r.name,
 			projectId,
@@ -79,7 +98,9 @@ export class ConfigCascade {
 	// ── Tools ────────────────────────────────────────────────────
 
 	resolveTools(projectId?: string): ResolvedItem<ToolInfo>[] {
-		return this.resolve<ToolInfo>(
+		return this.resolveViaPacks<ToolInfo>(
+			"tools",
+			[new ToolLoader()],
 			this.builtins.getTools(),
 			t => t.name,
 			projectId,
@@ -127,59 +148,61 @@ export class ConfigCascade {
 		return Object.fromEntries(merged);
 	}
 
-	// ── Generic resolution helper ────────────────────────────────
+	// ── Generic resolution adapter (over the single PackResolver) ──
 
 	/**
-	 * Merge three layers of config items by a unique key.
+	 * Resolve the three cascade layers (builtin → server → project) through
+	 * the unified {@link PackResolver}.
 	 *
-	 * 1. Builtins (origin "builtin")
-	 * 2. Server-level = standalone server stores (origin "server")
-	 * 3. Project-level = specified project's store, if a projectId was given (origin "project")
+	 * The layers' data lives in injected in-memory stores (not on a scannable
+	 * directory), so each layer is wrapped as a `preloaded` {@link PackEntry}
+	 * — the same single resolver pipeline, fed pre-loaded entities. With zero
+	 * market packs (the only state this cascade exercises) the ordered list is
+	 * exactly builtin < server < project, so the merge — insertion order,
+	 * shadowing, and `origin`/`overrides` — is byte-identical to the legacy
+	 * three-layer merge (design §6.1).
 	 *
-	 * Later layers shadow earlier ones. The `overrides` field records what was shadowed.
+	 * `resolveWorkflows`/`resolveToolGroupPolicies` are deliberately NOT routed
+	 * here — they are non-installable types with no loader (design §2.2 note).
 	 */
-	private resolve<T>(
+	private resolveViaPacks<T>(
+		type: import("./pack-types.js").EntityType,
+		loaders: import("./pack-types.js").EntityLoader<unknown>[],
 		builtinItems: T[],
 		keyFn: (item: T) => string,
 		projectId: string | undefined,
 		serverItems: T[],
 		getProjectItems: (ctx: import("./project-context.js").ProjectContext) => T[],
 	): ResolvedItem<T>[] {
-		const merged = new Map<string, ResolvedItem<T>>();
+		const wrap = (items: T[]): LoadedEntity<unknown>[] =>
+			items.map(item => ({ name: keyFn(item), item }));
+		const layer = (id: string, scope: PackScope, items: T[]): PackEntry => ({
+			id,
+			kind: scope === "builtin" ? "builtin" : "user",
+			scope,
+			path: "",
+			readOnly: scope === "builtin",
+			layout: "defaults-tree",
+			preloaded: { [type]: wrap(items) },
+		});
 
-		// Layer 1: builtins
-		for (const item of builtinItems) {
-			merged.set(keyFn(item), { item, origin: "builtin" });
-		}
-
-		// Layer 2: server-level (explicit server stores)
-		for (const item of serverItems) {
-			const key = keyFn(item);
-			const existing = merged.get(key);
-			merged.set(key, {
-				item,
-				origin: "server",
-				overrides: existing?.origin,
-			});
-		}
-
-		// Layer 3: project-level (when a projectId is specified).
+		const entries: PackEntry[] = [
+			layer("builtin", "builtin", builtinItems),
+			layer("user:server", "server", serverItems),
+		];
 		// Without projectId, only builtins + server stores are used (system scope).
 		if (projectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
-			if (projectCtx) {
-				for (const item of getProjectItems(projectCtx)) {
-					const key = keyFn(item);
-					const existing = merged.get(key);
-					merged.set(key, {
-						item,
-						origin: "project",
-						overrides: existing?.origin,
-					});
-				}
-			}
+			if (projectCtx) entries.push(layer("user:project", "project", getProjectItems(projectCtx)));
 		}
 
-		return [...merged.values()];
+		const resolved = new PackResolver(entries, loaders).resolve<T>(type);
+		return resolved.map((r: ResolvedEntity<T>) => {
+			const out: ResolvedItem<T> = { item: r.item, origin: scopeToOrigin(r.origin.scope) };
+			if (r.shadows.length > 0) {
+				out.overrides = scopeToOrigin(r.shadows[r.shadows.length - 1].scope);
+			}
+			return out;
+		});
 	}
 }

@@ -15,11 +15,14 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { parseCustomDirectories as parseCustomDirsFromConfig } from "../agent/config-directories.js";
+import { parseCustomDirectories as parseCustomDirsFromConfig, type ProjectConfigReader } from "../agent/config-directories.js";
+import { buildPackList } from "../agent/pack-list.js";
+import { PackResolver, SkillLoader } from "../agent/pack-resolver.js";
+import type { PackEntry, LoadedEntity } from "../agent/pack-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-/** Built-in skills shipped with Bobbit in defaults/skills/ (copied to dist/server/defaults/skills/ at build time). */
-const BUILTIN_SKILLS_DIR = path.join(__dirname, "..", "defaults", "skills");
+/** The builtin pack root (dist/server/defaults). Its skills/ subtree is the builtin-file skill source. */
+const BUILTINS_DIR = path.join(__dirname, "..", "defaults");
 
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
@@ -102,8 +105,11 @@ export function applySubstitutions(content: string, args: string): string {
 	return result;
 }
 
-/** Scan a directory for SKILL.md files (each in a subdirectory). */
-function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
+/**
+ * Scan a directory for SKILL.md files (each in a subdirectory).
+ * Exported so the pack resolver's SkillLoader reuses identical parse logic.
+ */
+export function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 	const skills: SlashSkill[] = [];
 	if (!fs.existsSync(dir)) return skills;
 
@@ -152,8 +158,11 @@ function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 	return skills;
 }
 
-/** Scan legacy .claude/commands/ directory for .md files. */
-function scanCommandsDir(dir: string): SlashSkill[] {
+/**
+ * Scan legacy .claude/commands/ directory for .md files.
+ * Exported so the pack resolver's SkillLoader reuses identical parse logic.
+ */
+export function scanCommandsDir(dir: string): SlashSkill[] {
 	const skills: SlashSkill[] = [];
 	if (!fs.existsSync(dir)) return skills;
 
@@ -248,56 +257,62 @@ let _cache: { skills: SlashSkill[]; cwd: string; configVal: string; ts: number }
 const CACHE_TTL_MS = 5_000;
 
 /**
+ * The single ordered pack list for skill discovery: the in-code static skill
+ * (lowest, §6.2 row 1) prepended to the unified pack list (§6.2 rows 2–8).
+ */
+function buildSkillPackList(cwd: string, projectConfigStore?: ProjectConfigReader): PackEntry[] {
+	const staticEntry: PackEntry = {
+		id: "builtin-skills-static",
+		kind: "builtin",
+		scope: "builtin",
+		path: "",
+		readOnly: true,
+		onlyTypes: ["skills"],
+		layout: "defaults-tree",
+		skillSource: "built-in",
+		preloaded: {
+			skills: BUILTIN_SKILLS.map((s): LoadedEntity<SlashSkill> => ({ name: s.name, item: s })),
+		},
+	};
+	const list = buildPackList({
+		builtinsDir: BUILTINS_DIR,
+		serverBase: cwd,
+		globalUserBase: os.homedir(),
+		projectBase: cwd,
+		cwd,
+		serverConfigStore: projectConfigStore,
+		projectConfigStore,
+	});
+	return [staticEntry, ...list];
+}
+
+/**
  * Discover all slash skills for a given working directory.
- * Merges project, personal, legacy, custom, and built-in sources.
- * Priority (highest wins): project > bobbit project > personal > bobbit personal > legacy > custom > built-in.
+ *
+ * Adapter over the single {@link PackResolver}: builds the unified pack list
+ * (§6.2 order preserved) and resolves the `skills` type, then applies the
+ * `userInvocable !== false` filter, alphabetical sort, and TTL cache exactly
+ * as before. Resolution is byte-identical to the legacy merge with zero
+ * market packs installed.
  */
 export function discoverSlashSkills(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
 ): SlashSkill[] {
-	const configVal = (projectConfigStore?.get("skill_directories") ?? "") + "|" + (projectConfigStore?.get("config_directories") ?? "");
+	const store = projectConfigStore as ProjectConfigReader | undefined;
+	const configVal =
+		(store?.get("skill_directories") ?? "") + "|" +
+		(store?.get("config_directories") ?? "") + "|" +
+		(store?.get("disabled_config_directories") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
 		return _cache.skills;
 	}
 
-	const projectSkillsDir = path.join(cwd, ".claude", "skills");
-	const personalSkillsDir = path.join(os.homedir(), ".claude", "skills");
-	const bobbitProjectSkillsDir = path.join(cwd, ".bobbit", "skills");
-	const bobbitPersonalSkillsDir = path.join(os.homedir(), ".bobbit", "skills");
-	const legacyCommandsDir = path.join(cwd, ".claude", "commands");
-
-	const projectSkills = scanSkillDir(projectSkillsDir, "project");
-	const personalSkills = scanSkillDir(personalSkillsDir, "personal");
-	const bobbitProjectSkills = scanSkillDir(bobbitProjectSkillsDir, "project");
-	const bobbitPersonalSkills = scanSkillDir(bobbitPersonalSkillsDir, "personal");
-	const legacyCommands = scanCommandsDir(legacyCommandsDir);
-
-	// Scan custom directories
-	const customSkills: SlashSkill[] = [];
-	for (const entry of parseCustomSkillDirectories(projectConfigStore)) {
-		customSkills.push(...scanSkillDir(entry.path, "custom"));
-	}
-
-	// Scan builtin skills shipped with Bobbit (defaults/skills/)
-	const builtinFileSkills = scanSkillDir(BUILTIN_SKILLS_DIR, "built-in" as SlashSkill["source"]);
-
-	// Merge with priority (lowest to highest — later insertions overwrite):
-	// built-in → builtin-file → custom → legacy → bobbit personal → claude personal → bobbit project → claude project
-	const byName = new Map<string, SlashSkill>();
-	for (const skill of BUILTIN_SKILLS) byName.set(skill.name, skill);
-	for (const skill of builtinFileSkills) byName.set(skill.name, skill);
-	for (const skill of customSkills) byName.set(skill.name, skill);
-	for (const skill of legacyCommands) byName.set(skill.name, skill);
-	for (const skill of bobbitPersonalSkills) byName.set(skill.name, skill);
-	for (const skill of personalSkills) byName.set(skill.name, skill);
-	for (const skill of bobbitProjectSkills) byName.set(skill.name, skill);
-	for (const skill of projectSkills) byName.set(skill.name, skill);
+	const entries = buildSkillPackList(cwd, store);
+	const resolved = new PackResolver(entries, [new SkillLoader()]).resolve<SlashSkill>("skills");
 
 	// Filter to user-invocable skills only (default is true)
-	const skills = Array.from(byName.values()).filter(
-		(s) => s.userInvocable !== false
-	);
+	const skills = resolved.map(r => r.item).filter((s) => s.userInvocable !== false);
 
 	// Sort alphabetically
 	skills.sort((a, b) => a.name.localeCompare(b.name));
