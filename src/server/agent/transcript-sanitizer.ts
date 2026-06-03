@@ -12,13 +12,19 @@
  * transcript is to repair the `.jsonl` Bobbit owns at the rehydration boundary
  * (before `switch_session`).
  *
- * This module is a pure, idempotent, one-pass sanitizer: it rewrites ANY
+ * This module is a pure, idempotent, one-pass sanitizer: it rewrites a
  * persisted `user` message whose effective text is blank/whitespace-only to the
  * synthetic `ATTACHMENT_ONLY_TEXT` ("Attachments:"), covering BOTH the
  * image-adjacent case (`[{text:""},{image}]`) AND the standalone empty/blank
  * user message produced by a non-image attachment-only send (`[{text:""}]`, or
- * a user message with only non-text content / no text block at all). It leaves
- * every other line byte-identical, so re-running it is a no-op.
+ * a user message with only non-text content / no text block at all).
+ *
+ * IMPORTANT: tool results are also represented as `role:"user"` messages whose
+ * content is a `tool_result`/`toolResult` block with no text. Those are normal,
+ * valid history — rewriting them to "Attachments:" would corrupt tool-call
+ * history and break tool-result ordering. So a user message that carries ANY
+ * tool_result/toolResult block is left byte-identical. It leaves every other
+ * line byte-identical too, so re-running it is a no-op.
  */
 
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
@@ -45,6 +51,19 @@ function effectiveText(content: unknown): string {
 		}
 	}
 	return parts.join("");
+}
+
+/**
+ * Detect whether a message `content` carries a tool-result block. Tool results
+ * are persisted as `role:"user"` messages with a `tool_result` (or `toolResult`)
+ * content block and no text — they are valid history and MUST NOT be rewritten.
+ */
+function hasToolResultBlock(content: unknown): boolean {
+	if (!Array.isArray(content)) return false;
+	return content.some(
+		(b) => b && typeof b === "object" &&
+			((b as any).type === "tool_result" || (b as any).type === "toolResult"),
+	);
 }
 
 /**
@@ -112,6 +131,10 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		if (!entry || entry.type !== "message" || !entry.message) continue;
 		if (entry.message.role !== "user") continue;
 
+		// Tool-result user messages are valid history (no text by design) —
+		// never touch them, or tool-call history/ordering is corrupted.
+		if (hasToolResultBlock(entry.message.content)) continue;
+
 		const text = effectiveText(entry.message.content);
 		if (text.trim() !== "") continue; // already valid — leave byte-identical
 
@@ -125,28 +148,100 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 	return { content: lines.join("\n"), changed: true, rewritten };
 }
 
+/** True iff `target` is `root` itself or strictly nested inside it. */
+function isInsideOrEqual(root: string, target: string): boolean {
+	const rel = path.relative(root, target);
+	if (rel === "") return true; // target === root
+	return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 /**
- * Guard the write target: a transcript file may only ever be written back
- * inside the agent's sessions directory (`globalAgentDir()/sessions`). This
- * prevents a malformed/hostile `agentSessionFile` value (path traversal, an
- * absolute path elsewhere, a different drive) from causing the sanitizer to
- * clobber an arbitrary file. Returns true only when `hostPath` resolves to a
- * location strictly inside the sessions root.
+ * Lexical-only guard kept for callers/tests that want a cheap prefix check:
+ * a transcript path is acceptable iff it has no `..` segment and resolves
+ * (lexically) strictly inside `globalAgentDir()/sessions`. Does NOT touch the
+ * filesystem — see `resolveSafeSessionsPath` for the symlink/TOCTOU-resistant
+ * variant used on the real I/O path.
  */
 export function isWithinAgentSessionsDir(hostPath: string): boolean {
 	if (!hostPath) return false;
-	// Reject explicit upward-traversal segments outright (defence in depth on
-	// top of the resolved-prefix check below).
 	const segments = hostPath.replace(/\\/g, "/").split("/");
 	if (segments.includes("..")) return false;
 
 	const sessionsRoot = path.resolve(globalAgentDir(), "sessions");
 	const resolved = path.resolve(hostPath);
 	const rel = path.relative(sessionsRoot, resolved);
-	// Inside the root iff `rel` is non-empty, does not climb out (`..`), and is
-	// not itself absolute (path.relative returns an absolute path across drives
-	// on Windows).
 	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
+ * Symlink/TOCTOU-resistant resolver for a transcript path that the sanitizer
+ * is about to read from / write to on the HOST filesystem.
+ *
+ * Rejects (returns `null`) when the path:
+ *  - is empty or contains a `..` traversal segment;
+ *  - has a parent directory that doesn't exist or, after `realpathSync`
+ *    (which follows directory symlinks), is NOT inside the real sessions root
+ *    (`realpath(globalAgentDir()/sessions)`);
+ *  - resolves to an existing entry that is a symlink or not a regular file.
+ *
+ * On success returns the concrete real path (real parent + basename), which the
+ * caller opens with `O_NOFOLLOW` (where available) so a symlink swapped in after
+ * this check is still not followed.
+ */
+export function resolveSafeSessionsPath(hostPath: string): string | null {
+	if (!hostPath) return null;
+	const segments = hostPath.replace(/\\/g, "/").split("/");
+	if (segments.includes("..")) return null;
+
+	let sessionsRootReal: string;
+	try {
+		sessionsRootReal = fs.realpathSync(path.resolve(globalAgentDir(), "sessions"));
+	} catch {
+		return null; // no sessions root → nothing legitimate to sanitize
+	}
+
+	const resolved = path.resolve(hostPath);
+	const parent = path.dirname(resolved);
+	let parentReal: string;
+	try {
+		parentReal = fs.realpathSync(parent); // follows directory symlinks
+	} catch {
+		return null; // parent missing/unreadable
+	}
+
+	// The real parent must be the sessions root or nested inside it.
+	if (!isInsideOrEqual(sessionsRootReal, parentReal)) return null;
+
+	const realPath = path.join(parentReal, path.basename(resolved));
+
+	// Reject if the target exists and is a symlink or not a regular file.
+	try {
+		const st = fs.lstatSync(realPath);
+		if (st.isSymbolicLink() || !st.isFile()) return null;
+	} catch (err: any) {
+		// ENOENT is tolerable in principle, but for sanitization the file must
+		// already exist (we only write back after a successful read). Treat any
+		// stat failure as a rejection to stay conservative.
+		return null;
+	}
+
+	return realPath;
+}
+
+/**
+ * Write `data` to `realPath` without following a final-component symlink. Uses
+ * `O_NOFOLLOW` where the platform provides it (POSIX); on Windows the constant
+ * is absent (0) and the prior `lstat` check is the symlink guard.
+ */
+function writeFileNoFollow(realPath: string, data: string): void {
+	const NOFOLLOW = (fs.constants as any).O_NOFOLLOW ?? 0;
+	const flags = fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_CREAT | NOFOLLOW;
+	const fd = fs.openSync(realPath, flags, 0o600);
+	try {
+		fs.writeFileSync(fd, data, "utf-8");
+	} finally {
+		fs.closeSync(fd);
+	}
 }
 
 /**
@@ -167,28 +262,38 @@ export async function sanitizeAgentTranscriptFile(
 	sandboxManager: SandboxManager | null,
 ): Promise<number> {
 	try {
+		// Resolve the host-side path. Non-sandboxed: filePath is already a host
+		// path and is what the read+write both touch. Sandboxed: the read runs
+		// in-container (docker exec); only the write is host-side, via the
+		// bind-mounted sessions dir (container path → host path).
+		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
+
+		// For non-sandboxed sessions, validate the real host path BEFORE reading
+		// — a symlink/traversal/out-of-root path must trigger neither a read nor
+		// a write. (For sandboxed, the read is in-container; the write below is
+		// still validated.)
+		if (!ctx.sandboxed && resolveSafeSessionsPath(hostPath) === null) {
+			console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
+			return 0;
+		}
+
 		const content = await sessionFileRead(ctx, filePath, sandboxManager);
 		if (content === null || content === undefined || content === "") return 0;
 
 		const result = sanitizeTranscriptContent(content);
 		if (!result.changed) return 0;
 
-		// Resolve the host-side path to write. Non-sandboxed: filePath is already
-		// a host path. Sandboxed: translate container path → host path (the agent
-		// sessions dir is bind-mounted, so the container sees the write).
-		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
-
-		// Security: only ever write back inside the agent sessions directory.
-		// A malformed/hostile agentSessionFile (traversal, foreign absolute path)
-		// must not let us clobber an arbitrary file — skip the write (no-op).
-		if (!isWithinAgentSessionsDir(hostPath)) {
-			console.warn(
-				`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`,
-			);
+		// Re-resolve + re-validate the real path immediately before writing
+		// (TOCTOU) and write with O_NOFOLLOW so a symlink swapped in after the
+		// check is not followed. A malformed/hostile agentSessionFile must never
+		// let us clobber an arbitrary file.
+		const realPath = resolveSafeSessionsPath(hostPath);
+		if (realPath === null) {
+			console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`);
 			return 0;
 		}
 
-		fs.writeFileSync(hostPath, result.content, "utf-8");
+		writeFileNoFollow(realPath, result.content);
 		console.log(
 			`[transcript-sanitizer] Un-poisoned ${result.rewritten} blank-text user message(s) in ${filePath}`,
 		);

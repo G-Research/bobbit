@@ -25,6 +25,7 @@ import {
 	sanitizeTranscriptContent,
 	sanitizeAgentTranscriptFile,
 	isWithinAgentSessionsDir,
+	resolveSafeSessionsPath,
 } from "../src/server/agent/transcript-sanitizer.ts";
 
 function msg(role: string, content: unknown, id = "x"): string {
@@ -88,6 +89,29 @@ describe("sanitizeTranscriptContent", () => {
 
 	it("(f) does NOT touch a blank assistant message", () => {
 		const line = msg("assistant", [{ type: "text", text: "" }]);
+		const { changed, content } = sanitizeTranscriptContent(line);
+		assert.equal(changed, false);
+		assert.equal(content, line);
+	});
+
+	it("(g) leaves a tool_result-only user message byte-identical (no text by design)", () => {
+		const line = msg("user", [{ type: "tool_result", toolCallId: "t1", content: "ok done" }]);
+		const { changed, content } = sanitizeTranscriptContent(line);
+		assert.equal(changed, false, "tool_result user message must NOT be rewritten");
+		assert.equal(content, line, "tool_result user message must stay byte-identical");
+	});
+
+	it("(g') leaves a toolResult-variant user message byte-identical", () => {
+		const line = msg("user", [{ type: "toolResult", toolCallId: "t2", content: [{ type: "text", text: "" }] }]);
+		const { changed, content } = sanitizeTranscriptContent(line);
+		assert.equal(changed, false, "toolResult user message must NOT be rewritten");
+		assert.equal(content, line, "toolResult user message must stay byte-identical");
+	});
+
+	it("(g'') leaves a tool_result + blank-text user message byte-identical (tool result wins)", () => {
+		// Even if a stray empty text block coexists, the presence of a tool_result
+		// block means this is tool-call history and must not be touched.
+		const line = msg("user", [{ type: "text", text: "" }, { type: "tool_result", content: "x" }]);
 		const { changed, content } = sanitizeTranscriptContent(line);
 		assert.equal(changed, false);
 		assert.equal(content, line);
@@ -184,5 +208,40 @@ describe("transcript write path validation", () => {
 		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, outside, null);
 		assert.equal(rewritten, 0, "write outside sessions root must be skipped");
 		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED, "file must remain untouched");
+	});
+
+	it("sanitizeAgentTranscriptFile rejects a symlink inside the sessions root (no read, no write)", async (t) => {
+		// Real (poisoned) file living OUTSIDE the sessions root.
+		const realTarget = path.join(agentDir, "symlink-target.jsonl");
+		fs.writeFileSync(realTarget, POISONED, "utf-8");
+
+		// A symlink INSIDE the sessions root pointing at the external file. If the
+		// platform forbids symlink creation (Windows w/o privilege), skip.
+		const link = path.join(sessionsRoot, "evil-link.jsonl");
+		try {
+			fs.symlinkSync(realTarget, link);
+		} catch {
+			t.skip("symlink creation not permitted on this platform");
+			return;
+		}
+
+		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, link, null);
+		assert.equal(rewritten, 0, "symlinked transcript path must be rejected");
+		assert.equal(
+			fs.readFileSync(realTarget, "utf-8"),
+			POISONED,
+			"symlink target must remain byte-identical (not followed)",
+		);
+	});
+
+	it("resolveSafeSessionsPath rejects symlink/out-of-root and accepts a real in-root file", () => {
+		const dir = path.join(sessionsRoot, "--ok--");
+		fs.mkdirSync(dir, { recursive: true });
+		const ok = path.join(dir, "real.jsonl");
+		fs.writeFileSync(ok, POISONED, "utf-8");
+		assert.equal(resolveSafeSessionsPath(ok), fs.realpathSync(ok));
+		assert.equal(resolveSafeSessionsPath(path.join(agentDir, "nope.jsonl")), null);
+		assert.equal(resolveSafeSessionsPath(path.join(sessionsRoot, "..", "x.jsonl")), null);
+		assert.equal(resolveSafeSessionsPath(""), null);
 	});
 });

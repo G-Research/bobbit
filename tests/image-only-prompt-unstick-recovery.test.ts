@@ -131,6 +131,66 @@ describe("blank-text poison: follow-up prompt via enqueuePrompt recovers against
 		);
 	});
 
+	it("retryLastPrompt: legacy attachment-only (no image) stuck session recovers with 'Attachments:' (not blank)", async () => {
+		const oldRecorded: RecordedPrompt[] = [];
+		const newRecorded: RecordedPrompt[] = [];
+		const oldBridge = makeBridge(oldRecorded);
+		registerRpcBridgeFactory(() => oldBridge);
+
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			update: () => {},
+			get: (id: string) => ({ id, agentSessionFile: "/fake/sessions/--cwd--/x.jsonl" }),
+		};
+		managers.push(manager);
+
+		const sessionId = "s-retry-attach-only";
+		const session: any = {
+			id: sessionId,
+			title: "Attachment only",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: oldBridge,
+			lastTurnErrored: true,
+			lastTurnErrorMessage: BLANK_TEXT_ERROR,
+			turnHadToolCalls: false,
+			consecutiveErrorTurns: 1,
+			// Legacy non-image attachment-only poison: no tracked text, no images.
+			lastPromptText: "",
+			lastPromptImages: undefined,
+		};
+		manager.sessions.set(sessionId, session);
+
+		let respawnCalled = 0;
+		manager._respawnAgentInPlace = async (sess: any) => {
+			respawnCalled++;
+			sess.rpcClient = makeBridge(newRecorded);
+			sess.lastTurnErrored = false;
+			sess.lastTurnErrorMessage = undefined;
+			return sess;
+		};
+
+		await manager.retryLastPrompt(sessionId);
+
+		assert.equal(respawnCalled, 1, "blank-content retry must respawn for a sanitized rehydrate");
+		assert.equal(oldRecorded.length, 0, "poisoned process must not be re-prompted");
+		assert.equal(newRecorded.length, 1, "retry must dispatch to the rehydrated process");
+		assert.equal(
+			newRecorded[0].text,
+			"Attachments:",
+			"attachment-only retry with empty text + no images must fall back to 'Attachments:', not blank",
+		);
+	});
+
 	it("non-poison errored turn is unaffected (no respawn; normal prefixed unstick)", async () => {
 		const oldRecorded: RecordedPrompt[] = [];
 		const oldBridge = makeBridge(oldRecorded);

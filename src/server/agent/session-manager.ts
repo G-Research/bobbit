@@ -16,7 +16,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, synthesizeAttachmentText, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
@@ -1820,7 +1820,13 @@ export class SessionManager {
 			if (poisonedByBlankText) {
 				const recovered = await this._recoverBlankTextPoison(session);
 				if (recovered) {
-					await this.dispatchDirectPrompt(recovered, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered);
+					// We know the prior turn carried attachment/image content (it
+					// poisoned on a blank ContentBlock). If this follow-up's own
+					// dispatch text is blank (e.g. a legacy attachment-only retry
+					// where attachments aren't tracked on SessionInfo), fall back to
+					// the synthetic phrase so we never re-send blank/invalid content.
+					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
+					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered);
 					return { status: "dispatched" };
 				}
 			}
@@ -2635,7 +2641,13 @@ export class SessionManager {
 		if (poisonedByBlankText) {
 			const target = await this._recoverBlankTextPoison(session);
 			if (target) {
-				const retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+				// We know this turn was a blank-content poison, so attachment/image
+				// content was present. For a legacy non-image attachment-only
+				// failure savedPromptText==="" and savedPromptImages===undefined, so
+				// synthesizeAttachmentText returns "" — fall back to the synthetic
+				// phrase unconditionally rather than re-send blank/invalid content.
+				let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
+				if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
 				target.lastPromptText = retryText;
 				target.lastPromptImages = savedPromptImages;
 				await target.rpcClient.prompt(retryText, savedPromptImages);
