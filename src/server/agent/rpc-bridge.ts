@@ -96,6 +96,46 @@ export interface IRpcBridge {
 
 export type RpcBridgeFactory = (options: RpcBridgeOptions) => IRpcBridge | null;
 
+/**
+ * Synthetic text body injected for attachment-only prompts. The model API
+ * rejects a user message whose ContentBlock has a blank `text` field (next to
+ * an image block, or as a standalone empty text block), so when the user sends
+ * only an image/attachment with no text we substitute this phrase.
+ *
+ * Exported so the transcript sanitizer can use the exact same phrase when
+ * un-poisoning already-committed blank-text user messages.
+ */
+export const ATTACHMENT_ONLY_TEXT = "Attachments:";
+
+/**
+ * Pure helper: decide the model-facing text for a prompt.
+ *
+ * Returns the synthetic `ATTACHMENT_ONLY_TEXT` ("Attachments:") when `text` is
+ * blank/whitespace-only AND at least one image or attachment is present;
+ * otherwise returns `text` unchanged.
+ *
+ * This is the single source of truth for "image/attachment-only prompts must
+ * carry a non-blank text body". It is applied at the dispatch boundary
+ * (session-manager `enqueuePrompt`) so every dispatch path — direct dispatch,
+ * queued drain, error-recovery prefix, retry — sees valid text, and defensively
+ * at the bridge `prompt()` (image case) as a backstop.
+ *
+ * Trims before deciding so whitespace-only text counts as blank (R4). Normal
+ * text, text+image, and empty-with-no-attachments are all returned unchanged
+ * (R5).
+ */
+export function synthesizeAttachmentText(
+	text: string,
+	images?: Array<unknown> | null,
+	attachments?: Array<unknown> | null,
+): string {
+	if (text && text.trim() !== "") return text;
+	const hasImages = Array.isArray(images) && images.length > 0;
+	const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+	if (hasImages || hasAttachments) return ATTACHMENT_ONLY_TEXT;
+	return text;
+}
+
 let _factory: RpcBridgeFactory | null = null;
 
 /**
@@ -399,10 +439,16 @@ export class RpcBridge {
 	// --- Convenience methods matching the RPC protocol ---
 
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>) {
+		// Defensive backstop: if a prompt carries image(s) but blank text, the
+		// model API rejects the blank ContentBlock. The primary fix synthesizes
+		// text upstream in session-manager.enqueuePrompt (where non-image
+		// attachments are also visible); this guard covers the image case for any
+		// direct bridge caller that bypasses that path.
+		const effectiveText = synthesizeAttachmentText(text, images);
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: text, ...(images?.length ? { images } : {}) });
+		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) });
 	}
 
 	steer(text: string) {

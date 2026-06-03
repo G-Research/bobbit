@@ -203,3 +203,7 @@ Residual at-least-once risk: a hard process kill in the small window between `rp
 | `src/server/ws/handler.ts` | WS command routing (`prompt`, `steer`, `follow_up`, etc.) |
 | `src/server/ws/protocol.ts` | `QueuedMessage` type, client/server message unions |
 | `src/app/remote-agent.ts` | Client-side optimistic rendering, dedup, queue state |
+
+## Related
+
+- [image-attachment-only-prompts.md](image-attachment-only-prompts.md) — `enqueuePrompt` synthesizes a non-blank text body for attachment-only prompts before they reach the queue, so queued/drained rows never carry a blank `ContentBlock`.
