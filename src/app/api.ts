@@ -1552,6 +1552,156 @@ export async function deleteWorkflow(id: string, projectId?: string): Promise<bo
 
 
 
+// ── Marketplace API ──────────────────────────────────────────────
+//
+// Shapes mirror docs/design/marketplace-mvp.md §3.3 / §5.2 / §6.6. The
+// server side is built in parallel; helpers are defensive (optional fields,
+// graceful fallbacks) so a missing/legacy field never crashes the page.
+
+/** Install scope vocabulary, reusing the config-scope model. */
+export type MarketScope = "system" | "project";
+
+export type MarketInstallStatus = "not-installed" | "installed" | "update-available" | "drifted";
+
+export interface MarketSource {
+	id: string;
+	kind: "git" | "local";
+	url?: string | null;
+	ref?: string | null;
+	path?: string | null;
+	label?: string;
+	addedAt?: number;
+	lastSyncedAt?: number | null;
+	lastSyncCommit?: string | null;
+	lastSyncError?: string | null;
+}
+
+export interface MarketPackEntity {
+	type: "role" | "tool" | "skill";
+	name: string;
+	/** present on drill-down responses */
+	installStatus?: MarketInstallStatus;
+}
+
+export interface MarketPack {
+	sourceId: string;
+	packId: string;
+	name: string;
+	description: string;
+	version: string;
+	sourceLabel?: string;
+	entities: MarketPackEntity[];
+	hasTools: boolean;
+	valid: boolean;
+	error?: string;
+	installStatus: MarketInstallStatus;
+	installedVersion?: string | null;
+	installedCommit?: string | null;
+}
+
+export interface MarketPackDetail extends MarketPack {
+	author?: string;
+	homepage?: string;
+	license?: string;
+	minBobbit?: string;
+	manifest?: Record<string, any>;
+}
+
+export interface MarketActionResult {
+	ok: boolean;
+	status: number;
+	data?: any;
+	error?: string;
+}
+
+async function marketPost(url: string, body: any): Promise<MarketActionResult> {
+	try {
+		const res = await gatewayFetch(url, { method: "POST", body: JSON.stringify(body) });
+		const data = await res.json().catch(() => null);
+		if (!res.ok) {
+			const error = (data && (data.error || data.message)) || `Failed: ${res.status}`;
+			return { ok: false, status: res.status, data, error };
+		}
+		return { ok: true, status: res.status, data };
+	} catch (err) {
+		const { message } = errorDetails(err);
+		return { ok: false, status: 0, error: message };
+	}
+}
+
+export async function fetchMarketSources(): Promise<MarketSource[]> {
+	try {
+		const res = await gatewayFetch("/api/marketplace/sources");
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.sources || [];
+	} catch {
+		return [];
+	}
+}
+
+export function addMarketSource(input: { kind: "git" | "local"; url?: string; ref?: string; path?: string; label?: string }): Promise<MarketActionResult> {
+	return marketPost("/api/marketplace/sources", input);
+}
+
+export async function removeMarketSource(id: string): Promise<boolean> {
+	try {
+		const res = await gatewayFetch(`/api/marketplace/sources/${encodeURIComponent(id)}`, { method: "DELETE" });
+		return res.ok || res.status === 204;
+	} catch {
+		return false;
+	}
+}
+
+export function syncMarketSource(id: string): Promise<MarketActionResult> {
+	return marketPost(`/api/marketplace/sources/${encodeURIComponent(id)}/sync`, {});
+}
+
+export async function fetchMarketPacks(scope: MarketScope, projectId?: string): Promise<MarketPack[]> {
+	const params = new URLSearchParams({ scope });
+	if (projectId) params.set("projectId", projectId);
+	try {
+		const res = await gatewayFetch(`/api/marketplace/packs?${params}`);
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.packs || [];
+	} catch {
+		return [];
+	}
+}
+
+export async function fetchMarketPack(sourceId: string, packId: string, scope: MarketScope, projectId?: string): Promise<MarketPackDetail | null> {
+	const params = new URLSearchParams({ scope });
+	if (projectId) params.set("projectId", projectId);
+	try {
+		const res = await gatewayFetch(`/api/marketplace/packs/${encodeURIComponent(sourceId)}/${encodeURIComponent(packId)}?${params}`);
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
+		return null;
+	}
+}
+
+export function installPack(args: {
+	sourceId: string;
+	packId: string;
+	scope: MarketScope;
+	projectId?: string;
+	entities?: { type: string; name: string }[];
+	conflict?: "fail" | "overwrite" | "skip";
+}): Promise<MarketActionResult> {
+	return marketPost("/api/marketplace/install", args);
+}
+
+export function updatePack(args: { sourceId: string; packId: string; scope: MarketScope; projectId?: string }): Promise<MarketActionResult> {
+	return marketPost("/api/marketplace/update", args);
+}
+
+export function uninstallPack(args: { sourceId: string; packId: string; scope: MarketScope; projectId?: string }): Promise<MarketActionResult> {
+	return marketPost("/api/marketplace/uninstall", args);
+}
+
+
 // ── Gate API ─────────────────────────────────────────────────────
 
 export interface GateState {

@@ -10,6 +10,7 @@ import "./app.css";
 import "./workflow-page.css";
 import "./role-manager.css";
 import "./tool-manager.css";
+import "./market-page.css";
 import "./storage.js"; // must initialize before anything else
 // Eagerly register <bg-process-pill> so it's available the moment the chat
 // view mounts. Lazy-loading via `ensureBgProcessPill()` (lazy-widgets.ts) was
@@ -319,6 +320,23 @@ async function handleHashChange(): Promise<void> {
 			loadSkillsPageData();
 			renderApp();
 			await refreshSessions();
+		} else if (route.view === "market" || route.view === "market-pack") {
+			clearDashboardState();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
+			const { loadMarketPageData, navigateToMarketPack } = await import("./market-page.js");
+			await loadMarketPageData();
+			if (route.view === "market-pack" && route.marketSourceId && route.marketPackId) {
+				await navigateToMarketPack(route.marketSourceId, route.marketPackId);
+			}
+			renderApp();
+			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -504,6 +522,13 @@ async function initApp() {
 			} else if (route.view === "skills") {
 				const { loadSkillsPageData } = await import("./skills-page.js");
 				loadSkillsPageData();
+			} else if (route.view === "market") {
+				const { loadMarketPageData } = await import("./market-page.js");
+				loadMarketPageData();
+			} else if (route.view === "market-pack" && route.marketSourceId && route.marketPackId) {
+				const { loadMarketPageData, navigateToMarketPack } = await import("./market-page.js");
+				await loadMarketPageData();
+				await navigateToMarketPack(route.marketSourceId, route.marketPackId);
 			} else if (route.view === "staff") {
 				const { loadStaffPageData } = await import("./staff-page.js");
 				loadStaffPageData();

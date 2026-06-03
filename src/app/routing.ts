@@ -2,7 +2,7 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search" | "walkthrough";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "market-pack" | "settings" | "search" | "walkthrough";
 
 export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
@@ -15,6 +15,8 @@ export interface AppRoute {
 	toolName?: string;
 	workflowId?: string;
 	staffId?: string;
+	marketSourceId?: string;
+	marketPackId?: string;
 	settingsScope?: string;
 	settingsTab?: SettingsTabId;
 	searchQuery?: string;
@@ -100,6 +102,13 @@ export function getRouteFromHash(): AppRoute {
 	if (hash === "#/skills") {
 		return { view: "skills" };
 	}
+	const marketPackMatch = hash.match(/^#\/market\/([a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)$/);
+	if (marketPackMatch) {
+		return { view: "market-pack", marketSourceId: marketPackMatch[1], marketPackId: marketPackMatch[2] };
+	}
+	if (hash === "#/market") {
+		return { view: "market" };
+	}
 	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z0-9-]+))?(?:\/([a-z]+))?$/);
 	if (settingsMatch) {
 		const first = settingsMatch[1] as string | undefined;
@@ -180,6 +189,11 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = "#/staff";
 	} else if (view === "skills") {
 		newHash = "#/skills";
+	} else if (view === "market-pack" && id) {
+		// id is the compound "<sourceId>/<packId>".
+		newHash = `#/market/${id}`;
+	} else if (view === "market") {
+		newHash = "#/market";
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
 	} else if (view === "walkthrough") {
@@ -213,7 +227,7 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 /** Config page route views (not landing, session, or goal-dashboard). */
 const CONFIG_VIEWS: Set<RouteView> = new Set([
 	"roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
-	"skills", "settings", "staff", "staff-edit",
+	"skills", "market", "market-pack", "settings", "staff", "staff-edit",
 	"search",
 ]);
 

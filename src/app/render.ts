@@ -2413,6 +2413,9 @@ export function doRenderApp(): void {
 		if (route.view === "skills") {
 			return lazyPage("skills", () => import("./skills-page.js"), "renderSkillsPage");
 		}
+		if (route.view === "market" || route.view === "market-pack") {
+			return lazyPage("market", () => import("./market-page.js"), "renderMarketPage");
+		}
 		if (route.view === "settings") {
 			return lazyPage("settings", () => import("./settings-page.js"), "renderSettingsPage");
 		}
