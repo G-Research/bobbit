@@ -107,6 +107,9 @@ Control what agents can do (tool access, system prompts) and how they behave. Us
 ### Skills
 Reusable templates for isolated sub-agents: code review, security review, test reports. Invoke them from any session for structured, repeatable outputs.
 
+### Marketplace (Extension Packs)
+Point Bobbit at git repos or local directories that contain **Extension Packs** — themed bundles of roles, tools, and skills — then browse and install them from the **Market** button in the sidebar (between Workflows and New Goal). Installing a pack copies its entities into your config layers, so they resolve through the normal cascade exactly like hand-authored config, with the same origin badges and scope (System / project) semantics. Provenance is recorded so packs update and uninstall cleanly. No hosted registry, no sandbox — just point at repos with the right layout. See [docs/marketplace.md](docs/marketplace.md).
+
 ### Interactive Agent Prompts
 Agents can ask you structured multiple-choice questions mid-task via the builtin `ask_user_choices` tool. An inline widget renders in the chat with up to 5 questions and an always-rendered free-text "Other" escape hatch. The tool is non-blocking — the agent's turn ends immediately and the session goes idle until you submit; your answers arrive as a tagged user message that wakes the agent on the next turn. See [docs/non-blocking-ask.md](docs/non-blocking-ask.md) for the architecture.
 
@@ -130,6 +133,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
+| [Marketplace](docs/marketplace.md) | Extension Packs: sources, install, provenance |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 
 **Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md)
