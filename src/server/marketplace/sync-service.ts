@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { stripTokenFromGitUrl } from "../skills/git.js";
+import { validateGitRef, validateGitUrl } from "./source-registry.js";
 import type { SourceRecord } from "./types.js";
 
 const execFile = promisify(execFileCb);
@@ -42,6 +43,14 @@ export class GitSourceBackend implements SourceBackend {
 		const url = source.url ?? "";
 		if (!url) return { root: cacheDir, commit: null, contentHash: null, error: "git source has no url" };
 		const ref = source.ref || null;
+		// Defence-in-depth: the registry validates url/ref on add, but a tampered
+		// sources.json must never let a `-`-leading url/ref reach git's argv.
+		try {
+			validateGitUrl(url);
+			if (ref) validateGitRef(ref);
+		} catch (err) {
+			return { root: cacheDir, commit: null, contentHash: null, error: (err as Error).message };
+		}
 		try {
 			const hasClone = fs.existsSync(path.join(cacheDir, ".git"));
 			if (!hasClone) {
@@ -50,12 +59,14 @@ export class GitSourceBackend implements SourceBackend {
 				fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
 				const cloneArgs = ["clone", "--depth", "1"];
 				if (ref) cloneArgs.push("--branch", ref);
-				cloneArgs.push(url, cacheDir);
+				// `--` terminates option parsing so a `-`-leading url/dir can never be
+				// interpreted as a git option (protocol-helper injection).
+				cloneArgs.push("--", url, cacheDir);
 				await git(cloneArgs);
 			} else {
 				// Re-sync → fetch + hard reset + clean (never a merge in a cache the user never edits).
 				const fetchRef = ref || "HEAD";
-				await git(["fetch", "--depth", "1", "origin", fetchRef], cacheDir);
+				await git(["fetch", "--depth", "1", "origin", "--", fetchRef], cacheDir);
 				await git(["reset", "--hard", "FETCH_HEAD"], cacheDir);
 				await git(["clean", "-fdx"], cacheDir);
 			}

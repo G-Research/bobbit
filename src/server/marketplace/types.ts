@@ -12,6 +12,13 @@ export type SourceKind = "git" | "local";
 export type InstallScope = "system" | "project";
 export type EntityType = "role" | "tool" | "skill";
 export type ConflictMode = "fail" | "overwrite" | "skip";
+/**
+ * How a pack was installed, recorded in provenance so update() can apply the
+ * right semantics: `pack` = whole pack (update adds newly-declared entities,
+ * refreshes existing, removes dropped); `subset` = explicit entity subset
+ * (update refreshes only tracked entities, never auto-adds new ones).
+ */
+export type InstallMode = "pack" | "subset";
 
 /** A configured marketplace source (git repo or local dir). Persisted in sources.json (§3.2). */
 export interface SourceRecord {
@@ -105,6 +112,8 @@ export interface ProvenanceRecord {
 	sourceCommit: string | null;
 	sourceContentHash: string | null;
 	installedAt: number;
+	/** whole-pack vs subset install — drives update() semantics (§6). */
+	installMode: InstallMode;
 	entities: InstalledEntity[];
 }
 

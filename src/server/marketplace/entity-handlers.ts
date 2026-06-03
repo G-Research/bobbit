@@ -11,7 +11,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { copyDirRecursive } from "../agent/tool-manager.js";
 import {
 	parseCustomDirectories,
 	saveCustomDirectories,
@@ -42,10 +41,75 @@ export function isSafeEntityName(name: unknown): name is string {
  * code path that bypasses the scanner can never write/delete outside scope.
  */
 export function assertWithin(root: string, target: string): void {
+	if (!isWithin(root, target)) {
+		throw new Error(`marketplace: path escapes ${root}: ${target}`);
+	}
+}
+
+/** Non-throwing containment check used by uninstall before any delete. */
+export function isWithin(root: string, target: string): boolean {
 	const r = path.resolve(root);
 	const t = path.resolve(target);
-	if (t !== r && !t.startsWith(r + path.sep)) {
-		throw new Error(`marketplace: path escapes ${root}: ${target}`);
+	return t === r || t.startsWith(r + path.sep);
+}
+
+/**
+ * Delete each path only if it is contained within `root` (the entity type's
+ * destination dir for the resolved scope). A path that escapes `root` — e.g.
+ * from a hand-edited / tampered provenance file — is refused and surfaced, so
+ * uninstall can never delete arbitrary host files.
+ */
+export function removeContainedPaths(root: string, paths: string[], recursive: boolean): void {
+	for (const p of paths) {
+		if (!isWithin(root, p)) {
+			console.error(`marketplace: refusing to delete path outside ${root}: ${p}`);
+			continue;
+		}
+		try { fs.rmSync(p, { recursive, force: true }); } catch { /* best-effort */ }
+	}
+}
+
+/**
+ * Recursively detect a symlink anywhere in a pack payload (the path itself or
+ * any descendant), using lstat so symlinks are not followed. A marketplace
+ * pack containing a symlink under roles/tools/skills is invalid: copying or
+ * hashing it could read/exfiltrate host files the symlink points at. Returns
+ * the offending path, or null if the subtree is symlink-free.
+ */
+export function findSymlink(p: string): string | null {
+	let st: fs.Stats;
+	try { st = fs.lstatSync(p); } catch { return null; }
+	if (st.isSymbolicLink()) return p;
+	if (st.isDirectory()) {
+		for (const name of fs.readdirSync(p)) {
+			const hit = findSymlink(path.join(p, name));
+			if (hit) return hit;
+		}
+	}
+	return null;
+}
+
+/**
+ * Marketplace-local recursive copy that refuses to follow symlinks. Unlike the
+ * shared tool-manager copyDirRecursive (which copyFileSync-follows links), this
+ * lstat-checks every node and throws on a symlink or any non-regular file, so a
+ * malicious pack cannot exfiltrate host files into a config layer.
+ */
+export function copyNoSymlinks(src: string, dest: string): void {
+	const st = fs.lstatSync(src);
+	if (st.isSymbolicLink()) {
+		throw new Error(`marketplace: refusing to copy symlink: ${src}`);
+	}
+	if (st.isDirectory()) {
+		fs.mkdirSync(dest, { recursive: true });
+		for (const name of fs.readdirSync(src)) {
+			copyNoSymlinks(path.join(src, name), path.join(dest, name));
+		}
+	} else if (st.isFile()) {
+		fs.mkdirSync(path.dirname(dest), { recursive: true });
+		fs.copyFileSync(src, dest);
+	} else {
+		throw new Error(`marketplace: refusing to copy non-regular file: ${src}`);
 	}
 }
 
@@ -124,6 +188,8 @@ const roleHandler: EntityTypeHandler = {
 	validate(packDir, name) {
 		const p = this.payloadPath(packDir, name);
 		if (!fs.existsSync(p)) return { ok: false, error: `role file missing: roles/${name}.yaml` };
+		const link = findSymlink(p);
+		if (link) return { ok: false, error: `role roles/${name}.yaml is a symlink (not allowed in packs)` };
 		try {
 			const parsed = YAML.parse(fs.readFileSync(p, "utf-8"));
 			if (!parsed || typeof parsed !== "object" || typeof parsed.name !== "string" || !parsed.name.trim()) {
@@ -141,15 +207,12 @@ const roleHandler: EntityTypeHandler = {
 		const dest = this.destPath(ctx, name);
 		assertWithin(path.join(packDir, "roles"), src);
 		assertWithin(roleConfigDir(ctx), dest);
-		fs.mkdirSync(path.dirname(dest), { recursive: true });
-		fs.copyFileSync(src, dest);
+		copyNoSymlinks(src, dest);
 		ctx.invalidateRoles?.();
 		return { type: "role", name, installedPaths: [dest] };
 	},
 	uninstall(ctx, entity) {
-		for (const p of entity.installedPaths) {
-			try { fs.rmSync(p, { force: true }); } catch { /* best-effort */ }
-		}
+		removeContainedPaths(roleConfigDir(ctx), entity.installedPaths, false);
 		ctx.invalidateRoles?.();
 	},
 };
@@ -164,6 +227,8 @@ const toolHandler: EntityTypeHandler = {
 		let stat: fs.Stats;
 		try { stat = fs.statSync(dir); } catch { return { ok: false, error: `tool group missing: tools/${name}/` }; }
 		if (!stat.isDirectory()) return { ok: false, error: `tools/${name} is not a directory` };
+		const link = findSymlink(dir);
+		if (link) return { ok: false, error: `tool group tools/${name}/ contains a symlink (not allowed in packs)` };
 		let yamlWithName = 0;
 		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
@@ -184,14 +249,12 @@ const toolHandler: EntityTypeHandler = {
 		const dest = this.destPath(ctx, name);
 		assertWithin(path.join(packDir, "tools"), src);
 		assertWithin(toolConfigDir(ctx), dest);
-		copyDirRecursive(src, dest);
+		copyNoSymlinks(src, dest);
 		ctx.invalidateTools?.();
 		return { type: "tool", name, installedPaths: [dest] };
 	},
 	uninstall(ctx, entity) {
-		for (const p of entity.installedPaths) {
-			try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
-		}
+		removeContainedPaths(toolConfigDir(ctx), entity.installedPaths, true);
 		ctx.invalidateTools?.();
 	},
 };
@@ -202,8 +265,11 @@ const skillHandler: EntityTypeHandler = {
 	carriesCode: false,
 	payloadPath: (packDir, name) => path.join(packDir, "skills", name),
 	validate(packDir, name) {
-		const skillFile = path.join(this.payloadPath(packDir, name), "SKILL.md");
+		const dir = this.payloadPath(packDir, name);
+		const skillFile = path.join(dir, "SKILL.md");
 		if (!fs.existsSync(skillFile)) return { ok: false, error: `skill missing: skills/${name}/SKILL.md` };
+		const link = findSymlink(dir);
+		if (link) return { ok: false, error: `skill skills/${name}/ contains a symlink (not allowed in packs)` };
 		return { ok: true };
 	},
 	destPath: (ctx, name) => path.join(ctx.skillInstallDir, name),
@@ -213,7 +279,7 @@ const skillHandler: EntityTypeHandler = {
 		const dest = this.destPath(ctx, name);
 		assertWithin(path.join(packDir, "skills"), src);
 		assertWithin(ctx.skillInstallDir, dest);
-		copyDirRecursive(src, dest);
+		copyNoSymlinks(src, dest);
 		const entity: InstalledEntity = { type: "skill", name, installedPaths: [dest] };
 		// Project scope: register the (absolute) skills dir so discoverSlashSkills
 		// resolves it cross-worktree. System scope (~/.bobbit/skills) is always scanned.
@@ -224,9 +290,7 @@ const skillHandler: EntityTypeHandler = {
 		return entity;
 	},
 	uninstall(ctx, entity) {
-		for (const p of entity.installedPaths) {
-			try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
-		}
+		removeContainedPaths(ctx.skillInstallDir, entity.installedPaths, true);
 		// Drop only the "skills" registration for this dir, preserving any other
 		// config types registered on the same path. Delete the dir only if it is
 		// now empty AND no longer referenced by config_directories.

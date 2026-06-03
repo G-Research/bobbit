@@ -39,6 +39,49 @@ export class SourceRegistryError extends Error {
 	}
 }
 
+/** git refs/branches/tags joined into argv must match a conservative grammar. */
+export const GIT_REF_PATTERN = /^[A-Za-z0-9._/-]+$/;
+const ALLOWED_GIT_SCHEMES = ["https", "ssh", "git", "file"];
+
+/**
+ * Reject a git URL that could be mis-parsed by `git clone`/`git fetch` as an
+ * option (a leading `-`) or that uses a dangerous protocol helper (e.g.
+ * `ext::`). Only the well-known transport schemes are allowed; the scp-like
+ * shorthand `user@host:path` (no URL scheme) is permitted because it cannot
+ * begin with `-` and carries no protocol-helper risk.
+ */
+export function validateGitUrl(url: string): void {
+	if (url.startsWith("-")) {
+		throw new SourceRegistryError(`git url must not start with "-" (would be parsed as a git option): ${url}`);
+	}
+	const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url);
+	if (schemeMatch) {
+		const scheme = schemeMatch[1].toLowerCase();
+		if (!ALLOWED_GIT_SCHEMES.includes(scheme)) {
+			throw new SourceRegistryError(
+				`git url scheme must be one of ${ALLOWED_GIT_SCHEMES.join("/")}, got: ${scheme}:`,
+			);
+		}
+		return;
+	}
+	// No URL scheme — only the scp-like shorthand (user@host:path) is acceptable.
+	if (!/^[^/:]+@[^/:]+:/.test(url)) {
+		throw new SourceRegistryError(
+			`git url must use an ${ALLOWED_GIT_SCHEMES.join("/")} scheme or scp-like syntax, got: ${url}`,
+		);
+	}
+}
+
+/** Reject a git ref that could be mis-parsed as an option or contains unsafe chars. */
+export function validateGitRef(ref: string): void {
+	if (ref.startsWith("-")) {
+		throw new SourceRegistryError(`git ref must not start with "-": ${ref}`);
+	}
+	if (!GIT_REF_PATTERN.test(ref)) {
+		throw new SourceRegistryError(`git ref must match ${GIT_REF_PATTERN}, got: ${ref}`);
+	}
+}
+
 export class SourceRegistry {
 	private sources = new Map<string, SourceRecord>();
 	private readonly storePath: string;
@@ -93,9 +136,13 @@ export class SourceRegistry {
 		let srcPath: string | null = null;
 		let defaultLabel: string;
 
+		const ref = input.ref?.trim() || null;
+		if (ref) validateGitRef(ref);
+
 		if (kind === "git") {
 			url = (input.url ?? "").trim();
 			if (!url) throw new SourceRegistryError("git source requires a non-empty url");
+			validateGitUrl(url);
 			defaultLabel = basenameFromGitUrl(url);
 		} else {
 			srcPath = (input.path ?? "").trim();
@@ -111,7 +158,7 @@ export class SourceRegistry {
 			id: randomUUID().slice(0, 8),
 			kind,
 			url,
-			ref: input.ref?.trim() || null,
+			ref,
 			path: srcPath,
 			label: input.label?.trim() || defaultLabel,
 			addedAt: Date.now(),

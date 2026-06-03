@@ -149,7 +149,10 @@ export function hashPackPayload(pack: ScannedPack): string {
 
 function hashPath(hash: crypto.Hash, root: string, p: string): void {
 	let stat: fs.Stats;
-	try { stat = fs.statSync(p); } catch { return; }
+	// lstat (not stat) so a symlink is never followed/read while hashing — a
+	// pack containing a symlink is rejected at scan time, but defence-in-depth.
+	try { stat = fs.lstatSync(p); } catch { return; }
+	if (stat.isSymbolicLink()) return; // never follow links into host files
 	if (stat.isDirectory()) {
 		for (const name of fs.readdirSync(p).sort()) {
 			hashPath(hash, root, path.join(p, name));

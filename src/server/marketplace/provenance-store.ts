@@ -12,7 +12,32 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { InstallStatus, ProvenanceRecord, ScannedPack, SourceRecord } from "./types.js";
+import type { EntityType, InstallStatus, ProvenanceRecord, ScannedPack, SourceRecord } from "./types.js";
+
+const ENTITY_TYPES: EntityType[] = ["role", "tool", "skill"];
+
+/**
+ * Validate + normalise a record loaded from installed.json. A hand-edited or
+ * corrupt file must never crash the server or feed malformed records into the
+ * install engine, so records failing the shape/type contract are dropped.
+ * Missing `installMode` defaults to "pack" (legacy records predate the field).
+ */
+function coerceRecord(raw: unknown): ProvenanceRecord | null {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+	const r = raw as Record<string, unknown>;
+	if (typeof r.sourceId !== "string" || typeof r.packId !== "string") return null;
+	if (r.scope !== "system" && r.scope !== "project") return null;
+	if (!Array.isArray(r.entities)) return null;
+	for (const e of r.entities) {
+		if (!e || typeof e !== "object" || Array.isArray(e)) return null;
+		const ent = e as Record<string, unknown>;
+		if (!ENTITY_TYPES.includes(ent.type as EntityType)) return null;
+		if (typeof ent.name !== "string") return null;
+		if (!Array.isArray(ent.installedPaths) || !ent.installedPaths.every((p) => typeof p === "string")) return null;
+	}
+	if (r.installMode !== "pack" && r.installMode !== "subset") r.installMode = "pack";
+	return r as unknown as ProvenanceRecord;
+}
 
 export class ProvenanceStore {
 	private records: ProvenanceRecord[] = [];
@@ -27,7 +52,8 @@ export class ProvenanceStore {
 	load(): void {
 		try {
 			const parsed = JSON.parse(fs.readFileSync(this.storePath, "utf-8"));
-			this.records = Array.isArray(parsed?.installs) ? parsed.installs : [];
+			const arr: unknown[] = Array.isArray(parsed?.installs) ? parsed.installs : [];
+			this.records = arr.map(coerceRecord).filter((r): r is ProvenanceRecord => r !== null);
 		} catch {
 			this.records = [];
 		}

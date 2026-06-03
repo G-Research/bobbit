@@ -10,8 +10,9 @@
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { stripTokenFromGitUrl } from "../skills/git.js";
-import { ENTITY_HANDLERS } from "./entity-handlers.js";
+import { ENTITY_HANDLERS, isWithin } from "./entity-handlers.js";
 import { hashPackPayload } from "./pack-scanner.js";
 import { ProvenanceStore } from "./provenance-store.js";
 import type {
@@ -19,6 +20,7 @@ import type {
 	EntityRef,
 	InstallCtx,
 	InstallEntityResult,
+	InstallMode,
 	InstallOutcome,
 	InstallScope,
 	InstalledEntity,
@@ -90,7 +92,19 @@ export class InstallService {
 
 		const { installed, skipped } = this.doCopy(ctx, targets, pack.dir, conflict);
 
-		const record = this.buildRecord(scope, projectId, source, pack, installed);
+		const isWholePack = entities === null;
+		// Subset install into an already-installed pack MERGES (union by type/name,
+		// new install wins) so installing A then B never loses A from provenance.
+		// Whole-pack install writes the full record.
+		const existing = provenance.find(source.id, pack.packId);
+		let recordEntities = installed;
+		if (!isWholePack && existing) {
+			const byKey = new Map(existing.entities.map((e) => [`${e.type}/${e.name}`, e]));
+			for (const e of installed) byKey.set(`${e.type}/${e.name}`, e);
+			recordEntities = [...byKey.values()];
+		}
+		const installMode = this.resolveInstallMode(isWholePack, pack, recordEntities);
+		const record = this.buildRecord(scope, projectId, source, pack, recordEntities, installMode);
 		provenance.upsert(record);
 
 		const results: InstallEntityResult[] = [
@@ -100,7 +114,29 @@ export class InstallService {
 		return { record, results, skipped };
 	}
 
-	/** Re-sync-then-refresh: re-copy recorded entities still declared; drop orphans. */
+	/** subset install becomes "pack" once its record covers every declared entity. */
+	private resolveInstallMode(isWholePack: boolean, pack: ScannedPack, recordEntities: InstalledEntity[]): InstallMode {
+		if (isWholePack) return "pack";
+		const declared = pack.entities.map((e) => `${e.type}/${e.name}`);
+		const have = new Set(recordEntities.map((e) => `${e.type}/${e.name}`));
+		const coversAll = declared.length > 0 && declared.every((k) => have.has(k));
+		return coversAll ? "pack" : "subset";
+	}
+
+	/**
+	 * Re-sync-then-refresh, fully transactional across removals AND copies.
+	 *
+	 * - installMode "pack"   → install everything the updated pack now declares
+	 *   (add newly-declared, refresh existing, remove no-longer-declared), so a
+	 *   whole-pack update truly reflects upstream.
+	 * - installMode "subset" → refresh only tracked entities still declared and
+	 *   remove tracked entities no longer declared; never auto-add new ones.
+	 *
+	 * A mid-update failure restores the system exactly as it was: every removed
+	 * and every overwritten entity is backed up first, and on failure newly
+	 * copied entities are removed and all backups restored. Provenance is
+	 * rewritten only on full success.
+	 */
 	update(args: UpdateArgs): InstallOutcome {
 		const { scope, projectId, source, pack } = args;
 		const provenance = this.deps.resolveProvenance(scope, projectId);
@@ -113,26 +149,94 @@ export class InstallService {
 		if (!ctx) throw new Error(`could not resolve install context for scope=${scope}`);
 		this.trust.check(source, pack);
 
+		const mode: InstallMode = existing.installMode === "subset" ? "subset" : "pack";
 		const declaredNow = new Set(pack.entities.map((e) => `${e.type}/${e.name}`));
-		const toRefresh = existing.entities.filter((e) => declaredNow.has(`${e.type}/${e.name}`));
-		const toRemove = existing.entities.filter((e) => !declaredNow.has(`${e.type}/${e.name}`));
 
-		// Drop entities the new version no longer declares (no orphans).
-		for (const entity of toRemove) {
-			ENTITY_HANDLERS[entity.type].uninstall(ctx, entity);
-		}
+		const finalTargets: EntityRef[] = mode === "pack"
+			? pack.entities.map((e) => ({ type: e.type, name: e.name }))
+			: existing.entities.filter((e) => declaredNow.has(`${e.type}/${e.name}`)).map((e) => ({ type: e.type, name: e.name }));
+		const finalKeys = new Set(finalTargets.map((t) => `${t.type}/${t.name}`));
+		const toRemove = existing.entities.filter((e) => !finalKeys.has(`${e.type}/${e.name}`));
 
-		// Re-copy the still-declared entities (overwrite).
-		const targets: EntityRef[] = toRefresh.map((e) => ({ type: e.type, name: e.name }));
-		const { installed, skipped } = this.doCopy(ctx, targets, pack.dir, "overwrite");
+		const installed = this.applyUpdateTransactional(ctx, pack.dir, finalTargets, toRemove);
 
-		const record = this.buildRecord(scope, projectId, source, pack, installed);
+		const installMode = this.resolveInstallMode(mode === "pack", pack, installed);
+		const record = this.buildRecord(scope, projectId, source, pack, installed, installMode);
 		provenance.upsert(record);
 
 		const results: InstallEntityResult[] = installed.map((e): InstallEntityResult => ({
 			type: e.type, name: e.name, status: "installed", installedPaths: e.installedPaths,
 		}));
-		return { record, results, skipped };
+		return { record, results, skipped: [] };
+	}
+
+	/** Entity-type destination root for the resolved scope (for containment + backup). */
+	private entityRoot(ctx: InstallCtx, ref: EntityRef): string {
+		return path.dirname(ENTITY_HANDLERS[ref.type].destPath(ctx, ref.name));
+	}
+
+	/**
+	 * Apply an update's removals + copies as one transaction. Every path that
+	 * will be removed or overwritten is renamed to a temp backup first; on any
+	 * failure newly-copied entities are removed and all backups restored, leaving
+	 * the system byte-for-byte as before. On success backups are discarded and
+	 * skill custom-dir registrations are dropped only when no skill remains.
+	 */
+	private applyUpdateTransactional(
+		ctx: InstallCtx,
+		packDir: string,
+		targets: EntityRef[],
+		toRemove: InstalledEntity[],
+	): InstalledEntity[] {
+		const backups: { dest: string; backup: string }[] = [];
+		const installed: InstalledEntity[] = [];
+		const backup = (dest: string): void => {
+			if (!fs.existsSync(dest)) return;
+			const bak = `${dest}.mp-bak-${randomUUID().slice(0, 8)}`;
+			fs.renameSync(dest, bak);
+			backups.push({ dest, backup: bak });
+		};
+		try {
+			// 1. Back up (move aside) every entity that is being removed.
+			for (const e of toRemove) {
+				const root = this.entityRoot(ctx, e);
+				for (const p of e.installedPaths) {
+					if (!isWithin(root, p)) continue; // never touch tampered out-of-scope paths
+					backup(p);
+				}
+			}
+			// 2. Back up overwrite targets, then copy every target fresh.
+			for (const t of targets) {
+				backup(ENTITY_HANDLERS[t.type].destPath(ctx, t.name));
+				installed.push(ENTITY_HANDLERS[t.type].install(ctx, packDir, t.name));
+			}
+		} catch (err) {
+			for (const e of installed) {
+				try { ENTITY_HANDLERS[e.type].uninstall(ctx, e); } catch { /* best-effort */ }
+			}
+			for (const b of [...backups].reverse()) {
+				try {
+					if (fs.existsSync(b.dest)) fs.rmSync(b.dest, { recursive: true, force: true });
+					fs.renameSync(b.backup, b.dest);
+				} catch { /* best-effort */ }
+			}
+			throw err;
+		}
+		// Success: discard backups.
+		for (const b of backups) {
+			try { fs.rmSync(b.backup, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+		// Removed skills: paths are already gone; drop the config_directories "skills"
+		// registration only when no skill remains installed (else a surviving skill
+		// would lose its dir registration).
+		if (toRemove.some((e) => e.type === "skill") && !installed.some((e) => e.type === "skill")) {
+			for (const e of toRemove.filter((e) => e.type === "skill")) {
+				try { ENTITY_HANDLERS.skill.uninstall(ctx, { ...e, installedPaths: [] }); } catch { /* best-effort */ }
+			}
+		}
+		if (toRemove.some((e) => e.type === "role")) ctx.invalidateRoles?.();
+		if (toRemove.some((e) => e.type === "tool")) ctx.invalidateTools?.();
+		return installed;
 	}
 
 	/** Remove exactly the paths the provenance record tracks, then drop the record. */
@@ -227,6 +331,7 @@ export class InstallService {
 		source: SourceRecord,
 		pack: ScannedPack,
 		installed: InstalledEntity[],
+		installMode: InstallMode,
 	): ProvenanceRecord {
 		return {
 			scope,
@@ -240,6 +345,7 @@ export class InstallService {
 			sourceCommit: source.lastSyncCommit ?? null,
 			sourceContentHash: source.kind === "local" ? hashPackPayload(pack) : null,
 			installedAt: Date.now(),
+			installMode,
 			entities: installed,
 		};
 	}
