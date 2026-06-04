@@ -131,6 +131,65 @@ export function findSkillSidecarEntry(
 	return entries.find((e) => e.modelText === modelText);
 }
 
+/**
+ * Pure merge of sidecar entries into a list of agent messages. For each user
+ * message whose text body equals an entry's `modelText`, rewrite the body to
+ * `originalText` and re-attach BOTH `skillExpansions` and `fileMentions`
+ * (when present). This is the restore / authoritative-snapshot counterpart to
+ * the live broadcast splice (`spliceSkillExpansionsIntoEvent`); the two MUST
+ * stay in sync or chips vanish on reload. Pinned by tests/skill-sidecar.test.ts.
+ *
+ * Duplicate identical messages are matched in FIFO order. Idempotent for
+ * messages without a matching entry. The input array/objects are not mutated.
+ */
+export function mergeSidecarEntriesIntoMessages(
+	entries: SkillSidecarEntry[],
+	messages: any[],
+): any[] {
+	if (!Array.isArray(messages) || messages.length === 0) return messages;
+	if (!Array.isArray(entries) || entries.length === 0) return messages;
+	const queues = new Map<string, SkillSidecarEntry[]>();
+	for (const e of entries) {
+		const arr = queues.get(e.modelText) ?? [];
+		arr.push(e);
+		queues.set(e.modelText, arr);
+	}
+	let changed = false;
+	const out = messages.map((msg: any) => {
+		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
+		let body: string;
+		if (typeof msg.content === "string") body = msg.content;
+		else if (Array.isArray(msg.content)) {
+			const block = msg.content.find((c: any) => c?.type === "text");
+			body = block?.text ?? "";
+		} else body = "";
+		const q = queues.get(body);
+		if (!q || q.length === 0) return msg;
+		const envelope = q.shift()!;
+		changed = true;
+		let newContent: any;
+		if (typeof msg.content === "string") {
+			newContent = envelope.originalText;
+		} else if (Array.isArray(msg.content)) {
+			newContent = msg.content.map((c: any) =>
+				c?.type === "text" ? { ...c, text: envelope.originalText } : c,
+			);
+			if (!newContent.some((c: any) => c?.type === "text")) {
+				newContent.unshift({ type: "text", text: envelope.originalText });
+			}
+		} else {
+			newContent = envelope.originalText;
+		}
+		return {
+			...msg,
+			content: newContent,
+			skillExpansions: envelope.skillExpansions,
+			...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
+		};
+	});
+	return changed ? out : messages;
+}
+
 /** Delete the sidecar for a session (archive purge / terminate). */
 export function purgeSkillSidecar(sessionId: string): void {
 	const file = sidecarPath(sessionId);
