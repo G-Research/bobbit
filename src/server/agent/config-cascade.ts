@@ -7,6 +7,7 @@
  * indicating which lower layer it shadows.
  */
 
+import os from "node:os";
 import path from "node:path";
 import type { Role, GrantPolicy } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
@@ -14,6 +15,7 @@ import type { ToolInfo } from "./tool-manager.js";
 import type { BuiltinConfigProvider } from "./builtin-config.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-types.js";
+import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
 
 /**
@@ -75,16 +77,32 @@ export interface ServerStores {
 }
 
 export class ConfigCascade {
+	/**
+	 * Base dir for the global-user scope's user pack (`<base>/.bobbit/config`,
+	 * via {@link scopePaths}). Defaults to `os.homedir()`; injectable so unit
+	 * tests can point the global-user user pack at a fixture dir instead of the
+	 * real home dir (design §3.1/§5.2).
+	 */
+	private globalUserBase: string;
+
 	constructor(
 		private builtins: BuiltinConfigProvider,
 		private serverStores: ServerStores,
 		private projectContextManager: ProjectContextManager,
 		private marketPackProvider?: MarketPackProvider,
-	) {}
+		globalUserBase?: string,
+	) {
+		this.globalUserBase = globalUserBase ?? os.homedir();
+	}
 
 	/** Late-bind the market-pack provider (server.ts wires it after fs/store setup). */
 	setMarketPackProvider(provider: MarketPackProvider): void {
 		this.marketPackProvider = provider;
+	}
+
+	/** Override the global-user scope base (tests; defaults to `os.homedir()`). */
+	setGlobalUserBase(base: string): void {
+		this.globalUserBase = base;
 	}
 
 	// ── Roles ────────────────────────────────────────────────────
@@ -240,8 +258,20 @@ export class ConfigCascade {
 		// Server segment: market packs below the server user pack.
 		pushMarket("server");
 		entries.push(layer("user:server", "server", serverItems));
-		// Global-user segment: market packs only (no in-memory user store today).
+		// Global-user segment: market packs, then the global-user user pack
+		// (`~/.bobbit/config/roles|tools`). The user pack is a real on-disk
+		// `defaults-tree` entry scanned by the same loaders (design §3.1/§5.2);
+		// it sits above global-user market packs (§3.2) and below the project
+		// segment. Empty today ⇒ byte-identical to the legacy 3-layer merge.
 		pushMarket("global-user");
+		entries.push({
+			id: "user:global-user",
+			kind: "user",
+			scope: "global-user",
+			path: scopePaths("global-user", this.globalUserBase).userPackRoot,
+			readOnly: false,
+			layout: "defaults-tree",
+		});
 		// Project segment (only when a projectId is specified — system scope omits it).
 		if (projectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);

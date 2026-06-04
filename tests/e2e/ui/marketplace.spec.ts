@@ -14,7 +14,7 @@
  * and reuses config-page conventions (origin badges, scope rows).
  */
 import type { Page } from "@playwright/test";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test, expect } from "../gateway-harness.js";
@@ -331,5 +331,53 @@ test.describe("Marketplace UI", () => {
 		await page.reload();
 		await navigateToHash(page, "#/roles");
 		await expect(page.locator(".role-row").filter({ hasText: "shared-role" }).locator('[data-testid="origin-pack-chip"]')).toHaveText("conf-a", { timeout: 15_000 });
+	});
+
+	// ------------------------------------------------------------------
+	// finding #3 — a SERVER-scope skill pack must resolve for a project whose
+	// rootPath != the server cwd. Skill discovery threads an explicit market
+	// scope context (serverBase = server cwd), so server-scope market skill
+	// packs resolve regardless of the active project's root. API-driven
+	// (resolution is server-side; no extra UI surface to exercise).
+	// ------------------------------------------------------------------
+	test("server-scope skill pack resolves for a non-default project root (root != server cwd)", async () => {
+		const repo = makeRepo();
+		writePack(repo, { name: "srv-skill-pack", skills: [{ name: "srv-scope-skill" }] });
+
+		// Register a SECOND project whose rootPath differs from the server cwd
+		// (the default project's root == server cwd, so it can't expose the bug).
+		const projDir = mkdtempSync(join(tmpdir(), "bobbit-mkt-proj-"));
+		mkdirSync(join(projDir, ".bobbit", "config"), { recursive: true });
+		const projRes = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `mkt-other-${Date.now()}`, rootPath: projDir }),
+		});
+		expect(projRes.status).toBe(201);
+		const proj = await projRes.json();
+
+		// Register the source and install the skill pack at SERVER scope.
+		const addRes = await apiFetch("/api/marketplace/sources", { method: "POST", body: JSON.stringify({ url: repo }) });
+		expect(addRes.status).toBe(201);
+		const src = (await addRes.json()).source;
+		const instRes = await apiFetch("/api/marketplace/install", {
+			method: "POST",
+			body: JSON.stringify({ sourceId: src.id, dirName: "srv-skill-pack", scope: "server" }),
+		});
+		expect(instRes.status).toBe(201);
+
+		try {
+			// The server-scope skill resolves for the OTHER project — only true
+			// when serverBase is the server cwd, not the project root.
+			const skillsRes = await apiFetch(`/api/slash-skills?projectId=${encodeURIComponent(proj.id)}`);
+			const skills = (await skillsRes.json()).skills as Array<{ name: string; originPackName?: string | null; originPackId?: string | null }>;
+			const hit = skills.find((s) => s.name === "srv-scope-skill");
+			expect(hit, "server-scope skill must resolve for a non-default project root").toBeTruthy();
+			expect(hit?.originPackName).toBe("srv-skill-pack");
+			expect(hit?.originPackId).toBe("market:server:srv-skill-pack");
+		} finally {
+			await apiFetch("/api/marketplace/installed", { method: "DELETE", body: JSON.stringify({ scope: "server", packName: "srv-skill-pack" }) }).catch(() => {});
+			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
+			try { rmSync(projDir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
 	});
 });

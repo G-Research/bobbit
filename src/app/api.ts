@@ -2324,7 +2324,7 @@ export function browseMarketplacePacks(id: string): Promise<MarketResult<{ packs
 	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/packs`);
 }
 
-export function installMarketplacePack(opts: { sourceId: string; packName: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
+export function installMarketplacePack(opts: { sourceId: string; dirName: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
 	return marketFetch("/api/marketplace/install", jsonInit("POST", opts));
 }
 

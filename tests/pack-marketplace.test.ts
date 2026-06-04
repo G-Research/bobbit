@@ -311,3 +311,96 @@ describe("#6 disabled_config_directories enforcement", () => {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	});
 });
+
+// ── finding #1 — market-pack skills never shadow user/legacy skill dirs ──
+
+describe("finding #1 — legacy/user skill dirs outrank market packs", () => {
+	function marketSkillPack(cwd: string, packName: string, skills: Array<[string, string]>) {
+		const dir = path.join(cwd, ".bobbit", "config", "market-packs", packName);
+		for (const [n, body] of skills) w(path.join(dir, "skills", n, "SKILL.md"), skillMd(n, body));
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [], tools: [], skills: skills.map((s) => s[0]) } });
+		writeMeta(dir, { sourceUrl: "u", sourceRef: "m", commit: "", packName, version: "1", installedAt: "t", updatedAt: "t", scope: "project" as any });
+	}
+
+	it("a project market-pack skill does NOT shadow same-named custom / .claude/commands / .claude/skills skills", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "f1-skill-"));
+		const customDir = path.join(cwd, "custom-skills");
+		// Each legacy/user skill dir defines a skill the market pack ALSO ships.
+		w(path.join(cwd, ".claude", "skills", "dup", "SKILL.md"), skillMd("dup", "FROM-CLAUDE-SKILLS"));
+		w(path.join(customDir, "custdup", "SKILL.md"), skillMd("custdup", "FROM-CUSTOM"));
+		w(path.join(cwd, ".claude", "commands", "cmddup.md"), skillMd("cmddup", "FROM-COMMANDS"));
+		// Market pack ships the same three names (must lose) + a unique one (must resolve).
+		marketSkillPack(cwd, "mkt", [["dup", "FROM-MARKET"], ["custdup", "FROM-MARKET"], ["cmddup", "FROM-MARKET"], ["mktonly", "FROM-MARKET"]]);
+
+		const store = { get: (k: string) => (k === "config_directories" ? JSON.stringify([{ path: customDir, types: ["skills"] }]) : undefined) };
+		const skills = discoverSlashSkills(cwd, store);
+		const get = (n: string) => skills.find((s) => s.name === n)!;
+		assert.ok(get("dup").content.includes("FROM-CLAUDE-SKILLS"), ".claude/skills (project legacy) must beat a market pack");
+		assert.ok(get("custdup").content.includes("FROM-CUSTOM"), "custom config_directories must beat a market pack");
+		assert.ok(get("cmddup").content.includes("FROM-COMMANDS"), ".claude/commands must beat a market pack");
+		// Market-only skill still resolves and is tagged with its pack (finding #5).
+		assert.ok(get("mktonly").content.includes("FROM-MARKET"), "market-only skill must still resolve");
+		assert.equal(get("mktonly").originPackName, "mkt");
+		assert.equal(get("mktonly").originPackId, "market:project:mkt");
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+});
+
+// ── finding #2 — global-user user pack resolves for roles/tools ──────────
+
+describe("finding #2 — global-user user pack (~/.bobbit/config) resolves", () => {
+	it("a role in the global-user user pack resolves with origin=user; project shadows it", () => {
+		const base = path.join(TMP, "f2-roles");
+		const builtinsDir = path.join(base, "builtin");
+		const guBase = path.join(base, "gu");
+		w(path.join(builtinsDir, "roles", "coder.yaml"), roleYaml("coder", "m-b"));
+		w(path.join(guBase, ".bobbit", "config", "roles", "special.yaml"), roleYaml("special", "m-gu"));
+
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+		const serverStores = { getRoles: () => [], getTools: () => [], getToolGroupPolicies: () => ({}) };
+		const projectSpecial = [{ name: "special", label: "s", promptTemplate: "m-proj", accessory: "none", createdAt: 0, updatedAt: 0 }];
+		const pcm = { getOrCreate: (id: string) => (id === "p1" ? { roleStore: { getAllLocal: () => projectSpecial } } : undefined) } as any;
+		const cascade = new ConfigCascade(builtins, serverStores, pcm);
+		cascade.setGlobalUserBase(guBase);
+
+		// No project: the global-user user pack is the only source of `special`.
+		const special = cascade.resolveRoles().find((r: AnyEntry) => r.item.name === "special")!;
+		assert.ok(special, "global-user user-pack role must resolve");
+		assert.equal(special.origin, "user");
+		assert.equal(special.item.promptTemplate, "m-gu");
+
+		// A project-scope `special` shadows the global-user one (project > global-user).
+		const ps = cascade.resolveRoles("p1").find((r: AnyEntry) => r.item.name === "special")!;
+		assert.equal(ps.origin, "project");
+		assert.equal(ps.overrides, "user");
+		assert.equal(ps.item.promptTemplate, "m-proj");
+	});
+
+	it("a tool in the global-user user pack resolves with origin=user", () => {
+		const base = path.join(TMP, "f2-tools");
+		const builtinsDir = path.join(base, "builtin");
+		const guBase = path.join(base, "gu");
+		w(path.join(guBase, ".bobbit", "config", "tools", "extra.yaml"), "name: extra\ndescription: d\ngroup: Misc\n");
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+		const serverStores = { getRoles: () => [], getTools: () => [], getToolGroupPolicies: () => ({}) };
+		const cascade = new ConfigCascade(builtins, serverStores, { getOrCreate: () => undefined } as any);
+		cascade.setGlobalUserBase(guBase);
+		const extra = cascade.resolveTools().find((t: AnyEntry) => t.item.name === "extra")!;
+		assert.ok(extra, "global-user user-pack tool must resolve");
+		assert.equal(extra.origin, "user");
+	});
+
+	it("empty global-user dir ⇒ byte-identical (server role keeps origin=server, overrides=builtin)", () => {
+		const base = path.join(TMP, "f2-empty");
+		const builtinsDir = path.join(base, "builtin");
+		w(path.join(builtinsDir, "roles", "coder.yaml"), roleYaml("coder", "m-b"));
+		const builtins = new BuiltinConfigProvider(builtinsDir);
+		const serverRoles = [{ name: "coder", label: "c", promptTemplate: "m-s", accessory: "none", createdAt: 0, updatedAt: 0 }];
+		const serverStores = { getRoles: () => serverRoles, getTools: () => [], getToolGroupPolicies: () => ({}) };
+		const cascade = new ConfigCascade(builtins, serverStores, { getOrCreate: () => undefined } as any);
+		cascade.setGlobalUserBase(path.join(base, "nonexistent-gu"));
+		const coder = cascade.resolveRoles().find((r: AnyEntry) => r.item.name === "coder")!;
+		assert.equal(coder.origin, "server");
+		assert.equal(coder.overrides, "builtin");
+	});
+});

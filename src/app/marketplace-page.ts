@@ -251,7 +251,7 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 	const key = `install:${pack.dirName}`;
 	busy.add(key);
 	renderApp();
-	const res = await installMarketplacePack({ sourceId: selectedSourceId!, packName: pack.name, scope, projectId });
+	const res = await installMarketplacePack({ sourceId: selectedSourceId!, dirName: pack.dirName, scope, projectId });
 	busy.delete(key);
 	if (res.ok) {
 		await loadMarketplaceData(false);

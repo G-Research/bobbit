@@ -90,6 +90,48 @@ export function localSourcePath(url: string): string {
 	return path.resolve(u);
 }
 
+/**
+ * Guard a source subdir name used to locate a pack in a browsed source tree.
+ * Unlike {@link isValidPackName} (which constrains the canonical INSTALLED
+ * name), source dir names are arbitrary on disk — so this only rejects path
+ * traversal and dot-dirs, not casing/underscores.
+ */
+export function isSafeDirName(name: unknown): name is string {
+	return (
+		typeof name === "string" &&
+		name.length > 0 &&
+		!name.startsWith(".") &&
+		!name.includes("..") &&
+		!name.includes("/") &&
+		!name.includes("\\") &&
+		!name.includes(":")
+	);
+}
+
+/**
+ * Find the source pack whose `manifest.name` equals `packName` within a synced
+ * source root. Prefers a same-named subdir (the common case); otherwise scans
+ * all subdirs (handles a source dir whose name differs from its manifest name).
+ */
+export function findSourcePackByName(root: string, packName: string): { dir: string; manifest: PackManifest } | null {
+	const direct = path.join(root, packName);
+	const directManifest = readManifest(direct);
+	if (directManifest && directManifest.name === packName) return { dir: direct, manifest: directManifest };
+	let dirents: fs.Dirent[];
+	try {
+		dirents = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const d of dirents) {
+		if (!d.isDirectory() || d.name === ".git" || d.name.startsWith(".")) continue;
+		const dir = path.join(root, d.name);
+		const manifest = readManifest(dir);
+		if (manifest && manifest.name === packName) return { dir, manifest };
+	}
+	return null;
+}
+
 /** Copy a directory subtree verbatim, skipping any `.git` directory. */
 export function copyDirVerbatim(src: string, dest: string): void {
 	fs.cpSync(src, dest, {
@@ -242,22 +284,38 @@ export class MarketplaceInstaller {
 		return scopePaths(ctx.scope as PackScope, base).marketPacksRoot;
 	}
 
-	/** Atomic install: stage → write meta → rename. Appends to pack_order. */
+	/**
+	 * Atomic install: stage → write meta → rename. Appends to pack_order.
+	 *
+	 * The source is located by its physical browse `dirName`, but the canonical
+	 * installed identity is `manifest.name` (design §1.4): the pack is installed
+	 * into `market-packs/<manifest.name>/`, and `meta.packName` / the pack_order
+	 * key / the resolver `PackEntry.id` all use `manifest.name`. This keeps a
+	 * source dir whose name differs from its manifest name consistent end-to-end
+	 * and prevents two differently-named source dirs with the same manifest name
+	 * from colliding silently.
+	 */
 	installPack(args: {
 		sourceId: string;
-		packName: string;
+		/** Physical source subdir name (browse identity) to read the pack from. */
+		dirName: string;
 		scope: InstallScope;
 		projectBase?: string;
 		packOrderStore?: PackOrderStore;
 	}): InstalledPackWire {
-		const { sourceId, packName, scope } = args;
-		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name: ${JSON.stringify(packName)}`);
+		const { sourceId, dirName, scope } = args;
+		if (!isSafeDirName(dirName)) throw new MarketplaceError("unsafe_name", `unsafe source dir name: ${JSON.stringify(dirName)}`);
 		const ctx: ScopeContext = { scope, projectBase: args.projectBase, packOrderStore: args.packOrderStore };
 
 		const { root, commit, source } = this.syncSource(sourceId);
-		const src = path.join(root, packName);
+		const src = path.join(root, dirName);
 		const manifest = readManifest(src);
-		if (!manifest) throw new MarketplaceError(fs.existsSync(src) ? "invalid_pack" : "unknown_pack", `no valid pack.yaml at ${packName}`);
+		if (!manifest) throw new MarketplaceError(fs.existsSync(src) ? "invalid_pack" : "unknown_pack", `no valid pack.yaml at ${dirName}`);
+
+		// Canonical installed identity = manifest.name (design §1.4). validateManifest
+		// already enforces the pack-name format, but guard defensively.
+		const packName = manifest.name;
+		if (!isValidPackName(packName)) throw new MarketplaceError("unsafe_name", `unsafe pack name in manifest: ${JSON.stringify(packName)}`);
 
 		const marketRoot = this.marketPacksRoot(ctx);
 		const dest = path.join(marketRoot, packName);
@@ -317,9 +375,12 @@ export class MarketplaceInstaller {
 		if (!source) throw new MarketplaceError("unknown_source", `source no longer registered: ${oldMeta.sourceUrl}`);
 
 		const { root, commit } = this.syncSource(source.id);
-		const src = path.join(root, packName);
-		const manifest = readManifest(src);
-		if (!manifest) throw new MarketplaceError(fs.existsSync(src) ? "invalid_pack" : "unknown_pack", `no valid pack.yaml at ${packName}`);
+		// The installed dir name is `manifest.name`, which may differ from the
+		// physical source subdir name (design §1.4). Locate the source pack by
+		// matching `manifest.name`, falling back to a same-named dir.
+		const found = findSourcePackByName(root, packName);
+		if (!found) throw new MarketplaceError("unknown_pack", `no source pack with name ${packName} in ${source.url}`);
+		const { manifest } = found;
 
 		const now = new Date().toISOString();
 		const meta: PackMeta = {
@@ -336,7 +397,7 @@ export class MarketplaceInstaller {
 		const staging = path.join(marketRoot, `.tmp-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		const backup = path.join(marketRoot, `.tmp-old-${packName}-${Math.random().toString(36).slice(2, 10)}`);
 		try {
-			copyDirVerbatim(src, staging);
+			copyDirVerbatim(found.dir, staging);
 			writeMeta(staging, meta);
 			// Swap: move current aside, publish staging, drop the old.
 			fs.renameSync(dest, backup);

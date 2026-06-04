@@ -205,7 +205,7 @@ describe("#7 install / uninstall / update", () => {
 	function sourceId() { return store.list()[0].id; }
 
 	it("install copies the subtree verbatim, writes meta, appends pack_order", () => {
-		const res = inst.installPack({ sourceId: sourceId(), packName: "qa-pack", scope: "server", packOrderStore: packOrder });
+		const res = inst.installPack({ sourceId: sourceId(), dirName: "qa-pack", scope: "server", packOrderStore: packOrder });
 		assert.equal(res.status, "ok");
 		const { marketPacksRoot } = scopePaths("server", root);
 		const dest = path.join(marketPacksRoot, "qa-pack");
@@ -228,16 +228,16 @@ describe("#7 install / uninstall / update", () => {
 	});
 
 	it("install rejects an already-installed pack (409)", () => {
-		inst.installPack({ sourceId: sourceId(), packName: "research-pack", scope: "server", packOrderStore: packOrder });
+		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
 		assert.throws(
-			() => inst.installPack({ sourceId: sourceId(), packName: "research-pack", scope: "server", packOrderStore: packOrder }),
+			() => inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder }),
 			(e: any) => e instanceof MarketplaceError && e.code === "already_installed",
 		);
 	});
 
 	it("install rejects unknown pack name", () => {
 		assert.throws(
-			() => inst.installPack({ sourceId: sourceId(), packName: "nope", scope: "server", packOrderStore: packOrder }),
+			() => inst.installPack({ sourceId: sourceId(), dirName: "nope", scope: "server", packOrderStore: packOrder }),
 			(e: any) => e instanceof MarketplaceError && e.code === "unknown_pack",
 		);
 	});
@@ -245,7 +245,7 @@ describe("#7 install / uninstall / update", () => {
 	it("path-traversal guards reject unsafe names", () => {
 		for (const bad of ["../evil", ".hidden", "a/b", "..", "C:foo"]) {
 			assert.throws(
-				() => inst.installPack({ sourceId: sourceId(), packName: bad, scope: "server", packOrderStore: packOrder }),
+				() => inst.installPack({ sourceId: sourceId(), dirName: bad, scope: "server", packOrderStore: packOrder }),
 				(e: any) => e instanceof MarketplaceError && e.code === "unsafe_name",
 				`install should reject ${bad}`,
 			);
@@ -258,8 +258,8 @@ describe("#7 install / uninstall / update", () => {
 	});
 
 	it("uninstall deletes exactly the added dir and cleans pack_order", () => {
-		inst.installPack({ sourceId: sourceId(), packName: "research-pack", scope: "server", packOrderStore: packOrder });
-		inst.installPack({ sourceId: sourceId(), packName: "qa-pack", scope: "server", packOrderStore: packOrder });
+		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
+		inst.installPack({ sourceId: sourceId(), dirName: "qa-pack", scope: "server", packOrderStore: packOrder });
 		const { marketPacksRoot } = scopePaths("server", root);
 		assert.deepEqual(fs.readdirSync(marketPacksRoot).sort(), ["qa-pack", "research-pack"]);
 		assert.deepEqual(packOrder.getPackOrder("server"), ["research-pack", "qa-pack"]);
@@ -277,7 +277,7 @@ describe("#7 install / uninstall / update", () => {
 	});
 
 	it("update replaces contents + rewrites meta, preserving installedAt", async () => {
-		const res = inst.installPack({ sourceId: sourceId(), packName: "research-pack", scope: "server", packOrderStore: packOrder });
+		const res = inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
 		const installedAt = res.meta.installedAt;
 		const { marketPacksRoot } = scopePaths("server", root);
 		const dest = path.join(marketPacksRoot, "research-pack");
@@ -303,6 +303,35 @@ describe("#7 install / uninstall / update", () => {
 			() => inst.updatePack({ packName: "qa-pack", scope: "server", packOrderStore: packOrder }),
 			(e: any) => e instanceof MarketplaceError && e.code === "not_installed",
 		);
+	});
+
+	it("installs by source dirName but the installed identity is manifest.name (§1.4)", () => {
+		// Source subdir name (weird-dir) differs from its manifest name (cool-pack).
+		w(path.join(repo, "weird-dir", "pack.yaml"),
+			"name: cool-pack\ndescription: renamed pack\nversion: 1.0.0\ncontents:\n  roles: [cooler]\n  tools: []\n  skills: []\n");
+		w(path.join(repo, "weird-dir", "roles", "cooler.yaml"),
+			"name: cooler\nlabel: Cooler\naccessory: none\ncreatedAt: 0\nupdatedAt: 0\npromptTemplate: c1\n");
+
+		const res = inst.installPack({ sourceId: sourceId(), dirName: "weird-dir", scope: "server", packOrderStore: packOrder });
+		const { marketPacksRoot } = scopePaths("server", root);
+		// Installed under manifest.name, NOT the source dir name.
+		assert.equal(res.packName, "cool-pack");
+		assert.ok(fs.existsSync(path.join(marketPacksRoot, "cool-pack")), "installed under manifest.name");
+		assert.equal(fs.existsSync(path.join(marketPacksRoot, "weird-dir")), false, "never under source dir name");
+		assert.equal(readMeta(path.join(marketPacksRoot, "cool-pack"))!.packName, "cool-pack");
+		// pack_order keyed by manifest.name
+		assert.deepEqual(packOrder.getPackOrder("server"), ["cool-pack"]);
+
+		// Update resolves the source by manifest.name even though the source dir
+		// name (weird-dir) differs from the installed name (cool-pack).
+		const upd = inst.updatePack({ packName: "cool-pack", scope: "server", packOrderStore: packOrder });
+		assert.equal(upd.packName, "cool-pack");
+		assert.equal(readMeta(path.join(marketPacksRoot, "cool-pack"))!.packName, "cool-pack");
+
+		// Uninstall by manifest.name removes exactly the installed dir.
+		inst.uninstallPack({ packName: "cool-pack", scope: "server", packOrderStore: packOrder });
+		assert.equal(fs.existsSync(path.join(marketPacksRoot, "cool-pack")), false);
+		assert.deepEqual(packOrder.getPackOrder("server"), []);
 	});
 });
 

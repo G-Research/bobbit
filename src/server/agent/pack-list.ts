@@ -189,8 +189,42 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 		},
 	});
 
-	// 2. Custom config_directories skill entries (§6.2 row 3). Read legacy key
-	//    via the existing helper; only to build the list.
+	// ── Roles/tools scope segments (low→high): builtin < server < global-user
+	//    < project. Within each scope: market packs (lowest) then the user pack
+	//    (§3.2). The legacy-implicit skill dirs are NOT interleaved here — they
+	//    are appended as a contiguous band ABOVE all market packs below, so a
+	//    market-pack skill can never shadow a user/legacy skill (finding #1).
+
+	// 2. Server scope: market packs, then the user pack.
+	{
+		const { userPackRoot, marketPacksRoot } = scopePaths("server", opts.serverBase);
+		pushMarket(scanMarketPacks(marketPacksRoot, "server", readPackOrder(opts.serverConfigStore, "server")));
+		entries.push(userPackEntry("server", userPackRoot));
+	}
+
+	// 3. Global-user scope: market packs, then the user pack.
+	{
+		const { userPackRoot, marketPacksRoot } = scopePaths("global-user", opts.globalUserBase);
+		pushMarket(scanMarketPacks(marketPacksRoot, "global-user", readPackOrder(opts.serverConfigStore, "global-user")));
+		entries.push(userPackEntry("global-user", userPackRoot));
+	}
+
+	// 4. Project scope: market packs, then the user pack.
+	if (opts.projectBase) {
+		const { userPackRoot, marketPacksRoot } = scopePaths("project", opts.projectBase);
+		pushMarket(scanMarketPacks(marketPacksRoot, "project", readPackOrder(opts.projectConfigStore, "project")));
+		entries.push(userPackEntry("project", userPackRoot));
+	}
+
+	// 5. Legacy-implicit skill band — ALL legacy skill dirs sit ABOVE every
+	//    market pack (finding #1: a market-pack skill must never shadow a
+	//    user-registered/custom/personal/project skill). The EXACT §6.2 order
+	//    (rows 3–8) is preserved AMONGST these entries, so byte-identical skill
+	//    resolution holds with zero market packs (user-pack skill dirs are new
+	//    and empty today; their position relative to this band is inert).
+
+	// 5a. Custom config_directories skill entries (§6.2 row 3). Read legacy key
+	//     via the existing helper; only to build the list.
 	if (opts.projectConfigStore) {
 		for (const entry of parseCustomDirectories(opts.projectConfigStore)) {
 			if (!entry.types.includes("skills")) continue;
@@ -198,7 +232,7 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 		}
 	}
 
-	// 3. .claude/commands (§6.2 row 4, commands-flat).
+	// 5b. .claude/commands (§6.2 row 4, commands-flat).
 	{
 		const dir = path.join(opts.cwd, ".claude", "commands");
 		if (!disabled.has(path.resolve(dir))) {
@@ -215,33 +249,11 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 		}
 	}
 
-	// 4. Server scope (roles/tools): market packs, then the user pack.
-	{
-		const { userPackRoot, marketPacksRoot } = scopePaths("server", opts.serverBase);
-		pushMarket(scanMarketPacks(marketPacksRoot, "server", readPackOrder(opts.serverConfigStore, "server")));
-		entries.push(userPackEntry("server", userPackRoot));
-	}
-
-	// 5. Global-user legacy personal skill dirs (§6.2 rows 5–6) — placed
-	//    between server and project segments to reproduce legacy precedence.
+	// 5c. Global-user legacy personal skill dirs (§6.2 rows 5–6).
 	legacySkillDir("legacy:~/.bobbit/skills", path.join(os.homedir(), ".bobbit", "skills"), "global-user", "personal");
 	legacySkillDir("legacy:~/.claude/skills", path.join(os.homedir(), ".claude", "skills"), "global-user", "personal");
 
-	// 6. Global-user scope (roles/tools): market packs, then the user pack.
-	{
-		const { userPackRoot, marketPacksRoot } = scopePaths("global-user", opts.globalUserBase);
-		pushMarket(scanMarketPacks(marketPacksRoot, "global-user", readPackOrder(opts.serverConfigStore, "global-user")));
-		entries.push(userPackEntry("global-user", userPackRoot));
-	}
-
-	// 7. Project scope (roles/tools): market packs, then the user pack.
-	if (opts.projectBase) {
-		const { userPackRoot, marketPacksRoot } = scopePaths("project", opts.projectBase);
-		pushMarket(scanMarketPacks(marketPacksRoot, "project", readPackOrder(opts.projectConfigStore, "project")));
-		entries.push(userPackEntry("project", userPackRoot));
-	}
-
-	// 8. Project legacy skill dirs (§6.2 rows 7–8, highest skill priority).
+	// 5d. Project legacy skill dirs (§6.2 rows 7–8, highest skill priority).
 	legacySkillDir("legacy:.bobbit/skills", path.join(opts.cwd, ".bobbit", "skills"), "project", "project");
 	legacySkillDir("legacy:.claude/skills", path.join(opts.cwd, ".claude", "skills"), "project", "project");
 

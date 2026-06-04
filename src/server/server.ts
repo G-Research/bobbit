@@ -21,7 +21,7 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
@@ -2178,6 +2178,23 @@ async function handleApiRoute(
 		return cwd;
 	}
 
+	/**
+	 * Explicit market-scope wiring for skill discovery (finding #3) — mirrors
+	 * the roles/tools `marketScopeContext` so server-scope market skill packs
+	 * resolve even when a project's root != the server cwd, and global-user
+	 * `pack_order` is read from the SERVER store (not the project store).
+	 */
+	function skillMarketContext(projectId: string | null | undefined): SkillMarketContext {
+		const ctx = projectId && projectContextManager ? projectContextManager.getOrCreate(projectId) : undefined;
+		return {
+			serverBase: getProjectRoot(),
+			globalUserBase: os.homedir(),
+			projectBase: ctx?.project.rootPath,
+			serverConfigStore: projectConfigStore,
+			projectConfigStore: ctx?.projectConfigStore,
+		};
+	}
+
 	/** Guard shared by the Fork endpoint: reject source sessions that cannot be
 	 * forked. The substrings (archived/terminated/delegate/child/read-only/team/
 	 * non-interactive) are load-bearing — the API E2E asserts on them. */
@@ -3650,7 +3667,7 @@ async function handleApiRoute(
 				if (session.sandboxed) skillCwd = ctx.project.rootPath;
 			}
 		}
-		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
+		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null));
 		if (!skill) {
 			json({ error: `Skill "${skillName}" not found` }, 404);
 			return;
@@ -4834,16 +4851,20 @@ async function handleApiRoute(
 		}
 
 		// ── Install / update / uninstall ──────────────────────────
-		// POST /api/marketplace/install { sourceId, packName, scope, projectId? }
+		// POST /api/marketplace/install { sourceId, dirName, scope, projectId? }
+		// `dirName` is the physical source subdir to read; the installed identity
+		// is the pack's `manifest.name` (design §1.4). `packName` is accepted as a
+		// back-compat alias for `dirName`.
 		if (url.pathname === "/api/marketplace/install" && req.method === "POST") {
 			const body = (await readBody(req)) as any;
 			const scope = parseScope(body?.scope);
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			if (typeof body?.sourceId !== "string" || typeof body?.packName !== "string") { json({ error: "sourceId and packName are required" }, 400); return; }
+			const dirName = typeof body?.dirName === "string" ? body.dirName : (typeof body?.packName === "string" ? body.packName : undefined);
+			if (typeof body?.sourceId !== "string" || typeof dirName !== "string") { json({ error: "sourceId and dirName are required" }, 400); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
-				const installed = installer.installPack({ sourceId: body.sourceId, packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				const installed = installer.installPack({ sourceId: body.sourceId, dirName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				json({ installed }, 201);
 			} catch (err) { handleMarketErr(err); }
@@ -4927,7 +4948,7 @@ async function handleApiRoute(
 			];
 			const skillCwd = resolveSkillDiscoveryCwd(process.cwd(), projectId ?? null);
 			const skillStore = resolveProjectConfigStore(projectId ?? null);
-			conflicts.push(...buildConflictsFor("skills", discoverSlashSkillsResolved(skillCwd, skillStore)));
+			conflicts.push(...buildConflictsFor("skills", discoverSlashSkillsResolved(skillCwd, skillStore, skillMarketContext(projectId ?? null))));
 			json({ conflicts });
 			return;
 		}
@@ -8716,8 +8737,8 @@ async function handleApiRoute(
 		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
 		// Skill files live on the host, so resolve the project rootPath for discovery.
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })) });
 		return;
 	}
 
@@ -8727,9 +8748,9 @@ async function handleApiRoute(
 		const projectId = url.searchParams.get("projectId");
 		const resolvedStore = resolveProjectConfigStore(projectId);
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore);
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
 		const directories = getSkillDirectories(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackName: s.originPackName ?? null })), directories });
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })), directories });
 		return;
 	}
 

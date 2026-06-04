@@ -49,6 +49,29 @@ export interface SlashSkill {
 	agent?: string;
 	/** Market pack `name` when this skill resolved from a market pack; null otherwise (design §5.2). */
 	originPackName?: string | null;
+	/** Market {@link PackEntry.id} when this skill resolved from a market pack; null otherwise (design §5.2). Mirrors roles/tools. */
+	originPackId?: string | null;
+}
+
+/**
+ * Explicit market-scope wiring for skill discovery — mirrors the roles/tools
+ * `marketScopeContext()` in `server.ts`. Threads each scope's on-disk base +
+ * `pack_order` store so server-scope market skill packs resolve even when the
+ * project root differs from the server cwd, and global-user `pack_order` is
+ * read from the SERVER store (not the project store). When omitted, discovery
+ * falls back to `cwd` for all scopes (back-compat; design §6.5, finding #3).
+ */
+export interface SkillMarketContext {
+	/** `<server-cwd>` — base for the server scope. */
+	serverBase: string;
+	/** `os.homedir()` — base for the global-user scope. */
+	globalUserBase: string;
+	/** `<project root>` — base for the project scope. */
+	projectBase?: string;
+	/** Reads `pack_order.{server,global-user}` (server config store). */
+	serverConfigStore?: ProjectConfigReader;
+	/** Reads `pack_order.project` + legacy keys (project config store). */
+	projectConfigStore?: ProjectConfigReader;
 }
 
 interface FrontMatter {
@@ -271,7 +294,11 @@ export function invalidateSlashSkillsCache(): void {
  * The single ordered pack list for skill discovery: the in-code static skill
  * (lowest, §6.2 row 1) prepended to the unified pack list (§6.2 rows 2–8).
  */
-function buildSkillPackList(cwd: string, projectConfigStore?: ProjectConfigReader): PackEntry[] {
+function buildSkillPackList(
+	cwd: string,
+	projectConfigStore?: ProjectConfigReader,
+	marketContext?: SkillMarketContext,
+): PackEntry[] {
 	const staticEntry: PackEntry = {
 		id: "builtin-skills-static",
 		kind: "builtin",
@@ -285,14 +312,18 @@ function buildSkillPackList(cwd: string, projectConfigStore?: ProjectConfigReade
 			skills: BUILTIN_SKILLS.map((s): LoadedEntity<SlashSkill> => ({ name: s.name, item: s })),
 		},
 	};
+	// With an explicit market context, thread each scope's real base + store
+	// (finding #3) so server-scope market skill packs resolve when the project
+	// root != server cwd, and global-user pack_order comes from the server
+	// store. Without it, fall back to `cwd` for every scope (back-compat).
 	const list = buildPackList({
 		builtinsDir: BUILTINS_DIR,
-		serverBase: cwd,
-		globalUserBase: os.homedir(),
-		projectBase: cwd,
+		serverBase: marketContext?.serverBase ?? cwd,
+		globalUserBase: marketContext?.globalUserBase ?? os.homedir(),
+		projectBase: marketContext?.projectBase ?? cwd,
 		cwd,
-		serverConfigStore: projectConfigStore,
-		projectConfigStore,
+		serverConfigStore: marketContext?.serverConfigStore ?? projectConfigStore,
+		projectConfigStore: marketContext?.projectConfigStore ?? projectConfigStore,
 	});
 	return [staticEntry, ...list];
 }
@@ -309,24 +340,33 @@ function buildSkillPackList(cwd: string, projectConfigStore?: ProjectConfigReade
 export function discoverSlashSkills(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
+	marketContext?: SkillMarketContext,
 ): SlashSkill[] {
 	const store = projectConfigStore as ProjectConfigReader | undefined;
 	const configVal =
 		(store?.get("skill_directories") ?? "") + "|" +
 		(store?.get("config_directories") ?? "") + "|" +
-		(store?.get("disabled_config_directories") ?? "");
+		(store?.get("disabled_config_directories") ?? "") + "|" +
+		// Server/global-user market packs depend on the market context's bases
+		// + server pack_order — include them so the TTL cache can't serve a
+		// stale list across differently-wired projects (finding #3).
+		(marketContext?.serverBase ?? "") + "|" +
+		(marketContext?.projectBase ?? "") + "|" +
+		(marketContext?.serverConfigStore?.get("pack_order") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
 		return _cache.skills;
 	}
 
-	const resolved = discoverSlashSkillsResolved(cwd, store);
+	const resolved = discoverSlashSkillsResolved(cwd, store, marketContext);
 
-	// Stamp the origin pack name (market packs only) so config pages can show
-	// the pack chip; filter to user-invocable skills only (default is true).
+	// Stamp the origin pack id + name (market packs only) so config pages can
+	// show the pack chip; filter to user-invocable skills only (default true).
 	const skills = resolved
 		.map((r) => {
 			const item = r.item;
-			item.originPackName = r.origin.kind === "market" ? (r.origin.manifest?.name ?? null) : null;
+			const isMarket = r.origin.kind === "market";
+			item.originPackName = isMarket ? (r.origin.manifest?.name ?? null) : null;
+			item.originPackId = isMarket ? r.origin.id : null;
 			return item;
 		})
 		.filter((s) => s.userInvocable !== false);
@@ -346,15 +386,21 @@ export function discoverSlashSkills(
 export function discoverSlashSkillsResolved(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
+	marketContext?: SkillMarketContext,
 ): ResolvedEntity<SlashSkill>[] {
 	const store = projectConfigStore as ProjectConfigReader | undefined;
-	const entries = buildSkillPackList(cwd, store);
+	const entries = buildSkillPackList(cwd, store, marketContext);
 	return new PackResolver(entries, [new SkillLoader()]).resolve<SlashSkill>("skills");
 }
 
 /** Look up a single slash skill by name. */
-export function getSlashSkill(cwd: string, name: string, projectConfigStore?: { get(key: string): string | undefined }): SlashSkill | undefined {
-	return discoverSlashSkills(cwd, projectConfigStore).find((s) => s.name === name);
+export function getSlashSkill(
+	cwd: string,
+	name: string,
+	projectConfigStore?: { get(key: string): string | undefined },
+	marketContext?: SkillMarketContext,
+): SlashSkill | undefined {
+	return discoverSlashSkills(cwd, projectConfigStore, marketContext).find((s) => s.name === name);
 }
 
 /**
