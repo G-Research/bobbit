@@ -21,6 +21,7 @@ import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
+import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
@@ -8460,6 +8461,22 @@ async function handleApiRoute(
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
 		const skills = discoverSlashSkills(cwd, resolvedStore);
 		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
+		return;
+	}
+
+	// GET /api/file-mentions — bounded file enumeration for @-mention autocomplete.
+	// Includes gitignored/untracked files; excludes .git/node_modules/etc. (no .gitignore consulted).
+	if (url.pathname === "/api/file-mentions" && req.method === "GET") {
+		const rawCwd = url.searchParams.get("cwd") || process.cwd();
+		const projectId = url.searchParams.get("projectId");
+		const q = url.searchParams.get("q") || undefined;
+		const limitRaw = url.searchParams.get("limit");
+		const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
+		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
+		// Sandbox sessions have container-internal cwds; resolve the host path.
+		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
+		const files = enumerateFiles(cwd, { query: q, limit });
+		json({ files: files.map((p) => ({ path: p })) });
 		return;
 	}
 

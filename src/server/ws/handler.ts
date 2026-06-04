@@ -12,6 +12,7 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
+import { resolveFileMentions, buildFileReferenceBlock } from "../skills/resolve-file-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
@@ -565,7 +566,7 @@ export function handleWebSocketConnection(
 							return null;
 						}
 						: undefined;
-					const { originalText, modelText, expansions, unknown } = resolveSkillExpansions(
+					const { originalText, expansions, unknown } = resolveSkillExpansions(
 						msg.text,
 						skillCwd,
 						resolvedConfigStore,
@@ -578,11 +579,74 @@ export function handleWebSocketConnection(
 						console.log(`[ws-handler] Resolved ${expansions.length} slash-skill expansion(s) for session ${sessionId}`);
 					}
 
+					// Resolve `@path` file mentions on the SAME verbatim text. The
+					// `/` and `@` token sets are disjoint by construction, so the
+					// two resolvers never produce overlapping ranges. A bad
+					// reference never tears down the send — it degrades to a
+					// literal `@path` plus a warning.
+					const fileMentionResult = resolveFileMentions(msg.text, skillCwd);
+					for (const w of fileMentionResult.warnings) {
+						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${session.cwd})`);
+					}
+					if (fileMentionResult.mentions.length > 0) {
+						console.log(`[ws-handler] Resolved ${fileMentionResult.mentions.length} file mention(s) for session ${sessionId}`);
+					}
+
+					// Merge skill expansions + text file mentions into one
+					// right-to-left splice over the original text (disjoint
+					// ranges). `modelText` from resolveSkillExpansions is
+					// recomputed here so both edits land on the same string.
+					const mergedReplacements: Array<{ start: number; end: number; expanded: string }> = [];
+					for (const e of expansions) {
+						mergedReplacements.push({ start: e.range[0], end: e.range[1], expanded: e.expanded });
+					}
+					for (const mention of fileMentionResult.mentions) {
+						if (mention.kind === "text" && mention.content !== undefined) {
+							mergedReplacements.push({
+								start: mention.range[0],
+								end: mention.range[1],
+								expanded: buildFileReferenceBlock(mention.path, mention.content),
+							});
+						}
+					}
+					let mergedModelText = originalText;
+					if (mergedReplacements.length > 0) {
+						mergedReplacements.sort((a, b) => a.start - b.start);
+						for (let i = mergedReplacements.length - 1; i >= 0; i--) {
+							const r = mergedReplacements[i];
+							mergedModelText = mergedModelText.slice(0, r.start) + r.expanded + mergedModelText.slice(r.end);
+						}
+					}
+
+					// Route image/binary mentions through the existing attachment
+					// pipeline; text mentions are already inlined into modelText.
+					const sendImages = msg.images ? [...msg.images] : [];
+					const sendAttachments = msg.attachments ? [...msg.attachments] : [];
+					for (const mention of fileMentionResult.mentions) {
+						if (mention.kind === "image" && mention.data && mention.mimeType) {
+							sendImages.push({ type: "image", data: mention.data, mimeType: mention.mimeType });
+						} else if (mention.kind === "binary" && mention.data) {
+							const norm = mention.path.replace(/\\/g, "/");
+							sendAttachments.push({
+								id: `mention-${Date.now()}-${mention.range[0]}`,
+								type: "document",
+								fileName: norm.slice(norm.lastIndexOf("/") + 1) || norm,
+								mimeType: mention.mimeType ?? "application/octet-stream",
+								size: mention.bytes ?? 0,
+								content: mention.data,
+							});
+						}
+					}
+
+					const hasFileMentions = fileMentionResult.mentions.length > 0;
+					const modelChanged = mergedModelText !== originalText;
+
 					await sessionManager.enqueuePrompt(sessionId, originalText, {
-						images: msg.images,
-						attachments: msg.attachments,
+						images: sendImages.length ? sendImages : undefined,
+						attachments: sendAttachments.length ? sendAttachments : undefined,
 						skillExpansions: expansions.length ? expansions : undefined,
-						modelText: expansions.length ? modelText : undefined,
+						fileMentions: hasFileMentions ? fileMentionResult.mentions : undefined,
+						modelText: modelChanged ? mergedModelText : undefined,
 					});
 					break;
 				}

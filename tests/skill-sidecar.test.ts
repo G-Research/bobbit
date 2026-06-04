@@ -98,4 +98,56 @@ describe("skill-sidecar", () => {
 		// Within 500ms tolerance: only the second matches.
 		assert.equal(got?.originalText, "SECOND");
 	});
+
+	const fileMentionSample = {
+		ts: 1714000001000,
+		modelText: "see <file-reference path=\"a.txt\">hi</file-reference>",
+		originalText: "see @a.txt",
+		skillExpansions: [],
+		fileMentions: [
+			{
+				path: "a.txt",
+				absPath: "/abs/a.txt",
+				range: [4, 10] as [number, number],
+				kind: "text" as const,
+				content: "hi",
+				bytes: 2,
+			},
+		],
+	};
+
+	it("round-trips an entry carrying fileMentions (no skill expansions)", () => {
+		const sid = "session-file-mentions";
+		appendSkillSidecarEntry(sid, fileMentionSample);
+		const entries = readSkillSidecarEntries(sid);
+		assert.equal(entries.length, 1);
+		assert.deepEqual(entries[0], fileMentionSample);
+		assert.equal(entries[0].fileMentions?.[0].kind, "text");
+	});
+
+	it("entry with only fileMentions (no skillExpansions array) still reads", () => {
+		const sid = "session-file-only";
+		const file = path.join(stateDir, "skill-sidecar", `${sid}.jsonl`);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		// Hand-write an entry missing skillExpansions entirely.
+		const raw = {
+			ts: 123,
+			modelText: "m",
+			originalText: "o",
+			fileMentions: [{ path: "x.txt", range: [0, 6], kind: "text", content: "c" }],
+		};
+		fs.appendFileSync(file, JSON.stringify(raw) + "\n", "utf-8");
+		const entries = readSkillSidecarEntries(sid);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].fileMentions?.[0].path, "x.txt");
+	});
+
+	it("old entry without fileMentions field still parses (backward compat)", () => {
+		const sid = "session-old-entry";
+		appendSkillSidecarEntry(sid, sample); // no fileMentions field
+		const entries = readSkillSidecarEntries(sid);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].fileMentions, undefined);
+		assert.equal(entries[0].skillExpansions.length, 1);
+	});
 });

@@ -22,6 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { SkillExpansion } from "./resolve-skill-expansions.js";
+import type { FileMention } from "./resolve-file-mentions.js";
 
 export interface SkillSidecarEntry {
 	/** Unix epoch (ms) at the moment the user message was persisted. */
@@ -30,8 +31,14 @@ export interface SkillSidecarEntry {
 	modelText: string;
 	/** What the user actually typed. */
 	originalText: string;
-	/** Chips, snapshotted at invocation time. */
+	/** Slash-skill chips, snapshotted at invocation time. */
 	skillExpansions: SkillExpansion[];
+	/**
+	 * `@path` file-mention chips, snapshotted at send time. Optional so old
+	 * entries (written before this field existed) still parse, and entries
+	 * carrying only file mentions (no skill expansions) round-trip correctly.
+	 */
+	fileMentions?: FileMention[];
 }
 
 let _sidecarDir: string | undefined;
@@ -89,7 +96,13 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 			if (!trimmed) continue;
 			try {
 				const parsed = JSON.parse(trimmed) as SkillSidecarEntry;
-				if (parsed && typeof parsed.modelText === "string" && Array.isArray(parsed.skillExpansions)) {
+				// Accept entries with skillExpansions OR fileMentions (either may be
+				// absent now that file mentions can be persisted without skills).
+				if (
+					parsed &&
+					typeof parsed.modelText === "string" &&
+					(Array.isArray(parsed.skillExpansions) || Array.isArray(parsed.fileMentions))
+				) {
 					out.push(parsed);
 				}
 			} catch { /* skip malformed line */ }
