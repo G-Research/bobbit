@@ -139,6 +139,19 @@ export class MessageEditor extends LitElement {
 	private _slashSkillsCwd?: string;
 	private _slashSkillsProjectId?: string;
 
+	// @-mention file autocomplete state (parallel to the _slash* fields above).
+	@state() private _atFiles: string[] = [];
+	@state() private _atFilteredFiles: string[] = [];
+	@state() private _atMenuOpen = false;
+	@state() private _atSelectedIndex = 0;
+	@state() private _atTokenStart = 0;
+	/** The query (path fragment) typed after the most recent `@`. */
+	private _atQuery = "";
+	/** Cache invalidation keys — refetch when cwd/project changes. */
+	private _atFilesCwd?: string;
+	private _atFilesProjectId?: string;
+	private _atLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
 	// Drag-to-reorder state
 	private _draggedPillId: string | null = null;
 
@@ -248,6 +261,91 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	/** Fetch the file list for the current `@` query from the server (debounced).
+	 *  Mirrors `_loadSlashSkills` but is query-scoped because the file tree can be
+	 *  large/remote, so the server does the filtering + ranking. */
+	private async _loadFileMentions(query: string) {
+		if (!this.cwd) {
+			this._atFiles = [];
+			this._atFilteredFiles = [];
+			return;
+		}
+		// Invalidate the local cache key so a later cwd/project change refetches.
+		this._atFilesCwd = this.cwd;
+		this._atFilesProjectId = this.projectId;
+		try {
+			let url = `/api/file-mentions?cwd=${encodeURIComponent(this.cwd)}`;
+			if (this.projectId) url += `&projectId=${encodeURIComponent(this.projectId)}`;
+			if (query) url += `&q=${encodeURIComponent(query)}`;
+			url += `&limit=50`;
+			const res = await gatewayFetch(url);
+			if (res.ok) {
+				const data = await res.json();
+				this._atFiles = Array.isArray(data.files)
+					? (data.files as Array<{ path: string }>).map((f) => f.path).filter((p) => typeof p === "string")
+					: [];
+				// Re-apply the current (possibly newer) token filter so the menu
+				// reflects what the user has typed since this fetch was scheduled.
+				this._applyAtFilter();
+			}
+		} catch {
+			// Best effort — leave the last results in place.
+		}
+	}
+
+	private _scheduleLoadFileMentions(query: string) {
+		if (this._atLoadTimer) clearTimeout(this._atLoadTimer);
+		this._atLoadTimer = setTimeout(() => {
+			this._atLoadTimer = null;
+			this._loadFileMentions(query);
+		}, 120);
+	}
+
+	/** Filter the cached file list by the current `@` query for an instant menu. */
+	private _applyAtFilter() {
+		const q = this._atQuery.toLowerCase();
+		const files = q ? this._atFiles.filter((p) => p.toLowerCase().includes(q)) : this._atFiles;
+		this._atFilteredFiles = files;
+		this._atMenuOpen = files.length > 0;
+		if (this._atSelectedIndex >= files.length) this._atSelectedIndex = 0;
+	}
+
+	private _updateAtAutocomplete() {
+		const textarea = this.textareaRef.value;
+		if (!textarea) { this._atMenuOpen = false; return; }
+		const cursorPos = textarea.selectionStart;
+		const textBeforeCursor = this.value.substring(0, cursorPos);
+		// Trigger on an `@` at a word boundary (start, whitespace, or newline)
+		// followed by a path fragment with no whitespace or further `@`.
+		const match = textBeforeCursor.match(/(^|[\s])@([^\s@]*)$/);
+		if (match) {
+			this._atTokenStart = cursorPos - match[2].length - 1; // position of "@"
+			this._atQuery = match[2];
+			// Instant filter from cache, then refresh from the server (debounced).
+			this._applyAtFilter();
+			this._scheduleLoadFileMentions(this._atQuery);
+		} else {
+			this._atMenuOpen = false;
+		}
+	}
+
+	private _selectFileMention(filePath: string) {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return;
+		const before = this.value.substring(0, this._atTokenStart);
+		const after = this.value.substring(textarea.selectionStart);
+		this.value = before + `@${filePath} ` + after;
+		this._atMenuOpen = false;
+		this.onInput?.(this.value);
+		// Update textarea and move cursor after the inserted path + trailing space.
+		if (textarea) {
+			textarea.value = this.value;
+			const newPos = before.length + filePath.length + 2; // "@" + path + " "
+			textarea.focus();
+			textarea.setSelectionRange(newPos, newPos);
+		}
+	}
+
 	private _isCursorOnVisualTopRow(): boolean {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return true;
@@ -288,20 +386,27 @@ export class MessageEditor extends LitElement {
 		return (fullHeight - cursorHeight) <= singleRowHeight;
 	}
 
-	private _getSlashMenuLeft(): number {
+	/** Horizontal pixel offset of the autocomplete menu for a token starting at
+	 *  `tokenStart` — measures the rendered width of the text from the start of
+	 *  the visual line up to the token. Shared by the slash and `@` menus. */
+	private _getMenuLeft(tokenStart: number): number {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return 0;
 		const style = getComputedStyle(textarea);
 		const mirror = document.createElement("span");
 		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;font:${style.font};letter-spacing:${style.letterSpacing};`;
 		mirror.textContent = this.value.substring(
-			this.value.lastIndexOf("\n", this._slashTokenStart - 1) + 1,
-			this._slashTokenStart,
+			this.value.lastIndexOf("\n", tokenStart - 1) + 1,
+			tokenStart,
 		);
 		document.body.appendChild(mirror);
 		const leftOffset = mirror.offsetWidth;
 		document.body.removeChild(mirror);
 		return leftOffset;
+	}
+
+	private _getSlashMenuLeft(): number {
+		return this._getMenuLeft(this._slashTokenStart);
 	}
 
 	/** Live preview order of pill IDs while dragging. Null when not dragging. */
@@ -361,6 +466,7 @@ export class MessageEditor extends LitElement {
 		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
+		this._updateAtAutocomplete();
 	};
 
 	private handleKeyDown = (e: KeyboardEvent) => {
@@ -390,6 +496,30 @@ export class MessageEditor extends LitElement {
 			} else if (e.key === "Escape") {
 				e.preventDefault();
 				this._slashMenuOpen = false;
+				return;
+			}
+		}
+
+		// @-mention file autocomplete keyboard handling. Mutually exclusive with
+		// the slash menu — a trailing token can only be `/...` or `@...`, never both.
+		if (this._atMenuOpen) {
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				this._atSelectedIndex = Math.min(this._atSelectedIndex + 1, this._atFilteredFiles.length - 1);
+				return;
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				this._atSelectedIndex = Math.max(this._atSelectedIndex - 1, 0);
+				return;
+			} else if (e.key === "Enter" || e.key === "Tab") {
+				e.preventDefault();
+				if (this._atFilteredFiles[this._atSelectedIndex]) {
+					this._selectFileMention(this._atFilteredFiles[this._atSelectedIndex]);
+				}
+				return;
+			} else if (e.key === "Escape") {
+				e.preventDefault();
+				this._atMenuOpen = false;
 				return;
 			}
 		}
@@ -766,6 +896,7 @@ export class MessageEditor extends LitElement {
 		super.disconnectedCallback();
 		document.removeEventListener("keydown", this.handleGlobalKeyDown);
 		document.removeEventListener("keyup", this.handleGlobalKeyUp);
+		if (this._atLoadTimer) { clearTimeout(this._atLoadTimer); this._atLoadTimer = null; }
 		this.stopSpeechRecognition();
 	}
 
@@ -787,6 +918,15 @@ export class MessageEditor extends LitElement {
 		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
 			this._slashSkillsLoaded = false;
 			this._loadSlashSkills();
+		}
+
+		if (changed.has("cwd") || changed.has("projectId")) {
+			// Invalidate the @-mention file cache so the next `@` refetches.
+			if (this._atFilesCwd !== this.cwd || this._atFilesProjectId !== this.projectId) {
+				this._atFiles = [];
+				this._atFilteredFiles = [];
+				this._atMenuOpen = false;
+			}
 		}
 	}
 
@@ -933,6 +1073,27 @@ export class MessageEditor extends LitElement {
 								<span class="text-xs text-muted-foreground truncate">${skill.description}</span>
 							</button>
 						`)}
+					</div>
+				` : nothing}
+
+				<!-- @-mention file autocomplete (reuses slash-menu styling) -->
+				${this._atMenuOpen ? html`
+					<div class="slash-menu at-menu border-b border-border max-h-48 overflow-y-auto" style="margin-left: ${this._getMenuLeft(this._atTokenStart)}px">
+						${this._atFilteredFiles.map((filePath, i) => {
+							const slash = filePath.lastIndexOf("/");
+							const dir = slash >= 0 ? filePath.slice(0, slash + 1) : "";
+							const base = slash >= 0 ? filePath.slice(slash + 1) : filePath;
+							return html`
+							<button
+								class="w-full text-left px-3 py-2 flex items-center gap-2 cursor-pointer transition-colors ${i === this._atSelectedIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}"
+								data-testid=${`file-mention-${filePath}`}
+								@mousedown=${(e: Event) => { e.preventDefault(); this._selectFileMention(filePath); }}
+								@mouseenter=${() => { this._atSelectedIndex = i; }}
+							>
+								<span class="font-mono text-sm truncate"><span class="text-muted-foreground">@${dir}</span><span class="text-primary">${base}</span></span>
+							</button>
+						`;
+						})}
 					</div>
 				` : nothing}
 
