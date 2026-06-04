@@ -107,6 +107,9 @@ Control what agents can do (tool access, system prompts) and how they behave. Us
 ### Skills
 Reusable templates for isolated sub-agents: code review, security review, test reports. Invoke them from any session for structured, repeatable outputs.
 
+### Marketplace
+Distribute and install roles, tools, and skills as self-contained **packs** — directories you install from a git repo or local source. Installing copies a pack in; uninstalling deletes it; resolution walks one ordered list of packs so installed entities show up on the Roles/Tools/Skills pages tagged with their origin pack. See [docs/marketplace.md](docs/marketplace.md).
+
 ### Interactive Agent Prompts
 Agents can ask you structured multiple-choice questions mid-task via the builtin `ask_user_choices` tool. An inline widget renders in the chat with up to 5 questions and an always-rendered free-text "Other" escape hatch. The tool is non-blocking — the agent's turn ends immediately and the session goes idle until you submit; your answers arrive as a tagged user message that wakes the agent on the next turn. See [docs/non-blocking-ask.md](docs/non-blocking-ask.md) for the architecture.
 
@@ -130,6 +133,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
+| [Marketplace](docs/marketplace.md) | Pack-based install of roles, tools, and skills |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 
 **Technical reference:** [REST API](docs/rest-api.md) · [WebSocket Protocol](docs/websocket-protocol.md) · [Security](docs/security.md) · [Networking](docs/networking.md)

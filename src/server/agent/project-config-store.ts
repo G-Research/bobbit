@@ -197,7 +197,31 @@ export interface SandboxTokenEntry {
 const MIGRATED_KEYS = new Set([
 	"config_directories",
 	"sandbox_tokens",
+	"pack_order",
 ]);
+
+/**
+ * Scope keys for the {@link ProjectConfigStore.getPackOrder} scoped map.
+ * `project` lives in the project config; `server` + `global-user` live in the
+ * server config (they share a file but stay independent — design §3.3).
+ */
+export type PackOrderScope = "server" | "global-user" | "project";
+const PACK_ORDER_SCOPES: ReadonlySet<string> = new Set(["server", "global-user", "project"]);
+
+/** A scope→ordered-pack-name-list map persisted as a native-YAML field. */
+export type PackOrderMap = Partial<Record<PackOrderScope, string[]>>;
+
+function normalizePackOrder(raw: unknown): { value: PackOrderMap; ok: boolean } {
+	if (!isPlainObject(raw)) return { value: {}, ok: false };
+	const out: PackOrderMap = {};
+	for (const [k, v] of Object.entries(raw)) {
+		if (!PACK_ORDER_SCOPES.has(k)) continue;
+		if (!Array.isArray(v)) continue;
+		const names = v.filter((x): x is string => typeof x === "string");
+		out[k as PackOrderScope] = names;
+	}
+	return { value: out, ok: true };
+}
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
 	return !!x && typeof x === "object" && !Array.isArray(x);
@@ -278,10 +302,12 @@ export class ProjectConfigStore {
 	// ── Native-YAML migrated fields ──
 	private configDirectories: ConfigDirectoryEntry[] = [];
 	private sandboxTokens: SandboxTokenEntry[] = [];
+	private packOrder: PackOrderMap = {};
 	/** Track whether each migrated field was explicitly present on disk. */
 	private present = {
 		config_directories: false,
 		sandbox_tokens: false,
+		pack_order: false,
 	};
 	/** Set when load() found legacy (string-encoded) shapes — triggers next save() to rewrite native. */
 	private dirty = false;
@@ -306,9 +332,11 @@ export class ProjectConfigStore {
 		// Reset migrated fields to defaults before loading.
 		this.configDirectories = [];
 		this.sandboxTokens = [];
+		this.packOrder = {};
 		this.present = {
 			config_directories: false,
 			sandbox_tokens: false,
+			pack_order: false,
 		};
 
 		try {
@@ -405,6 +433,35 @@ export class ProjectConfigStore {
 			}
 		}
 
+		// pack_order — scoped map { server?, "global-user"?, project? }: string[]
+		if (raw.pack_order !== undefined && raw.pack_order !== null) {
+			const v = raw.pack_order;
+			if (typeof v === "string") {
+				if (v.length > 0) {
+					try {
+						const parsed = JSON.parse(v);
+						const norm = normalizePackOrder(parsed);
+						if (norm.ok) {
+							this.packOrder = norm.value;
+							this.present.pack_order = true;
+							this.dirty = true;
+						} else {
+							console.warn("[project-config-store] Failed to parse pack_order, treating as default");
+						}
+					} catch (err) {
+						console.warn("[project-config-store] Failed to parse pack_order, treating as default:", err);
+					}
+				}
+			} else {
+				const norm = normalizePackOrder(v);
+				if (norm.ok) {
+					this.packOrder = norm.value;
+					this.present.pack_order = true;
+				} else {
+					console.warn("[project-config-store] Failed to parse pack_order, treating as default");
+				}
+			}
+		}
 	}
 
 	private save(): void {
@@ -441,6 +498,9 @@ export class ProjectConfigStore {
 				// Persisted form NEVER contains `value:` — secrets live in secrets.json.
 				out.sandbox_tokens = this.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
 			}
+			if (this.present.pack_order || this.packOrderNonEmpty()) {
+				out.pack_order = this.serializePackOrder();
+			}
 			// Clear dirty flag — file is now in native form.
 			this.dirty = false;
 
@@ -466,6 +526,22 @@ export class ProjectConfigStore {
 					return o;
 				}),
 			);
+		}
+		if (this.present.pack_order || this.packOrderNonEmpty()) {
+			out.pack_order = JSON.stringify(this.serializePackOrder());
+		}
+		return out;
+	}
+
+	private packOrderNonEmpty(): boolean {
+		return Object.values(this.packOrder).some(arr => Array.isArray(arr) && arr.length > 0);
+	}
+
+	/** Emit only scopes that have a (possibly empty) explicit array. */
+	private serializePackOrder(): Record<string, string[]> {
+		const out: Record<string, string[]> = {};
+		for (const [k, v] of Object.entries(this.packOrder)) {
+			if (Array.isArray(v)) out[k] = [...v];
 		}
 		return out;
 	}
@@ -528,6 +604,22 @@ export class ProjectConfigStore {
 				}
 				break;
 			}
+			case "pack_order": {
+				try {
+					const parsed = JSON.parse(value);
+					const norm = normalizePackOrder(parsed);
+					if (norm.ok) {
+						this.packOrder = norm.value;
+						this.present.pack_order = true;
+						this.save();
+					} else {
+						throw new Error("Invalid pack_order shape");
+					}
+				} catch (err) {
+					throw new Error(`Failed to parse pack_order as JSON: ${(err as Error).message}`);
+				}
+				break;
+			}
 		}
 	}
 
@@ -540,6 +632,10 @@ export class ProjectConfigStore {
 			case "sandbox_tokens":
 				this.sandboxTokens = [];
 				this.present.sandbox_tokens = false;
+				break;
+			case "pack_order":
+				this.packOrder = {};
+				this.present.pack_order = false;
 				break;
 		}
 		this.save();
@@ -595,6 +691,32 @@ export class ProjectConfigStore {
 		});
 		this.present.sandbox_tokens = this.sandboxTokens.length > 0;
 		this.save();
+	}
+
+	/**
+	 * Read a scope's market-pack order (highest priority LAST). Returns a
+	 * defensive copy; missing scope ⇒ []. `project` lives in the project config;
+	 * `server` + `global-user` live in the server config (design §3.3).
+	 */
+	getPackOrder(scope: PackOrderScope): string[] {
+		return [...(this.packOrder[scope] ?? [])];
+	}
+
+	/** Replace a scope's market-pack order. Persists immediately. */
+	setPackOrder(scope: PackOrderScope, order: string[]): void {
+		const names = order.filter((x): x is string => typeof x === "string");
+		this.packOrder = { ...this.packOrder, [scope]: names };
+		this.present.pack_order = this.packOrderNonEmpty();
+		this.save();
+	}
+
+	/** Full scoped map (defensive copy) — used by buildPackList wiring. */
+	getPackOrderMap(): PackOrderMap {
+		const out: PackOrderMap = {};
+		for (const [k, v] of Object.entries(this.packOrder)) {
+			if (Array.isArray(v)) out[k as PackOrderScope] = [...v];
+		}
+		return out;
 	}
 
 	/** Returns a defensive clone of the named component's `config` map (or {} if missing/unknown). */

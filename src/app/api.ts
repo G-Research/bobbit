@@ -1943,9 +1943,10 @@ export async function fetchTools(): Promise<ToolInfo[]> {
 	}
 }
 
-export async function fetchToolDetail(name: string): Promise<ToolInfo | null> {
+export async function fetchToolDetail(name: string, projectId?: string): Promise<ToolInfo | null> {
 	try {
-		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`);
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}${qs}`);
 		if (!res.ok) return null;
 		return await res.json();
 	} catch {
@@ -2197,4 +2198,161 @@ export async function deleteDraftFromServer(sessionId: string, type: string): Pr
 	} catch (err) {
 		console.error("[draft-api] Failed to delete draft:", err);
 	}
+}
+
+// ============================================================================
+// MARKETPLACE API (Pack-Based Marketplace — see docs/design/pack-based-marketplace.md §9)
+// ============================================================================
+
+/** Install scopes a pack may target (wire form). */
+export type MarketScope = "global-user" | "server" | "project";
+
+export interface PackManifest {
+	name: string;
+	description: string;
+	version: string;
+	author?: string;
+	homepage?: string;
+	contents: {
+		roles: string[];
+		tools: string[];
+		skills: string[];
+	};
+}
+
+export interface PackMeta {
+	sourceUrl: string;
+	sourceRef: string;
+	commit: string;
+	packName: string;
+	version: string;
+	installedAt: string;
+	updatedAt: string;
+	scope: MarketScope;
+}
+
+export interface MarketplaceSource {
+	id: string;
+	url: string;
+	ref?: string;
+	addedAt: string;
+	lastSyncedAt?: string;
+	lastCommit?: string;
+}
+
+export interface BrowsePackWire extends PackManifest {
+	dirName: string;
+	hasTools: boolean;
+}
+
+export interface InstalledPackWire {
+	scope: MarketScope;
+	packName: string;
+	manifest: PackManifest;
+	meta: PackMeta;
+	status: "ok" | "corrupt";
+}
+
+export interface ConflictPackRef {
+	packEntryId: string;
+	scope: string;
+	label: string;
+}
+
+export interface ConflictWire {
+	type: "roles" | "tools" | "skills";
+	name: string;
+	winner: ConflictPackRef;
+	shadowed: ConflictPackRef[];
+}
+
+/** Discriminated result for marketplace calls so the UI can degrade gracefully
+ *  (show the server's error) while the REST backend is still being built. */
+export type MarketResult<T> =
+	| { ok: true; data: T }
+	| { ok: false; error: string; status: number };
+
+async function marketFetch<T>(
+	path: string,
+	init?: RequestInit,
+	emptyOk = false,
+): Promise<MarketResult<T>> {
+	try {
+		const res = await gatewayFetch(path, init);
+		if (!res.ok) {
+			let error = `HTTP ${res.status}`;
+			try {
+				const body = await res.json();
+				if (body && typeof body.error === "string") error = body.error;
+			} catch {
+				/* non-JSON error body */
+			}
+			return { ok: false, error, status: res.status };
+		}
+		if (emptyOk || res.status === 204) return { ok: true, data: undefined as unknown as T };
+		const data = (await res.json()) as T;
+		return { ok: true, data };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err), status: 0 };
+	}
+}
+
+function jsonInit(method: string, body?: unknown): RequestInit {
+	return {
+		method,
+		headers: { "Content-Type": "application/json" },
+		...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+	};
+}
+
+export function listMarketplaceSources(): Promise<MarketResult<{ sources: MarketplaceSource[] }>> {
+	return marketFetch("/api/marketplace/sources");
+}
+
+export function addMarketplaceSource(url: string, ref?: string): Promise<MarketResult<{ source: MarketplaceSource }>> {
+	return marketFetch("/api/marketplace/sources", jsonInit("POST", ref ? { url, ref } : { url }));
+}
+
+export function removeMarketplaceSource(id: string): Promise<MarketResult<void>> {
+	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}`, { method: "DELETE" }, true);
+}
+
+export function syncMarketplaceSource(id: string): Promise<MarketResult<{ source: MarketplaceSource }>> {
+	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/sync`, { method: "POST" });
+}
+
+export function browseMarketplacePacks(id: string): Promise<MarketResult<{ packs: BrowsePackWire[] }>> {
+	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/packs`);
+}
+
+export function installMarketplacePack(opts: { sourceId: string; dirName: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
+	return marketFetch("/api/marketplace/install", jsonInit("POST", opts));
+}
+
+export function updateInstalledPack(opts: { scope: MarketScope; packName: string; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
+	return marketFetch("/api/marketplace/update", jsonInit("POST", opts));
+}
+
+export function uninstallMarketplacePack(opts: { scope: MarketScope; packName: string; projectId?: string }): Promise<MarketResult<void>> {
+	return marketFetch("/api/marketplace/installed", jsonInit("DELETE", opts), true);
+}
+
+export function listInstalledPacks(projectId?: string): Promise<MarketResult<{ installed: InstalledPackWire[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/marketplace/installed${qs}`);
+}
+
+export function getPackOrder(scope: MarketScope, projectId?: string): Promise<MarketResult<{ scope: MarketScope; order: string[] }>> {
+	const params = new URLSearchParams({ scope });
+	if (projectId) params.set("projectId", projectId);
+	return marketFetch(`/api/marketplace/pack-order?${params}`);
+}
+
+export function setPackOrder(opts: { scope: MarketScope; projectId?: string; order: string[] }): Promise<MarketResult<{ scope: MarketScope; order: string[] }>> {
+	return marketFetch("/api/marketplace/pack-order", jsonInit("PUT", opts));
+}
+
+export function getPackConflicts(projectId?: string): Promise<MarketResult<{ conflicts: ConflictWire[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/packs/conflicts${qs}`);
 }

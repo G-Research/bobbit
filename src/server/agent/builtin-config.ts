@@ -19,6 +19,128 @@ import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 
+// ── Shared parse helpers (single source of truth) ───────────────
+//
+// Extracted so BOTH BuiltinConfigProvider and the pack-resolver loaders
+// (RoleLoader / ToolLoader) parse byte-identically. Do NOT fork these.
+
+/** Parse a single role YAML document into a Role, or null if it has no name. */
+export function parseRoleYaml(content: string): Role | null {
+	const data = parse(content);
+	if (!data?.name) return null;
+
+	let toolPolicies: Record<string, GrantPolicy> | undefined;
+	if (data.toolPolicies && typeof data.toolPolicies === "object") {
+		toolPolicies = {};
+		for (const [k, v] of Object.entries(data.toolPolicies)) {
+			if (typeof v === "string") toolPolicies[k] = normalizeGrantPolicy(v);
+		}
+		if (Object.keys(toolPolicies).length === 0) toolPolicies = undefined;
+	}
+
+	return {
+		name: data.name,
+		label: data.label ?? data.name,
+		promptTemplate: data.promptTemplate ?? "",
+		accessory: data.accessory ?? "none",
+		toolPolicies,
+		model: validateModelString(data.model),
+		thinkingLevel: validateThinkingLevel(data.thinkingLevel),
+		createdAt: data.createdAt ?? 0,
+		updatedAt: data.updatedAt ?? 0,
+	};
+}
+
+/** Read all role YAML files from `<dir>` (flat) into Role[]. */
+export function parseRolesDir(rolesDir: string): Role[] {
+	const roles: Role[] = [];
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(rolesDir, { withFileTypes: true });
+	} catch {
+		return roles;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
+		try {
+			const role = parseRoleYaml(fs.readFileSync(path.join(rolesDir, entry.name), "utf-8"));
+			if (role) roles.push(role);
+		} catch (err) {
+			console.error(`[builtin-config] Failed to parse role ${entry.name}:`, err);
+		}
+	}
+	return roles;
+}
+
+function toolInfoFrom(data: any, fallbackGroup: string): ToolInfo {
+	return {
+		name: data.name,
+		description: data.description || "",
+		group: data.group || fallbackGroup,
+		docs: data.docs,
+		detail_docs: data.detail_docs,
+		hasRenderer: !!data.renderer,
+		rendererFile: data.renderer,
+		grantPolicy: data.grantPolicy,
+		params: Array.isArray(data.params)
+			? data.params.filter((p: unknown): p is string => typeof p === "string")
+			: undefined,
+	};
+}
+
+/**
+ * Read tools from `<toolsDir>` using the grouped+flat two-pass logic:
+ *   1. grouped subdirectories `tools/<group>/*.yaml` (group = dir name)
+ *   2. flat files `tools/*.yaml` (group = data.group || "Other")
+ * First-seen name wins within the dir.
+ */
+export function parseToolsDir(toolsDir: string): ToolInfo[] {
+	const tools: ToolInfo[] = [];
+	const seen = new Set<string>();
+
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+	} catch {
+		return tools;
+	}
+
+	// First pass: grouped subdirectories (tools/<group>/*.yaml)
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const groupPath = path.join(toolsDir, entry.name);
+		try {
+			const files = fs.readdirSync(groupPath, { withFileTypes: true });
+			for (const file of files) {
+				if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
+				try {
+					const data = parse(fs.readFileSync(path.join(groupPath, file.name), "utf-8"));
+					if (!data?.name || seen.has(data.name)) continue;
+					seen.add(data.name);
+					tools.push(toolInfoFrom(data, entry.name));
+				} catch (err) {
+					console.error(`[builtin-config] Failed to parse tool ${file.name}:`, err);
+				}
+			}
+		} catch { /* skip unreadable group dir */ }
+	}
+
+	// Second pass: flat files (tools/*.yaml)
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
+		try {
+			const data = parse(fs.readFileSync(path.join(toolsDir, entry.name), "utf-8"));
+			if (!data?.name || seen.has(data.name)) continue;
+			seen.add(data.name);
+			tools.push(toolInfoFrom(data, "Other"));
+		} catch (err) {
+			console.error(`[builtin-config] Failed to parse tool ${entry.name}:`, err);
+		}
+	}
+
+	return tools;
+}
+
 export class BuiltinConfigProvider {
 	private readonly builtinsDir: string;
 
@@ -30,6 +152,11 @@ export class BuiltinConfigProvider {
 	constructor(builtinsDir?: string) {
 		// Default: dist/server/agent/ → ../defaults → dist/server/defaults/
 		this.builtinsDir = builtinsDir ?? path.join(__dirname, "..", "defaults");
+	}
+
+	/** Absolute path to the builtin `defaults/` tree (the builtin pack root). */
+	getBuiltinsDir(): string {
+		return this.builtinsDir;
 	}
 
 	// ── Public getters ──────────────────────────────────────────
@@ -67,108 +194,11 @@ export class BuiltinConfigProvider {
 	// ── Private loaders (mirror the existing store parsing logic) ─
 
 	private loadRoles(): Role[] {
-		const dir = path.join(this.builtinsDir, "roles");
-		const roles: Role[] = [];
-		for (const entry of this.readYamlDir(dir)) {
-			try {
-				const data = parse(entry.content);
-				if (!data?.name) continue;
-
-				let toolPolicies: Record<string, GrantPolicy> | undefined;
-				if (data.toolPolicies && typeof data.toolPolicies === "object") {
-					toolPolicies = {};
-					for (const [k, v] of Object.entries(data.toolPolicies)) {
-						if (typeof v === "string") toolPolicies[k] = normalizeGrantPolicy(v);
-					}
-					if (Object.keys(toolPolicies).length === 0) toolPolicies = undefined;
-				}
-
-				roles.push({
-					name: data.name,
-					label: data.label ?? data.name,
-					promptTemplate: data.promptTemplate ?? "",
-					accessory: data.accessory ?? "none",
-					toolPolicies,
-					model: validateModelString(data.model),
-					thinkingLevel: validateThinkingLevel(data.thinkingLevel),
-					createdAt: data.createdAt ?? 0,
-					updatedAt: data.updatedAt ?? 0,
-				});
-			} catch (err) {
-				console.error(`[builtin-config] Failed to parse role ${entry.file}:`, err);
-			}
-		}
-		return roles;
+		return parseRolesDir(path.join(this.builtinsDir, "roles"));
 	}
 
 	private loadTools(): ToolInfo[] {
-		const toolsDir = path.join(this.builtinsDir, "tools");
-		const tools: ToolInfo[] = [];
-		const seen = new Set<string>();
-
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(toolsDir, { withFileTypes: true });
-		} catch {
-			return tools;
-		}
-
-		// First pass: grouped subdirectories (tools/<group>/*.yaml)
-		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
-			const groupPath = path.join(toolsDir, entry.name);
-			try {
-				const files = fs.readdirSync(groupPath, { withFileTypes: true });
-				for (const file of files) {
-					if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
-					try {
-						const raw = fs.readFileSync(path.join(groupPath, file.name), "utf-8");
-						const data = parse(raw);
-						if (!data?.name || seen.has(data.name)) continue;
-						seen.add(data.name);
-						tools.push({
-							name: data.name,
-							description: data.description || "",
-							group: data.group || entry.name,
-							docs: data.docs,
-							detail_docs: data.detail_docs,
-							hasRenderer: !!data.renderer,
-							rendererFile: data.renderer,
-							grantPolicy: data.grantPolicy,
-							params: Array.isArray(data.params) ? data.params.filter((p: unknown): p is string => typeof p === "string") : undefined,
-						});
-					} catch (err) {
-						console.error(`[builtin-config] Failed to parse tool ${file.name}:`, err);
-					}
-				}
-			} catch { /* skip unreadable group dir */ }
-		}
-
-		// Second pass: flat files (tools/*.yaml)
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-			try {
-				const raw = fs.readFileSync(path.join(toolsDir, entry.name), "utf-8");
-				const data = parse(raw);
-				if (!data?.name || seen.has(data.name)) continue;
-				seen.add(data.name);
-				tools.push({
-					name: data.name,
-					description: data.description || "",
-					group: data.group || "Other",
-					docs: data.docs,
-					detail_docs: data.detail_docs,
-					hasRenderer: !!data.renderer,
-					rendererFile: data.renderer,
-					grantPolicy: data.grantPolicy,
-					params: Array.isArray(data.params) ? data.params.filter((p: unknown): p is string => typeof p === "string") : undefined,
-				});
-			} catch (err) {
-				console.error(`[builtin-config] Failed to parse tool ${entry.name}:`, err);
-			}
-		}
-
-		return tools;
+		return parseToolsDir(path.join(this.builtinsDir, "tools"));
 	}
 
 	private loadToolGroupPolicies(): Record<string, GrantPolicy> {
@@ -190,23 +220,4 @@ export class BuiltinConfigProvider {
 		}
 	}
 
-	// ── Helpers ──────────────────────────────────────────────────
-
-	/** Read all .yaml files from a flat directory. */
-	private readYamlDir(dir: string): Array<{ file: string; content: string }> {
-		const results: Array<{ file: string; content: string }> = [];
-		try {
-			const entries = fs.readdirSync(dir, { withFileTypes: true });
-			for (const entry of entries) {
-				if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
-				try {
-					results.push({
-						file: entry.name,
-						content: fs.readFileSync(path.join(dir, entry.name), "utf-8"),
-					});
-				} catch { /* skip unreadable files */ }
-			}
-		} catch { /* directory doesn't exist */ }
-		return results;
-	}
 }

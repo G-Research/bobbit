@@ -2,6 +2,7 @@ import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
@@ -40,7 +41,8 @@ import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
-import { discoverSlashSkills } from "../skills/slash-skills.js";
+import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
+import { getProjectRoot } from "../bobbit-dir.js";
 import { shouldSkipRemotePush, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
@@ -1615,7 +1617,17 @@ export class SessionManager {
 			if (!hasActivate) return undefined;
 		}
 		try {
-			const all = discoverSlashSkills(discoveryRoot, projectConfigStore);
+			// Best-available market-scope wiring (finding #3): thread the server
+			// base + server config store so server/global-user market skill packs
+			// resolve for the active project even when its root != server cwd.
+			const marketContext: SkillMarketContext = {
+				serverBase: getProjectRoot(),
+				globalUserBase: os.homedir(),
+				projectBase: discoveryRoot,
+				serverConfigStore: this.projectConfigStore,
+				projectConfigStore: projectConfigStore as SkillMarketContext["projectConfigStore"],
+			};
+			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext);
 			// Filter: omit disable-model-invocation and skills with empty descriptions.
 			// userInvocable=false skills are already filtered by discoverSlashSkills.
 			return all.filter(s => s.disableModelInvocation !== true && (s.description?.trim() || "").length > 0);

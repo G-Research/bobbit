@@ -31,9 +31,27 @@ export class ProjectContextManager {
    * ProjectContext gets the same dispatcher reference.
    */
   private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
+  /**
+   * Optional post-create configurator applied to every context (existing and
+   * lazily-created). `server.ts` uses it to wire each context's `toolManager`
+   * with its market-pack `tools/` roots provider so market-pack tools resolve
+   * at runtime (design §3.2 / finding #1).
+   */
+  private contextConfigurator: ((ctx: ProjectContext) => void) | null = null;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
+  }
+
+  /**
+   * Late-bind a configurator run against every context (existing + future).
+   * Idempotent and order-independent with respect to `initAll()`/`getOrCreate`.
+   */
+  setContextConfigurator(configurator: (ctx: ProjectContext) => void): void {
+    this.contextConfigurator = configurator;
+    for (const ctx of this.contexts.values()) {
+      try { configurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
+    }
   }
 
   /**
@@ -66,6 +84,10 @@ export class ProjectContextManager {
     // Propagate any post-boot dispatcher wiring to lazily-created contexts.
     if (this.goalTriggerDispatcher) {
       ctx.setGoalTriggerDispatcher(this.goalTriggerDispatcher);
+    }
+    // Apply any post-boot context configurator (e.g. market tool roots).
+    if (this.contextConfigurator) {
+      try { this.contextConfigurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
     }
     this.contexts.set(projectId, ctx);
     return ctx;

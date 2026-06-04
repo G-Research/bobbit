@@ -10,6 +10,7 @@ import "./app.css";
 import "./workflow-page.css";
 import "./role-manager.css";
 import "./tool-manager.css";
+import "./marketplace.css";
 import "./storage.js"; // must initialize before anything else
 // Eagerly register <bg-process-pill> so it's available the moment the chat
 // view mounts. Lazy-loading via `ensureBgProcessPill()` (lazy-widgets.ts) was
@@ -320,6 +321,20 @@ async function handleHashChange(): Promise<void> {
 			loadSkillsPageData();
 			renderApp();
 			await refreshSessions();
+		} else if (route.view === "market") {
+			clearDashboardState();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
+			const { loadMarketplaceData } = await import("./marketplace-page.js");
+			loadMarketplaceData();
+			renderApp();
+			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -510,6 +525,9 @@ async function initApp() {
 			} else if (route.view === "skills") {
 				const { loadSkillsPageData } = await import("./skills-page.js");
 				loadSkillsPageData();
+			} else if (route.view === "market") {
+				const { loadMarketplaceData } = await import("./marketplace-page.js");
+				loadMarketplaceData();
 			} else if (route.view === "staff") {
 				const { loadStaffPageData } = await import("./staff-page.js");
 				loadStaffPageData();
