@@ -6,12 +6,16 @@
  * The `/` and `@` *inline* token sets are disjoint, BUT a PREFIX-only slash
  * skill claims the whole-message range `[0, originalText.length]`
  * (see resolve-skill-expansions.ts), which overlaps any `@file` token in the
- * same message (e.g. `/mockup @notes.txt`). On overlap the SKILL expansion
- * wins for `modelText` and the file mention is NOT inlined — inlining it too
- * would corrupt the spliced text. The file mention is still recorded by the
- * resolver so its chip renders in the user bubble.
+ * same message (e.g. `/mockup @notes.txt`). We must NOT splice the overlapping
+ * file mention inline (that would corrupt the skill-expanded body), but we also
+ * must NOT drop its content — the spec requires every text `@path` to reach the
+ * model. So overlapping TEXT mentions are APPENDED (in original-text order) as
+ * `<file-reference>` blocks AFTER the spliced body. The skill expansion stays
+ * intact and the file content is still delivered. image/binary mentions never
+ * touch `modelText` (routed as attachments). The chip still renders at the
+ * original `@path` range in the user bubble regardless.
  *
- * All replacements are spliced right-to-left to preserve earlier indices.
+ * Inline replacements are spliced right-to-left to preserve earlier indices.
  */
 
 import { buildFileReferenceBlock, type FileMention } from "./resolve-file-mentions.js";
@@ -36,27 +40,33 @@ export function buildMergedModelText(
 ): string {
 	const skillRanges = skillExpansions.map((e) => e.range);
 	const replacements: Array<{ start: number; end: number; expanded: string }> = [];
+	const appended: string[] = []; // overlapping text mentions, original-text order
 
 	for (const e of skillExpansions) {
 		replacements.push({ start: e.range[0], end: e.range[1], expanded: e.expanded });
 	}
 	for (const m of fileMentions) {
 		if (m.kind !== "text" || m.content === undefined) continue;
-		// Skill expansion wins on overlap — skip inlining this file mention.
-		if (skillRanges.some((sr) => overlaps(sr, m.range))) continue;
-		replacements.push({
-			start: m.range[0],
-			end: m.range[1],
-			expanded: buildFileReferenceBlock(m.path, m.content),
-		});
+		const block = buildFileReferenceBlock(m.path, m.content);
+		if (skillRanges.some((sr) => overlaps(sr, m.range))) {
+			// Overlaps a skill range: cannot splice inline without corrupting the
+			// skill body — append the file content after the spliced body instead.
+			appended.push(block);
+		} else {
+			replacements.push({ start: m.range[0], end: m.range[1], expanded: block });
+		}
 	}
 
-	if (replacements.length === 0) return originalText;
-	replacements.sort((a, b) => a.start - b.start);
 	let out = originalText;
-	for (let i = replacements.length - 1; i >= 0; i--) {
-		const r = replacements[i];
-		out = out.slice(0, r.start) + r.expanded + out.slice(r.end);
+	if (replacements.length > 0) {
+		replacements.sort((a, b) => a.start - b.start);
+		for (let i = replacements.length - 1; i >= 0; i--) {
+			const r = replacements[i];
+			out = out.slice(0, r.start) + r.expanded + out.slice(r.end);
+		}
+	}
+	if (appended.length > 0) {
+		out += "\n\n" + appended.join("\n\n");
 	}
 	return out;
 }
