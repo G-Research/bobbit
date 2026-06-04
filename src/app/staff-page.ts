@@ -322,6 +322,7 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 		<div class="rounded-md border border-border bg-secondary/20 p-3">
 			<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px">
 				<select
+					data-testid="trigger-type-select"
 					class="text-xs px-2 py-1 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 					.value=${trigger.type}
 					@change=${onTypeChange}
