@@ -15,6 +15,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PackManifest, PackMeta, PackScope } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
 import { isValidPackName, readManifest, readMeta, writeMeta } from "./pack-manifest.js";
@@ -81,8 +82,10 @@ export function isLocalDirSource(url: string): boolean {
 export function localSourcePath(url: string): string {
 	const u = url.trim();
 	if (u.startsWith("file://")) {
+		// `fileURLToPath` correctly maps `file:///C:/repo` → `C:\repo` on Windows;
+		// the old `new URL(u).pathname` yielded `/C:/repo` → `C:\C:\repo`.
 		try {
-			return path.resolve(new URL(u).pathname);
+			return path.resolve(fileURLToPath(u));
 		} catch {
 			return path.resolve(u.slice("file://".length));
 		}
@@ -423,8 +426,15 @@ export class MarketplaceInstaller {
 	 * List installed packs across the given scope contexts. Corrupt dirs (valid
 	 * `pack.yaml` but missing/invalid `.pack-meta.yaml`, or vice versa) are
 	 * reported with `status: "corrupt"`. `.tmp-*` dirs are skipped.
+	 *
+	 * Rows within each scope are ordered to match resolver precedence (the same
+	 * rule as `pack-list.ts::scanMarketPacks`): on-disk-but-unlisted packs first
+	 * (install order ≈ readdir order), then `pack_order`-listed names in order
+	 * (highest precedence last). This keeps the UI's displayed order — which it
+	 * uses to build reorder payloads — consistent with actual precedence across
+	 * reloads (finding #2). Omitting `packOrder` preserves raw readdir order.
 	 */
-	listInstalled(contexts: Array<{ scope: InstallScope; projectBase?: string }>): InstalledPackWire[] {
+	listInstalled(contexts: Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }>): InstalledPackWire[] {
 		const out: InstalledPackWire[] = [];
 		// Dedup by resolved root: a self-managed project (rootPath == server cwd)
 		// resolves multiple scopes to the same `market-packs` dir; attribute the
@@ -441,16 +451,17 @@ export class MarketplaceInstaller {
 			} catch {
 				continue;
 			}
+			const rows = new Map<string, InstalledPackWire>();
 			for (const d of dirents) {
 				if (!d.isDirectory() || d.name.startsWith(".tmp-") || d.name.startsWith(".")) continue;
 				const dir = path.join(marketRoot, d.name);
 				const manifest = readManifest(dir);
 				const meta = readMeta(dir);
 				if (manifest && meta) {
-					out.push({ scope: c.scope, packName: d.name, manifest, meta, status: "ok" });
+					rows.set(d.name, { scope: c.scope, packName: d.name, manifest, meta, status: "ok" });
 				} else if (manifest || meta) {
 					// Partial / corrupt install — surface so the UI can offer cleanup.
-					out.push({
+					rows.set(d.name, {
 						scope: c.scope,
 						packName: d.name,
 						manifest: manifest ?? synthManifest(d.name, meta),
@@ -459,6 +470,12 @@ export class MarketplaceInstaller {
 					});
 				}
 			}
+			// Order per pack_order: unlisted-on-disk first, then listed in order.
+			const orderHint = c.packOrder ?? [];
+			const listed = new Set(orderHint);
+			const unlisted = [...rows.keys()].filter((n) => !listed.has(n));
+			const ordered = [...unlisted, ...orderHint.filter((n) => rows.has(n))];
+			for (const n of ordered) out.push(rows.get(n)!);
 		}
 		return out;
 	}

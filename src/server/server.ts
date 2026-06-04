@@ -28,7 +28,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
+import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
 import {
@@ -913,6 +913,35 @@ export function createGateway(config: GatewayConfig) {
 		},
 	};
 	configCascade.setMarketPackProvider(marketPackProvider);
+
+	// Ordered installed market-pack `tools/` roots (low→high) for a project, so
+	// market-pack tools are listed, documented, provider-loaded, and usable at
+	// runtime — not just surfaced by the cascade listing (design §3.2 / finding
+	// #1). Mirrors the cascade scope order (server < global-user < project) and
+	// dedups self-managed-project path collisions, keeping the FIRST (lowest)
+	// scope, exactly as `ConfigCascade.resolveEntities` does.
+	const marketToolRoots = (projectId?: string): string[] => {
+		const roots: string[] = [];
+		const seen = new Set<string>();
+		for (const scope of ["server", "global-user", "project"] as const) {
+			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
+				const toolsDir = path.join(e.path, "tools");
+				const key = path.resolve(toolsDir);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				roots.push(toolsDir);
+			}
+		}
+		return roots;
+	};
+	// Server-level toolManager (used by GET /api/tools/:name without a project)
+	// sees server + global-user market packs (project scope needs a projectId).
+	toolManager.setMarketToolRootsProvider(() => marketToolRoots(undefined));
+	// Every per-project context's toolManager sees its full cross-scope market
+	// roots (server < global-user < project) — applied to existing + future ctxs.
+	projectContextManager.setContextConfigurator((ctx) => {
+		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+	});
 
 	const staffManager = new StaffManager(projectContextManager);
 
@@ -2105,11 +2134,17 @@ async function handleApiRoute(
 		...r.item,
 		origin: r.origin,
 		...(r.overrides ? { overrides: r.overrides } : {}),
-		...(r.originPackName ? { originPackId: r.originPackId ?? null, originPackName: r.originPackName } : {}),
+		// Always emit originPackId/originPackName (null for builtin/user entities)
+		// so roles/tools match the skills wire shape (finding #3).
+		originPackId: r.originPackId ?? null,
+		originPackName: r.originPackName ?? null,
 	});
-	// Roles/tools resolution is recomputed per call; only the slash-skills TTL
-	// cache needs busting after a marketplace pack-list mutation (design §9.1).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); };
+	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
+	// and the ToolManager mtime-keyed scan cache both need busting after a
+	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
+	// installed/updated/removed market-pack tool roots are re-scanned (Windows
+	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); };
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -4454,7 +4489,13 @@ async function handleApiRoute(
 		const name = decodeURIComponent(toolMatch[1]);
 
 		if (req.method === "GET") {
-			const tool = toolManager.getToolByName(name);
+			// Resolve via the project's toolManager when a projectId is supplied so
+			// project-scope market-pack tools are visible (their `tools/` roots are
+			// wired into that context's manager — finding #1). Falls back to the
+			// server-level manager (server + global-user market packs + builtins).
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
+			const tool = tm.getToolByName(name);
 			if (!tool) { json({ error: "Tool not found" }, 404); return; }
 			json(tool);
 			return;
@@ -4786,15 +4827,17 @@ async function handleApiRoute(
 			jsonError(500, err);
 		};
 
-		// All scope contexts present for cross-scope listing.
-		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string }> => {
-			const ctxs: Array<{ scope: InstallScope; projectBase?: string }> = [
-				{ scope: "server" },
-				{ scope: "global-user" },
+		// All scope contexts present for cross-scope listing. Each carries its
+		// scope's `pack_order` so `listInstalled` returns rows in precedence order
+		// (finding #2) — the UI relies on that order to build reorder payloads.
+		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> => {
+			const ctxs: Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> = [
+				{ scope: "server", packOrder: projectConfigStore.getPackOrder("server") },
+				{ scope: "global-user", packOrder: projectConfigStore.getPackOrder("global-user") },
 			];
 			if (projectId) {
 				const ctx = projectContextManager.getOrCreate(projectId);
-				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath });
+				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath, packOrder: ctx.projectConfigStore.getPackOrder("project") });
 			}
 			return ctxs;
 		};

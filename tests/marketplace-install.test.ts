@@ -139,6 +139,23 @@ describe("#8 local-dir vs git-url branching (no network)", () => {
 		assert.match(localSourcePath("file:///x/y"), /[\\/]x[\\/]y$/);
 	});
 
+	// finding #4 — `file:///C:/repo` must convert via fileURLToPath, NOT
+	// `new URL(u).pathname` (which yields `/C:/repo` → path.resolve →
+	// `C:\C:\repo` on Windows, a doubled drive letter).
+	it("resolves a Windows-style file:///C:/... url without doubling the drive", () => {
+		const resolved = localSourcePath("file:///C:/repo/packs");
+		// Never a doubled drive letter (the old new URL().pathname bug).
+		assert.ok(!/C:[\\/]+C:/i.test(resolved), `drive must not be doubled; got: ${resolved}`);
+		if (process.platform === "win32") {
+			assert.equal(resolved, path.resolve("C:\\repo\\packs"));
+			assert.match(resolved, /^C:\\repo\\packs$/i);
+		} else {
+			// On POSIX fileURLToPath keeps the leading slash form; the point is
+			// only that there is no doubled-drive corruption.
+			assert.match(resolved, /repo[\\/]packs$/);
+		}
+	});
+
 	it("local-dir source reads in place (no clone, empty commit)", () => {
 		const root = fs.mkdtempSync(path.join(TMP, "ldir-"));
 		const repo = path.join(root, "repo");
@@ -364,6 +381,34 @@ describe("#7 corrupt-guard + listInstalled", () => {
 		assert.equal(byName.get("ok-pack").status, "ok");
 		assert.equal(byName.get("bad-pack").status, "corrupt");
 		assert.equal(byName.has(".tmp-x-123"), false); // staging never listed
+	});
+
+	// finding #2 — listInstalled must order rows per the scope's pack_order
+	// (unlisted-on-disk first, then listed names in order) so the UI's displayed
+	// order matches actual precedence after a reload.
+	it("orders rows per pack_order (unlisted first, then listed in order)", () => {
+		const root = fs.mkdtempSync(path.join(TMP, "order-"));
+		const { marketPacksRoot } = scopePaths("server", root);
+		for (const n of ["alpha", "beta", "gamma"]) {
+			w(path.join(marketPacksRoot, n, "pack.yaml"),
+				`name: ${n}\ndescription: ${n}\nversion: 1.0.0\ncontents:\n  roles: []\n  tools: []\n  skills: []\n`);
+			w(path.join(marketPacksRoot, n, ".pack-meta.yaml"),
+				`packName: ${n}\nversion: 1.0.0\nscope: server\nsourceUrl: x\nsourceRef: main\ncommit: c\ninstalledAt: t\nupdatedAt: t\n`);
+		}
+		const store = new MarketplaceSourceStore(path.join(root, "cfg"));
+		const inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+
+		// pack_order lists gamma then alpha (highest last); beta is unlisted ⇒ first.
+		const ordered = inst.listInstalled([{ scope: "server", packOrder: ["gamma", "alpha"] }]);
+		assert.deepEqual(ordered.map((p: any) => p.packName), ["beta", "gamma", "alpha"]);
+
+		// Without a packOrder, raw readdir order is preserved (no crash, all rows).
+		const raw = inst.listInstalled([{ scope: "server" }]);
+		assert.deepEqual(raw.map((p: any) => p.packName).sort(), ["alpha", "beta", "gamma"]);
+
+		// A pack_order naming an absent pack drops it; on-disk-but-unlisted appended first.
+		const partial = inst.listInstalled([{ scope: "server", packOrder: ["ghost", "alpha"] }]);
+		assert.deepEqual(partial.map((p: any) => p.packName), ["beta", "gamma", "alpha"]);
 	});
 });
 

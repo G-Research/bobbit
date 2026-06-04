@@ -1943,9 +1943,10 @@ export async function fetchTools(): Promise<ToolInfo[]> {
 	}
 }
 
-export async function fetchToolDetail(name: string): Promise<ToolInfo | null> {
+export async function fetchToolDetail(name: string, projectId?: string): Promise<ToolInfo | null> {
 	try {
-		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`);
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}${qs}`);
 		if (!res.ok) return null;
 		return await res.json();
 	} catch {

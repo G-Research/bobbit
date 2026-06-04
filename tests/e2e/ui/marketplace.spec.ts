@@ -244,6 +244,46 @@ test.describe("Marketplace UI", () => {
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="kit-pack"]').first()).toBeVisible({ timeout: 15_000 });
 	});
 
+	// finding #1 — a market-pack tool must be usable at RUNTIME, not just listed
+	// by the cascade: GET /api/tools/:name returns it (404 before the fix) and it
+	// appears as an available tool tagged with the pack; uninstall removes it.
+	test("market-pack tool resolves through the runtime tool machinery (GET /api/tools/:name) + removed on uninstall", async () => {
+		const repo = makeRepo();
+		writePack(repo, { name: "rt-tool-pack", tools: [{ group: "rtgroup", name: "rt-tool" }] });
+
+		const addRes = await apiFetch("/api/marketplace/sources", { method: "POST", body: JSON.stringify({ url: repo }) });
+		expect(addRes.status).toBe(201);
+		const src = (await addRes.json()).source;
+		const instRes = await apiFetch("/api/marketplace/install", {
+			method: "POST",
+			body: JSON.stringify({ sourceId: src.id, dirName: "rt-tool-pack", scope: "server" }),
+		});
+		expect(instRes.status).toBe(201);
+
+		try {
+			// GET /api/tools/:name returns the market tool (was 404 before finding #1).
+			const detailRes = await apiFetch("/api/tools/rt-tool");
+			expect(detailRes.status).toBe(200);
+			expect((await detailRes.json()).name).toBe("rt-tool");
+
+			// It surfaces as an available tool, tagged with the originating pack.
+			const listRes = await apiFetch("/api/tools");
+			const tools = (await listRes.json()).tools as Array<{ name: string; originPackName?: string | null }>;
+			const hit = tools.find((t) => t.name === "rt-tool");
+			expect(hit, "market tool must appear in /api/tools").toBeTruthy();
+			expect(hit?.originPackName).toBe("rt-tool-pack");
+		} finally {
+			await apiFetch("/api/marketplace/installed", { method: "DELETE", body: JSON.stringify({ scope: "server", packName: "rt-tool-pack" }) }).catch(() => {});
+		}
+
+		// Uninstall removes exactly what was added: tool gone from detail + list.
+		const after = await apiFetch("/api/tools/rt-tool");
+		expect(after.status).toBe(404);
+		const listAfter = await apiFetch("/api/tools");
+		const toolsAfter = (await listAfter.json()).tools as Array<{ name: string }>;
+		expect(toolsAfter.find((t) => t.name === "rt-tool")).toBeFalsy();
+	});
+
 	// §12.3 #7 — update (re-sync upstream) and uninstall (entities disappear).
 	test("update re-syncs upstream and uninstall removes exactly what was installed", async ({ page }) => {
 		const repo = makeRepo();
@@ -331,6 +371,26 @@ test.describe("Marketplace UI", () => {
 		await page.reload();
 		await navigateToHash(page, "#/roles");
 		await expect(page.locator(".role-row").filter({ hasText: "shared-role" }).locator('[data-testid="origin-pack-chip"]')).toHaveText("conf-a", { timeout: 15_000 });
+
+		// finding #2 — after reload the INSTALLED-CARD ORDER must reflect the
+		// persisted pack_order (server: [conf-b, conf-a] after the move), not raw
+		// readdir order — otherwise the UI builds reorder payloads from a stale
+		// order and a subsequent move persists the wrong sequence.
+		await navigateToHash(page, "#/market");
+		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-a"]').first()).toBeVisible({ timeout: 15_000 });
+		// Filter to the two conflict packs — the worker's server scope may hold
+		// other packs from sibling tests sharing the same BOBBIT_DIR.
+		const cardOrder = await page.evaluate(() =>
+			Array.from(document.querySelectorAll('[data-testid="market-installed-pack"]'))
+				.map((el) => el.getAttribute("data-pack-name"))
+				.filter((n): n is string => n === "conf-a" || n === "conf-b"),
+		);
+		expect(cardOrder).toEqual(["conf-b", "conf-a"]);
+
+		// And the persisted pack-order endpoint agrees (highest precedence last).
+		const orderRes = await apiFetch("/api/marketplace/pack-order?scope=server");
+		const order = ((await orderRes.json()).order as string[]).filter((n) => n === "conf-a" || n === "conf-b");
+		expect(order).toEqual(["conf-b", "conf-a"]);
 	});
 
 	// ------------------------------------------------------------------

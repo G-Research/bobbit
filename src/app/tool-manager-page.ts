@@ -345,7 +345,7 @@ export function navigateToToolEdit(toolName: string): void {
 		saving = false;
 		renderApp();
 		// Also fetch full detail (may have docs)
-		fetchToolDetail(toolName).then((detail) => {
+		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
 			if (detail && selectedTool?.name === toolName) {
 				selectedTool = detail;
 				// Only update docs from detail if user hasn't changed it
@@ -363,7 +363,7 @@ export function navigateToToolEdit(toolName: string): void {
 		});
 	} else {
 		// Not in cache, fetch directly
-		fetchToolDetail(toolName).then((detail) => {
+		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
 			if (detail) {
 				currentView = "edit";
 				selectedTool = detail;
@@ -441,7 +441,7 @@ async function handleSave(): Promise<void> {
 		const updated = tools.find((t) => t.name === selectedTool!.name);
 		if (updated) {
 			// Fetch full detail to get docs back
-			const detail = await fetchToolDetail(updated.name);
+			const detail = await fetchToolDetail(updated.name, getConfigProjectId());
 			if (detail) {
 				showEdit(detail);
 			} else {

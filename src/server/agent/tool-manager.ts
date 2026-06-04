@@ -204,43 +204,52 @@ export function __resetToolScanCache(): void {
 }
 
 /**
- * Load tool definitions with group-level cascade: builtins first, then overlay
- * from config-level toolsDir. A group in the higher layer replaces the entire group.
+ * Load tool definitions over an ordered cascade of layers (low→high priority):
+ *
+ *   builtin (lowest)  <  market-pack roots (low→high)  <  config-level toolsDir
+ *
+ * A group defined in a HIGHER layer replaces the entire same-named group in all
+ * lower layers; within the surviving set, the first-seen name wins (lowest layer
+ * wins on a pure cross-group name collision — a legacy quirk preserved exactly).
+ *
+ * With zero market roots this collapses to the original two-layer cascade
+ * (builtin → toolsDir) and is byte-identical to the legacy behavior — see
+ * docs/design/pack-based-marketplace.md §3.2 / finding #1.
  */
-function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseToolInfo[] {
-	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir));
+function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: string[] = []): BaseToolInfo[] {
+	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir, marketRoots));
 }
 
-function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string): BaseToolInfo[] {
-	const seen = new Set<string>();     // tool name dedup
-	const seenGroups = new Set<string>(); // track which groups came from overlay
+function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: string[] = []): BaseToolInfo[] {
+	// Ordered layer dirs, low→high priority. The builtin layer is lowest, the
+	// scope's own user `toolsDir` overlay is highest, market-pack tool roots sit
+	// in between (caller orders them server < global-user < project, design §3.2).
+	const layerDirs: string[] = [];
+	if (builtinToolsDir) layerDirs.push(builtinToolsDir);
+	for (const r of marketRoots) layerDirs.push(r);
+	layerDirs.push(toolsDir);
 
-	// Scan overlay (config-level) first to determine which groups are overridden
-	const overlayTools = scanToolsDirCached(toolsDir, toolsDir);
-	for (const t of overlayTools) {
-		if (t.groupDir) seenGroups.add(t.groupDir);
-	}
+	const scanned = layerDirs.map((dir) => scanToolsDirCached(dir, dir));
 
+	// For each group dir, find the HIGHEST layer index that defines it. That
+	// layer "owns" the group; the same group in lower layers is fully shadowed.
+	const groupOwner = new Map<string, number>();
+	scanned.forEach((tools, idx) => {
+		for (const t of tools) if (t.groupDir) groupOwner.set(t.groupDir, idx);
+	});
+
+	const seen = new Set<string>(); // tool name dedup (lowest layer wins)
 	const result: BaseToolInfo[] = [];
-
-	// Add builtin tools whose group is NOT overridden
-	if (builtinToolsDir) {
-		const builtinTools = scanToolsDirCached(builtinToolsDir, builtinToolsDir);
-		for (const t of builtinTools) {
-			// Skip if the group is overridden by the config level
-			if (t.groupDir && seenGroups.has(t.groupDir)) continue;
+	// Emit low→high so output order matches the legacy cascade (builtins first).
+	scanned.forEach((tools, idx) => {
+		for (const t of tools) {
+			// A higher layer owns this group ⇒ this layer's copy is shadowed.
+			if (t.groupDir && groupOwner.get(t.groupDir) !== idx) continue;
 			if (seen.has(t.name)) continue;
 			seen.add(t.name);
 			result.push(t);
 		}
-	}
-
-	// Add overlay tools (these take precedence)
-	for (const t of overlayTools) {
-		if (seen.has(t.name)) continue;
-		seen.add(t.name);
-		result.push(t);
-	}
+	});
 
 	return result;
 }
@@ -269,10 +278,33 @@ export class ToolManager {
 	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
 	private readonly toolsDir: string;
 	private readonly builtinToolsDir: string | undefined;
+	/**
+	 * Supplies the ordered `tools/` roots of installed market packs (low→high
+	 * priority) so market-pack tools resolve at runtime — listed, documented,
+	 * provider-loaded, and usable in sessions. Injected by `server.ts` (mirrors
+	 * the roles/tools cascade `marketPackProvider`). Omitted ⇒ no market roots,
+	 * so resolution is byte-identical to the legacy two-layer cascade.
+	 * See docs/design/pack-based-marketplace.md §3.2 / finding #1.
+	 */
+	private marketRootsProvider?: () => string[];
 
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
+	}
+
+	/** Late-bind the installed market-pack `tools/` roots provider (design §3.2). */
+	setMarketToolRootsProvider(provider: () => string[]): void {
+		this.marketRootsProvider = provider;
+	}
+
+	/** Resolve the current ordered market-pack `tools/` roots (low→high). */
+	private marketRoots(): string[] {
+		try {
+			return this.marketRootsProvider?.() ?? [];
+		} catch {
+			return [];
+		}
 	}
 
 	/** Get the config-level tools directory. */
@@ -371,7 +403,7 @@ export class ToolManager {
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(): ToolInfo[] {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const result = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -408,7 +440,7 @@ export class ToolManager {
 				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined };
 			}
 		}
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
 		if (!base) return undefined;
 		return {
@@ -433,7 +465,7 @@ export class ToolManager {
 		const dir = path.join(stateDir, 'tool-docs');
 		fs.mkdirSync(dir, { recursive: true });
 
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		// Group tools by groupDir
 		const grouped = new Map<string, Array<{ name: string; docs?: string; detail_docs?: string; description: string }>>();
@@ -465,7 +497,7 @@ export class ToolManager {
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
 	getToolDocsForPrompt(toolNames?: string[], stateDir?: string): string {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		type Entry = { name: string; summary: string; params?: string[] };
 		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();
@@ -535,14 +567,14 @@ export class ToolManager {
 	getToolProvider(name: string): ToolProvider | undefined {
 		const ext = this.externalTools.get(name);
 		if (ext) return ext.provider;
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const base = tools.find((t) => t.name === name);
 		return base?.provider;
 	}
 
 	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
 	getToolProviders(): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
 		for (const tool of tools) {
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
@@ -555,7 +587,7 @@ export class ToolManager {
 
 	/** Returns all tool names from YAML definitions. */
 	getAllToolNames(): string[] {
-		const yamlNames = loadToolDefinitions(this.toolsDir, this.builtinToolsDir).map((t) => t.name);
+		const yamlNames = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots()).map((t) => t.name);
 		return [...yamlNames, ...this.externalTools.keys()];
 	}
 
@@ -564,6 +596,8 @@ export class ToolManager {
 	 * If the tool's group only exists in builtins, copies the entire group to toolsDir first.
 	 */
 	updateToolMetadata(name: string, updates: { description?: string; group?: string; docs?: string; detail_docs?: string; grantPolicy?: string }): boolean {
+		// Market tools are read-only: omit market roots so a market-pack tool is
+		// not found here and can never be written back into market-packs/.
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir);
 		const base = tools.find((t) => t.name === name);
 		if (!base) return false;
