@@ -276,6 +276,9 @@ export class MessageEditor extends LitElement {
 		try {
 			let url = `/api/file-mentions?cwd=${encodeURIComponent(this.cwd)}`;
 			if (this.projectId) url += `&projectId=${encodeURIComponent(this.projectId)}`;
+			// Let the server resolve the session's real host worktree (autocomplete
+			// must be scoped to the session cwd, not the project root).
+			if (this.sessionId) url += `&sessionId=${encodeURIComponent(this.sessionId)}`;
 			if (query) url += `&q=${encodeURIComponent(query)}`;
 			url += `&limit=50`;
 			const res = await gatewayFetch(url);
