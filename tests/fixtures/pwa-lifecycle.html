@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head><title>PWA Lifecycle Tests</title></head>
+<body>
+<script>
+/**
+ * Inline copy of the PURE shouldReloadOnResume() from src/app/pwa-lifecycle.ts
+ * for testing in a file:// fixture without a build step. Keep in sync with the
+ * source — the rules are the single source of truth for the iOS grey-screen
+ * reload decision.
+ */
+function shouldReloadOnResume(args) {
+	var appMounted = args.appMounted;
+	var hiddenAtMs = args.hiddenAtMs;
+	var resumeAtMs = args.resumeAtMs;
+	var lastAliveMs = args.lastAliveMs;
+	var nowMs = args.nowMs;
+	var lastReloadAtMs = args.lastReloadAtMs;
+	var staleThresholdMs = args.staleThresholdMs;
+	var reloadCooldownMs = args.reloadCooldownMs;
+
+	// Loop guard overrides everything.
+	if (lastReloadAtMs != null && nowMs - lastReloadAtMs < reloadCooldownMs) {
+		return false;
+	}
+
+	// Dead bootstrap — nothing painted; page never re-bootstrapped.
+	if (!appMounted) return true;
+
+	// Mounted-but-frozen snapshot.
+	var longSuspend = hiddenAtMs != null && nowMs - hiddenAtMs >= staleThresholdMs;
+	var heartbeatStale = lastAliveMs == null || lastAliveMs <= resumeAtMs;
+	if (longSuspend && heartbeatStale) return true;
+
+	return false;
+}
+
+// Expose for Playwright
+window.shouldReloadOnResume = shouldReloadOnResume;
+</script>
+</body>
+</html>
