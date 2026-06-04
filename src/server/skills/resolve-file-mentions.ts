@@ -15,22 +15,23 @@
  *                   (the literal `@path` stays so the model has the
  *                   filename, and the handler routes the bytes through the
  *                   image attachment frame).
+ *       • `binary`→ non-image, non-text files (e.g. `.zip`, `.bin`): base64
+ *                   snapshot in `data`, ext-derived (or octet-stream) mimeType;
+ *                   `modelText` left untouched (literal `@path` kept). The
+ *                   handler routes these to the attachment pipeline as a
+ *                   document — for UI chip + snapshot parity with
+ *                   user-uploaded documents. (See handler note: model-side
+ *                   delivery of document bytes is an existing platform concern,
+ *                   not a regression of this feature.)
  *       • `unresolved` → missing / unreadable / too-large / outside-cwd /
- *                   aggregate-cap / too-many-mentions / unsupported-binary.
- *                   Literal `@path` left in `modelText`, `reason` set.
- *                   **Never throws** — every failure path degrades gracefully.
+ *                   aggregate-cap / too-many-mentions. Literal `@path` left in
+ *                   `modelText`, `reason` set. **Never throws** — every failure
+ *                   path degrades gracefully.
  *
- *     Non-image, non-text files (e.g. `.zip`, `.bin`) are classified
- *     `unresolved` with reason `unsupported-binary`: the prompt RPC only
- *     carries text + images (`rpcClient.prompt(text, images)`), so there is
- *     no honest way to deliver raw binary bytes to the model. The literal
- *     `@path` stays in `modelText` so the model at least sees the filename,
- *     and the chip surfaces the reason.
- *
- *   - **Snapshot at resolve time** — text content and image base64 bytes are
- *     captured now so replaying a `.jsonl` later renders the same content the
- *     model originally saw, even if the file changed on disk. (Same guarantee
- *     as skill expansions.)
+ *   - **Snapshot at resolve time** — text content and image/binary base64
+ *     bytes are captured now so replaying a `.jsonl` later renders the same
+ *     content the model originally saw, even if the file changed on disk.
+ *     (Same guarantee as skill expansions.)
  *
  *   - **Path safety** — the target is canonicalized with `fs.realpathSync`
  *     and a `path.relative` containment check is applied to the CANONICAL
@@ -48,21 +49,22 @@ import path from "node:path";
 /** Char range, in UTF-16 code units (matches `String.prototype.slice`). */
 export type MentionRange = [number, number];
 
-export type MentionKind = "text" | "image" | "unresolved";
+export type MentionKind = "text" | "image" | "binary" | "unresolved";
 
 export interface FileMention {
 	/** Relative path exactly as typed (after the `@`), trailing punctuation trimmed. */
 	path: string;
-	/** Resolved (canonical) absolute host path (omitted if unresolved). */
+	/** Resolved (canonical) absolute host path. Internal to the resolver — the
+	 *  handler strips this before the mention crosses the wire / is persisted. */
 	absPath?: string;
 	/** UTF-16 char range in `originalText` that the chip replaces (`@path` span). */
 	range: MentionRange;
 	kind: MentionKind;
 	/** text kind: snapshotted file content (verbatim). */
 	content?: string;
-	/** image kind: base64 (no data-URL prefix) snapshot. */
+	/** image/binary kind: base64 (no data-URL prefix) snapshot. */
 	data?: string;
-	/** image kind: detected MIME type. */
+	/** image/binary kind: detected MIME type. */
 	mimeType?: string;
 	/** Resolved file size in bytes. */
 	bytes?: number;
@@ -83,7 +85,7 @@ export interface ResolvedMentions {
 
 /** Per-file cap for **text** inlining. Oversized text → unresolved (too-large). */
 export const MAX_INLINE_TEXT_BYTES = 256 * 1024; // 256 KiB
-/** Per-file cap for image snapshots. Over → unresolved (too-large). */
+/** Per-file cap for image/binary snapshots. Over → unresolved (too-large). */
 export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 /** Aggregate cap across all resolved mentions in one send. */
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
@@ -103,6 +105,25 @@ const IMAGE_MIME: Record<string, string> = {
 	".avif": "image/avif",
 };
 
+/** A few common binary extensions → MIME type. Falls back to octet-stream. */
+const BINARY_MIME: Record<string, string> = {
+	".pdf": "application/pdf",
+	".zip": "application/zip",
+	".gz": "application/gzip",
+	".tar": "application/x-tar",
+	".wasm": "application/wasm",
+	".doc": "application/msword",
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xls": "application/vnd.ms-excel",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".ppt": "application/vnd.ms-powerpoint",
+	".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+function binaryMimeForExt(ext: string): string {
+	return BINARY_MIME[ext] ?? "application/octet-stream";
+}
+
 /** Trailing punctuation trimmed off a token end (unlikely to be part of a path). */
 const TRAILING_PUNCT = new Set([".", ",", ")", ":", ";"]);
 
@@ -113,6 +134,16 @@ const TRAILING_PUNCT = new Set([".", ",", ")", ":", ";"]);
  */
 export function buildFileReferenceBlock(relPath: string, content: string): string {
 	return `<file-reference path="${relPath.replace(/\\/g, "/")}">\n${content}\n</file-reference>`;
+}
+
+/**
+ * Strip resolver-internal fields (`absPath`) from a mention before it crosses
+ * the wire / is persisted to the sidecar. The UI never needs `absPath` and
+ * exposing it would leak the host filesystem layout (FOLLOW-UP-D).
+ */
+export function toWireMention(m: FileMention): FileMention {
+	const { absPath: _absPath, ...rest } = m;
+	return rest;
 }
 
 export interface ResolveFileMentionsOptions {
@@ -161,6 +192,13 @@ function escapesDir(baseDir: string, target: string): boolean {
 function isLikelyText(buf: Buffer): boolean {
 	if (buf.length === 0) return true;
 	if (buf.includes(0)) return false; // NUL byte ⇒ binary
+	// Reject content that is not valid UTF-8 (e.g. stray high bytes from a
+	// binary blob without NULs). A fatal TextDecoder throws on malformed input.
+	try {
+		new TextDecoder("utf-8", { fatal: true }).decode(buf);
+	} catch {
+		return false;
+	}
 	const sample = buf.subarray(0, Math.min(buf.length, 8192));
 	let control = 0;
 	for (const b of sample) {
@@ -324,11 +362,20 @@ export function resolveFileMentions(
 			continue;
 		}
 
-		// Non-image binary: the prompt RPC only carries text + images, so raw
-		// binary bytes cannot be honestly delivered to the model. Leave the
-		// literal `@path` in modelText (model still sees the filename) and
-		// surface the reason in the chip.
-		markUnresolved("unsupported-binary");
+		// Non-image binary (per frozen design §2): snapshot base64 in `data`,
+		// ext-derived mimeType. The handler routes this to attachments[] as a
+		// document for UI chip + snapshot parity. `modelText` is left untouched
+		// (literal `@path` kept). Subject to the per-file + aggregate caps.
+		const data = buf.toString("base64");
+		if (aggregateUsed + data.length > maxAggregate) {
+			markUnresolved("aggregate-cap");
+			continue;
+		}
+		aggregateUsed += data.length;
+		base.kind = "binary";
+		base.data = data;
+		base.mimeType = binaryMimeForExt(ext);
+		mentions.push(base);
 	}
 
 	// Build modelText by splicing text mentions right-to-left.

@@ -12,7 +12,7 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
-import { resolveFileMentions } from "../skills/resolve-file-mentions.js";
+import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
@@ -551,9 +551,18 @@ export function handleWebSocketConnection(
 					// two resolvers never produce overlapping ranges. A bad
 					// reference never tears down the send — it degrades to a
 					// literal `@path` plus a warning.
-					const fileMentionResult = resolveFileMentions(msg.text, skillCwd);
+					//
+					// IMPORTANT: file mentions resolve against the session's HOST
+					// worktree, NOT skillCwd. skillCwd redirects to the project
+					// rootPath for SKILL discovery (correct there), but that tree
+					// misses the goal/session worktree's branch-local, untracked
+					// and gitignored files. worktreePath is the host path; for
+					// sandboxed sessions session.cwd is a container path, so
+					// worktreePath is required to reach the real files.
+					const fileMentionCwd = session.worktreePath || session.cwd;
+					const fileMentionResult = resolveFileMentions(msg.text, fileMentionCwd);
 					for (const w of fileMentionResult.warnings) {
-						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${session.cwd})`);
+						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
 					if (fileMentionResult.mentions.length > 0) {
 						console.log(`[ws-handler] Resolved ${fileMentionResult.mentions.length} file mention(s) for session ${sessionId}`);
@@ -566,25 +575,46 @@ export function handleWebSocketConnection(
 					// renders). See buildMergedModelText for the full rationale.
 					const mergedModelText = buildMergedModelText(originalText, expansions, fileMentionResult.mentions);
 
-					// Route image mentions through the existing image frame. Text
-					// mentions are inlined into modelText above; non-image/binary
-					// mentions resolve to `unresolved` (the prompt RPC carries
-					// only text + images, so raw binary cannot reach the model).
+					// Route image mentions through the image frame and binary
+					// mentions through the document-attachment pipeline (text
+					// mentions are inlined into modelText above). Binary mentions
+					// are attached for UI chip + snapshot parity with
+					// user-uploaded documents; model-side delivery of document
+					// bytes is an existing platform concern (the prompt RPC
+					// carries text + images), NOT a regression of this feature.
 					const sendImages = msg.images ? [...msg.images] : [];
+					const sendAttachments = msg.attachments ? [...msg.attachments] : [];
 					for (const mention of fileMentionResult.mentions) {
 						if (mention.kind === "image" && mention.data && mention.mimeType) {
 							sendImages.push({ type: "image", data: mention.data, mimeType: mention.mimeType });
+						} else if (mention.kind === "binary" && mention.data) {
+							const norm = mention.path.replace(/\\/g, "/");
+							sendAttachments.push({
+								id: `mention-${Date.now()}-${mention.range[0]}`,
+								type: "document",
+								fileName: norm.slice(norm.lastIndexOf("/") + 1) || norm,
+								mimeType: mention.mimeType ?? "application/octet-stream",
+								size: mention.bytes ?? 0,
+								content: mention.data,
+							});
 						}
 					}
 
 					const hasFileMentions = fileMentionResult.mentions.length > 0;
 					const modelChanged = mergedModelText !== originalText;
 
+					// Strip the internal canonical `absPath` before the mention
+					// crosses the wire / is persisted to the sidecar — the UI
+					// never needs it and it would leak host filesystem layout.
+					const wireFileMentions = hasFileMentions
+						? fileMentionResult.mentions.map(toWireMention)
+						: undefined;
+
 					await sessionManager.enqueuePrompt(sessionId, originalText, {
 						images: sendImages.length ? sendImages : undefined,
-						attachments: msg.attachments,
+						attachments: sendAttachments.length ? sendAttachments : undefined,
 						skillExpansions: expansions.length ? expansions : undefined,
-						fileMentions: hasFileMentions ? fileMentionResult.mentions : undefined,
+						fileMentions: wireFileMentions,
 						modelText: modelChanged ? mergedModelText : undefined,
 					});
 					break;

@@ -34,6 +34,7 @@ after(() => {
 const {
 	resolveFileMentions,
 	buildFileReferenceBlock,
+	toWireMention,
 	MAX_INLINE_TEXT_BYTES,
 	MAX_MENTION_FILE_BYTES,
 	MAX_MENTION_AGGREGATE_BYTES,
@@ -53,6 +54,15 @@ describe("resolveFileMentions", () => {
 		assert.equal(r.modelText, "just a normal message");
 		assert.equal(r.mentions.length, 0);
 		assert.equal(r.warnings.length, 0);
+	});
+
+	it("FOLLOW-UP-D: resolver sets internal absPath; toWireMention strips it", () => {
+		const r = resolveFileMentions("@notes.txt", cwdDir);
+		assert.ok(r.mentions[0].absPath, "resolver keeps canonical absPath internally");
+		const wire = toWireMention(r.mentions[0]);
+		assert.equal(wire.absPath, undefined, "wire mention must not carry absPath");
+		assert.equal(wire.path, "notes.txt"); // other fields preserved
+		assert.equal(wire.kind, "text");
 	});
 
 	it("inline text file → inlined with <file-reference> header; range covers @path", () => {
@@ -107,13 +117,29 @@ describe("resolveFileMentions", () => {
 		assert.equal(r.modelText, text); // literal @path left in place
 	});
 
-	it("non-image binary (NUL bytes) → unresolved (unsupported-binary), literal preserved", () => {
+	it("non-image binary (NUL bytes) → kind binary, base64 data, modelText unchanged", () => {
 		const text = "@data.bin";
 		const r = resolveFileMentions(text, cwdDir);
-		assert.equal(r.mentions[0].kind, "unresolved");
-		assert.equal(r.mentions[0].reason, "unsupported-binary");
-		assert.equal(r.mentions[0].data, undefined); // bytes are NOT snapshotted
-		assert.equal(r.modelText, text); // literal @path left so model sees the filename
+		assert.equal(r.mentions[0].kind, "binary");
+		assert.ok(r.mentions[0].data && r.mentions[0].data.length > 0);
+		assert.equal(r.mentions[0].mimeType, "application/octet-stream");
+		assert.equal(r.modelText, text); // literal @path left (not inlined)
+	});
+
+	it("binary mimeType is ext-derived when known (.pdf)", () => {
+		fs.writeFileSync(path.join(cwdDir, "doc.pdf"), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]));
+		const r = resolveFileMentions("@doc.pdf", cwdDir);
+		assert.equal(r.mentions[0].kind, "binary");
+		assert.equal(r.mentions[0].mimeType, "application/pdf");
+	});
+
+	it("FOLLOW-UP-C: invalid UTF-8 without NUL bytes → kind binary, not inlined as text", () => {
+		// Lone 0xFF / 0xFE continuation bytes are not valid UTF-8 and contain no NUL.
+		fs.writeFileSync(path.join(cwdDir, "invalid-utf8.dat"), Buffer.from([0xff, 0xfe, 0x41, 0xc0, 0x80]));
+		const r = resolveFileMentions("@invalid-utf8.dat", cwdDir);
+		assert.equal(r.mentions[0].kind, "binary");
+		assert.equal(r.mentions[0].content, undefined);
+		assert.equal(r.modelText, "@invalid-utf8.dat");
 	});
 
 	it("missing file → unresolved, literal token preserved, reason set", () => {
