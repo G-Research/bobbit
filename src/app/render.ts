@@ -8,7 +8,7 @@ import { repeat } from "lit/directives/repeat.js";
 import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, ShoppingBag, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -471,7 +471,7 @@ function renderMobileLanding() {
 							data-testid="market-nav-button-mobile"
 							title="Marketplace"
 							@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}>
-							${icon(ShoppingBag, "xs")} Market
+							${icon(Store, "xs")} Market
 						</button>
 						<button
 							data-new-goal-trigger

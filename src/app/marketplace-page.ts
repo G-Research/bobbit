@@ -17,7 +17,7 @@ import {
 	Package,
 	Plus,
 	RotateCw,
-	ShoppingBag,
+	Store,
 	Trash2,
 } from "lucide";
 import { renderApp, state } from "./state.js";
@@ -403,7 +403,7 @@ function renderNavBar(): TemplateResult {
 				title="Back"
 			>${icon(ArrowLeft, "sm")}</button>
 			<h1 class="text-lg font-semibold flex items-center gap-2">
-				${icon(ShoppingBag, "sm")}
+				${icon(Store, "sm")}
 				Marketplace
 			</h1>
 		</div>

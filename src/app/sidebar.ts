@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, ShoppingBag, Users, Workflow, Wrench, Zap } from "lucide";
+import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -1395,7 +1395,7 @@ export function renderSidebar() {
 						@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); import("./routing.js").then((m) => m.setHashRoute("market")); })}
 						title="Marketplace"
 					>
-						${icon(ShoppingBag, "xs", "!w-3.5 !h-3.5")}
+						${icon(Store, "xs", "!w-3.5 !h-3.5")}
 						<span>Market</span>
 					</button>
 					<button
