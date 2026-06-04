@@ -56,6 +56,10 @@ Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 - **Catalog budget**: The catalog is capped in bytes to keep the system prompt small. Default is **16 KB**; configurable per-user via Settings → General → "Skills catalog budget" within **1–128 KB**. The preference is stored as `skillsCatalogBudget` (bytes) via `PUT /api/preferences`; absent or `null` falls back to the default. When skills exceed the budget, the list is sorted alphabetically by name and the tail is dropped with a `_… (N more skills omitted, alphabetically truncated)_` footer so the agent knows more exist (it can still invoke them by name). A `[system-prompt] Skills catalog exceeded <budget>B budget — truncated N skill(s).` warning is logged. Tuning bounds are enforced server-side in `resolveSkillsCatalogBudget` (`src/server/agent/system-prompt.ts`) and mirrored by the Settings input.
 - **API**: `GET /api/slash-skills` for autocomplete data, `GET /api/slash-skills/details` for full content, file paths, and scanned directories.
 
+## File References (`@`-mentions)
+
+Type `@` in the prompt composer to reference a file by path, mirroring the `/` slash-skill menu. On send the server resolves each `@path` token: text files are inlined into the model-facing prompt as `<file-reference>` blocks, images route through the `images[]` frame, and other binaries become document attachments. Unresolvable / oversized / out-of-cwd references degrade gracefully to the literal `@path`. Content is snapshotted at send time, so chips and original text replay stably via the shared skill sidecar. Backed by `GET /api/file-mentions`. See [at-mention-file-references.md](at-mention-file-references.md) for the full behaviour, caps, path-safety, and source map.
+
 ## Cost Tracking
 
 Per-session token usage and cost tracking, aggregated to goal and task level.

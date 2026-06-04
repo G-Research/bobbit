@@ -12,10 +12,12 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
+import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
+import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
+import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -57,50 +59,16 @@ function stampSnapshotOrder(data: unknown): unknown {
  * Merge persisted skill-expansion sidecar entries into a list of agent
  * messages. For each user message whose text body equals a sidecar
  * `modelText`, rewrite the body to `originalText` and attach
- * `skillExpansions`. Idempotent: messages without matching sidecar entries
- * pass through unchanged.
+ * `skillExpansions` AND `fileMentions` (mirroring the live broadcast splice
+ * in `spliceSkillExpansionsIntoEvent`, so @-mention chips survive reload /
+ * the authoritative post-turn snapshot). Idempotent: messages without
+ * matching sidecar entries pass through unchanged.
  */
 function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[] {
 	if (!Array.isArray(messages) || messages.length === 0) return messages;
 	const entries = readSkillSidecarEntries(sessionId);
 	if (entries.length === 0) return messages;
-	// Build a queue of envelopes per modelText so duplicate identical
-	// messages each get matched in FIFO order.
-	const queues = new Map<string, typeof entries>();
-	for (const e of entries) {
-		const arr = queues.get(e.modelText) ?? [];
-		arr.push(e);
-		queues.set(e.modelText, arr);
-	}
-	let changed = false;
-	const out = messages.map((msg: any) => {
-		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
-		let body: string;
-		if (typeof msg.content === "string") body = msg.content;
-		else if (Array.isArray(msg.content)) {
-			const block = msg.content.find((c: any) => c?.type === "text");
-			body = block?.text ?? "";
-		} else body = "";
-		const q = queues.get(body);
-		if (!q || q.length === 0) return msg;
-		const envelope = q.shift()!;
-		changed = true;
-		let newContent: any;
-		if (typeof msg.content === "string") {
-			newContent = envelope.originalText;
-		} else if (Array.isArray(msg.content)) {
-			newContent = msg.content.map((c: any) =>
-				c?.type === "text" ? { ...c, text: envelope.originalText } : c,
-			);
-			if (!newContent.some((c: any) => c?.type === "text")) {
-				newContent.unshift({ type: "text", text: envelope.originalText });
-			}
-		} else {
-			newContent = envelope.originalText;
-		}
-		return { ...msg, content: newContent, skillExpansions: envelope.skillExpansions };
-	});
-	return changed ? out : messages;
+	return mergeSidecarEntriesIntoMessages(entries, messages);
 }
 
 /** Send persisted model info as fallback when getState() is unavailable. */
@@ -565,7 +533,7 @@ export function handleWebSocketConnection(
 							return null;
 						}
 						: undefined;
-					const { originalText, modelText, expansions, unknown } = resolveSkillExpansions(
+					const { originalText, expansions, unknown } = resolveSkillExpansions(
 						msg.text,
 						skillCwd,
 						resolvedConfigStore,
@@ -578,11 +546,76 @@ export function handleWebSocketConnection(
 						console.log(`[ws-handler] Resolved ${expansions.length} slash-skill expansion(s) for session ${sessionId}`);
 					}
 
+					// Resolve `@path` file mentions on the SAME verbatim text. The
+					// `/` and `@` token sets are disjoint by construction, so the
+					// two resolvers never produce overlapping ranges. A bad
+					// reference never tears down the send — it degrades to a
+					// literal `@path` plus a warning.
+					//
+					// IMPORTANT: file mentions resolve against the session's HOST
+					// worktree, NOT skillCwd. skillCwd redirects to the project
+					// rootPath for SKILL discovery (correct there), but that tree
+					// misses the goal/session worktree's branch-local, untracked
+					// and gitignored files. worktreePath is the host path; for
+					// sandboxed sessions session.cwd is a container path, so
+					// worktreePath is required to reach the real files.
+					const fileMentionCwd = session.worktreePath || session.cwd;
+					const fileMentionResult = resolveFileMentions(msg.text, fileMentionCwd);
+					for (const w of fileMentionResult.warnings) {
+						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
+					}
+					if (fileMentionResult.mentions.length > 0) {
+						console.log(`[ws-handler] Resolved ${fileMentionResult.mentions.length} file mention(s) for session ${sessionId}`);
+					}
+
+					// Merge skill expansions + text file mentions into one
+					// right-to-left splice over the original text. Prefix-only
+					// slash skills overlap any @file token; on overlap the skill
+					// wins and the file mention is not inlined (chip still
+					// renders). See buildMergedModelText for the full rationale.
+					const mergedModelText = buildMergedModelText(originalText, expansions, fileMentionResult.mentions);
+
+					// Route image mentions through the image frame and binary
+					// mentions through the document-attachment pipeline (text
+					// mentions are inlined into modelText above). Binary mentions
+					// are attached for UI chip + snapshot parity with
+					// user-uploaded documents; model-side delivery of document
+					// bytes is an existing platform concern (the prompt RPC
+					// carries text + images), NOT a regression of this feature.
+					const sendImages = msg.images ? [...msg.images] : [];
+					const sendAttachments = msg.attachments ? [...msg.attachments] : [];
+					for (const mention of fileMentionResult.mentions) {
+						if (mention.kind === "image" && mention.data && mention.mimeType) {
+							sendImages.push({ type: "image", data: mention.data, mimeType: mention.mimeType });
+						} else if (mention.kind === "binary" && mention.data) {
+							const norm = mention.path.replace(/\\/g, "/");
+							sendAttachments.push({
+								id: `mention-${Date.now()}-${mention.range[0]}`,
+								type: "document",
+								fileName: norm.slice(norm.lastIndexOf("/") + 1) || norm,
+								mimeType: mention.mimeType ?? "application/octet-stream",
+								size: mention.bytes ?? 0,
+								content: mention.data,
+							});
+						}
+					}
+
+					const hasFileMentions = fileMentionResult.mentions.length > 0;
+					const modelChanged = mergedModelText !== originalText;
+
+					// Strip the internal canonical `absPath` before the mention
+					// crosses the wire / is persisted to the sidecar — the UI
+					// never needs it and it would leak host filesystem layout.
+					const wireFileMentions = hasFileMentions
+						? fileMentionResult.mentions.map(toWireMention)
+						: undefined;
+
 					await sessionManager.enqueuePrompt(sessionId, originalText, {
-						images: msg.images,
-						attachments: msg.attachments,
+						images: sendImages.length ? sendImages : undefined,
+						attachments: sendAttachments.length ? sendAttachments : undefined,
 						skillExpansions: expansions.length ? expansions : undefined,
-						modelText: expansions.length ? modelText : undefined,
+						fileMentions: wireFileMentions,
+						modelText: modelChanged ? mergedModelText : undefined,
 					});
 					break;
 				}
