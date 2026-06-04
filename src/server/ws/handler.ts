@@ -16,7 +16,7 @@ import { resolveFileMentions, buildFileReferenceBlock } from "../skills/resolve-
 import { inferMeta } from "../agent/aigw-manager.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
+import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -58,50 +58,16 @@ function stampSnapshotOrder(data: unknown): unknown {
  * Merge persisted skill-expansion sidecar entries into a list of agent
  * messages. For each user message whose text body equals a sidecar
  * `modelText`, rewrite the body to `originalText` and attach
- * `skillExpansions`. Idempotent: messages without matching sidecar entries
- * pass through unchanged.
+ * `skillExpansions` AND `fileMentions` (mirroring the live broadcast splice
+ * in `spliceSkillExpansionsIntoEvent`, so @-mention chips survive reload /
+ * the authoritative post-turn snapshot). Idempotent: messages without
+ * matching sidecar entries pass through unchanged.
  */
 function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[] {
 	if (!Array.isArray(messages) || messages.length === 0) return messages;
 	const entries = readSkillSidecarEntries(sessionId);
 	if (entries.length === 0) return messages;
-	// Build a queue of envelopes per modelText so duplicate identical
-	// messages each get matched in FIFO order.
-	const queues = new Map<string, typeof entries>();
-	for (const e of entries) {
-		const arr = queues.get(e.modelText) ?? [];
-		arr.push(e);
-		queues.set(e.modelText, arr);
-	}
-	let changed = false;
-	const out = messages.map((msg: any) => {
-		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
-		let body: string;
-		if (typeof msg.content === "string") body = msg.content;
-		else if (Array.isArray(msg.content)) {
-			const block = msg.content.find((c: any) => c?.type === "text");
-			body = block?.text ?? "";
-		} else body = "";
-		const q = queues.get(body);
-		if (!q || q.length === 0) return msg;
-		const envelope = q.shift()!;
-		changed = true;
-		let newContent: any;
-		if (typeof msg.content === "string") {
-			newContent = envelope.originalText;
-		} else if (Array.isArray(msg.content)) {
-			newContent = msg.content.map((c: any) =>
-				c?.type === "text" ? { ...c, text: envelope.originalText } : c,
-			);
-			if (!newContent.some((c: any) => c?.type === "text")) {
-				newContent.unshift({ type: "text", text: envelope.originalText });
-			}
-		} else {
-			newContent = envelope.originalText;
-		}
-		return { ...msg, content: newContent, skillExpansions: envelope.skillExpansions };
-	});
-	return changed ? out : messages;
+	return mergeSidecarEntriesIntoMessages(entries, messages);
 }
 
 /** Send persisted model info as fallback when getState() is unavailable. */
