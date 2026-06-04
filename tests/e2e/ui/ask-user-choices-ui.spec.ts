@@ -125,6 +125,52 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(readOnly.locator('input[type="radio"]').first()).toBeDisabled();
 	});
 
+	test("indicator shape — square for multi-select, circular for single-select", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		// ask_user_choices_multi → Q1 ("Which colors?", multi:true) + Q2 ("Team size?", single).
+		await sendMessage(page, "please use ask_user_choices_multi");
+
+		const widget = page.locator("ask-user-choices-widget").first();
+		await expect(widget).toBeVisible({ timeout: 20_000 });
+
+		// Q1 is the active tab and is multi-select → indicators must be square
+		// (rounded-sm) and NOT circular (rounded-full). Covers regular options.
+		await expect(widget.locator('[role="tab"][data-tab-index="0"]'))
+			.toHaveAttribute("aria-selected", "true");
+		const multiChecks = widget.locator(".ask-option:not(.ask-option-other) .ask-option-check");
+		await expect(multiChecks.first()).toBeVisible();
+		const multiCount = await multiChecks.count();
+		expect(multiCount).toBeGreaterThan(0);
+		for (let i = 0; i < multiCount; i++) {
+			await expect(multiChecks.nth(i)).toHaveClass(/rounded-sm/);
+			await expect(multiChecks.nth(i)).not.toHaveClass(/rounded-full/);
+		}
+		// "Other" option indicator on a multi-select question is also square.
+		const multiOther = widget.locator(".ask-option-other .ask-option-check");
+		await expect(multiOther).toHaveClass(/rounded-sm/);
+		await expect(multiOther).not.toHaveClass(/rounded-full/);
+
+		// Switch to Q2 (single-select) → indicators must be circular (rounded-full)
+		// and NOT square (rounded-sm).
+		await widget.locator('[role="tab"][data-tab-index="1"]').click();
+		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true");
+		const singleChecks = widget.locator(".ask-option:not(.ask-option-other) .ask-option-check");
+		await expect(singleChecks.first()).toBeVisible();
+		const singleCount = await singleChecks.count();
+		expect(singleCount).toBeGreaterThan(0);
+		for (let i = 0; i < singleCount; i++) {
+			await expect(singleChecks.nth(i)).toHaveClass(/rounded-full/);
+			await expect(singleChecks.nth(i)).not.toHaveClass(/rounded-sm/);
+		}
+		// "Other" option indicator on a single-select question is circular.
+		const singleOther = widget.locator(".ask-option-other .ask-option-check");
+		await expect(singleOther).toHaveClass(/rounded-full/);
+		await expect(singleOther).not.toHaveClass(/rounded-sm/);
+	});
+
 	test("cross-client finalization via keyboard-only submission", async ({ page, context, rec }) => {
 		await openApp(page);
 		await createSessionViaUI(page);

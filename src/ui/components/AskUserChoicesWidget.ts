@@ -646,7 +646,7 @@ export class AskUserChoicesWidget extends LitElement {
 				@focus=${() => { if (!readOnly) this._focusedOption = optIdx; }}>
 				${inputAttrs}
 				<span class="ask-option-index font-mono text-xs text-muted-foreground w-4 text-right select-none" aria-hidden="true">${optIdx + 1}.</span>
-				<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 rounded-full border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
+				<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 ${multi ? "rounded-sm" : "rounded-full"} border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
 					${checked ? html`<span class="ask-check-glyph text-[10px] leading-none">✓</span>` : nothing}
 				</span>
 				<span class="ask-option-text">${option}</span>
@@ -705,7 +705,7 @@ export class AskUserChoicesWidget extends LitElement {
 					@focus=${() => { if (!readOnly) this._focusedOption = optIdx; }}>
 					${inputEl}
 					<span class="ask-option-index font-mono text-xs text-muted-foreground w-4 text-right select-none" aria-hidden="true">${optIdx + 1}.</span>
-					<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 rounded-full border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
+					<span class="ask-option-check inline-flex items-center justify-center w-4 h-4 ${multi ? "rounded-sm" : "rounded-full"} border pointer-events-none ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border text-transparent"}" aria-hidden="true">
 						${checked ? html`<span class="ask-check-glyph text-[10px] leading-none">✓</span>` : nothing}
 					</span>
 					<span class="ask-option-text">Other</span>
