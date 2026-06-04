@@ -48,9 +48,10 @@ export interface EnumerateFilesOptions {
 
 /**
  * Enumerate files under `cwd`. Returns relative forward-slash paths, ranked
- * and bounded. Never throws — unreadable directories are skipped.
+ * and bounded. Never throws — unreadable directories are skipped. Async so the
+ * directory walk never blocks the HTTP event loop on large/slow trees.
  */
-export function enumerateFiles(cwd: string, opts?: EnumerateFilesOptions): string[] {
+export async function enumerateFiles(cwd: string, opts?: EnumerateFilesOptions): Promise<string[]> {
 	const query = (opts?.query ?? "").trim().toLowerCase();
 	const resultCap = Math.max(1, Math.min(opts?.limit ?? DEFAULT_RESULT_CAP, MAX_RESULT_CAP));
 	const walkCap = opts?.walkCap ?? DEFAULT_WALK_CAP;
@@ -64,7 +65,7 @@ export function enumerateFiles(cwd: string, opts?: EnumerateFilesOptions): strin
 		const dir = queue.shift()!;
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
 		} catch {
 			continue; // unreadable dir — skip
 		}

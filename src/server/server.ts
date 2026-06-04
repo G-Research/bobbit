@@ -8475,7 +8475,7 @@ async function handleApiRoute(
 		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
 		// Sandbox sessions have container-internal cwds; resolve the host path.
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const files = enumerateFiles(cwd, { query: q, limit });
+		const files = await enumerateFiles(cwd, { query: q, limit });
 		json({ files: files.map((p) => ({ path: p })) });
 		return;
 	}

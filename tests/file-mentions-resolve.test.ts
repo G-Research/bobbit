@@ -37,6 +37,7 @@ const {
 	MAX_INLINE_TEXT_BYTES,
 	MAX_MENTION_FILE_BYTES,
 	MAX_MENTION_AGGREGATE_BYTES,
+	MAX_MENTIONS_PER_SEND,
 } = await import("../src/server/skills/resolve-file-mentions.ts");
 
 describe("resolveFileMentions", () => {
@@ -44,6 +45,7 @@ describe("resolveFileMentions", () => {
 		assert.equal(MAX_INLINE_TEXT_BYTES, 256 * 1024);
 		assert.equal(MAX_MENTION_FILE_BYTES, 10 * 1024 * 1024);
 		assert.equal(MAX_MENTION_AGGREGATE_BYTES, 20 * 1024 * 1024);
+		assert.equal(MAX_MENTIONS_PER_SEND, 50);
 	});
 
 	it("no mentions → text unchanged, empty mentions", () => {
@@ -105,12 +107,13 @@ describe("resolveFileMentions", () => {
 		assert.equal(r.modelText, text); // literal @path left in place
 	});
 
-	it("non-image binary (NUL bytes) → kind binary, modelText unchanged", () => {
+	it("non-image binary (NUL bytes) → unresolved (unsupported-binary), literal preserved", () => {
 		const text = "@data.bin";
 		const r = resolveFileMentions(text, cwdDir);
-		assert.equal(r.mentions[0].kind, "binary");
-		assert.ok(r.mentions[0].data);
-		assert.equal(r.modelText, text);
+		assert.equal(r.mentions[0].kind, "unresolved");
+		assert.equal(r.mentions[0].reason, "unsupported-binary");
+		assert.equal(r.mentions[0].data, undefined); // bytes are NOT snapshotted
+		assert.equal(r.modelText, text); // literal @path left so model sees the filename
 	});
 
 	it("missing file → unresolved, literal token preserved, reason set", () => {
@@ -168,5 +171,39 @@ describe("resolveFileMentions", () => {
 			r.mentions.map((m) => m.kind),
 			["text", "unresolved", "unresolved", "image"],
 		);
+	});
+
+	it("HIGH-1: symlink inside cwd pointing outside cwd is rejected (outside-cwd), no leak", (t) => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mentions-outside-"));
+		const secret = path.join(outsideDir, "secret.txt");
+		fs.writeFileSync(secret, "TOPSECRET", "utf-8");
+		const link = path.join(cwdDir, "link-to-secret.txt");
+		try {
+			fs.symlinkSync(secret, link);
+		} catch {
+			// Creating symlinks can throw EPERM on unprivileged Windows — skip
+			// so the suite stays green there.
+			t.skip("symlink creation not permitted on this platform");
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+			return;
+		}
+		const r = resolveFileMentions("@link-to-secret.txt", cwdDir);
+		assert.equal(r.mentions[0].kind, "unresolved");
+		assert.equal(r.mentions[0].reason, "outside-cwd");
+		assert.ok(!(r.mentions[0].content ?? "").includes("TOPSECRET"), "secret must not be snapshotted");
+		fs.rmSync(link, { force: true });
+		fs.rmSync(outsideDir, { recursive: true, force: true });
+	});
+
+	it("HIGH-5: more than MAX_MENTIONS_PER_SEND tokens → extras unresolved (too-many-mentions)", () => {
+		const n = MAX_MENTIONS_PER_SEND + 3;
+		const text = Array.from({ length: n }, () => "@notes.txt").join(" ");
+		const r = resolveFileMentions(text, cwdDir);
+		assert.equal(r.mentions.length, n);
+		// First MAX are resolved (text); extras degrade without fs work.
+		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND - 1].kind, "text");
+		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND].kind, "unresolved");
+		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND].reason, "too-many-mentions");
+		assert.equal(r.mentions[n - 1].reason, "too-many-mentions");
 	});
 });
