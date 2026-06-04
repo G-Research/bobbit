@@ -208,9 +208,22 @@ export function __resetToolScanCache(): void {
  *
  *   builtin (lowest)  <  market-pack roots (low→high)  <  config-level toolsDir
  *
- * A group defined in a HIGHER layer replaces the entire same-named group in all
- * lower layers; within the surviving set, the first-seen name wins (lowest layer
- * wins on a pure cross-group name collision — a legacy quirk preserved exactly).
+ * Precedence is **by tool NAME** — a higher layer's tool overrides a lower
+ * layer's same-named tool, matching the unified `PackResolver`/`ToolLoader`
+ * that powers `/api/tools` (design §3.2). Runtime resolution and the config
+ * API therefore return the SAME tool set for any pack arrangement (finding #1).
+ *
+ * The ONE legacy exception, preserved byte-identical, is the builtin ↔ user
+ * `toolsDir` pair: if the user layer defines a group, it shadows that ENTIRE
+ * same-named group in the BUILTIN layer (the pre-cascade two-layer behavior
+ * pinned by `tests/e2e/tools-cascade.spec.ts` etc.). This whole-group replace
+ * is identical to a by-name merge in practice because customizing a builtin
+ * tool copies the WHOLE group into `toolsDir` first (see `updateToolMetadata`).
+ *
+ * Market-pack layers are pure **by-name overlays**: they add new tools and may
+ * override an individual same-named tool, but NEVER shadow the rest of a
+ * builtin/user group. So installing a market pack that touches a shared group
+ * (e.g. `tools/shell/extra.yaml`) can never drop builtin tools like `bash`.
  *
  * With zero market roots this collapses to the original two-layer cascade
  * (builtin → toolsDir) and is byte-identical to the legacy behavior — see
@@ -221,37 +234,40 @@ function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketR
 }
 
 function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: string[] = []): BaseToolInfo[] {
-	// Ordered layer dirs, low→high priority. The builtin layer is lowest, the
+	// Ordered layers, low→high priority. The builtin layer is lowest, the
 	// scope's own user `toolsDir` overlay is highest, market-pack tool roots sit
 	// in between (caller orders them server < global-user < project, design §3.2).
-	const layerDirs: string[] = [];
-	if (builtinToolsDir) layerDirs.push(builtinToolsDir);
-	for (const r of marketRoots) layerDirs.push(r);
-	layerDirs.push(toolsDir);
+	const layers: Array<{ dir: string; isBuiltin: boolean }> = [];
+	if (builtinToolsDir) layers.push({ dir: builtinToolsDir, isBuiltin: true });
+	for (const r of marketRoots) layers.push({ dir: r, isBuiltin: false });
+	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
+	const userIdx = layers.length - 1;
 
-	const scanned = layerDirs.map((dir) => scanToolsDirCached(dir, dir));
+	const scanned = layers.map((l) => scanToolsDirCached(l.dir, l.dir));
 
-	// For each group dir, find the HIGHEST layer index that defines it. That
-	// layer "owns" the group; the same group in lower layers is fully shadowed.
-	const groupOwner = new Map<string, number>();
+	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
+	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
+	// Market layers neither own nor are shadowed by groups — they overlay by
+	// tool NAME only (design §3.2 / finding #1).
+	const userGroups = new Set<string>();
+	for (const t of scanned[userIdx]) if (t.groupDir) userGroups.add(t.groupDir);
+
+	// Resolve the winner per tool name (higher layer wins — matches the
+	// PackResolver), but emit in first-seen low→high order so prompt/doc output
+	// order is stable (builtins first).
+	const winner = new Map<string, BaseToolInfo>();
+	const order: string[] = [];
 	scanned.forEach((tools, idx) => {
-		for (const t of tools) if (t.groupDir) groupOwner.set(t.groupDir, idx);
-	});
-
-	const seen = new Set<string>(); // tool name dedup (lowest layer wins)
-	const result: BaseToolInfo[] = [];
-	// Emit low→high so output order matches the legacy cascade (builtins first).
-	scanned.forEach((tools, idx) => {
+		const isBuiltin = layers[idx].isBuiltin;
 		for (const t of tools) {
-			// A higher layer owns this group ⇒ this layer's copy is shadowed.
-			if (t.groupDir && groupOwner.get(t.groupDir) !== idx) continue;
-			if (seen.has(t.name)) continue;
-			seen.add(t.name);
-			result.push(t);
+			// Builtin tool in a group the user owns ⇒ whole-group shadowed.
+			if (isBuiltin && t.groupDir && userGroups.has(t.groupDir)) continue;
+			if (!winner.has(t.name)) order.push(t.name);
+			winner.set(t.name, t); // higher layer overwrites lower by name
 		}
 	});
 
-	return result;
+	return order.map((n) => winner.get(n)!);
 }
 
 /** Recursively copy a directory. */

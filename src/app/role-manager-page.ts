@@ -720,6 +720,17 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	const origin = (selectedRole as any).origin as ConfigOrigin | undefined;
 	if (!origin) return "";
 
+	// Market-pack entities are read-only — managed via the Marketplace (install/
+	// uninstall), NOT the legacy customize/override endpoints (which can't remove
+	// an installed pack). Gate the actions off when the entity carries a pack tag.
+	// See docs/design/pack-based-marketplace.md §3.2 / finding #2.
+	const originPackName = (selectedRole as any).originPackName as string | null | undefined;
+	const originPackId = (selectedRole as any).originPackId as string | null | undefined;
+	if (originPackName || originPackId) {
+		return html`<span class="config-readonly-note" data-testid="market-readonly-note"
+			title="Installed from pack '${originPackName ?? originPackId}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
+	}
+
 	const scope = getConfigScope();
 	const projectId = getConfigProjectId();
 

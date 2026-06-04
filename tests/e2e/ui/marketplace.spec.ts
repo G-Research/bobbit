@@ -343,6 +343,13 @@ test.describe("Marketplace UI", () => {
 		await expect(roleRow).toBeVisible({ timeout: 15_000 });
 		await expect(roleRow.locator('[data-testid="origin-pack-chip"]')).toHaveText("kit-pack");
 
+		// finding #2 — a market-pack entity is READ-ONLY: opening its editor shows
+		// a "Manage in Marketplace" note, NOT the legacy customize/revert buttons
+		// (those call override endpoints that can't remove an installed pack).
+		await roleRow.click();
+		await expect(page.locator('[data-testid="market-readonly-note"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(".config-action-btn")).toHaveCount(0);
+
 		// Tools + skills resolve through the single resolver, tagged with the pack
 		// (chip rendering is the identical UI asserted above for roles; the tools
 		// page groups rows which makes a UI-visibility assertion brittle). Scope

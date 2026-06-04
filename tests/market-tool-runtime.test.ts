@@ -133,3 +133,72 @@ describe("market-pack tools at runtime (finding #1)", () => {
 		assert.equal(tm.getToolByName("shared")!.description, "from builtin");
 	});
 });
+
+// ── finding #1: a market pack touching a SHARED builtin group must NOT drop
+//    the rest of that group, and runtime must EQUAL the resolver's by-name set.
+const { PackResolver, ToolLoader } = await import("../src/server/agent/pack-resolver.ts");
+import type { PackEntry } from "../src/server/agent/pack-types.ts";
+
+describe("market pack overlaying a shared builtin group (finding #1)", () => {
+	// Builtin `shell` group with a provider-backed `bash` (must survive).
+	const f = fs.mkdtempSync(path.join(TMP, "shared-group-"));
+	const builtin = path.join(f, "builtin", "tools");
+	tool(builtin, "shell", "bash", { desc: "builtin bash", provider: "provider:\n  type: builtin\n  tool: read\n" });
+	tool(builtin, "shell", "ls", { desc: "builtin ls" });
+
+	// Market pack ships ONE extra tool into the SAME `shell` group.
+	const mkt = path.join(f, "market", "tools");
+	tool(mkt, "shell", "extra", { desc: "market extra", provider: "provider:\n  type: bobbit-extension\n  extension: extension.ts\n" });
+	w(path.join(mkt, "shell", "extension.ts"), "export const y = 2;\n");
+
+	// Bare user config (no overrides).
+	const cfg = path.join(f, "config");
+	fs.mkdirSync(path.join(cfg, "tools"), { recursive: true });
+
+	/** Resolve the same layers through the unified PackResolver (the /api/tools path). */
+	function resolverNames(marketRoots: string[]): Set<string> {
+		const entries: PackEntry[] = [
+			{ id: "builtin", kind: "builtin", scope: "builtin", path: path.dirname(builtin), readOnly: true, layout: "defaults-tree" },
+			...marketRoots.map((r, i): PackEntry => ({
+				id: `market:${i}`, kind: "market", scope: "project", path: path.dirname(r), readOnly: true, layout: "defaults-tree",
+			})),
+			{ id: "user:project", kind: "user", scope: "project", path: cfg, readOnly: false, layout: "defaults-tree" },
+		];
+		return new Set(new PackResolver(entries, [new ToolLoader()]).resolve("tools").map((r) => r.name));
+	}
+
+	it("builtin bash + its provider survive; market extra resolves; no group drop", () => {
+		__resetToolScanCache();
+		const tm = new ToolManager(cfg, builtin);
+		tm.setMarketToolRootsProvider(() => [mkt]);
+
+		const bash = tm.getToolByName("bash");
+		assert.ok(bash, "builtin bash must NOT be dropped by the market pack");
+		assert.ok(tm.getToolProviders().has("bash"), "builtin bash provider must remain loaded");
+		assert.equal(tm.getToolByName("ls")!.description, "builtin ls");
+
+		const extra = tm.getToolByName("extra");
+		assert.ok(extra, "market extra must resolve");
+		assert.equal(tm.getToolProviders().get("extra")!.type, "bobbit-extension");
+	});
+
+	it("runtime tool set EQUALS the resolver/by-name set (no divergence)", () => {
+		__resetToolScanCache();
+		const tm = new ToolManager(cfg, builtin);
+		tm.setMarketToolRootsProvider(() => [mkt]);
+		const runtime = new Set(tm.getAllToolNames());
+		assert.deepEqual([...runtime].sort(), [...resolverNames([mkt])].sort());
+		assert.deepEqual([...runtime].sort(), ["bash", "extra", "ls"]);
+	});
+
+	it("market pack defining a BRAND-NEW group adds it and equals the resolver", () => {
+		__resetToolScanCache();
+		const newGrp = path.join(f, "market-new", "tools");
+		tool(newGrp, "fresh", "fresh_tool", { desc: "brand new" });
+		const tm = new ToolManager(cfg, builtin);
+		tm.setMarketToolRootsProvider(() => [newGrp]);
+		assert.ok(tm.getToolByName("fresh_tool"), "brand-new group tool resolves");
+		assert.ok(tm.getToolByName("bash"), "builtin bash still present");
+		assert.deepEqual(new Set(tm.getAllToolNames()), resolverNames([newGrp]));
+	});
+});
