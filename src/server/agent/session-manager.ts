@@ -20,6 +20,7 @@ import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBrid
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
+import type { FileMention } from "../skills/resolve-file-mentions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
@@ -309,6 +310,8 @@ export interface SessionInfo {
 		modelText: string;
 		originalText: string;
 		skillExpansions: SkillExpansion[];
+		/** `@path` file-mention chips re-attached alongside skill expansions. */
+		fileMentions?: FileMention[];
 	}>;
 	/** Repo path (cached from worktree provisioning). */
 	repoPath?: string;
@@ -519,7 +522,7 @@ import { broadcastStatus } from "./session-status.js";
  *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
  *  must route through here so envelope fields stay consistent.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[] }> }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
 	const spliced = spliceSkillExpansionsIntoEvent(session, truncated);
 	const entry = session.eventBuffer.push(spliced);
 	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
@@ -548,7 +551,7 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
  * the un-spliced (modelText) message — that is what the model has seen.
  */
 function spliceSkillExpansionsIntoEvent(
-	session: { pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[] }> },
+	session: { pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> },
 	event: unknown,
 ): unknown {
 	const ev = event as any;
@@ -564,6 +567,9 @@ function spliceSkillExpansionsIntoEvent(
 	const envelope = pending.splice(idx, 1)[0];
 	const rewrittenMsg = rewriteUserMessageText(msg, envelope.originalText);
 	rewrittenMsg.skillExpansions = envelope.skillExpansions;
+	if (envelope.fileMentions && envelope.fileMentions.length > 0) {
+		rewrittenMsg.fileMentions = envelope.fileMentions;
+	}
 	return { ...ev, message: rewrittenMsg };
 }
 
@@ -1727,6 +1733,8 @@ export class SessionManager {
 		modelText?: string;
 		/** Resolved slash-skill expansions, in original-text order. UI-only metadata. */
 		skillExpansions?: SkillExpansion[];
+		/** Resolved `@path` file mentions (all kinds), in original-text order. UI-only metadata. */
+		fileMentions?: FileMention[];
 		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
 		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
 		source?: PromptSource;
@@ -1746,13 +1754,15 @@ export class SessionManager {
 		// no-attachment prompts pass through unchanged. See
 		// synthesizeAttachmentText for the exact rule.
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-		const hasExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
-		if (hasExpansions) {
+		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
+		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
+		if (hasSkillExpansions || hasFileMentions) {
 			appendSkillSidecarEntry(session.id, {
 				ts: Date.now(),
 				modelText: dispatchText,
 				originalText: text,
-				skillExpansions: opts!.skillExpansions!,
+				skillExpansions: opts?.skillExpansions ?? [],
+				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 			});
 			// Stash the envelope so when the agent echoes the user message
 			// back via `message_end`, we can splice the original text +
@@ -1761,7 +1771,8 @@ export class SessionManager {
 			session.pendingSkillExpansions.push({
 				modelText: dispatchText,
 				originalText: text,
-				skillExpansions: opts!.skillExpansions!,
+				skillExpansions: opts?.skillExpansions ?? [],
+				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 			});
 		}
 
