@@ -331,6 +331,16 @@ export class StaffManager {
 			id: t.id || randomUUID(),
 		}));
 
+		// When the caller didn't supply a usable accessory (absent/empty/"none")
+		// but selected a role, default the persisted accessory to the role's
+		// accessory. This mirrors the edit-UI pre-fill so API- and proposal-created
+		// role staff also inherit the role's accessory. An explicit accessory wins.
+		let effectiveAccessory = opts?.accessory;
+		if ((!effectiveAccessory || effectiveAccessory === "none") && opts?.roleId) {
+			const role = sessionManager.getRoleManager?.()?.getRole(opts.roleId);
+			if (role?.accessory && role.accessory !== "none") effectiveAccessory = role.accessory;
+		}
+
 		const staff: PersistedStaff = {
 			id,
 			name,
@@ -344,7 +354,7 @@ export class StaffManager {
 			triggers,
 			memory: "",
 			roleId: opts?.roleId,
-			accessory: normalizeStaffAccessory(opts?.accessory),
+			accessory: normalizeStaffAccessory(effectiveAccessory),
 			createdAt: now,
 			updatedAt: now,
 			projectId,

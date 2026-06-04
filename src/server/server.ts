@@ -9773,6 +9773,11 @@ async function handleApiRoute(
 			json({ error: "Missing systemPrompt" }, 400);
 			return;
 		}
+		// Defense-in-depth: roleId, when present, must be a string or null.
+		if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+			json({ error: "roleId must be a string or null" }, 400);
+			return;
+		}
 		// Validate the referenced role exists (when provided). roleId omitted or
 		// null/empty is allowed — staff with no role behave as before.
 		if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
@@ -9873,6 +9878,11 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			// Defense-in-depth: roleId, when present, must be a string or null.
+			if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+				json({ error: "roleId must be a string or null" }, 400);
+				return;
+			}
 			// Validate the referenced role exists (when provided). roleId: null
 			// (clear) and omitted are allowed.
 			if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
