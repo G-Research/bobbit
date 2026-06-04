@@ -15,17 +15,27 @@
  *                   (the literal `@path` stays so the model has the
  *                   filename, and the handler routes the bytes through the
  *                   image attachment frame).
- *       • `binary`→ base64 snapshot in `data`; routed as a document
- *                   attachment by the handler; `modelText` untouched.
  *       • `unresolved` → missing / unreadable / too-large / outside-cwd /
- *                   aggregate-cap. Literal `@path` left in `modelText`,
- *                   `reason` set. **Never throws** — every failure path
- *                   degrades gracefully.
+ *                   aggregate-cap / too-many-mentions / unsupported-binary.
+ *                   Literal `@path` left in `modelText`, `reason` set.
+ *                   **Never throws** — every failure path degrades gracefully.
  *
- *   - **Snapshot at resolve time** — file content (text) and base64 bytes
- *     (image/binary) are captured now so replaying a `.jsonl` later renders
- *     the same content the model originally saw, even if the file changed
- *     on disk. (Same guarantee as skill expansions.)
+ *     Non-image, non-text files (e.g. `.zip`, `.bin`) are classified
+ *     `unresolved` with reason `unsupported-binary`: the prompt RPC only
+ *     carries text + images (`rpcClient.prompt(text, images)`), so there is
+ *     no honest way to deliver raw binary bytes to the model. The literal
+ *     `@path` stays in `modelText` so the model at least sees the filename,
+ *     and the chip surfaces the reason.
+ *
+ *   - **Snapshot at resolve time** — text content and image base64 bytes are
+ *     captured now so replaying a `.jsonl` later renders the same content the
+ *     model originally saw, even if the file changed on disk. (Same guarantee
+ *     as skill expansions.)
+ *
+ *   - **Path safety** — the target is canonicalized with `fs.realpathSync`
+ *     and a `path.relative` containment check is applied to the CANONICAL
+ *     paths BEFORE any stat/read, so a symlink inside `cwd` that points
+ *     outside `cwd` cannot leak host files.
  *
  * Text inlining splices **right-to-left** by range to preserve indices.
  *
@@ -38,21 +48,21 @@ import path from "node:path";
 /** Char range, in UTF-16 code units (matches `String.prototype.slice`). */
 export type MentionRange = [number, number];
 
-export type MentionKind = "text" | "image" | "binary" | "unresolved";
+export type MentionKind = "text" | "image" | "unresolved";
 
 export interface FileMention {
 	/** Relative path exactly as typed (after the `@`), trailing punctuation trimmed. */
 	path: string;
-	/** Resolved absolute host path (omitted if unresolved). */
+	/** Resolved (canonical) absolute host path (omitted if unresolved). */
 	absPath?: string;
 	/** UTF-16 char range in `originalText` that the chip replaces (`@path` span). */
 	range: MentionRange;
 	kind: MentionKind;
 	/** text kind: snapshotted file content (verbatim). */
 	content?: string;
-	/** image/binary kind: base64 (no data-URL prefix) snapshot. */
+	/** image kind: base64 (no data-URL prefix) snapshot. */
 	data?: string;
-	/** image/binary kind: detected MIME type. */
+	/** image kind: detected MIME type. */
 	mimeType?: string;
 	/** Resolved file size in bytes. */
 	bytes?: number;
@@ -73,10 +83,12 @@ export interface ResolvedMentions {
 
 /** Per-file cap for **text** inlining. Oversized text → unresolved (too-large). */
 export const MAX_INLINE_TEXT_BYTES = 256 * 1024; // 256 KiB
-/** Per-file cap for image/binary snapshots. Over → unresolved (too-large). */
+/** Per-file cap for image snapshots. Over → unresolved (too-large). */
 export const MAX_MENTION_FILE_BYTES = 10 * 1024 * 1024; // 10 MiB
 /** Aggregate cap across all resolved mentions in one send. */
 export const MAX_MENTION_AGGREGATE_BYTES = 20 * 1024 * 1024; // 20 MiB
+/** Max `@path` tokens resolved per send. Extra tokens → unresolved (too-many-mentions), no fs work. */
+export const MAX_MENTIONS_PER_SEND = 50;
 
 /** Image extensions → MIME type. */
 const IMAGE_MIME: Record<string, string> = {
@@ -139,6 +151,12 @@ function scanTokens(text: string): ScannedToken[] {
 	return out;
 }
 
+/** True when `target` is not contained within `baseDir` (escape via `..` / absolute). */
+function escapesDir(baseDir: string, target: string): boolean {
+	const rel = path.relative(baseDir, target);
+	return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel);
+}
+
 /** Heuristic: is this buffer likely UTF-8 text (not binary)? */
 function isLikelyText(buf: Buffer): boolean {
 	if (buf.length === 0) return true;
@@ -171,7 +189,18 @@ export function resolveFileMentions(
 	const warnings: string[] = [];
 	const replacements: Array<{ start: number; end: number; expanded: string }> = [];
 
+	// Canonicalize cwd once for symlink-safe containment checks. Fall back to
+	// the lexically-resolved cwd if it cannot be realpath'd (e.g. missing).
+	const resolvedCwd = path.resolve(cwd);
+	let canonicalCwd: string;
+	try {
+		canonicalCwd = fs.realpathSync.native(resolvedCwd);
+	} catch {
+		canonicalCwd = resolvedCwd;
+	}
+
 	let aggregateUsed = 0;
+	let resolvedCount = 0;
 
 	for (const tok of tokens) {
 		const rawPath = tok.rawPath;
@@ -185,15 +214,38 @@ export function resolveFileMentions(
 			warnings.push(`@${rawPath}: ${reason}`);
 		};
 
-		// Path safety: resolve relative to cwd and reject escapes.
-		const absPath = path.resolve(cwd, normRel);
-		const relCheck = path.relative(cwd, absPath);
-		if (relCheck === ".." || relCheck.startsWith(".." + path.sep) || path.isAbsolute(relCheck)) {
+		// Mention-count cap: beyond the cap, degrade without any filesystem work.
+		if (resolvedCount >= MAX_MENTIONS_PER_SEND) {
+			markUnresolved("too-many-mentions");
+			continue;
+		}
+		resolvedCount++;
+
+		// Path safety, step 1: cheap lexical reject of obvious `..` / absolute
+		// escapes (also handles non-existent traversal paths).
+		const lexicalAbs = path.resolve(resolvedCwd, normRel);
+		if (escapesDir(resolvedCwd, lexicalAbs)) {
 			markUnresolved("outside-cwd");
 			continue;
 		}
 
-		// Stat the file.
+		// Path safety, step 2: canonicalize to defeat symlink escapes. realpath
+		// throws when the target does not exist → treat as missing. The
+		// containment check runs on the CANONICAL paths BEFORE any stat/read,
+		// so a symlink inside cwd pointing outside cwd is rejected.
+		let absPath: string;
+		try {
+			absPath = fs.realpathSync.native(lexicalAbs);
+		} catch {
+			markUnresolved("missing");
+			continue;
+		}
+		if (escapesDir(canonicalCwd, absPath)) {
+			markUnresolved("outside-cwd");
+			continue;
+		}
+
+		// Stat the (canonical) file.
 		let size: number;
 		try {
 			const st = fs.statSync(absPath);
@@ -272,17 +324,11 @@ export function resolveFileMentions(
 			continue;
 		}
 
-		// Binary (non-image).
-		const data = buf.toString("base64");
-		if (aggregateUsed + data.length > maxAggregate) {
-			markUnresolved("aggregate-cap");
-			continue;
-		}
-		aggregateUsed += data.length;
-		base.kind = "binary";
-		base.data = data;
-		base.mimeType = "application/octet-stream";
-		mentions.push(base);
+		// Non-image binary: the prompt RPC only carries text + images, so raw
+		// binary bytes cannot be honestly delivered to the model. Leave the
+		// literal `@path` in modelText (model still sees the filename) and
+		// surface the reason in the chip.
+		markUnresolved("unsupported-binary");
 	}
 
 	// Build modelText by splicing text mentions right-to-left.

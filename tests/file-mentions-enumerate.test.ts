@@ -43,8 +43,8 @@ const { enumerateFiles, DEFAULT_RESULT_CAP, MAX_RESULT_CAP } =
 	await import("../src/server/skills/file-enumeration.ts");
 
 describe("enumerateFiles", () => {
-	it("includes gitignored/untracked files, excludes noise dirs", () => {
-		const files = enumerateFiles(cwdDir);
+	it("includes gitignored/untracked files, excludes noise dirs", async () => {
+		const files = await enumerateFiles(cwdDir);
 		assert.ok(files.includes("secret.env"), "gitignored file should be included");
 		assert.ok(files.includes(".gitignore"));
 		assert.ok(files.includes("src/index.ts"));
@@ -54,40 +54,40 @@ describe("enumerateFiles", () => {
 		assert.ok(!files.some((f) => f.startsWith(".bobbit/")), ".bobbit excluded");
 	});
 
-	it("returns forward-slash relative paths", () => {
-		const files = enumerateFiles(cwdDir);
+	it("returns forward-slash relative paths", async () => {
+		const files = await enumerateFiles(cwdDir);
 		assert.ok(files.every((f) => !f.includes("\\")));
 		assert.ok(files.includes("src/util/helpers.ts"));
 	});
 
-	it("query substring filter is case-insensitive", () => {
-		const files = enumerateFiles(cwdDir, { query: "BUTTON" });
+	it("query substring filter is case-insensitive", async () => {
+		const files = await enumerateFiles(cwdDir, { query: "BUTTON" });
 		assert.ok(files.includes("src/components/Button.tsx"));
 		assert.ok(!files.includes("README.md"));
 	});
 
-	it("basename matches rank ahead of path-only matches", () => {
+	it("basename matches rank ahead of path-only matches", async () => {
 		touch("util.ts");
-		const files = enumerateFiles(cwdDir, { query: "util" });
+		const files = await enumerateFiles(cwdDir, { query: "util" });
 		// "util.ts" (basename match) should outrank "src/util/helpers.ts" (path-only).
 		assert.equal(files[0], "util.ts");
 	});
 
-	it("respects the result cap (limit), clamped to MAX_RESULT_CAP", () => {
-		const limited = enumerateFiles(cwdDir, { limit: 2 });
+	it("respects the result cap (limit), clamped to MAX_RESULT_CAP", async () => {
+		const limited = await enumerateFiles(cwdDir, { limit: 2 });
 		assert.equal(limited.length, 2);
 		// Over-max limit clamps rather than returning more than MAX_RESULT_CAP.
-		const clamped = enumerateFiles(cwdDir, { limit: MAX_RESULT_CAP + 5000 });
+		const clamped = await enumerateFiles(cwdDir, { limit: MAX_RESULT_CAP + 5000 });
 		assert.ok(clamped.length <= MAX_RESULT_CAP);
 	});
 
-	it("walk cap stops enumeration early", () => {
-		const capped = enumerateFiles(cwdDir, { walkCap: 1 });
+	it("walk cap stops enumeration early", async () => {
+		const capped = await enumerateFiles(cwdDir, { walkCap: 1 });
 		assert.ok(capped.length <= DEFAULT_RESULT_CAP);
 	});
 
-	it("never throws on an unreadable / missing root", () => {
-		const files = enumerateFiles(path.join(cwdDir, "does-not-exist"));
+	it("never throws on an unreadable / missing root", async () => {
+		const files = await enumerateFiles(path.join(cwdDir, "does-not-exist"));
 		assert.deepEqual(files, []);
 	});
 });
