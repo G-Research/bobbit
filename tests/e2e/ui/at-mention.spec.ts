@@ -121,31 +121,13 @@ test.describe("@-mention file references UI", () => {
 		await expect(page.locator(".at-menu")).toHaveCount(0);
 	});
 
-	// KNOWN SERVER GAP — text-mention chip persistence (design §5/§8.4).
-	//
-	// The UI is correct: a text `@`-mention DOES render a chip live (verified
-	// manually — `fileMentions` arrives on the broadcast user message and
-	// `FileMentionChip` renders, same code path the image/unresolved tests
-	// exercise green here). But the chip is lost on the authoritative
-	// snapshot/reload path because the SERVER-side merge drops `fileMentions`:
-	//
-	//   src/server/ws/handler.ts  `mergeSkillSidecarIntoMessages` returns
-	//     `{ ...msg, content, skillExpansions: envelope.skillExpansions }`
-	//   — it never re-attaches `envelope.fileMentions`. So on reload (and the
-	//   post-turn snapshot that replaces the live row) text mentions lose their
-	//   chip. Image/unresolved survive only because their `modelText` equals the
-	//   original text, so they don't depend on this rewrite carrying metadata.
-	//
-	// One-line server fix (team-lead owns the server bundle; UI must not touch
-	// src/server): in `mergeSkillSidecarIntoMessages`, mirror the live splice in
-	// `spliceSkillExpansionsIntoEvent` —
-	//   return { ...msg, content: newContent,
-	//            skillExpansions: envelope.skillExpansions,
-	//            ...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}) };
-	//
-	// Once that lands, drop `.fixme` and this test verifies chip + literal text
-	// persist across reload.
-	test.fixme("@text-file persists as a chip across reload; click expands the snapshot", async ({ page }) => {
+	// Exercises the text-mention round trip: the chip renders live and survives
+	// the authoritative snapshot/reload path (the sidecar carries `fileMentions`
+	// alongside `skillExpansions`, so the rewritten user message restores both).
+	// Text mentions are the case where `modelText !== originalText` (content is
+	// inlined for the model), so this guards the rewrite-carries-metadata path
+	// that image/unresolved mentions don't depend on.
+	test("@text-file persists as a chip across reload; click expands the snapshot", async ({ page }) => {
 		const cwd = uniqueCwd();
 		writeFixtures(cwd);
 		await openSession(page, cwd);
