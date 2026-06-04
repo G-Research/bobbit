@@ -6,6 +6,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
@@ -20,7 +21,7 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
-import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
@@ -204,7 +205,11 @@ import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
-import { ConfigCascade } from "./agent/config-cascade.js";
+import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
+import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
+import { MarketplaceInstaller, MarketplaceError, type InstallScope, type PackOrderStore } from "./agent/marketplace-install.js";
+import { scopeMarketPackEntries } from "./agent/pack-list.js";
+import { buildConflictsFor, type ConflictWire, type PackScope } from "./agent/pack-types.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -876,6 +881,39 @@ export function createGateway(config: GatewayConfig) {
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
+	// ── Pack-Based Marketplace (single resolver over installed packs) ──────
+	// Sources are global to the server; the cache + sources file live under
+	// the server scope. Install/resolve derive market-pack roots from a per-
+	// scope `base` via scopePaths() (design §1.3.1). Server base is the
+	// project root (getProjectRoot()), global-user is the home dir, project is
+	// each project's rootPath.
+	const marketplaceSourceStore = new MarketplaceSourceStore(configDir);
+	const marketplaceInstaller = new MarketplaceInstaller({
+		sourceStore: marketplaceSourceStore,
+		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
+		serverBase: getProjectRoot(),
+		globalUserBase: os.homedir(),
+	});
+	// Resolve the on-disk base + pack_order store for an install scope.
+	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
+		if (scope === "server") return { base: getProjectRoot(), store: projectConfigStore };
+		if (scope === "global-user") return { base: os.homedir(), store: projectConfigStore };
+		// project
+		if (!projectId) return null;
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) return null;
+		return { base: ctx.project.rootPath, store: ctx.projectConfigStore };
+	};
+	// Feed installed market packs into the roles/tools cascade (design §3.2).
+	const marketPackProvider: MarketPackProvider = {
+		marketEntries(scope, projectId) {
+			const sc = marketScopeContext(scope as InstallScope, projectId);
+			if (!sc) return [];
+			return scopeMarketPackEntries(scope as PackScope, sc.base, sc.store.getPackOrder(scope));
+		},
+	};
+	configCascade.setMarketPackProvider(marketPackProvider);
+
 	const staffManager = new StaffManager(projectContextManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
@@ -1065,7 +1103,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2056,10 +2094,22 @@ async function handleApiRoute(
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
 	prWalkthroughAgentManager?: WalkthroughAgentManager,
+	marketplaceSourceStore?: MarketplaceSourceStore,
+	marketplaceInstaller?: MarketplaceInstaller,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
+	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
+	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
+		...r.item,
+		origin: r.origin,
+		...(r.overrides ? { overrides: r.overrides } : {}),
+		...(r.originPackName ? { originPackId: r.originPackId ?? null, originPackName: r.originPackName } : {}),
+	});
+	// Roles/tools resolution is recomputed per call; only the slash-skills TTL
+	// cache needs busting after a marketplace pack-list mutation (design §9.1).
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); };
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -4367,7 +4417,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveTools(projectId);
-		const tools: Array<Record<string, unknown>> = resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) }));
+		const tools: Array<Record<string, unknown>> = resolved.map(r => withOrigin(r as any));
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
@@ -4675,6 +4725,214 @@ async function handleApiRoute(
 		const resolvedStore = resolveProjectConfigStore(projectId);
 		resetConfigDirectories(resolvedStore);
 		json({ ok: true });
+		return;
+	}
+
+	// ── Pack-Based Marketplace (design §9 / §9.1 / §9.2) ──────────────
+	if (url.pathname.startsWith("/api/marketplace/") || url.pathname === "/api/packs/conflicts") {
+		if (!marketplaceInstaller || !marketplaceSourceStore) { json({ error: "marketplace not available" }, 500); return; }
+		const installer = marketplaceInstaller;
+		const sourceStore = marketplaceSourceStore;
+
+		const MARKET_SCOPES = new Set(["global-user", "server", "project"]);
+		const parseScope = (raw: unknown): InstallScope | null =>
+			typeof raw === "string" && MARKET_SCOPES.has(raw) ? (raw as InstallScope) : null;
+
+		type ScopeTarget = { scope: InstallScope; projectBase?: string; store: PackOrderStore };
+		const resolveScopeTarget = (
+			scope: InstallScope,
+			projectId: string | undefined,
+		): { ok: true; target: ScopeTarget } | { ok: false; status: number; error: string } => {
+			if (scope === "project") {
+				if (!projectId) return { ok: false, status: 400, error: "projectId required for project scope" };
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!ctx) return { ok: false, status: 404, error: "Project not found" };
+				return { ok: true, target: { scope, projectBase: ctx.project.rootPath, store: ctx.projectConfigStore } };
+			}
+			return { ok: true, target: { scope, store: projectConfigStore } };
+		};
+
+		const errStatus = (code: string, notInstalled = 409): number => {
+			switch (code) {
+				case "unknown_source": return 404;
+				case "unknown_pack": return 404;
+				case "invalid_pack": return 422;
+				case "already_installed": return 409;
+				case "not_installed": return notInstalled;
+				case "unsafe_name": return 400;
+				case "git_failed": return 502;
+				default: return 400;
+			}
+		};
+		const handleMarketErr = (err: unknown, notInstalled = 409): void => {
+			if (err instanceof MarketplaceError) { json({ error: err.message }, errStatus(err.code, notInstalled)); return; }
+			jsonError(500, err);
+		};
+
+		// All scope contexts present for cross-scope listing.
+		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string }> => {
+			const ctxs: Array<{ scope: InstallScope; projectBase?: string }> = [
+				{ scope: "server" },
+				{ scope: "global-user" },
+			];
+			if (projectId) {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath });
+			}
+			return ctxs;
+		};
+
+		// ── Sources ───────────────────────────────────────────────
+		// GET /api/marketplace/sources
+		if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
+			json({ sources: sourceStore.list() });
+			return;
+		}
+		// POST /api/marketplace/sources { url, ref? }
+		if (url.pathname === "/api/marketplace/sources" && req.method === "POST") {
+			const body = await readBody(req);
+			const srcUrl = body && typeof (body as any).url === "string" ? (body as any).url.trim() : "";
+			if (!srcUrl) { json({ error: "url is required" }, 400); return; }
+			if (sourceStore.getByUrl(srcUrl)) { json({ error: `source already registered: ${srcUrl}` }, 409); return; }
+			let source;
+			try {
+				source = sourceStore.add({ url: srcUrl, ref: (body as any).ref });
+			} catch (err) { jsonError(400, err); return; }
+			try {
+				installer.syncSource(source.id);
+			} catch (err) {
+				// Roll back the registration if the initial sync fails.
+				sourceStore.remove(source.id);
+				handleMarketErr(err);
+				return;
+			}
+			json({ source: sourceStore.get(source.id) }, 201);
+			return;
+		}
+		// /api/marketplace/sources/:id[...]
+		const sourceMatch = url.pathname.match(/^\/api\/marketplace\/sources\/([^/]+)(\/sync|\/packs)?$/);
+		if (sourceMatch) {
+			const id = decodeURIComponent(sourceMatch[1]);
+			const sub = sourceMatch[2];
+			if (!isValidSourceId(id) || !sourceStore.get(id)) { json({ error: `unknown source: ${id}` }, 404); return; }
+
+			if (!sub && req.method === "DELETE") {
+				sourceStore.remove(id);
+				try { fs.rmSync(installer.cacheDirFor(id), { recursive: true, force: true }); } catch { /* ignore */ }
+				res.writeHead(204); res.end();
+				return;
+			}
+			if (sub === "/sync" && req.method === "POST") {
+				try { installer.syncSource(id); } catch (err) { handleMarketErr(err); return; }
+				json({ source: sourceStore.get(id) });
+				return;
+			}
+			if (sub === "/packs" && req.method === "GET") {
+				try { json({ packs: installer.browsePacks(id) }); } catch (err) { handleMarketErr(err); }
+				return;
+			}
+		}
+
+		// ── Install / update / uninstall ──────────────────────────
+		// POST /api/marketplace/install { sourceId, packName, scope, projectId? }
+		if (url.pathname === "/api/marketplace/install" && req.method === "POST") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.sourceId !== "string" || typeof body?.packName !== "string") { json({ error: "sourceId and packName are required" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			try {
+				const installed = installer.installPack({ sourceId: body.sourceId, packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				invalidateResolverCaches();
+				json({ installed }, 201);
+			} catch (err) { handleMarketErr(err); }
+			return;
+		}
+		// POST /api/marketplace/update { scope, packName, projectId? }
+		if (url.pathname === "/api/marketplace/update" && req.method === "POST") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			try {
+				const installed = installer.updatePack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				invalidateResolverCaches();
+				json({ installed });
+			} catch (err) { handleMarketErr(err, 409); }
+			return;
+		}
+		// DELETE /api/marketplace/installed { scope, packName, projectId? }
+		if (url.pathname === "/api/marketplace/installed" && req.method === "DELETE") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			try {
+				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				invalidateResolverCaches();
+				res.writeHead(204); res.end();
+			} catch (err) { handleMarketErr(err, 404); }
+			return;
+		}
+		// GET /api/marketplace/installed?projectId=
+		if (url.pathname === "/api/marketplace/installed" && req.method === "GET") {
+			const projectId = url.searchParams.get("projectId") || undefined;
+			try { json({ installed: installer.listInstalled(allContexts(projectId)) }); } catch (err) { jsonError(500, err); }
+			return;
+		}
+
+		// ── pack-order (§9.2) ─────────────────────────────────────
+		if (url.pathname === "/api/marketplace/pack-order" && req.method === "GET") {
+			const scope = parseScope(url.searchParams.get("scope"));
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const st = resolveScopeTarget(scope, projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			json({ scope, order: st.target.store.getPackOrder(scope) });
+			return;
+		}
+		if (url.pathname === "/api/marketplace/pack-order" && req.method === "PUT") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (!Array.isArray(body?.order) || !body.order.every((x: unknown) => typeof x === "string")) { json({ error: "order must be a string array" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			// Normalize: drop names not installed at this scope; append on-disk-but-absent
+			// packs at lowest priority (front), preserving the requested order otherwise.
+			const installedNames = installer.listInstalled([{ scope, projectBase: st.target.projectBase }])
+				.filter((p) => p.scope === scope && p.status !== "corrupt")
+				.map((p) => p.packName);
+			const installedSet = new Set(installedNames);
+			const filtered = (body.order as string[]).filter((n) => installedSet.has(n));
+			const missing = installedNames.filter((n) => !filtered.includes(n));
+			const normalized = [...missing, ...filtered];
+			st.target.store.setPackOrder(scope, normalized);
+			invalidateResolverCaches();
+			json({ scope, order: normalized });
+			return;
+		}
+
+		// ── conflicts (§4 / §9) ───────────────────────────────────
+		if (url.pathname === "/api/packs/conflicts" && req.method === "GET") {
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const conflicts: ConflictWire[] = [
+				...buildConflictsFor("roles", configCascade.resolveRolesEntries(projectId)),
+				...buildConflictsFor("tools", configCascade.resolveToolsEntries(projectId)),
+			];
+			const skillCwd = resolveSkillDiscoveryCwd(process.cwd(), projectId ?? null);
+			const skillStore = resolveProjectConfigStore(projectId ?? null);
+			conflicts.push(...buildConflictsFor("skills", discoverSlashSkillsResolved(skillCwd, skillStore)));
+			json({ conflicts });
+			return;
+		}
+
+		json({ error: "not found" }, 404);
 		return;
 	}
 
@@ -5171,7 +5429,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveRoles(projectId);
-		json({ roles: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
+		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}
 
@@ -5283,7 +5541,7 @@ async function handleApiRoute(
 				const resolved = configCascade.resolveRoles(qProjectId);
 				const found = resolved.find(r => r.item.name === name);
 				if (!found) { json({ error: "Role not found" }, 404); return; }
-				json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
+				json(withOrigin(found as any));
 			} else {
 				const role = roleManager.getRole(name);
 				if (!role) { json({ error: "Role not found" }, 404); return; }
@@ -8471,7 +8729,7 @@ async function handleApiRoute(
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
 		const skills = discoverSlashSkills(cwd, resolvedStore);
 		const directories = getSkillDirectories(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })), directories });
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackName: s.originPackName ?? null })), directories });
 		return;
 	}
 

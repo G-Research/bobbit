@@ -63,6 +63,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)
 	"state/sandbox-agent-auth/",  // scoped sandbox auth mounts (host-tokens.ts)
 	"state/system-project/",      // synthetic system-project anchor (server.ts)
+	"state/marketplace-cache/",   // server.ts (marketplace source git-clone cache; server-global)
 ];
 
 export interface ArchiveResult {

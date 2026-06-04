@@ -113,6 +113,18 @@ function scanMarketPacks(
 	return ordered.map((n) => found.get(n)!).filter(Boolean);
 }
 
+/**
+ * Ordered market-pack {@link PackEntry} list for ONE scope (low→high), derived
+ * via {@link scopePaths} from a scope `base`. Exported so the roles/tools
+ * cascade adapter can interleave installed market packs into its resolution
+ * without re-implementing the corrupt-guard / ordering rules. `base` per scope:
+ * server = `<server-cwd>`, global-user = `os.homedir()`, project = `<project root>`.
+ */
+export function scopeMarketPackEntries(scope: PackScope, base: string, packOrder: string[]): PackEntry[] {
+	const { marketPacksRoot } = scopePaths(scope, base);
+	return scanMarketPacks(marketPacksRoot, scope, packOrder);
+}
+
 /** Read a scope's market-pack order hint from a store, if present. */
 function readPackOrder(store: ProjectConfigReader | undefined, scope: PackScope): string[] {
 	if (!store) return [];
@@ -132,6 +144,13 @@ function readPackOrder(store: ProjectConfigReader | undefined, scope: PackScope)
 export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 	const entries: PackEntry[] = [];
 	const disabled = readDisabledDirs(opts.projectConfigStore);
+
+	// NOTE: market entries are intentionally NOT deduped by path here. When all
+	// scope bases coincide (a self-managed project whose rootPath == server cwd),
+	// the higher scope re-scans the same dir and its `pack_order` legitimately
+	// wins (pinned by tests/pack-marketplace.test.ts "market-vs-market"). The
+	// resulting same-path self-shadow is harmless for skill resolution.
+	const pushMarket = (list: PackEntry[]): void => { entries.push(...list); };
 
 	// A skills-flat legacy-implicit entry, omitted if disabled (§6.3).
 	const legacySkillDir = (
@@ -199,7 +218,7 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 	// 4. Server scope (roles/tools): market packs, then the user pack.
 	{
 		const { userPackRoot, marketPacksRoot } = scopePaths("server", opts.serverBase);
-		entries.push(...scanMarketPacks(marketPacksRoot, "server", readPackOrder(opts.serverConfigStore, "server")));
+		pushMarket(scanMarketPacks(marketPacksRoot, "server", readPackOrder(opts.serverConfigStore, "server")));
 		entries.push(userPackEntry("server", userPackRoot));
 	}
 
@@ -211,14 +230,14 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 	// 6. Global-user scope (roles/tools): market packs, then the user pack.
 	{
 		const { userPackRoot, marketPacksRoot } = scopePaths("global-user", opts.globalUserBase);
-		entries.push(...scanMarketPacks(marketPacksRoot, "global-user", readPackOrder(opts.serverConfigStore, "global-user")));
+		pushMarket(scanMarketPacks(marketPacksRoot, "global-user", readPackOrder(opts.serverConfigStore, "global-user")));
 		entries.push(userPackEntry("global-user", userPackRoot));
 	}
 
 	// 7. Project scope (roles/tools): market packs, then the user pack.
 	if (opts.projectBase) {
 		const { userPackRoot, marketPacksRoot } = scopePaths("project", opts.projectBase);
-		entries.push(...scanMarketPacks(marketPacksRoot, "project", readPackOrder(opts.projectConfigStore, "project")));
+		pushMarket(scanMarketPacks(marketPacksRoot, "project", readPackOrder(opts.projectConfigStore, "project")));
 		entries.push(userPackEntry("project", userPackRoot));
 	}
 

@@ -128,11 +128,60 @@ export interface EntityLoader<T> {
 // ── Resolved output ──────────────────────────────────────────────
 
 export interface ResolvedEntity<T> {
+	/** Merge key (entity name), echoed so callers can build conflict reports. */
+	name: string;
 	item: T;
 	/** The winning pack. */
 	origin: PackEntry;
 	/** Lower-priority packs that defined the same name (oldest→newest). */
 	shadows: PackEntry[];
+}
+
+// ── Conflict surfacing (marketplace manager + /api/packs/conflicts) ──
+
+/** A reference to one pack participating in a same-name conflict (wire shape). */
+export interface ConflictPackRef {
+	/** {@link PackEntry.id}, e.g. `market:project:research-pack`. */
+	packEntryId: string;
+	scope: string;
+	/** Human label: market pack name, else the scope kind. */
+	label: string;
+}
+
+/** One same-name conflict `(type, name)` with winner + shadowed packs. */
+export interface ConflictWire {
+	type: EntityType;
+	name: string;
+	winner: ConflictPackRef;
+	shadowed: ConflictPackRef[];
+}
+
+/** Build a wire reference for a pack entry participating in a conflict. */
+export function packEntryRef(entry: PackEntry): ConflictPackRef {
+	const label = entry.kind === "market" ? (entry.manifest?.name ?? entry.id) : entry.scope;
+	return { packEntryId: entry.id, scope: entry.scope, label };
+}
+
+/**
+ * Derive the conflict list for one entity type's resolved entities.
+ *
+ * Only **market-pack-involved** shadows are reported (design §4): a plain
+ * builtin→user customize/override is the normal flow and is NOT flagged.
+ */
+export function buildConflictsFor<T>(type: EntityType, resolved: ResolvedEntity<T>[]): ConflictWire[] {
+	const out: ConflictWire[] = [];
+	for (const r of resolved) {
+		if (r.shadows.length === 0) continue;
+		const involvesMarket = r.origin.kind === "market" || r.shadows.some((s) => s.kind === "market");
+		if (!involvesMarket) continue;
+		out.push({
+			type,
+			name: r.name,
+			winner: packEntryRef(r.origin),
+			shadowed: r.shadows.map(packEntryRef),
+		});
+	}
+	return out;
 }
 
 // ── Scope path derivation (single source of truth) ───────────────

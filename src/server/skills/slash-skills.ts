@@ -18,7 +18,7 @@ import YAML from "yaml";
 import { parseCustomDirectories as parseCustomDirsFromConfig, type ProjectConfigReader } from "../agent/config-directories.js";
 import { buildPackList } from "../agent/pack-list.js";
 import { PackResolver, SkillLoader } from "../agent/pack-resolver.js";
-import type { PackEntry, LoadedEntity } from "../agent/pack-types.js";
+import type { PackEntry, LoadedEntity, ResolvedEntity } from "../agent/pack-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** The builtin pack root (dist/server/defaults). Its skills/ subtree is the builtin-file skill source. */
@@ -47,6 +47,8 @@ export interface SlashSkill {
 	context?: string;
 	/** Optional agent type for forked context */
 	agent?: string;
+	/** Market pack `name` when this skill resolved from a market pack; null otherwise (design §5.2). */
+	originPackName?: string | null;
 }
 
 interface FrontMatter {
@@ -257,6 +259,15 @@ let _cache: { skills: SlashSkill[]; cwd: string; configVal: string; ts: number }
 const CACHE_TTL_MS = 5_000;
 
 /**
+ * Drop the slash-skill discovery TTL cache. Called by the REST layer after a
+ * marketplace install/uninstall/update/pack-order change so the next
+ * `/api/slash-skills` reflects the new pack list synchronously (design §9.1).
+ */
+export function invalidateSlashSkillsCache(): void {
+	_cache = null;
+}
+
+/**
  * The single ordered pack list for skill discovery: the in-code static skill
  * (lowest, §6.2 row 1) prepended to the unified pack list (§6.2 rows 2–8).
  */
@@ -308,17 +319,37 @@ export function discoverSlashSkills(
 		return _cache.skills;
 	}
 
-	const entries = buildSkillPackList(cwd, store);
-	const resolved = new PackResolver(entries, [new SkillLoader()]).resolve<SlashSkill>("skills");
+	const resolved = discoverSlashSkillsResolved(cwd, store);
 
-	// Filter to user-invocable skills only (default is true)
-	const skills = resolved.map(r => r.item).filter((s) => s.userInvocable !== false);
+	// Stamp the origin pack name (market packs only) so config pages can show
+	// the pack chip; filter to user-invocable skills only (default is true).
+	const skills = resolved
+		.map((r) => {
+			const item = r.item;
+			item.originPackName = r.origin.kind === "market" ? (r.origin.manifest?.name ?? null) : null;
+			return item;
+		})
+		.filter((s) => s.userInvocable !== false);
 
 	// Sort alphabetically
 	skills.sort((a, b) => a.name.localeCompare(b.name));
 
 	_cache = { skills, cwd, configVal, ts: Date.now() };
 	return skills;
+}
+
+/**
+ * Resolve slash skills as raw {@link ResolvedEntity} records (winner + shadows),
+ * unfiltered and unsorted. Used by the conflicts endpoint to surface same-name
+ * shadows that the flat {@link discoverSlashSkills} list discards.
+ */
+export function discoverSlashSkillsResolved(
+	cwd: string,
+	projectConfigStore?: { get(key: string): string | undefined },
+): ResolvedEntity<SlashSkill>[] {
+	const store = projectConfigStore as ProjectConfigReader | undefined;
+	const entries = buildSkillPackList(cwd, store);
+	return new PackResolver(entries, [new SkillLoader()]).resolve<SlashSkill>("skills");
 }
 
 /** Look up a single slash skill by name. */

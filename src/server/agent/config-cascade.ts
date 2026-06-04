@@ -7,6 +7,7 @@
  * indicating which lower layer it shadows.
  */
 
+import path from "node:path";
 import type { Role, GrantPolicy } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
@@ -37,6 +38,21 @@ export interface ResolvedItem<T> {
 	origin: ConfigOrigin;
 	/** Which layer this item shadows, if any. */
 	overrides?: ConfigOrigin;
+	/** {@link PackEntry.id} when the winner is a market pack (design §5.2); null otherwise. */
+	originPackId?: string | null;
+	/** Market pack `name` when the winner is a market pack; null otherwise. */
+	originPackName?: string | null;
+}
+
+/**
+ * Supplies the installed market-pack {@link PackEntry} list for a scope so the
+ * cascade adapter can interleave them into roles/tools resolution (market packs
+ * sit BELOW the scope's user pack — design §3.2). Injected (not derived from
+ * fs here) so {@link ConfigCascade} stays decoupled from path/store wiring.
+ * Omitted ⇒ no market packs (existing cascade tests resolve unchanged).
+ */
+export interface MarketPackProvider {
+	marketEntries(scope: "server" | "global-user" | "project", projectId?: string): PackEntry[];
 }
 
 export interface ResolvedPolicy {
@@ -63,12 +79,23 @@ export class ConfigCascade {
 		private builtins: BuiltinConfigProvider,
 		private serverStores: ServerStores,
 		private projectContextManager: ProjectContextManager,
+		private marketPackProvider?: MarketPackProvider,
 	) {}
+
+	/** Late-bind the market-pack provider (server.ts wires it after fs/store setup). */
+	setMarketPackProvider(provider: MarketPackProvider): void {
+		this.marketPackProvider = provider;
+	}
 
 	// ── Roles ────────────────────────────────────────────────────
 
 	resolveRoles(projectId?: string): ResolvedItem<Role>[] {
-		return this.resolveViaPacks<Role>(
+		return this.resolveRolesEntries(projectId).map(r => toResolvedItem(r));
+	}
+
+	/** Raw resolved role entries (with origin pack + shadows) — for conflicts. */
+	resolveRolesEntries(projectId?: string): ResolvedEntity<Role>[] {
+		return this.resolveEntities<Role>(
 			"roles",
 			[new RoleLoader()],
 			this.builtins.getRoles(),
@@ -98,7 +125,12 @@ export class ConfigCascade {
 	// ── Tools ────────────────────────────────────────────────────
 
 	resolveTools(projectId?: string): ResolvedItem<ToolInfo>[] {
-		return this.resolveViaPacks<ToolInfo>(
+		return this.resolveToolsEntries(projectId).map(r => toResolvedItem(r));
+	}
+
+	/** Raw resolved tool entries (with origin pack + shadows) — for conflicts. */
+	resolveToolsEntries(projectId?: string): ResolvedEntity<ToolInfo>[] {
+		return this.resolveEntities<ToolInfo>(
 			"tools",
 			[new ToolLoader()],
 			this.builtins.getTools(),
@@ -151,21 +183,24 @@ export class ConfigCascade {
 	// ── Generic resolution adapter (over the single PackResolver) ──
 
 	/**
-	 * Resolve the three cascade layers (builtin → server → project) through
-	 * the unified {@link PackResolver}.
+	 * Resolve the cascade layers (builtin → server → global-user → project)
+	 * through the unified {@link PackResolver}, interleaving installed market
+	 * packs into each scope segment (market BELOW the scope's user pack —
+	 * design §3.2).
 	 *
-	 * The layers' data lives in injected in-memory stores (not on a scannable
-	 * directory), so each layer is wrapped as a `preloaded` {@link PackEntry}
-	 * — the same single resolver pipeline, fed pre-loaded entities. With zero
-	 * market packs (the only state this cascade exercises) the ordered list is
-	 * exactly builtin < server < project, so the merge — insertion order,
-	 * shadowing, and `origin`/`overrides` — is byte-identical to the legacy
-	 * three-layer merge (design §6.1).
+	 * The user/builtin layers' data lives in injected in-memory stores (not on
+	 * a scannable directory), so each is wrapped as a `preloaded`
+	 * {@link PackEntry}; market packs are real on-disk `defaults-tree` entries
+	 * loaded by the same loaders. With zero market packs (the only state the
+	 * legacy cascade tests exercise) the ordered list is exactly
+	 * builtin < server < project, so insertion order, shadowing, and
+	 * `origin`/`overrides` are byte-identical to the legacy three-layer merge
+	 * (design §6.1). The global-user segment is empty for roles/tools today.
 	 *
 	 * `resolveWorkflows`/`resolveToolGroupPolicies` are deliberately NOT routed
 	 * here — they are non-installable types with no loader (design §2.2 note).
 	 */
-	private resolveViaPacks<T>(
+	private resolveEntities<T>(
 		type: import("./pack-types.js").EntityType,
 		loaders: import("./pack-types.js").EntityLoader<unknown>[],
 		builtinItems: T[],
@@ -173,7 +208,7 @@ export class ConfigCascade {
 		projectId: string | undefined,
 		serverItems: T[],
 		getProjectItems: (ctx: import("./project-context.js").ProjectContext) => T[],
-	): ResolvedItem<T>[] {
+	): ResolvedEntity<T>[] {
 		const wrap = (items: T[]): LoadedEntity<unknown>[] =>
 			items.map(item => ({ name: keyFn(item), item }));
 		const layer = (id: string, scope: PackScope, items: T[]): PackEntry => ({
@@ -185,24 +220,50 @@ export class ConfigCascade {
 			layout: "defaults-tree",
 			preloaded: { [type]: wrap(items) },
 		});
+		// Dedup market entries by absolute path: when two scopes resolve to the
+		// same `market-packs` dir (a self-managed project whose rootPath equals
+		// the server cwd — design §1.3.1 path collision), attribute the pack to
+		// the FIRST (lowest) scope and skip the duplicate, so it never appears
+		// to "conflict with itself".
+		const seenMarketPaths = new Set<string>();
+		const pushMarket = (scope: "server" | "global-user" | "project"): void => {
+			const list = this.marketPackProvider ? this.marketPackProvider.marketEntries(scope, projectId) : [];
+			for (const e of list) {
+				const key = path.resolve(e.path);
+				if (seenMarketPaths.has(key)) continue;
+				seenMarketPaths.add(key);
+				entries.push(e);
+			}
+		};
 
-		const entries: PackEntry[] = [
-			layer("builtin", "builtin", builtinItems),
-			layer("user:server", "server", serverItems),
-		];
-		// Without projectId, only builtins + server stores are used (system scope).
+		const entries: PackEntry[] = [layer("builtin", "builtin", builtinItems)];
+		// Server segment: market packs below the server user pack.
+		pushMarket("server");
+		entries.push(layer("user:server", "server", serverItems));
+		// Global-user segment: market packs only (no in-memory user store today).
+		pushMarket("global-user");
+		// Project segment (only when a projectId is specified — system scope omits it).
 		if (projectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(projectId);
-			if (projectCtx) entries.push(layer("user:project", "project", getProjectItems(projectCtx)));
+			if (projectCtx) {
+				pushMarket("project");
+				entries.push(layer("user:project", "project", getProjectItems(projectCtx)));
+			}
 		}
 
-		const resolved = new PackResolver(entries, loaders).resolve<T>(type);
-		return resolved.map((r: ResolvedEntity<T>) => {
-			const out: ResolvedItem<T> = { item: r.item, origin: scopeToOrigin(r.origin.scope) };
-			if (r.shadows.length > 0) {
-				out.overrides = scopeToOrigin(r.shadows[r.shadows.length - 1].scope);
-			}
-			return out;
-		});
+		return new PackResolver(entries, loaders).resolve<T>(type);
 	}
+}
+
+/** Map a raw {@link ResolvedEntity} to the wire {@link ResolvedItem} (origin/overrides + pack tags). */
+function toResolvedItem<T>(r: ResolvedEntity<T>): ResolvedItem<T> {
+	const out: ResolvedItem<T> = { item: r.item, origin: scopeToOrigin(r.origin.scope) };
+	if (r.shadows.length > 0) {
+		out.overrides = scopeToOrigin(r.shadows[r.shadows.length - 1].scope);
+	}
+	if (r.origin.kind === "market") {
+		out.originPackId = r.origin.id;
+		out.originPackName = r.origin.manifest?.name ?? null;
+	}
+	return out;
 }

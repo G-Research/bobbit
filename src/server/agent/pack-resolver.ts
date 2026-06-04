@@ -45,6 +45,7 @@ export class PackResolver {
 				for (const { name, item } of loader.load(entry)) {
 					const prev = byName.get(name);
 					byName.set(name, {
+						name,
 						item: item as T,
 						origin: entry,
 						shadows: prev ? [...prev.shadows, prev.origin] : [],

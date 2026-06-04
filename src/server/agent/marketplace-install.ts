@@ -236,7 +236,9 @@ export class MarketplaceInstaller {
 	// ── install / uninstall / update ─────────────────────────────
 
 	private marketPacksRoot(ctx: ScopeContext): string {
-		const base = scopeBase(ctx.scope, this.opts);
+		// Merge the context's projectBase so project-scope install/uninstall/list
+		// derive the right root (the installer options only carry server/global bases).
+		const base = scopeBase(ctx.scope, { ...this.opts, projectBase: ctx.projectBase });
 		return scopePaths(ctx.scope as PackScope, base).marketPacksRoot;
 	}
 
@@ -363,8 +365,15 @@ export class MarketplaceInstaller {
 	 */
 	listInstalled(contexts: Array<{ scope: InstallScope; projectBase?: string }>): InstalledPackWire[] {
 		const out: InstalledPackWire[] = [];
+		// Dedup by resolved root: a self-managed project (rootPath == server cwd)
+		// resolves multiple scopes to the same `market-packs` dir; attribute the
+		// pack to the FIRST listed scope only so it isn't shown twice.
+		const seenRoots = new Set<string>();
 		for (const c of contexts) {
 			const marketRoot = this.marketPacksRoot({ scope: c.scope, projectBase: c.projectBase });
+			const rootKey = path.resolve(marketRoot);
+			if (seenRoots.has(rootKey)) continue;
+			seenRoots.add(rootKey);
 			let dirents: fs.Dirent[];
 			try {
 				dirents = fs.readdirSync(marketRoot, { withFileTypes: true });
