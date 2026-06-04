@@ -127,13 +127,24 @@ function binaryMimeForExt(ext: string): string {
 /** Trailing punctuation trimmed off a token end (unlikely to be part of a path). */
 const TRAILING_PUNCT = new Set([".", ",", ")", ":", ";"]);
 
+/** Escape the five XML attribute-significant chars so a quote / angle bracket
+ *  in a filename cannot break out of the `path="…"` delimiter. */
+function escapeXmlAttr(s: string): string {
+	return s
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
+
 /**
  * Build the model-facing inline block for a text mention. Exported so the
  * handler can re-splice text mentions and skill expansions onto the same
- * original string in one merged right-to-left pass (disjoint ranges).
+ * original string in one merged right-to-left pass (disjoint ranges). The path
+ * is XML-attribute-escaped so a hostile filename cannot break the delimiter.
  */
 export function buildFileReferenceBlock(relPath: string, content: string): string {
-	return `<file-reference path="${relPath.replace(/\\/g, "/")}">\n${content}\n</file-reference>`;
+	return `<file-reference path="${escapeXmlAttr(relPath.replace(/\\/g, "/"))}">\n${content}\n</file-reference>`;
 }
 
 /**
@@ -301,36 +312,22 @@ export function resolveFileMentions(
 		base.bytes = size;
 		const ext = path.extname(normRel).toLowerCase();
 
-		// ── Image (by extension) ──────────────────────────────────────
-		if (IMAGE_MIME[ext]) {
-			if (size > maxFileBytes) {
-				markUnresolved("too-large");
-				continue;
-			}
-			let data: string;
-			try {
-				data = fs.readFileSync(absPath).toString("base64");
-			} catch {
-				markUnresolved("unreadable");
-				continue;
-			}
-			if (aggregateUsed + data.length > maxAggregate) {
-				markUnresolved("aggregate-cap");
-				continue;
-			}
-			aggregateUsed += data.length;
-			base.kind = "image";
-			base.data = data;
-			base.mimeType = IMAGE_MIME[ext];
-			mentions.push(base);
-			continue;
-		}
-
-		// ── Non-image: read and sniff text vs binary ─────────────────
+		// Per-file cap, checked against the STAT size before any read so a giant
+		// file is never loaded. (Text has a smaller cap, applied post-read on
+		// the decoded content below.)
 		if (size > maxFileBytes) {
 			markUnresolved("too-large");
 			continue;
 		}
+		// Aggregate gate BEFORE reading/encoding: with up to 50 mentions × 10 MiB
+		// each, unconditional reads would block the WS handler with hundreds of
+		// MiB despite the 20 MiB cap. Pre-check using the known stat size; only
+		// read when it fits, then account the actual bytes.
+		if (aggregateUsed + size > maxAggregate) {
+			markUnresolved("aggregate-cap");
+			continue;
+		}
+
 		let buf: Buffer;
 		try {
 			buf = fs.readFileSync(absPath);
@@ -338,14 +335,39 @@ export function resolveFileMentions(
 			markUnresolved("unreadable");
 			continue;
 		}
+		// TOCTOU: the file may have grown between stat and read. Re-validate the
+		// per-file cap and remaining aggregate budget against the bytes we
+		// actually got; never emit oversized content.
+		if (buf.length > maxFileBytes) {
+			markUnresolved("too-large");
+			continue;
+		}
+		if (aggregateUsed + buf.length > maxAggregate) {
+			markUnresolved("aggregate-cap");
+			continue;
+		}
 
+		// ── Image (by extension) ──────────────────────────────────────
+		if (IMAGE_MIME[ext]) {
+			aggregateUsed += buf.length;
+			base.kind = "image";
+			base.data = buf.toString("base64");
+			base.mimeType = IMAGE_MIME[ext];
+			base.bytes = buf.length;
+			mentions.push(base);
+			continue;
+		}
+
+		// ── Non-image: sniff text vs binary ──────────────────────────
 		if (isLikelyText(buf)) {
-			if (size > maxTextBytes) {
+			const content = buf.toString("utf-8");
+			const contentBytes = Buffer.byteLength(content, "utf-8");
+			// Text has a smaller per-file cap, applied to the decoded content.
+			if (contentBytes > maxTextBytes) {
 				markUnresolved("too-large");
 				continue;
 			}
-			const content = buf.toString("utf-8");
-			const contentBytes = Buffer.byteLength(content, "utf-8");
+			// Re-check aggregate against the actual content bytes (TOCTOU).
 			if (aggregateUsed + contentBytes > maxAggregate) {
 				markUnresolved("aggregate-cap");
 				continue;
@@ -353,6 +375,7 @@ export function resolveFileMentions(
 			aggregateUsed += contentBytes;
 			base.kind = "text";
 			base.content = content;
+			base.bytes = buf.length;
 			mentions.push(base);
 			replacements.push({
 				start: tok.range[0],
@@ -365,16 +388,12 @@ export function resolveFileMentions(
 		// Non-image binary (per frozen design §2): snapshot base64 in `data`,
 		// ext-derived mimeType. The handler routes this to attachments[] as a
 		// document for UI chip + snapshot parity. `modelText` is left untouched
-		// (literal `@path` kept). Subject to the per-file + aggregate caps.
-		const data = buf.toString("base64");
-		if (aggregateUsed + data.length > maxAggregate) {
-			markUnresolved("aggregate-cap");
-			continue;
-		}
-		aggregateUsed += data.length;
+		// (literal `@path` kept). Caps already enforced above.
+		aggregateUsed += buf.length;
 		base.kind = "binary";
-		base.data = data;
+		base.data = buf.toString("base64");
 		base.mimeType = binaryMimeForExt(ext);
+		base.bytes = buf.length;
 		mentions.push(base);
 	}
 

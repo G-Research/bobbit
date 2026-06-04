@@ -175,12 +175,39 @@ describe("resolveFileMentions", () => {
 		assert.equal(r.mentions[1].reason, "aggregate-cap");
 	});
 
+	it("BLOCKER-B: once aggregate is exhausted, a subsequent large mention is aggregate-cap with NO data (not read)", () => {
+		fs.writeFileSync(path.join(cwdDir, "first.txt"), "aaaa", "utf-8"); // 4 bytes
+		// A large file that would be expensive to read; must NOT be read once the
+		// budget is gone. Image extension so it would otherwise base64-encode.
+		fs.writeFileSync(path.join(cwdDir, "huge.png"), Buffer.alloc(1024, 1));
+		const r = resolveFileMentions("@first.txt @huge.png", cwdDir, { maxAggregateBytes: 5 });
+		assert.equal(r.mentions[0].kind, "text");
+		const big = r.mentions[1];
+		assert.equal(big.kind, "unresolved");
+		assert.equal(big.reason, "aggregate-cap");
+		assert.equal(big.data, undefined, "oversized mention must not be read/encoded");
+		assert.equal(big.content, undefined);
+	});
+
 	it("trailing punctuation is trimmed from the token (see @notes.txt.)", () => {
 		const r = resolveFileMentions("see @notes.txt.", cwdDir);
 		assert.equal(r.mentions.length, 1);
 		assert.equal(r.mentions[0].path, "notes.txt");
 		// Range must cover exactly "@notes.txt" (not the trailing dot).
 		assert.deepEqual(r.mentions[0].range, [4, 4 + "@notes.txt".length]);
+	});
+
+	it("LOW-SEC: buildFileReferenceBlock escapes XML attribute chars in the path", () => {
+		const block = buildFileReferenceBlock('a"><x>&.txt', "BODY");
+		// The raw quote/angle/amp must not appear unescaped inside the attribute.
+		assert.ok(block.startsWith('<file-reference path="'));
+		assert.ok(block.includes("&quot;"));
+		assert.ok(block.includes("&gt;"));
+		assert.ok(block.includes("&lt;"));
+		assert.ok(block.includes("&amp;"));
+		// No stray closing-bracket from the path can terminate the opening tag early.
+		const openTag = block.slice(0, block.indexOf("\n"));
+		assert.equal((openTag.match(/>/g) || []).length, 1, "opening tag has exactly one '>'");
 	});
 
 	it("backslash path normalised for lookup (header uses forward slashes)", () => {

@@ -30,16 +30,31 @@ describe("buildMergedModelText", () => {
 		assert.equal(out, "see SKILL-BODY and " + buildFileReferenceBlock("a.txt", "FILE"));
 	});
 
-	it("HIGH-2: prefix-only /skill claiming whole range overlaps @file → skill wins, no corruption", () => {
+	it("BLOCKER-A: prefix-only /skill overlaps @file → skill body, then APPENDED file-reference (content not dropped)", () => {
 		// "/mockup @notes.txt" — prefix-only skill range covers the whole text.
 		const text = "/mockup @notes.txt";
 		const skill = { range: [0, text.length] as [number, number], expanded: "EXPANDED" };
 		const fileStart = text.indexOf("@notes.txt");
 		const file = textMention("notes.txt", "HELLO", [fileStart, fileStart + "@notes.txt".length]);
 		const out = buildMergedModelText(text, [skill], [file]);
-		// Skill expansion wins for the whole message; file content is NOT inlined.
-		assert.equal(out, "EXPANDED");
-		assert.ok(!out.includes("file-reference"), "overlapping file mention must not be inlined");
+		// Skill body stays intact AND the file content is delivered (appended).
+		assert.equal(out, "EXPANDED" + "\n\n" + buildFileReferenceBlock("notes.txt", "HELLO"));
+		assert.ok(out.startsWith("EXPANDED"), "skill expansion must remain intact at the front");
+		assert.ok(out.includes("file-reference"), "overlapping text mention content must still be delivered");
+	});
+
+	it("BLOCKER-A: multiple overlapping @file mentions appended in original-text order", () => {
+		const text = "/mockup @a.txt @b.txt";
+		const skill = { range: [0, text.length] as [number, number], expanded: "EXP" };
+		const aStart = text.indexOf("@a.txt");
+		const bStart = text.indexOf("@b.txt");
+		const a = textMention("a.txt", "AA", [aStart, aStart + 6]);
+		const b = textMention("b.txt", "BB", [bStart, bStart + 6]);
+		const out = buildMergedModelText(text, [skill], [a, b]);
+		assert.equal(
+			out,
+			"EXP\n\n" + buildFileReferenceBlock("a.txt", "AA") + "\n\n" + buildFileReferenceBlock("b.txt", "BB"),
+		);
 	});
 
 	it("multiple @file mentions splice right-to-left preserving indices", () => {
