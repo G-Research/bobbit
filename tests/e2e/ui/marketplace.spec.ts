@@ -2,16 +2,30 @@
  * Browser E2E — Pack-Based Marketplace UI surface.
  * See docs/design/pack-based-marketplace.md §12.3.
  *
- * STATUS: This spec is written against the documented REST contracts (§9). The
- * backend (/api/marketplace/*, /api/packs/conflicts, originPackName on
- * /api/roles|tools|skills) is being built in parallel. Tests that only exercise
- * the UI shell (Market button position, opening the surface, graceful error
- * degradation, the add-source form) run today. Tests that need live REST are
- * marked `test.fixme` with a TODO so the REST agent can un-skip them once the
- * endpoints land — they are NOT left failing.
+ * ISOLATION CONTRACT (why this spec is the shape it is):
+ * The browser project runs spec FILES concurrently across 3 workers against a
+ * single SHARED gateway (playwright-e2e.config.ts: workers:3, fullyParallel:
+ * false). The gateway's SERVER scope (server cwd `.bobbit/config`) and
+ * GLOBAL-USER scope are therefore gateway-global — a market pack installed at
+ * either scope resolves for EVERY project, so its roles/tools/skills leak into
+ * sibling specs running on other workers (e.g. tool-activation seeing an
+ * orphan "kit-tool has no provider" warning). To stay self-isolating, every
+ * install in this spec targets a DEDICATED, per-test PROJECT scope: a throwaway
+ * project created via POST /api/projects with a fresh tmp rootPath. Project-
+ * scope packs resolve ONLY for that projectId, which no other spec references,
+ * so nothing leaks. afterEach uninstalls, deletes the temp projects + dirs, and
+ * clears every registered source so no residue survives across tests/retries.
  *
- * Pattern: mirrors tests/e2e/ui/sidebar-navigation.spec.ts + skills-chip.spec.ts
- * and reuses config-page conventions (origin badges, scope rows).
+ * The one assertion that genuinely needs SERVER scope — "a server-scope skill
+ * pack resolves for a project whose root != the server cwd" (the serverBase
+ * wiring, design finding #3) — was moved to a file:// unit test
+ * (tests/pack-marketplace.test.ts → "finding #3 — server-scope skill pack
+ * resolves for a non-default project root") which injects an explicit
+ * serverBase. That removes the last gateway-global install from this spec
+ * entirely while keeping the finding-#3 guarantee pinned.
+ *
+ * Pattern: mirrors tests/e2e/ui/workflow-page-scope.spec.ts (dedicated project
+ * + scope tabs) and reuses config-page conventions (origin badges, scope rows).
  */
 import type { Page } from "@playwright/test";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -21,15 +35,9 @@ import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
-/** Resolve the harness default project's id (rootPath == the worker BOBBIT_DIR). */
-async function defaultProjectId(): Promise<string> {
-	const res = await apiFetch("/api/projects");
-	const body = await res.json();
-	const projects: Array<{ id?: string; name?: string }> = Array.isArray(body) ? body : (body.projects ?? []);
-	const def = projects.find((p) => p.name === "default") ?? projects[0];
-	if (!def?.id) throw new Error("no default project");
-	return def.id;
-}
+// Within-file serial is already implied by fullyParallel:false, but make it
+// explicit so a failed test can never leak partial state into the next one.
+test.describe.configure({ mode: "serial" });
 
 // ---------------------------------------------------------------------------
 // Local-dir source fixtures (no network/git). Each test builds a temp repo of
@@ -95,24 +103,132 @@ function writePack(repo: string, spec: PackSpec): void {
 	}
 }
 
-/** Open the app and navigate to the marketplace surface. */
-async function openMarket(page: Page): Promise<void> {
+// ---------------------------------------------------------------------------
+// Per-test isolation registry. Tests run serially, so module-level arrays are
+// safe; afterEach drains them.
+// ---------------------------------------------------------------------------
+
+interface DedicatedProject { id: string; name: string; dir: string; }
+let _projects: DedicatedProject[] = [];
+// Temp project dirs are removed in afterAll, NOT afterEach: deleting a project
+// closes its search index asynchronously, and rm'ing the dir in the same tick
+// races that flush (harmless ENOENT log noise). Deferring removal sidesteps it.
+const _projectDirs: string[] = [];
+
+/** Create a throwaway, fully-isolated project scope for one test. Its market
+ *  packs resolve ONLY for this projectId, so installs never leak to siblings. */
+async function makeDedicatedProject(label: string): Promise<DedicatedProject> {
+	const dir = mkdtempSync(join(tmpdir(), `bobbit-mkt-proj-${label}-`));
+	mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+	const name = `mkt-${label}-${Date.now()}-${_projects.length}`;
+	const res = await apiFetch("/api/projects", {
+		method: "POST",
+		body: JSON.stringify({ name, rootPath: dir, __e2e_seed_skip__: true }),
+	});
+	if (res.status !== 201) throw new Error(`project create failed ${res.status}: ${await res.text()}`);
+	const id = (await res.json()).id as string;
+	const p = { id, name, dir };
+	_projects.push(p);
+	_projectDirs.push(dir);
+	return p;
+}
+
+test.afterEach(async () => {
+	// Delete the temp projects (removes project-scope resolution from the
+	// registry). Dir removal is deferred to afterAll (see _projectDirs).
+	for (const p of _projects) {
+		await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
+	}
+	_projects = [];
+	// Clear every registered source. Sources are gateway-global, but ONLY this
+	// (serial) spec touches /api/marketplace/sources, so wiping them between
+	// tests guarantees a clean browse panel without affecting other specs.
+	try {
+		const res = await apiFetch("/api/marketplace/sources");
+		const body = await res.json();
+		for (const s of (body.sources ?? []) as Array<{ id: string }>) {
+			await apiFetch(`/api/marketplace/sources/${encodeURIComponent(s.id)}`, { method: "DELETE" }).catch(() => {});
+		}
+	} catch { /* ignore */ }
+});
+
+test.afterAll(() => {
+	for (const d of _projectDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
+	for (const r of _repos) { try { rmSync(r, { recursive: true, force: true }); } catch { /* ignore */ } }
+});
+
+// ---------------------------------------------------------------------------
+// UI helpers
+// ---------------------------------------------------------------------------
+
+/** Point the in-memory active project at `projectId` so the marketplace page's
+ *  installed panel + conflicts query that (dedicated) project. Waits until the
+ *  project has propagated into the app's project list first. */
+async function setActiveProject(page: Page, projectId: string): Promise<void> {
+	// Wait (event-driven) until the project has propagated into the app's list,
+	// then pin it as active and force a repaint.
+	await page.waitForFunction(
+		(id) => {
+			const st = (window as any).__bobbitState;
+			return !!st && ((st.projects ?? []) as Array<{ id: string }>).some((p) => p.id === id);
+		},
+		projectId,
+		{ timeout: 15_000 },
+	);
+	await page.evaluate((id) => {
+		const st = (window as any).__bobbitState;
+		if (st) st.activeProjectId = id;
+		(window as any).__bobbitRenderApp?.();
+	}, projectId);
+}
+
+/** Open the app, optionally pin the active project, and open the marketplace. */
+async function openMarket(page: Page, opts?: { activeProjectId?: string }): Promise<void> {
 	await openApp(page);
+	if (opts?.activeProjectId) await setActiveProject(page, opts.activeProjectId);
 	await navigateToHash(page, "#/market");
 	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
 }
 
-/** Register a local-dir source by absolute path; resolves when its packs are browsable. */
+/** Re-establish the marketplace surface after a reload (state is reset). */
+async function reopenMarketAfterReload(page: Page, projectId: string): Promise<void> {
+	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+	await setActiveProject(page, projectId);
+	await navigateToHash(page, "#/market");
+	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
+}
+
+/** Register a local-dir source by absolute path; resolves only once its packs
+ *  are actually browsable (poll for at least one pack card). */
 async function registerSource(page: Page, repoPath: string): Promise<void> {
 	await page.locator('[data-testid="market-source-url"]').fill(repoPath);
 	await page.locator('[data-testid="market-add-source"]').click();
-	// handleAddSource auto-browses the freshly-added source → its pack cards render.
-	await expect(page.locator('[data-testid="market-browse-pack"]').first()).toBeVisible({ timeout: 15_000 });
+	// The source row must appear...
+	await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible({ timeout: 15_000 });
+	// ...and handleAddSource auto-browses it → poll until the pack cards render
+	// (browse is async after the POST; a single visibility check can race it).
+	await expect
+		.poll(async () => page.locator('[data-testid="market-browse-pack"]').count(), { timeout: 15_000 })
+		.toBeGreaterThan(0);
 }
 
-test.afterAll(() => {
-	for (const r of _repos) { try { rmSync(r, { recursive: true, force: true }); } catch { /* ignore */ } }
-});
+/** Pick a dedicated project in the install scope picker. */
+async function selectInstallScopeProject(page: Page, projectId: string): Promise<void> {
+	await page.locator('[data-testid="market-install-scope"]').selectOption(`project:${projectId}`);
+}
+
+/** On a config page (Roles/Tools/Skills), switch the scope row to a project. */
+async function selectConfigProjectScope(page: Page, container: string, projectName: string): Promise<void> {
+	const tab = page.locator(`${container} button`).filter({ hasText: projectName }).first();
+	await expect(tab).toBeVisible({ timeout: 15_000 });
+	await tab.click();
+}
+
+/** Confirm the "installs executable code" dialog. */
+async function confirmExecWarning(page: Page): Promise<void> {
+	await expect(page.getByText(/installs executable code that runs on your machine/i)).toBeVisible({ timeout: 10_000 });
+	await page.getByRole("button", { name: "Install anyway" }).click();
+}
 
 /** Ordinal of the named config-nav button within the expanded sidebar's nav row. */
 async function navButtonOrder(page: Page): Promise<string[]> {
@@ -129,7 +245,7 @@ async function navButtonOrder(page: Page): Promise<string[]> {
 test.describe("Marketplace UI", () => {
 	// ------------------------------------------------------------------
 	// §12.3 #1 — Market button visible & positioned between Workflows and
-	// New Goal; opens the marketplace surface. (UI shell — runs today.)
+	// New Goal; opens the marketplace surface. (UI shell — no install.)
 	// ------------------------------------------------------------------
 	test("Market button is between Workflows and New Goal and opens the surface @smoke", async ({ page }) => {
 		await openApp(page);
@@ -170,13 +286,13 @@ test.describe("Marketplace UI", () => {
 	});
 
 	// ==================================================================
-	// LIVE-REST TESTS — drive the full §12.3 acceptance flow against the
-	// real /api/marketplace/* endpoints using a local-dir source fixture.
-	// Installs target the SERVER scope (isolated under the worker's BOBBIT_DIR);
-	// resolution is verified on the config pages.
+	// LIVE-REST TESTS — drive the §12.3 acceptance flow against the real
+	// /api/marketplace/* endpoints using a local-dir source fixture. Every
+	// install targets a DEDICATED PROJECT scope (see ISOLATION CONTRACT).
 	// ==================================================================
 
-	// §12.3 #2–3 — register a source and browse its packs.
+	// §12.3 #2–3 — register a source and browse its packs (deterministic; no
+	// install, so no scope needed).
 	test("register a local-dir source and browse its packs", async ({ page }) => {
 		const repo = makeRepo();
 		writePack(repo, { name: "browse-pack", description: "Browseable demo pack", roles: [{ name: "browse-role" }], skills: [{ name: "browse-skill" }] });
@@ -186,15 +302,16 @@ test.describe("Marketplace UI", () => {
 
 		await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible();
 		const card = page.locator('[data-testid="market-browse-pack"][data-pack-name="browse-pack"]');
-		await expect(card).toBeVisible();
+		await expect(card).toBeVisible({ timeout: 15_000 });
 		await expect(card).toContainText("Browseable demo pack");
-		// Declared entity chips render (role + skill).
-		await expect(card.locator(".market-entity-chip")).toHaveCount(2);
+		// Declared entity chips render (role + skill) — poll so we don't race the
+		// async browse render.
+		await expect.poll(async () => card.locator(".market-entity-chip").count(), { timeout: 15_000 }).toBe(2);
 	});
 
 	// §12.3 #4–6 — install to a scope; entities resolve on the config pages
 	// tagged with the specific pack (originPackName chip); persist across reload;
-	// provenance shown.
+	// provenance shown. Installed at a DEDICATED PROJECT scope for isolation.
 	test("install a pack → entities resolve with pack origin chip + persist + provenance", async ({ page }) => {
 		const repo = makeRepo();
 		writePack(repo, {
@@ -204,93 +321,103 @@ test.describe("Marketplace UI", () => {
 			tools: [{ group: "kitgroup", name: "kit-tool" }],
 			skills: [{ name: "kit-skill" }],
 		});
+		const proj = await makeDedicatedProject("kit");
 
-		await openMarket(page);
+		await openMarket(page, { activeProjectId: proj.id });
 		await registerSource(page, repo);
+		await selectInstallScopeProject(page, proj.id);
 
-		// Install to the (default) server scope. The pack ships a tool, so the
-		// executable-code warning dialog appears — accept it.
+		// The pack ships a tool → executable-code warning dialog appears; confirm.
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="kit-pack"]').locator('[data-testid="market-install-pack"]').click();
-		await expect(page.getByText(/installs executable code that runs on your machine/i)).toBeVisible({ timeout: 10_000 });
-		await page.keyboard.press("Enter"); // confirm "Install anyway"
+		await confirmExecWarning(page);
 
-		// Installed card + provenance.
+		// Installed card + provenance (the active project is the dedicated one).
 		const installed = page.locator('[data-testid="market-installed-pack"][data-pack-name="kit-pack"]').first();
 		await expect(installed).toBeVisible({ timeout: 15_000 });
 		await expect(installed.locator('[data-testid="market-provenance"]')).toBeVisible();
 
-		// Roles page (system scope): role resolves with the pack origin chip in the UI.
+		// Roles page → dedicated project scope tab → role resolves with pack chip.
 		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", proj.name);
 		const roleRow = page.locator(".role-row").filter({ hasText: "kit-role" });
 		await expect(roleRow).toBeVisible({ timeout: 15_000 });
 		await expect(roleRow.locator('[data-testid="origin-pack-chip"]')).toHaveText("kit-pack");
 
-		// Tools + skills resolve through the single resolver tagged with the pack
-		// (verified via the REST contract — the chip rendering is identical UI to
-		// roles, already asserted above; the tools page groups rows which makes a
-		// UI-visibility assertion brittle).
-		const projectId = await defaultProjectId();
-		const toolsRes = await apiFetch("/api/tools");
+		// Tools + skills resolve through the single resolver, tagged with the pack
+		// (chip rendering is the identical UI asserted above for roles; the tools
+		// page groups rows which makes a UI-visibility assertion brittle). Scope
+		// the REST calls to the dedicated project.
+		const toolsRes = await apiFetch(`/api/tools?projectId=${encodeURIComponent(proj.id)}`);
 		const tools = (await toolsRes.json()).tools as Array<{ name: string; originPackName?: string | null }>;
 		expect(tools.find((t) => t.name === "kit-tool")?.originPackName).toBe("kit-pack");
 
-		const skillsRes = await apiFetch(`/api/slash-skills/details?projectId=${encodeURIComponent(projectId)}`);
+		const skillsRes = await apiFetch(`/api/slash-skills/details?projectId=${encodeURIComponent(proj.id)}`);
 		const skills = (await skillsRes.json()).skills as Array<{ name: string; originPackName?: string | null }>;
 		expect(skills.find((s) => s.name === "kit-skill")?.originPackName).toBe("kit-pack");
 
-		// Persists across reload: installed card survives.
+		// Persists across reload: the installed card survives (re-pin the active
+		// project, which reload resets to the harness default).
 		await page.reload();
-		await navigateToHash(page, "#/market");
+		await reopenMarketAfterReload(page, proj.id);
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="kit-pack"]').first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	// finding #1 — a market-pack tool must be usable at RUNTIME, not just listed
 	// by the cascade: GET /api/tools/:name returns it (404 before the fix) and it
 	// appears as an available tool tagged with the pack; uninstall removes it.
+	// API-only; installed at a DEDICATED PROJECT scope so nothing leaks.
 	test("market-pack tool resolves through the runtime tool machinery (GET /api/tools/:name) + removed on uninstall", async () => {
 		const repo = makeRepo();
 		writePack(repo, { name: "rt-tool-pack", tools: [{ group: "rtgroup", name: "rt-tool" }] });
+		const proj = await makeDedicatedProject("rt");
+		const pid = encodeURIComponent(proj.id);
 
 		const addRes = await apiFetch("/api/marketplace/sources", { method: "POST", body: JSON.stringify({ url: repo }) });
 		expect(addRes.status).toBe(201);
 		const src = (await addRes.json()).source;
 		const instRes = await apiFetch("/api/marketplace/install", {
 			method: "POST",
-			body: JSON.stringify({ sourceId: src.id, dirName: "rt-tool-pack", scope: "server" }),
+			body: JSON.stringify({ sourceId: src.id, dirName: "rt-tool-pack", scope: "project", projectId: proj.id }),
 		});
 		expect(instRes.status).toBe(201);
 
 		try {
-			// GET /api/tools/:name returns the market tool (was 404 before finding #1).
-			const detailRes = await apiFetch("/api/tools/rt-tool");
+			// GET /api/tools/:name?projectId= returns the market tool (was 404 before
+			// finding #1) — resolved via the project's toolManager.
+			const detailRes = await apiFetch(`/api/tools/rt-tool?projectId=${pid}`);
 			expect(detailRes.status).toBe(200);
 			expect((await detailRes.json()).name).toBe("rt-tool");
 
-			// It surfaces as an available tool, tagged with the originating pack.
-			const listRes = await apiFetch("/api/tools");
+			// It surfaces as an available tool for the project, tagged with its pack.
+			const listRes = await apiFetch(`/api/tools?projectId=${pid}`);
 			const tools = (await listRes.json()).tools as Array<{ name: string; originPackName?: string | null }>;
 			const hit = tools.find((t) => t.name === "rt-tool");
-			expect(hit, "market tool must appear in /api/tools").toBeTruthy();
+			expect(hit, "market tool must appear in /api/tools for the project").toBeTruthy();
 			expect(hit?.originPackName).toBe("rt-tool-pack");
 		} finally {
-			await apiFetch("/api/marketplace/installed", { method: "DELETE", body: JSON.stringify({ scope: "server", packName: "rt-tool-pack" }) }).catch(() => {});
+			await apiFetch("/api/marketplace/installed", { method: "DELETE", body: JSON.stringify({ scope: "project", packName: "rt-tool-pack", projectId: proj.id }) }).catch(() => {});
 		}
 
 		// Uninstall removes exactly what was added: tool gone from detail + list.
-		const after = await apiFetch("/api/tools/rt-tool");
+		const after = await apiFetch(`/api/tools/rt-tool?projectId=${pid}`);
 		expect(after.status).toBe(404);
-		const listAfter = await apiFetch("/api/tools");
+		const listAfter = await apiFetch(`/api/tools?projectId=${pid}`);
 		const toolsAfter = (await listAfter.json()).tools as Array<{ name: string }>;
 		expect(toolsAfter.find((t) => t.name === "rt-tool")).toBeFalsy();
 	});
 
 	// §12.3 #7 — update (re-sync upstream) and uninstall (entities disappear).
+	// Installed at a DEDICATED PROJECT scope.
 	test("update re-syncs upstream and uninstall removes exactly what was installed", async ({ page }) => {
 		const repo = makeRepo();
 		writePack(repo, { name: "upd-pack", version: "1.0.0", roles: [{ name: "upd-role" }] });
+		const proj = await makeDedicatedProject("upd");
 
-		await openMarket(page);
+		await openMarket(page, { activeProjectId: proj.id });
 		await registerSource(page, repo);
+		await selectInstallScopeProject(page, proj.id);
+
+		// upd-pack ships no tools → no exec-code warning.
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="upd-pack"]').locator('[data-testid="market-install-pack"]').click();
 		const installed = page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first();
 		await expect(installed).toBeVisible({ timeout: 15_000 });
@@ -301,8 +428,9 @@ test.describe("Marketplace UI", () => {
 		await installed.locator('[data-testid="market-update-pack"]').click();
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first()).toContainText("v2.0.0", { timeout: 15_000 });
 
-		// Role currently resolves.
+		// Role currently resolves on the dedicated project scope.
 		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", proj.name);
 		await expect(page.locator(".role-row").filter({ hasText: "upd-role" })).toBeVisible({ timeout: 15_000 });
 
 		// Uninstall → confirm → card gone AND entity gone from #/roles.
@@ -310,14 +438,18 @@ test.describe("Marketplace UI", () => {
 		await page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first()
 			.locator('[data-testid="market-uninstall-pack"]').click();
 		await expect(page.getByText(/deletes the pack directory/i)).toBeVisible({ timeout: 10_000 });
-		await page.keyboard.press("Enter"); // confirm "Uninstall"
+		// Confirm via Enter — the dialog's "Uninstall" button shares its accessible
+		// name with the installed card's uninstall button (strict-mode collision).
+		await page.keyboard.press("Enter");
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]')).toHaveCount(0, { timeout: 15_000 });
 
 		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", proj.name);
 		await expect(page.locator(".role-row").filter({ hasText: "upd-role" })).toHaveCount(0, { timeout: 15_000 });
 	});
 
-	// §12.3 #8 — tool-bearing packs show the executable-code warning before install.
+	// §12.3 #8 — tool-bearing packs show the executable-code warning before
+	// install. Cancels — nothing is installed — so no scope is needed.
 	test("tool-bearing pack shows executable-code warning before install", async ({ page }) => {
 		const repo = makeRepo();
 		writePack(repo, { name: "warn-pack", tools: [{ group: "warngroup", name: "warn-tool" }] });
@@ -326,7 +458,7 @@ test.describe("Marketplace UI", () => {
 		await registerSource(page, repo);
 
 		const card = page.locator('[data-testid="market-browse-pack"][data-pack-name="warn-pack"]');
-		await expect(card.locator(".market-exec-warning")).toBeVisible();
+		await expect(card.locator(".market-exec-warning")).toBeVisible({ timeout: 15_000 });
 
 		await card.locator('[data-testid="market-install-pack"]').click();
 		await expect(page.getByText(/installs executable code that runs on your machine/i)).toBeVisible({ timeout: 10_000 });
@@ -336,16 +468,21 @@ test.describe("Marketplace UI", () => {
 	});
 
 	// §12.3 #9 — same-name conflict warning + reorder flips the winner.
+	// Installed at a DEDICATED PROJECT scope; reorder persists via PUT
+	// /api/marketplace/pack-order (scope=project).
 	test("conflict warning appears and reorder flips the winner (PUT pack-order)", async ({ page }) => {
 		const repo = makeRepo();
 		// Two packs in one source, each defining the SAME role name.
 		writePack(repo, { name: "conf-a", roles: [{ name: "shared-role", label: "From A" }] });
 		writePack(repo, { name: "conf-b", roles: [{ name: "shared-role", label: "From B" }] });
+		const proj = await makeDedicatedProject("conf");
+		const pid = encodeURIComponent(proj.id);
 
-		await openMarket(page);
+		await openMarket(page, { activeProjectId: proj.id });
 		await registerSource(page, repo);
+		await selectInstallScopeProject(page, proj.id);
 
-		// Install both at server scope (install order a → b ⇒ b wins initially).
+		// Install both (order a → b ⇒ b wins initially as highest precedence).
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="conf-a"]').locator('[data-testid="market-install-pack"]').click();
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-a"]').first()).toBeVisible({ timeout: 15_000 });
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="conf-b"]').locator('[data-testid="market-install-pack"]').click();
@@ -356,6 +493,7 @@ test.describe("Marketplace UI", () => {
 
 		// Winner is conf-b (highest precedence = last installed).
 		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", proj.name);
 		const roleRow = page.locator(".role-row").filter({ hasText: "shared-role" });
 		await expect(roleRow.locator('[data-testid="origin-pack-chip"]')).toHaveText("conf-b", { timeout: 15_000 });
 
@@ -365,21 +503,23 @@ test.describe("Marketplace UI", () => {
 			.locator('[data-testid="market-move-down"]').click();
 
 		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", proj.name);
 		await expect(page.locator(".role-row").filter({ hasText: "shared-role" }).locator('[data-testid="origin-pack-chip"]')).toHaveText("conf-a", { timeout: 15_000 });
 
 		// Persists across reload.
 		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", proj.name);
 		await expect(page.locator(".role-row").filter({ hasText: "shared-role" }).locator('[data-testid="origin-pack-chip"]')).toHaveText("conf-a", { timeout: 15_000 });
 
 		// finding #2 — after reload the INSTALLED-CARD ORDER must reflect the
-		// persisted pack_order (server: [conf-b, conf-a] after the move), not raw
+		// persisted pack_order (project: [conf-b, conf-a] after the move), not raw
 		// readdir order — otherwise the UI builds reorder payloads from a stale
 		// order and a subsequent move persists the wrong sequence.
+		await setActiveProject(page, proj.id);
 		await navigateToHash(page, "#/market");
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-a"]').first()).toBeVisible({ timeout: 15_000 });
-		// Filter to the two conflict packs — the worker's server scope may hold
-		// other packs from sibling tests sharing the same BOBBIT_DIR.
 		const cardOrder = await page.evaluate(() =>
 			Array.from(document.querySelectorAll('[data-testid="market-installed-pack"]'))
 				.map((el) => el.getAttribute("data-pack-name"))
@@ -388,56 +528,8 @@ test.describe("Marketplace UI", () => {
 		expect(cardOrder).toEqual(["conf-b", "conf-a"]);
 
 		// And the persisted pack-order endpoint agrees (highest precedence last).
-		const orderRes = await apiFetch("/api/marketplace/pack-order?scope=server");
+		const orderRes = await apiFetch(`/api/marketplace/pack-order?scope=project&projectId=${pid}`);
 		const order = ((await orderRes.json()).order as string[]).filter((n) => n === "conf-a" || n === "conf-b");
 		expect(order).toEqual(["conf-b", "conf-a"]);
-	});
-
-	// ------------------------------------------------------------------
-	// finding #3 — a SERVER-scope skill pack must resolve for a project whose
-	// rootPath != the server cwd. Skill discovery threads an explicit market
-	// scope context (serverBase = server cwd), so server-scope market skill
-	// packs resolve regardless of the active project's root. API-driven
-	// (resolution is server-side; no extra UI surface to exercise).
-	// ------------------------------------------------------------------
-	test("server-scope skill pack resolves for a non-default project root (root != server cwd)", async () => {
-		const repo = makeRepo();
-		writePack(repo, { name: "srv-skill-pack", skills: [{ name: "srv-scope-skill" }] });
-
-		// Register a SECOND project whose rootPath differs from the server cwd
-		// (the default project's root == server cwd, so it can't expose the bug).
-		const projDir = mkdtempSync(join(tmpdir(), "bobbit-mkt-proj-"));
-		mkdirSync(join(projDir, ".bobbit", "config"), { recursive: true });
-		const projRes = await apiFetch("/api/projects", {
-			method: "POST",
-			body: JSON.stringify({ name: `mkt-other-${Date.now()}`, rootPath: projDir }),
-		});
-		expect(projRes.status).toBe(201);
-		const proj = await projRes.json();
-
-		// Register the source and install the skill pack at SERVER scope.
-		const addRes = await apiFetch("/api/marketplace/sources", { method: "POST", body: JSON.stringify({ url: repo }) });
-		expect(addRes.status).toBe(201);
-		const src = (await addRes.json()).source;
-		const instRes = await apiFetch("/api/marketplace/install", {
-			method: "POST",
-			body: JSON.stringify({ sourceId: src.id, dirName: "srv-skill-pack", scope: "server" }),
-		});
-		expect(instRes.status).toBe(201);
-
-		try {
-			// The server-scope skill resolves for the OTHER project — only true
-			// when serverBase is the server cwd, not the project root.
-			const skillsRes = await apiFetch(`/api/slash-skills?projectId=${encodeURIComponent(proj.id)}`);
-			const skills = (await skillsRes.json()).skills as Array<{ name: string; originPackName?: string | null; originPackId?: string | null }>;
-			const hit = skills.find((s) => s.name === "srv-scope-skill");
-			expect(hit, "server-scope skill must resolve for a non-default project root").toBeTruthy();
-			expect(hit?.originPackName).toBe("srv-skill-pack");
-			expect(hit?.originPackId).toBe("market:server:srv-skill-pack");
-		} finally {
-			await apiFetch("/api/marketplace/installed", { method: "DELETE", body: JSON.stringify({ scope: "server", packName: "srv-skill-pack" }) }).catch(() => {});
-			await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
-			try { rmSync(projDir, { recursive: true, force: true }); } catch { /* ignore */ }
-		}
 	});
 });

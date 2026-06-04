@@ -23,7 +23,7 @@ const { PackResolver, RoleLoader, ToolLoader, SkillLoader } = await import("../s
 const { buildPackList } = await import("../src/server/agent/pack-list.ts");
 const { ConfigCascade } = await import("../src/server/agent/config-cascade.ts");
 const { BuiltinConfigProvider } = await import("../src/server/agent/builtin-config.ts");
-const { discoverSlashSkills, scanSkillDir, scanCommandsDir } = await import("../src/server/skills/slash-skills.ts");
+const { discoverSlashSkills, discoverSlashSkillsResolved, scanSkillDir, scanCommandsDir } = await import("../src/server/skills/slash-skills.ts");
 
 type AnyEntry = any;
 
@@ -402,5 +402,54 @@ describe("finding #2 — global-user user pack (~/.bobbit/config) resolves", () 
 		const coder = cascade.resolveRoles().find((r: AnyEntry) => r.item.name === "coder")!;
 		assert.equal(coder.origin, "server");
 		assert.equal(coder.overrides, "builtin");
+	});
+});
+
+// ── finding #3 — server-scope market skill packs resolve for a project whose
+//    root != the server cwd. This is the file:// unit equivalent of the former
+//    browser E2E "server-scope skill pack resolves for a non-default project
+//    root" — moved here so the browser spec no longer has to install at the
+//    gateway-global server scope (which contaminated concurrent specs). The
+//    wiring under test is `SkillMarketContext.serverBase` (server cwd) being
+//    threaded into skill discovery independently of the active project root.
+
+describe("finding #3 — server-scope skill pack resolves for a non-default project root", () => {
+	function serverSkillPack(serverBase: string, packName: string, skill: string, body: string) {
+		const dir = path.join(serverBase, ".bobbit", "config", "market-packs", packName);
+		w(path.join(dir, "skills", skill, "SKILL.md"), skillMd(skill, body));
+		writeManifest(dir, { name: packName, description: "d", version: "1", contents: { roles: [], tools: [], skills: [skill] } });
+		writeMeta(dir, { sourceUrl: "u", sourceRef: "m", commit: "", packName, version: "1", installedAt: "t", updatedAt: "t", scope: "server" as any });
+	}
+
+	it("a server-scope market skill resolves when serverBase != project root, tagged with its pack", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "f3-srv-skill-"));
+		const serverBase = path.join(root, "server-cwd");
+		const projectBase = path.join(root, "some-other-project"); // root != server cwd
+		const globalUserBase = path.join(root, "gu-empty");
+		fs.mkdirSync(projectBase, { recursive: true });
+		fs.mkdirSync(globalUserBase, { recursive: true });
+		serverSkillPack(serverBase, "srv-skill-pack", "srv-scope-skill", "FROM-SERVER-MARKET");
+
+		// WITH the market context (serverBase wired) the server-scope skill resolves
+		// for the non-default project root and carries its origin pack id/name.
+		const wired = discoverSlashSkills(projectBase, undefined, { serverBase, globalUserBase, projectBase });
+		const hit = wired.find((s) => s.name === "srv-scope-skill");
+		assert.ok(hit, "server-scope skill must resolve for a non-default project root when serverBase is wired");
+		assert.equal(hit!.content.includes("FROM-SERVER-MARKET"), true);
+		assert.equal(hit!.originPackName, "srv-skill-pack");
+		assert.equal(hit!.originPackId, "market:server:srv-skill-pack");
+
+		// Also surfaces as a winner in the raw resolved (conflict) view.
+		const resolved = discoverSlashSkillsResolved(projectBase, undefined, { serverBase, globalUserBase, projectBase });
+		assert.ok(resolved.some((r: AnyEntry) => r.item.name === "srv-scope-skill" && r.origin.kind === "market"));
+
+		// WITHOUT the market context, serverBase defaults to the project cwd, which
+		// holds no market packs — so the server-scope skill must NOT leak in. This
+		// is exactly why the bug existed before the serverBase wiring landed.
+		const unwired = discoverSlashSkills(projectBase);
+		assert.equal(unwired.find((s) => s.name === "srv-scope-skill"), undefined,
+			"without serverBase wiring the server-scope skill must not resolve (proves the wiring is load-bearing)");
+
+		fs.rmSync(root, { recursive: true, force: true });
 	});
 });
