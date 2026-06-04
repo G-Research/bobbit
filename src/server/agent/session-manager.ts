@@ -57,7 +57,7 @@ import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-ma
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
-import { buildAvailableRolesList } from "./team-manager.js";
+import { resolveRolePrompt } from "./role-prompt.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -1049,6 +1049,11 @@ export class SessionManager {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
 	}
 
+	/** Get the role manager (used by the staff path to resolve role prompts). */
+	getRoleManager(): RoleManager | undefined {
+		return this.roleManager;
+	}
+
 	/** Get the sandbox manager (used by team-manager and verification-harness). */
 	getSandboxManager(): SandboxManager | null {
 		return this.sandboxManager;
@@ -1679,18 +1684,13 @@ export class SessionManager {
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 
-			let rolePrompt: string | undefined;
-			let roleName: string | undefined;
-			if (session.role && this.roleManager) {
-				const role = this.roleManager.getRole(session.role);
-				if (role?.promptTemplate) {
-					rolePrompt = role.promptTemplate;
-					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
-					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
-					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
-					roleName = session.role;
-				}
-			}
+			const role = session.role && this.roleManager ? this.roleManager.getRole(session.role) : undefined;
+			const rolePrompt = resolveRolePrompt(role, {
+				branch: goal?.branch,
+				agentId: `${session.role}-${(session.goalId || session.id).slice(0, 8)}`,
+				roleManager: this.roleManager,
+			});
+			const roleName = rolePrompt ? session.role : undefined;
 
 			parts = {
 				baseSystemPromptPath: this.systemPromptPath,
@@ -3455,18 +3455,13 @@ export class SessionManager {
 
 			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
 			const goalSpec = goal?.spec;
-			let rolePrompt: string | undefined;
-			let roleName: string | undefined;
-			if (ps.role && this.roleManager) {
-				const role = this.roleManager.getRole(ps.role);
-				if (role?.promptTemplate) {
-					rolePrompt = role.promptTemplate;
-					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
-					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
-					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
-					roleName = ps.role;
-				}
-			}
+			const role = ps.role && this.roleManager ? this.roleManager.getRole(ps.role) : undefined;
+			const rolePrompt = resolveRolePrompt(role, {
+				branch: goal?.branch,
+				agentId: `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`,
+				roleManager: this.roleManager,
+			});
+			const roleName = rolePrompt ? ps.role : undefined;
 
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: this.systemPromptPath,
@@ -4795,13 +4790,22 @@ export class SessionManager {
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
 		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
+		// Resolve the role prompt through the shared helper so placeholder
+		// substitution ({{GOAL_BRANCH}}/{{AGENT_ID}}/{{AVAILABLE_ROLES}}) matches
+		// the other regular-session sites (previously passed raw — latent bug).
+		const rolePrompt = resolveRolePrompt(fullRole ?? role, {
+			branch: goal?.branch,
+			agentId: `${role.name}-${(session.goalId || session.id).slice(0, 8)}`,
+			roleManager: this.roleManager,
+		});
+
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
 			cwd: session.cwd,
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec,
-			rolePrompt: role.promptTemplate,
+			rolePrompt,
 			roleName: role.name,
 			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
 			projectConfigStore: this.projectConfigStore,
