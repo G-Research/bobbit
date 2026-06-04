@@ -350,6 +350,17 @@ test.describe("Marketplace UI", () => {
 		await expect(page.locator('[data-testid="market-readonly-note"]')).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator(".config-action-btn")).toHaveCount(0);
 
+		// finding #1 — the tool DETAIL/EDIT view (#/tools/:name) must keep the
+		// origin pack chip + read-only "Manage in Marketplace" note AFTER the
+		// detail fetch overwrites the cascade list item. Before the fix the detail
+		// payload had no origin/originPack*, so navigating here (or just loading
+		// detail) dropped the badge and re-enabled customize/revert. The config
+		// scope is already pinned to the dedicated project from the roles step.
+		await navigateToHash(page, "#/tools/kit-tool");
+		await expect(page.locator('[data-testid="market-readonly-note"]')).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator('[data-testid="origin-pack-chip"]').first()).toHaveText("kit-pack");
+		await expect(page.locator(".config-action-btn")).toHaveCount(0);
+
 		// Tools + skills resolve through the single resolver, tagged with the pack
 		// (chip rendering is the identical UI asserted above for roles; the tools
 		// page groups rows which makes a UI-visibility assertion brittle). Scope
@@ -393,7 +404,15 @@ test.describe("Marketplace UI", () => {
 			// finding #1) — resolved via the project's toolManager.
 			const detailRes = await apiFetch(`/api/tools/rt-tool?projectId=${pid}`);
 			expect(detailRes.status).toBe(200);
-			expect((await detailRes.json()).name).toBe("rt-tool");
+			const detail = await detailRes.json() as { name: string; origin?: string; originPackId?: string | null; originPackName?: string | null };
+			expect(detail.name).toBe("rt-tool");
+			// The detail payload MUST carry the same origin metadata the LIST
+			// endpoint emits (finding #1) so the tools edit page keeps the pack
+			// badge + read-only state after the detail fetch overwrites the list
+			// item. Without merging cascade origin these would be undefined.
+			expect(detail.origin).toBe("project");
+			expect(detail.originPackName).toBe("rt-tool-pack");
+			expect(detail.originPackId).toBeTruthy();
 
 			// It surfaces as an available tool for the project, tagged with its pack.
 			const listRes = await apiFetch(`/api/tools?projectId=${pid}`);
@@ -411,6 +430,51 @@ test.describe("Marketplace UI", () => {
 		const listAfter = await apiFetch(`/api/tools?projectId=${pid}`);
 		const toolsAfter = (await listAfter.json()).tools as Array<{ name: string }>;
 		expect(toolsAfter.find((t) => t.name === "rt-tool")).toBeFalsy();
+	});
+
+	// finding #2 — install into a project that is NOT the marketplace's active
+	// project. The Installed list, update and uninstall must address the install
+	// TARGET's project, never the active/first project. Before the fix the
+	// install picker could point at project T while the Installed-list query +
+	// update/uninstall used the active project A, so the pack vanished from the
+	// list and manage ops hit the wrong scope.
+	test("install into a non-active project shows in the Installed list and uninstall targets the right project", async ({ page }) => {
+		const repo = makeRepo();
+		writePack(repo, { name: "scoped-pack", roles: [{ name: "scoped-role" }] });
+		const projActive = await makeDedicatedProject("act");
+		const projTarget = await makeDedicatedProject("tgt");
+
+		// Pin a DIFFERENT project as active so the install target diverges from it.
+		await openMarket(page, { activeProjectId: projActive.id });
+		await registerSource(page, repo);
+		// Point the install scope picker at the *target* project (not the active).
+		await selectInstallScopeProject(page, projTarget.id);
+
+		// Install (no tools → no exec warning).
+		await page.locator('[data-testid="market-browse-pack"][data-pack-name="scoped-pack"]').locator('[data-testid="market-install-pack"]').click();
+
+		// Appears in the Installed list — the list query is now bound to the
+		// install target, not the active project (would be empty before the fix).
+		const installed = page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]').first();
+		await expect(installed).toBeVisible({ timeout: 15_000 });
+
+		// Resolves on the TARGET project's roles scope (proves the install landed
+		// in projTarget, not projActive).
+		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", projTarget.name);
+		await expect(page.locator(".role-row").filter({ hasText: "scoped-role" })).toBeVisible({ timeout: 15_000 });
+
+		// Uninstall targets projTarget → card + entity gone.
+		await navigateToHash(page, "#/market");
+		await page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]').first()
+			.locator('[data-testid="market-uninstall-pack"]').click();
+		await expect(page.getByText(/deletes the pack directory/i)).toBeVisible({ timeout: 10_000 });
+		await page.keyboard.press("Enter");
+		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]')).toHaveCount(0, { timeout: 15_000 });
+
+		await navigateToHash(page, "#/roles");
+		await selectConfigProjectScope(page, ".roles-container", projTarget.name);
+		await expect(page.locator(".role-row").filter({ hasText: "scoped-role" })).toHaveCount(0, { timeout: 15_000 });
 	});
 
 	// §12.3 #7 — update (re-sync upstream) and uninstall (entities disappear).

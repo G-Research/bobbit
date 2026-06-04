@@ -4497,7 +4497,17 @@ async function handleApiRoute(
 			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
 			const tool = tm.getToolByName(name);
 			if (!tool) { json({ error: "Tool not found" }, 404); return; }
-			json(tool);
+			// Merge in cascade origin metadata so the detail payload carries the same
+			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
+			// Without this, the tools edit page replaces the cascade list item with the
+			// raw detail and a market-pack tool loses its origin badge + read-only state.
+			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
+			if (cascadeEntry) {
+				const withMeta = withOrigin(cascadeEntry as any);
+				json({ ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName });
+			} else {
+				json(tool);
+			}
 			return;
 		}
 

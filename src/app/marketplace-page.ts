@@ -66,6 +66,14 @@ let addingSource = false;
 let installScope: MarketScope = "server";
 let installProjectId: string | undefined = undefined;
 
+/** The project the marketplace currently operates on for the *project* scope
+ *  segment. Set whenever the user picks a "Project: X" install target (or
+ *  installs into one) so the Installed-list query, update, uninstall and
+ *  pack-order all address the SAME project the install targeted — never the
+ *  active/first project (finding #2). Defaults (when unset) to the active
+ *  project, then the first registered project. */
+let focusProjectId: string | undefined = undefined;
+
 /** Per-pack busy flags keyed by `${scope}:${packName}` or `dirName`. */
 const busy = new Set<string>();
 
@@ -93,6 +101,9 @@ export function clearMarketplaceState(): void {
 	newSourceUrl = "";
 	newSourceRef = "";
 	addingSource = false;
+	installScope = "server";
+	installProjectId = undefined;
+	focusProjectId = undefined;
 	busy.clear();
 	expandedConflicts.clear();
 }
@@ -102,10 +113,11 @@ export function clearMarketplaceState(): void {
 // ============================================================================
 
 function currentProjectId(): string | undefined {
-	// Marketplace conflicts/installed are scoped to a project when one exists so
-	// the project segment of the resolver is included. Use the active project,
-	// else the first registered project.
-	return state.activeProjectId || state.projects[0]?.id || undefined;
+	// The project the marketplace addresses for the *project* scope segment.
+	// Prefer the explicitly focused project (set by the install scope picker so
+	// install + Installed-list + update/uninstall never diverge — finding #2),
+	// else the active project, else the first registered project.
+	return focusProjectId || state.activeProjectId || state.projects[0]?.id || undefined;
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {
@@ -235,6 +247,10 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 		renderApp();
 		return;
 	}
+	// Bind the marketplace's project focus to the install target so the pack we
+	// install appears in the Installed list and update/uninstall address the
+	// same project we installed into (finding #2).
+	if (scope === "project" && projectId) focusProjectId = projectId;
 
 	const shipsTools = pack.hasTools || (pack.contents?.tools?.length ?? 0) > 0;
 	if (shipsTools) {
@@ -484,6 +500,13 @@ function renderScopePicker(): TemplateResult {
 					if (v.startsWith("project:")) {
 						installScope = "project";
 						installProjectId = v.slice("project:".length);
+						// Re-focus the marketplace on the chosen project and reload the
+						// Installed list/conflicts for it so they match the install target.
+						if (focusProjectId !== installProjectId) {
+							focusProjectId = installProjectId;
+							void loadMarketplaceData(false);
+							return;
+						}
 					} else {
 						installScope = v as MarketScope;
 						installProjectId = undefined;
