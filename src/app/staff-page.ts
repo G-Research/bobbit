@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
 import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
-import { fetchStaff, updateStaffAgent, deleteStaffAgent, enqueueInboxManual, refreshSessions, type StaffAgent } from "./api.js";
+import { fetchStaff, updateStaffAgent, deleteStaffAgent, enqueueInboxManual, refreshSessions, fetchRoles, type StaffAgent, type RoleData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
@@ -37,6 +37,13 @@ let wakeFeedback: string | null = null;
 // Session appearance state
 let editColorIndex = -1;
 let editAccessory = "none";
+// True once the user manually picks an accessory this edit session. Gates the
+// role-driven accessory pre-fill so a manual choice is never overridden.
+let accessoryUserTouched = false;
+
+// Role picker state
+let editRoleId: string | null = null;
+let roles: RoleData[] = [];
 
 interface TriggerDef {
 	type: string;
@@ -59,6 +66,18 @@ export async function loadStaffPageData(): Promise<void> {
 	staffList = await fetchStaff();
 	loading = false;
 	renderApp();
+	void ensureRolesLoaded();
+}
+
+/** Fetch roles for the picker (idempotent; re-renders when they arrive). */
+async function ensureRolesLoaded(): Promise<void> {
+	if (roles.length > 0) return;
+	try {
+		roles = await fetchRoles();
+		renderApp();
+	} catch {
+		/* roles are optional; leave list empty */
+	}
 }
 
 // ============================================================================
@@ -82,10 +101,13 @@ function showEdit(agent: StaffAgent): void {
 	editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 	editMemory = agent.memory || "";
 	editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
+	editRoleId = agent.roleId || null;
+	accessoryUserTouched = false;
 	wakeFeedback = null;
 	saving = false;
 	deleting = false;
 	loadSessionAppearance(agent);
+	void ensureRolesLoaded();
 	setHashRoute("staff-edit", agent.id);
 }
 
@@ -102,10 +124,13 @@ export function navigateToStaffEdit(staffId: string): void {
 		editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 		editMemory = agent.memory || "";
 		editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
+		editRoleId = agent.roleId || null;
+		accessoryUserTouched = false;
 		wakeFeedback = null;
 		saving = false;
 		deleting = false;
 		loadSessionAppearance(agent);
+		void ensureRolesLoaded();
 	} else {
 		// Staff id unknown in current list — likely a stale search result.
 		// Dispatch a page-local event so the search page can show a toast.
@@ -153,6 +178,7 @@ async function handleSave(): Promise<void> {
 		memory: editMemory,
 		contextPolicy: editContextPolicy,
 		accessory: editAccessory,
+		roleId: editRoleId,
 	});
 	// Save session appearance (color only; staff accessory is persisted on the staff record).
 	if (selectedStaff.currentSessionId) {
@@ -189,6 +215,18 @@ async function handleDelete(): Promise<void> {
 		showList();
 	}
 	deleting = false;
+	renderApp();
+}
+
+function onRoleChange(e: Event): void {
+	const value = (e.target as HTMLSelectElement).value;
+	editRoleId = value || null;
+	// Pre-fill the accessory from the selected role, but only as a default —
+	// never override an accessory the user has manually chosen this session.
+	if (editRoleId && !accessoryUserTouched) {
+		const role = roles.find((r) => r.name === editRoleId);
+		if (role) editAccessory = role.accessory || "none";
+	}
 	renderApp();
 }
 
@@ -613,6 +651,20 @@ function renderEditView(): TemplateResult {
 						`)}
 					</div>
 				</div>
+				<!-- Role picker -->
+				<div data-testid="staff-role-picker">
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Role</label>
+					<p class="text-[10px] text-muted-foreground mb-1">Optional. Prepends the role's prompt context and pre-fills the accessory.</p>
+					<select
+						data-testid="staff-role-select"
+						class="w-full h-9 px-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+						.value=${editRoleId ?? ""}
+						@change=${onRoleChange}
+					>
+						<option value="" ?selected=${!editRoleId}>No role</option>
+						${roles.map((r) => html`<option value=${r.name} ?selected=${editRoleId === r.name}>${r.label || r.name}</option>`)}
+					</select>
+				</div>
 				<!-- Accessory picker -->
 				<div>
 					<div class="text-xs text-muted-foreground mb-2 font-medium">Accessory</div>
@@ -626,7 +678,7 @@ function renderEditView(): TemplateResult {
 										${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : "hover:bg-secondary/50"}"
 									style="width:40px;"
 									title="${a.label}"
-									@click=${() => { editAccessory = accId; renderApp(); }}
+									@click=${() => { editAccessory = accId; accessoryUserTouched = true; renderApp(); }}
 								>
 									<span class="block" style="width:20px;height:18px;position:relative;">
 										${statusBobbit("idle", false, undefined, false, false, false, false, accId, true)}
