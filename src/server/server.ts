@@ -8468,13 +8468,26 @@ async function handleApiRoute(
 	// Includes gitignored/untracked files; excludes .git/node_modules/etc. (no .gitignore consulted).
 	if (url.pathname === "/api/file-mentions" && req.method === "GET") {
 		const rawCwd = url.searchParams.get("cwd") || process.cwd();
-		const projectId = url.searchParams.get("projectId");
+		const sessionId = url.searchParams.get("sessionId");
 		const q = url.searchParams.get("q") || undefined;
 		const limitRaw = url.searchParams.get("limit");
 		const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
 		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
-		// Sandbox sessions have container-internal cwds; resolve the host path.
-		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
+		// Enumerate the session's HOST worktree, NOT the project root. The
+		// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
+		// discovery but wrong here: file mentions must see the goal/session
+		// worktree's branch-local, untracked and gitignored files. worktreePath
+		// is the host path; for sandboxed sessions cwd is a container path so
+		// worktreePath is required. Fall back to the raw `cwd` param (never the
+		// project root) when no session is bound.
+		let cwd = rawCwd;
+		if (sessionId) {
+			const session = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			const worktree = session?.worktreePath || persisted?.worktreePath;
+			const sessionCwd = session?.cwd || persisted?.cwd;
+			cwd = worktree || sessionCwd || rawCwd;
+		}
 		const files = await enumerateFiles(cwd, { query: q, limit });
 		json({ files: files.map((p) => ({ path: p })) });
 		return;
