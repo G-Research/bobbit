@@ -310,7 +310,10 @@ export class MessageEditor extends LitElement {
 		const files = q ? this._atFiles.filter((p) => p.toLowerCase().includes(q)) : this._atFiles;
 		this._atFilteredFiles = files;
 		this._atMenuOpen = files.length > 0;
-		if (this._atSelectedIndex >= files.length) this._atSelectedIndex = 0;
+		// Reset to the top-ranked match on every recompute (mirrors the slash
+		// menu) so a changed query never leaves a stale highlight that Enter/Tab
+		// would select.
+		this._atSelectedIndex = 0;
 	}
 
 	private _updateAtAutocomplete() {
