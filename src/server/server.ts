@@ -1939,7 +1939,7 @@ export function createGateway(config: GatewayConfig) {
 				await pool.drain();
 			}
 			await sessionManager.shutdown();
-			projectContextManager.closeAll();
+			await projectContextManager.closeAll();
 			if (sandboxManager) {
 				await sandboxManager.shutdownAll();
 			}

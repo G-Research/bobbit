@@ -539,6 +539,10 @@ One failure path: the FlexSearch store failed to open (usually because `<project
 
 Corrupt per-key files are tolerated on open — the loader logs a warning, skips the bad file, and the meta check triggers a background rebuild. Crash-mid-flush leaves `.tmp` files that are ignored on next open.
 
+### `[search] flex flush error: ENOENT … __docs__.json.tmp` spew (esp. during E2E teardown)
+
+A flush is racing removal of the project's `.bobbit/state/search.flex/` dir. The close path is now fully awaitable, so a fresh occurrence means an ordering regression. Check, in order: (1) `ProjectContext.close()` / `ProjectContextManager.closeAll()` are still `async` and `server.ts` shutdown `await`s `closeAll()` — if any link drops the await, the dir is removed mid-flush; (2) `SearchService.close()` still awaits the in-flight `_openPromise` and `_doOpen()` still re-checks `_state === "closed"` after its awaits (a store/rebuild-timer resurrected after close keeps flushing into a deleted dir); (3) `FlexSearchStore._isBenignTeardownError()` only swallows `ENOENT`/`EPERM`/`EBUSY` when `_closed` — if the error fires while the store is still open, it's a real write failure, not a teardown race. See [docs/internals.md — Close & teardown ordering](internals.md#close--teardown-ordering). Sibling symptom `[search] Skipping corrupt index file 1.tag.json` on a healthy index = the empty-tag export/import round-trip regressed; `classifyTagImport()` must treat the all-`null` tag shape as `empty`, not `invalid`.
+
 ### Stats endpoint didn't return
 
 - `GET /api/search/stats?projectId=<id>` returns `{ state, engine, engineVersion, rowCountsBySource, datasetBytes, lastRebuildAt }`. **400** if `projectId` is missing; **503** if the service is disabled (body carries `reason`).

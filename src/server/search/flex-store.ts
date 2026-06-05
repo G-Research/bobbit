@@ -431,9 +431,28 @@ export class FlexSearchStore {
 	async writeMeta(meta: MetaRow): Promise<void> {
 		const final = path.join(this.dataDir, META_FILE);
 		const tmp = `${final}.tmp`;
-		await fs.promises.mkdir(this.dataDir, { recursive: true });
-		await fs.promises.writeFile(tmp, JSON.stringify(writeMetaRow(meta)), "utf-8");
-		await fs.promises.rename(tmp, final);
+		try {
+			await fs.promises.mkdir(this.dataDir, { recursive: true });
+			await fs.promises.writeFile(tmp, JSON.stringify(writeMetaRow(meta)), "utf-8");
+			await fs.promises.rename(tmp, final);
+		} catch (err) {
+			if (this._isBenignTeardownError(err)) return;
+			throw err;
+		}
+	}
+
+	/**
+	 * True when a filesystem write failed because the target dir was removed
+	 * concurrently AND this store is already closed — i.e. a flush lost the
+	 * race against teardown removing the temp `.bobbit` state dir. ENOENT is
+	 * the POSIX symptom; Windows can surface EPERM/EBUSY against a vanishing
+	 * directory. Only benign once `_closed === true`; genuine open-store
+	 * write failures must still surface.
+	 */
+	private _isBenignTeardownError(err: unknown): boolean {
+		if (!this._closed) return false;
+		const code = (err as NodeJS.ErrnoException)?.code;
+		return code === "ENOENT" || code === "EPERM" || code === "EBUSY";
 	}
 
 	/** Passthrough no-op. Kept for SearchService.compact() compatibility. */
@@ -465,6 +484,10 @@ export class FlexSearchStore {
 		if (this._saveTimer) return;
 		this._saveTimer = setTimeout(() => {
 			this._saveTimer = null;
+			// Re-check `_closed`: the timer was scheduled while open, but
+			// `close()` may have run (and torn the dir down) before it fired.
+			// The unref()'d timer can still fire during teardown.
+			if (this._closed) return;
 			void this._flushNow().catch((err) =>
 				console.error("[search] flex persistence failed:", err),
 			);
@@ -495,6 +518,18 @@ export class FlexSearchStore {
 	}
 
 	private async __doFlush(): Promise<void> {
+		try {
+			await this.__doFlushUnsafe();
+		} catch (err) {
+			// If we're already closed and the failure is the temp dir being
+			// removed underneath us (teardown race), swallow silently — the
+			// data we were flushing is about to be deleted anyway.
+			if (this._isBenignTeardownError(err)) return;
+			throw err;
+		}
+	}
+
+	private async __doFlushUnsafe(): Promise<void> {
 		const dir = path.join(this.dataDir, INDEX_SUBDIR);
 		await fs.promises.mkdir(dir, { recursive: true });
 		const written: string[] = [];
@@ -513,10 +548,22 @@ export class FlexSearchStore {
 
 		await this._idx.export(async (key: string, data: unknown) => {
 			if (data === undefined || data === null) return;
+			let payloadData: unknown = data;
+			// FlexSearch exports the tag context as `[field, valueMapOrNull]`
+			// pairs; an empty/partially-empty index yields `null` values that
+			// crash `Document.import` on reload (`null.length`). Strip the
+			// null-valued entries before persisting; skip the file entirely
+			// when nothing meaningful remains.
+			if (isTagKey(key)) {
+				const parsed = typeof data === "string" ? safeParse(data) : data;
+				const sanitised = sanitiseTagImport(parsed);
+				if (sanitised === null) return;
+				payloadData = sanitised;
+			}
 			const safeKey = sanitiseKey(key);
 			const final = path.join(dir, `${safeKey}.json`);
 			const tmp = `${final}.tmp`;
-			const payload = typeof data === "string" ? data : JSON.stringify(data);
+			const payload = typeof payloadData === "string" ? payloadData : JSON.stringify(payloadData);
 			await fs.promises.writeFile(tmp, payload, "utf-8");
 			await fs.promises.rename(tmp, final);
 			written.push(`${safeKey}.json`);
@@ -571,6 +618,29 @@ export class FlexSearchStore {
 			try {
 				const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
 				const data = safeParse(raw);
+				if (isTagKey(key)) {
+					// Classify the tag export so a genuinely corrupt payload still
+					// forces rebuild-from-mirror. Only the KNOWN empty-tag shape
+					// (an array of `[field, null]` pairs that sanitises to empty)
+					// is a clean no-op — those `null` values would otherwise crash
+					// `Document.import` on reload. Malformed / unparseable /
+					// unrecognized payloads must count as importFailures so the
+					// rebuild-from-`__docs__.json` recovery still fires.
+					const tag = classifyTagImport(data);
+					if (tag.kind === "invalid") {
+						importFailures++;
+						console.warn(`[search] Skipping corrupt index file ${file}: unrecognized tag payload`);
+						await yieldToLoop();
+						continue;
+					}
+					if (tag.kind === "import") {
+						this._idx.import(key, tag.entries as never);
+					}
+					// "empty" — known FlexSearch empty-tag shape; clean no-op.
+					importSuccesses++;
+					await yieldToLoop();
+					continue;
+				}
 				this._idx.import(key, data as never);
 				importSuccesses++;
 			} catch (err) {
@@ -673,6 +743,75 @@ function titleFromText(text: string): string {
 function safeParse(raw: string): unknown {
 	try { return JSON.parse(raw); }
 	catch { return raw; }
+}
+
+/**
+ * True for FlexSearch export keys that hold the document tag context
+ * (e.g. `1.tag`, `<field>.1.tag`). The reference segment is the last
+ * dot-delimited component.
+ */
+export function isTagKey(key: string): boolean {
+	return key.endsWith(".tag");
+}
+
+/**
+ * Sanitise a FlexSearch tag-context export payload.
+ *
+ * The tag context serialises as an array of `[field, valueMapOrNull]`
+ * pairs. Fields with no indexed values export as `[field, null]`; on
+ * reload `Document.import`'s `json_to_ctx`/`json_to_map` then crash on
+ * `null.length`, logged as a noisy `Skipping corrupt index file …` and
+ * (for non-empty indexes) forcing a full rebuild-from-mirror every boot.
+ *
+ * Returns the array with the null/empty-valued entries removed so the
+ * import sees only populated tag fields, or `null` when nothing
+ * meaningful remains (an empty tag context — skip the import entirely;
+ * this is not a corruption). Non-array / unrecognised payloads return
+ * `null` so callers treat them as "nothing to import".
+ */
+export function sanitiseTagImport(data: unknown): unknown[] | null {
+	if (!Array.isArray(data)) return null;
+	const kept = data.filter(
+		(entry) =>
+			Array.isArray(entry) &&
+			entry.length >= 2 &&
+			entry[1] != null,
+	);
+	return kept.length > 0 ? kept : null;
+}
+
+export type TagImportClassification =
+	| { kind: "import"; entries: unknown[] }
+	| { kind: "empty" }
+	| { kind: "invalid" };
+
+/**
+ * Classify a FlexSearch tag-context export payload read back from disk so the
+ * loader can tell a benign empty-tag context apart from genuine corruption.
+ *
+ * The tag context serialises as an array of `[field, valueMapOrNull]` pairs.
+ * Three outcomes:
+ *
+ *  - `import`  — a well-formed tag array with ≥1 populated field. The caller
+ *    imports only the populated entries.
+ *  - `empty`   — a well-formed tag array whose fields are ALL `null` (the known
+ *    FlexSearch empty-tag shape) or an empty array. A clean no-op, NOT a
+ *    corruption — do not force a rebuild.
+ *  - `invalid` — anything else: a non-array, an unparseable string (from
+ *    `safeParse` on bad JSON), or an array containing malformed entries. The
+ *    caller MUST treat this as an import failure so rebuild-from-`__docs__.json`
+ *    still fires; otherwise a corrupt tag file is silently skipped and the
+ *    in-memory index degrades without warning.
+ */
+export function classifyTagImport(data: unknown): TagImportClassification {
+	if (!Array.isArray(data)) return { kind: "invalid" };
+	for (const entry of data) {
+		if (!Array.isArray(entry) || entry.length < 2 || typeof entry[0] !== "string") {
+			return { kind: "invalid" };
+		}
+	}
+	const populated = data.filter((entry) => (entry as unknown[])[1] != null);
+	return populated.length > 0 ? { kind: "import", entries: populated } : { kind: "empty" };
 }
 
 // FlexSearch export keys may include characters awkward for filenames

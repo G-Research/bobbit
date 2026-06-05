@@ -484,7 +484,7 @@ function renderSourcesPanel(): TemplateResult {
 					class="market-input"
 					placeholder="https://github.com/acme/bobbit-packs.git or /abs/local/path"
 					.value=${newSourceUrl}
-					@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; }}
+					@input=${(e: Event) => { newSourceUrl = (e.target as HTMLInputElement).value; renderApp(); }}
 					@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
 				/>
 				<div class="flex items-center gap-2">
@@ -494,7 +494,7 @@ function renderSourcesPanel(): TemplateResult {
 						class="market-input flex-1"
 						placeholder="ref (branch/tag, optional)"
 						.value=${newSourceRef}
-						@input=${(e: Event) => { newSourceRef = (e.target as HTMLInputElement).value; }}
+						@input=${(e: Event) => { newSourceRef = (e.target as HTMLInputElement).value; renderApp(); }}
 						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && newSourceUrl.trim()) handleAddSource(); }}
 					/>
 					<button

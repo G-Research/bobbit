@@ -210,8 +210,17 @@ async function reopenMarketAfterReload(page: Page, projectId: string): Promise<v
  *  are actually browsable (poll for at least one pack card). */
 async function registerSource(page: Page, repoPath: string): Promise<void> {
 	// Must be on the Sources tab (where the add-source form lives).
-	await page.locator('[data-testid="market-source-url"]').fill(repoPath);
-	await page.locator('[data-testid="market-add-source"]').click();
+	const urlInput = page.locator('[data-testid="market-source-url"]');
+	const addSourceBtn = page.locator('[data-testid="market-add-source"]');
+	// fill() dispatches the input event, but the Add button is disabled
+	// (?disabled=${!newSourceUrl.trim()}) until the component re-renders. Under
+	// load that render can lag a naive click, leaving the button disabled → click
+	// timeout. Synchronize on the real precondition (button enabled) instead of
+	// clicking optimistically.
+	await urlInput.fill(repoPath);
+	await expect(urlInput).toHaveValue(repoPath);
+	await expect(addSourceBtn).toBeEnabled({ timeout: 15_000 });
+	await addSourceBtn.click();
 	// handleAddSource auto-switches to the Browse tab and browses the new source
 	// → poll until the pack cards render (browse is async after the POST; a single
 	// visibility check can race it).

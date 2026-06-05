@@ -1543,6 +1543,28 @@ The current engine is **[FlexSearch](https://github.com/nextapps-de/flexsearch)*
 - Persistence is export/import via FlexSearch's built-in serializer, written per-key with an atomic `.tmp` → rename and a trailing-edge debounce. Crash-mid-write leaves `.tmp` files that the loader skips on next open.
 - Meta mismatch on startup triggers a full rebuild from the source-of-truth stores. Fields checked: `engine`, `engineVersion`, `schemaVersion`, `contentPolicyVersion`.
 
+### Close & teardown ordering
+
+The search flush-on-close path is **fully awaitable** end to end. This matters because the flush is async disk I/O (`mkdir` → `writeFile(<tmp>)` → `rename`), and the E2E harness deletes each worker's temp `.bobbit` state dir immediately after shutdown. If the close were fire-and-forget, the directory removal would race a flush still in flight, surfacing as a `[search] flex flush error: ENOENT … __docs__.json.tmp` spew (POSIX) or `EPERM`/`EBUSY` (Windows). Beyond the log noise, the dangling I/O competed with the next worker for Windows filesystem/Defender handles and destabilized parallel runs. The fix threads the promise all the way up so teardown's `rm` cannot start until the final flush has settled:
+
+- **`ProjectContext.close()`** (`src/server/agent/project-context.ts`) is `async`: flushes the session store, then `await this.searchIndex.close()` (no longer `void`-fire-and-forget).
+- **`ProjectContextManager.closeAll()`** (`project-context-manager.ts`) is `async` and `await`s `Promise.allSettled(...)` over every context's `close()` before clearing the map. `remove(projectId)` stays fire-and-forget (`void ctx.close().catch(...)`) on purpose — it runs during normal operation, not teardown, so it must not block but must not throw.
+- **`server.ts` shutdown** `await`s `projectContextManager.closeAll()`.
+
+`SearchService.close()` (`search-service.ts`) coordinates with a possibly in-flight `open()`. Without this, `_doOpen()` could resume *after* `close()` returned and re-establish the store, indexer, and rebuild timer — leaking live search resources past shutdown. The two guards together close the race:
+
+1. `close()` first `await`s any in-flight `_openPromise`, then sets `_state = "closed"`, clears the startup `_rebuildTimer`, re-reads `_store` (in case `_doOpen` just assigned it), closes it, and nulls `_indexer`.
+2. `_doOpen()` re-checks `_state` after the `FlexSearchStore.open()` await *and* after the meta-read awaits. If state went `"closed"` mid-open it `await store.close()` and returns **without** assigning `_store`/`_indexer`, scheduling the rebuild timer, or flipping to `"ready"`.
+
+The startup rebuild timer is `unref()`'d (never keeps the process alive) and cancelled on close; its callback also re-checks `_state === "closed" || !_indexer` before rebuilding, because an already-scheduled timer can still fire during teardown.
+
+`FlexSearchStore` (`flex-store.ts`) is the belt-and-braces layer for any flush that still loses the race (a debounced timer or concurrent project-delete):
+
+- `_isBenignTeardownError()` swallows a write failure **only** when `_closed === true` *and* the code is `ENOENT`/`EPERM`/`EBUSY` (a vanishing dir). Genuine failures against an open store still throw — corruption is never hidden.
+- `close()` sets `_closed`, clears the debounce `_saveTimer`, awaits any in-flight flush, then does a final `_flushNow()`. The `_scheduleSave` timer callback re-checks `_closed` before flushing.
+- **Empty-tag exports** are skipped: FlexSearch serialises its tag context as `[field, valueMapOrNull]` pairs, and an empty index yields `null` values that crash `Document.import` (`null.length`) on reload. The exporter strips null-valued entries and skips the file entirely when nothing meaningful remains.
+- **Malformed tag files still trigger rebuild.** On load, `classifyTagImport()` returns `import` / `empty` / `invalid`. Only the known empty-tag shape is a clean no-op; an unparseable or malformed tag payload counts as an import failure so the rebuild-from-`__docs__.json` mirror recovery still fires (instead of silently degrading the in-memory index).
+
 ### Abstractions
 
 The surface in `src/server/search/types.ts` that downstream code sees is unchanged from the previous backend, so v2 work (e.g. file indexing) drops in without a refactor:
