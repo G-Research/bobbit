@@ -97,7 +97,8 @@ pi.registerTool({
     name: Type.String(),
     args: Type.Optional(Type.String()),
   }),
-  async execute({ name, args }) { /* POST /api/sessions/:id/activate-skill */ }
+  // pi's contract: execute(toolCallId, params, …) — params are the SECOND arg.
+  async execute(_toolCallId, { name, args }) { /* POST /api/sessions/:id/activate-skill */ }
 });
 ```
 
@@ -366,8 +367,15 @@ pi.registerTool({
     name: Type.String({ description: "Skill name (no leading slash)" }),
     args: Type.Optional(Type.String({ description: "Arguments string" })),
   }),
-  async execute({ name, args }) {
+  // pi's contract: execute(toolCallId, params, signal, onUpdate, ctx) — the
+  // tool-call id is FIRST, validated params SECOND. Reading params off the
+  // first arg silently drops `name`/`args` (gateway then 400s `name is
+  // required`). Pinned by tests/activate-skill-extension.test.ts.
+  async execute(_toolCallId, { name, args }) {
     const resp = await api("POST", `/api/sessions/${sessionId}/activate-skill`, { name, args: args ?? "" });
+    // NOTE: a returned `{ isError: true }` does NOT propagate to the UI — pi's
+    // agent-loop hardcodes isError:false for tools that return (vs throw). The
+    // renderer must surface result text independently of the flag.
     if (resp.ok === false) return { content: [{ type: "text", text: resp.error }], isError: true, details: undefined };
     return {
       content: [{ type: "text", text: resp.expanded }],
@@ -480,7 +488,7 @@ The `convertToLlm` path in `Messages.ts` is unchanged — `skillExpansions` is p
 - Assert:
   1. The `tool_result` text equals `buildSlashSkillPrompt(mockup, "")`.
   2. The next assistant turn's input contains the resolved body.
-  3. `disable-model-invocation: true` skill rejected with 403; tool surfaces `isError`.
+  3. `disable-model-invocation: true` skill rejected with 403; the tool returns an error result whose text content (`activate_skill failed: …`) is surfaced by the renderer. Do NOT assert on `result.isError` — pi hardcodes `isError:false` for returned (non-thrown) tool results, so the renderer must surface the error text independently of the flag (pinned by `tests/activate-skill-renderer.spec.ts`).
   4. `Skills: never` policy → tool not registered → 4xx during agent activation init (existing tool-guard test pattern).
 
 ### Browser E2E (`tests/e2e/ui/skills-chip.spec.ts`)
