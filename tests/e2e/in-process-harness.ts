@@ -53,6 +53,7 @@ export interface GatewayInfo {
 	bobbitDir: string;
 	sessionManager: any;  // Exposed for sandbox security tests
 	bgProcessManager: any;  // Exposed for bg-wait abort tests
+	teamManager: any;     // Exposed for pause-cascade supervisor-respawn tests
 }
 
 function readHarnessToken(info: GatewayInfo): string {
@@ -159,6 +160,15 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+		// Default the system-scope Subgoals (Experimental) flag ON for E2E tests so
+		// existing nested-goal specs keep working unchanged. The flag's OFF path
+		// is covered by tests/e2e/ui/subgoals-experimental-toggle.spec.ts and the
+		// server-unit + helper unit tests. See
+		// docs/design/subgoals-experimental-toggle.md §9.
+		writeFileSync(
+			join(bobbitDir, "state", "preferences.json"),
+			JSON.stringify({ subgoalsEnabled: true }, null, 2),
+		);
 
 		// Set BOBBIT_DIR env BEFORE importing server modules.
 		// Playwright workers are separate Node processes, so module singletons
@@ -286,6 +296,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			bobbitDir,
 			sessionManager: gw.sessionManager,
 			bgProcessManager: gw.bgProcessManager,
+			teamManager: (gw as any).teamManager,
 		};
 
 		await use(info);

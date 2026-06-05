@@ -60,7 +60,7 @@ describe("normalizeStep — unknown type loud-failure", () => {
 		const store = makeStore();
 		assert.throws(
 			() => store.getAll(),
-			/Workflow step "approve" has unknown type: "human-approval"\. Expected one of: command, llm-review, agent-qa, human-signoff/,
+			/Workflow step "approve" has unknown type: "human-approval"\. Expected one of: command, llm-review, agent-qa, subgoal, human-signoff/,
 		);
 	});
 

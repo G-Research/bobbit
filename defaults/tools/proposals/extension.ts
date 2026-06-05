@@ -122,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
 			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
-			parentGoalId: Type.Optional(Type.String({ description: "Parent goal ID for creating a subgoal. When omitted inside a team-lead session, the server auto-fills from the current goal. Pass null or omit for top-level." })),
+			parentGoalId: Type.Optional(Type.String({ description: "Parent goal ID for a subgoal; omit for top-level (team-lead auto-fills)." })),
 			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
 				name: Type.String({ description: "Role id (kebab-case); must equal the map key." }),
 				label: Type.String({ description: "Display name." }),

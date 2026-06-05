@@ -261,6 +261,25 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 		if (newBody === opts.body) return opts;
 		return { ...opts, body: newBody as BodyInit };
 	}
+	// POST /api/projects: canonicalize rootPath via realpathSync so tests
+	// using tmpdir()-derived paths (which on macOS are symlinks /var/folders
+	// -> /private/var/folders) don't 400 with code:"symlink_root", AND so
+	// the value stored in the registry matches what the test compares
+	// against in subsequent GETs. Tests that deliberately exercise the
+	// symlink-rejection path use rawApiFetch() or page-driven UI and bypass
+	// this entirely.
+	if (method === "POST" && path === "/api/projects" && typeof opts.body === "string") {
+		try {
+			const parsed = JSON.parse(opts.body) as Record<string, unknown>;
+			if (typeof parsed === "object" && parsed !== null && typeof parsed.rootPath === "string") {
+				let rp = parsed.rootPath;
+				try { const fs = await import("node:fs"); rp = fs.realpathSync(rp); } catch { /* path may not exist yet */ }
+				if (rp !== parsed.rootPath) {
+					return { ...opts, body: JSON.stringify({ ...parsed, rootPath: rp }) };
+				}
+			}
+		} catch { /* not JSON, leave alone */ }
+	}
 	return opts;
 }
 
@@ -785,7 +804,12 @@ export async function createGoal(opts: {
 	autoStartTeam?: boolean;
 	projectId?: string;
 }): Promise<{ id: string; [k: string]: unknown }> {
-	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, ...opts };
+	// Default spec for tests that don't care about spec content. The server now
+	// requires a non-placeholder spec (>=20 chars) before starting a team, so the
+	// helper supplies a sensible default. Tests that exercise SPEC_REQUIRED call
+	// apiFetch("/api/goals", ...) directly and bypass this helper.
+	const defaultSpec = "E2E harness goal — spec autopopulated by createGoal() helper for tests that do not exercise spec content.";
+	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, spec: defaultSpec, ...opts };
 	if (!body.projectId) {
 		// Auto-inject harness default projectId when caller didn't specify one.
 		// Server prefers projectId over cwd. Tests that exercise the 400 path
@@ -805,9 +829,9 @@ export async function createGoal(opts: {
 	return resp.json();
 }
 
-/** Delete a goal (best-effort, for cleanup). */
-export async function deleteGoal(id: string): Promise<void> {
-	await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+/** Delete a goal (best-effort, for cleanup). Server requires explicit `cascade` query param (returns 422 CASCADE_REQUIRED when omitted). Cleanup paths default to cascade=true so descendants are archived together. */
+export async function deleteGoal(id: string, cascade = true): Promise<void> {
+	await apiFetch(`/api/goals/${id}?cascade=${cascade ? "true" : "false"}`, { method: "DELETE" }).catch(() => {});
 }
 
 /** Start a team for a goal, returns the team lead session ID. */
@@ -820,9 +844,9 @@ export async function startTeam(goalId: string): Promise<string> {
 	return data.sessionId;
 }
 
-/** Teardown a team (best-effort, for cleanup). */
-export async function teardownTeam(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}/team/teardown`, { method: "POST" }).catch(() => {});
+/** Teardown a team (best-effort, for cleanup). Server returns 422 CASCADE_REQUIRED when `cascade` is omitted, so cleanup paths must always send it. */
+export async function teardownTeam(goalId: string, cascade = true): Promise<void> {
+	await apiFetch(`/api/goals/${goalId}/team/teardown?cascade=${cascade ? "true" : "false"}`, { method: "POST" }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------

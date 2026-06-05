@@ -969,15 +969,16 @@ export class SpecContext {
 				throw new Error("server_crash: SpecContext was constructed without a gateway fixture");
 			}
 			await this._gateway.crash();
-			// Wait for the client to observe the disconnect. The client
-			// doesn't expose its WebSocket on `window.__bobbit_ws`, so we
-			// poll `window.bobbitState.connectionStatus` instead. Best-effort
-			// — swallow timeout because the assertion that follows the
-			// crash is the real contract under test.
-			await this._page.waitForFunction(() => {
-				const s = (window as any).bobbitState;
-				return !!s && s.connectionStatus !== "connected";
-			}, undefined, { timeout: 5_000 }).catch(() => { /* best-effort */ });
+			// Wait for the client to observe the disconnect. Best-effort —
+			// swallow timeouts AND page/context closures (a Playwright frame
+			// detach during rapid crash cycles surfaces as "Target closed";
+			// the assertion that follows the crash is the real contract).
+			if (!this._page.isClosed()) {
+				await this._page.waitForFunction(() => {
+					const s = (window as any).bobbitState;
+					return !!s && s.connectionStatus !== "connected";
+				}, undefined, { timeout: 5_000 }).catch(() => { /* best-effort */ });
+			}
 		},
 		server_restart: async () => {
 			trackIntent(this._activeStory, this._phase, "server_restart");
@@ -986,23 +987,41 @@ export class SpecContext {
 			}
 			await this._gateway.restart();
 			// Wait for the client to reach the server again. Two-stage:
-			// (a) /api/health responds (server bound and accepting requests),
-			// (b) if a session is active, its WebSocket is also reconnected
-			//     (state.connectionStatus === "connected"). On the landing
-			//     page (#/) no session WS exists, so connectionStatus stays
-			//     "disconnected" — (a) alone is sufficient. Reconnect failure
-			// must fail the test (no .catch()).
-			await this._page.waitForFunction(async () => {
+			// (a) /api/health responds (server bound and accepting requests)
+			//     — polled from Node via apiFetch so page/context closure
+			//     during rapid crash-restart cycles cannot mask the signal.
+			//     This is the strict half: failure here = real bug.
+			// (b) if a session is active AND the page is still alive, the
+			//     session WebSocket reconnects (connectionStatus==="connected").
+			//     Best-effort: if Playwright reports the frame detached or the
+			//     page closed, we don't fail — subsequent UI assertions will
+			//     surface the real problem with a meaningful locator error.
+			await pollUntil(async () => {
 				try {
-					const r = await fetch("/api/health", { cache: "no-store" });
-					if (!r.ok) return false;
+					const r = await apiFetch("/api/health", { method: "GET" });
+					return r.ok;
 				} catch { return false; }
-				const s = (window as any).bobbitState;
-				const hash = window.location.hash || "";
-				const onSession = /^#\/session\//.test(hash);
-				if (onSession) return !!s && s.connectionStatus === "connected";
-				return true;
-			}, undefined, { timeout: 20_000, polling: 250 });
+			}, { timeoutMs: 20_000, intervalMs: 250, label: "server_restart /api/health" });
+			if (this._page.isClosed()) return;
+			try {
+				await this._page.waitForFunction(() => {
+					const s = (window as any).bobbitState;
+					const hash = window.location.hash || "";
+					const onSession = /^#\/session\//.test(hash);
+					if (onSession) return !!s && s.connectionStatus === "connected";
+					return true;
+				}, undefined, { timeout: 15_000, polling: 250 });
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) {
+					// Page closed/detached mid-poll during rapid crash-restart
+					// cycles. /api/health already confirmed the server is back;
+					// downstream assertions will reopen or fail with a clearer
+					// message if the page truly is unusable.
+					return;
+				}
+				throw err;
+			}
 		},
 		disconnect: async () => {
 			trackIntent(this._activeStory, this._phase, "disconnect");
