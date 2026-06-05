@@ -190,3 +190,26 @@ Run: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
 - **Unit C — Proposal/tool** (after B for api.ts roleId): `defaults/tools/proposals/extension.ts`, `propose_staff.yaml`, `src/server/agent/staff-assistant.ts`, `src/app/proposal-panels.ts` (apply path role→roleId).
 
 A and B run in parallel (no file overlap). C runs after B (depends on `api.ts` `roleId`; touches `staff-assistant.ts` which A leaves untouched).
+
+## Follow-ups (fix-up on top of the merged feature)
+
+The original feature (above) shipped and is mostly working. Two gaps in the staff **proposal panel** (`src/app/proposal-panels.ts`, `staffPreviewPanel()` / `handleCreateStaff`) were closed afterwards. Both are UI-only — no server, tool, or shared-helper changes — and reuse the idioms the regular surfaces already established rather than inventing new ones.
+
+### 1. Proposal-panel role picker parity
+
+The edit page (`staff-page.ts`) already had a working role picker, but the proposal panel only read the proposed role from `state.activeProposals.staff?.fields?.role` and forwarded it to `createStaffAgent` with no visible control. So a proposed role could not be seen, changed, or added when absent.
+
+Fix: add a role `<select>` to the panel mirroring `staff-page.ts` — an explicit **"No role"** option plus one option per role, populated lazily via `ensureStaffProposalRolesLoaded()` (panel-local mirror of `staff-page.ts::ensureRolesLoaded()`; roles are kept panel-local so the two surfaces never share mutable state, and fetch errors are swallowed since roles are optional). Panel-local module state: `_staffProposalRoles`, `_staffProposalRoleId` (`null` ⇒ "No role"), `_staffProposalRolesLoaded`, and `_staffProposalRoleSeeded`.
+
+The selector is **seeded once** from the proposal's `role` field, guarded by `_staffProposalRoleSeeded` so re-renders never clobber a user choice. The seed guard (and the role selection) is reset in `resetProposalAnnCount("staff")` when a fresh proposal arrives. `handleCreateStaff` now reads `_staffProposalRoleId` instead of the raw proposal field; empty/`null` ⇒ no role. Server-side 404 still rejects unknown roles, so no extra client validation is added. The panel has no accessory control, so the role→accessory default stays server-side (the create path already fills accessory from the role when the request supplies none) — no accessory picker was added.
+
+### 2. Create-in-flight guard
+
+`handleCreateStaff` previously `await`ed `createStaffAgent` with no in-flight UI, so the slow round trip invited double-clicks. Fix mirrors the goal panel's `config.saving ? "Creating…"` idiom and the session `state.creatingSession` re-entrancy guard:
+
+- Module-local `_creatingStaff` flag, set before the request and cleared in a `finally` (so it always re-enables on error).
+- `handleCreateStaff` early-returns if `_creatingStaff` is already set (belt-and-braces alongside the disabled button).
+- While in flight: the "Create Staff" button is disabled and shows **"Creating…"**; the Dismiss button is disabled too.
+- Error path preserved: the pre-existing `if (!result) return` still fires **before** any teardown, so the proposal panel and staff-assistant session stay open; the only addition is clearing `_creatingStaff` in `finally` so the user can retry. Success path unchanged.
+
+Tests: `tests/e2e/ui/staff-proposal-role.spec.ts` (role select appears, reflects the proposed role, is changeable, persists on the created staff after reload, plus a "No role" case and the disabled/"Creating…" in-flight assertions), with a mock-agent hook in `tests/e2e/mock-agent-core.mjs`.
