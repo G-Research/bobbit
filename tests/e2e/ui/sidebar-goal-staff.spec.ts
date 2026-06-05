@@ -53,7 +53,7 @@ test.describe("Sidebar goal actions & staff", () => {
 		goalIds.push(goal.id);
 
 		// Archive the goal
-		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 
 		// Desktop viewport so the sidebar-actions hamburger trigger renders
 		await page.setViewportSize({ width: 1280, height: 900 });
@@ -148,7 +148,7 @@ test.describe("Sidebar goal actions & staff", () => {
 		await expect(page.getByText("SB23 Archive Test").first()).toBeVisible({ timeout: 10_000 });
 
 		// Archive via API
-		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 
 		// Reload to get fresh state
 		await page.reload();
