@@ -167,11 +167,21 @@ export class SearchService {
 	}
 
 	async close(): Promise<void> {
+		// Coordinate with an in-flight open(): if _doOpen() is still awaiting
+		// disk I/O, wait for it to settle before tearing down. Otherwise
+		// _doOpen() could resume *after* close() returns and re-establish the
+		// store, indexer, and rebuild timer — leaking live search resources and
+		// a timer past shutdown. _doOpen() also re-checks `_state` after its
+		// awaits, so between the two guards the open/close race is fully closed.
+		if (this._openPromise) {
+			try { await this._openPromise; } catch { /* open failed — still tear down */ }
+		}
 		this._state = "closed";
 		if (this._rebuildTimer) {
 			clearTimeout(this._rebuildTimer);
 			this._rebuildTimer = null;
 		}
+		// Re-read _store after the await — _doOpen() may have just assigned it.
 		if (this._store) {
 			try { await this._store.close(); }
 			catch (err) { console.error("[search] FlexSearchStore.close failed:", err); }
@@ -535,6 +545,16 @@ export class SearchService {
 			});
 			return;
 		}
+
+		// close() may have run while FlexSearchStore.open() awaited disk I/O. If
+		// so, bail without assigning _store/_indexer, scheduling a rebuild timer,
+		// or flipping to "ready" — just release the freshly opened store so it
+		// doesn't outlive shutdown. (close() also awaits _openPromise; this guard
+		// covers the case where _state flips to "closed" mid-open.)
+		if ((this._state as SearchServiceState) === "closed") {
+			try { await store.close(); } catch { /* best-effort */ }
+			return;
+		}
 		this._store = store;
 
 		this._indexer = new Indexer({
@@ -555,6 +575,7 @@ export class SearchService {
 			const corrupt = stored !== null && store.count() === 0;
 			if (metaNeedsRebuild(stored, current) || corrupt) {
 				if (
+					(this._state as SearchServiceState) !== "closed" &&
 					context?.goalStore &&
 					context?.sessionStore &&
 					(context?.staffStore || this.staffStore)
@@ -581,7 +602,9 @@ export class SearchService {
 			console.error("[search] Meta read failed (non-fatal):", err);
 		}
 
-		this._state = "ready";
+		// A concurrent close() may have run during the awaits above; don't
+		// resurrect the service to "ready" if it has already been closed.
+		if ((this._state as SearchServiceState) !== "closed") this._state = "ready";
 	}
 }
 

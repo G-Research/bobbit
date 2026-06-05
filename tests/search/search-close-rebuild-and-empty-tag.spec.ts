@@ -25,6 +25,7 @@ import {
 	FlexSearchStore,
 	isTagKey,
 	sanitiseTagImport,
+	classifyTagImport,
 	type FlexDoc,
 } from "../../src/server/search/flex-store.ts";
 import { SearchService } from "../../src/server/search/search-service.ts";
@@ -108,6 +109,52 @@ test("close() cancels the scheduled startup rebuild — no 'already closed' thro
 	expect(errors.filter((e) => e.includes("Background rebuild failed"))).toEqual([]);
 });
 
+test("rapid open() → close() with no whenReady(): no rebuild timer, store closed, state stays closed", async () => {
+	const stateDir = tmp("svc-open-close-race-");
+	const prevDelay = process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS;
+	// Long delay so the rebuild timer would still be pending if not cancelled.
+	process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS = "10000";
+
+	const errors: string[] = [];
+	const origError = console.error;
+	console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+
+	try {
+		const svc = new SearchService({
+			stateDir,
+			projectId: "p1",
+			progressBus: new ProgressBus(),
+		});
+		const context = {
+			goalStore: { getAll: () => [] },
+			sessionStore: { getAll: () => [] },
+			staffStore: { getAll: () => [] },
+		} as unknown as Parameters<SearchService["open"]>[0];
+
+		// Begin opening, then close immediately WITHOUT whenReady() — close()
+		// must coordinate with the in-flight open() so no resources leak.
+		svc.open(context);
+		await svc.close();
+
+		// Give any stray (unref'd) timer or open continuation a window to fire.
+		await new Promise((r) => setTimeout(r, 60));
+
+		// close() won the race: state is "closed" (never left flipped to
+		// "ready"), the store was torn down, and no rebuild timer is pending.
+		expect(svc.getState()).toBe("closed");
+		expect((svc as unknown as { _store: unknown })._store).toBeNull();
+		expect((svc as unknown as { _rebuildTimer: unknown })._rebuildTimer).toBeNull();
+	} finally {
+		console.error = origError;
+		if (prevDelay === undefined) delete process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS;
+		else process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS = prevDelay;
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+
+	expect(errors.filter((e) => e.includes("already closed"))).toEqual([]);
+	expect(errors.filter((e) => e.includes("Background rebuild failed"))).toEqual([]);
+});
+
 test("scheduled rebuild callback no-ops when the service is already closed", async () => {
 	const stateDir = tmp("svc-rebuild-guard-");
 	const prevDelay = process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS;
@@ -160,6 +207,25 @@ test("sanitiseTagImport strips null-valued tag entries", () => {
 	// Non-array / junk → nothing to import.
 	expect(sanitiseTagImport(null)).toBeNull();
 	expect(sanitiseTagImport("nope")).toBeNull();
+});
+
+test("classifyTagImport: import / empty / invalid", () => {
+	// Populated → import only the non-null fields.
+	expect(
+		classifyTagImport([["source_id", [["messages", ["a"]]]], ["project_id", null]]),
+	).toEqual({ kind: "import", entries: [["source_id", [["messages", ["a"]]]]] });
+	// Known empty-tag shape (all null) → clean no-op, NOT a corruption.
+	expect(
+		classifyTagImport([["source_id", null], ["project_id", null], ["archived_tag", null]]),
+	).toEqual({ kind: "empty" });
+	// Empty array → empty.
+	expect(classifyTagImport([])).toEqual({ kind: "empty" });
+	// Non-array / unparseable (safeParse returns the raw string) → invalid.
+	expect(classifyTagImport(null)).toEqual({ kind: "invalid" });
+	expect(classifyTagImport("{not valid json")).toEqual({ kind: "invalid" });
+	// Array with a malformed entry → invalid (not the recognized tag shape).
+	expect(classifyTagImport([["source_id", null], ["oops"]])).toEqual({ kind: "invalid" });
+	expect(classifyTagImport([42])).toEqual({ kind: "invalid" });
 });
 
 test("isTagKey recognises tag export keys", () => {
@@ -219,6 +285,43 @@ test("pre-existing null-shape tag export file imports cleanly (no warning, no re
 
 	expect(warns.filter((w) => w.includes("Skipping corrupt index file"))).toEqual([]);
 	expect(warns.filter((w) => w.includes("Rebuilding in-memory index"))).toEqual([]);
+});
+
+test("corrupt invalid-JSON tag export in a populated index → rebuild-from-mirror", async () => {
+	const dir = tmp("corrupt-tag-");
+	const indexDir = path.join(dir, "index");
+	fs.mkdirSync(indexDir, { recursive: true });
+	// A populated mirror so rebuild-from-mirror has something to rebuild from.
+	const mirror = doc({
+		id: "goal:1",
+		text: "hello world goal",
+		source_id: "goals",
+		entity_type: "goal",
+		project_id: "p1",
+	});
+	fs.writeFileSync(path.join(indexDir, "__docs__.json"), JSON.stringify([mirror]), "utf-8");
+	// A genuinely corrupt (invalid-JSON) tag export must NOT be silently
+	// skipped — it has to count as an import failure so rebuild fires.
+	fs.writeFileSync(path.join(indexDir, "1.tag.json"), "{not valid json", "utf-8");
+
+	const warns: string[] = [];
+	const origWarn = console.warn;
+	console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
+
+	let count = 0;
+	try {
+		const store = await FlexSearchStore.open({ dataDir: dir });
+		count = store.count();
+		await store.close();
+	} finally {
+		console.warn = origWarn;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+
+	// Corrupt tag payload counted as a failure → rebuild-from-mirror fired.
+	expect(warns.filter((w) => w.includes("Rebuilding in-memory index")).length).toBeGreaterThan(0);
+	// The mirror doc survived (rebuild restores it).
+	expect(count).toBe(1);
 });
 
 test("populated tag index round-trips: tag-filtered search still works after reload", async () => {

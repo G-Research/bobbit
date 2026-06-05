@@ -619,14 +619,24 @@ export class FlexSearchStore {
 				const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
 				const data = safeParse(raw);
 				if (isTagKey(key)) {
-					// An empty/partially-empty tag export contains `null` value
-					// entries that crash `Document.import`. Strip them; a fully
-					// empty tag context is a no-op, not a corruption — don't
-					// escalate to importFailures (which forces rebuild-from-mirror).
-					const sanitised = sanitiseTagImport(data);
-					if (sanitised !== null) {
-						this._idx.import(key, sanitised as never);
+					// Classify the tag export so a genuinely corrupt payload still
+					// forces rebuild-from-mirror. Only the KNOWN empty-tag shape
+					// (an array of `[field, null]` pairs that sanitises to empty)
+					// is a clean no-op — those `null` values would otherwise crash
+					// `Document.import` on reload. Malformed / unparseable /
+					// unrecognized payloads must count as importFailures so the
+					// rebuild-from-`__docs__.json` recovery still fires.
+					const tag = classifyTagImport(data);
+					if (tag.kind === "invalid") {
+						importFailures++;
+						console.warn(`[search] Skipping corrupt index file ${file}: unrecognized tag payload`);
+						await yieldToLoop();
+						continue;
 					}
+					if (tag.kind === "import") {
+						this._idx.import(key, tag.entries as never);
+					}
+					// "empty" — known FlexSearch empty-tag shape; clean no-op.
 					importSuccesses++;
 					await yieldToLoop();
 					continue;
@@ -768,6 +778,40 @@ export function sanitiseTagImport(data: unknown): unknown[] | null {
 			entry[1] != null,
 	);
 	return kept.length > 0 ? kept : null;
+}
+
+export type TagImportClassification =
+	| { kind: "import"; entries: unknown[] }
+	| { kind: "empty" }
+	| { kind: "invalid" };
+
+/**
+ * Classify a FlexSearch tag-context export payload read back from disk so the
+ * loader can tell a benign empty-tag context apart from genuine corruption.
+ *
+ * The tag context serialises as an array of `[field, valueMapOrNull]` pairs.
+ * Three outcomes:
+ *
+ *  - `import`  — a well-formed tag array with ≥1 populated field. The caller
+ *    imports only the populated entries.
+ *  - `empty`   — a well-formed tag array whose fields are ALL `null` (the known
+ *    FlexSearch empty-tag shape) or an empty array. A clean no-op, NOT a
+ *    corruption — do not force a rebuild.
+ *  - `invalid` — anything else: a non-array, an unparseable string (from
+ *    `safeParse` on bad JSON), or an array containing malformed entries. The
+ *    caller MUST treat this as an import failure so rebuild-from-`__docs__.json`
+ *    still fires; otherwise a corrupt tag file is silently skipped and the
+ *    in-memory index degrades without warning.
+ */
+export function classifyTagImport(data: unknown): TagImportClassification {
+	if (!Array.isArray(data)) return { kind: "invalid" };
+	for (const entry of data) {
+		if (!Array.isArray(entry) || entry.length < 2 || typeof entry[0] !== "string") {
+			return { kind: "invalid" };
+		}
+	}
+	const populated = data.filter((entry) => (entry as unknown[])[1] != null);
+	return populated.length > 0 ? { kind: "import", entries: populated } : { kind: "empty" };
 }
 
 // FlexSearch export keys may include characters awkward for filenames
