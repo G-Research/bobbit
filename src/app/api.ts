@@ -1679,9 +1679,13 @@ export type CreateStaffAgentData = {
 	projectId?: string;
 	sandboxed?: boolean;
 	accessory?: string;
+	/** Optional role to attach. `null`/omitted = no role. */
+	roleId?: string | null;
 };
 
-export type StaffAgentUpdate = Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy" | "accessory">>;
+// `roleId` accepts `null` to explicitly clear the field; JSON.stringify keeps
+// nulls (it only strips `undefined`), so the server receives the clear signal.
+export type StaffAgentUpdate = Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy" | "accessory">> & { roleId?: string | null };
 
 export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
 	try {

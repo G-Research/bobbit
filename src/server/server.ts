@@ -161,6 +161,7 @@ import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-lev
 const askSubmittedToolUseIds = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
+import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { GoalTriggerDispatcher } from "./agent/goal-trigger-dispatcher.js";
 import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
@@ -945,6 +946,7 @@ export function createGateway(config: GatewayConfig) {
 	});
 
 	const staffManager = new StaffManager(projectContextManager);
+	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
 	// `inboxNudger` ticks every 15s to deliver digests to idle staff.
@@ -7292,9 +7294,7 @@ async function handleApiRoute(
 
 		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
 		if (staff) {
-			let fullPrompt = staff.systemPrompt;
-			if (staff.memory) fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
-			createOpts.rolePrompt = fullPrompt;
+			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager);
 			createOpts.roleName = staff.roleId;
 			createOpts.accessory = staff.accessory;
 			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
@@ -9774,6 +9774,17 @@ async function handleApiRoute(
 			json({ error: "Missing systemPrompt" }, 400);
 			return;
 		}
+		// Defense-in-depth: roleId, when present, must be a string or null.
+		if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+			json({ error: "roleId must be a string or null" }, 400);
+			return;
+		}
+		// Validate the referenced role exists (when provided). roleId omitted or
+		// null/empty is allowed — staff with no role behave as before.
+		if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
+			json({ error: "Role not found" }, 404);
+			return;
+		}
 		// Validate goal-* triggers carry a non-empty prompt (push-based
 		// dispatcher has no fallback; the prompt is mandatory).
 		try {
@@ -9868,6 +9879,17 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			// Defense-in-depth: roleId, when present, must be a string or null.
+			if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+				json({ error: "roleId must be a string or null" }, 400);
+				return;
+			}
+			// Validate the referenced role exists (when provided). roleId: null
+			// (clear) and omitted are allowed.
+			if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
+				json({ error: "Role not found" }, 404);
+				return;
+			}
 			// Validate goal-* triggers carry a non-empty prompt before any other
 			// work (mirrors POST /api/staff). Only applies when the caller is
 			// updating triggers — PUTs that omit the field are unchanged.

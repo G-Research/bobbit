@@ -1387,6 +1387,12 @@ function staffPreviewPanel() {
 			? state.projects.find(p => p.id === submitProjectId)
 			: undefined;
 		const cwd = effectiveStaffPreviewCwd(submitProject);
+		// Optional role carried by the proposal seed. Unknown roles are rejected
+		// server-side (404) — no extra client validation needed.
+		const proposalRole = state.activeProposals.staff?.fields?.role;
+		const roleId = typeof proposalRole === "string" && proposalRole.trim()
+			? proposalRole.trim()
+			: undefined;
 		const result = await createStaffAgent({
 			name: trimmedName,
 			description: state.staffPreviewDescription,
@@ -1396,6 +1402,7 @@ function staffPreviewPanel() {
 			triggers,
 			projectId: submitProjectId,
 			sandboxed,
+			roleId,
 		});
 		if (!result) return;
 

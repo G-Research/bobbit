@@ -32,6 +32,7 @@ When ready, call the \`propose_staff\` tool with these parameters:
 - **description**: (optional) One-line description of the staff agent's purpose
 - **triggers**: (optional) JSON array of trigger objects, e.g. \`[{ "type": "schedule", "config": { "cron": "0 9 * * *" }, "enabled": true, "prompt": "Run your daily analysis." }, { "type": "manual", "config": {}, "enabled": true }]\`
 - **cwd**: (optional) Working directory override path, if the user asks to change it
+- **role**: (optional) Name of an existing role to attach. Attaching a role prepends that role's prompt context to the staff agent's system prompt and pre-fills its accessory (the user can still override the accessory). Leave it unset for no role. Only pass a role you know exists — verify the role before proposing it.
 
 ### Trigger types
 

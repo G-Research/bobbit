@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { StaffStore, normalizeStaffAccessory, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
+import { buildStaffSystemPrompt } from "./role-prompt.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
@@ -330,6 +331,16 @@ export class StaffManager {
 			id: t.id || randomUUID(),
 		}));
 
+		// When the caller didn't supply a usable accessory (absent/empty/"none")
+		// but selected a role, default the persisted accessory to the role's
+		// accessory. This mirrors the edit-UI pre-fill so API- and proposal-created
+		// role staff also inherit the role's accessory. An explicit accessory wins.
+		let effectiveAccessory = opts?.accessory;
+		if ((!effectiveAccessory || effectiveAccessory === "none") && opts?.roleId) {
+			const role = sessionManager.getRoleManager?.()?.getRole(opts.roleId);
+			if (role?.accessory && role.accessory !== "none") effectiveAccessory = role.accessory;
+		}
+
 		const staff: PersistedStaff = {
 			id,
 			name,
@@ -343,7 +354,7 @@ export class StaffManager {
 			triggers,
 			memory: "",
 			roleId: opts?.roleId,
-			accessory: normalizeStaffAccessory(opts?.accessory),
+			accessory: normalizeStaffAccessory(effectiveAccessory),
 			createdAt: now,
 			updatedAt: now,
 			projectId,
@@ -369,10 +380,10 @@ export class StaffManager {
 
 		// Create the permanent session for this staff agent
 		try {
-			let fullPrompt = staff.systemPrompt;
-			if (staff.memory) {
-				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
-			}
+			// Prepend the role's prompt context (when roleId set) ahead of the
+			// staff's own systemPrompt + pinned memory. roleManager comes from the
+			// session manager so the staff path reuses the regular-session resolver.
+			const fullPrompt = buildStaffSystemPrompt(staff, sessionManager.getRoleManager?.());
 			// Per-staff sandbox preference: read straight from the persisted
 			// record. The project-level setting is NEVER consulted here.
 			const effectiveSandboxed = staff.sandboxed;
@@ -637,10 +648,7 @@ export class StaffManager {
 
 		// Branch 1: legacy migration — no permanent session yet, create one
 		if (!staff.currentSessionId) {
-			let fullPrompt = staff.systemPrompt;
-			if (staff.memory) {
-				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
-			}
+			const fullPrompt = buildStaffSystemPrompt(staff, sessionManager.getRoleManager?.());
 			const sessionCwd = this.staffSessionCwd(staff, found.projectId);
 			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,

@@ -174,6 +174,7 @@ export default function (pi: ExtensionAPI) {
 			prompt: Type.String(),
 			triggers: Type.Optional(Type.String()),
 			cwd: Type.Optional(Type.String()),
+			role: Type.Optional(Type.String({ description: "Role name to attach to the staff agent (optional)." })),
 		}),
 		async execute(_id, args) { const r = await seedProposal("staff", args); return ack(r.rev); },
 	});

@@ -29,7 +29,7 @@ function triggerSelect(page: Page) {
 	// The trigger editor renders one <select> per trigger card inside the
 	// staff edit form; we only ever add a single trigger in this test so the
 	// first match is the right one.
-	return page.locator("select").filter({ hasText: "Goal created" }).first();
+	return page.locator('[data-testid="trigger-type-select"]').filter({ hasText: "Goal created" }).first();
 }
 
 function triggerPromptTextarea(page: Page) {
@@ -95,7 +95,7 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 		await page.getByRole("button", { name: "+ Add trigger" }).click();
 
 		// New trigger defaults to schedule — switch to goal_created.
-		const select = page.locator("select").first();
+		const select = page.locator('[data-testid="trigger-type-select"]').first();
 		await expect(
 			select,
 			"STAFF_GOAL_TRIGGER_BROWSER_SELECT_VISIBLE: trigger type select should render",

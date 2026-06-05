@@ -57,7 +57,7 @@ import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-ma
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
-import { buildAvailableRolesList } from "./team-manager.js";
+import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -628,6 +628,14 @@ export class SessionManager {
 	private _testSearchIndex: SearchService | null = null;
 	private colorStore?: ColorStore;
 	private roleManager?: RoleManager;
+	/**
+	 * Minimal staff-record lookup wired late from `server.ts` via
+	 * `setStaffManager`. Used by the restore path to rebuild a staff session's
+	 * full system prompt (role context + systemPrompt + pinned memory) since
+	 * `rolePrompt` isn't persisted. Typed structurally to avoid a circular
+	 * import on `StaffManager`.
+	 */
+	private staffRecordSource?: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined };
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
@@ -691,6 +699,10 @@ export class SessionManager {
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
 		this._inboxNudger = nudger;
+	}
+
+	setStaffManager(sm: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined }): void {
+		this.staffRecordSource = sm;
 	}
 
 	/**
@@ -1047,6 +1059,11 @@ export class SessionManager {
 	/** Whether Docker sandbox mode is enabled in project config. */
 	get isSandboxEnabled(): boolean {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
+	}
+
+	/** Get the role manager (used by the staff path to resolve role prompts). */
+	getRoleManager(): RoleManager | undefined {
+		return this.roleManager;
 	}
 
 	/** Get the sandbox manager (used by team-manager and verification-harness). */
@@ -1679,18 +1696,13 @@ export class SessionManager {
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 
-			let rolePrompt: string | undefined;
-			let roleName: string | undefined;
-			if (session.role && this.roleManager) {
-				const role = this.roleManager.getRole(session.role);
-				if (role?.promptTemplate) {
-					rolePrompt = role.promptTemplate;
-					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
-					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${session.role}-${(session.goalId || session.id).slice(0, 8)}`);
-					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
-					roleName = session.role;
-				}
-			}
+			const role = session.role && this.roleManager ? this.roleManager.getRole(session.role) : undefined;
+			const rolePrompt = resolveRolePrompt(role, {
+				branch: goal?.branch,
+				agentId: `${session.role}-${(session.goalId || session.id).slice(0, 8)}`,
+				roleManager: this.roleManager,
+			});
+			const roleName = rolePrompt ? session.role : undefined;
 
 			parts = {
 				baseSystemPromptPath: this.systemPromptPath,
@@ -3453,20 +3465,16 @@ export class SessionManager {
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
 
-			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
+			// Re-attach role/staff prompt (lost on restart since rolePrompt isn't
+			// persisted). Staff sessions rebuild the full role context + systemPrompt
+			// + pinned memory via buildStaffSystemPrompt; team agents resolve the role
+			// template. See buildRestoreRolePrompt.
 			const goalSpec = goal?.spec;
-			let rolePrompt: string | undefined;
-			let roleName: string | undefined;
-			if (ps.role && this.roleManager) {
-				const role = this.roleManager.getRole(ps.role);
-				if (role?.promptTemplate) {
-					rolePrompt = role.promptTemplate;
-					if (goal?.branch) rolePrompt = rolePrompt.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch);
-					rolePrompt = rolePrompt.replace(/\{\{AGENT_ID\}\}/g, `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`);
-					rolePrompt = rolePrompt.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(this.roleManager));
-					roleName = ps.role;
-				}
-			}
+			const { rolePrompt, roleName } = buildRestoreRolePrompt(ps, {
+				goalBranch: goal?.branch,
+				roleManager: this.roleManager,
+				getStaff: this.staffRecordSource ? (id) => this.staffRecordSource!.getStaff(id) : undefined,
+			});
 
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: this.systemPromptPath,
@@ -4795,13 +4803,22 @@ export class SessionManager {
 		const effectiveAllowed = this.resolveEffectiveAllowedTools(fullRole);
 		const effectiveAllowedNames = effectiveAllowed.map(e => e.name);
 
+		// Resolve the role prompt through the shared helper so placeholder
+		// substitution ({{GOAL_BRANCH}}/{{AGENT_ID}}/{{AVAILABLE_ROLES}}) matches
+		// the other regular-session sites (previously passed raw — latent bug).
+		const rolePrompt = resolveRolePrompt(fullRole ?? role, {
+			branch: goal?.branch,
+			agentId: `${role.name}-${(session.goalId || session.id).slice(0, 8)}`,
+			roleManager: this.roleManager,
+		});
+
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
 			cwd: session.cwd,
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec,
-			rolePrompt: role.promptTemplate,
+			rolePrompt,
 			roleName: role.name,
 			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
 			projectConfigStore: this.projectConfigStore,

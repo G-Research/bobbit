@@ -23,7 +23,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 - **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context.
 - **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Tool descriptions are budget-pinned by `tests/tool-description-budget.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
-- **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts` (`pack-resolver.ts`, `pack-list.ts`); `config-cascade.ts` + `slash-skills.ts` are adapters. Market surface: `src/app/marketplace-page.ts`. MCP/AGENTS keep their own loaders. See [docs/marketplace.md](docs/marketplace.md).
+- **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; `config-cascade.ts` + `slash-skills.ts` are adapters. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
 - **Tests**: `tests/` (unit), `tests/e2e/` (API), `tests/e2e/ui/` (browser), `tests/manual-integration/` (real agents + Docker).
@@ -41,7 +41,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 - **UI-only changes** → `test:unit`. **Server changes** → `test:unit` + `test:e2e`. **Session lifecycle / sandbox / worktree / restart** → also `test:manual`.
 - **Test types**: unit (`tests/*.spec.ts`, file:// fixtures), API E2E (`tests/e2e/*.spec.ts`, in-process gateway via `./in-process-harness.js`), browser E2E (`tests/e2e/ui/*.spec.ts`, spawned gateway via `../gateway-harness.js`).
 - Tests run in isolation — never read/write `.bobbit/` directly; use the isolated dir from `e2e-setup.ts`.
-- **Never start background servers from bash** (`node server.js &`) — pipes hang the agent. Use Playwright `webServer` config or `bash_bg`.
+- **Never start background servers from bash** (`node server.js &`) — pipes hang the agent. Use `bash_bg`.
 - Prefer `file://` fixtures for new tests; use E2E only when you need a real server.
 - **Every user-facing feature MUST have a browser E2E** covering navigation, happy path, persistence across reload, cleanup/undo. Pattern: `tests/e2e/ui/settings.spec.ts`.
 - **Run tests before committing.** **No flaky tests** — every failure is a real bug.
@@ -53,7 +53,7 @@ Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
 **Line endings**: LF everywhere except `*.cmd`/`*.bat`/`*.ps1` (CRLF), pinned via `.gitattributes`. Windows: `git config --global core.autocrlf false` (phantom "modified" entries on fresh checkout = `core.autocrlf=true`).
 
-**Worktrees**: dev server runs from the **primary worktree** on `master`. Sessions use separate worktrees under `<project-root>-wt/<branch>/` (single-repo) or `<project-root>-wt/<branch>/<repo>/` (multi-repo). Branch namespaces: `pool/_pool-<id>`, `session/<id8>`, `goal/<slug>-<id>`, `staff-<name>-<id>`. Multi-repo invariant: every component repo gets a sibling worktree on the same branch. Start-point for new worktrees is the project's `base_ref` when set, else the remote primary — see [docs/design/base-ref.md](docs/design/base-ref.md).
+**Worktrees**: dev server runs from the **primary worktree** on `master`. Sessions use separate worktrees under `<project-root>-wt/<branch>/` (single-repo) or `<project-root>-wt/<branch>/<repo>/` (multi-repo). Branch namespaces: `pool/_pool-<id>`, `session/<id8>`, `goal/<slug>-<id>`, `staff-<name>-<id>`. Multi-repo: every component repo gets a sibling worktree on the same branch. Start-point: project `base_ref` else remote primary — see [docs/design/base-ref.md](docs/design/base-ref.md).
 
 **Always edit files in your session worktree, never in the primary worktree.** For infra files: edit here → commit → push → pull from primary. Pushing to remote `master` does NOT update the dev server — `cd <primary-worktree> && git pull origin master`.
 
@@ -64,7 +64,7 @@ See [docs/dev-workflow.md](docs/dev-workflow.md) for the full worktree story —
 AGENTS.md is loaded into **every** agent turn. Keep it small and general.
 
 - **No specific recipes or debugging entries.** Symptom→fix lookups belong in `docs/debugging.md`; how-to-do-X belongs in the relevant `docs/<topic>.md`. Agents discover them via the "Before editing" search step above.
-- **No invariant prose pretending to prevent regressions.** Tests prevent regressions; prose hopes the next agent reads it. If something needs to be invariant, write the test that pins it.
+- **No invariant prose pretending to prevent regressions.** Write the test that pins it instead.
 - Keep this file under ~5 KB. If it grows, the new content probably belongs in `docs/`.
 
 ## Reference docs
