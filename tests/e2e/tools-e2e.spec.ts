@@ -236,7 +236,7 @@ test.describe("Sessions API", () => {
 
 test.describe("Goals API", () => {
 	let goalId: string;
-	test.afterEach(async () => { if (goalId) { await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {}); goalId = ""; } });
+	test.afterEach(async () => { if (goalId) { await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {}); goalId = ""; } });
 
 	test("POST creates a goal @smoke", async () => {
 		const resp = await apiFetch("/api/goals", {
@@ -297,7 +297,8 @@ test.describe("Goals API", () => {
 			body: JSON.stringify({ title: "Archive test", cwd: nonGitCwd() }),
 		});
 		goalId = (await resp1.json()).id;
-		const resp = await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
+		// Server requires explicit cascade query param (422 CASCADE_REQUIRED otherwise).
+		const resp = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 		expect(resp.status).toBe(200);
 		// Goal still exists but is archived
 		const getResp = await apiFetch(`/api/goals/${goalId}`);
@@ -348,7 +349,7 @@ test.describe("Tasks API", () => {
 		goalId = (await resp.json()).id;
 	});
 	test.afterEach(async () => {
-		if (goalId) await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+		if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
 
 	test("creates a non-implementation task without design-doc", async () => {
@@ -441,7 +442,7 @@ test.describe("Artifacts API", () => {
 		goalId = (await resp.json()).id;
 	});
 	test.afterEach(async () => {
-		if (goalId) await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+		if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
 
 	test("CRUD lifecycle", async () => {

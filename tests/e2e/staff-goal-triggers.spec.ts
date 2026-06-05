@@ -72,7 +72,7 @@ test.describe("Staff goal lifecycle triggers — REST API", () => {
 
 	test.afterAll(async () => {
 		for (const id of cleanupGoalIds) {
-			await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 		}
 		for (const id of cleanupStaffIds) {
 			await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
@@ -122,7 +122,7 @@ test.describe("Staff goal lifecycle triggers — REST API", () => {
 		expect(pre.find((e: any) => e.source.triggerId === triggerId)).toBeUndefined();
 
 		// First archive: should fire.
-		const arch1 = await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		const arch1 = await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 		expect(arch1.ok).toBe(true);
 
 		const afterOne = await listInbox(staff.id, "pending");
@@ -134,7 +134,7 @@ test.describe("Staff goal lifecycle triggers — REST API", () => {
 		// Second archive: idempotent at the API level (returns ok), but MUST NOT
 		// re-fire the inbox entry. Some implementations may 404 here — also
 		// acceptable as long as the entry count stays at 1.
-		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => { /* ok */ });
+		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" }).catch(() => { /* ok */ });
 
 		const afterTwo = await listInbox(staff.id, "pending");
 		const matches2 = afterTwo.filter((e: any) => e.source.triggerId === triggerId);
@@ -163,7 +163,7 @@ test.describe("Staff goal lifecycle triggers — REST API", () => {
 		expect(archived.length).toBe(0);
 
 		// Archive: now exactly one entry from the goal_archived trigger too.
-		const arch = await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		const arch = await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 		expect(arch.ok).toBe(true);
 
 		entries = await listInbox(staff.id, "pending");

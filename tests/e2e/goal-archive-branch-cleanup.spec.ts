@@ -56,6 +56,7 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 				name: "bare-origin-test",
 				rootPath: workRepo,
 				upsert: true,
+				acceptCanonical: true,
 			}),
 		});
 		if (!projResp.ok) throw new Error(`project register failed: ${projResp.status} ${await projResp.text()}`);
@@ -130,7 +131,7 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 
 		// Archive the goal — DELETE /api/goals/:id triggers
 		// deleteRemoteGoalBranches() fire-and-forget.
-		const del = await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
+		const del = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 		expect(del.status).toBe(200);
 
 		// Poll ls-remote until every per-role branch is gone (≤55s).

@@ -34,7 +34,8 @@ async function createArchivedGoal(projectId: string, title: string): Promise<str
 	});
 	expect(resp.status).toBe(201);
 	const goal = await resp.json();
-	await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+	// Server requires explicit `cascade` (returns 422 CASCADE_REQUIRED when omitted).
+	await apiFetch(`/api/goals/${goal.id}?cascade=false`, { method: "DELETE" });
 	return goal.id;
 }
 
