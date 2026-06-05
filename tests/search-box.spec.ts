@@ -59,10 +59,15 @@ test.describe("SearchBox: debounced input", () => {
 		await page.click("#search-input");
 		await page.evaluate(() => (window as any).clearEvents());
 
-		// Type characters with small delays (within debounce window)
-		await page.type("#search-input", "a", { delay: 30 });
-		await page.type("#search-input", "b", { delay: 30 });
-		await page.type("#search-input", "c", { delay: 30 });
+		// Type all characters in a SINGLE browser-side action so the
+		// keystrokes land back-to-back within the 200ms debounce window
+		// regardless of host load. Using three separate page.type() calls
+		// made this flaky under parallel-suite contention: the Playwright
+		// protocol round-trip between calls could exceed the debounce and
+		// fire more than one event. A single action with a small per-key
+		// delay (3 × 30ms = 90ms < 200ms) keeps the intent (rapid typing
+		// coalesces to one event) while being deterministic.
+		await page.type("#search-input", "abc", { delay: 30 });
 
 		await page.waitForTimeout(350);
 
