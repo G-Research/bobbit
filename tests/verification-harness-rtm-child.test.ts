@@ -51,7 +51,7 @@ function makeRoleStore() {
 }
 
 const ROOT_RTM_VERIFY = [
-	{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}}" },
+	{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." },
 	{ name: "Master merged into branch", type: "command", run: "git fetch origin master && git merge origin/master --no-edit" },
 	{ name: "PR raised", type: "command", run: "gh pr view {{branch}}" },
 ];

@@ -92,11 +92,11 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("render.ts contains goal-form-subgoals-toggle testid (restored by a35d7f34)", () => {
-		const text = read("src/app/render.ts");
+	it("proposal-panels.ts contains goal-form-subgoals-toggle testid (restored by a35d7f34)", () => {
+		const text = read("src/app/proposal-panels.ts");
 		assert.ok(
 			text.includes("goal-form-subgoals-toggle"),
-			"src/app/render.ts::renderGoalForm must render the 'Allow subgoals'\n" +
+			"src/app/proposal-panels.ts::renderGoalForm must render the 'Allow subgoals'\n" +
 			"checkbox with data-testid=\"goal-form-subgoals-toggle\" in the goal\n" +
 			"proposal modal. Originally shipped in 492d88e1, silently dropped during\n" +
 			"a later merge, restored by a35d7f34. Without it operators cannot\n" +
@@ -106,11 +106,11 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("render.ts contains goal-form-max-depth testid (restored by a35d7f34)", () => {
-		const text = read("src/app/render.ts");
+	it("proposal-panels.ts contains goal-form-max-depth testid (restored by a35d7f34)", () => {
+		const text = read("src/app/proposal-panels.ts");
 		assert.ok(
 			text.includes("goal-form-max-depth"),
-			"src/app/render.ts::renderGoalForm must render the 'Max depth' number\n" +
+			"src/app/proposal-panels.ts::renderGoalForm must render the 'Max depth' number\n" +
 			"input with data-testid=\"goal-form-max-depth\". Originally shipped in\n" +
 			"492d88e1, silently dropped during a later merge, restored by a35d7f34.\n" +
 			"Without it operators cannot tighten the per-goal nesting cap at\n" +
@@ -137,11 +137,11 @@ describe("Source pin — merge-loss invariants", () => {
 	// them or weakening them to allow the old YAML textareas is a hard fail.
 	// ----------------------------------------------------------------------
 
-	it("render.ts wires draft inlineWorkflow state into the proposal modal (this proposal-modal-tabs fix)", () => {
-		const text = read("src/app/render.ts");
+	it("proposal-panels.ts wires draft inlineWorkflow state into the proposal modal (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/proposal-panels.ts");
 		assert.ok(
 			text.includes("inlineWorkflow"),
-			"src/app/render.ts must reference `inlineWorkflow` somewhere in the\n" +
+			"src/app/proposal-panels.ts must reference `inlineWorkflow` somewhere in the\n" +
 			"goal proposal modal — it is the draft-scoped customised-workflow\n" +
 			"snapshot the Workflow tab edits and the submit path forwards as the\n" +
 			"`workflow` field of createGoal. Regression commit 46e21256 silently\n" +
@@ -154,11 +154,11 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("render.ts wires draft inlineRoles state into the proposal modal (this proposal-modal-tabs fix)", () => {
-		const text = read("src/app/render.ts");
+	it("proposal-panels.ts wires draft inlineRoles state into the proposal modal (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/proposal-panels.ts");
 		assert.ok(
 			text.includes("inlineRoles"),
-			"src/app/render.ts must reference `inlineRoles` somewhere in the\n" +
+			"src/app/proposal-panels.ts must reference `inlineRoles` somewhere in the\n" +
 			"goal proposal modal — it is the draft-scoped per-role customisation\n" +
 			"map the Roles tab edits and the submit path forwards to createGoal.\n" +
 			"Regression commit 46e21256 silently dropped the entire inline-roles\n" +
@@ -170,11 +170,11 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("render.ts renders the proposal-modal Workflow tab (this proposal-modal-tabs fix)", () => {
-		const text = read("src/app/render.ts");
+	it("proposal-panels.ts renders the proposal-modal Workflow tab (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/proposal-panels.ts");
 		assert.ok(
 			text.includes('data-testid="goal-proposal-tab-workflow"'),
-			"src/app/render.ts must render the proposal modal's Workflow tab\n" +
+			"src/app/proposal-panels.ts must render the proposal modal's Workflow tab\n" +
 			"button with data-testid=\"goal-proposal-tab-workflow\". This is the\n" +
 			"user-visible affordance that lets operators inspect/customise the\n" +
 			"selected workflow for a goal at creation time. Regression commit\n" +
@@ -185,11 +185,11 @@ describe("Source pin — merge-loss invariants", () => {
 		);
 	});
 
-	it("render.ts renders the proposal-modal Roles tab (this proposal-modal-tabs fix)", () => {
-		const text = read("src/app/render.ts");
+	it("proposal-panels.ts renders the proposal-modal Roles tab (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/proposal-panels.ts");
 		assert.ok(
 			text.includes('data-testid="goal-proposal-tab-roles"'),
-			"src/app/render.ts must render the proposal modal's Roles tab button\n" +
+			"src/app/proposal-panels.ts must render the proposal modal's Roles tab button\n" +
 			"with data-testid=\"goal-proposal-tab-roles\". This is the user-visible\n" +
 			"affordance that lets operators inspect/customise per-goal role\n" +
 			"overrides at creation time. Regression commit 46e21256 silently\n" +
