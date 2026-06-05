@@ -1268,6 +1268,19 @@ extracted helper. No migrations.
 
 ### WP11 — Flaky-test root-cause + search-flush teardown ENOENT (Wave 5)
 
+> **⚠️ SUPERSEDED / IMPLEMENTED (goal "Stabilize flaky E2E suite").** The search-flush teardown
+> portion of this plan shipped; the durable, authoritative description now lives in
+> [docs/internals.md — "Close & teardown ordering"](../../internals.md#close--teardown-ordering) and
+> [docs/testing-strategy.md — "Flake-stabilization patterns"](../../testing-strategy.md). **One
+> deliberate deviation from the plan below:** `ProjectContextManager.remove(projectId)` was kept
+> **fire-and-forget** (`void ctx.close().catch(...)`), NOT made async/awaited as steps 2/acceptance
+> propose. `remove()` runs during normal operation (DELETE `/api/projects/:id`), not process teardown,
+> so it must not block the request path; the rejection handler prevents an unhandled rejection. Only
+> the shutdown path (`closeAll()` → awaited by `server.ts shutdown()`) needs to be awaitable to fix the
+> ENOENT race. Treat the step text below as historical; do not reintroduce an async `remove()`. The
+> non-search items (pre-compaction-history, project-assistant-saved-state, dynamic-chat-tabs) were not
+> part of that goal and remain as originally planned.
+
 **Verdict: revise** — fixes the wrong hash source (step 7), the step-3 in-place client-flag breakage,
 the false SIGTERM-timeout mitigation, and the floating-promise on the project-deletion path.
 
