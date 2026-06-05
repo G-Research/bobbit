@@ -16,6 +16,7 @@
  * fetch; subsequent calls reuse the same module promise.
  */
 import type { Goal } from "./state.js";
+import type { CascadeArchiveResult, CascadePauseResult, CascadeResumeResult } from "./dialogs.js";
 
 let _loaded: Promise<typeof import("./dialogs.js")> | null = null;
 function load(): Promise<typeof import("./dialogs.js")> {
@@ -85,4 +86,33 @@ export async function createProjectAssistantSession(
 ): Promise<void> {
 	const m = await load();
 	return m.createProjectAssistantSession(dirPath, scaffolding, opts);
+}
+
+// ── Cascade goal dialogs (archive / pause / resume / stop-team).  ────────
+// These are user-initiated (await a confirmation), so routing them through
+// the lazy loader keeps the heavy `dialogs.ts` module out of the eager
+// session-runtime chunk that imports `api.ts`.
+
+export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveResult> {
+	const m = await load();
+	return m.showArchiveGoalDialog(goal);
+}
+
+export async function showPauseGoalDialog(goal: Goal, descendantCount: number): Promise<CascadePauseResult> {
+	const m = await load();
+	return m.showPauseGoalDialog(goal, descendantCount);
+}
+
+export async function showResumeGoalDialog(goal: Goal, descendantCount: number): Promise<CascadeResumeResult> {
+	const m = await load();
+	return m.showResumeGoalDialog(goal, descendantCount);
+}
+
+export async function showStopTeamDialog(
+	goal: { id: string; title: string },
+	descendantTeamCount: number,
+	descendants: Array<{ id: string; title: string }>,
+): Promise<"no-descendants" | "cascade" | "cancel"> {
+	const m = await load();
+	return m.showStopTeamDialog(goal, descendantTeamCount, descendants);
 }

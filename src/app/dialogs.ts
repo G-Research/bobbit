@@ -2420,7 +2420,7 @@ export function showProjectDialog(): void {
 // authority. See AGENTS.md "Cascade confirmation dialogs".
 // ============================================================================
 
-interface CascadeArchiveResult { archived: number; hasErrors?: boolean }
+export interface CascadeArchiveResult { archived: number; hasErrors?: boolean }
 
 /**
  * Archive a goal with cascade UX. Returns count of goals archived (0=cancelled).
@@ -2561,7 +2561,7 @@ export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveR
 	});
 }
 
-interface CascadePauseResult { paused: number }
+export interface CascadePauseResult { paused: number }
 
 /**
  * Pause a goal with optional cascade. Cascade defaults ON when descendants
@@ -2764,7 +2764,7 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 	});
 }
 
-interface CascadeResumeResult { resumed: number }
+export interface CascadeResumeResult { resumed: number }
 
 /** Resume a goal with optional cascade. Checkbox defaults OFF (resume target only). */
 export async function showResumeGoalDialog(goal: Goal, descendantCount: number): Promise<CascadeResumeResult> {
@@ -2873,24 +2873,7 @@ export async function showResumeGoalDialog(goal: Goal, descendantCount: number):
 	});
 }
 
-/** Walk client state for the count of non-archived descendants of `goalId`. */
-export function countDescendants(goalId: string): number {
-	// Walk THROUGH archived nodes (mirroring the server's walk-through semantics
-	// so a live grandchild under an archived parent is counted). Only count
-	// non-archived nodes so the dialog accurately reflects what the cascade will
-	// archive beyond what is already archived.
-	let total = 0;
-	const queue = [goalId];
-	const seen = new Set<string>();
-	while (queue.length > 0) {
-		const cur = queue.shift()!;
-		for (const g of state.goals) {
-			if (g.parentGoalId !== cur) continue;
-			if (seen.has(g.id)) continue;
-			seen.add(g.id);
-			if (!g.archived) total++;
-			queue.push(g.id); // always descend, even through archived
-		}
-	}
-	return total;
-}
+// `countDescendants` moved to `./goal-descendants-count.js` so synchronous
+// callers (api.ts) don't statically pull this heavy module into the eager
+// session-runtime chunk. Re-exported here for backward compatibility.
+export { countDescendants } from "./goal-descendants-count.js";

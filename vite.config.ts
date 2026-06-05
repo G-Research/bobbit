@@ -386,6 +386,19 @@ export default defineConfig(({ mode }) => ({
 						normalizedId.endsWith("/src/ui/inbox/AddToInboxDialog.ts") ||
 						normalizedId.endsWith("/src/ui/inbox/InboxEntry.ts")
 					) return "app-inbox";
+					// Leaf UI modules (pure data / pure helpers with no back-edge into the
+					// session-runtime graph): peeled into one shared eager chunk so they
+					// don't pad `app-session-runtime`. Cycle-free by construction (none of
+					// these import `src/app/*`), so no circular-chunk warning. Combined with
+					// the lazy `dialogs.ts` split, this keeps app-session-runtime comfortably
+					// under the 600 KB raw budget after the sub-goals port (bundle-size.test.ts).
+					if (
+						normalizedId.endsWith("/src/ui/bobbit-sprite-data.ts") ||
+						normalizedId.endsWith("/src/ui/bobbit-render.ts") ||
+						normalizedId.endsWith("/src/ui/utils/i18n.ts") ||
+						normalizedId.endsWith("/src/ui/utils/attachment-utils.ts") ||
+						normalizedId.endsWith("/src/ui/prompts/prompts.ts")
+					) return "app-ui-leaves";
 					if (!normalizedId.includes("node_modules")) return;
 					if (normalizedId.includes("/@sinclair/typebox/")) return "vendor-typebox";
 					if (normalizedId.includes("/marked")) return "vendor-marked";
