@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_AI_BEDROCK_HEADERS_PATCH_LABEL } from "./pi-ai-bedrock-headers-patch.js";
+import { type RuntimeBin, DEFAULT_RUNTIME_BIN } from "./runtime-bin.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,11 +24,11 @@ export function isBuildingImage(): boolean {
 	return _building;
 }
 
-export async function buildSandboxImage(imageName: string, projectDir: string): Promise<{ success: boolean; error?: string }> {
+export async function buildSandboxImage(imageName: string, projectDir: string, runtime: RuntimeBin = DEFAULT_RUNTIME_BIN): Promise<{ success: boolean; error?: string }> {
 	_building = true;
 	try {
 		console.log(`[sandbox] Building Docker image "${imageName}" from docker/Dockerfile...`);
-		await execFileAsync("docker", ["build", "-t", imageName, "docker/"], { cwd: projectDir, timeout: 300_000 });
+		await execFileAsync(runtime, ["build", "-t", imageName, "docker/"], { cwd: projectDir, timeout: 300_000 });
 		console.log(`[sandbox] Docker image "${imageName}" built successfully`);
 		return { success: true };
 	} catch (err: any) {
@@ -43,10 +44,10 @@ export async function buildSandboxImage(imageName: string, projectDir: string): 
  * Check if the Docker image has the expected pi-coding-agent version baked in.
  * Returns the image version (or null if not labelled / image missing).
  */
-export async function getImageAgentVersion(imageName: string): Promise<string | null> {
+export async function getImageAgentVersion(imageName: string, runtime: RuntimeBin = DEFAULT_RUNTIME_BIN): Promise<string | null> {
 	try {
 		const { stdout } = await execFileAsync(
-			"docker", ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", imageName],
+			runtime, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", imageName],
 			{ timeout: 5000 },
 		);
 		const version = stdout.trim();
@@ -56,10 +57,10 @@ export async function getImageAgentVersion(imageName: string): Promise<string | 
 	}
 }
 
-export async function getImageBedrockHeadersPatchLabel(imageName: string): Promise<string | null> {
+export async function getImageBedrockHeadersPatchLabel(imageName: string, runtime: RuntimeBin = DEFAULT_RUNTIME_BIN): Promise<string | null> {
 	try {
 		const { stdout } = await execFileAsync(
-			"docker", ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-ai-bedrock-ua-patch\"}}", imageName],
+			runtime, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-ai-bedrock-ua-patch\"}}", imageName],
 			{ timeout: 5000 },
 		);
 		const label = stdout.trim();
@@ -87,15 +88,15 @@ export function getHostAgentVersion(): string | null {
  * Rebuilds automatically if the version is stale or missing.
  * Returns true if the image is ready.
  */
-export async function ensureImageAgentVersion(imageName: string, projectDir: string): Promise<boolean> {
+export async function ensureImageAgentVersion(imageName: string, projectDir: string, runtime: RuntimeBin = DEFAULT_RUNTIME_BIN): Promise<boolean> {
 	const hostVersion = getHostAgentVersion();
 	if (!hostVersion) {
 		console.warn("[sandbox] Cannot determine host pi-coding-agent version, skipping image version check");
 		return true;
 	}
 
-	const imageVersion = await getImageAgentVersion(imageName);
-	const imagePatchLabel = await getImageBedrockHeadersPatchLabel(imageName);
+	const imageVersion = await getImageAgentVersion(imageName, runtime);
+	const imagePatchLabel = await getImageBedrockHeadersPatchLabel(imageName, runtime);
 	if (imageVersion === hostVersion && imagePatchLabel === PI_AI_BEDROCK_HEADERS_PATCH_LABEL) {
 		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} and Bedrock headers patch ${imagePatchLabel} (matches host)`);
 		return true;
@@ -111,7 +112,7 @@ export async function ensureImageAgentVersion(imageName: string, projectDir: str
 	_building = true;
 	try {
 		await execFileAsync(
-			"docker",
+			runtime,
 			["build", "--build-arg", `PI_AGENT_VERSION=${hostVersion}`, "-t", imageName, "docker/"],
 			{ cwd: projectDir, timeout: 180_000 },
 		);
@@ -126,25 +127,25 @@ export async function ensureImageAgentVersion(imageName: string, projectDir: str
 	}
 }
 
-export async function checkDockerAvailability(imageName?: string): Promise<SandboxStatus> {
+export async function checkDockerAvailability(imageName?: string, runtime: RuntimeBin = DEFAULT_RUNTIME_BIN): Promise<SandboxStatus> {
 	try {
-		const { stdout } = await execFileAsync("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 });
+		const { stdout } = await execFileAsync(runtime, ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 });
 		const status: SandboxStatus = { available: true, dockerVersion: stdout.trim() };
 		if (imageName) {
 			try {
-				await execFileAsync("docker", ["image", "inspect", imageName], { timeout: 5000 });
+				await execFileAsync(runtime, ["image", "inspect", imageName], { timeout: 5000 });
 				status.imageExists = true;
 			} catch {
 				status.imageExists = false;
 				// Check if Dockerfile exists so UI can show build instructions
 				if (fs.existsSync(path.join(process.cwd(), "docker", "Dockerfile"))) {
 					status.dockerfileExists = true;
-					status.buildCommand = `docker build -t ${imageName} docker/`;
+					status.buildCommand = `${runtime} build -t ${imageName} docker/`;
 				}
 			}
 		}
 		return status;
 	} catch (err) {
-		return { available: false, error: String(err) };
+		return { available: false, error: `${runtime} not available: ${String(err)}` };
 	}
 }

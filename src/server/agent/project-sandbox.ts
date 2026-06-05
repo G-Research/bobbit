@@ -26,9 +26,9 @@ import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
+import type { RuntimeBin } from "./runtime-bin.js";
 
 const execFileAsync = promisify(execFileCb);
-const DOCKER_BIN = "docker";
 
 /** Env config for docker commands — suppresses MSYS path mangling on Windows. */
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
@@ -61,15 +61,15 @@ function dockerChildLabel(args: readonly string[]): string {
 	return `docker ${args[0] || "command"}`;
 }
 
-async function execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+async function execDocker(bin: RuntimeBin, args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
 	if (!cpuDiagnosticsEnabled()) {
-		return await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+		return await execFileAsync(bin, args, options) as unknown as { stdout: string; stderr: string };
 	}
 	const start = performance.now();
 	let success = 0;
 	let errorCode = "none";
 	try {
-		const result = await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+		const result = await execFileAsync(bin, args, options) as unknown as { stdout: string; stderr: string };
 		success = 1;
 		return result;
 	} catch (err) {
@@ -92,18 +92,20 @@ interface DockerResourceLimits {
 	memBytes: number;
 }
 
-let _cachedDockerLimits: DockerResourceLimits | null | undefined; // undefined = not yet queried
+/** Per-runtime cache — undefined entry = not yet queried. */
+const _cachedDockerLimits: Partial<Record<RuntimeBin, DockerResourceLimits | null>> = {};
 
 /**
- * Query Docker daemon's available CPU and memory.
- * Cached for the process lifetime (Docker resource limits don't change mid-session).
- * Returns null if `docker info` fails (caller should fall back to host values).
+ * Query the container runtime daemon's available CPU and memory.
+ * Cached per-runtime for the process lifetime (limits don't change mid-session).
+ * Returns null if `<bin> info` fails (caller should fall back to host values).
  */
-export async function getDockerResourceLimits(): Promise<DockerResourceLimits | null> {
-	if (_cachedDockerLimits !== undefined) return _cachedDockerLimits;
+export async function getDockerResourceLimits(bin: RuntimeBin = "docker"): Promise<DockerResourceLimits | null> {
+	if (bin in _cachedDockerLimits) return _cachedDockerLimits[bin]!;
 
 	try {
 		const { stdout } = await execDocker(
+			bin,
 			["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
 			{ timeout: 5_000, env: DOCKER_ENV },
 		);
@@ -111,13 +113,13 @@ export async function getDockerResourceLimits(): Promise<DockerResourceLimits | 
 		const cpus = parseInt(parts[0], 10);
 		const memBytes = parseInt(parts[1], 10);
 		if (Number.isNaN(cpus) || Number.isNaN(memBytes) || cpus <= 0 || memBytes <= 0) {
-			_cachedDockerLimits = null;
+			_cachedDockerLimits[bin] = null;
 			return null;
 		}
-		_cachedDockerLimits = { cpus, memBytes };
-		return _cachedDockerLimits;
+		_cachedDockerLimits[bin] = { cpus, memBytes };
+		return _cachedDockerLimits[bin]!;
 	} catch {
-		_cachedDockerLimits = null;
+		_cachedDockerLimits[bin] = null;
 		return null;
 	}
 }
@@ -143,7 +145,7 @@ export function computeResourceLimits(
 
 /** @internal — exported for testing only. Resets the cached Docker limits. */
 export function _resetDockerLimitsCache(): void {
-	_cachedDockerLimits = undefined;
+	for (const k of Object.keys(_cachedDockerLimits)) delete _cachedDockerLimits[k as RuntimeBin];
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -160,6 +162,8 @@ export interface ProjectSandboxOptions {
 	 */
 	cloneSource?: SandboxCloneSource;
 	image: string;             // Docker image name
+	/** Container CLI binary to spawn ("docker" | "podman"). Resolved at bootstrap from sandbox_runtime. */
+	runtimeBin: RuntimeBin;
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
@@ -281,7 +285,7 @@ export class ProjectSandbox {
 			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
 		} catch {
 			// Permission denied — create as root and chown to node
-			await execDocker([
+			await execDocker(this.options.runtimeBin, [
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -391,7 +395,7 @@ export class ProjectSandbox {
 		try {
 			await this._dockerExec(containerId, ["mkdir", "-p", container]);
 		} catch {
-			await execDocker([
+			await execDocker(this.options.runtimeBin, [
 				"exec", "-u", "root", containerId, "sh", "-c",
 				`mkdir -p ${container} && chown node:node ${container}`,
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -608,7 +612,7 @@ export class ProjectSandbox {
 				const wtList = await this._dockerExec(this.containerId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
 				console.log(`[project-sandbox] Pre-shutdown worktrees in ${this.containerId.substring(0, 12)}: ${wtList.trim()}`);
 			} catch { /* best-effort audit */ }
-			await execDocker(["stop", this.containerId], {
+			await execDocker(this.options.runtimeBin, ["stop", this.containerId], {
 				timeout: 30_000,
 				env: DOCKER_ENV,
 			});
@@ -624,14 +628,14 @@ export class ProjectSandbox {
 		const volumeName = this._volumeName();
 		if (this.containerId) {
 			try {
-				await execDocker(["rm", "-f", this.containerId], {
+				await execDocker(this.options.runtimeBin, ["rm", "-f", this.containerId], {
 					timeout: 15_000,
 					env: DOCKER_ENV,
 				});
 			} catch { /* already gone */ }
 		}
 		try {
-			await execDocker(["volume", "rm", "-f", volumeName], {
+			await execDocker(this.options.runtimeBin, ["volume", "rm", "-f", volumeName], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -691,7 +695,7 @@ export class ProjectSandbox {
 			} else {
 				// Stopped — try to start it
 				try {
-					await execDocker(["start", existingId], {
+					await execDocker(this.options.runtimeBin, ["start", existingId], {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
@@ -732,7 +736,7 @@ export class ProjectSandbox {
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
 		// Query Docker daemon to avoid requesting more resources than the VM has
-		const dockerLimits = await getDockerResourceLimits();
+		const dockerLimits = await getDockerResourceLimits(this.options.runtimeBin);
 		const { cpus: totalCpus, memoryGB: totalMemGB } = computeResourceLimits(
 			os.cpus().length,
 			os.totalmem(),
@@ -780,7 +784,7 @@ export class ProjectSandbox {
 			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
 		}
 
-		const { stdout } = await execDocker(dockerArgs, {
+		const { stdout } = await execDocker(this.options.runtimeBin, dockerArgs, {
 			timeout: 60_000,
 			env: DOCKER_ENV,
 		});
@@ -794,7 +798,7 @@ export class ProjectSandbox {
 
 		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
 		try {
-			await execDocker([
+			await execDocker(this.options.runtimeBin, [
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -804,7 +808,7 @@ export class ProjectSandbox {
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
-			await execDocker([
+			await execDocker(this.options.runtimeBin, [
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mount --bind /dev/null /proc/1/environ 2>/dev/null || chmod 0400 /proc/1/environ 2>/dev/null || true",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -998,7 +1002,7 @@ export class ProjectSandbox {
 
 	private async _findContainerByLabel(label: string): Promise<string | null> {
 		try {
-			const { stdout } = await execDocker([
+			const { stdout } = await execDocker(this.options.runtimeBin, [
 				"ps", "-a",
 				"--filter", `label=${label}`,
 				"--format", "{{.ID}}",
@@ -1025,8 +1029,8 @@ export class ProjectSandbox {
 	private async _isContainerImageStale(containerId: string, imageTag: string): Promise<boolean> {
 		try {
 			const [containerImg, currentImg] = await Promise.all([
-				execDocker(["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
-				execDocker(["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
+				execDocker(this.options.runtimeBin, ["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
+				execDocker(this.options.runtimeBin, ["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
 			]);
 			const a = containerImg.stdout.trim();
 			const b = currentImg.stdout.trim();
@@ -1039,7 +1043,7 @@ export class ProjectSandbox {
 
 	private async _isContainerRunning(containerId: string): Promise<boolean> {
 		try {
-			const { stdout } = await execDocker([
+			const { stdout } = await execDocker(this.options.runtimeBin, [
 				"inspect", "--format", "{{.State.Running}}", containerId,
 			], {
 				timeout: 5_000,
@@ -1053,7 +1057,7 @@ export class ProjectSandbox {
 
 	private async _removeContainer(containerId: string): Promise<void> {
 		try {
-			await execDocker(["rm", "-f", containerId], {
+			await execDocker(this.options.runtimeBin, ["rm", "-f", containerId], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -1076,7 +1080,7 @@ export class ProjectSandbox {
 		}
 		execArgs.push(containerId, ...args);
 
-		const { stdout } = await execDocker(execArgs, {
+		const { stdout } = await execDocker(this.options.runtimeBin, execArgs, {
 			timeout: opts?.timeout ?? 60_000,
 			env: DOCKER_ENV,
 			maxBuffer: 10 * 1024 * 1024,

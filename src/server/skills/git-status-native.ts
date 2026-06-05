@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import type { GitStatusResult } from "../server.js";
 import { parseBaseRef } from "./git.js";
+import { type RuntimeBin, DEFAULT_RUNTIME_BIN } from "../agent/runtime-bin.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -43,8 +44,10 @@ function statusGitOperation(args: readonly string[]): string {
 export interface BatchGitStatusOpts {
 	/** When true, runs porcelain with -uall (untracked included). Default false → -uno. */
 	untracked?: boolean;
-	/** When set, all git invocations route through `docker exec -w cwd <cid> git ...`. */
+	/** When set, all git invocations route through `<runtime> exec -w cwd <cid> git ...`. */
 	containerId?: string;
+	/** Container CLI binary to spawn when `containerId` is set. Defaults to "docker". */
+	runtime?: RuntimeBin;
 	/**
 	 * Project-level `base_ref` configuration. When non-empty, drives the
 	 * `primaryBranch` used for `aheadOfPrimary`/`behindPrimary` counters,
@@ -73,6 +76,7 @@ async function runGit(
 	containerId?: string,
 	timeoutMs = PER_CALL_TIMEOUT_MS,
 	trim = true,
+	runtime: RuntimeBin = DEFAULT_RUNTIME_BIN,
 ): Promise<{ stdout: string; ok: boolean }> {
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
@@ -82,7 +86,7 @@ async function runGit(
 		let stdout: string;
 		if (containerId) {
 			const r = await execFileAsync(
-				"docker",
+				runtime,
 				["exec", "-w", cwd, containerId, "git", ...args],
 				{ encoding: "utf-8", timeout: timeoutMs, windowsHide: true },
 			);
@@ -270,7 +274,7 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: stri
 /** Container path: preserve the legacy single-spawn batched script. The
  * Windows tax is host-side only; inside Linux containers `git` is fast and
  * one `docker exec sh -c` round-trip beats 11 parallel `docker exec` calls. */
-async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef?: string): Promise<GitStatusResult | null> {
+async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef?: string, runtime: RuntimeBin = DEFAULT_RUNTIME_BIN): Promise<GitStatusResult | null> {
 	const porcelainLine = untracked
 		? "git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null"
 		: "git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null";
@@ -327,7 +331,7 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 	let stdout: string;
 	try {
 		const result = await execFileAsync(
-			"docker",
+			runtime,
 			["exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript],
 			{
 				encoding: "utf-8",
@@ -434,7 +438,7 @@ export async function runBatchGitStatusNative(
 ): Promise<GitStatusResult | null> {
 	const untracked = opts?.untracked === true;
 	if (opts?.containerId) {
-		return runContainer(cwd, opts.containerId, untracked, opts?.configuredBaseRef);
+		return runContainer(cwd, opts.containerId, untracked, opts?.configuredBaseRef, opts?.runtime ?? DEFAULT_RUNTIME_BIN);
 	}
 	return runHost(cwd, untracked, opts?.configuredBaseRef);
 }

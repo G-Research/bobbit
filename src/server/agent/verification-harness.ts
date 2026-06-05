@@ -31,6 +31,7 @@ import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
+import { runtimeBin } from "./runtime-bin.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
@@ -3409,6 +3410,10 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
+			// Container CLI binary for the selected project runtime ("docker" | "podman").
+			const containerRuntime = runtimeBin(
+				streamCtx ? this.resolveProjectConfigStore(streamCtx.goalId) : this.projectConfigStore,
+			);
 			// Shell selection: default to plain bash (fast), use --login only for
 			// commands that need the full interactive PATH (npm, pytest, gh, etc.).
 			const { shell: shellBin, args: shellArgs } = getVerificationShell(command);
@@ -3501,7 +3506,7 @@ export class VerificationHarness {
 					const stepKillId = randomUUID().slice(0, 8);
 					const pidFile = `/tmp/.bobbit-step-${stepKillId}.pid`;
 					const wrappedCmd = `echo $$ > ${pidFile}; ${command}`;
-					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+					tracked = spawnTracked(containerRuntime, ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
@@ -3513,7 +3518,7 @@ export class VerificationHarness {
 							// processes (agent sessions, other verification steps,
 							// bg-processes) untouched.
 							try {
-								const killer = spawn("docker", [
+								const killer = spawn(containerRuntime, [
 									"exec", containerId, "/bin/sh", "-c",
 									`p=$(cat ${pidFile} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${pidFile} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${pidFile}`,
 								], { stdio: "ignore" });

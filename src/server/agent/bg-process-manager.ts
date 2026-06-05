@@ -8,15 +8,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import { getShellConfig } from "./shell-util.js";
+import { type RuntimeBin, DEFAULT_RUNTIME_BIN } from "./runtime-bin.js";
 
 /**
  * Function used to spawn the underlying child process. Injected via the
  * constructor so unit tests can supply a fake EventEmitter-backed child
  * without touching the OS. Production wiring uses {@link defaultSpawn}.
  */
-export type SpawnFn = (command: string, cwd: string, containerId: string | undefined) => ChildProcess;
+export type SpawnFn = (command: string, cwd: string, containerId: string | undefined, runtimeBin: RuntimeBin) => ChildProcess;
 
-function defaultSpawn(command: string, cwd: string, containerId: string | undefined): ChildProcess {
+function defaultSpawn(command: string, cwd: string, containerId: string | undefined, runtimeBin: RuntimeBin = DEFAULT_RUNTIME_BIN): ChildProcess {
 	const { shell: hostShell, args: hostArgs } = getShellConfig();
 	// Inside the container: always /bin/sh, use the caller's cwd
 	// (which is the container-internal worktree path for sandboxed sessions)
@@ -28,7 +29,7 @@ function defaultSpawn(command: string, cwd: string, containerId: string | undefi
 		console.log(`[bg-process] Docker exec in container ${containerId.substring(0, 12)}, cwd=${containerCwd}`);
 	}
 	return containerId
-		? spawn("docker", ["exec", "-w", containerCwd, containerId, shell, ...args, command], {
+		? spawn(runtimeBin, ["exec", "-w", containerCwd, containerId, shell, ...args, command], {
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: false, // docker exec manages the process
 			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
@@ -121,12 +122,12 @@ export class BgProcessManager {
 		}
 	}
 
-	create(sessionId: string, command: string, cwd: string, containerId?: string, sandboxed?: boolean, name?: string): BgProcessInfo {
+	create(sessionId: string, command: string, cwd: string, containerId?: string, sandboxed?: boolean, name?: string, runtimeBin: RuntimeBin = DEFAULT_RUNTIME_BIN): BgProcessInfo {
 		if (sandboxed && !containerId) {
 			throw new Error("Sandboxed session without containerId — refusing host-side execution");
 		}
 		const id = `bg-${this.nextId++}`;
-		const child = this.spawnFn(command, cwd, containerId);
+		const child = this.spawnFn(command, cwd, containerId, runtimeBin);
 
 		// Unref so bg process doesn't prevent gateway from exiting (host spawns only)
 		if (!containerId && typeof child.unref === "function") child.unref();

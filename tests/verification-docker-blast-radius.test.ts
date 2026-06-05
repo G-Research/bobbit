@@ -84,15 +84,17 @@ describe("verification-harness docker-exec timeout — blast radius", () => {
 	});
 
 	it("the docker-exec onTimeout closure uses a pgid-scoped kill, not container-wide", () => {
-		// Locate the onTimeout closure in the docker-exec branch and inspect it.
-		const dockerExecRe = /spawnTracked\("docker",[\s\S]*?onTimeout:\s*\(\s*\)\s*=>\s*\{([\s\S]*?)^\s*\},/m;
+		// Locate the onTimeout closure in the container-exec branch and inspect it.
+		// The spawned binary is the resolved runtime (`containerRuntime`, "docker"
+		// | "podman") — not a hardcoded "docker" literal anymore.
+		const dockerExecRe = /spawnTracked\(containerRuntime,[\s\S]*?onTimeout:\s*\(\s*\)\s*=>\s*\{([\s\S]*?)^\s*\},/m;
 		const m = dockerExecRe.exec(SRC);
-		assert.ok(m, "could not locate docker-exec spawnTracked block — test needs updating");
+		assert.ok(m, "could not locate container-exec spawnTracked block — test needs updating");
 
 		const body = m![1];
 		assert.ok(
-			body.includes("docker") && body.includes("exec") && body.includes("kill"),
-			"sanity: onTimeout body should fire an in-container kill",
+			body.includes("containerRuntime") && body.includes("exec") && body.includes("kill"),
+			"sanity: onTimeout body should fire an in-container kill via the runtime binary",
 		);
 
 		// The body should NOT contain `-1` as a pid argument to `kill`.

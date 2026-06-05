@@ -18,6 +18,7 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
+import { runtimeBin } from "./runtime-bin.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
 import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
@@ -724,6 +725,7 @@ export class SessionManager {
 	 */
 	private async recoverSandboxSessions(projectId: string, newContainerId: string): Promise<void> {
 		console.log(`[session-manager] Recovering sandbox sessions for project ${projectId} (new container: ${newContainerId.substring(0, 12)})`);
+		const bin = runtimeBin(this.projectContextManager?.getOrCreate(projectId)?.projectConfigStore ?? this.projectConfigStore);
 
 		const sessionsToRecover: SessionInfo[] = [];
 		for (const session of this.sessions.values()) {
@@ -747,19 +749,19 @@ export class SessionManager {
 
 					// Check if worktree still exists (volumes may survive rm -f)
 					try {
-						await execFileAsync("docker", [
+						await execFileAsync(bin, [
 							"exec", newContainerId, "test", "-d", session.cwd,
 						], { timeout: 5_000 });
 						worktreeOk = true;
 					} catch {
 						// Try git worktree repair first
 						try {
-							await execFileAsync("docker", [
+							await execFileAsync(bin, [
 								"exec", "-w", "/workspace", newContainerId,
 								"git", "worktree", "repair",
 							], { timeout: 10_000 });
 							// Re-check after repair
-							await execFileAsync("docker", [
+							await execFileAsync(bin, [
 								"exec", newContainerId, "test", "-d", session.cwd,
 							], { timeout: 5_000 });
 							worktreeOk = true;
@@ -1139,7 +1141,7 @@ export class SessionManager {
 	async ensureSandboxNetwork(): Promise<string> {
 		const name = SessionManager.SANDBOX_NETWORK;
 		try {
-			await execFileAsync("docker", [
+			await execFileAsync(runtimeBin(this.projectConfigStore), [
 				"network", "create", name,
 				"--driver", "bridge",
 				"--opt", "com.docker.network.bridge.enable_icc=false",
@@ -1162,7 +1164,7 @@ export class SessionManager {
 	 */
 	async cleanupSandboxNetwork(): Promise<void> {
 		try {
-			await execFileAsync("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
+			await execFileAsync(runtimeBin(this.projectConfigStore), ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
 			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);
 		} catch {
 			// Non-fatal — network may not exist or may have connected containers
@@ -1310,6 +1312,7 @@ export class SessionManager {
 			: null;
 		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
 		const secretsStore = projectContext?.secretsStore ?? null;
+		bridgeOptions.runtimeBin = runtimeBin(projectConfigStore);
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
 		ensureSandboxAgentAuthFile({
@@ -3337,8 +3340,9 @@ export class SessionManager {
 			});
 			// Verify the sandbox worktree still exists inside the container
 			if (ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+				const restoreBin = bridgeOptions.runtimeBin ?? runtimeBin((ps.projectId ? this.projectContextManager?.getOrCreate(ps.projectId)?.projectConfigStore : undefined) ?? this.projectConfigStore);
 				try {
-					await execFileAsync("docker", [
+					await execFileAsync(restoreBin, [
 						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
 					], { timeout: 5_000 });
 					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
@@ -3348,12 +3352,12 @@ export class SessionManager {
 
 					// Try git worktree repair first — handles broken .git link files after hard container kill
 					try {
-						await execFileAsync("docker", [
+						await execFileAsync(restoreBin, [
 							"exec", "-w", "/workspace", bridgeOptions.containerId!,
 							"git", "worktree", "repair",
 						], { timeout: 10_000 });
 						// Re-check if worktree now exists after repair
-						await execFileAsync("docker", [
+						await execFileAsync(restoreBin, [
 							"exec", bridgeOptions.containerId!, "test", "-d", ps.cwd!,
 						], { timeout: 5_000 });
 						console.log(`[session-manager] Sandbox worktree repaired for ${ps.id}: ${ps.cwd}`);
