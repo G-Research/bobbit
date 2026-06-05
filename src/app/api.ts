@@ -23,17 +23,19 @@ import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } fro
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 export { errorFromResponse, errorDetails };
-// Static import of dialogs creates a cycle (dialogs.ts imports from api.ts),
-// but neither module references the other at module-init time, so ESM's
-// live-binding semantics resolve it correctly at runtime.
+// `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
+// route these through `dialogs-lazy.js` so it stays out of the eager
+// session-runtime chunk that imports this module. `countDescendants` is a
+// synchronous pure helper, so it lives in its own tiny standalone module.
+// (dialogs-lazy is a thin wrapper, so no api.ts↔dialogs.ts module-init cycle.)
 import {
 	confirmAction,
-	countDescendants,
 	showArchiveGoalDialog,
 	showPauseGoalDialog,
 	showResumeGoalDialog,
 	showStopTeamDialog,
-} from "./dialogs.js";
+} from "./dialogs-lazy.js";
+import { countDescendants } from "./goal-descendants-count.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -104,36 +106,11 @@ function legacyCopyText(text: string): boolean {
 	}
 }
 
-// Standalone toast fallback. `showHeaderToast` only renders inside the session
-// header (active-session view); the landing / no-active-session sidebar has no
-// header, so we surface the SAME toast (identical `.review-toast` styling and
-// `data-testid="header-toast"`) appended to <body> when no header is mounted.
-let _sidebarToastEl: HTMLDivElement | null = null;
-let _sidebarToastTimer: ReturnType<typeof setTimeout> | null = null;
-
-function mountStandaloneSidebarToast(text: string): void {
-	if (typeof document === "undefined") return;
-	if (!_sidebarToastEl || !_sidebarToastEl.isConnected) {
-		_sidebarToastEl = document.createElement("div");
-		_sidebarToastEl.className = "review-toast";
-		_sidebarToastEl.setAttribute("data-testid", "header-toast");
-		document.body.appendChild(_sidebarToastEl);
-	}
-	_sidebarToastEl.textContent = text;
-	if (_sidebarToastTimer) clearTimeout(_sidebarToastTimer);
-	_sidebarToastTimer = setTimeout(() => {
-		_sidebarToastEl?.remove();
-		_sidebarToastEl = null;
-		_sidebarToastTimer = null;
-	}, 2500);
-}
-
-/** Flash the same "Link copied" toast the session header uses. When a session
- *  header is mounted, reuse `showHeaderToast`; otherwise (landing / no active
- *  session) mount a standalone toast so the flash is visible in every sidebar
- *  context. The header's `[data-testid="copy-session-link"]` button renders
- *  under the exact same condition as the header toast, so its presence is a
- *  reliable, synchronous signal that the header toast will be visible. */
+/** Flash the same "Link copied" toast the session header uses. `headerToast()`
+ *  is rendered at the app-shell level in every view (landing, active session,
+ *  disconnected), so `showHeaderToast` alone surfaces the toast everywhere —
+ *  no standalone body fallback is needed (a fallback would double-mount the
+ *  `data-testid="header-toast"` element on the landing view). */
 async function flashSidebarToast(text: string): Promise<void> {
 	try {
 		const { showHeaderToast } = await import("./render.js");
@@ -141,9 +118,6 @@ async function flashSidebarToast(text: string): Promise<void> {
 	} catch {
 		// best-effort toast
 	}
-	if (typeof document === "undefined") return;
-	if (document.querySelector('[data-testid="copy-session-link"]')) return;
-	mountStandaloneSidebarToast(text);
 }
 
 export async function copySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
