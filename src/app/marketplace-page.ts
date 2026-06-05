@@ -263,18 +263,6 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 	// same project we installed into (finding #2).
 	if (scope === "project" && projectId) focusProjectId = projectId;
 
-	const shipsTools = pack.hasTools || (pack.contents?.tools?.length ?? 0) > 0;
-	if (shipsTools) {
-		const { confirmAction } = await import("./dialogs.js");
-		const ok = await confirmAction(
-			"Install executable code?",
-			`This pack installs executable code that runs on your machine. Only install "${pack.name}" from sources you trust.`,
-			"Install anyway",
-			true,
-		);
-		if (!ok) return;
-	}
-
 	const key = `install:${pack.dirName}`;
 	busy.add(key);
 	renderApp();
@@ -478,6 +466,20 @@ function renderSourcesPanel(): TemplateResult {
 
 			<div class="flex flex-col gap-2 mt-2 pt-3 border-t border-border">
 				<div class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add source</div>
+				<div class="market-trust-warning" data-testid="market-trust-warning">
+					${icon(AlertTriangle, "xs")}
+					<div class="flex flex-col gap-1.5">
+						<span>Only add sources you trust. Installing any pack from a source can run code or instruct agents on your machine.</span>
+						<details class="market-trust-why" data-testid="market-trust-why">
+							<summary>Why?</summary>
+							<div class="market-trust-why-body">
+								<p data-kind="tool"><strong>Tools</strong> ship <code>extension.ts</code> / <code>_shared/</code> code that runs directly in the Bobbit server process on the host, deterministically, with no LLM and no sandbox in the loop. Highest, most immediate risk.</p>
+								<p data-kind="skill"><strong>Skills</strong> are free-form instructions an agent tends to follow literally; an agent with shell access can be directed to do damage.</p>
+								<p data-kind="role"><strong>Roles</strong> steer persona/behavior; influential but more diffuse. Still drives an LLM with tool access.</p>
+							</div>
+						</details>
+					</div>
+				</div>
 				<input
 					type="text"
 					data-testid="market-source-url"
@@ -586,7 +588,6 @@ function renderBrowsePanel(): TemplateResult {
 }
 
 function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
-	const shipsTools = pack.hasTools || (pack.contents?.tools?.length ?? 0) > 0;
 	const installing = busy.has(`install:${pack.dirName}`);
 	return html`
 		<div class="market-pack-card" data-testid="market-browse-pack" data-pack-name=${pack.name}>
@@ -595,7 +596,6 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 					<div class="flex items-center gap-2 flex-wrap">
 						<span class="text-sm font-semibold">${pack.name}</span>
 						<span class="text-[11px] text-muted-foreground">v${pack.version}</span>
-						${shipsTools ? html`<span class="market-exec-warning" title="Installs executable code">${icon(AlertTriangle, "xs")} executable code</span>` : ""}
 					</div>
 					<div class="text-xs text-muted-foreground mt-0.5">${pack.description}</div>
 					<div class="mt-1.5">${entityChips(pack)}</div>
