@@ -56,7 +56,27 @@ security-reviewer}.yaml`, `src/server/agent/system-prompt.ts`,
 
 ## Authoritative file inventory (port verbatim)
 
+Each shared-file group below is tagged with the **specific subgoals concern**
+it carries, so the porting coder takes only the subgoal-relevant delta and not
+incidental #497 drift. For broad shared files (`project-context.ts`,
+`project-registry.ts`, `search/flex-store.ts`, `preview/path-guard.ts`,
+`rpc-bridge.ts`, manager-page UIs), **diff against master first and port only
+hunks that reference subgoal/nested/children/plan/pause/cost symbols** — if a
+hunk is unrelated to sub-goals, leave it out.
+
 ### Backend — `src/server/**`, `defaults/**` (Coder A)
+Rationale tags: goal-store/goal-manager = **new goal fields + store
+migration**; nested-goal-routes/spawn-child-*/server.ts = **REST surface +
+route wiring**; verification-harness/-logic/-reviewer-meta = **subgoal verify
+step (`runSubgoalStep`) + recovery**; skills/git = **local child merge
+helpers**; plan-mutation*/parent-workflow-freeze = **governance**;
+goal-paused-guard/session-manager/team-manager = **pause cascade + session
+soft-abort**; cost-tracker/cost-backfill = **subtree cost rollup +
+goalId stamp**; config-cascade/project-context = **subgoal prefs**;
+tool-activation/tool-group-policy-store/resolve-role/role-prompt/system-prompt =
+**Children tool gating + prompt injection**; workflow-store/
+seed-default-workflows = **parent/subgoal workflow + execution gate**;
+ws/protocol = **goal_state_changed / mutation_pending broadcasts**.
 New standalone modules (checkout as-is):
 `subgoal-nesting-limit.ts`, `goal-subtree.ts`, `goal-descendants.ts`,
 `child-ready-to-merge.ts`, `spawn-child-spawnedby.ts`,
@@ -87,6 +107,29 @@ policy: `always-allow` team-lead, `never` contributors),
 `defaults/tools/team/*`, `defaults/tools/proposals/*`, `defaults/system-prompt.md`.
 
 ### Frontend — `src/app/**`, `src/ui/**`, `src/shared/**` (Coder B)
+Rationale tags: proposal-panels = **subgoal toggle + max-depth + Workflow/Roles
+tabs**; subgoals-flag/settings-page/main/remote-agent = **system pref +
+dataset mirror**; sidebar-* /render-helpers = **nesting hierarchy + badges**;
+goal-dashboard*/plan-* = **DAG plan/children tabs**; Goal*Renderer/children-* =
+**Children tool cards**; api/state/message-reducer/custom-messages = **REST
+client + WS state**. The detailed UX requirements these must satisfy:
+
+- **Plan tab inline nested disclosure:** a chevron on a child node expands that
+  child's plan recursively (depth cap 3); overflow collapses to a
+  "Show N more…" affordance. `plan-live-only-toggle` (`data-testid`) defaults
+  to inclusive (shows archived, dimmed/dashed with `plan-node-archived-pill`).
+  Per-node gate status pending/running/passed/failed; merge/conflict state per
+  child. Source DAG from `GET /descendants` (live + archived), not the
+  archived-filtered sidebar list.
+- **Sidebar:** children nest under their spawning team-lead
+  (`spawnedBySessionId`, resolved at spawn + render-side fallback); parent rows
+  show a `sidebar-descendant-badge` descendant count; **same-titled siblings
+  get a disambiguation suffix**; depth-5 sidebar cap; live/archived/blocked
+  children visually distinguished.
+- **Approval surfaces (both):** the in-chat `<children-mutation-approval>`
+  custom message **and** a dashboard **mutation-pending card** (driven by the
+  `mutation_pending` broadcast), both POSTing
+  `/mutation/:requestId/decision`.
 `subgoals-flag.ts`, `proposal-panels.ts` (subgoal toggle, max-depth control,
 Workflow/Roles tabs), `settings-page.ts` (Subgoals toggle +
 `general-max-nesting-depth` stepper), `main.ts` + `remote-agent.ts` (dataset
@@ -189,9 +232,16 @@ helpers so REST and the verification harness share one code path:
   cancels in-flight verifications; resume re-enables spawns.
 - `POST /api/goals/:id/mutation/:requestId/decision` — body `{ approve }`;
   applies or rejects a pending plan mutation.
-- `PATCH /api/goals/:id/policy` — root-only; sets `divergencePolicy`
-  (`strict`/`balanced`/`autonomous`) and `maxConcurrentChildren`
-  (floor 1, hard max 8).
+- `PATCH /api/goals/:id/policy` — body `{ divergencePolicy?, maxConcurrentChildren? }`.
+  The route itself accepts **any goal id** and persists the fields on that
+  goal record: `divergencePolicy` (`strict`/`balanced`/`autonomous`) is a
+  **per-goal** setting consulted by that goal's own plan-mutation handler;
+  `maxConcurrentChildren` (validated `[1,8]`) is stored per-goal but **enforced
+  at the root** — the spawn scheduler resolves the *root's* value via
+  `resolve-root-max-concurrent-children` for the per-root semaphore, so in
+  practice operators set concurrency on the root (`goal_set_policy` is
+  documented root-oriented for that field). On success broadcasts
+  `goal_state_changed` with the new values.
 - `GET /api/goals/:id/descendants` — live + archived descendants for the Plan
   tab (independent of the sidebar's archived filter).
 - `GET /api/goals/:id/tree-cost` — cost/token rollup rooted at the requested
@@ -210,6 +260,66 @@ contributors via `tool-group-policies.yaml` Children group)
 `goal_merge_child`, `goal_pause`, `goal_resume`, `goal_archive_child`,
 `goal_decide_mutation`, `goal_set_policy` — thin wrappers over the REST
 contracts above.
+
+## Governance: mutation classifier & divergence matrix (exact, from `plan-mutation.ts`)
+
+`classifyMutation()` is a **pure** module (no I/O). It diffs the frozen
+`execution.verify[]` subgoal steps (`current`) against `proposed`, keying by
+`planId`. Field precedence: top-level `title`/`spec`/`dependsOn` win over
+nested `subgoal.*` (one-shot `console.warn` on conflict). It computes
+`{added, removed, modified, phaseChanges}` where a step is `modified` if any of
+title/spec/workflowId/suggestedRole/phase/dependsOn changed.
+
+**Structural severity** (`noop < fix-up < expansion < restructure`):
+1. no add/remove/modify → `noop`.
+2. any `removed` → `restructure`.
+3. else any existing step's phase **decreased** → `restructure`.
+4. else a new step at phase `> max(current.phase)` **or** an existing step's
+   phase **increased** → `expansion`.
+5. else (only adds/modifies at non-increasing phase) → `fix-up`.
+6. **dependsOn override:** a changed dep set on an *existing* step bumps a
+   `noop`/`fix-up` up to `restructure`.
+
+**Criteria-coverage override (always wins):** build a haystack =
+`normalise(rootSpec)` ∪ `normalise(proposed[i].spec)` joined by newline, where
+`normalise = collapse-whitespace → trim → toLocaleLowerCase("en")`. For each
+root acceptance criterion, if its normalised form is **not** a substring of the
+haystack it is uncovered. Any uncovered criterion forces `kind =
+"criteria-drop"` and populates `uncoveredCriteria[]`. This is why specs must
+quote criteria **verbatim under a `## Covers` heading** — the match is a
+whitespace-normalised, locale-pinned-`en`, case-insensitive substring test
+(not a hash), so paraphrasing capitalisation/whitespace is tolerated but
+dropping the text is not. Locale is pinned to `en` so a Turkish-locale `İ`
+does not spuriously fail.
+
+**Binding decision matrix** (applied in the `PATCH /plan` handler, per-goal
+`divergencePolicy`, default `balanced`):
+
+| kind | strict | balanced | autonomous |
+|---|---|---|---|
+| `criteria-drop` | `409 CRITERIA_DROP` | `409 CRITERIA_DROP` | `409 CRITERIA_DROP` |
+| `restructure` (goal not paused) | `409 RESTRUCTURE_REQUIRES_PAUSE` | `409 RESTRUCTURE_REQUIRES_PAUSE` | `409 RESTRUCTURE_REQUIRES_PAUSE` |
+| `restructure` (paused) | approval | approval | approval |
+| `expansion` | approval | approval | approval |
+| `fix-up` | approval | apply directly | apply directly |
+| `noop` | apply (no-op) | apply (no-op) | apply (no-op) |
+
+"approval" = persist a `PendingMutation` (`requestId`, 24h `DEFAULT_MUTATION_TTL_MS`,
+restart-safe via `plan-mutation-store`), broadcast `mutation_pending`, respond
+`{requiresApproval:true, requestId}`; resolved via
+`POST /mutation/:requestId/decision`. Each applied mutation increments
+`replanCount`; `replanCount > 5` auto-pauses the goal.
+
+## Spawn idempotency & partial-failure boundary
+`spawn-child` is idempotent on `planId`: before creating, the handler checks
+for an existing child whose `spawnedFromPlanId === planId` and returns it
+instead of creating a duplicate. `spawnedFromPlanId` is stamped **synchronously
+immediately after `createGoal` with no intervening awaits**, so the
+duplicate-prevention key is durable before any async work. If a crash occurs
+between `createGoal` and stamping (the only unstamped window), the boot
+`backfillCompleteState`/recovery pass reconciles; a retried spawn with the same
+`planId` is matched by the idempotency check once stamped, preventing duplicate
+children.
 
 ## Acceptance matrix (criteria quoted verbatim → surfaces)
 
@@ -261,5 +371,24 @@ Coders A and B run in parallel (disjoint paths). Coder C depends on both.
 - `npm run test:unit`, `npm run test:e2e` green.
 - Clean diff: `git diff --name-only master | grep -i lsp` returns nothing;
   no marketplace modules touched.
-- Browser E2E coverage for every user-facing surface (proposal toggle,
-  sidebar nesting, plan tab, pause cascade) via the ported suites.
+- Browser E2E coverage for **every** user-facing surface via the ported
+  suites, one per capability:
+  - Proposal Allow-subgoals toggle + Max-depth control + Workflow/Roles tabs →
+    `e2e/ui/subgoals-experimental-toggle`, `goal-proposal-form`.
+  - Settings Subgoals toggle + `general-max-nesting-depth` stepper persistence
+    across reload → `subgoals-experimental-toggle`.
+  - Sidebar nesting, descendant badge, sibling disambiguation, dedupe →
+    `e2e/ui/sidebar-spawned-children-dedupe`.
+  - Plan tab DAG, archived distinction, live-only toggle, inline disclosure →
+    `e2e/ui/plan-tab-archived-children`, `plan-archived-children`.
+  - Children tab + tree-cost rollup → `e2e/ui/tree-cost-rollup`,
+    `cost-backfill-on-boot`.
+  - Children tool renderers + mutation-approval card →
+    `e2e/ui/children-tool-renderers`.
+  - Spawn refusal / nesting limit (API + UI) →
+    `e2e/api-goals-spawn-child-route`, `api-subgoals-disabled`,
+    `e2e/ui/subgoal-nesting-limit`.
+  - Pause/resume cascade persistence → `e2e` pause-cascade suites.
+  Any ported capability lacking a browser E2E in #497 gets a new one before the
+  documentation gate (per AGENTS.md: nav, happy path, persistence across
+  reload, cleanup).
