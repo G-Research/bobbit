@@ -36,6 +36,8 @@
  * unit-testable `shouldReloadOnResume()` — no DOM, no globals.
  */
 
+import { bootMark, bootTimingFlush } from "./boot-timing.js";
+
 declare global {
 	interface Window {
 		__bobbitBootStart?: number;
@@ -322,6 +324,11 @@ export function installPwaLifecycleRecovery(): void {
 function finalizeBoot(): void {
 	if (booted) return;
 	booted = true;
+	// First real paint: #app has child content. Records the structural-floor
+	// timing (navigation → module waterfall → first paint) before any session
+	// snapshot lands. Dev-only; no-op in production. See boot-timing.ts.
+	bootMark("first-paint");
+	bootTimingFlush("first-paint");
 	if (bootObserver) {
 		try {
 			bootObserver.disconnect();
