@@ -548,10 +548,22 @@ export class FlexSearchStore {
 
 		await this._idx.export(async (key: string, data: unknown) => {
 			if (data === undefined || data === null) return;
+			let payloadData: unknown = data;
+			// FlexSearch exports the tag context as `[field, valueMapOrNull]`
+			// pairs; an empty/partially-empty index yields `null` values that
+			// crash `Document.import` on reload (`null.length`). Strip the
+			// null-valued entries before persisting; skip the file entirely
+			// when nothing meaningful remains.
+			if (isTagKey(key)) {
+				const parsed = typeof data === "string" ? safeParse(data) : data;
+				const sanitised = sanitiseTagImport(parsed);
+				if (sanitised === null) return;
+				payloadData = sanitised;
+			}
 			const safeKey = sanitiseKey(key);
 			const final = path.join(dir, `${safeKey}.json`);
 			const tmp = `${final}.tmp`;
-			const payload = typeof data === "string" ? data : JSON.stringify(data);
+			const payload = typeof payloadData === "string" ? payloadData : JSON.stringify(payloadData);
 			await fs.promises.writeFile(tmp, payload, "utf-8");
 			await fs.promises.rename(tmp, final);
 			written.push(`${safeKey}.json`);
@@ -606,6 +618,19 @@ export class FlexSearchStore {
 			try {
 				const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
 				const data = safeParse(raw);
+				if (isTagKey(key)) {
+					// An empty/partially-empty tag export contains `null` value
+					// entries that crash `Document.import`. Strip them; a fully
+					// empty tag context is a no-op, not a corruption — don't
+					// escalate to importFailures (which forces rebuild-from-mirror).
+					const sanitised = sanitiseTagImport(data);
+					if (sanitised !== null) {
+						this._idx.import(key, sanitised as never);
+					}
+					importSuccesses++;
+					await yieldToLoop();
+					continue;
+				}
 				this._idx.import(key, data as never);
 				importSuccesses++;
 			} catch (err) {
@@ -708,6 +733,41 @@ function titleFromText(text: string): string {
 function safeParse(raw: string): unknown {
 	try { return JSON.parse(raw); }
 	catch { return raw; }
+}
+
+/**
+ * True for FlexSearch export keys that hold the document tag context
+ * (e.g. `1.tag`, `<field>.1.tag`). The reference segment is the last
+ * dot-delimited component.
+ */
+export function isTagKey(key: string): boolean {
+	return key.endsWith(".tag");
+}
+
+/**
+ * Sanitise a FlexSearch tag-context export payload.
+ *
+ * The tag context serialises as an array of `[field, valueMapOrNull]`
+ * pairs. Fields with no indexed values export as `[field, null]`; on
+ * reload `Document.import`'s `json_to_ctx`/`json_to_map` then crash on
+ * `null.length`, logged as a noisy `Skipping corrupt index file …` and
+ * (for non-empty indexes) forcing a full rebuild-from-mirror every boot.
+ *
+ * Returns the array with the null/empty-valued entries removed so the
+ * import sees only populated tag fields, or `null` when nothing
+ * meaningful remains (an empty tag context — skip the import entirely;
+ * this is not a corruption). Non-array / unrecognised payloads return
+ * `null` so callers treat them as "nothing to import".
+ */
+export function sanitiseTagImport(data: unknown): unknown[] | null {
+	if (!Array.isArray(data)) return null;
+	const kept = data.filter(
+		(entry) =>
+			Array.isArray(entry) &&
+			entry.length >= 2 &&
+			entry[1] != null,
+	);
+	return kept.length > 0 ? kept : null;
 }
 
 // FlexSearch export keys may include characters awkward for filenames
