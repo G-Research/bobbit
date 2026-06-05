@@ -1040,6 +1040,7 @@ export class RemoteAgent {
 	}
 
 	requestMessages(): void {
+		bootMark("get-messages-sent");
 		this.send({ type: "get_messages" });
 	}
 
