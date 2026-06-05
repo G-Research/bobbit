@@ -4,7 +4,7 @@
 
 export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "settings" | "search" | "walkthrough";
 
-export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates";
+export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
 
 export interface AppRoute {
@@ -25,7 +25,7 @@ export interface AppRoute {
 	focusSignalId?: string;
 }
 
-const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "commits", "gates"]);
+const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "commits", "gates", "plan", "children"]);
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "components", "workflows", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
 export function getRouteFromHash(): AppRoute {

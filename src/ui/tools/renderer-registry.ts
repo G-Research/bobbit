@@ -5,6 +5,7 @@ import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";
 import { AlertTriangle, ChevronsUpDown, ChevronUp, FileQuestion, Loader } from "lucide";
 import type { ToolRenderer, ToolRenderResult } from "./types.js";
+import { renderApp } from "../../app/state.js";
 
 /** Possible states for a tool call header icon/styling. */
 export type ToolHeaderState = "inprogress" | "complete" | "error" | "warning";
@@ -84,9 +85,7 @@ function startLoad(toolName: string, loader: LazyRendererLoader): void {
 			// can pull its own update even if renderApp() short-circuits.
 			dispatchRendererLoaded(toolName);
 			// Belt-and-braces top-down re-render.
-			import("../../app/state.js")
-				.then(({ renderApp }) => renderApp())
-				.catch(() => { /* state module may not exist in unit-test fixtures */ });
+			try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
 			return renderer as ToolRenderer;
 		})
 		.catch((err) => {
@@ -97,9 +96,7 @@ function startLoad(toolName: string, loader: LazyRendererLoader): void {
 			pendingLazy.delete(toolName);
 			inFlight.delete(toolName);
 			dispatchRendererLoaded(toolName);
-			import("../../app/state.js")
-				.then(({ renderApp }) => renderApp())
-				.catch(() => { /* state module may not exist in unit-test fixtures */ });
+			try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
 			// Resolve to the fallback so the inFlight promise does not surface
 			// as an unhandled rejection — callers ignore the value anyway.
 			return fallback;

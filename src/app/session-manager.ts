@@ -14,7 +14,7 @@ import {
 	GW_SESSION_KEY,
 	type GatewaySession,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision } from "./api.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
@@ -48,7 +48,9 @@ import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
 	clearProposalDismissed as clearProposalDismissedTyped,
+	deleteProposalFile,
 } from "./proposal-helpers.js";
+import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -1317,9 +1319,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			try { refreshGitStatusForSession(sessionId); } catch { /* ignore */ }
 			try { refreshBgProcessesForSession(sessionId); } catch { /* ignore */ }
 			try {
-				const { initAnnotationStore } = await import("../ui/components/review/AnnotationStore.js");
 				initAnnotationStore(sessionId).catch(() => { /* best-effort */ });
-			} catch { /* AnnotationStore module load failed — keep going */ }
+			} catch { /* AnnotationStore init failed — keep going */ }
 		};
 
 		// Server broadcasts session_removed when ANY session is terminated/archived/
@@ -2347,8 +2348,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const projectId = session?.projectId;
 	if (!projectId) return;
 
-	const { promoteProject, fetchProjects, gatewayFetch } = await import("./api.js");
-
 	// Promote the provisional project
 	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
 	if (!promoted) return;
@@ -2371,7 +2370,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 				const details = Array.isArray(data?.details) && data.details.length > 0
 					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
 					: "";
-				const { showConnectionError } = await import("./dialogs.js");
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
@@ -2395,7 +2393,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	if (proposal.sessionId) {
 		deleteProjectDraft(proposal.sessionId);
 		// Slice E: drop the on-disk proposal file once accepted.
-		const { deleteProposalFile } = await import("./proposal-helpers.js");
 		void deleteProposalFile(proposal.sessionId, "project");
 	}
 
@@ -2410,7 +2407,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
  * Project Assistant" button after Apply Changes.
  */
 export async function terminateProjectAssistantSession(sessionId: string): Promise<void> {
-	const { gatewayFetch } = await import("./api.js");
 	try {
 		uncacheSession(sessionId);
 		if (activeSessionId() === sessionId) {
@@ -2450,7 +2446,6 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	const projectId = session?.projectId;
 	if (!projectId) return;
 
-	const { gatewayFetch, fetchProjects } = await import("./api.js");
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 
 	// 1. Rename via PUT /api/projects/:id if a name is supplied.
@@ -2481,7 +2476,6 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 				const details = Array.isArray(data?.details) && data.details.length > 0
 					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
 					: "";
-				const { showConnectionError } = await import("./dialogs.js");
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
@@ -2505,8 +2499,12 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.
-	const { deleteProposalFile } = await import("./proposal-helpers.js");
 	void deleteProposalFile(propSessionId, "project");
+	// Notify the proposing agent that the change is now live so it can
+	// continue its task without polling. Mid-session only — provisional
+	// (project-assistant) flow terminates the session, so notifying there
+	// is a no-op.
+	void notifyProposalDecision(propSessionId, "project", "accepted", fieldNameStr || "(unnamed)");
 	renderApp();
 }
 
@@ -2549,6 +2547,33 @@ export function backToSessions(): void {
 	setHashRoute("landing");
 	renderApp();
 	refreshSessions();
+}
+
+// ============================================================================
+// MUTATION-APPROVAL CHAT CARDS — Phase 5b
+//
+// Server emits `mutation_pending {goalId, requestId, kind, summary}` when a
+// post-freeze plan-mutation lands in the approval queue. Client renders an
+// inline card in the chat with Approve / Reject buttons. On the WS reply
+// `mutation_decided`, we flip the card to a decided state.
+// ============================================================================
+
+export function handleMutationPendingEvent(msg: { goalId: string; requestId: string; kind: "fix-up" | "expansion" | "restructure" | "criteria-drop"; summary: string }): void {
+	if (!state.remoteAgent) return;
+	state.remoteAgent.appendMutationPendingCard({
+		goalId: msg.goalId,
+		requestId: msg.requestId,
+		kind: msg.kind,
+		summary: msg.summary,
+	});
+}
+
+export function handleMutationDecidedEvent(msg: { goalId: string; requestId: string; decision: "approve" | "reject" }): void {
+	if (!state.remoteAgent) return;
+	state.remoteAgent.markMutationDecided(msg.requestId, msg.decision);
+	// Best-effort: refresh the dashboard so the Plan tab reflects the
+	// applied/rejected mutation immediately.
+	import("./goal-dashboard.js").then(m => m.notifyGoalEventForDashboard?.()).catch(() => {});
 }
 
 export function disconnectGateway(): void {
