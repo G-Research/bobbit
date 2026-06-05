@@ -72,12 +72,28 @@ export type ClientMessage =
 	| { type: "resume"; fromSeq: number }
 	| { type: "status_resync" };
 
+/**
+ * Optional per-phase timing for a `get_messages` snapshot, attached only under
+ * the dev harness (`BOBBIT_DEV_HARNESS=1`). Lets the client's boot-timing
+ * sample attribute the reload's snapshot cost to agent-side assembly (`rpcMs`)
+ * vs. server-side transform (`pipelineMs`/`stampMs`) vs. serialize
+ * (`stringifyMs`). `bytes` is the serialized snapshot size.
+ */
+export interface SnapshotServerTiming {
+	rpcMs: number;
+	pipelineMs: number;
+	stampMs: number;
+	stringifyMs: number;
+	bytes: number;
+	msgCount: number;
+}
+
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
 	| { type: "auth_ok" }
 	| { type: "auth_failed" }
 	| { type: "state"; data: unknown }
-	| { type: "messages"; data: unknown[] }
+	| { type: "messages"; data: unknown[]; serverTiming?: SnapshotServerTiming }
 	| { type: "event"; data: unknown; seq?: number; ts?: number }
 	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }
