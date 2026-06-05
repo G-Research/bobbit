@@ -157,20 +157,13 @@ export default {
 				// Docker-dependent tests — run via test:manual instead
 				"**/sandbox-recovery-docker*",
 			],
-			// Lowered from 3 to 2. Each browser worker is gateway + Chromium +
-			// UI static serve; under full-suite load (running concurrently with
-			// the api project, capped by the top-level workers:4) three browser
-			// workers starved each other on Windows FS / Defender, so cold-start
-			// session creation (POST /api/sessions) and marketplace openApp could
-			// exceed their per-step budgets — surfacing as flaky-on-retry timeouts
-			// in goal-accept-failure-keeps-assistant and marketplace specs (the
-			// tests themselves use event-based waits; the failures were pure
-			// contention, not logic races). Capping at 2 leaves headroom for the
-			// api project within the global cap and removes the remaining browser
-			// flake cluster. See goal "Stabilize flaky E2E suite".
-			workers: 2,
-			// Serialise browser specs within the project (one spec per worker,
-			// sequential within-spec). API project stays fullyParallel: true
+			workers: 3,
+			// Serialise browser specs within the project. Each browser worker
+			// is gateway + Chromium + UI static serve — even at workers=3, cross-
+			// worker contention on Windows FS / Defender still produced 3–4 flakes
+			// per run. fullyParallel=false confines parallelism to the 3 workers
+			// (one spec per worker, sequential within-spec), which empirically
+			// eliminates a flake cluster. API project stays fullyParallel: true
 			// (inherited from top-level).
 			fullyParallel: false,
 		},
