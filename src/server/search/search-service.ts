@@ -76,6 +76,14 @@ export class SearchService {
 
 	private _openPromise: Promise<void> | null = null;
 
+	/**
+	 * Handle for the deferred startup rebuild scheduled in `_doOpen`. Kept on
+	 * the instance so `close()` can cancel it — otherwise the timer fires after
+	 * the store has been closed and the rebuild calls `store.clear()` on a
+	 * closed store, throwing `FlexSearchStore: already closed`.
+	 */
+	private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+
 	private readonly _goalSource = new GoalIndexSource();
 	private readonly _sessionSource = new SessionIndexSource();
 	private readonly _messageSource = new MessageIndexSource();
@@ -160,6 +168,10 @@ export class SearchService {
 
 	async close(): Promise<void> {
 		this._state = "closed";
+		if (this._rebuildTimer) {
+			clearTimeout(this._rebuildTimer);
+			this._rebuildTimer = null;
+		}
 		if (this._store) {
 			try { await this._store.close(); }
 			catch (err) { console.error("[search] FlexSearchStore.close failed:", err); }
@@ -550,6 +562,11 @@ export class SearchService {
 					const staff = (context.staffStore ?? this.staffStore) as StaffStore;
 					const delayMs = Number(process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS ?? 5000);
 					const timer = setTimeout(() => {
+						this._rebuildTimer = null;
+						// `close()` may have run between scheduling and firing; the
+						// store is then closed and clear()/upsert() would throw
+						// "FlexSearchStore: already closed". No-op in that case.
+						if (this._state === "closed" || !this._indexer) return;
 						this.rebuildFromSources(
 							context.goalStore!,
 							context.sessionStore!,
@@ -557,6 +574,7 @@ export class SearchService {
 						).catch((err) => console.error("[search] Background rebuild failed:", err));
 					}, delayMs);
 					if (typeof timer.unref === "function") timer.unref();
+					this._rebuildTimer = timer;
 				}
 			}
 		} catch (err) {
