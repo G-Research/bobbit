@@ -27,6 +27,8 @@ interface Mark { name: string; t: number; }
 interface BootMeta {
 	sessionId?: string;
 	transcriptMessages?: number;
+	/** Size (chars ≈ bytes for ASCII JSON) of the raw get_state snapshot frame. */
+	snapshotChars?: number;
 }
 
 const marks: Mark[] = [];
@@ -90,6 +92,7 @@ function buildSample(reason: string): Record<string, unknown> {
 		route: typeof location !== "undefined" ? location.hash || location.pathname : undefined,
 		sessionId: meta.sessionId,
 		transcriptMessages: meta.transcriptMessages,
+		snapshotChars: meta.snapshotChars,
 		buildId: (globalThis as { __BOBBIT_BUILD_ID__?: string }).__BOBBIT_BUILD_ID__,
 		userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
 		viewport: typeof window !== "undefined" ? { w: window.innerWidth, h: window.innerHeight } : undefined,
