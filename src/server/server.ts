@@ -9,6 +9,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
@@ -2293,6 +2294,36 @@ async function handleApiRoute(
 		}
 		touchGatewayRestartSentinel();
 		json({ ok: true, restartRequested: true }, 202);
+		return;
+	}
+
+	// POST /api/dev/boot-timing — append one client reload-timing sample to
+	// <stateDir>/boot-timing.jsonl. Harness-only (same gate as restart): the
+	// perf-instrumentation toggle that drives these POSTs is only shown under
+	// the dev harness, and we reject here too as defense-in-depth.
+	if (url.pathname === "/api/dev/boot-timing" && req.method === "POST") {
+		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
+			json({ error: "Perf instrumentation is only available under the dev harness" }, 403);
+			return;
+		}
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const written = recordBootTiming(body);
+		if (!written) { json({ error: "Sample rejected" }, 422); return; }
+		json({ ok: true, path: path.join(bobbitStateDir(), BOOT_TIMING_FILE) }, 201);
+		return;
+	}
+
+	// GET /api/dev/boot-timing — read recent reload-timing samples (newest last)
+	// for inspection from the UI or tooling. Harness-only. `?limit=N` caps rows.
+	if (url.pathname === "/api/dev/boot-timing" && req.method === "GET") {
+		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
+			json({ error: "Perf instrumentation is only available under the dev harness" }, 403);
+			return;
+		}
+		const limitParamRaw = url.searchParams.get("limit");
+		const limit = limitParamRaw ? Math.max(1, Math.min(500, parseInt(limitParamRaw, 10) || 50)) : 50;
+		json({ path: path.join(bobbitStateDir(), BOOT_TIMING_FILE), samples: readBootTimings(limit) });
 		return;
 	}
 
