@@ -946,6 +946,7 @@ export function createGateway(config: GatewayConfig) {
 	});
 
 	const staffManager = new StaffManager(projectContextManager);
+	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
 	// `inboxNudger` ticks every 15s to deliver digests to idle staff.

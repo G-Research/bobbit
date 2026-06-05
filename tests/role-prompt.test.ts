@@ -11,7 +11,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { resolveRolePrompt, buildStaffSystemPrompt } = await import("../src/server/agent/role-prompt.ts");
+const { resolveRolePrompt, buildStaffSystemPrompt, buildRestoreRolePrompt } = await import("../src/server/agent/role-prompt.ts");
 
 // A RoleManager-like stub. buildAvailableRolesList prefers getAll() then
 // listRoles(); we expose listRoles so {{AVAILABLE_ROLES}} resolves to a list.
@@ -146,5 +146,74 @@ describe("buildStaffSystemPrompt", () => {
 	it("falls back to systemPrompt when roleId is set but no roleManager given", () => {
 		const staff = { ...baseStaff, roleId: "coder" };
 		assert.equal(buildStaffSystemPrompt(staff as any), "You are a warden.");
+	});
+});
+
+describe("buildRestoreRolePrompt", () => {
+	const staffRecord = {
+		id: "abcd1234ef",
+		name: "warden",
+		description: "",
+		systemPrompt: "You are a warden.",
+		cwd: "/tmp",
+		state: "active" as const,
+		triggers: [],
+		memory: "remember this",
+		accessory: "none",
+		roleId: "coder",
+		createdAt: 0,
+		updatedAt: 0,
+	};
+
+	it("(a) staff session with a role → role context, systemPrompt, then Pinned Context; roleName = staff.roleId", () => {
+		const rm = fakeRoleManager({ coder: { promptTemplate: "ROLE CTX", accessory: "robot" } });
+		const getStaff = (id: string) => (id === staffRecord.id ? (staffRecord as any) : undefined);
+		const { rolePrompt, roleName } = buildRestoreRolePrompt(
+			{ staffId: staffRecord.id, id: "sess-1" },
+			{ roleManager: rm, getStaff },
+		);
+		assert.equal(
+			rolePrompt,
+			"ROLE CTX\n\n---\n\nYou are a warden.\n\n---\n\n## Pinned Context\n\nremember this",
+		);
+		assert.equal(roleName, "coder");
+	});
+
+	it("(b) staff session with no role → systemPrompt (+ memory) only, roleName undefined", () => {
+		const staff = { ...staffRecord, roleId: undefined };
+		const getStaff = (id: string) => (id === staff.id ? (staff as any) : undefined);
+		const { rolePrompt, roleName } = buildRestoreRolePrompt(
+			{ staffId: staff.id, id: "sess-1" },
+			{ getStaff },
+		);
+		assert.equal(rolePrompt, "You are a warden.\n\n---\n\n## Pinned Context\n\nremember this");
+		assert.equal(roleName, undefined);
+	});
+
+	it("(c) team-agent session (role set, no staffId) → resolves role template with AGENT_ID format, roleName = ps.role", () => {
+		const rm = fakeRoleManager({ coder: { promptTemplate: "agent={{AGENT_ID}}" } });
+		const { rolePrompt, roleName } = buildRestoreRolePrompt(
+			{ role: "coder", goalId: "goal1234deadbeef", id: "sess-1" },
+			{ goalBranch: "goal/foo", roleManager: rm },
+		);
+		assert.equal(rolePrompt, "agent=coder-goal1234");
+		assert.equal(roleName, "coder");
+	});
+
+	it("(d) plain session (no role, no staff) → both undefined", () => {
+		const rm = fakeRoleManager({ coder: { promptTemplate: "ROLE CTX" } });
+		const { rolePrompt, roleName } = buildRestoreRolePrompt({ id: "sess-1" }, { roleManager: rm });
+		assert.equal(rolePrompt, undefined);
+		assert.equal(roleName, undefined);
+	});
+
+	it("falls back to role resolution when staffId is set but getStaff misses", () => {
+		const rm = fakeRoleManager({ coder: { promptTemplate: "agent={{AGENT_ID}}" } });
+		const { rolePrompt, roleName } = buildRestoreRolePrompt(
+			{ staffId: "gone", role: "coder", goalId: "goal1234deadbeef", id: "sess-1" },
+			{ roleManager: rm, getStaff: () => undefined },
+		);
+		assert.equal(rolePrompt, "agent=coder-goal1234");
+		assert.equal(roleName, "coder");
 	});
 });

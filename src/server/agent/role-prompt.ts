@@ -68,3 +68,41 @@ export function buildStaffSystemPrompt(
 	if (staff.memory) prompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
 	return prompt;
 }
+
+/**
+ * Rebuild the `{ rolePrompt, roleName }` pair for a session being restored on
+ * gateway restart. `rolePrompt` isn't persisted, so it must be reconstructed.
+ *
+ * - **Staff sessions** (`ps.staffId` set + a `getStaff` lookup available):
+ *   rebuild via `buildStaffSystemPrompt` so the restored prompt matches the
+ *   create path's ordering — role context → staff `systemPrompt` → pinned
+ *   memory — and `roleName` is the staff's `roleId` (for model / thinking /
+ *   tool-policy resolution). This fixes restored staff sessions previously
+ *   losing their `systemPrompt` + memory because the path keyed off `ps.role`.
+ * - **Team-agent / role sessions** (`ps.role` set, no staff): resolve the
+ *   role's `promptTemplate` via `resolveRolePrompt`, with `roleName` set only
+ *   when a prompt was produced.
+ * - **Plain sessions** (no role, no staff): both `undefined`.
+ */
+export function buildRestoreRolePrompt(
+	ps: { staffId?: string; role?: string; goalId?: string; id: string },
+	ctx: {
+		goalBranch?: string;
+		roleManager?: RoleManager;
+		getStaff?: (id: string) => PersistedStaff | undefined;
+	},
+): { rolePrompt?: string; roleName?: string } {
+	if (ps.staffId && ctx.getStaff) {
+		const staff = ctx.getStaff(ps.staffId);
+		if (staff) {
+			return { rolePrompt: buildStaffSystemPrompt(staff, ctx.roleManager), roleName: staff.roleId };
+		}
+	}
+	const role = ps.role && ctx.roleManager ? ctx.roleManager.getRole(ps.role) : undefined;
+	const rolePrompt = resolveRolePrompt(role, {
+		branch: ctx.goalBranch,
+		agentId: `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`,
+		roleManager: ctx.roleManager,
+	});
+	return { rolePrompt, roleName: rolePrompt ? ps.role : undefined };
+}

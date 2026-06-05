@@ -57,7 +57,7 @@ import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-ma
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
-import { resolveRolePrompt } from "./role-prompt.js";
+import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -628,6 +628,14 @@ export class SessionManager {
 	private _testSearchIndex: SearchService | null = null;
 	private colorStore?: ColorStore;
 	private roleManager?: RoleManager;
+	/**
+	 * Minimal staff-record lookup wired late from `server.ts` via
+	 * `setStaffManager`. Used by the restore path to rebuild a staff session's
+	 * full system prompt (role context + systemPrompt + pinned memory) since
+	 * `rolePrompt` isn't persisted. Typed structurally to avoid a circular
+	 * import on `StaffManager`.
+	 */
+	private staffRecordSource?: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined };
 	private toolManager?: ToolManager;
 	private groupPolicyStore?: ToolGroupPolicyStore;
 	private preferencesStore?: import("./preferences-store.js").PreferencesStore;
@@ -691,6 +699,10 @@ export class SessionManager {
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
 		this._inboxNudger = nudger;
+	}
+
+	setStaffManager(sm: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined }): void {
+		this.staffRecordSource = sm;
 	}
 
 	/**
@@ -3453,15 +3465,16 @@ export class SessionManager {
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
 
-			// Re-attach role prompt for team agents (lost on restart since rolePrompt isn't persisted)
+			// Re-attach role/staff prompt (lost on restart since rolePrompt isn't
+			// persisted). Staff sessions rebuild the full role context + systemPrompt
+			// + pinned memory via buildStaffSystemPrompt; team agents resolve the role
+			// template. See buildRestoreRolePrompt.
 			const goalSpec = goal?.spec;
-			const role = ps.role && this.roleManager ? this.roleManager.getRole(ps.role) : undefined;
-			const rolePrompt = resolveRolePrompt(role, {
-				branch: goal?.branch,
-				agentId: `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`,
+			const { rolePrompt, roleName } = buildRestoreRolePrompt(ps, {
+				goalBranch: goal?.branch,
 				roleManager: this.roleManager,
+				getStaff: this.staffRecordSource ? (id) => this.staffRecordSource!.getStaff(id) : undefined,
 			});
-			const roleName = rolePrompt ? ps.role : undefined;
 
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: this.systemPromptPath,
