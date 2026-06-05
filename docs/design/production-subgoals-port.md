@@ -152,6 +152,95 @@ In `readSubgoalNestingPrefs` / the system prefs default, flip
 unit/E2E expectation accordingly. This is the only intentional behavioural
 change; everything else is verbatim.
 
+## Architecture / API contracts (self-contained)
+
+All nested-goal routes live in `nested-goal-routes.ts`, dispatched from
+`server.ts::handleApiRoute()`. Enforcement is funnelled through single-source
+helpers so REST and the verification harness share one code path:
+`subgoal-nesting-limit.ts` (`checkCanSpawnChild`), `goal-paused-guard.ts`
+(pause gate), `child-ready-to-merge.ts` (RTM), `plan-mutation.ts`
+(classifier), `parent-workflow-freeze.ts` (freeze).
+
+### REST endpoints
+- `POST /api/goals/:id/spawn-child` — body `{ planId, title, spec,
+  dependsOn?: string[], workflowId?, suggestedRole?, inlineWorkflow?,
+  inlineRoles? }`. Idempotent on `planId`. Errors: `409 GOAL_PAUSED`,
+  `400 SPEC_TOO_SHORT`, `403 SUBGOALS_DISABLED`,
+  `403 NESTING_DEPTH_EXCEEDED {currentDepth,maxDepth}`,
+  `400 SELF_DEPENDENCY|UNKNOWN_PLAN_ID|DEPENDS_ON_CYCLE`. Children inherit the
+  root repo path (cwd derived via `path.relative` offset) and the parent's
+  effective `subgoalsAllowed`/`maxNestingDepth`. Stamps `spawnedFromPlanId`,
+  `dependsOnPlanIds`, `spawnedBySessionId`, `parentGoalId` immediately.
+- `GET /api/goals/:id/plan` — returns the execution-gate subgoal steps + their
+  state; `frozen` reflects `gate.metadata.frozen === "true"`.
+- `PATCH /api/goals/:id/plan` — body `{ proposedSteps[] }`; requires an
+  `execution` gate (`409 NO_EXECUTION_GATE`); validates each step
+  (`400 INVALID_PLAN_STEP`); runs depends-on validation then the mutation
+  classifier. Verdicts: `criteria-drop`→`409 CRITERIA_DROP`;
+  `restructure` on non-paused goal→`409 RESTRUCTURE_REQUIRES_PAUSE`; `noop`
+  no-op; `fix-up` auto-applies under `balanced`/`autonomous`; otherwise an
+  approval request is persisted (24h TTL) for `POST /mutation/:requestId/decision`.
+- `POST /api/goals/:id/integrate-child/:childId` — requires child RTM
+  (`409 RTM_NOT_PASSED`) and matching parent (`400 PARENT_MISMATCH`); merges
+  the child branch locally into the parent.
+- `POST /api/goals/:id/pause` and `/resume` — body `{ cascade: boolean }`
+  required (`422 CASCADE_REQUIRED`); optional `childGoalId` must be a direct
+  child (`403 NOT_DIRECT_CHILD`). Pause soft-aborts subtree sessions and
+  cancels in-flight verifications; resume re-enables spawns.
+- `POST /api/goals/:id/mutation/:requestId/decision` — body `{ approve }`;
+  applies or rejects a pending plan mutation.
+- `PATCH /api/goals/:id/policy` — root-only; sets `divergencePolicy`
+  (`strict`/`balanced`/`autonomous`) and `maxConcurrentChildren`
+  (floor 1, hard max 8).
+- `GET /api/goals/:id/descendants` — live + archived descendants for the Plan
+  tab (independent of the sidebar's archived filter).
+- `GET /api/goals/:id/tree-cost` — cost/token rollup rooted at the requested
+  goal across its subtree (live + archived), surviving purge via `goalId`
+  stamping on cost records.
+
+### Persisted `PersistedGoal` fields (owned by `goal-store.ts`)
+`parentGoalId?`, `subgoalsAllowed?`, `maxNestingDepth?`,
+`divergencePolicy?`, `maxConcurrentChildren?`, `spawnedFromPlanId?`
+(idempotency key, stamped synchronously after `createGoal`),
+`dependsOnPlanIds?`, `spawnedBySessionId?`, `paused?`, `replanCount?`.
+
+### Children tools (team-lead only; `always-allow` team-lead / `never`
+contributors via `tool-group-policies.yaml` Children group)
+`goal_spawn_child`, `goal_plan_propose`, `goal_plan_status`,
+`goal_merge_child`, `goal_pause`, `goal_resume`, `goal_archive_child`,
+`goal_decide_mutation`, `goal_set_policy` — thin wrappers over the REST
+contracts above.
+
+## Acceptance matrix (criteria quoted verbatim → surfaces)
+
+| Acceptance criterion | Backend | Frontend | Tests |
+|---|---|---|---|
+| "A goal proposal exposes an Allow-subgoals toggle and Max-depth control, gated by the system Subgoals preference." | subgoal-nesting-limit, prefs (config-cascade) | proposal-panels, subgoals-flag, settings-page | subgoals-flag, e2e/subgoals-experimental-toggle, e2e/goal-proposal-form |
+| "A team-lead can spawn a sub-goal via a tool call only when its goal permits subgoals." | nested-goal-routes, defaults/tools/children/goal_spawn_child | GoalSpawnChildRenderer | api-goals-spawn-child, role-children-tools-policy |
+| "Spawning is refused server-side past the nesting ceiling, and a team-lead at the depth cap cannot create a subgoals-allowed child." | subgoal-nesting-limit (`checkCanSpawnChild`), nested-goal-routes | — | subgoal-nesting-limit, e2e/subgoal-nesting-limit, e2e/api-subgoals-disabled |
+| "Nested sub-goals render under their spawning team-lead in the sidebar with a descendant-count badge." | spawn-child-spawnedby | sidebar-nesting, sidebar-spawned-children, render-helpers | sidebar-spawned-children, e2e/sidebar-spawned-children-dedupe |
+| "The goal dashboard shows a DAG … per-node status, archived distinction, and merge/conflict state." | goal-descendants (`GET /descendants`) | plan-synthesis, plan-node-state, goal-dashboard-plan-tab | plan-archived-children, e2e/plan-tab-archived-children |
+| "Subtree cost and tokens roll up across live and archived descendants." | cost-tracker, cost-backfill (`GET /tree-cost`, `goalId` stamp) | goal-dashboard-children-tab, tree-cost-legacy | tree-cost-rollup, tree-cost-purge-survival, cost-backfill, e2e/cost-backfill-on-boot |
+| "An agent can attach a custom workflow … and a child may override its parent's workflow." | spawn-child-workflow, workflow-store, nested-goal-routes | proposal-panels (Workflow/Roles tabs) | spawn-child-workflow-resolution, runSubgoalStep-inline-roles-inheritance |
+| "Completed child work merges locally into the parent branch with no per-child PR; only the root goal raises a PR; merge conflicts preserve the child." | skills/git (`mergeChildBranchLocal`, `shouldSkipRemotePush`), verification-harness (`runSubgoalStep`), child-ready-to-merge | GoalMergeChildRenderer | child-ready-to-merge-helper, runSubgoalStep-merge-then-archive |
+| "Plan changes after freeze are classified and gated by the divergence policy; criteria-drops are always rejected; excessive replans auto-pause the goal." | plan-mutation, plan-mutation-store, parent-workflow-freeze | GoalPlanProposeRenderer, GoalDecideMutationRenderer, children-mutation-approval | plan-mutation, plan-mutation-store, api-goals-plan-mutation |
+| "An operator can pause/resume a goal's entire subtree, and pause actually stops the work and survives supervisor respawn." | goal-paused-guard, goal-manager (`_bootRespawnSessionlessGoals` skip) | GoalPauseResumeRenderer | any-in-flight-child-excludes-paused, runSubgoalStep-paused-child-keeps-waiting |
+
+## Edge cases and recovery
+
+| Condition | Detection point | Response | Tests |
+|---|---|---|---|
+| Sibling dependency cycle / self-dep / unknown id | `depends-on-validation.ts` at spawn + plan PATCH | `400 DEPENDS_ON_CYCLE` / `SELF_DEPENDENCY {planId}` / `UNKNOWN_PLAN_ID {missing}` | goal-spawn-child-dependsOn, depends-on-validation |
+| Child with unmet deps | spawn / integrate-child | created paused, auto-resumes when last dep merges | goal-spawn-child-dependsOn-blocking, runSubgoalStep-dependsOn-stamping |
+| Merge conflict | `runSubgoalStep` merge | `git merge --abort`, step fails with manual-recovery directive, child preserved (not archived) | runSubgoalStep-merge-then-archive |
+| Workflow-less `complete` child | `runSubgoalStep` recovery | degenerate-workflow recovery treats as ready-to-merge | runSubgoalStep-degenerate-workflow-less-recovery |
+| Stale archived/child pointer | `runSubgoalStep` | stale-pointer invalidation, re-resolves | runSubgoalStep-stale-archived-invalidates |
+| Retroactive system depth reduction | `effectiveMaxNestingDepth` (system is ceiling) | live trees retroactively capped; deeper spawns refused | subgoal-nesting-limit |
+| `replanCount > 5` | plan PATCH | auto-pause the goal | plan-mutation, api-goals-plan-mutation |
+| Pending mutation TTL / restart | `plan-mutation-store` | 24h TTL, restart-safe persistence | plan-mutation-store |
+| Archived descendants in DAG vs live-only sidebar | `GET /descendants` (inclusive) vs `plan-live-only-toggle` | DAG includes archived (dimmed); sidebar filters | plan-archived-children |
+| Boot respawn over paused goal | `goal-manager` supervisor | skips paused goals (whack-a-mole fix); `backfillCompleteState` | any-in-flight-child-excludes-paused, cost-backfill-on-boot |
+
 ## Execution plan (parallel, file-disjoint)
 
 1. **Coder A — backend** (`src/server/**`, `defaults/**`): checkout listed
