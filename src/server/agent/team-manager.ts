@@ -1,5 +1,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
@@ -7,19 +9,43 @@ import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
+import { resolveRole, listAvailableRoles } from "./resolve-role.js";
+import { GoalPausedError } from "./goal-paused-guard.js";
 import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
-import { generateTeamName } from "./team-names.js";
+import { generateTeamName, generateTeamNameSync } from "./team-names.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { ColorStore } from "./color-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { VerificationHarness } from "./verification-harness.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { checkGateDependencies } from "./gate-dependency-check.js";
+import { anyInFlightChild } from "./team-manager-helpers.js";
+import {
+	findOrphanTeamEntries,
+	pickCanonicalTeamLeadJsonl,
+	reconstructTeamLeadSessionRecord,
+	reconstructAgentSessionRecord,
+	discoverAgentsForGoal,
+	scanSlugDirForJsonlsAt,
+	isStaleRecoveredTeamLeadTitle,
+} from "./team-store-consistency.js";
+import {
+	readSessionSidecar,
+	reconcileRecoveredSessionWithSidecar,
+	sidecarPathFor,
+	writeSessionSidecar,
+	buildSessionSidecar,
+} from "./session-sidecar.js";
 
 const execFile = promisify(execFileCb);
 
+/** Production wrapper around the testable `scanSlugDirForJsonlsAt`. */
+function scanSlugDirForJsonls(worktreePath: string) {
+	const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
+	return scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join);
+}
 
 /**
  * Build a markdown list of available roles (excluding team-lead and assistant)
@@ -138,9 +164,9 @@ export class TeamManager {
 	private localStore: TeamStore | null;
 	/** Local GoalManager — used only in the non-PCM (test) path. */
 	private _localGoalManager: GoalManager | null = null;
-	/** Timers for the idle-nudge mechanism (goalId → timer). One-shot setTimeouts that reschedule with exponential backoff. */
+	/** goalId → idle-nudge timer (one-shot, exponential reschedule). */
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	/** Count of consecutive workers-nudges sent for a goal (goalId → count). Reset on agent_start. */
+	/** goalId → consecutive workers-nudge count (reset on agent_start). */
 	private idleNudgeCount = new Map<string, number>();
 	/** Separate timer for nudging when no workers remain (goalId → timer). One-shot setTimeouts that reschedule with exponential backoff. */
 	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -149,12 +175,20 @@ export class TeamManager {
 	private noWorkersNudgeCount = new Map<string, number>();
 	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
 	private nudgePending = new Map<string, boolean>();
+	/** goalId → last spec-edit nudge ms (throttle). */
+	private lastSpecNudgeTs = new Map<string, number>();
+	/** Spec-edit nudge throttle window. */
+	private static readonly SPEC_NUDGE_THROTTLE_MS = 30_000;
+	/** goalId → ms when team-lead became idle. */
+	private leadIdleSinceByGoal = new Map<string, number>();
+	/** goalId → last stuck-nudge ms (5-min floor). */
+	private lastNudgeAtPerGoal = new Map<string, number>();
+	/** Periodic 60s sweep that detects fully-idle teams. */
+	private stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
 	private verificationHarness?: VerificationHarness;
-	/** Base delay before nudging the idle team lead when workers are active (ms). Successive nudges back off exponentially up to MAX_IDLE_NUDGE_DELAY_MS. */
+	/** Base workers-active idle nudge delay (ms); exponential up to MAX. */
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
-	/** Maximum delay between workers-nudges (ms). Caps the exponential backoff. */
 	private static readonly MAX_IDLE_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
-	/** Delay before nudging the idle team lead when no workers remain (ms). */
 	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
 	/** Maximum delay between no-workers nudges (ms). Caps the exponential backoff. */
 	private static readonly MAX_NO_WORKERS_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
@@ -164,6 +198,9 @@ export class TeamManager {
 	 * team lead while workers are making real progress.
 	 */
 	private static readonly LONG_STREAMING_THRESHOLD_MS = 30 * 60 * 1000; // 30m
+	private static readonly STUCK_SWEEP_INTERVAL_MS = 60_000;
+	/** Quiet threshold before watchdog fires; reused as inter-nudge floor. */
+	private static readonly STUCK_QUIET_THRESHOLD_MS = 5 * 60_000;
 
 	/** Reverse lookup: sessionId → goalId for quick dismissal. */
 	private sessionToGoal = new Map<string, string>();
@@ -187,6 +224,93 @@ export class TeamManager {
 			this._localGoalManager = new GoalManager(new GoalStore(dir));
 		}
 		this.restoreTeams();
+		this.startStuckSweep();
+	}
+
+	/** Stop watchdog timers (idempotent). */
+	dispose(): void {
+		this.stopStuckSweep();
+	}
+
+	/** Start the periodic stuck-team watchdog (idempotent). */
+	startStuckSweep(): void {
+		if (this.stuckSweepTimer) return;
+		const t = setInterval(() => {
+			try {
+				this._stuckSweepTick();
+			} catch (err) {
+				console.error("[team-manager] Stuck-team watchdog tick failed:", err);
+			}
+		}, TeamManager.STUCK_SWEEP_INTERVAL_MS);
+		t.unref?.();
+		this.stuckSweepTimer = t;
+	}
+
+	stopStuckSweep(): void {
+		if (this.stuckSweepTimer) {
+			clearInterval(this.stuckSweepTimer);
+			this.stuckSweepTimer = null;
+		}
+	}
+
+	/**
+	 * Stuck-team watchdog tick. Fires a recovery nudge when lead is idle,
+	 * workers > 0 are all idle, lead-idle and last-nudge are both older than
+	 * STUCK_QUIET_THRESHOLD_MS, and !shouldSkipNudge.
+	 * See docs/design/auto-nudge-stuck-team-leads.md.
+	 */
+	_stuckSweepTick(now: number = Date.now()): void {
+		for (const [goalId, entry] of this.teams) {
+			if (!entry.teamLeadSessionId) continue;
+			if (this.shouldSkipNudge(goalId)) continue;
+
+			const lead = this.sessionManager.getSession(entry.teamLeadSessionId);
+			if (!lead || lead.status !== "idle") continue;
+
+			const workers = this.getActiveWorkers(goalId);
+			if (workers.length === 0) continue; // no-workers timer owns this case
+
+			const allIdle = workers.every((agent) => {
+				const s = this.sessionManager.getSession(agent.sessionId);
+				return !!s && s.status === "idle";
+			});
+			if (!allIdle) continue;
+
+			const leadIdleSince = this.leadIdleSinceByGoal.get(goalId);
+			if (typeof leadIdleSince !== "number") continue;
+			if (now - leadIdleSince < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
+
+			const lastNudgeAt = this.lastNudgeAtPerGoal.get(goalId);
+			if (typeof lastNudgeAt === "number" && now - lastNudgeAt < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
+
+			this._fireStuckNudge(goalId, entry, workers, now, leadIdleSince);
+		}
+	}
+
+	private _fireStuckNudge(
+		goalId: string,
+		entry: TeamEntry,
+		workers: TeamAgent[],
+		now: number,
+		leadIdleSince: number,
+	): void {
+		const minutes = Math.max(0, Math.floor((now - leadIdleSince) / 60_000));
+		const message =
+			`[AUTO-NUDGE] Your team is fully idle and the workflow has stalled.\n` +
+			`All ${workers.length} team agent(s) are idle and you have been idle for ${minutes} minutes.\n` +
+			"Check `task_list` and `gate_list` to identify the next action — either\n" +
+			"merge a finished branch, mark a task complete, or signal the next gate.\n" +
+			"If all gates have passed, call `team_complete`.";
+
+		this.nudgePending.set(goalId, true);
+		this.lastNudgeAtPerGoal.set(goalId, now);
+		try {
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
+		} catch (err) {
+			console.error(`[team-manager] Stuck-team watchdog enqueuePrompt failed for goal ${goalId}:`, err);
+			return;
+		}
+		console.log(`[team-manager] Stuck-team watchdog fired for goal ${goalId} after ${minutes}m idle`);
 	}
 
 	private resolveTeamStore(goalId: string): TeamStore {
@@ -268,15 +392,396 @@ export class TeamManager {
 	}
 
 	/**
-	 * Restore teams from disk persistence.
-	 * Reconstructs the in-memory Maps from the persisted store.
-	 */
-	/**
-	 * Phase 1: Restore team data structures and reverse lookups from disk.
-	 * Called from the constructor (before sessions are restored).
-	 * Event subscriptions are deferred to resubscribeTeamEvents().
+	 * Restore teams from disk. Called from the constructor (before sessions
+	 * are restored). Event subscriptions deferred to resubscribeTeamEvents().
 	 */
 	private restoreTeams(): void {
+		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
+		// entry FIRST and drop entries whose `goalId` is not present in the
+		// owning project's goal store. This prevents the zombie-reviewer sweep
+		// in `resubscribeTeamEvents` from blowing up later (it ultimately calls
+		// `unregisterReviewerSession` → `persistEntry` → `resolveTeamStore`,
+		// which would throw because the goal is unknown).
+		//
+		// Symptom this fixes: server crashes on boot, harness restarts in 1s,
+		// server crashes on boot again — endless loop the user has to
+		// manually intervene to break.
+		//
+		// We only drop entries when we have a project-context manager wired
+		// in (the production path). In the local/test path, `resolveTeamStore`
+		// always returns `this.localStore` so no resolution-time throw can
+		// happen and the cleanup is a no-op.
+		let droppedOrphans = 0;
+		if (this.config.projectContextManager) {
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const entry of ctx.teamStore.getAll()) {
+					const goal = ctx.goalStore.get(entry.goalId);
+					if (!goal) {
+						try {
+							ctx.teamStore.remove(entry.goalId);
+							droppedOrphans++;
+							console.warn(
+								`[team-manager] Boot cleanup: dropped orphan team entry for unknown goal "${entry.goalId}" ` +
+								`(team lead session ${entry.teamLeadSessionId ?? "<none>"}).`,
+							);
+						} catch (err) {
+							console.error(
+								`[team-manager] Failed to drop orphan team entry for goalId=${entry.goalId}:`,
+								err,
+							);
+						}
+					}
+				}
+			}
+			if (droppedOrphans > 0) {
+				console.log(`[team-manager] Cleaned ${droppedOrphans} orphan team entries on boot.`);
+			}
+
+			// Second pass — handle team entries whose `teamLeadSessionId` points
+			// at a session that no longer exists in the owning project's
+			// session store.
+			//
+			// Cause class: a session record can disappear from sessions.json
+			// (race / partial save / DELETE-with-immediate-purge / past bug)
+			// while the agent's .jsonl transcript and the team-store entry
+			// both survive on disk. Naively dropping the team-store entry
+			// here would destroy the user's only handle on the surviving
+			// transcript and force them to start a new team-lead from scratch.
+			//
+			// Recovery policy:
+			//   1. Try to locate the canonical .jsonl in the team-lead's
+			//      worktree slug-dir (`~/.bobbit/agent/sessions/<slug>/`).
+			//      If found → reconstruct a fresh session record pointing
+			//      at the surviving .jsonl and write it via sessionStore.put().
+			//      Team-store entry is preserved untouched.
+			//   2. If no .jsonl can be found → there is genuinely nothing
+			//      to restore; drop the team-store entry so `Start Team`
+			//      works for the user.
+			//
+			// Source-side leaks that could create these orphans are plugged
+			// in `session-manager.ts::purgeOneSession` (refusal guard for
+			// live team-leads) and `server.ts::DELETE /api/sessions/:id`
+			// (no auto-purge of archived sessions). This boot pass is the
+			// final safety net for existing damaged state and for future
+			// unknown leak sources.
+			let recovered = 0;
+			let droppedDanglingLead = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				const orphans = findOrphanTeamEntries(
+					ctx.teamStore.getAll(),
+					(id) => ctx.sessionStore.get(id) !== undefined,
+				);
+				for (const goalId of orphans) {
+					const entry = ctx.teamStore.get(goalId);
+					const tlid = entry?.teamLeadSessionId ?? "<none>";
+					try {
+						// Step 1 — try recovery from a surviving .jsonl.
+						const goal = ctx.goalStore.get(goalId);
+						let recoveredOk = false;
+						if (goal?.worktreePath && entry?.teamLeadSessionId) {
+							const candidates = scanSlugDirForJsonls(goal.worktreePath);
+							const chosen = pickCanonicalTeamLeadJsonl(candidates);
+							if (chosen) {
+								const funName = generateTeamNameSync();
+								const reconstructed = reconstructTeamLeadSessionRecord({
+									teamLeadSessionId: entry.teamLeadSessionId,
+									goal: {
+										id: goal.id,
+										title: goal.title,
+										projectId: goal.projectId,
+										worktreePath: goal.worktreePath,
+										repoPath: goal.repoPath,
+										branch: goal.branch,
+										sandboxed: goal.sandboxed,
+										archived: goal.archived,
+									},
+									chosenJsonl: chosen,
+									funName,
+								});
+								if (reconstructed) {
+									// Sidecar wins over heuristic: if a `.bobbit.json`
+									// exists next to the chosen .jsonl, prefer its
+									// exact values (original session id, title, role,
+									// team links, model prefs).
+									const sidecar = readSessionSidecar(chosen.jsonlPath);
+									const finalRecord = sidecar
+										? reconcileRecoveredSessionWithSidecar(reconstructed as unknown as Record<string, unknown>, sidecar)
+										: reconstructed;
+									ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
+									recovered++;
+									recoveredOk = true;
+									console.log(
+										`[team-manager] Boot recovery: reconstructed team-lead session ` +
+										`${entry.teamLeadSessionId.slice(0, 8)} for goal "${goal.title}" ` +
+										`(${goalId.slice(0, 8)}) from surviving .jsonl ${chosen.jsonlPath}.`,
+									);
+								}
+							}
+						}
+						// Step 2 — fall back to drop only when recovery
+						// genuinely isn't possible.
+						if (!recoveredOk) {
+							ctx.teamStore.remove(goalId);
+							droppedDanglingLead++;
+							console.warn(
+								`[team-manager] Boot cleanup: dropped team entry for goal "${goalId}" — ` +
+								`team-lead session ${tlid} missing AND no surviving .jsonl found in ` +
+								`worktree slug-dir. The team is no longer recoverable.`,
+							);
+						}
+					} catch (err) {
+						console.error(
+							`[team-manager] Boot recovery/cleanup failed for goalId=${goalId}:`,
+							err,
+						);
+					}
+				}
+			}
+			if (recovered > 0) {
+				console.log(`[team-manager] Boot recovery: reconstructed ${recovered} team-lead session record(s) from surviving .jsonl files.`);
+			}
+			if (droppedDanglingLead > 0) {
+				console.log(`[team-manager] Cleaned ${droppedDanglingLead} unrecoverable team entries on boot.`);
+			}
+
+			// Third pass — fully-orphaned team-mode goals.
+			//
+			// Shape this handles: the parent's team-store entry was lost AND
+			// the session record was lost, but the agent's .jsonl transcripts
+			// still survive in the worktree slug-dir. The user's 18 subgoals
+			// under "Audit subgoals branch" looked exactly like this: every
+			// archived team-mode subgoal had 7-9 surviving .jsonls and zero
+			// pointers into them. The second pass above only catches orphans
+			// the team-store still references; this third pass catches goals
+			// the team-store has forgotten about entirely.
+			//
+			// We don't re-create the team-store entry — these goals are
+			// archived (the team is done), so there's no need for a live
+			// team-store row. We just stamp the team-lead session record
+			// back into sessionStore (archived=true matching the goal). The
+			// sidebar's archived branch then surfaces the team-lead under
+			// the goal again, with the full .jsonl history available via
+			// continue-archived if the user wants to read it.
+			let fullyOrphanRecovered = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const goal of ctx.goalStore.getAll()) {
+					if (!goal.team) continue;
+					if (!goal.worktreePath) continue;
+					// Skip if a team-store entry exists (already handled by the
+					// pass above) — even orphan entries.
+					if (ctx.teamStore.get(goal.id)) continue;
+					// Skip if any session record already references this goal
+					// as its team-lead — recovery isn't needed.
+					const existingLead = ctx.sessionStore.getAll()
+						.find(s => s.teamGoalId === goal.id && s.role === "team-lead");
+					if (existingLead) continue;
+					// Look for surviving .jsonl(s) in the worktree slug-dir.
+					const candidates = scanSlugDirForJsonls(goal.worktreePath);
+					const chosen = pickCanonicalTeamLeadJsonl(candidates);
+					if (!chosen) continue;
+					// Generate a fresh-but-stable bobbit session id. The
+					// original is unknowable (never persisted).
+					const newSessionId = randomUUID();
+					try {
+						const funName = generateTeamNameSync();
+						const reconstructed = reconstructTeamLeadSessionRecord({
+							teamLeadSessionId: newSessionId,
+							goal: {
+								id: goal.id,
+								title: goal.title,
+								projectId: goal.projectId,
+								worktreePath: goal.worktreePath,
+								repoPath: goal.repoPath,
+								branch: goal.branch,
+								sandboxed: goal.sandboxed,
+								archived: goal.archived,
+							},
+							chosenJsonl: chosen,
+							funName,
+						});
+						if (reconstructed) {
+							const sidecar = readSessionSidecar(chosen.jsonlPath);
+							const finalRecord = sidecar
+								? reconcileRecoveredSessionWithSidecar(reconstructed as unknown as Record<string, unknown>, sidecar)
+								: reconstructed;
+							ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
+							fullyOrphanRecovered++;
+							console.log(
+								`[team-manager] Boot recovery: reconstructed fully-orphan team-lead ` +
+								`session ${newSessionId.slice(0, 8)} for goal "${goal.title}" ` +
+								`(${goal.id.slice(0, 8)}, archived=${!!goal.archived}) from ` +
+								`surviving .jsonl ${chosen.jsonlPath}.`,
+							);
+						}
+					} catch (err) {
+						console.error(
+							`[team-manager] Fully-orphan recovery failed for goalId=${goal.id}:`,
+							err,
+						);
+					}
+				}
+			}
+			if (fullyOrphanRecovered > 0) {
+				console.log(`[team-manager] Boot recovery: reconstructed ${fullyOrphanRecovered} fully-orphan team-lead session(s).`);
+			}
+
+			// Fourth pass — rename stale recovered team-lead titles.
+			//
+			// Earlier recovered sessions used the goal-title in the title
+			// ("Team Lead: Audit subgoals branch (recovered)") which doesn't
+			// match bobbit's normal "Team Lead: Jira Springer" shape. Upgrade
+			// them to use a generated fun-name on first boot after this fix.
+			// Idempotent: the predicate detects the OLD shape only, so after
+			// rename the predicate stays false on subsequent boots.
+			let titlesUpgraded = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const session of ctx.sessionStore.getAll()) {
+					if (session.role !== "team-lead" || !session.teamGoalId) continue;
+					const goal = ctx.goalStore.get(session.teamGoalId);
+					if (!isStaleRecoveredTeamLeadTitle(session.title, goal?.title)) continue;
+					const funName = generateTeamNameSync();
+					const newTitle = `Team Lead: ${funName} (recovered)`;
+					try {
+						ctx.sessionStore.update(session.id, { title: newTitle });
+						titlesUpgraded++;
+						console.log(`[team-manager] Boot recovery: renamed recovered session ${session.id.slice(0, 8)} to "${newTitle}" (was "${session.title}").`);
+					} catch (err) {
+						console.error(`[team-manager] Title upgrade failed for session ${session.id}:`, err);
+					}
+				}
+			}
+			if (titlesUpgraded > 0) {
+				console.log(`[team-manager] Boot recovery: upgraded ${titlesUpgraded} stale recovered title(s) to fun-name shape.`);
+			}
+
+			// Fifth pass — recover non-team-lead agent sessions (coders,
+			// reviewers, qa-testers, etc.) for every team-mode goal whose
+			// team-lead is now reachable.
+			//
+			// Shape: agent worktrees are siblings of the team-lead worktree
+			// (e.g. `goal-audit-subg-225e4d3d/` vs `goal-goal-audit-subg-
+			// 225e4d3d-coder-ad801c01/`). The worktree dirs themselves get
+			// cleaned up after the agent merges back, but the agent's .jsonl
+			// transcripts under `~/.bobbit/agent/sessions/<agent-slug>/` are
+			// preserved. The user's "Audit subgoals branch" had 14+ agent
+			// slug-dirs surviving with zero session records pointing at them.
+			//
+			// For each agent slug-dir discovered, we reconstruct a session
+			// record with role parsed from the worktree name, teamGoalId
+			// pointing at the goal, and teamLeadSessionId pointing at the
+			// recovered team-lead. Archived flag mirrors the goal. The
+			// sidebar's archived branch then nests them under their
+			// team-lead via the existing `teamLeadSessionId === lead.id`
+			// filter in render-helpers.ts.
+			//
+			// Idempotent: each agent worktree path is uniquely keyed; we
+			// skip any agent whose worktreePath already has a session record.
+			const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
+			let agentsRecovered = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				for (const goal of ctx.goalStore.getAll()) {
+					if (!goal.team || !goal.worktreePath) continue;
+					// Find the team-lead session for this goal (recovered or
+					// original). Without one we can't attribute the agents.
+					const teamLead = ctx.sessionStore.getAll()
+						.find(s => s.teamGoalId === goal.id && s.role === "team-lead");
+					if (!teamLead) continue;
+					// Collect existing agent worktreePaths so we skip them.
+					const existingAgentWorktrees = new Set(
+						ctx.sessionStore.getAll()
+							.filter(s => s.teamGoalId === goal.id && s.role !== "team-lead" && s.worktreePath)
+							.map(s => s.worktreePath!),
+					);
+					const discovered = discoverAgentsForGoal(
+						sessionsRoot,
+						goal.worktreePath,
+						fs,
+						path.join,
+						path.dirname,
+						path.basename,
+					);
+					for (const agent of discovered) {
+						if (existingAgentWorktrees.has(agent.agentWorktreePath)) continue;
+						const chosen = pickCanonicalTeamLeadJsonl(agent.candidates);
+						if (!chosen) continue;
+						try {
+							const funName = generateTeamNameSync(agent.role);
+							const newSessionId = randomUUID();
+							const record = reconstructAgentSessionRecord({
+								newSessionId,
+								role: agent.role,
+								funName,
+								teamLeadSessionId: teamLead.id,
+								goal: {
+									id: goal.id,
+									projectId: goal.projectId,
+									repoPath: goal.repoPath,
+									sandboxed: goal.sandboxed,
+									archived: goal.archived,
+								},
+								agentWorktreePath: agent.agentWorktreePath,
+								chosenJsonl: chosen,
+							});
+							const sidecar = readSessionSidecar(chosen.jsonlPath);
+							const finalRecord = sidecar
+								? reconcileRecoveredSessionWithSidecar(record as unknown as Record<string, unknown>, sidecar)
+								: record;
+							ctx.sessionStore.put(finalRecord as Parameters<typeof ctx.sessionStore.put>[0]);
+							agentsRecovered++;
+						} catch (err) {
+							console.error(`[team-manager] Agent recovery failed for ${agent.agentWorktreePath}:`, err);
+						}
+					}
+				}
+			}
+			if (agentsRecovered > 0) {
+				console.log(`[team-manager] Boot recovery: reconstructed ${agentsRecovered} non-team-lead agent session(s) from surviving .jsonl files.`);
+			}
+
+			// Sixth pass — boot-time sidecar backfill.
+			//
+			// Walk every session record and write a sidecar alongside its
+			// .jsonl if one doesn't already exist. This makes legacy
+			// pre-sidecar sessions recoverable-exact going forward: a future
+			// data-loss event will preserve whatever identity is on disk now
+			// rather than invent a fresh UUID + fun-name again.
+			//
+			// Idempotent: the helper is a no-op if the file already exists
+			// with matching content (atomic rename overwrites in-place
+			// either way, so we don't even need to compare).
+			//
+			// We process `(recovered)`-titled sessions first so the freshly
+			// rolled identity from THIS boot's recovery passes gets a sidecar
+			// before any other race could disturb the record again.
+			let sidecarsBackfilled = 0;
+			for (const ctx of this.config.projectContextManager.all()) {
+				const allSessions = ctx.sessionStore.getAll();
+				const ordered = [
+					...allSessions.filter(s => typeof s.title === "string" && s.title.includes("(recovered)")),
+					...allSessions.filter(s => !(typeof s.title === "string" && s.title.includes("(recovered)"))),
+				];
+				for (const s of ordered) {
+					if (!s.agentSessionFile) continue;
+					try {
+						const sidecarPath = sidecarPathFor(s.agentSessionFile);
+						if (fs.existsSync(sidecarPath)) continue;
+						// Skip if the .jsonl itself is missing — nothing to attach
+						// the sidecar to and the session is non-recoverable anyway.
+						if (!fs.existsSync(s.agentSessionFile)) continue;
+						const agentSessionId = path.basename(s.agentSessionFile).replace(/\.jsonl$/, "");
+						const sidecar = buildSessionSidecar(s, agentSessionId, undefined);
+						writeSessionSidecar(s.agentSessionFile, sidecar);
+						sidecarsBackfilled++;
+					} catch (err) {
+						console.warn(`[team-manager] Sidecar backfill failed for session ${s.id}:`, err);
+					}
+				}
+			}
+			if (sidecarsBackfilled > 0) {
+				console.log(`[team-manager] Boot backfill: wrote ${sidecarsBackfilled} session sidecar(s) for legacy sessions.`);
+			}
+		}
+
 		let persisted: PersistedTeamEntry[];
 		if (this.config.projectContextManager) {
 			persisted = [];
@@ -321,11 +826,46 @@ export class TeamManager {
 	}
 
 	/**
-	 * Phase 2: Re-subscribe to team lead and worker agent events.
-	 * Must be called AFTER sessions have been restored (restoreSessions()),
-	 * because it needs live session objects to attach event listeners.
+	 * Re-subscribe to team-lead and worker agent events. Must run AFTER
+	 * restoreSessions() — needs live session objects.
 	 */
 	resubscribeTeamEvents(): void {
+		// zombie-reviewer sweep — Zombie-reviewer sweep. After a server restart, reviewer
+		// sessions belonging to a verification that was running mid-flight are
+		// torn down by the harness's resume logic. The persisted `team-state.json`
+		// can still carry a stale agent entry pointing at the dead session; if
+		// nothing reaps it, every subsequent team_list / dashboard render
+		// surfaces it as a phantom reviewer. This defensive sweep removes
+		// reviewer agents whose underlying session no longer exists in the
+		// session manager.
+		//
+		// `unregisterReviewerSession` is wrapped in try/catch so one bad reviewer
+		// entry can't take down the whole boot path — the symptom would be
+		// indistinguishable from orphan team-store cleanup (endless restart loop) but
+		// triggered later in the boot sequence.
+		for (const [goalId, entry] of this.teams) {
+			const reviewers = entry.agents.filter((a) => a.kind === "reviewer" || a.role === "reviewer");
+			for (const reviewer of reviewers) {
+				const session = this.sessionManager.getSession(reviewer.sessionId);
+				if (!session || session.status === "terminated") {
+					try {
+						this.unregisterReviewerSession(goalId, reviewer.sessionId);
+						console.log(
+							`[team-manager] Zombie-reviewer sweep: unregistered terminated reviewer session ` +
+							`${reviewer.sessionId} from goal ${goalId}.`,
+						);
+					} catch (err) {
+						console.error(
+							`[team-manager] Zombie-reviewer sweep failed for goal=${goalId} session=${reviewer.sessionId}:`,
+							err,
+						);
+						// Continue processing other reviewers / goals — one bad
+						// entry must not block boot.
+					}
+				}
+			}
+		}
+
 		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed
 			if (entry.teamLeadSessionId) {
@@ -357,12 +897,149 @@ export class TeamManager {
 				agent.unsubscribeEvent = unsubscribe;
 			}
 		}
+		// boot-respawn for sessionless in-progress goals — Boot-respawn for sessionless in-progress goals.
+		this._bootRespawnSessionlessGoals();
+
+		// boot-resume idle team-leads with outstanding work. The stuck-sweep
+		// would catch these after STUCK_QUIET_THRESHOLD_MS (5 min) but that
+		// leaves a gap where the operator sees a freshly-restored team-lead
+		// sitting idle on a failed gate / open task with no progress signal.
+		// Fire a one-shot wake-up immediately for teams whose state implies
+		// concrete pending work. shouldSkipNudge handles paused/complete/
+		// archived/in-flight-child so dormant goals are not woken.
+		this._bootResumeIdleTeamLeads();
+
 		console.log(`[team-manager] Re-subscribed to events for ${this.teams.size} team(s)`);
 	}
 
 	/**
-	 * Clear and remove all idle-nudge timers for a goal.
+	 * Detect teams whose lead is idle on boot AND that have concrete
+	 * outstanding work (a failed gate or an open task). Send a one-shot
+	 * boot-resume nudge so the operator doesn't have to wait for the 5-min
+	 * stuck-sweep tick before progress resumes after a gateway restart.
+	 *
+	 * Conservatism rules:
+	 *  - Skip everything `shouldSkipNudge` skips (paused/complete/shelved/
+	 *    archived/in-flight-child/nudge-pending/active-verification).
+	 *  - Skip teams with no failed gate AND no open task — a goal with all
+	 *    gates passed and no pending tasks is genuinely dormant; nudging
+	 *    it would just re-invoke an LLM for no reason.
+	 *  - Stamp `nudgePending` + `lastNudgeAtPerGoal` so the stuck-sweep
+	 *    doesn't double-fire within STUCK_QUIET_THRESHOLD_MS.
 	 */
+	private _bootResumeIdleTeamLeads(): void {
+		const now = Date.now();
+		let resumed = 0;
+		for (const [goalId, entry] of this.teams) {
+			if (!entry.teamLeadSessionId) continue;
+			const session = this.sessionManager.getSession(entry.teamLeadSessionId);
+			if (!session || session.status !== "idle") continue;
+			if (this.shouldSkipNudge(goalId)) continue;
+			const summary = this._outstandingWorkSummary(goalId);
+			if (!summary) continue;
+
+			const msg =
+				`[BOOT-RESUME] The gateway restarted; you were idle with outstanding work.\n` +
+				`${summary}\n\n` +
+				"Check `task_list` and `gate_list` to confirm, then resume — fix any\n" +
+				"failed gate, assign or complete open tasks, or call `team_complete`\n" +
+				"if everything is genuinely done.";
+			try {
+				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, msg, { isSteered: true });
+				this.nudgePending.set(goalId, true);
+				this.lastNudgeAtPerGoal.set(goalId, now);
+				resumed++;
+				console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
+			} catch (err) {
+				console.error(`[team-manager] Boot-resume enqueuePrompt failed for goal=${goalId}:`, err);
+			}
+		}
+		if (resumed > 0) {
+			console.log(`[team-manager] Boot-resume nudged ${resumed} idle team-lead(s) with outstanding work.`);
+		}
+	}
+
+	/**
+	 * Return a one-line description of a goal's concrete outstanding work,
+	 * or null if there is none. "Outstanding" = failed gate OR open task
+	 * (state in todo/in-progress). Passed gates and complete tasks don't
+	 * count; this is about "the team-lead has a concrete next action".
+	 */
+	private _outstandingWorkSummary(goalId: string): string | null {
+		const ctx = this.config.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx) return null;
+		let failedGates = 0;
+		try {
+			const gateStates = ctx.gateStore.getGatesForGoal(goalId);
+			failedGates = gateStates.filter(g => g.status === "failed").length;
+		} catch { /* gate store may be unavailable for a freshly-recovered goal */ }
+		let openTasks = 0;
+		try {
+			const tasks = ctx.taskStore.getByGoalId(goalId);
+			openTasks = tasks.filter(t => t.state === "todo" || t.state === "in-progress").length;
+		} catch { /* task store may be unavailable */ }
+		if (failedGates === 0 && openTasks === 0) return null;
+		const parts: string[] = [];
+		if (failedGates > 0) parts.push(`${failedGates} failed gate(s)`);
+		if (openTasks > 0) parts.push(`${openTasks} open task(s)`);
+		return parts.join(", ");
+	}
+
+	/**
+	 * boot-respawn for sessionless in-progress goals — Walk every non-archived goal that is in-progress, has
+	 * setupStatus=ready, and is a team goal but has no live team entry. Spin
+	 * up a fresh team-lead for each so the goal is not stranded.
+	 *
+	 * Symptom on PR #409: after several gateway restarts, three Phase-2 leaves
+	 * all sat in `state: in-progress, setupStatus: ready, archived: null`
+	 * with ZERO team agents and ZERO team-lead session. The harness's
+	 * existing recovery only fired when there was an active verification with
+	 * the child's planId — but the parent's verification record was itself
+	 * lost in the restart, so nothing rescued the orphan.
+	 *
+	 * Wraps each respawn in try/catch — one bad goal must not block the rest.
+	 */
+	private _bootRespawnSessionlessGoals(): void {
+		if (!this.config.projectContextManager) return;
+
+		for (const ctx of this.config.projectContextManager.all()) {
+			for (const goal of ctx.goalStore.getAll()) {
+				if (goal.archived) continue;
+				// Pause-cascade: a paused goal must never trigger a fresh
+				// team-lead spawn on boot/respawn. Without this guard, an
+				// operator who pauses a goal then aborts its team-lead would
+				// see a new team-lead reappear within seconds (whack-a-mole).
+				// See docs/design/pause-cascade.md §Call-site 7 (CRITICAL).
+				if (goal.paused) continue;
+				if (goal.state !== "in-progress") continue;
+				if (goal.setupStatus !== "ready") continue;
+				if (!goal.team) continue;
+				if (this.teams.has(goal.id)) continue;
+
+				try {
+					console.log(
+						`[team-manager] Boot recovery: respawning team-lead for sessionless in-progress goal "${goal.title}" (id=${goal.id})`,
+					);
+					// Fire and forget — startTeam returns a promise but boot can't
+					// block on it. Errors are logged inside the catch so they
+					// don't propagate as unhandled rejections.
+					this.startTeam(goal.id).catch((err) => {
+						console.error(
+							`[team-manager] Boot recovery startTeam failed for goal=${goal.id} ("${goal.title}"):`,
+							err,
+						);
+					});
+				} catch (err) {
+					console.error(
+						`[team-manager] Boot recovery failed synchronously for goal=${goal.id} ("${goal.title}"):`,
+						err,
+					);
+				}
+			}
+		}
+	}
+
+	/** Clear and remove all idle-nudge timers for a goal. */
 	private clearIdleNudgeTimer(goalId: string): void {
 		const timer = this.idleNudgeTimers.get(goalId);
 		if (timer) {
@@ -379,14 +1056,11 @@ export class TeamManager {
 		this.nudgePending.delete(goalId);
 	}
 
-	/**
-	 * Format elapsed time since a timestamp.
-	 */
 	private formatElapsed(sinceMs: number): string {
 		return formatElapsed(sinceMs);
 	}
 
-	/** Common pre-checks for nudge timer ticks. Returns true if the nudge should be skipped. */
+	/** Common pre-checks for nudge timer ticks. True → skip the nudge. */
 	private shouldSkipNudge(goalId: string): boolean {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return true;
@@ -394,9 +1068,22 @@ export class TeamManager {
 		if (!tl || tl.status !== "idle") return true;
 		if (this.verificationHarness?.getActiveVerifications(goalId).length) return true;
 		if (this.nudgePending.get(goalId)) return true;
-		// Don't nudge a team lead whose goal has already finished (complete/shelved/archived).
+		// Don't nudge a team lead whose goal has already finished or is paused.
+		// Paused goals are sticky-by-operator-intent (see goal-paused-guard.ts):
+		// the operator explicitly stopped progress, so the watchdog must not
+		// resume it via an idle-nudge. The team-lead's pause cascade already
+		// terminated its workers; nudging would re-enter the workflow loop.
 		const goal = this.resolveGoal(goalId);
-		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
+		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved" || goal.paused) return true;
+		// Skip if any subgoal is in-flight — the parent-notification path
+		// will wake the parent on RTM/fail/pause. paused children DO count
+		// as in-flight=false (a paused child can't progress without parent
+		// intervention, so the nudge IS wanted then).
+		try {
+			const gm = this.resolveGoalManager(goalId);
+			const allGoals = typeof gm.listLiveGoals === "function" ? gm.listLiveGoals() : [];
+			if (anyInFlightChild(goalId, allGoals)) return true;
+		} catch { /* mock path or PCM lookup miss — treat as no children */ }
 		return false;
 	}
 
@@ -412,15 +1099,8 @@ export class TeamManager {
 	}
 
 	/**
-	 * Start both idle-nudge timers when the team lead goes idle.
-	 *
-	 * Two independent repeating timers run in parallel:
-	 * - **No-workers timer** (5 min): fires when the team lead is idle with zero
-	 *   active workers — one-shot nudge then self-clears.
-	 * - **Workers timer** (10 min): fires when the team lead is idle while workers
-	 *   are still active — repeats every 10 min.
-	 *
-	 * Each timer checks conditions on every tick and returns early if they don't apply.
+	 * Start both idle-nudge timers (no-workers 5min one-shot + workers 10min
+	 * exponential). See docs/design/auto-nudge-stuck-team-leads.md.
 	 */
 	private startIdleNudgeTimer(goalId: string): void {
 		// Clear any pending timers but PRESERVE counters — callers either come
@@ -596,11 +1276,20 @@ export class TeamManager {
 		// Clean up any previous subscription
 		entry.unsubscribeTeamLeadEvents?.();
 
+		// If the lead is already idle at subscribe time (e.g. resubscribe after
+		// restart), seed leadIdleSinceByGoal so the stuck-team watchdog has a
+		// timestamp to compare against on its next tick.
+		if (session.status === "idle" && !this.leadIdleSinceByGoal.has(goalId)) {
+			this.leadIdleSinceByGoal.set(goalId, Date.now());
+		}
+
 		const unsubscribe = session.rpcClient.onEvent((event: any) => {
 			if (event.type === "agent_end") {
+				this.leadIdleSinceByGoal.set(goalId, Date.now());
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
 				this.nudgePending.delete(goalId);
+				this.leadIdleSinceByGoal.delete(goalId);
 				const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
 				const lastSource = tl?.lastPromptSource ?? "user";
 				if (lastSource === "user" || lastSource === "system") {
@@ -698,6 +1387,13 @@ export class TeamManager {
 		if (this.teams.has(goalId)) {
 			throw new Error(`Team already active for goal: ${goalId}`);
 		}
+		// Pause-cascade guard — refuse to spawn a team-lead for a paused goal.
+		if (goal.paused) throw new GoalPausedError(goalId);
+		// Scheduler-block guard — refuse to start a goal that still has
+		// unresolved dependsOn deps. 'blocked' is set at spawn time and
+		// cleared by integrate-child when all deps merge. Manual team/start
+		// must be gated here so a user cannot bypass the scheduler block.
+		if (goal.state === "blocked") throw new GoalPausedError(goalId);
 
 		// Use the goal's worktree/cwd for the team lead
 		const cwd = goal.worktreePath || goal.cwd;
@@ -705,7 +1401,9 @@ export class TeamManager {
 		// Build the Team Lead role prompt with structural placeholders only
 		// Secrets (gateway URL, auth token, goal ID) are passed as env vars, NOT embedded in prompt text
 		const roleStore = this.config.roleStore;
-		const storedRole = roleStore?.get("team-lead");
+		// Resolve via the goal's inline-roles snapshot first, then the
+		// project/server/builtin role-store cascade — same precedence as spawnRole().
+		const storedRole = resolveRole(goal, "team-lead", roleStore);
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
@@ -740,6 +1438,10 @@ export class TeamManager {
 				sandboxed,
 				// For sandboxed goals, create a worktree at the goal branch inside the container
 				sandboxBranch: sandboxed && goal.branch ? goal.branch : undefined,
+				// Honour role-level model / thinking-level override (cascade-resolved above).
+				// Empty string falls through to undefined → system default.
+				initialModel: storedRole.model || undefined,
+				initialThinkingLevel: storedRole.thinkingLevel || undefined,
 			},
 		);
 
@@ -775,8 +1477,14 @@ export class TeamManager {
 			await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
 		}
 
-		// Kick off the team lead with an initial prompt (same pattern as delegate sessions)
-		session.rpcClient.prompt("Execute the task described in your system prompt. Follow the instructions carefully.").catch((err: any) => {
+		// Kick off the team lead with an initial prompt (same pattern as delegate sessions).
+		// Re-read goal so we pick up any spec edits that happened during session setup.
+		const freshGoal = this.resolveGoal(goalId) ?? goal;
+		const specBody = (freshGoal.spec ?? "").trim();
+		const kickoff = specBody
+			? `# Goal Spec\n\n${specBody}\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.`
+			: "Execute the task described in your system prompt. Follow the instructions carefully.";
+		session.rpcClient.prompt(kickoff).catch((err: any) => {
 			console.error("[team-manager] Failed to send team lead kickoff prompt:", err);
 		});
 
@@ -870,9 +1578,13 @@ export class TeamManager {
 		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
 		const roleStore = this.config.roleStore;
-		const storedRoleDef = roleStore?.get(role);
+		// Resolve via the goal's inline-roles snapshot first, then the
+		// project/server/builtin role-store cascade. See resolveRole() and the
+		// PersistedGoal.inlineRoles field doc for the precedence rule.
+		const goalForRole = this.resolveGoal(goalId);
+		const storedRoleDef = resolveRole(goalForRole, role, roleStore);
 		if (!storedRoleDef) {
-			const available = roleStore?.getAll().map(r => r.name).join(", ") ?? "none";
+			const available = listAvailableRoles(goalForRole, roleStore).join(", ") || "none";
 			throw new Error(`Role "${role}" not found. Available roles: ${available}`);
 		}
 
@@ -896,6 +1608,9 @@ export class TeamManager {
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
+		// Pause-cascade guard — in-process callers (team-lead extension
+		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth.
+		if (goal.paused) throw new GoalPausedError(goalId);
 
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.
@@ -984,6 +1699,10 @@ export class TeamManager {
 					// Pass branch info so applySandboxWiring creates the worktree inside the container
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName && goal.branch ? `origin/${goal.branch}` : undefined,
+					// Honour role-level model / thinking-level override (cascade-resolved above).
+					// Empty string falls through to undefined → system default.
+					initialModel: storedRoleDef.model || undefined,
+					initialThinkingLevel: storedRoleDef.thinkingLevel || undefined,
 				},
 			);
 
@@ -1104,7 +1823,7 @@ export class TeamManager {
 		const now = Date.now();
 		const lastNotify = this.lastNotifyTime.get(workerSessionId);
 		if (lastNotify && now - lastNotify < 30_000) {
-			console.log(`[team-manager] Debounced notification for ${agentId} (last: ${now - lastNotify}ms ago)`);
+			console.log(`[team-manager] notifyTeamLead deferred for ${role}/${agentId} — ${now - lastNotify}ms ago`);
 			return;
 		}
 		this.lastNotifyTime.set(workerSessionId, now);
@@ -1149,6 +1868,44 @@ export class TeamManager {
 	 * Called from the task transition REST endpoint so the team lead wakes up
 	 * even if the worker continues with another task without going idle.
 	 */
+	/**
+	 * Notify the team lead that the goal's spec has been edited mid-flight.
+	 * The agent read the spec once at session startup; this nudge tells it to
+	 * re-read via `view_goal_spec` and decide whether the change affects the
+	 * plan. Throttled to one nudge per SPEC_NUDGE_THROTTLE_MS so a flurry of
+	 * edits doesn't spam the agent.
+	 */
+	notifyTeamLeadOfSpecChange(goalId: string, prevLen: number, newLen: number): void {
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return;
+
+		const teamLeadSession = this.sessionManager.getSession(entry.teamLeadSessionId);
+		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
+
+		const now = Date.now();
+		const last = this.lastSpecNudgeTs.get(goalId) ?? 0;
+		if (now - last < TeamManager.SPEC_NUDGE_THROTTLE_MS) {
+			console.log(`[team-manager] Skipping spec-edit nudge for goal ${goalId} (throttled, last ${now - last}ms ago)`);
+			return;
+		}
+		this.lastSpecNudgeTs.set(goalId, now);
+
+		const message =
+			`**Your goal's spec has been edited** (length changed from ${prevLen} to ${newLen} chars). ` +
+			`The change has NOT been re-injected into your system prompt — re-read the latest spec via ` +
+			`\`view_goal_spec\` (or \`GET /api/goals/${goalId}\`) to see what changed, then decide whether the new ` +
+			`content changes your plan, requires new tasks, or invalidates an upstream gate signal.`;
+
+		if (teamLeadSession.status === "streaming") {
+			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message).catch((err: any) => {
+				console.error(`[team-manager] Failed to steer team lead on spec change for goal ${goalId}:`, err);
+			});
+		} else {
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
+		}
+		console.log(`[team-manager] Notified team lead of spec change for goal ${goalId} (${prevLen} → ${newLen} chars)`);
+	}
+
 	notifyTeamLeadOfTaskCompletion(goalId: string, taskTitle: string, taskState: string): void {
 		const entry = this.teams.get(goalId);
 		if (!entry?.teamLeadSessionId) return;
@@ -1437,6 +2194,8 @@ export class TeamManager {
 
 		// Remove team tracking entirely
 		this.teams.delete(goalId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
 		this.resolveTeamStore(goalId).remove(goalId);
 
 		console.log(`[team-manager] Tore down team for goal ${goalId}`);

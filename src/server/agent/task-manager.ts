@@ -232,11 +232,16 @@ export class TaskManager {
 	}
 
 	/**
-	 * Transition a task to a new state with validation.
+	 * Transition a task to a new state with validation. No-op (success) if the
+	 * task is already in the target state — agents commonly re-issue the
+	 * current state when stitching together `task_update` calls, and rejecting
+	 * those as 400s wedges team-lead loops.
 	 */
 	transitionTask(taskId: string, newState: TaskState): boolean {
 		const task = this.store.get(taskId);
 		if (!task) return false;
+
+		if (task.state === newState) return true;
 
 		if (!this.isValidTransition(task.state, newState)) {
 			throw new Error(`Invalid state transition: ${task.state} → ${newState}`);

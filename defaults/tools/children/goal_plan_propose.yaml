@@ -1,0 +1,67 @@
+name: goal_plan_propose
+description: "Submit (or re-submit) a plan of subgoal steps. Call FIRST for multi-step plans."
+summary: "Submit a plan or replan. On parent-workflow goals: classifier+freeze flow. On non-parent: spawn-children-direct with auto-pause enforcement for dependsOn."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Required: `steps` — array of subgoal-typed plan steps. Each step: `{ planId, title, spec, workflowId?, suggestedRole?, phase?, dependsOn? }`. `dependsOn` is an optional array of sibling planIds (empty/omitted = parallel sibling). Self-deps / unknown refs / cycles return 400 with a structured code.
+
+  **Workflow-type behaviour:**
+  - **Parent workflow (has `execution` gate):** steps are stored in `execution.verify[]` and go through the mutation classifier (`noop`, `fix-up`, `expansion`, `restructure`, `criteria-drop`). Changing `dependsOn` on an existing step is classified as `restructure`.
+  - **Non-parent workflow (no `execution` gate):** falls back to `spawn-children-direct` — each step is spawned via `goal_spawn_child` (idempotent on planId). `dependsOn` is enforced via **auto-pause**: children with unresolved deps are created paused and auto-resume when their last dep merges. Response includes `warning: "degraded-execution: ..."`, `blockedCount`, and `blockedPlanIds` when any step has `dependsOn`. Steps are spawned in topological order to prevent `UNKNOWN_PLAN_ID` errors on valid unordered DAGs. Pass `fallback: "spawn-children-direct"` to opt in to this path explicitly.
+detail_docs: >-
+  ## Purpose
+
+
+  Call this as your FIRST action when a multi-step plan is needed. Never
+  call `goal_spawn_child` directly for a multi-step plan — direct spawns
+  bypass plan tracking and the classifier/freeze flow.
+
+
+  ## Parent-workflow (execution gate present)
+
+
+  Before the `goal-plan` gate is signalled, the first call seeds the
+  plan. After signal the array is frozen and further calls go through
+  the mutation classifier. Decision matrix: criteria-drop → 409,
+  restructure on a non-paused goal → 409, expansion → always requires
+  approval, fix-up under strict → requires approval, fix-up under
+  balanced/autonomous → applied immediately, noop → applied (no-op).
+
+
+  ## Acceptance criteria coverage
+
+
+  The classifier walks the union of `{rootSpec} ∪ {every proposed
+  step's spec}` and verifies each acceptance criterion is
+  whitespace-normalised case-insensitive substring-found. If any
+  criterion is uncovered, the result is `criteria-drop` (409). **Quote
+  criteria verbatim** in the relevant subgoal's spec.
+
+
+  ## Non-parent workflow (spawn-children-direct fallback)
+
+
+  When the goal has no `execution` gate, `goal_plan_propose` falls back
+  to spawning each step directly. `dependsOn` is still enforced: children
+  with unresolved deps are created `paused: true` and automatically
+  unpaused when their last dependency merges into the parent. Steps are
+  sorted topologically before spawning. The response includes:
+  - `warning: "degraded-execution: ..."` — present when any step has `dependsOn`
+  - `blockedCount` — number of children created paused
+  - `blockedPlanIds` — planIds of the paused children
+  - `spawned[].blocked: true` / `pendingDeps` — per-step blocked status
+
+
+  ## Returns (parent-workflow)
+
+
+  - `{ kind: "noop" | "fix-up", applied: true }` — plan applied directly.
+
+  - `{ kind: "fix-up" | "expansion" | "restructure", requestId, requiresApproval: true }`
+    — request queued; user approves via `goal_decide_mutation`.
+
+  - 409 with `{ kind: "restructure" | "criteria-drop", uncoveredCriteria? }`
+    — rejected.
