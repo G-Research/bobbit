@@ -182,12 +182,20 @@ async function setActiveProject(page: Page, projectId: string): Promise<void> {
 	}, projectId);
 }
 
-/** Open the app, optionally pin the active project, and open the marketplace. */
+/** Switch the marketplace sub-tab and wait for its panel to render. */
+async function goToTab(page: Page, tab: "installed" | "browse" | "sources"): Promise<void> {
+	await expect(page.locator(`[data-testid="market-tab-${tab}"]`)).toBeVisible({ timeout: 15_000 });
+	await page.locator(`[data-testid="market-tab-${tab}"]`).click();
+	await expect(page.locator(`[data-testid="market-${tab}-panel"]`)).toBeVisible({ timeout: 15_000 });
+}
+
+/** Open the app, optionally pin the active project, and open the marketplace on
+ *  the Sources tab (the entry point for most flows: register a source first). */
 async function openMarket(page: Page, opts?: { activeProjectId?: string }): Promise<void> {
 	await openApp(page);
 	if (opts?.activeProjectId) await setActiveProject(page, opts.activeProjectId);
 	await navigateToHash(page, "#/market");
-	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
+	await goToTab(page, "sources");
 }
 
 /** Re-establish the marketplace surface after a reload (state is reset). */
@@ -195,32 +203,34 @@ async function reopenMarketAfterReload(page: Page, projectId: string): Promise<v
 	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 	await setActiveProject(page, projectId);
 	await navigateToHash(page, "#/market");
-	await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 15_000 });
+	await goToTab(page, "sources");
 }
 
 /** Register a local-dir source by absolute path; resolves only once its packs
  *  are actually browsable (poll for at least one pack card). */
 async function registerSource(page: Page, repoPath: string): Promise<void> {
+	// Must be on the Sources tab (where the add-source form lives).
 	const urlInput = page.locator('[data-testid="market-source-url"]');
 	const addSourceBtn = page.locator('[data-testid="market-add-source"]');
-	// fill() dispatches the input event, but the Add button is disabled until the
-	// component's reactive state catches up. Under load that render can lag the
-	// click, leaving the button disabled → 30s click timeout. Synchronize on the
-	// real precondition (button enabled) instead of clicking optimistically.
+	// fill() dispatches the input event, but the Add button is disabled
+	// (?disabled=${!newSourceUrl.trim()}) until the component re-renders. Under
+	// load that render can lag a naive click, leaving the button disabled → click
+	// timeout. Synchronize on the real precondition (button enabled) instead of
+	// clicking optimistically.
 	await urlInput.fill(repoPath);
 	await expect(urlInput).toHaveValue(repoPath);
 	await expect(addSourceBtn).toBeEnabled({ timeout: 15_000 });
 	await addSourceBtn.click();
-	// The source row must appear...
-	await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible({ timeout: 15_000 });
-	// ...and handleAddSource auto-browses it → poll until the pack cards render
-	// (browse is async after the POST; a single visibility check can race it).
+	// handleAddSource auto-switches to the Browse tab and browses the new source
+	// → poll until the pack cards render (browse is async after the POST; a single
+	// visibility check can race it).
+	await expect(page.locator('[data-testid="market-browse-panel"]')).toBeVisible({ timeout: 15_000 });
 	await expect
 		.poll(async () => page.locator('[data-testid="market-browse-pack"]').count(), { timeout: 15_000 })
 		.toBeGreaterThan(0);
 }
 
-/** Pick a dedicated project in the install scope picker. */
+/** Pick a dedicated project in the install scope picker (Browse tab). */
 async function selectInstallScopeProject(page: Page, projectId: string): Promise<void> {
 	await page.locator('[data-testid="market-install-scope"]').selectOption(`project:${projectId}`);
 }
@@ -270,12 +280,20 @@ test.describe("Marketplace UI", () => {
 		expect(mk).toBeGreaterThan(wf);
 		expect(ng).toBeGreaterThan(mk);
 
-		// Opening navigates to #/market and renders the marketplace panels.
+		// Opening navigates to #/market and renders the marketplace sub-tabs.
 		await marketBtn.click();
 		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/market");
-		await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="market-browse-panel"]')).toBeVisible();
+		// Three sub-tabs: Installed (default), Browse, Sources. Each tab shows its
+		// own panel; only one panel is visible at a time.
+		await expect(page.locator('[data-testid="market-tab-installed"]')).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="market-tab-browse"]')).toBeVisible();
+		await expect(page.locator('[data-testid="market-tab-sources"]')).toBeVisible();
+		// Default tab is Installed.
 		await expect(page.locator('[data-testid="market-installed-panel"]')).toBeVisible();
+		// Switch to Browse → its panel shows.
+		await goToTab(page, "browse");
+		// Switch to Sources → its panel shows.
+		await goToTab(page, "sources");
 	});
 
 	// ------------------------------------------------------------------
@@ -285,10 +303,12 @@ test.describe("Marketplace UI", () => {
 	test("marketplace renders the add-source form and degrades gracefully", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/market");
-		await expect(page.locator('[data-testid="market-sources-panel"]')).toBeVisible({ timeout: 10_000 });
+		// Sources tab → add-source form.
+		await goToTab(page, "sources");
 		await expect(page.locator('[data-testid="market-source-url"]')).toBeVisible();
 		await expect(page.locator('[data-testid="market-add-source"]')).toBeVisible();
-		// Install scope picker present with the three documented scope options.
+		// Browse tab → install scope picker present with the documented scopes.
+		await goToTab(page, "browse");
 		const scope = page.locator('[data-testid="market-install-scope"]');
 		await expect(scope).toBeVisible();
 	});
@@ -308,13 +328,17 @@ test.describe("Marketplace UI", () => {
 		await openMarket(page);
 		await registerSource(page, repo);
 
-		await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible();
+		// registerSource auto-lands on the Browse tab → pack card is visible.
 		const card = page.locator('[data-testid="market-browse-pack"][data-pack-name="browse-pack"]');
 		await expect(card).toBeVisible({ timeout: 15_000 });
 		await expect(card).toContainText("Browseable demo pack");
 		// Declared entity chips render (role + skill) — poll so we don't race the
 		// async browse render.
 		await expect.poll(async () => card.locator(".market-entity-chip").count(), { timeout: 15_000 }).toBe(2);
+
+		// The registered source appears on the Sources tab.
+		await goToTab(page, "sources");
+		await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible();
 	});
 
 	// §12.3 #4–6 — install to a scope; entities resolve on the config pages
@@ -340,6 +364,7 @@ test.describe("Marketplace UI", () => {
 		await confirmExecWarning(page);
 
 		// Installed card + provenance (the active project is the dedicated one).
+		await goToTab(page, "installed");
 		const installed = page.locator('[data-testid="market-installed-pack"][data-pack-name="kit-pack"]').first();
 		await expect(installed).toBeVisible({ timeout: 15_000 });
 		await expect(installed.locator('[data-testid="market-provenance"]')).toBeVisible();
@@ -385,6 +410,7 @@ test.describe("Marketplace UI", () => {
 		// project, which reload resets to the harness default).
 		await page.reload();
 		await reopenMarketAfterReload(page, proj.id);
+		await goToTab(page, "installed");
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="kit-pack"]').first()).toBeVisible({ timeout: 15_000 });
 	});
 
@@ -463,6 +489,7 @@ test.describe("Marketplace UI", () => {
 
 		// Appears in the Installed list — the list query is now bound to the
 		// install target, not the active project (would be empty before the fix).
+		await goToTab(page, "installed");
 		const installed = page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]').first();
 		await expect(installed).toBeVisible({ timeout: 15_000 });
 
@@ -474,6 +501,7 @@ test.describe("Marketplace UI", () => {
 
 		// Uninstall targets projTarget → card + entity gone.
 		await navigateToHash(page, "#/market");
+		await goToTab(page, "installed");
 		await page.locator('[data-testid="market-installed-pack"][data-pack-name="scoped-pack"]').first()
 			.locator('[data-testid="market-uninstall-pack"]').click();
 		await expect(page.getByText(/deletes the pack directory/i)).toBeVisible({ timeout: 10_000 });
@@ -498,6 +526,7 @@ test.describe("Marketplace UI", () => {
 
 		// upd-pack ships no tools → no exec-code warning.
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="upd-pack"]').locator('[data-testid="market-install-pack"]').click();
+		await goToTab(page, "installed");
 		const installed = page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first();
 		await expect(installed).toBeVisible({ timeout: 15_000 });
 		await expect(installed).toContainText("v1.0.0");
@@ -514,6 +543,7 @@ test.describe("Marketplace UI", () => {
 
 		// Uninstall → confirm → card gone AND entity gone from #/roles.
 		await navigateToHash(page, "#/market");
+		await goToTab(page, "installed");
 		await page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first()
 			.locator('[data-testid="market-uninstall-pack"]').click();
 		await expect(page.getByText(/deletes the pack directory/i)).toBeVisible({ timeout: 10_000 });
@@ -563,8 +593,11 @@ test.describe("Marketplace UI", () => {
 
 		// Install both (order a → b ⇒ b wins initially as highest precedence).
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="conf-a"]').locator('[data-testid="market-install-pack"]').click();
+		await goToTab(page, "installed");
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-a"]').first()).toBeVisible({ timeout: 15_000 });
+		await goToTab(page, "browse");
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="conf-b"]').locator('[data-testid="market-install-pack"]').click();
+		await goToTab(page, "installed");
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-b"]').first()).toBeVisible({ timeout: 15_000 });
 
 		// Conflict warning surfaces on the installed cards.
@@ -578,6 +611,7 @@ test.describe("Marketplace UI", () => {
 
 		// Reorder: bump conf-a to higher precedence (move-down) → conf-a wins.
 		await navigateToHash(page, "#/market");
+		await goToTab(page, "installed");
 		await page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-a"]').first()
 			.locator('[data-testid="market-move-down"]').click();
 
@@ -598,6 +632,7 @@ test.describe("Marketplace UI", () => {
 		// order and a subsequent move persists the wrong sequence.
 		await setActiveProject(page, proj.id);
 		await navigateToHash(page, "#/market");
+		await goToTab(page, "installed");
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="conf-a"]').first()).toBeVisible({ timeout: 15_000 });
 		const cardOrder = await page.evaluate(() =>
 			Array.from(document.querySelectorAll('[data-testid="market-installed-pack"]'))
