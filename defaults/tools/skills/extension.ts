@@ -51,7 +51,7 @@ export default function (pi: ExtensionAPI) {
 			name: Type.String({ description: "Skill name without leading slash." }),
 			args: Type.Optional(Type.String()),
 		}),
-		async execute(input: { name: string; args?: string }) {
+		async execute(_toolCallId: string, input: { name: string; args?: string }) {
 			try {
 				const resp = await fetch(`${baseUrl}/api/sessions/${sessionId}/activate-skill`, {
 					method: "POST",

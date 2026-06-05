@@ -49,6 +49,12 @@ function clearDashboardState(): void {
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
 import { activeSidePanelTabIdForSession, loadPersistedPanelWorkspace } from "./panel-workspace.js";
+import { bootMark } from "./boot-timing.js";
+
+// Boot-timing: this fires only after the entire eager module graph has been
+// fetched + evaluated (the Vite dev module waterfall), so `t` here ≈ cost of
+// navigation → all modules ready. Dev-only; no-op in production.
+bootMark("modules-evaluated");
 
 // ============================================================================
 // WIRE UP RENDER
@@ -394,6 +400,7 @@ async function handleHashChange(): Promise<void> {
 // ============================================================================
 
 async function initApp() {
+	bootMark("initApp-start");
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
@@ -438,6 +445,7 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		state.appView = "gateway-starting";
 	}
+	bootMark("first-render-call");
 	renderApp();
 	// Signal boot intent. renderApp() defers the real Lit render to a rAF, so
 	// #app may still be empty right now — markAppBooted() does NOT clear the

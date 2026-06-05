@@ -626,6 +626,16 @@ Walk the data path in order:
 
 See [docs/internals.md — Skill chip rendering & autonomous activation](internals.md#skill-chip-rendering--autonomous-activation) for the full architecture and [docs/design/skill-ux-and-autonomous-activation.md](design/skill-ux-and-autonomous-activation.md) for the design rationale (model-prompt byte-equality, snapshot-at-invocation, backward compat).
 
+## `activate_skill` returns "name is required" / failures invisible in UI
+
+Symptom: the model calls `activate_skill` autonomously and the tool result is `activate_skill failed: name is required` every time, while the chat UI shows only a benign "Activating /name…" header (no error). User-typed `/name` slash invocations still work, because they resolve through the WS handler's expansion logic — a different path that never touches this tool. Two distinct defects, both confirmed in practice:
+
+1. **Extension dropped the params (wrong `execute()` argument).** pi's `ToolDefinition.execute` contract is `execute(toolCallId, params, signal, onUpdate, ctx)` — the tool-call id string is **first**, the validated params are **second**. The skills extension declared a single parameter and read `input.name`/`input.args`, so `input` was actually the id string and both fields were `undefined`. `JSON.stringify({ name: undefined, args: "" })` drops the `undefined` key, so the gateway received `{"args":""}`, `POST /api/sessions/:id/activate-skill` set `skillName = ""`, and returned 400 `name is required`. Deterministic, independent of sandbox/network. Fix: read params from the second argument — `async execute(_toolCallId, input: { name, args? })` — matching every other `defaults/tools/*` extension. Pinned by `tests/activate-skill-extension.test.ts`, which invokes the real registered tool with pi's `(toolCallId, params)` convention and asserts the captured request body carries both `name` and `args`. (`tests/e2e/activate-skill.spec.ts` did NOT catch this — it hits the REST endpoint directly, bypassing `execute()`.)
+
+2. **Renderer hid the failure behind `result.isError`.** `ActivateSkillRenderer` only surfaced failure text when `result.isError` was truthy. But pi's agent-loop hardcodes `isError: false` for any tool whose `execute()` *returns* (rather than throws), so the extension's returned `{ isError: true }` never reaches the renderer. With no `skillExpansion` and a falsy flag, the renderer fell through to the benign "Activating…" header and discarded `result.content[0].text` (which held `activate_skill failed: …`). Fix: when there is no `skillExpansion`, surface the result's text content as a visible error (red header + message) regardless of the flag. Pinned by `tests/activate-skill-renderer.spec.ts`.
+
+Lesson for extension authors: never read tool params from the first `execute()` argument, and never gate UI error display on `isError` for tools that signal failure by *returning* an error result. See [docs/internals.md — Skill chip rendering & autonomous activation](internals.md#skill-chip-rendering--autonomous-activation).
+
 ## Multi-project / per-project state
 
 - State is per-project: goals, sessions, tasks, teams, gates, search, costs all live in `<project-root>/.bobbit/state/`
