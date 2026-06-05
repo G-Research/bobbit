@@ -64,7 +64,15 @@ Select a source to list its packs. Each pack shows its name, version, descriptio
 
 Each pack has an **Install** button with a scope picker. Installing copies the pack's directory verbatim into the chosen scope's `market-packs/<pack-name>/` and writes a generated `.pack-meta.yaml` recording provenance. Every contained role/tool/skill then resolves through the single resolver, tagged with that pack as its `origin`.
 
-**Executable-code warning.** If a pack ships tools (`contents.tools` is non-empty), the UI shows an explicit confirmation — *"This pack installs executable code that runs on your machine"* — before install. Tool packs carry `extension.ts` / `_shared/` code that runs in Bobbit; this is the only trust gate in the MVP (there is no signing or sandboxing yet).
+**Trust lives at the source boundary, not per pack.** There is no per-pack confirmation dialog and no "executable code" chip. The trust decision is made once, when you **add a source**: the Add-source panel carries a persistent warning that you should only add sources you trust, because installing *any* pack from a source can run code or instruct agents on your machine. Install then proceeds without a further gate.
+
+Why a blanket warning rather than a tool-pack-only one? The old model implied a false binary — tool packs dangerous, role/skill packs safe. In reality every pack is risky once installed, because roles and skills become instructions to an LLM that has shell access. The Add-source panel includes an expandable **"Why?"** disclosure (collapsed by default) explaining the risk spectrum across the three entity types, highest to lowest:
+
+- **Tools** — ship `extension.ts` / `_shared/` code that runs **directly in the Bobbit server process on the host**, deterministically, with no LLM and no sandbox in the loop. This is the highest, most immediate risk.
+- **Skills** — free-form instructions an agent tends to follow literally. An agent with shell access can be directed to do damage.
+- **Roles** — persona/behavior steering; influential but more diffuse. Still drives an LLM with tool access.
+
+There is no signing or sandboxing yet, so the source-level trust decision is the only safeguard.
 
 ### Viewing provenance
 
@@ -155,9 +163,10 @@ version: 1.2.0                   # REQUIRED. Semver-ish string; shown in provena
 author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
 contents:                        # REQUIRED. All three keys required; each MAY be empty.
-  roles:  [researcher]           #   Drives the browse-UI chips and the
-  tools:  [research]             #   executable-code warning (tools non-empty).
-  skills: [lit-review]           #   tools[] are tool GROUP dir names under tools/.
+  roles:  [researcher]           #   Drives the browse-UI declared-entity chips.
+  tools:  [research]             #   tools[] are tool GROUP dir names under tools/.
+  skills: [lit-review]           #   (No per-pack gate keys off tools[]; trust is
+                                 #    decided once when adding a source.)
 ```
 
 Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with all three array keys present (each may be empty). A `contents.mcp` key is **rejected** — MCP installs are out of scope in the MVP. Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
@@ -189,7 +198,7 @@ All marketplace routes live in `server.ts::handleApiRoute()`. Full request/respo
 | `POST /api/marketplace/sources` | Add a source `{ url, ref? }` (syncs immediately). |
 | `DELETE /api/marketplace/sources/:id` | Remove a source and its cache dir. |
 | `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch). |
-| `GET /api/marketplace/sources/:id/packs` | Browse a source's packs (`hasTools` drives the warning). |
+| `GET /api/marketplace/sources/:id/packs` | Browse a source's packs (`hasTools` reflects whether the pack ships tools; informational only — it no longer drives a per-pack gate). |
 | `POST /api/marketplace/install` | `{ sourceId, dirName, scope, projectId? }` — install a pack. |
 | `POST /api/marketplace/update` | `{ scope, packName, projectId? }` — re-pull + replace. |
 | `DELETE /api/marketplace/installed` | `{ scope, packName, projectId? }` — uninstall. |
@@ -253,7 +262,7 @@ See [docs/design/pack-based-marketplace.md](design/pack-based-marketplace.md) fo
 
 - **MCP and AGENTS are not installable.** `.mcp.json` and AGENTS/CLAUDE.md keep their own loaders and resolve as before; a pack may not ship `mcp/` or AGENTS content. MCP configs reference local binaries, absolute paths, and secrets that mostly won't run on the installer's machine; AGENTS.md describes one specific project. The resolver leaves an `mcp/` loader seam for when a parameterization/secrets model exists.
 - **Per-conflict pinning is deferred.** The only conflict-resolution mechanism is `pack_order` (plus user-pack customization). A future `pack_conflicts` schema is sketched in the design doc but not implemented, surfaced, or tested.
-- **No trust, signing, or sandboxing.** Installing a tool-bearing pack copies executable code as-is; the only safeguard is the "installs executable code" warning. A permission/trust gate would slot into the install pipeline later.
+- **No trust, signing, or sandboxing.** Installing any pack copies its contents as-is — tool packs copy executable code that runs in the Bobbit server process, and role/skill packs copy instructions for an LLM with shell access. The only safeguard is the blanket trust warning shown when adding a source (see the "Why?" disclosure for the per-entity-type threat model). A per-pack permission/signing gate would slot into the install pipeline later.
 - **Git sync is synchronous.** Add-source, re-sync, and install run git inline and block until done.
 - **No hosted registry yet.** Sources are git repos or local dirs; the `MarketplaceSource` abstraction is kept open to a future hosted/searchable registry backend.
 - **Portable workflows and staff templates are not packable.** Workflows stay project-scoped inline in `project.yaml`; staff templates are noted as a gap. UI panels/plugins are the intended future headline entity type — the pack/loader format is designed to accommodate a `panels/` type additively.

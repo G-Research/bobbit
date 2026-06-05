@@ -242,12 +242,6 @@ async function selectConfigProjectScope(page: Page, container: string, projectNa
 	await tab.click();
 }
 
-/** Confirm the "installs executable code" dialog. */
-async function confirmExecWarning(page: Page): Promise<void> {
-	await expect(page.getByText(/installs executable code that runs on your machine/i)).toBeVisible({ timeout: 10_000 });
-	await page.getByRole("button", { name: "Install anyway" }).click();
-}
-
 /** Ordinal of the named config-nav button within the expanded sidebar's nav row. */
 async function navButtonOrder(page: Page): Promise<string[]> {
 	return page.evaluate(() => {
@@ -359,9 +353,8 @@ test.describe("Marketplace UI", () => {
 		await registerSource(page, repo);
 		await selectInstallScopeProject(page, proj.id);
 
-		// The pack ships a tool → executable-code warning dialog appears; confirm.
+		// Install proceeds directly — no per-pack confirm gate.
 		await page.locator('[data-testid="market-browse-pack"][data-pack-name="kit-pack"]').locator('[data-testid="market-install-pack"]').click();
-		await confirmExecWarning(page);
 
 		// Installed card + provenance (the active project is the dedicated one).
 		await goToTab(page, "installed");
@@ -557,23 +550,39 @@ test.describe("Marketplace UI", () => {
 		await expect(page.locator(".role-row").filter({ hasText: "upd-role" })).toHaveCount(0, { timeout: 15_000 });
 	});
 
-	// §12.3 #8 — tool-bearing packs show the executable-code warning before
-	// install. Cancels — nothing is installed — so no scope is needed.
-	test("tool-bearing pack shows executable-code warning before install", async ({ page }) => {
-		const repo = makeRepo();
-		writePack(repo, { name: "warn-pack", tools: [{ group: "warngroup", name: "warn-tool" }] });
-
+	// Source-level trust warning lives in the Add-source panel: it is always
+	// visible, the "Why?" disclosure is collapsed by default, expands on click to
+	// reveal the per-entity-type risk explanations, and survives a reload. There
+	// is no longer a per-pack executable-code gate — install proceeds directly.
+	test("source panel shows blanket trust warning with collapsible Why disclosure", async ({ page }) => {
 		await openMarket(page);
-		await registerSource(page, repo);
 
-		const card = page.locator('[data-testid="market-browse-pack"][data-pack-name="warn-pack"]');
-		await expect(card.locator(".market-exec-warning")).toBeVisible({ timeout: 15_000 });
+		const warning = page.locator('[data-testid="market-trust-warning"]');
+		await expect(warning).toBeVisible({ timeout: 15_000 });
+		await expect(warning).toContainText(/only add sources you trust/i);
 
-		await card.locator('[data-testid="market-install-pack"]').click();
-		await expect(page.getByText(/installs executable code that runs on your machine/i)).toBeVisible({ timeout: 10_000 });
-		// Cancel — nothing installed.
-		await page.getByRole("button", { name: "Cancel" }).click();
-		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="warn-pack"]')).toHaveCount(0);
+		// "Why?" disclosure is collapsed by default — body not visible.
+		const why = page.locator('[data-testid="market-trust-why"]');
+		await expect(why).toBeVisible();
+		await expect(why).not.toHaveAttribute("open", /.*/);
+		const body = why.locator(".market-trust-why-body");
+		await expect(body).toBeHidden();
+
+		// Expand → per-entity explanations become visible.
+		await why.locator("summary").click();
+		await expect(why).toHaveAttribute("open", /.*/);
+		await expect(body).toBeVisible();
+		await expect(body).toContainText(/Tools/);
+		await expect(body).toContainText(/Skills/);
+		await expect(body).toContainText(/Roles/);
+		await expect(body).toContainText(/runs directly in the Bobbit server process/i);
+
+		// Warning persists across reload.
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await navigateToHash(page, "#/market");
+		await goToTab(page, "sources");
+		await expect(page.locator('[data-testid="market-trust-warning"]')).toBeVisible({ timeout: 15_000 });
 	});
 
 	// §12.3 #9 — same-name conflict warning + reorder flips the winner.
