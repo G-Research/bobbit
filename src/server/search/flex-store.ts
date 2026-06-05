@@ -431,9 +431,28 @@ export class FlexSearchStore {
 	async writeMeta(meta: MetaRow): Promise<void> {
 		const final = path.join(this.dataDir, META_FILE);
 		const tmp = `${final}.tmp`;
-		await fs.promises.mkdir(this.dataDir, { recursive: true });
-		await fs.promises.writeFile(tmp, JSON.stringify(writeMetaRow(meta)), "utf-8");
-		await fs.promises.rename(tmp, final);
+		try {
+			await fs.promises.mkdir(this.dataDir, { recursive: true });
+			await fs.promises.writeFile(tmp, JSON.stringify(writeMetaRow(meta)), "utf-8");
+			await fs.promises.rename(tmp, final);
+		} catch (err) {
+			if (this._isBenignTeardownError(err)) return;
+			throw err;
+		}
+	}
+
+	/**
+	 * True when a filesystem write failed because the target dir was removed
+	 * concurrently AND this store is already closed — i.e. a flush lost the
+	 * race against teardown removing the temp `.bobbit` state dir. ENOENT is
+	 * the POSIX symptom; Windows can surface EPERM/EBUSY against a vanishing
+	 * directory. Only benign once `_closed === true`; genuine open-store
+	 * write failures must still surface.
+	 */
+	private _isBenignTeardownError(err: unknown): boolean {
+		if (!this._closed) return false;
+		const code = (err as NodeJS.ErrnoException)?.code;
+		return code === "ENOENT" || code === "EPERM" || code === "EBUSY";
 	}
 
 	/** Passthrough no-op. Kept for SearchService.compact() compatibility. */
@@ -465,6 +484,10 @@ export class FlexSearchStore {
 		if (this._saveTimer) return;
 		this._saveTimer = setTimeout(() => {
 			this._saveTimer = null;
+			// Re-check `_closed`: the timer was scheduled while open, but
+			// `close()` may have run (and torn the dir down) before it fired.
+			// The unref()'d timer can still fire during teardown.
+			if (this._closed) return;
 			void this._flushNow().catch((err) =>
 				console.error("[search] flex persistence failed:", err),
 			);
@@ -495,6 +518,18 @@ export class FlexSearchStore {
 	}
 
 	private async __doFlush(): Promise<void> {
+		try {
+			await this.__doFlushUnsafe();
+		} catch (err) {
+			// If we're already closed and the failure is the temp dir being
+			// removed underneath us (teardown race), swallow silently — the
+			// data we were flushing is about to be deleted anyway.
+			if (this._isBenignTeardownError(err)) return;
+			throw err;
+		}
+	}
+
+	private async __doFlushUnsafe(): Promise<void> {
 		const dir = path.join(this.dataDir, INDEX_SUBDIR);
 		await fs.promises.mkdir(dir, { recursive: true });
 		const written: string[] = [];

@@ -340,19 +340,22 @@ export class ProjectContextManager {
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
-  /** Close all contexts on shutdown. */
-  closeAll(): void {
-    for (const ctx of this.contexts.values()) {
-      ctx.close();
-    }
+  /** Close all contexts on shutdown. Awaits every context's async close so
+   *  the caller (server shutdown / test teardown) can safely remove the temp
+   *  state dir only after all pending search flushes have settled. */
+  async closeAll(): Promise<void> {
+    await Promise.allSettled([...this.contexts.values()].map((ctx) => ctx.close()));
     this.contexts.clear();
   }
 
-  /** Remove a context when a project is unregistered. */
+  /** Remove a context when a project is unregistered. Runs during normal
+   *  operation (not teardown), so the async close is fire-and-forget — but we
+   *  swallow any rejection so the now-`Promise`-returning close can't surface
+   *  an unhandled rejection. */
   remove(projectId: string): void {
     const ctx = this.contexts.get(projectId);
     if (ctx) {
-      ctx.close();
+      void ctx.close().catch((err) => console.warn("[pcm] context close failed:", err));
       this.contexts.delete(projectId);
     }
   }
