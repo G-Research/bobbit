@@ -679,6 +679,15 @@ export class ToolMessage extends LitElement {
 		}
 		const sessionIdCtx = appState.remoteAgent?.gatewaySessionId;
 		const getAskResponseAnswers = appState.remoteAgent?.findAskResponseAnswers?.bind(appState.remoteAgent);
+		// Thread current session's goalId so renderers (e.g. goal_plan_propose's
+		// approval flow) can target the right goal. Looked up via the session
+		// record (single source of truth) rather than tracked on remote-agent.
+		let goalIdCtx: string | undefined;
+		if (sessionIdCtx) {
+			const rec = appState.gatewaySessions.find((s: any) => s.id === sessionIdCtx)
+				?? appState.archivedSessions.find((s: any) => s.id === sessionIdCtx);
+			goalIdCtx = (rec as any)?.goalId || (rec as any)?.teamGoalId || undefined;
+		}
 		const renderResult = renderTool(
 			toolName,
 			this.toolCall.arguments,
@@ -688,6 +697,7 @@ export class ToolMessage extends LitElement {
 				toolUseId: this.toolCall.id,
 				toolCallInput: (this.toolCall as any).input,
 				sessionId: sessionIdCtx,
+				goalId: goalIdCtx,
 				getAskResponseAnswers,
 			},
 		);

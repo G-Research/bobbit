@@ -50,6 +50,8 @@ export type Action =
 	| { type: "compaction-placeholder"; message: any }
 	| { type: "compaction-result"; message: any; success: boolean; toolResult?: any }
 	| { type: "system-notification"; message: any }
+	| { type: "mutation-pending"; message: any }
+	| { type: "mutation-update"; messageId: string; patch: Record<string, unknown> }
 	| { type: "error"; message: any }
 	| { type: "deny-permission-filter"; messageId: string }
 	| { type: "replace-messages"; messages: any[] }
@@ -658,6 +660,40 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				nextTick: tick + 1,
 				highestSeq: state.highestSeq,
 			};
+		}
+
+		case "mutation-pending": {
+			// Phase 5b: identical to system-notification — append a synthetic
+			// row for the mutation-pending chat card. Dedupe by `requestId`:
+			// a duplicate WS event for the same requestId should not produce
+			// a second card.
+			const incoming = action.message;
+			const reqId = incoming?.requestId;
+			if (reqId) {
+				const exists = state.messages.some((m: any) => m?.role === "mutation-pending" && m?.requestId === reqId);
+				if (exists) return state;
+			}
+			const tick = state.nextTick;
+			const order = state.highestSeq + 0.5;
+			const messages = [
+				...state.messages,
+				stamp(action.message, "synthetic", order, tick),
+			];
+			return {
+				messages: sortMessages(messages),
+				nextTick: tick + 1,
+				highestSeq: state.highestSeq,
+			};
+		}
+
+		case "mutation-update": {
+			// Patch an existing mutation-pending row in place (e.g. to flip
+			// `decided: "approved"` after the WS `mutation_decided` arrives).
+			const messages = state.messages.map((m: any) => {
+				if (m?.id === action.messageId) return { ...m, ...action.patch };
+				return m;
+			});
+			return { ...state, messages };
 		}
 
 		case "error": {

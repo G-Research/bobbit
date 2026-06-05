@@ -23,6 +23,17 @@ import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } fro
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 export { errorFromResponse, errorDetails };
+// Static import of dialogs creates a cycle (dialogs.ts imports from api.ts),
+// but neither module references the other at module-init time, so ESM's
+// live-binding semantics resolve it correctly at runtime.
+import {
+	confirmAction,
+	countDescendants,
+	showArchiveGoalDialog,
+	showPauseGoalDialog,
+	showResumeGoalDialog,
+	showStopTeamDialog,
+} from "./dialogs.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -428,6 +439,10 @@ export async function refreshSessions(): Promise<void> {
 				for (const g of incoming) {
 					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
 						expandedGoals.add(g.id);
+						// Also expand the parent so this goal's own row is visible in the
+						// sidebar (child rows only render when the parent is expanded).
+						const parentId = (g as { parentGoalId?: string }).parentGoalId;
+						if (parentId) expandedGoals.add(parentId);
 						saveExpandedGoals();
 					}
 				}
@@ -783,7 +798,6 @@ export async function registerProject(name: string, rootPath: string, color?: st
     return await res.json();
   } catch (err) {
     if (err instanceof SymlinkRootError) throw err;
-    const { showConnectionError } = await import("./dialogs.js");
     const msg = err instanceof Error ? err.message : String(err);
     const code = err && typeof err === "object" ? (err as any).code : undefined;
     const stack = err instanceof Error ? err.stack : undefined;
@@ -801,7 +815,6 @@ export async function updateProject(id: string, updates: { name?: string; color?
     if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return await res.json();
   } catch (err) {
-    const { showConnectionError } = await import("./dialogs.js");
     const { message, code, stack } = errorDetails(err);
     showConnectionError("Failed to update project", message, { code, stack });
     return null;
@@ -814,7 +827,6 @@ export async function removeProject(id: string): Promise<boolean> {
     if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return true;
   } catch (err) {
-    const { showConnectionError } = await import("./dialogs.js");
     const { message, code, stack } = errorDetails(err);
     showConnectionError("Failed to remove project", message, { code, stack });
     return false;
@@ -857,7 +869,6 @@ export async function promoteProject(id: string, name?: string): Promise<Project
     if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return await res.json();
   } catch (err) {
-    const { showConnectionError } = await import("./dialogs.js");
     const { message, code, stack } = errorDetails(err);
     showConnectionError("Failed to promote project", message, { code, stack });
     return null;
@@ -1264,8 +1275,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; parentGoalId?: string }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, parentGoalId } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -1274,6 +1285,13 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		if (projectId) body.projectId = projectId;
 		if (enabledOptionalSteps?.length) body.enabledOptionalSteps = enabledOptionalSteps;
 		if (autoStartTeam !== undefined) body.autoStartTeam = autoStartTeam;
+		if (workflow !== undefined) body.workflow = workflow;
+		if (inlineRoles !== undefined && inlineRoles !== null && Object.keys(inlineRoles).length > 0) {
+			body.inlineRoles = inlineRoles;
+		}
+		if (subgoalsAllowed !== undefined) body.subgoalsAllowed = subgoalsAllowed;
+		if (maxNestingDepth !== undefined) body.maxNestingDepth = maxNestingDepth;
+		if (parentGoalId) body.parentGoalId = parentGoalId;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -1308,12 +1326,12 @@ export async function updateGoal(id: string, updates: Partial<Pick<Goal, "title"
 }
 
 export async function deleteGoal(id: string): Promise<void> {
-	const { confirmAction } = await import("./dialogs.js");
 	const goal = state.goals.find((g) => g.id === id);
-	const goalTitle = goal?.title || "this goal";
+	if (!goal) return;
+	const goalTitle = goal.title || "this goal";
 	const sessionsUnderGoal = state.gatewaySessions.filter((s) => s.goalId === id);
 
-	// Detect active team for this goal (mirror of heuristic in render-helpers.ts).
+	// Detect active team (mirror of render-helpers heuristic).
 	const isTeamGoal = !!(goal as any)?.team;
 	const teamActive = isTeamGoal && state.gatewaySessions.some(
 		(s) => (s.goalId === id || s.teamGoalId === id)
@@ -1321,6 +1339,30 @@ export async function deleteGoal(id: string): Promise<void> {
 			&& s.status !== "terminated",
 	);
 
+	// descendants > 0 routes through cascade-confirm dialog; else single-goal confirm.
+	const descendants = countDescendants(id);
+
+	if (descendants > 0) {
+		// Show the cascade-archive confirmation dialog first. The server's
+		// archiveOne handles team teardown inside the cascade after the user
+		// confirms — we must NOT pre-tear down before confirmation (destructive,
+		// non-undoable). The cascade-confirm dialog handles teams itself.
+		const result = await showArchiveGoalDialog(goal);
+		if (result.archived > 0) {
+			// Eager local archive flip avoids a flash-of-live-goals.
+			// Skip when partial errors occurred — the server may not have
+			// archived all descendants, so refreshSessions() is authoritative.
+			if (!result.hasErrors) {
+				const allIds = collectGoalIdsFor(id);
+				eagerMarkArchived(allIds);
+			}
+			setHashRoute("landing");
+			await refreshSessions();
+		}
+		return;
+	}
+
+	// Single-goal path — wording adapts to active-team state.
 	const title = teamActive ? "Stop team and archive goal?" : "Archive Goal";
 	let body = teamActive
 		? `The team will be stopped and "${goalTitle}" will be archived.`
@@ -1329,23 +1371,83 @@ export async function deleteGoal(id: string): Promise<void> {
 		body += ` Its ${sessionsUnderGoal.length} session(s) will become ungrouped.`;
 	}
 	const confirmLabel = teamActive ? "Stop & Archive" : "Archive";
-
 	const confirmed = await confirmAction(title, body, confirmLabel, teamActive);
 	if (!confirmed) return;
 
 	if (teamActive) {
 		const ok = await teardownTeam(id);
-		if (!ok) return; // teardownTeam already surfaced an error toast.
+		if (!ok) return;
 	}
 
 	try {
-		const res = await gatewayFetch(`/api/goals/${id}`, { method: "DELETE" });
+		const res = await gatewayFetch(`/api/goals/${id}?cascade=false`, { method: "DELETE" });
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
+		eagerMarkArchived([id]);
 		setHashRoute("landing");
 		await refreshSessions();
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to archive goal", message, { code, stack });
+	}
+}
+
+/** Collect a goal + all its non-archived descendants from client state. */
+function collectGoalIdsFor(rootId: string): string[] {
+	// Walk THROUGH archived nodes (mirroring countDescendants walk-through
+	// semantics) so live descendants under archived intermediates are included
+	// in the eager-archive flip. Only collect non-archived IDs since already-
+	// archived goals need no flip.
+	const out = [rootId];
+	const queue = [rootId];
+	const seen = new Set<string>([rootId]);
+	while (queue.length > 0) {
+		const cur = queue.shift()!;
+		for (const g of state.goals) {
+			if (g.parentGoalId !== cur || seen.has(g.id)) continue;
+			seen.add(g.id);
+			if (!g.archived) out.push(g.id); // only collect non-archived
+			queue.push(g.id); // always descend through archived
+		}
+	}
+	return out;
+}
+
+/**
+ * Mutate `state.goals` to flip `archived: true` (and stamp `archivedAt`) for
+ * the given ids. Safe to call before `refreshSessions()` returns — the next
+ * fetch will replace the goal list anyway, but this gives the sidebar an
+ * instant visual update instead of waiting for the network round-trip.
+ */
+function eagerMarkArchived(ids: string[]): void {
+	const idSet = new Set(ids);
+	const now = Date.now();
+	for (const g of state.goals) {
+		if (idSet.has(g.id) && !g.archived) {
+			g.archived = true;
+			(g as Goal).archivedAt = now;
+		}
+	}
+}
+
+/** Pause a goal with cascade-confirm UX. */
+export async function pauseGoalWithDialog(id: string): Promise<void> {
+	const goal = state.goals.find((g) => g.id === id);
+	if (!goal) return;
+	const descendants = countDescendants(id);
+	const result = await showPauseGoalDialog(goal, descendants);
+	if (result.paused > 0) {
+		await refreshSessions();
+	}
+}
+
+/** Resume a goal with cascade-confirm UX. */
+export async function resumeGoalWithDialog(id: string): Promise<void> {
+	const goal = state.goals.find((g) => g.id === id);
+	if (!goal) return;
+	const descendants = countDescendants(id);
+	const result = await showResumeGoalDialog(goal, descendants);
+	if (result.resumed > 0) {
+		await refreshSessions();
 	}
 }
 
@@ -1403,17 +1505,81 @@ export async function completeTeam(goalId: string): Promise<boolean> {
 	}
 }
 
-export async function teardownTeam(goalId: string): Promise<boolean> {
+/**
+ * Tear down a goal's team. When the goal has live descendant teams, the
+ * server returns 409 HAS_DESCENDANT_TEAMS — the dialog wrapper below
+ * (`teardownTeamWithDialog`) handles that case by prompting the user to
+ * cascade. Direct callers that already know there are no descendants (or
+ * accept the failure mode) can use this raw helper.
+ */
+export async function teardownTeam(goalId: string, cascade = false): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/teardown`, {
-			method: "POST",
-		});
+		// Server requires explicit `cascade` (returns 422 CASCADE_REQUIRED when
+		// omitted). Always send the value, even when false, to honour the
+		// AGENTS.md "every cascade-affecting REST call requires explicit cascade"
+		// contract.
+		const url = `/api/goals/${goalId}/team/teardown?cascade=${cascade ? "true" : "false"}`;
+		const res = await gatewayFetch(url, { method: "POST" });
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		await refreshSessions();
 		return true;
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to tear down team", message, { code, stack });
+		return false;
+	}
+}
+
+/**
+ * Tear down with cascade-confirmation dialog when descendants are present.
+ * Pre-flight: try cascade=false. On 409 HAS_DESCENDANT_TEAMS, show the
+ * confirmation dialog with the descendant list + count and let the user
+ * choose. On any other status the no-cascade path completes immediately.
+ *
+ * Returns true if the teardown completed (with or without cascade), false
+ * on cancel or network error.
+ */
+export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
+	try {
+		// Explicit cascade=false on the probe — server returns 422
+		// CASCADE_REQUIRED otherwise. See AGENTS.md.
+		const probe = await gatewayFetch(`/api/goals/${goalId}/team/teardown?cascade=false`, { method: "POST" });
+		if (probe.ok) {
+			await refreshSessions();
+			return true;
+		}
+		if (probe.status === 409) {
+			const body = await probe.json().catch(() => null) as { code?: string; count?: number; descendants?: Array<{ id: string; title: string }> } | null;
+			if (body?.code === "HAS_DESCENDANT_TEAMS") {
+				// R-024 + R-040: the descendant-count-zero short-circuit lives
+				// here so the dialog only ever returns "cascade" | "cancel".
+				// In practice the 409 path always implies count > 0, but we
+				// still treat a defensive 0-count response as a no-op success.
+				if ((body.count ?? 0) === 0) {
+					await refreshSessions();
+					return true;
+				}
+				// R-041: resolve the goal title from live client state. The
+				// historical `window.__goalCache` fallback is gone — if the
+				// goal isn't in state yet we use the raw goalId as the title.
+				const liveGoal = state.goals.find(g => g.id === goalId);
+				const goal = liveGoal
+					? { id: liveGoal.id, title: liveGoal.title }
+					: { id: goalId, title: goalId };
+				const decision = await showStopTeamDialog(goal, body.count ?? 0, body.descendants ?? []);
+				if (decision === "cancel") return false;
+				if (decision === "cascade") {
+					const r = await gatewayFetch(`/api/goals/${goalId}/team/teardown?cascade=true`, { method: "POST" });
+					if (!r.ok) throw new Error(`Failed: ${r.status}`);
+					await refreshSessions();
+					return true;
+				}
+				return false;
+			}
+		}
+		throw new Error(`Failed: ${probe.status}`);
+	} catch (err) {
+		showConnectionError("Failed to tear down team", err instanceof Error ? err.message : String(err));
 		return false;
 	}
 }
@@ -2010,11 +2176,27 @@ export async function createRole(role: {
 	promptTemplate: string;
 	toolPolicies?: Record<string, string>;
 	accessory: string;
+	model?: string;
+	thinkingLevel?: string;
+	description?: string;
 }): Promise<RoleData | null> {
 	try {
+		// Strip undefined fields so the wire payload stays minimal and the
+		// server's optional-string validation (model, thinkingLevel) doesn't
+		// see empty strings as "set".
+		const body: Record<string, unknown> = {
+			name: role.name,
+			label: role.label,
+			promptTemplate: role.promptTemplate,
+			accessory: role.accessory,
+		};
+		if (role.toolPolicies !== undefined) body.toolPolicies = role.toolPolicies;
+		if (role.model !== undefined && role.model !== "") body.model = role.model;
+		if (role.thinkingLevel !== undefined && role.thinkingLevel !== "") body.thinkingLevel = role.thinkingLevel;
+		if (role.description !== undefined && role.description !== "") body.description = role.description;
 		const res = await gatewayFetch("/api/roles", {
 			method: "POST",
-			body: JSON.stringify(role),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return await res.json();
@@ -2216,6 +2398,38 @@ export async function deleteDraftFromServer(sessionId: string, type: string): Pr
 		});
 	} catch (err) {
 		console.error("[draft-api] Failed to delete draft:", err);
+	}
+}
+
+/**
+ * Tell the proposing agent that the user just accepted (or rejected) its
+ * proposal. Enqueues a synthetic user-style message to the session via
+ * POST /api/sessions/:id/notify. Fire-and-forget — never throws, never
+ * blocks the accept flow on the network call.
+ *
+ * `summary` should be a one-line human-readable identifier of what was
+ * accepted (e.g. role name, project name, goal title) so the agent can
+ * mention it back specifically. The message wording is normalised here
+ * so all five accept paths produce identical UX.
+ */
+export async function notifyProposalDecision(
+	sessionId: string,
+	type: "goal" | "project" | "role" | "tool" | "staff",
+	decision: "accepted" | "rejected",
+	summary: string,
+): Promise<void> {
+	const verb = decision === "accepted" ? "accepted" : "rejected";
+	const message = `[SYSTEM: The user ${verb} your ${type} proposal${summary ? ` "${summary}"` : ""}. ${decision === "accepted" ? "The change is now live in the project — continue with your task." : "Adjust your approach and propose again, or pick a different path."}]`;
+	try {
+		await gatewayFetch(`/api/sessions/${sessionId}/notify`, {
+			method: "POST",
+			body: JSON.stringify({ message }),
+		});
+	} catch (err) {
+		// Never let a notification failure block the accept flow — the user
+		// has already taken the action successfully and the network failure
+		// is a separate concern.
+		console.warn("[proposal-notify] Failed to notify proposing session:", err);
 	}
 }
 

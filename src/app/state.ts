@@ -84,7 +84,7 @@ export interface GatewaySession {
 	consecutiveErrorTurns?: number;
 }
 
-export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
+export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
 export interface Goal {
 	id: string;
@@ -109,6 +109,22 @@ export interface Goal {
 	reattemptOf?: string;
 	/** Whether team agents should run in Docker sandbox */
 	sandboxed?: boolean;
+	/** Nested-goals fields (Phase 1 data model). All optional; lazy-migrated. */
+	parentGoalId?: string;
+	rootGoalId?: string;
+	mergeTarget?: "master" | "parent";
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren?: number;
+	acceptanceCriteria?: string[];
+	spawnedFromPlanId?: string;
+	/** Sibling planIds this child depends on (Phase 5 — explicit DAG). */
+	dependsOnPlanIds?: string[];
+	/** Set on goal_spawn_child to the spawning team-lead session id. Used
+	 *  by the sidebar to nest sub-goals under their spawning session so
+	 *  collapsing the team-lead also hides the sub-goals it owns. */
+	spawnedBySessionId?: string;
+	paused?: boolean;
+	replanCount?: number;
 	workflow?: {
 		id: string;
 		name: string;
@@ -786,6 +802,7 @@ export const GOAL_STATE_LABELS: Record<GoalState, string> = {
 	"in-progress": "In Progress",
 	"complete": "Complete",
 	"shelved": "Shelved",
+	"blocked": "Blocked",
 };
 
 // ============================================================================
@@ -809,7 +826,10 @@ export function getSidebarData(): SidebarData {
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !s.parentSessionId && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
+	// Exclude staff sessions even before state.staffList loads by also checking
+	// assistantType. Without this, a race between fetchStaff() and initial render
+	// shows staff sessions in the Sessions bucket until the staff list arrives.
+	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !s.parentSessionId && !staffSessionIds.has(s.id) && (s as any).assistantType !== "staff").sort((a, b) => a.createdAt - b.createdAt);
 	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
 	const liveGoals = sortedGoals.filter(g => !g.archived);
 	const archivedGoals = sortedGoals.filter(g => g.archived);
