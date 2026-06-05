@@ -50,17 +50,42 @@ export class ActivateSkillRenderer
 		const exp = result?.details?.skillExpansion;
 		if (!exp) {
 			const label = name ? `Activating /${name}${args ? ` ${args}` : ""}\u2026` : "Activating skill\u2026";
-			if (result?.isError) {
-				const errText =
-					result.content
-						?.filter((c) => c.type === "text")
-						.map((c: any) => c.text)
-						.join("\n") || "Failed to activate skill";
+
+			// A completed result with no `skillExpansion` is a failed activation.
+			// We must NOT gate the error display on `result.isError`: pi's
+			// agent-loop hardcodes `isError: false` for any tool whose `execute()`
+			// *returns* (rather than throws), so the extension's `{ isError: true }`
+			// is dropped before it reaches this renderer
+			// (see executePreparedToolCall in @earendil-works/pi-agent-core).
+			// Surface whatever text the result carries (`activate_skill failed: …`)
+			// as a visible error state regardless of the flag.
+			const errText =
+				result?.content
+					?.filter((c) => c.type === "text")
+					.map((c: any) => c.text)
+					.join("\n")
+					.trim() || "";
+			if (result && errText) {
 				return {
 					content: html`
 						<div class="space-y-2">
-							${renderHeader(state, Sparkles, name ? `/${name}` : "activate_skill")}
+							${renderHeader("error", Sparkles, name ? `/${name}` : "activate_skill")}
 							<div class="text-sm text-destructive">${errText}</div>
+						</div>
+					`,
+					isCustom: false,
+				};
+			}
+
+			// A completed result that carried `isError` but no text content still
+			// renders as an error; only a genuinely empty/streaming result falls
+			// through to the benign "Activating…" header.
+			if (result?.isError) {
+				return {
+					content: html`
+						<div class="space-y-2">
+							${renderHeader("error", Sparkles, name ? `/${name}` : "activate_skill")}
+							<div class="text-sm text-destructive">Failed to activate skill</div>
 						</div>
 					`,
 					isCustom: false,
