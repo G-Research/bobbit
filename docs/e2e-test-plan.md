@@ -101,7 +101,7 @@ Resolved or reduced:
 Remaining risk:
 
 - The final margin is 7s. This meets the target, but future test additions should prefer API/UI-fixture coverage or folded browser setup before adding new spawned-gateway journeys.
-- Search index `ENOENT`/corrupt-index log noise has appeared in some runs without failing final exact commands. Treat new failures from this class as harness/filesystem contention until proven otherwise.
+- ~~Search index `ENOENT`/corrupt-index log noise has appeared in some runs without failing final exact commands. Treat new failures from this class as harness/filesystem contention until proven otherwise.~~ **Superseded (goal "Stabilize flaky E2E suite").** The search flush-on-close path is now fully awaitable and the empty-tag export/import round-trip is fixed, so this noise no longer appears in a clean run. A fresh `[search] flex flush error: ENOENT … __docs__.json.tmp` or `Skipping corrupt index file 1.tag.json` is now a **teardown-ordering / round-trip regression**, not generic contention — debug it per [docs/debugging.md](debugging.md#search-flex-flush-error-enoent--__docs__jsontmp-spew-esp-during-e2e-teardown) and [docs/internals.md — Close & teardown ordering](internals.md#close--teardown-ordering).
 
 ## Coverage and story audit
 
