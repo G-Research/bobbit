@@ -201,8 +201,16 @@ async function reopenMarketAfterReload(page: Page, projectId: string): Promise<v
 /** Register a local-dir source by absolute path; resolves only once its packs
  *  are actually browsable (poll for at least one pack card). */
 async function registerSource(page: Page, repoPath: string): Promise<void> {
-	await page.locator('[data-testid="market-source-url"]').fill(repoPath);
-	await page.locator('[data-testid="market-add-source"]').click();
+	const urlInput = page.locator('[data-testid="market-source-url"]');
+	const addSourceBtn = page.locator('[data-testid="market-add-source"]');
+	// fill() dispatches the input event, but the Add button is disabled until the
+	// component's reactive state catches up. Under load that render can lag the
+	// click, leaving the button disabled → 30s click timeout. Synchronize on the
+	// real precondition (button enabled) instead of clicking optimistically.
+	await urlInput.fill(repoPath);
+	await expect(urlInput).toHaveValue(repoPath);
+	await expect(addSourceBtn).toBeEnabled({ timeout: 15_000 });
+	await addSourceBtn.click();
 	// The source row must appear...
 	await expect(page.locator('[data-testid="market-source-row"]').first()).toBeVisible({ timeout: 15_000 });
 	// ...and handleAddSource auto-browses it → poll until the pack cards render

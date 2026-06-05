@@ -28,8 +28,17 @@
 import { test, expect } from "../gateway-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { apiFetch, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch, deleteSession, nonGitCwd } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
+
+// The gateway-harness is worker-scoped, so projects created here persist across
+// specs running on the same worker unless we delete them. Leaking a second
+// project makes later single-project specs (e.g. goal-accept-failure-keeps-
+// assistant) hit an unexpected "Select a project" dialog on New Goal, which
+// blocks POST /api/sessions and times out. Track and tear down everything we
+// create so the worker returns to a single "default" project after each test.
+const _createdProjectIds: string[] = [];
+const _createdSessionIds: string[] = [];
 
 const TEXT_FILE = "notes.txt";
 const TEXT_MARKER = "AT_MENTION_E2E_TEXT_MARKER_BODY";
@@ -76,6 +85,7 @@ async function openSession(page: import("@playwright/test").Page, cwd: string): 
 	});
 	expect(projResp.status).toBe(201);
 	const proj = await projResp.json();
+	_createdProjectIds.push(proj.id);
 
 	const created = await apiFetch("/api/sessions", {
 		method: "POST",
@@ -84,6 +94,7 @@ async function openSession(page: import("@playwright/test").Page, cwd: string): 
 	expect(created.status).toBe(201);
 	const { id: sessionId } = await created.json();
 	expect(sessionId).toBeTruthy();
+	_createdSessionIds.push(sessionId);
 
 	await openApp(page);
 	await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
@@ -92,6 +103,23 @@ async function openSession(page: import("@playwright/test").Page, cwd: string): 
 }
 
 test.describe("@-mention file references UI", () => {
+	// Delete the per-test session + project so they never leak into a later
+	// single-project spec on the same (worker-scoped) gateway.
+	test.afterEach(async () => {
+		for (const id of _createdSessionIds.splice(0)) await deleteSession(id).catch(() => {});
+		for (const id of _createdProjectIds.splice(0)) {
+			await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
+	test.afterAll(async () => {
+		// Belt-and-braces: ensure the worker is back to exactly one project.
+		for (const id of _createdSessionIds.splice(0)) await deleteSession(id).catch(() => {});
+		for (const id of _createdProjectIds.splice(0)) {
+			await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("typing @ shows menu, filters, ↑/↓ navigate, Enter inserts @<path>", async ({ page }) => {
 		const cwd = uniqueCwd();
 		writeFixtures(cwd);

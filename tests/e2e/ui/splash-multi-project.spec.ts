@@ -15,7 +15,18 @@ function uniqueDir(tag: string): string {
 	return dir;
 }
 
+// The gateway-harness is worker-scoped: any extra project registered here
+// persists into later specs on the same worker and can trip single-project
+// flows (unexpected project pickers). Track and delete them after each test.
+const _createdProjectIds: string[] = [];
+
 test.describe("Splash screen — ≥2 projects", () => {
+	test.afterEach(async () => {
+		for (const id of _createdProjectIds.splice(0)) {
+			await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("clicking 'New Session' opens project picker; selecting a project creates a session bound to it", async ({ page }) => {
 		await openApp(page);
 
@@ -27,6 +38,7 @@ test.describe("Splash screen — ≥2 projects", () => {
 			body: JSON.stringify({ name: "second-project", rootPath: dir, upsert: true }),
 		});
 		expect(resp.ok).toBeTruthy();
+		_createdProjectIds.push((await resp.json()).id);
 
 		await page.reload();
 		await expect(
@@ -50,10 +62,12 @@ test.describe("Splash screen — ≥2 projects", () => {
 	test("picker closes on Escape", async ({ page }) => {
 		await openApp(page);
 		const dir = uniqueDir("p3");
-		await apiFetch("/api/projects", {
+		const resp = await apiFetch("/api/projects", {
 			method: "POST",
 			body: JSON.stringify({ name: "third-project", rootPath: dir, upsert: true }),
 		});
+		expect(resp.ok).toBeTruthy();
+		_createdProjectIds.push((await resp.json()).id);
 		await page.reload();
 		const splashLabel = page.locator('[data-testid="splash-new-session-label"]').first();
 		await expect(splashLabel).toBeVisible({ timeout: 10_000 });
