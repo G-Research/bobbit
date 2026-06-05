@@ -13,29 +13,48 @@ import {
 	apiFetch,
 	createSession,
 	connectWs,
-	agentEndPredicate,
 	type WsMsg,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
+const OPUS_48 = "claude-opus-4-8";
+const FALLBACK_MODEL_IDS = new Set(["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4"]);
+
+function stateModelId(message: WsMsg): string | undefined {
+	return message.type === "state" ? (message.data as any)?.model?.id : undefined;
+}
+
+function expectNoFallbackBeforeOpus48(messages: WsMsg[], context: string) {
+	const badBeforeTarget: string[] = [];
+	let sawTarget = false;
+	for (const message of messages) {
+		const id = stateModelId(message);
+		if (!id) continue;
+		if (id === OPUS_48) {
+			sawTarget = true;
+			break;
+		}
+		if (FALLBACK_MODEL_IDS.has(id)) badBeforeTarget.push(id);
+	}
+	expect(sawTarget, `${context}: expected first authoritative Opus 4.8 state; got states ${JSON.stringify(messages.filter(m => m.type === "state").map(m => m.data))}`).toBe(true);
+	expect(badBeforeTarget, `${context}: older Opus fallback state must not appear before ${OPUS_48}`).toEqual([]);
+}
+
 test.describe("archived session footer model", () => {
-	test("initial connect to archived session pushes persisted model in state frame", async () => {
+	test("initial connect to archived Opus 4.8 session pushes persisted model without fallback flash", async () => {
 		// 1. Create a fresh session
 		const sessionId = await createSession();
 
-		// 2. Connect, set a non-default model, send a prompt to trigger persistence
+		// 2. Connect, select Opus 4.8, and wait for persistence.
 		const ws1 = await connectWs(sessionId);
-		ws1.send({ type: "set_model", provider: "anthropic", modelId: "claude-sonnet-4-20250514" });
-		ws1.send({ type: "prompt", text: "hello" });
-		await ws1.waitFor(agentEndPredicate(), 10_000);
+		ws1.send({ type: "set_model", provider: "anthropic", modelId: OPUS_48 });
 
-		// Wait for model + persistence
 		await pollUntil(async () => {
 			const resp = await apiFetch(`/api/sessions/${sessionId}`);
 			if (!resp.ok) return false;
 			const data = await resp.json();
-			return data.modelProvider === "anthropic" && data.modelId === "claude-sonnet-4-20250514";
-		}, { timeoutMs: 5_000, intervalMs: 50, label: "model persisted" });
+			return data.modelProvider === "anthropic" && data.modelId === OPUS_48;
+		}, { timeoutMs: 5_000, intervalMs: 50, label: "Opus 4.8 model persisted" });
 
 		const closed1 = new Promise<void>(r => ws1.ws.once("close", () => r()));
 		ws1.close();
@@ -63,22 +82,23 @@ test.describe("archived session footer model", () => {
 			(m: WsMsg) => {
 				if (m.type !== "state") return false;
 				const model = (m.data as any)?.model;
-				return model?.provider === "anthropic" && model?.id === "claude-sonnet-4-20250514";
+				return model?.provider === "anthropic" && model?.id === OPUS_48;
 			},
 			5_000,
 		).catch(() => {});
 
 		const stateMessages = ws2.messages.filter((m: WsMsg) => m.type === "state");
 		const archivedStates = stateMessages.filter((m: WsMsg) => (m.data as any)?.archived === true);
+		expectNoFallbackBeforeOpus48(stateMessages, "archived initial connect");
 
-		// 7. There MUST be at least one state frame, and it MUST carry the model
+		// 7. There MUST be at least one archived state frame, and it MUST carry the model.
 		const hasArchivedModelFrame = archivedStates.some((m: WsMsg) => {
 			const model = (m.data as any)?.model;
-			return model?.provider === "anthropic" && model?.id === "claude-sonnet-4-20250514";
+			return model?.provider === "anthropic" && model?.id === OPUS_48;
 		});
 
 		expect(hasArchivedModelFrame,
-			`Expected an archived state frame with model anthropic/claude-sonnet-4-20250514 ` +
+			`Expected an archived state frame with model anthropic/${OPUS_48} ` +
 			`on initial connect (no get_state sent). ` +
 			`Got ${stateMessages.length} state frames, ${archivedStates.length} archived. ` +
 			`State data: ${JSON.stringify(stateMessages.map(m => m.data))}`

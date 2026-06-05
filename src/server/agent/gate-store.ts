@@ -6,7 +6,7 @@ export type GateStatus = "pending" | "passed" | "failed";
 
 export interface GateSignalStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa" | "subgoal";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
 	passed: boolean;
 	skipped?: boolean;
 	output: string;
@@ -53,7 +53,17 @@ export interface GateState {
 	currentContentVersion?: number;
 	currentMetadata?: Record<string, string>;
 	signals: GateSignal[];
+	/** Signals at or before this timestamp are ineligible for verification-step cache reuse. */
+	verificationCacheInvalidatedAt?: number;
 	updatedAt: number;
+}
+
+export interface GateResetResult {
+	requestedGateId: string;
+	affectedGateIds: string[];
+	changedGateIds: string[];
+	unchangedGateIds: string[];
+	previousStatuses: Record<string, GateStatus>;
 }
 
 function compositeKey(goalId: string, gateId: string): string {
@@ -65,7 +75,7 @@ export class GateStore {
 	private readonly storeFile: string;
 	private gates: Map<string, GateState> = new Map();
 
-	/** Optional callback invoked when any gate status changes (for bumping goal generation). */
+	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
 	constructor(stateDir: string) {
@@ -141,6 +151,7 @@ export class GateStore {
 		gate.signals.push(signal);
 		gate.updatedAt = Date.now();
 		this.save();
+		this.onStatusChange?.(signal.goalId, signal.gateId);
 	}
 
 	updateGateStatus(goalId: string, gateId: string, status: GateStatus): void {
@@ -186,31 +197,102 @@ export class GateStore {
 		}
 	}
 
+	private getDependentGateIds(gateId: string, workflow: Workflow, includeRequested: boolean): string[] {
+		const gateIds = new Set(workflow.gates.map(g => g.id));
+		if (!gateIds.has(gateId)) {
+			throw new Error(`Unknown gate: ${gateId}`);
+		}
+
+		const adjacency = new Map<string, string[]>();
+		for (const gate of workflow.gates) {
+			for (const depId of gate.dependsOn) {
+				const list = adjacency.get(depId) ?? [];
+				list.push(gate.id);
+				adjacency.set(depId, list);
+			}
+		}
+
+		const result: string[] = [];
+		const visited = new Set<string>();
+		const queue = [gateId];
+		visited.add(gateId);
+		while (queue.length > 0) {
+			const current = queue.shift()!;
+			if (includeRequested || current !== gateId) result.push(current);
+			for (const depId of adjacency.get(current) ?? []) {
+				if (visited.has(depId)) continue;
+				visited.add(depId);
+				queue.push(depId);
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * Reset a selected gate and every transitive dependent to pending.
+	 * Preserves signal history, current content, content version, and metadata.
+	 */
+	resetGateAndDependents(goalId: string, gateId: string, workflow: Workflow): GateResetResult {
+		const affectedGateIds = this.getDependentGateIds(gateId, workflow, true);
+		const changedGateIds: string[] = [];
+		const unchangedGateIds: string[] = [];
+		const previousStatuses: Record<string, GateStatus> = {};
+		const now = Date.now();
+
+		for (const affectedGateId of affectedGateIds) {
+			const key = compositeKey(goalId, affectedGateId);
+			const gate = this.gates.get(key);
+			const previousStatus = gate?.status ?? "pending";
+			previousStatuses[affectedGateId] = previousStatus;
+
+			if (gate) {
+				gate.verificationCacheInvalidatedAt = now;
+				gate.updatedAt = now;
+			}
+
+			if (gate && gate.status !== "pending") {
+				gate.status = "pending";
+				changedGateIds.push(affectedGateId);
+			} else {
+				unchangedGateIds.push(affectedGateId);
+			}
+		}
+
+		if (affectedGateIds.length > 0) {
+			this.save();
+		}
+		for (const changedGateId of changedGateIds) {
+			this.onStatusChange?.(goalId, changedGateId);
+		}
+
+		return {
+			requestedGateId: gateId,
+			affectedGateIds,
+			changedGateIds,
+			unchangedGateIds,
+			previousStatuses,
+		};
+	}
+
 	/**
 	 * Reset downstream gates to pending when an upstream gate is re-signaled.
 	 * Uses the workflow definition to find transitive dependents.
 	 */
 	cascadeReset(goalId: string, gateId: string, workflow: Workflow): void {
-		const dependents = new Set<string>();
-		const findDependents = (id: string) => {
-			for (const gate of workflow.gates) {
-				if (gate.dependsOn.includes(id) && !dependents.has(gate.id)) {
-					dependents.add(gate.id);
-					findDependents(gate.id);
-				}
-			}
-		};
-		findDependents(gateId);
+		const dependents = this.getDependentGateIds(gateId, workflow, false);
+		const changedGateIds: string[] = [];
+		const now = Date.now();
 
 		for (const depId of dependents) {
 			const key = compositeKey(goalId, depId);
 			const gate = this.gates.get(key);
 			if (gate && gate.status !== "pending") {
 				gate.status = "pending";
-				gate.updatedAt = Date.now();
+				gate.updatedAt = now;
+				changedGateIds.push(depId);
 			}
 		}
-		if (dependents.size > 0) this.save();
+		if (changedGateIds.length > 0) this.save();
 	}
 
 	/** Remove all gates for a goal (cleanup on goal deletion). */

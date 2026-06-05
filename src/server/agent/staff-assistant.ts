@@ -32,14 +32,17 @@ When ready, call the \`propose_staff\` tool with these parameters:
 - **description**: (optional) One-line description of the staff agent's purpose
 - **triggers**: (optional) JSON array of trigger objects, e.g. \`[{ "type": "schedule", "config": { "cron": "0 9 * * *" }, "enabled": true, "prompt": "Run your daily analysis." }, { "type": "manual", "config": {}, "enabled": true }]\`
 - **cwd**: (optional) Working directory override path, if the user asks to change it
+- **role**: (optional) Name of an existing role to attach. Attaching a role prepends that role's prompt context to the staff agent's system prompt and pre-fills its accessory (the user can still override the accessory). Leave it unset for no role. Only pass a role you know exists — verify the role before proposing it.
 
 ### Trigger types
 
 - **schedule**: Cron-based recurring trigger. Config: \`{ "cron": "0 9 * * *", "timezone": "America/New_York" }\`
 - **git**: Repository event trigger. Config: \`{ "event": "push", "branch": "master" }\`
 - **manual**: On-demand, user-invoked. Config: \`{}\`
+- **goal_created**: Fires when a new goal is created in any project. Config: \`{}\`. **Prompt is required.**
+- **goal_archived**: Fires when a goal is archived. Config: \`{}\`. **Prompt is required.**
 
-Each trigger can have an optional \`prompt\` field — the message sent to the agent when that trigger fires.
+Each trigger can have an optional \`prompt\` field — the message sent to the agent when that trigger fires — EXCEPT for \`goal_created\` and \`goal_archived\`, where \`prompt\` is mandatory (a non-empty string). The server returns 400 if a goal-* trigger is saved with an empty prompt.
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_staff\` again with the changes.
 

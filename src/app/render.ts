@@ -1,15 +1,14 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
-import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import "../ui/components/CommentableMarkdown.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, render, nothing, type TemplateResult } from "lit";
-import { ref, createRef } from "lit/directives/ref.js";
-import { reconcileFollowTail } from "./follow-tail.js";
+import { html, render } from "lit";
+import { repeat } from "lit/directives/repeat.js";
+import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
+import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -20,47 +19,97 @@ import {
 	setUngroupedExpanded,
 
 	getSidebarData,
-	isProposalStreaming,
+	setRenderSuppressed,
 } from "./state.js";
-import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus, notifyProposalDecision } from "./api.js";
-import { errorDetails } from "./error-helpers.js";
-import { clearSessionModel } from "./routing.js";
-import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
-import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
-import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed, connectToSession, terminateProjectAssistantSession, acceptProjectProposal } from "./session-manager.js";
-import { deleteProposalFile } from "./proposal-helpers.js";
-import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError, confirmAction, createProjectAssistantSession } from "./dialogs.js";
+import { gatewayFetch, refreshSessions } from "./api.js";
+import { clearAllAnnotations, clearAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import {
+	clearPersistedReviewDocuments,
+	openReviewDocumentFromEvent,
+	removePersistedReviewDocument,
+	reviewDecisionPayloadFromDetail,
+	reviewDocumentFromDecisionDetail,
+	submitReviewDecision,
+} from "./review-sources.js";
+import { backToSessions, createAndConnectSession, terminateSession } from "./session-manager.js";
+// Lazy wrapper for the proposal-panels chunk. Static import here keeps
+// the wrapper itself in the entry bundle while the ~80 kB body of
+// goal/role/tool/staff/project preview panels lands on first view.
+import * as lazyProposalPanels from "./proposal-panels-lazy.js";
+// Re-export functions whose home moved during the proposal-panels extraction
+// (see docs/design/shrink-initial-bundle.md, Task G). Test fixtures and a few
+// external entry points still import from `render.ts` — keep them working.
+export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
+
+// Route every dialog open through the lazy wrappers so the ~66 kB
+// `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
+// fires the same shared `import("./dialogs.js")` on first use; the
+// chunk is shared across all UI surfaces that open dialogs.
+import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
-import "../ui/components/SearchBox.js";
-import "../ui/components/SearchResults.js";
-// Register review pane web components
+// <search-box> + <search-results> appear in the mobile landing + search
+// route. Lazy-load via the shared widgets registrar so their combined
+// ~9 kB stays out of entry; Lit upgrades the unknown tag once the
+// chunk lands. The mobile landing's first render shows an unupgraded
+// `<search-box>` for ~50 ms which is visually identical (the element
+// is empty until properties are applied anyway).
+import { ensureSearchBox } from "./lazy-widgets.js";
+void ensureSearchBox();
+// Register review pane web components. <review-pane> and
+// <commentable-markdown> are cheap shells; their connectedCallback
+// lazy-loads <review-document> + <annotation-popover> + the
+// @recogito/text-annotator chain. Keep this import static so the
+// shell elements upgrade synchronously on first render.
 import "../ui/components/review/ReviewPane.js";
-import "../ui/components/review/ReviewDocument.js";
-import "../ui/components/review/AnnotationPopover.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
-/**
- * Returns true when the given session id refers to a session that is already
- * archived (present in `state.archivedSessions`). Proposal-panel submit
- * handlers use this to skip the `DELETE /api/sessions/:id` teardown call —
- * when the user resubmits a proposal from an archived session view the
- * session is already gone server-side and the DELETE would 404 + surface as
- * an error toast.
- */
-function isSessionArchived(sessionId: string | null | undefined): boolean {
-	if (!sessionId) return false;
-	return state.archivedSessions.some((s) => s.id === sessionId);
-}
-
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
-import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters, isChildSession } from "./render-helpers.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
+import {
+	CHAT_PANEL_TAB_ID,
+	activeSidePanelTabIdForSession,
+	assistantProposalType,
+	buildPanelWorkspaceTabs,
+	findPanelTab,
+	isHistoricalPreviewTab,
+	isHistoricalProposalTab,
+	isLivePreviewTab,
+	isPinnedPanelTab,
+	markPreviewContentDismissed,
+	nextActivePanelTabId,
+	normalizePreviewContentHash,
+	normalizeSidePanelTabs,
+	panelContentTabs,
+	panelTabsForSession,
+	panelWorkspaceSessionKey,
+	previewContentHashFromTab,
+	previewTabDisplayTitle,
+	previewTabVersion,
+	previewVersionRecordFor,
+	reviewPanelTabId,
+	reviewTitleFromPanelTab,
+	setActivePanelTabIdForSession,
+	walkthroughChangesetIdFromPanelTabId,
+	walkthroughPanelTabId,
+	setPanelTabsForSession,
+	type PanelWorkspaceTab,
+} from "./panel-workspace.js";
+import type { OpenPrWalkthroughInput } from "./pr-walkthrough.js";
+import { restorePrWalkthroughJobForSession, restorePrWalkthroughPanel, upsertPrWalkthroughJobPanel } from "./pr-walkthrough.js";
+import { ensurePrWalkthroughPanel } from "./pr-walkthrough-lazy.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
+
+function prWalkthroughStandaloneHref(sessionId: string, tabId: string): string {
+	const params = new URLSearchParams();
+	if (sessionId) params.set("session", sessionId);
+	params.set("tab", tabId);
+	return `/walkthrough?${params.toString()}`;
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Splash-screen new-session gating
@@ -159,17 +208,106 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 	}
 });
 
-/** Preview the worktree path that goal-manager will create. */
-function worktreePreviewPath(cwd: string, title: string): string {
-	const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
-	const lastSlash = normalized.lastIndexOf("/");
-	const parent = lastSlash > 0 ? normalized.slice(0, lastSlash) : normalized;
-	const base = lastSlash > 0 ? normalized.slice(lastSlash + 1) : normalized;
-	const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 10) || "untitled";
-	return `${parent}/${base}-wt/goal-${slug}-xxxxxxxx/`;
+window.addEventListener("bobbit-open-review-document", (e: Event) => {
+	const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
+	if (!doc) showHeaderToast("Could not open review document");
+});
+
+document.addEventListener("open-pr-walkthrough", (e: Event) => {
+	const detail = ((e as CustomEvent).detail || {}) as Record<string, unknown>;
+	const eventSource = (typeof (e as Event).composedPath === "function" ? (e as Event).composedPath()[0] : e.target) as Record<string, unknown> | null;
+	const stringDetail = (...keys: string[]) => {
+		for (const key of keys) {
+			const value = detail[key];
+			if (typeof value === "string" && value.trim()) return value;
+		}
+		return undefined;
+	};
+	const numberDetail = (...keys: string[]) => {
+		for (const key of keys) {
+			const value = detail[key];
+			if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.trunc(value));
+		}
+		return undefined;
+	};
+	const filesFromDetail = () => {
+		const explicit = numberDetail("filesChanged", "fileCount", "changedFiles");
+		if (explicit != null) return explicit;
+		for (const source of [detail, eventSource]) {
+			if (!source) continue;
+			for (const key of ["statusFiles", "status"]) {
+				const value = source[key];
+				if (Array.isArray(value)) return value.length;
+			}
+		}
+		return undefined;
+	};
+	const input = {
+		baseSha: stringDetail("baseSha", "base", "baseRef", "baseBranch"),
+		headSha: stringDetail("headSha", "head", "headRef", "headBranch"),
+		prNumber: typeof detail.prNumber === "string" || typeof detail.prNumber === "number"
+			? detail.prNumber
+			: typeof detail.number === "string" || typeof detail.number === "number"
+				? detail.number
+				: undefined,
+		url: stringDetail("url", "prUrl"),
+		prUrl: stringDetail("prUrl", "url"),
+		title: stringDetail("title", "prTitle"),
+		prTitle: stringDetail("prTitle", "title"),
+		prBody: stringDetail("prBody", "body"),
+		provider: stringDetail("provider"),
+		filesChanged: filesFromDetail(),
+		additions: numberDetail("additions", "insertions", "insertionsVsPrimary"),
+		deletions: numberDetail("deletions", "deletionsVsPrimary"),
+	} satisfies OpenPrWalkthroughInput;
+	void import("./pr-walkthrough.js").then(({ openPrWalkthroughPanel }) => {
+		void openPrWalkthroughPanel(state, activeSessionId() || "", input);
+		renderApp();
+	});
+});
+
+function handlePrWalkthroughJobUpdated(detail: unknown): void {
+	const record = detail && typeof detail === "object" ? detail as Record<string, unknown> : undefined;
+	const job = (record?.job && typeof record.job === "object" ? record.job : record) as any;
+	if (!job?.jobId || !job?.childSessionId || !job?.changesetId || !job?.status) return;
+	const active = activeSessionId();
+	upsertPrWalkthroughJobPanel(state, job, { select: active === job.childSessionId });
+	renderApp();
 }
 
-import { cwdCombobox } from "./cwd-combobox.js";
+let prWalkthroughViewerWs: WebSocket | null = null;
+let prWalkthroughViewerReconnect: ReturnType<typeof setTimeout> | null = null;
+
+function connectPrWalkthroughViewerEvents(): void {
+	if (prWalkthroughViewerWs && (prWalkthroughViewerWs.readyState === WebSocket.OPEN || prWalkthroughViewerWs.readyState === WebSocket.CONNECTING)) return;
+	const token = localStorage.getItem("gateway.token");
+	if (!token) {
+		if (prWalkthroughViewerReconnect) clearTimeout(prWalkthroughViewerReconnect);
+		prWalkthroughViewerReconnect = setTimeout(connectPrWalkthroughViewerEvents, 3_000);
+		return;
+	}
+	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+	const ws = new WebSocket(`${protocol}//${location.host}/ws/viewer`);
+	prWalkthroughViewerWs = ws;
+	ws.addEventListener("open", () => {
+		ws.send(JSON.stringify({ type: "auth", token }));
+	});
+	ws.addEventListener("message", (event) => {
+		try {
+			const msg = JSON.parse(event.data as string);
+			if (msg?.type === "pr_walkthrough_job_updated" || msg?.type === "pr-walkthrough-job-updated") handlePrWalkthroughJobUpdated(msg);
+		} catch { /* ignore */ }
+	});
+	ws.addEventListener("close", () => {
+		if (prWalkthroughViewerWs === ws) prWalkthroughViewerWs = null;
+		if (prWalkthroughViewerReconnect) clearTimeout(prWalkthroughViewerReconnect);
+		prWalkthroughViewerReconnect = setTimeout(connectPrWalkthroughViewerEvents, 3_000);
+	});
+}
+
+document.addEventListener("pr-walkthrough-job-updated", (e: Event) => handlePrWalkthroughJobUpdated((e as CustomEvent).detail));
+window.addEventListener("bobbit-pr-walkthrough-job-updated", (e: Event) => handlePrWalkthroughJobUpdated((e as CustomEvent).detail));
+connectPrWalkthroughViewerEvents();
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
@@ -275,7 +413,7 @@ function renderMobileLanding() {
 		const q = state.searchQuery.toLowerCase();
 		liveGoals = liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(q);
-			const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+			const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s));
 			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 			return goalMatches || hasMatchingSession;
 		});
@@ -288,7 +426,8 @@ function renderMobileLanding() {
 		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 
 	return html`
-		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root">
+		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
+			${renderProjectReorderLiveRegion()}
 			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					${(() => {
@@ -298,6 +437,7 @@ function renderMobileLanding() {
 						const isWorkflowsActive = isRouteActive("workflows", "workflow-edit")
 							|| (route.view === "settings" && (route as any).settingsTab === "workflows");
 						const isSkillsActive = isRouteActive("skills");
+						const isMarketActive = isRouteActive("market");
 						return html`
 					<div class="flex items-center gap-1">
 						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
@@ -326,6 +466,12 @@ function renderMobileLanding() {
 								setHashRoute("settings", `${projectId}/workflows`, true);
 							}}>
 							${icon(WorkflowIcon, "xs")} Workflows
+						</button>
+						<button class="flex-1 px-1.5 py-1 rounded transition-colors flex items-center justify-center gap-1 ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground active:bg-secondary/50'}" style="font-size: 1.1667em;"
+							data-testid="market-nav-button-mobile"
+							title="Marketplace"
+							@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}>
+							${icon(Store, "xs")} Market
 						</button>
 						<button
 							data-new-goal-trigger
@@ -383,8 +529,9 @@ function renderMobileLanding() {
 										const q = state.searchQuery.toLowerCase();
 										staffList = filterStaffByQuery(staffList, q);
 									}
+									const projectsForRender = projectOrderForRender();
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
-										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
+										for (const p of projectsForRender) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
 										for (const g of liveGoals) {
 											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
 											const bucket = projectMap.get(g.projectId);
@@ -407,19 +554,25 @@ function renderMobileLanding() {
 											bucket.staff.push(s);
 										}
 										// Bucket archived goals + standalone archived sessions per project.
-										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !isChildSession(s)) : [];
 										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
-										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, state.projects);
-										return html`${state.projects.map((project, i) => {
+										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, projectsForRender);
+										return html`<div data-project-reorder-list>${projectsForRender.map((project, i) => {
 											const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
 											const expanded = isProjectExpanded(project.id);
+											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-												<div class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
-													@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
-													<span class="text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
-													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
+												<div data-project-reorder-id=${project.id} data-project-id=${project.id}>
+													<div
+														data-testid="project-header"
+														data-project-id=${project.id}
+														class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+														@click=${() => { if (isProjectReordering()) return; toggleProjectExpanded(project.id); renderApp(); }}>
+														<span class="text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;font-size: 1.1667em;">${effectiveExpanded ? "▾" : "▸"}</span>
+														${renderProjectReorderHandle(project)}
+														<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button
@@ -441,7 +594,7 @@ function renderMobileLanding() {
 														</button>
 													</div>
 												</div>
-												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+												${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 													${data.goals.map((goal, gi) => html`
 														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
@@ -488,6 +641,7 @@ function renderMobileLanding() {
 														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");
 													})()}
 												</div>` : ""}
+												</div>
 											`;
 										})}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
@@ -496,7 +650,7 @@ function renderMobileLanding() {
 												${state.archivedGoalsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
 												${state.archivedSessionsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}
 											</div>
-										` : ""}`;
+										` : ""}</div>`;
 								})()}
 							`}
 			</div>
@@ -519,310 +673,9 @@ function renderMobileLanding() {
 	`;
 }
 
-// ============================================================================
-// GOAL PREVIEW PANEL (goal assistant split-screen)
-// ============================================================================
-
-/** Cached workflows for goal creation dropdown — keyed per-project (workflows are project-scoped). */
-import { fetchWorkflows, fetchGroupPolicies, type Workflow, type RoleData } from "./api.js";
-import {
-	renderWorkflowList,
-	renderWorkflowInspector,
-	renderWorkflowEditor,
-	clearWorkflowEditorController,
-} from "./workflow-page.js";
-import {
-	renderRoleList,
-	renderRoleInspector,
-	renderRoleEditor,
-	fetchRolesForProject,
-	type RoleEditorDraft,
-} from "./role-manager-page.js";
-const _workflowCacheByProject = new Map<string, Workflow[]>();
-const _workflowsLoadingByProject = new Set<string>();
-let _cachedWorkflows: Workflow[] = [];
-let _selectedWorkflowId = "";
-let _goalSandboxed = false;
-let _goalAutoStartTeam = true;
-let _staffSandboxed = false;
-let _assistantEnabledOptionalSteps: string[] = [];
-
-/** Set the selected workflow ID from outside the render module (e.g. from a goal proposal). */
-export function setSelectedWorkflowId(id: string): void {
-	_selectedWorkflowId = id;
-}
-
-function ensureWorkflowsLoaded(projectId?: string): void {
-	// Workflows are project-scoped (no system layer). Without a project we can't
-	// resolve any — leave the cache empty so the goal form falls back gracefully.
-	if (!projectId) {
-		_cachedWorkflows = [];
-		return;
-	}
-	const cached = _workflowCacheByProject.get(projectId);
-	if (cached) {
-		_cachedWorkflows = cached;
-		// Stale-id normalization: if a previously-selected workflow id no
-		// longer exists in the cached list for this project (e.g. user
-		// switched projects, or the workflow was deleted), clear it so the
-		// seeding step below picks a valid first entry. Otherwise the
-		// dropdown shows a phantom selection and submit sends an unknown id.
-		const cachedIds = new Set(cached.map(w => w.id));
-		if (_selectedWorkflowId && !cachedIds.has(_selectedWorkflowId)) {
-			_selectedWorkflowId = "";
-		}
-		if (_proposalWorkflowId && !cachedIds.has(_proposalWorkflowId)) {
-			_proposalWorkflowId = "";
-		}
-		// Seed defaults from the cache too. The async fetch path below also
-		// seeds these, but a new proposal can reset _proposalWorkflowId to ""
-		// in syncProposalFormState() and then hit this cached branch — without
-		// this seeding the submit would send no workflow id and the server
-		// would fail for projects without a 'general' workflow.
-		if (!_selectedWorkflowId && cached.length > 0) {
-			_selectedWorkflowId = cached[0].id;
-		}
-		if (!_proposalWorkflowId && !_proposalInlineWorkflow && cached.length > 0) {
-			_proposalWorkflowId = cached[0].id;
-		}
-		return;
-	}
-	if (_workflowsLoadingByProject.has(projectId)) return;
-	_workflowsLoadingByProject.add(projectId);
-	fetchWorkflows(projectId).then((wfs) => {
-		_workflowCacheByProject.set(projectId, wfs);
-		_workflowsLoadingByProject.delete(projectId);
-		_cachedWorkflows = wfs;
-		// Stale-id normalization (matches the cached path above).
-		const wfsIds = new Set(wfs.map(w => w.id));
-		if (_selectedWorkflowId && !wfsIds.has(_selectedWorkflowId)) {
-			_selectedWorkflowId = "";
-		}
-		if (_proposalWorkflowId && !wfsIds.has(_proposalWorkflowId)) {
-			_proposalWorkflowId = "";
-		}
-		// Seed default workflow selection to the first available id when no
-		// explicit choice has been made. The server now requires a real id
-		// (no "general" magic default), so the dropdown must show a valid
-		// option from the moment it renders.
-		if (!_selectedWorkflowId && wfs.length > 0) {
-			_selectedWorkflowId = wfs[0].id;
-		}
-		if (!_proposalWorkflowId && !_proposalInlineWorkflow && wfs.length > 0) {
-			_proposalWorkflowId = wfs[0].id;
-		}
-		renderApp();
-	});
-}
-
-/** Derive workflow-loading state for the goal form's empty-workflows banner. */
-function workflowStateFor(projectId: string | undefined): "no-project" | "loading" | "empty" | "ready" {
-	if (!projectId) return "no-project";
-	if (_workflowCacheByProject.has(projectId)) {
-		return (_workflowCacheByProject.get(projectId) || []).length === 0 ? "empty" : "ready";
-	}
-	return "loading";
-}
-
-let _sandboxStatusFetching = false;
-
-/** Cached `repoCount` per project for the goal-creation multi-repo indicator.
- *  Phase 4b. Counts distinct `repo` values across configured components. */
-const _projectComponentsCache = new Map<string, { repoCount: number; componentCount: number; multiRepo: boolean }>();
-const _projectComponentsFetching = new Set<string>();
-function ensureProjectComponentsLoaded(projectId: string): void {
-	if (_projectComponentsCache.has(projectId) || _projectComponentsFetching.has(projectId)) return;
-	_projectComponentsFetching.add(projectId);
-	gatewayFetch(`/api/projects/${projectId}/structured`)
-		.then(r => r.json())
-		.then(data => {
-			const components: Array<{ repo?: string }> = Array.isArray(data?.components) ? data.components : [];
-			const repos = new Set<string>();
-			for (const c of components) repos.add(c.repo || ".");
-			const summary = {
-				repoCount: repos.size,
-				componentCount: components.length,
-				multiRepo: components.some(c => (c.repo || ".") !== "."),
-			};
-			_projectComponentsCache.set(projectId, summary);
-			_projectComponentsFetching.delete(projectId);
-			renderApp();
-		})
-		.catch(() => {
-			_projectComponentsCache.set(projectId, { repoCount: 1, componentCount: 0, multiRepo: false });
-			_projectComponentsFetching.delete(projectId);
-			renderApp();
-		});
-}
-
-const _qaConfigCache = new Map<string, boolean>();
-let _qaConfigFetching = false;
-function ensureQaConfigLoaded(projectId: string): void {
-	if (_qaConfigCache.has(projectId) || _qaConfigFetching) return;
-	_qaConfigFetching = true;
-	gatewayFetch(`/api/projects/${projectId}/qa-testing-config`)
-		.then(r => r.json())
-		.then(data => {
-			_qaConfigCache.set(projectId, !!data.configured);
-			_qaConfigFetching = false;
-			renderApp();
-		})
-		.catch(() => {
-			_qaConfigCache.set(projectId, false);
-			_qaConfigFetching = false;
-			renderApp();
-		});
-}
-function ensureSandboxStatusLoaded(): void {
-	if (state.sandboxStatus || _sandboxStatusFetching) return;
-	_sandboxStatusFetching = true;
-	fetchSandboxStatus().then(s => { _sandboxStatusFetching = false; if (s) { state.sandboxStatus = s; renderApp(); } });
-}
-
-// ============================================================================
-// PROPOSAL STREAMING UX (shared helpers)
-// ============================================================================
-
-/** Pulsing dot + "Streaming…" label rendered to the left of submit buttons. */
-function streamingBadge() {
-	return html`
-		<span class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
-			  data-testid="proposal-streaming-badge"
-			  aria-live="polite">
-			<span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
-			Streaming…
-		</span>
-	`;
-}
-
-/** Tailwind class fragment applied to scrollable preview/textarea regions
- *  while streaming. Pulsing left border. */
-const STREAMING_BORDER = "border-l-2 border-l-primary/70 animate-pulse";
-
-/** Walk the goal parentGoalId chain to compute 1-based depth (root=1). Capped at 20. */
-function computeGoalDepth(goalId: string, goals: ReadonlyArray<{ id: string; parentGoalId?: string }>): number {
-	let depth = 1;
-	let cur: { id: string; parentGoalId?: string } | undefined = goals.find(g => g.id === goalId);
-	const seen = new Set<string>();
-	while (cur?.parentGoalId && !seen.has(cur.id)) {
-		seen.add(cur.id);
-		cur = goals.find(g => g.id === cur!.parentGoalId);
-		depth++;
-		if (depth >= 20) break;
-	}
-	return depth;
-}
-
-// Module-scoped refs (one per scroll-target). Refs are singletons because at
-// most one of each panel is mounted at a time (the assistant preview pane is
-// not virtualised).
-const goalSpecPreviewRef = createRef<HTMLDivElement>();
-const goalSpecTextareaRef = createRef<HTMLTextAreaElement>();
-const rolePromptPreviewRef = createRef<HTMLDivElement>();
-const rolePromptTextareaRef = createRef<HTMLTextAreaElement>();
-// Inline-comments wrapper refs (one per commentable proposal panel).
-const goalCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
-const rolePromptCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
-const staffPromptCommentableRef = createRef<import("../ui/components/CommentableMarkdown.js").CommentableMarkdown>();
-// Annotation count fields, mirrored from <commentable-markdown> via
-// the bubbled `annotation-change` event. Used to gate the badge + Send-feedback button.
-let _goalAnnCount = 0;
-/** Timestamp of the most recent Spec Copy click; UI flips to "Copied" for 1.5 s. */
-let _specCopiedAt = 0;
-async function _copySpecText(text: string): Promise<void> {
-	try {
-		await navigator.clipboard.writeText(text);
-	} catch {
-		const ta = document.createElement("textarea");
-		ta.value = text;
-		ta.style.position = "fixed";
-		ta.style.opacity = "0";
-		document.body.appendChild(ta);
-		ta.select();
-		try { document.execCommand("copy"); } catch { /* ignore */ }
-		ta.remove();
-	}
-	_specCopiedAt = Date.now();
-	renderApp();
-	setTimeout(() => {
-		if (Date.now() - _specCopiedAt >= 1500) renderApp();
-	}, 1600);
-}
-let _roleAnnCount = 0;
-let _staffAnnCount = 0;
-// Toast text for "Proposal updated — comments cleared" notifications.
-let _proposalToastText = "";
-let _proposalToastTimer: ReturnType<typeof setTimeout> | null = null;
-
-/**
- * Module-level helper to flash a brief toast above the proposal panel.
- * Reuses the existing `.review-toast` CSS (auto-fade animation).
- */
-export function showProposalToast(text: string): void {
-	_proposalToastText = text;
-	if (_proposalToastTimer) clearTimeout(_proposalToastTimer);
-	_proposalToastTimer = setTimeout(() => {
-		_proposalToastText = "";
-		_proposalToastTimer = null;
-		renderApp();
-	}, 2500);
-	renderApp();
-}
-
-/** Reset annotation counts — called after a proposal is dismissed or its body is replaced. */
-export function resetProposalAnnCount(type: "goal" | "role" | "staff"): void {
-	if (type === "goal") _goalAnnCount = 0;
-	else if (type === "role") _roleAnnCount = 0;
-	else if (type === "staff") _staffAnnCount = 0;
-}
-
-function recomputeAssistantHasProposal(): void {
-	state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
-}
-
-function clearProposalReviewState(sessionId: string | null | undefined, type: ProposalType): void {
-	if (!sessionId) return;
-	if (type === "goal" || type === "role" || type === "staff") {
-		clearProposalAnnotations(sessionId, type);
-		resetProposalAnnCount(type);
-	}
-}
-
-function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
-	const mobileTabs = unifiedPanelTabs();
-	if (!mobileTabs.includes(state.previewPanelTab as UnifiedPanelTab)) {
-		setUnifiedMobileTab(mobileTabs.includes("preview") ? "preview" : "chat");
-	} else if ((state.previewPanelTab as UnifiedPanelTab) === type) {
-		setUnifiedMobileTab(mobileTabs.includes("preview") ? "preview" : "chat");
-	}
-
-	const contentTabs = unifiedPanelContentTabs();
-	if ((state.previewPanelActiveTab as UnifiedContentTab) === type || !contentTabs.includes(state.previewPanelActiveTab as UnifiedContentTab)) {
-		setUnifiedDesktopTab(contentTabs[0] ?? "preview");
-	}
-}
-
-function dismissTypedProposal(type: ProposalType): void {
-	const slot = state.activeProposals[type];
-	const sessionId = slot?.sessionId ?? activeSessionId();
-	clearProposalReviewState(sessionId, type);
-	if (sessionId && slot?.fields) markProposalDismissed(sessionId, type, slot.fields);
-	delete state.activeProposals[type];
-	recomputeAssistantHasProposal();
-	clampUnifiedTabsAfterProposalRemoved(type);
-	if (sessionId) void deleteProposalFile(sessionId, type);
-	renderApp();
-}
-
-/** Render the "comments cleared" toast above a proposal panel, if active. */
-function proposalToast() {
-	if (!_proposalToastText) return "";
-	return html`<div class="review-toast" data-testid="proposal-toast">${_proposalToastText}</div>`;
-}
-
 // Header-only "Link copied" toast — separate state + testid so it doesn't
-// collide with the proposal-toast testid used by `proposalToast()` (the
-// session header is rendered alongside open proposal panels).
+// collide with the proposal-toast testid used by the proposal panels' own
+// toast (the session header is rendered alongside open proposal panels).
 let _headerToastText = "";
 let _headerToastTimer: ReturnType<typeof setTimeout> | null = null;
 export function showHeaderToast(text: string): void {
@@ -839,2727 +692,6 @@ function headerToast() {
 	if (!_headerToastText) return "";
 	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
 }
-const toolDocsPreviewRef = createRef<HTMLDivElement>();
-const toolRendererPreviewRef = createRef<HTMLDivElement>();
-const toolOuterScrollRef = createRef<HTMLDivElement>();
-const staffPromptPreviewRef = createRef<HTMLDivElement>();
-const staffPromptTextareaRef = createRef<HTMLTextAreaElement>();
-const projectOuterScrollRef = createRef<HTMLDivElement>();
-
-// ============================================================================
-// SHARED GOAL FORM
-// ============================================================================
-
-interface GoalFormConfig {
-	// Field values
-	title: string;
-	spec: string;
-	cwd: string;
-	workflowId: string;
-	sandboxed: boolean;
-	specEditMode: boolean;
-	enabledOptionalSteps: string[];
-	linkedProjectId?: string;
-
-	/** Workflow availability for the linked project. Drives the empty-workflows
-	 *  banner and Accept-disabled state in the form header. */
-	workflowState?: "no-project" | "loading" | "empty" | "ready";
-
-	/** Invoked when the user clicks "Open Project Assistant" in the empty
-	 *  workflows banner. */
-	onOpenProjectAssistant?: () => void;
-
-	// Field change callbacks
-	onTitleChange: (e: Event) => void;
-	onSpecChange: (e: Event) => void;
-	onCwdChange: (value: string) => void;
-	onCwdSelect: (value: string) => void;
-	onWorkflowChange: (e: Event) => void;
-	onSandboxChange: (e: Event) => void;
-	onSpecEditToggle: () => void;
-	onOptionalStepsChange: (steps: string[]) => void;
-	autoStartTeam: boolean;
-	onAutoStartTeamChange: (e: Event) => void;
-
-	// CWD combobox state
-	cwdDropdownOpen: boolean;
-	cwdHighlightIndex: number;
-	onCwdToggle: (open: boolean) => void;
-	onCwdHighlight: (index: number) => void;
-
-	// Action callbacks
-	onCreate: () => void;
-	onDismiss?: () => void;
-
-	// UI state
-	saving?: boolean;
-	createDisabled?: boolean;
-	streaming?: boolean;
-	/**
-	 * When true, render <commentable-markdown> in Preview mode instead of
-	 * <markdown-block> so users can leave inline comments. Set only at the
-	 * proposal-panel call site — the goal-dashboard view stays read-only.
-	 */
-	commentable?: boolean;
-
-	/** If set, this goal will be created as a subgoal of the given parent goal ID. */
-	parentGoalId?: string;
-	/** Callback to update the selected parent goal. Pass undefined to clear (top-level). */
-	onParentGoalChange?: (id: string | undefined) => void;
-	/** Whether subgoals are enabled at the system level. */
-	subgoalsEnabled?: boolean;
-	/** Maximum nesting depth from system prefs. */
-	maxNestingDepth?: number;
-
-	/** Current value of the per-goal "Allow subgoals" toggle. `null` means
-	 *  the user has not touched it (inherit system pref). Only set in
-	 *  proposal-modal mode; the goal-assistant flow leaves this undefined
-	 *  so the row is not rendered (and would otherwise be a no-op there). */
-	subgoalsAllowedValue?: boolean | null;
-	/** Current value of the per-goal "Max nesting depth" input. `null` means
-	 *  inherit system pref. Only set in proposal-modal mode. */
-	maxNestingDepthValue?: number | null;
-	/** Invoked when the user toggles "Allow subgoals". Presence (alongside
-	 *  `onMaxNestingDepthChange`) gates rendering of the subgoals row. */
-	onSubgoalsAllowedChange?: (value: boolean) => void;
-	/** Invoked when the user changes the "Max depth" input. `null` means the
-	 *  user cleared the field (inherit system pref). */
-	onMaxNestingDepthChange?: (value: number | null) => void;
-
-	// ---- Proposal-modal tabs (Goal / Workflow / Roles) ----
-	/** When true, wrap the form body in a tabbed surface with Workflow + Roles
-	 *  tabs alongside Goal. The footer stays outside the panels so submit/dismiss
-	 *  remain visible on every tab. */
-	tabbed?: boolean;
-	activeTab?: ProposalTab;
-	onTabChange?: (tab: ProposalTab) => void;
-
-	/** Draft-scoped customised workflow. When non-null the submit path forwards
-	 *  it as `workflow` instead of `workflowId`. */
-	inlineWorkflow?: Workflow | null;
-	onInlineWorkflowChange?: (wf: Workflow | null) => void;
-	/** True when the right pane of the Workflow tab should render the editor
-	 *  instead of the read-only inspector. */
-	customizingWorkflow?: boolean;
-	onCustomizeWorkflow?: () => void;
-	onResetWorkflow?: () => void;
-
-	/** Draft-scoped per-role override map keyed by role name. */
-	inlineRoles?: Record<string, RoleData>;
-	selectedRoleName?: string | null;
-	onSelectRole?: (name: string) => void;
-	customizingRole?: boolean;
-	onCustomizeRole?: () => void;
-	onResetRole?: () => void;
-	onRoleDraftChange?: (patch: Partial<RoleEditorDraft>) => void;
-	onRoleEditorTabChange?: (tab: "prompt" | "tools" | "model") => void;
-	onRoleToggleToolGroup?: (group: string) => void;
-	roleEditTab?: "prompt" | "tools" | "model";
-	roleCollapsedGroups?: ReadonlySet<string>;
-	roleList?: RoleData[];
-	roleListLoading?: boolean;
-	availableTools?: ToolInfo[];
-	groupPolicies?: Record<string, string>;
-}
-
-function renderGoalForm(config: GoalFormConfig) {
-	ensureMarkdownBlock();
-	const linkedProject = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
-	const wfState = config.workflowState ?? "ready";
-	const noWorkflows = wfState === "empty";
-	const workflowsLoading = wfState === "loading";
-	const worktreePath = linkedProject
-		? worktreePreviewPath(linkedProject.rootPath, config.title)
-		: worktreePreviewPath(config.cwd, config.title);
-	const wf = _cachedWorkflows.find(w => w.id === config.workflowId);
-	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
-	if (config.linkedProjectId) ensureProjectComponentsLoaded(config.linkedProjectId);
-	const componentSummary = config.linkedProjectId ? _projectComponentsCache.get(config.linkedProjectId) : undefined;
-	const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
-	if (wf) {
-		for (const gate of wf.gates) {
-			if (gate.verify) {
-				for (const step of gate.verify) {
-					if (step.optional) {
-						optionalSteps.push({ name: step.name, label: step.label || step.name, description: step.description, type: step.type });
-					}
-				}
-			}
-		}
-	}
-	const sandboxConfigured = !!state.sandboxStatus?.configured;
-	const sandboxAvailable = !!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists);
-	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
-
-	queueMicrotask(() => {
-		reconcileFollowTail(goalSpecPreviewRef.value);
-		reconcileFollowTail(goalSpecTextareaRef.value);
-	});
-
-	const goalRev = state.activeProposals.goal?.rev ?? 0;
-	const tabbed = !!config.tabbed;
-	const activeTab: ProposalTab = config.activeTab ?? "goal";
-	const goalBody = html`
-		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5"
-			role=${tabbed ? "tabpanel" : nothing}
-			id=${tabbed ? "goal-proposal-panel-goal" : nothing}
-			aria-labelledby=${tabbed ? "goal-proposal-tab-goal" : nothing}
-			data-testid=${tabbed ? "goal-proposal-panel-goal" : nothing}>
-			${goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
-			${noWorkflows ? html`
-				<div
-					class="rounded-md border p-3 flex flex-col gap-2"
-					style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); background: color-mix(in oklch, var(--warning) 10%, transparent);"
-					data-testid="goal-form-no-workflows-banner"
-				>
-					<div class="text-sm font-medium">This project has no workflows yet</div>
-					<p class="text-xs text-muted-foreground">Goals need a workflow to define gates and verification. Run the project assistant to scaffold workflows for this project.</p>
-					<button
-						class="self-start text-xs px-3 py-1.5 rounded-md border border-border bg-background hover:bg-secondary text-foreground"
-						@click=${config.onOpenProjectAssistant}
-						data-testid="goal-form-open-project-assistant"
-						?disabled=${!config.onOpenProjectAssistant}
-					>Open Project Assistant</button>
-				</div>
-			` : ""}
-			<div class="flex flex-col md:flex-row gap-2.5 md:items-center">
-				<div class="flex items-center gap-2 flex-1 min-w-0">
-					<label class="${lblCls} w-20 md:w-16">Title</label>
-					<div class="flex-1 min-w-0">
-						${Input({
-							type: "text",
-							value: config.title,
-							placeholder: "Goal title",
-							onInput: config.onTitleChange,
-						})}
-					</div>
-				</div>
-				${workflowsLoading ? html`
-					<div class="flex items-center gap-2 md:shrink-0">
-						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
-						<div class="flex-1 md:flex-none md:w-44 h-9 rounded-md bg-muted/40 animate-pulse" data-testid="goal-form-workflow-skeleton"></div>
-					</div>
-				` : _cachedWorkflows.length > 0 ? html`
-					<div class="flex items-center gap-2 md:shrink-0">
-						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
-						<select
-							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
-							.value=${config.workflowId}
-							@change=${config.onWorkflowChange}
-						>
-							${_cachedWorkflows.map((w) => html`
-								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
-							`)}
-						</select>
-					</div>
-				` : ""}
-			</div>
-			${(config.subgoalsEnabled || config.parentGoalId) ? html`
-				<div class="flex items-center gap-2" data-testid="goal-form-parent-row">
-					<label class="${lblCls} w-20 md:w-16">Parent</label>
-					<select
-						class="flex-1 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
-						.value=${config.parentGoalId || ""}
-						@change=${(e: Event) => {
-							const v = (e.target as HTMLSelectElement).value;
-							config.onParentGoalChange?.(v || undefined);
-						}}
-						data-testid="goal-form-parent-picker"
-					>
-						<option value="">— Top-level goal —</option>
-						${state.goals.filter(g => !g.archived && (!config.linkedProjectId || g.projectId === config.linkedProjectId)).map(g => html`
-							<option value=${g.id} ?selected=${config.parentGoalId === g.id}>${g.title}</option>
-						`)}
-					</select>
-				</div>
-			` : ""}
-			${config.parentGoalId ? (() => {
-				const parentGoal = state.goals.find(g => g.id === config.parentGoalId);
-				const project = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
-				const parentDepth = config.parentGoalId ? computeGoalDepth(config.parentGoalId, state.goals) : 0;
-				const childDepth = parentDepth + 1;
-				const atCap = config.maxNestingDepth !== undefined && childDepth >= config.maxNestingDepth;
-				return html`
-					<div class="flex flex-col gap-1 text-xs text-muted-foreground">
-						<div class="truncate" data-testid="goal-form-breadcrumb">
-							${project ? html`<span class="font-medium text-foreground/70">${project.name}</span><span class="mx-1 opacity-50">›</span>` : ""}
-							${parentGoal ? html`<span>${parentGoal.title}</span><span class="mx-1 opacity-50">›</span>` : ""}
-							<span class="font-medium text-foreground/80">${config.title || "New Goal"}</span>
-						</div>
-						<div class="${atCap ? "text-destructive font-medium" : ""}" data-testid="goal-form-depth-indicator">
-							depth ${childDepth} of ${config.maxNestingDepth ?? 3}${atCap ? " — cap reached" : ""}
-						</div>
-						<div class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary self-start" data-testid="goal-form-subgoal-badge">
-							Subgoal of ${parentGoal?.title ?? config.parentGoalId}
-						</div>
-					</div>
-				`;
-			})() : (config.subgoalsEnabled ? html`
-				<div class="text-xs text-muted-foreground self-start px-2 py-0.5 rounded-full bg-secondary/60" data-testid="goal-form-toplevel-badge">Top-level goal</div>
-			` : "")}
-			${linkedProject ? html`
-				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
-					<span class="${lblCls} w-20 md:w-16">Worktree</span>
-					<span class="truncate flex-1 min-w-0" title=${linkedProject.rootPath + ' → ' + worktreePath}>
-						<span class="font-medium text-foreground/80">${linkedProject.name}</span>
-						<code class="text-[10px] font-mono opacity-80 ml-1">${worktreePath}</code>
-					</span>
-				</div>
-				${componentSummary?.multiRepo ? html`
-					<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0" data-testid="multi-repo-indicator">
-						<span class="${lblCls} w-20 md:w-16"></span>
-						<span class="truncate flex-1 min-w-0 text-amber-600 dark:text-amber-400">
-							Will create ${componentSummary.componentCount} worktree${componentSummary.componentCount === 1 ? "" : "s"}
-							across ${componentSummary.repoCount} repo${componentSummary.repoCount === 1 ? "" : "s"}.
-						</span>
-					</div>
-				` : ""}
-			` : html`
-				<div class="flex items-start gap-2">
-					<label class="${lblCls} w-20 md:w-16 mt-2">Directory</label>
-					<div class="flex-1 min-w-0">
-						${cwdCombobox({
-							value: config.cwd,
-							onInput: config.onCwdChange,
-							onSelect: config.onCwdSelect,
-							dropdownOpen: config.cwdDropdownOpen,
-							onToggle: config.onCwdToggle,
-							highlightedIndex: config.cwdHighlightIndex,
-							onHighlight: config.onCwdHighlight,
-						})}
-						<p class="text-[11px] text-muted-foreground mt-0.5 opacity-70 truncate" title=${worktreePath}>Worktree: <code class="text-[10px]">${worktreePath}</code></p>
-					</div>
-				</div>
-			`}
-			<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-0.5">
-				${sandboxConfigured ? html`
-					<label class="flex items-center gap-1.5 cursor-pointer ${!sandboxAvailable ? "opacity-40 pointer-events-none" : ""}">
-						<input type="checkbox" class="toggle-switch" .checked=${config.sandboxed}
-							?disabled=${!sandboxAvailable}
-							@change=${config.onSandboxChange} />
-						<span class="text-xs text-muted-foreground font-medium">Sandbox</span>
-						<span title=${!sandboxAvailable
-							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-							: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
-							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-					</label>
-				` : ""}
-				<label class="flex items-center gap-1.5 cursor-pointer">
-					<input type="checkbox" class="toggle-switch" .checked=${config.autoStartTeam}
-						@change=${config.onAutoStartTeamChange} />
-					<span class="text-xs text-muted-foreground font-medium">Auto-start team</span>
-					<span title="Automatically start the team lead when the worktree is ready"
-						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-				</label>
-				${optionalSteps.map(os => {
-					const qaDisabled = os.type === 'agent-qa' && !!config.linkedProjectId && _qaConfigCache.has(config.linkedProjectId) && !_qaConfigCache.get(config.linkedProjectId);
-					return html`
-					<label class="flex items-center gap-1.5 cursor-pointer ${qaDisabled ? 'opacity-40 pointer-events-none' : ''}">
-						<input type="checkbox" class="toggle-switch"
-							.checked=${config.enabledOptionalSteps.includes(os.name)}
-							?disabled=${qaDisabled}
-							@change=${(e: Event) => {
-								const checked = (e.target as HTMLInputElement).checked;
-								const updated = checked
-									? (config.enabledOptionalSteps.includes(os.name) ? config.enabledOptionalSteps : [...config.enabledOptionalSteps, os.name])
-									: config.enabledOptionalSteps.filter(n => n !== os.name);
-								config.onOptionalStepsChange(updated);
-							}}
-						/>
-						<span class="text-xs text-muted-foreground font-medium">${os.label}</span>
-						${os.description ? html`
-							<span title=${qaDisabled
-								? 'Set qa_start_command on a component\'s config map to enable QA testing'
-								: os.description}
-								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-						` : ''}
-					</label>
-				`;})}
-				${(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange) ? (() => {
-					const systemCap = config.maxNestingDepth ?? 3;
-					const allowed = config.subgoalsAllowedValue ?? config.subgoalsEnabled;
-					const depthValue = config.maxNestingDepthValue ?? systemCap;
-					return html`
-						<label class="flex items-center gap-1.5 cursor-pointer">
-							<input type="checkbox" class="toggle-switch"
-								.checked=${allowed}
-								data-testid="goal-form-subgoals-toggle"
-								@change=${(e: Event) => {
-									config.onSubgoalsAllowedChange?.((e.target as HTMLInputElement).checked);
-								}} />
-							<span class="text-xs text-muted-foreground font-medium">Allow subgoals</span>
-							<span title="Allow this goal to spawn child subgoals. When off, the team-lead cannot use goal_spawn_child / goal_plan_propose."
-								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-						</label>
-						${allowed ? html`
-							<label class="flex items-center gap-1.5 text-xs text-muted-foreground -ml-2">
-								<span>Max depth</span>
-								<input
-									type="number"
-									min="1"
-									max=${String(systemCap)}
-									step="1"
-									.value=${String(depthValue)}
-									data-testid="goal-form-max-depth"
-									class="w-12 text-xs px-1.5 py-0.5 rounded border border-border bg-background text-foreground"
-									@change=${(e: Event) => {
-										const raw = parseInt((e.target as HTMLInputElement).value, 10);
-										if (Number.isFinite(raw)) {
-											config.onMaxNestingDepthChange?.(Math.min(systemCap, Math.max(1, raw)));
-										} else {
-											config.onMaxNestingDepthChange?.(null);
-										}
-									}} />
-								<span title=${`System cap is ${systemCap} — per-goal can tighten further, never exceed it`}
-									class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-							</label>
-						` : ""}
-					`;
-				})() : ""}
-			</div>
-			<div class="flex-1 flex flex-col min-h-0">
-				<div class="flex items-center justify-between mb-1.5">
-					<div class="flex items-center gap-1">
-						<label class="text-xs text-muted-foreground font-medium">Spec</label>
-						${config.commentable && !config.specEditMode && _goalAnnCount > 0 ? html`
-							<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
-								data-testid="proposal-comment-count">
-								${_goalAnnCount} comment${_goalAnnCount === 1 ? "" : "s"}
-							</span>
-						` : ""}
-					</div>
-					<div class="flex items-center gap-1">
-						${(() => {
-							const justCopied = Date.now() - _specCopiedAt < 1500;
-							return html`<button
-								class="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-border ${justCopied ? "text-primary border-primary" : "text-muted-foreground hover:text-foreground hover:bg-secondary"} transition-colors"
-								title="Copy spec markdown"
-								@click=${() => _copySpecText(config.spec)}
-							>
-								${icon(justCopied ? Check : Copy, "xs")}
-								<span>${justCopied ? "Copied" : "Copy"}</span>
-							</button>`;
-						})()}
-						<button
-							class="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Toggle edit/preview mode"
-							@click=${config.onSpecEditToggle}
-						>
-							${icon(config.specEditMode ? Eye : Pencil, "xs")}
-							<span>${config.specEditMode ? "Preview" : "Edit"}</span>
-						</button>
-					</div>
-				</div>
-				${config.specEditMode
-					? html`<textarea
-							${ref(goalSpecTextareaRef)}
-							class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${config.streaming ? STREAMING_BORDER : ""}"
-							.value=${config.spec}
-							@input=${config.onSpecChange}
-						></textarea>`
-					: html`<div ${ref(goalSpecPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${config.streaming ? STREAMING_BORDER : ""}">
-							${config.commentable
-								? html`<commentable-markdown
-										${ref(goalCommentableRef)}
-										.markdown=${config.spec || "_No spec content yet_"}
-										.sessionId=${activeSessionId() || ""}
-										.bucket=${"proposal:goal"}
-										@annotation-change=${(e: CustomEvent) => { _goalAnnCount = e.detail?.count ?? 0; renderApp(); }}
-									></commentable-markdown>`
-								: html`<markdown-block .content=${config.spec || "_No spec content yet_"}></markdown-block>`}
-						</div>`
-				}
-			</div>
-		</div>
-	`;
-	const footer = html`
-		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
-			<div class="flex items-center justify-end gap-2">
-				${config.streaming ? streamingBadge() : ""}
-				${config.commentable && _goalAnnCount > 0 && !config.streaming ? Button({
-					variant: "secondary",
-					onClick: () => {
-						const el = goalCommentableRef.value;
-						if (!el) return;
-						const text = el.sendFeedback();
-						if (text && state.remoteAgent) {
-							state.remoteAgent.prompt(text);
-						}
-						_goalAnnCount = 0;
-						renderApp();
-					},
-					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_goalAnnCount})</span>`,
-				}) : ""}
-				${config.onDismiss ? Button({ variant: "ghost", onClick: config.onDismiss, children: "Dismiss" }) : ""}
-				<span
-					data-testid="proposal-primary-submit"
-					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : ""}
-				>${Button({
-					variant: "default",
-					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows,
-					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
-				})}</span>
-			</div>
-		</div>
-	`;
-	if (!tabbed) {
-		return html`${goalBody}${footer}`;
-	}
-	const onTabChange = (t: ProposalTab) => config.onTabChange?.(t);
-	const onTabKey = (e: KeyboardEvent) => {
-		const order: ProposalTab[] = ["goal", "workflow", "roles"];
-		const i = order.indexOf(activeTab);
-		if (e.key === "ArrowRight") { e.preventDefault(); onTabChange(order[(i + 1) % order.length]); }
-		else if (e.key === "ArrowLeft") { e.preventDefault(); onTabChange(order[(i - 1 + order.length) % order.length]); }
-		else if (e.key === "Home") { e.preventDefault(); onTabChange(order[0]); }
-		else if (e.key === "End") { e.preventDefault(); onTabChange(order[order.length - 1]); }
-	};
-	const tabCls = (selected: boolean) => "px-3 py-1.5 text-xs font-medium border-b-2 transition-colors " + (selected
-		? "border-primary text-foreground"
-		: "border-transparent text-muted-foreground hover:text-foreground");
-	// Static literal testids so the source-pin tests can detect them via text search.
-	const tabBar = html`
-		<div role="tablist" aria-label="Goal proposal sections"
-			class="shrink-0 flex items-center gap-1 px-5 pt-2 border-b border-border">
-			<button
-				role="tab"
-				id="goal-proposal-tab-goal"
-				data-testid="goal-proposal-tab-goal"
-				aria-selected=${activeTab === "goal" ? "true" : "false"}
-				aria-controls="goal-proposal-panel-goal"
-				tabindex=${activeTab === "goal" ? 0 : -1}
-				class=${tabCls(activeTab === "goal")}
-				@click=${() => onTabChange("goal")}
-				@keydown=${onTabKey}
-			>Goal</button>
-			<button
-				role="tab"
-				id="goal-proposal-tab-workflow"
-				data-testid="goal-proposal-tab-workflow"
-				aria-selected=${activeTab === "workflow" ? "true" : "false"}
-				aria-controls="goal-proposal-panel-workflow"
-				tabindex=${activeTab === "workflow" ? 0 : -1}
-				class=${tabCls(activeTab === "workflow")}
-				@click=${() => onTabChange("workflow")}
-				@keydown=${onTabKey}
-			>Workflow</button>
-			<button
-				role="tab"
-				id="goal-proposal-tab-roles"
-				data-testid="goal-proposal-tab-roles"
-				aria-selected=${activeTab === "roles" ? "true" : "false"}
-				aria-controls="goal-proposal-panel-roles"
-				tabindex=${activeTab === "roles" ? 0 : -1}
-				class=${tabCls(activeTab === "roles")}
-				@click=${() => onTabChange("roles")}
-				@keydown=${onTabKey}
-			>Roles</button>
-		</div>
-	`;
-	const panel = activeTab === "goal"
-		? goalBody
-		: activeTab === "workflow"
-			? renderProposalWorkflowTab(config)
-			: renderProposalRolesTab(config);
-	return html`${tabBar}${panel}${footer}`;
-}
-
-// ============================================================================
-// PROPOSAL MODAL — WORKFLOW TAB
-//
-// Reuses renderWorkflowList / renderWorkflowInspector / renderWorkflowEditor
-// exported from src/app/workflow-page.ts so the DOM matches the main Workflows
-// page exactly. The editor runs in `goal-draft` scope: every mutation flows
-// back through `config.onInlineWorkflowChange` and NEVER mutates the project
-// workflow store.
-// ============================================================================
-function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
-	const selectedId = config.workflowId;
-	const workflows = _cachedWorkflows;
-	const inline = config.inlineWorkflow ?? null;
-	const customizing = !!config.customizingWorkflow && !!inline;
-	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
-	const displayWf = inline ?? selectedLibrary;
-	const dirtyIds = new Set<string>();
-	if (inline) dirtyIds.add(inline.id);
-	return html`
-		<div class="flex-1 overflow-hidden flex min-h-0"
-			role="tabpanel"
-			id="goal-proposal-panel-workflow"
-			aria-labelledby="goal-proposal-tab-workflow"
-			data-testid="goal-proposal-panel-workflow">
-			<div class="w-64 shrink-0 border-r border-border overflow-y-auto p-3">
-				${workflows.length === 0
-					? html`<p class="text-xs text-muted-foreground">No workflows available for this project.</p>`
-					: renderWorkflowList({
-						workflows,
-						selectedId,
-						dirtyIds,
-						onSelect: (wf) => {
-							const ev = new Event("change");
-							Object.defineProperty(ev, "target", { value: { value: wf.id } });
-							config.onWorkflowChange(ev);
-							config.onResetWorkflow?.();
-						},
-						scope: "goal-draft",
-					})}
-			</div>
-			<div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 min-w-0">
-				<div class="flex items-center justify-end gap-2">
-					${customizing
-						? Button({
-								variant: "ghost",
-								size: "sm",
-								onClick: () => config.onResetWorkflow?.(),
-								children: html`<span data-testid="goal-proposal-workflow-reset">Reset to selected</span>`,
-						  })
-						: Button({
-								variant: "secondary",
-								size: "sm",
-								onClick: () => config.onCustomizeWorkflow?.(),
-								disabled: !selectedLibrary,
-								children: html`<span data-testid="goal-proposal-workflow-customize">Customize for this goal</span>`,
-						  })}
-				</div>
-				${customizing && inline
-					? renderWorkflowEditor({
-						workflow: inline,
-						onChange: (wf) => config.onInlineWorkflowChange?.(wf),
-						scope: "goal-draft",
-					})
-					: renderWorkflowInspector({ workflow: displayWf, scope: "goal-draft" })}
-			</div>
-		</div>
-	`;
-}
-
-// ============================================================================
-// PROPOSAL MODAL — ROLES TAB
-//
-// Reuses renderRoleList / renderRoleInspector / renderRoleEditor exported
-// from src/app/role-manager-page.ts. Customisations are kept in a
-// per-role-name map (`inlineRoles`) and only the subset the user actually
-// touched is forwarded to createGoal at submit time.
-// ============================================================================
-function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
-	const roles = config.roleList ?? [];
-	const selectedName = config.selectedRoleName ?? null;
-	const inlineMap = config.inlineRoles ?? {};
-	const customizedNames = new Set(Object.keys(inlineMap));
-	const selectedLibraryRole = roles.find((r) => r.name === selectedName) ?? roles[0] ?? null;
-	const inlineSelected = selectedName ? inlineMap[selectedName] : undefined;
-	const displayRole = inlineSelected ?? selectedLibraryRole;
-	const customizing = !!config.customizingRole && !!inlineSelected;
-	const availableTools = config.availableTools ?? [];
-	const groupPolicies = config.groupPolicies ?? {};
-	const draft: RoleEditorDraft | null = displayRole ? {
-		label: displayRole.label,
-		promptTemplate: displayRole.promptTemplate,
-		accessory: displayRole.accessory ?? "none",
-		toolPolicies: { ...(displayRole.toolPolicies ?? {}) },
-		model: displayRole.model ?? "",
-		thinkingLevel: displayRole.thinkingLevel ?? "",
-		activeTab: config.roleEditTab ?? "prompt",
-	} : null;
-	return html`
-		<div class="flex-1 overflow-hidden flex min-h-0"
-			role="tabpanel"
-			id="goal-proposal-panel-roles"
-			aria-labelledby="goal-proposal-tab-roles"
-			data-testid="goal-proposal-panel-roles">
-			<div class="w-64 shrink-0 border-r border-border overflow-y-auto p-3">
-				${config.roleListLoading
-					? html`<p class="text-xs text-muted-foreground">Loading roles…</p>`
-					: roles.length === 0
-						? html`<p class="text-xs text-muted-foreground">No roles available.</p>`
-						: renderRoleList({
-							roles,
-							selectedName,
-							customizedNames,
-							onSelect: (r) => config.onSelectRole?.(r.name),
-							scope: "goal-draft",
-						})}
-			</div>
-			<div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 min-w-0">
-				<div class="flex items-center justify-end gap-2">
-					${displayRole ? (customizing
-						? Button({
-								variant: "ghost",
-								size: "sm",
-								onClick: () => config.onResetRole?.(),
-								children: html`<span data-testid="goal-proposal-role-reset">Reset to default</span>`,
-						  })
-						: Button({
-								variant: "secondary",
-								size: "sm",
-								onClick: () => config.onCustomizeRole?.(),
-								children: html`<span data-testid="goal-proposal-role-customize">Customize for this goal</span>`,
-						  })) : nothing}
-				</div>
-				${displayRole && draft
-					? (customizing
-						? renderRoleEditor({
-							role: displayRole,
-							draft,
-							availableTools,
-							groupPolicies,
-							collapsedToolGroups: config.roleCollapsedGroups ?? new Set<string>(),
-							callbacks: {
-								onDraftChange: (patch) => config.onRoleDraftChange?.(patch),
-								onTabChange: (tab) => config.onRoleEditorTabChange?.(tab),
-								onToggleToolGroup: (g) => config.onRoleToggleToolGroup?.(g),
-							},
-							scope: "goal-draft",
-						})
-						: renderRoleInspector({
-							role: displayRole,
-							availableTools,
-							groupPolicies,
-							scope: "goal-draft",
-						}))
-					: html`<p class="text-xs text-muted-foreground">Select a role from the list to inspect or customise it.</p>`}
-			</div>
-		</div>
-	`;
-}
-
-/** Hydrate proposal-tab module state from a goal proposal in the preview-panel
- *  (goal assistant) flow. Mirrors the Workflow / Roles inline hydration block
- *  from `syncProposalFormState` without touching the title/spec/cwd/workflowId
- *  state that the preview panel owns separately via `state.previewTitle` etc. */
-let _previewProposalInlineKey: string | null = null;
-function syncPreviewProposalTabsState(): void {
-	const slot = state.activeProposals.goal;
-	const proposal = slot?.fields as undefined | {
-		inlineWorkflow?: Workflow;
-		inlineRoles?: Record<string, RoleData>;
-	};
-	// Identity keyed by sessionId + initial inline payload, NOT mutable title/
-	// spec; otherwise streaming token updates would wipe the user's active tab
-	// and any draft customisations. Same proposal session => keep tabs.
-	const inlineKey = proposal?.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
-	const rolesKey = proposal?.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
-	const key = `${slot?.sessionId || ""}|${inlineKey}|${rolesKey}`;
-	if (_previewProposalInlineKey === key) return;
-	// NOTE: resetProposalTabsState() clears _previewProposalInlineKey, so set
-	// it AFTER the reset.
-	resetProposalTabsState();
-	_previewProposalInlineKey = key;
-	if (proposal?.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
-		_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
-		_proposalCustomizingWorkflow = true;
-		if (!_selectedWorkflowId) _selectedWorkflowId = _proposalInlineWorkflow.id;
-	}
-	if (proposal?.inlineRoles && typeof proposal.inlineRoles === "object") {
-		for (const [name, role] of Object.entries(proposal.inlineRoles)) {
-			if (role && typeof role === "object") {
-				_proposalInlineRoles[name] = cloneRole(role as RoleData);
-			}
-		}
-		const firstCustomized = Object.keys(_proposalInlineRoles)[0];
-		if (firstCustomized) _proposalSelectedRoleName = firstCustomized;
-	}
-}
-
-function goalPreviewPanel() {
-	// Populate previewProjectId for re-attempt / assistant sessions where it
-	// wasn't seeded by the +New Goal picker. Resolution order:
-	// 1. Active session's projectId (server inherits this for re-attempts).
-	// 2. Original goal's projectId via reattemptGoalId.
-	// 3. Match proposal cwd against a registered project's rootPath.
-	if (!state.previewProjectId) {
-		const sid = activeSessionId();
-		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
-		let candidate = sess?.projectId;
-		if (!candidate && sess?.reattemptGoalId) {
-			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
-		}
-		if (!candidate) {
-			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
-			if (cwd) {
-				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-				const target = norm(cwd);
-				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
-			}
-		}
-		if (candidate && state.projects.some(p => p.id === candidate)) {
-			state.previewProjectId = candidate;
-		}
-	}
-	syncPreviewProposalTabsState();
-	ensureWorkflowsLoaded(state.previewProjectId || undefined);
-	ensureSandboxStatusLoaded();
-	ensureProposalRolesLoaded();
-	ensureProposalGroupPoliciesLoaded();
-	ensureToolsLoaded();
-
-	const handleCreateGoal = async () => {
-		const trimmedTitle = state.previewTitle.trim();
-		if (!trimmedTitle) return;
-		if (!state.previewProjectId) {
-			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
-			return;
-		}
-		// Guard: refuse to accept while the linked project has no workflows.
-		// The form's banner handles the affordance; this is the defensive backstop.
-		if (workflowStateFor(state.previewProjectId) === "empty") {
-			showConnectionError(
-				"This project has no workflows yet",
-				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
-			);
-			return;
-		}
-
-		// Snapshot form state up-front so a retry after createGoal() rejection
-		// reads the latest values (the user may have edited the workflow id /
-		// title between attempts).
-		const sessionId = activeSessionId();
-		const isAssistantContext = state.assistantType === "goal";
-		const projectId = state.previewProjectId || undefined;
-		const workflowId = _selectedWorkflowId || undefined;
-		const sandboxed = _goalSandboxed;
-		const autoStartTeam = _goalAutoStartTeam;
-		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
-		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
-		const reattemptGoalId = currentSession?.reattemptGoalId;
-		// Customised inline workflow / roles from the modal tabs take precedence
-		// over the library workflowId. inlineRoles is only forwarded when non-empty.
-		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
-		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
-			? _proposalInlineRoles as Record<string, unknown>
-			: undefined;
-
-		// Await the server FIRST. If it rejects, leave the assistant session,
-		// draft, gateway.sessionId, and form state intact so the user can edit
-		// (e.g. change workflow) and try again. See goal spec §1.
-		let goal;
-		try {
-			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
-				spec: state.previewSpec,
-				workflowId: inlineWorkflowField ? undefined : workflowId,
-				workflow: inlineWorkflowField,
-				inlineRoles: inlineRolesField,
-				reattemptOf: reattemptGoalId || undefined,
-				sandboxed,
-				projectId,
-				enabledOptionalSteps,
-				autoStartTeam,
-			});
-		} catch (err) {
-			const { message, code, stack } = errorDetails(err);
-			showConnectionError("Failed to create goal", message, { code, stack });
-			return;
-		}
-		if (!goal) {
-			// createGoal() returns falsy on certain server errors (the helper
-			// already surfaces a toast). Preserve the assistant either way.
-			return;
-		}
-
-		// --- Success path: now tear down the assistant. ---
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-		state.assistantType = null;
-		if (sessionId) clearProposalAnnotations(sessionId, "goal");
-		resetProposalAnnCount("goal");
-		delete state.activeProposals.goal;
-		state.previewProjectId = "";
-		_selectedWorkflowId = "";
-		_goalSandboxed = false;
-		_goalAutoStartTeam = true;
-		_assistantEnabledOptionalSteps = [];
-		resetProposalTabsState();
-		_previewProposalInlineKey = null;
-		if (sessionId) {
-			deleteGoalDraft(sessionId);
-		}
-		localStorage.removeItem("gateway.sessionId");
-		state.appView = "authenticated";
-
-		// Slice E: drop the on-disk proposal file once accepted.
-		if (sessionId) void deleteProposalFile(sessionId, "goal");
-
-		// If this is a re-attempt, archive the old goal and link the new one
-		if (reattemptGoalId) {
-			// cascade=true — the reattempted goal's tree (if any) goes with it.
-			await gatewayFetch(`/api/goals/${reattemptGoalId}?cascade=true`, { method: "DELETE" });
-			await gatewayFetch(`/api/goals/${goal.id}`, {
-				method: "PUT",
-				body: JSON.stringify({ reattemptOf: reattemptGoalId }),
-			});
-		}
-
-		// Notify the proposing agent (mid-session only — assistant context
-		// tears down the session below, so notifying there would be moot).
-		if (!isAssistantContext && sessionId && goal) {
-			void notifyProposalDecision(sessionId, "goal", "accepted", trimmedTitle);
-		}
-
-		if (isAssistantContext && sessionId && !isSessionArchived(sessionId)) {
-			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-			clearSessionModel(sessionId);
-		}
-		await refreshSessions();
-		setHashRoute("goal-dashboard", goal.id, true);
-		renderApp();
-	};
-
-	const handleOpenProjectAssistant = async () => {
-		const linked = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
-		if (!linked) return;
-		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
-	};
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal">
-			${proposalToast()}
-			${renderGoalForm({
-				title: state.previewTitle,
-				spec: state.previewSpec,
-				cwd: state.previewCwd,
-				workflowId: _selectedWorkflowId,
-				sandboxed: _goalSandboxed,
-				specEditMode: state.previewSpecEditMode,
-				enabledOptionalSteps: _assistantEnabledOptionalSteps,
-				linkedProjectId: state.previewProjectId || undefined,
-				workflowState: workflowStateFor(state.previewProjectId || undefined),
-				onOpenProjectAssistant: handleOpenProjectAssistant,
-				onTitleChange: (e: Event) => {
-					state.previewTitle = (e.target as HTMLInputElement).value;
-					state.previewTitleEdited = true;
-					const sid = activeSessionId();
-					if (sid) saveGoalDraft(sid);
-					// Debounced goal title summarization (1s)
-					if ((state as any)._goalTitleDebounceTimer) {
-						clearTimeout((state as any)._goalTitleDebounceTimer);
-					}
-					const trimmedTitle = (e.target as HTMLInputElement).value.trim();
-					if (trimmedTitle.length >= 3 && trimmedTitle !== (state as any)._lastSummarizedGoalTitle && state.remoteAgent) {
-						(state as any)._goalTitleDebounceTimer = setTimeout(() => {
-							(state as any)._lastSummarizedGoalTitle = trimmedTitle;
-							state.remoteAgent?.summarizeGoalTitle(trimmedTitle);
-							(state as any)._goalTitleDebounceTimer = null;
-						}, 1000);
-					}
-				},
-				onSpecChange: (e: Event) => {
-					state.previewSpec = (e.target as HTMLTextAreaElement).value;
-					state.previewSpecEdited = true;
-					const sid = activeSessionId();
-					if (sid) saveGoalDraft(sid);
-				},
-				onCwdChange: (v) => {
-					state.previewCwd = v;
-					state.previewCwdEdited = true;
-					const sid = activeSessionId();
-					if (sid) saveGoalDraft(sid);
-					renderApp();
-				},
-				onCwdSelect: (v) => {
-					state.previewCwd = v;
-					state.previewCwdEdited = true;
-					const sid = activeSessionId();
-					if (sid) saveGoalDraft(sid);
-					renderApp();
-				},
-				onWorkflowChange: (e: Event) => {
-					_selectedWorkflowId = (e.target as HTMLSelectElement).value;
-					// Changing the picker selects a different library workflow; any
-					// prior goal-draft inline workflow customisation is for the old
-					// selection and must be cleared so submit doesn't ship stale
-					// inline content alongside the newly-selected workflowId.
-					_proposalInlineWorkflow = null;
-					_proposalCustomizingWorkflow = false;
-					clearWorkflowEditorController();
-					renderApp();
-				},
-				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
-				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
-				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
-				autoStartTeam: _goalAutoStartTeam,
-				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
-				cwdDropdownOpen: state.cwdDropdownOpen,
-				cwdHighlightIndex: state.cwdHighlightIndex,
-				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
-				onCwdHighlight: (i) => { state.cwdHighlightIndex = i; },
-				onCreate: handleCreateGoal,
-				streaming: isProposalStreaming("goal_proposal"),
-				commentable: true,
-
-				// ---- Proposal-modal tabs wiring (shared with goalProposalPanel) ----
-				tabbed: true,
-				activeTab: _proposalActiveTab,
-				onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
-
-				inlineWorkflow: _proposalInlineWorkflow,
-				customizingWorkflow: _proposalCustomizingWorkflow,
-				onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
-				onCustomizeWorkflow: () => {
-					const src = _cachedWorkflows.find((w) => w.id === _selectedWorkflowId) ?? _cachedWorkflows[0];
-					if (!src) return;
-					_proposalInlineWorkflow = cloneWorkflow(src);
-					_proposalCustomizingWorkflow = true;
-					clearWorkflowEditorController();
-					renderApp();
-				},
-				onResetWorkflow: () => {
-					_proposalInlineWorkflow = null;
-					_proposalCustomizingWorkflow = false;
-					// If the selected workflow id is from a seeded inline workflow
-					// that is not in the project's library, the user just discarded
-					// the only thing carrying that id. Snap back to a real library
-					// workflow so submit doesn't forward a stale inline-only id as
-					// `workflowId`. See goal-proposal-tabs spec — "Reset to selected
-					// normalizes stale inline id".
-					if (!_cachedWorkflows.some((w) => w.id === _selectedWorkflowId)) {
-						_selectedWorkflowId = _cachedWorkflows[0]?.id ?? "";
-					}
-					clearWorkflowEditorController();
-					renderApp();
-				},
-
-				inlineRoles: _proposalInlineRoles,
-				selectedRoleName: _proposalSelectedRoleName,
-				onSelectRole: (name) => {
-					_proposalSelectedRoleName = name;
-					_proposalCustomizingRole = !!_proposalInlineRoles[name];
-					renderApp();
-				},
-				customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
-				onCustomizeRole: () => {
-					const name = _proposalSelectedRoleName;
-					if (!name) return;
-					const src = proposalRolesList().find((r) => r.name === name);
-					if (!src) return;
-					if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
-					_proposalCustomizingRole = true;
-					_proposalRoleEditTab = "prompt";
-					renderApp();
-				},
-				onResetRole: () => {
-					const name = _proposalSelectedRoleName;
-					if (!name) return;
-					delete _proposalInlineRoles[name];
-					_proposalCustomizingRole = false;
-					renderApp();
-				},
-				onRoleDraftChange: (patch) => {
-					const name = _proposalSelectedRoleName;
-					if (!name) return;
-					const current = _proposalInlineRoles[name];
-					if (!current) return;
-					const next: RoleData = { ...current };
-					if (patch.label !== undefined) next.label = patch.label;
-					if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
-					if (patch.accessory !== undefined) next.accessory = patch.accessory;
-					if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
-					if (patch.model !== undefined) next.model = patch.model;
-					if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
-					_proposalInlineRoles[name] = next;
-					renderApp();
-				},
-				onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
-				onRoleToggleToolGroup: (group) => {
-					if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
-					else _proposalRoleCollapsedGroups.add(group);
-					renderApp();
-				},
-				roleEditTab: _proposalRoleEditTab,
-				roleCollapsedGroups: _proposalRoleCollapsedGroups,
-				roleList: proposalRolesList(),
-				roleListLoading: proposalRolesLoading(),
-				availableTools: _availableTools,
-				groupPolicies: _proposalGroupPoliciesCache ?? {},
-			})}
-		</div>
-	`;
-}
-
-// ============================================================================
-// ROLE PREVIEW PANEL (role assistant split-screen)
-// ============================================================================
-
-import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
-import { fetchTools, type ToolInfo } from "./api.js";
-
-/** Cached available tools list (loaded once). */
-let _availableTools: ToolInfo[] = [];
-let _toolsLoaded = false;
-
-function ensureToolsLoaded(): void {
-	if (_toolsLoaded) return;
-	_toolsLoaded = true;
-	fetchTools().then((tools) => { _availableTools = tools; renderApp(); });
-}
-
-function rolePreviewPanel() {
-	ensureMarkdownBlock();
-	ensureToolsLoaded();
-	const streaming = isProposalStreaming("role_proposal");
-	queueMicrotask(() => {
-		reconcileFollowTail(rolePromptPreviewRef.value);
-		reconcileFollowTail(rolePromptTextareaRef.value);
-	});
-
-	const handleCreateRole = async () => {
-		const trimmedName = state.rolePreviewName.trim();
-		const trimmedLabel = state.rolePreviewLabel.trim();
-		if (!trimmedName || !trimmedLabel) return;
-		const proposalSessionId = state.activeProposals.role?.sessionId ?? activeSessionId();
-		const isRoleAssistant = state.assistantType === "role";
-
-		// Parse tools: comma-separated string -> array
-		const toolsList = state.rolePreviewTools
-			.split(",")
-			.map((t) => t.trim())
-			.filter(Boolean);
-
-		// Convert tools list to toolPolicies (all explicitly listed tools get "allow")
-		const toolPolicies: Record<string, string> = {};
-		for (const t of toolsList) toolPolicies[t] = "allow";
-
-		const created = await createRole({
-			name: trimmedName,
-			label: trimmedLabel,
-			promptTemplate: state.rolePreviewPrompt,
-			toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
-			accessory: state.rolePreviewAccessory,
-		});
-		if (!created) return;
-
-		clearProposalReviewState(proposalSessionId, "role");
-		delete state.activeProposals.role;
-		recomputeAssistantHasProposal();
-		clampUnifiedTabsAfterProposalRemoved("role");
-		if (proposalSessionId) {
-			deleteRoleDraft(proposalSessionId);
-			void deleteProposalFile(proposalSessionId, "role");
-		}
-
-		// Notify the proposing agent (fire-and-forget). In assistant context
-		// the session will be terminated immediately below — skip the notify
-		// since there's no agent to receive it.
-		if (!isRoleAssistant && proposalSessionId) {
-			void notifyProposalDecision(proposalSessionId, "role", "accepted", trimmedName);
-		}
-
-		if (isRoleAssistant) {
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.assistantType = null;
-			localStorage.removeItem("gateway.sessionId");
-			if (proposalSessionId && !isSessionArchived(proposalSessionId)) {
-				await gatewayFetch(`/api/sessions/${proposalSessionId}`, { method: "DELETE" });
-				clearSessionModel(proposalSessionId);
-			}
-		}
-
-		// Navigate to the roles page
-		const { loadRolePageData } = await import("./role-manager-page.js");
-		await loadRolePageData();
-		setHashRoute("roles");
-		renderApp();
-	};
-
-	// Parse current tools string into array for display
-	const currentTools = state.rolePreviewTools
-		.split(",")
-		.map((t) => t.trim())
-		.filter(Boolean);
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="role-proposal">
-			${proposalToast()}
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
-					${Input({
-						type: "text",
-						value: state.rolePreviewName,
-						placeholder: "role-name (lowercase, hyphens)",
-						onInput: (e: Event) => {
-							state.rolePreviewName = (e.target as HTMLInputElement).value;
-							state.rolePreviewNameEdited = true;
-							const sid = activeSessionId();
-							if (sid) saveRoleDraft(sid);
-						},
-					})}
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Label</label>
-					${Input({
-						type: "text",
-						value: state.rolePreviewLabel,
-						placeholder: "Display Label",
-						onInput: (e: Event) => {
-							state.rolePreviewLabel = (e.target as HTMLInputElement).value;
-							state.rolePreviewLabelEdited = true;
-							const sid = activeSessionId();
-							if (sid) saveRoleDraft(sid);
-						},
-					})}
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Accessory</label>
-					<div class="flex flex-wrap gap-2">
-						${ACCESSORY_IDS.map((accId) => {
-							const acc = getAccessory(accId);
-							const isSelected = state.rolePreviewAccessory === accId;
-							return html`
-								<button
-									class="flex flex-col items-center gap-1 px-2 py-1.5 rounded border transition-colors ${isSelected ? "border-primary bg-primary/10" : "border-border hover:border-muted-foreground/50"}"
-									@click=${() => {
-										state.rolePreviewAccessory = accId;
-										state.rolePreviewAccessoryEdited = true;
-										const sid = activeSessionId();
-										if (sid) saveRoleDraft(sid);
-										renderApp();
-									}}
-									title=${acc.label}
-								>
-									${statusBobbit("idle", false, undefined, isSelected, false, accId === "crown", accId === "bandana", accId)}
-									<span class="text-[10px] text-muted-foreground">${acc.label}</span>
-								</button>
-							`;
-						})}
-					</div>
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Tools</label>
-					<div class="flex flex-wrap gap-1 mb-2">
-						${currentTools.map((tool) => html`
-							<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-secondary text-secondary-foreground">
-								${tool}
-								<button class="hover:text-destructive" title="Remove tool" @click=${() => {
-									const remaining = currentTools.filter((t) => t !== tool);
-									state.rolePreviewTools = remaining.join(", ");
-									state.rolePreviewToolsEdited = true;
-									const sid = activeSessionId();
-									if (sid) saveRoleDraft(sid);
-									renderApp();
-								}}>&times;</button>
-							</span>
-						`)}
-						${currentTools.length === 0 ? html`<span class="text-xs text-muted-foreground italic">All tools allowed</span>` : ""}
-					</div>
-					${_availableTools.length > 0 ? html`
-						<div class="flex flex-wrap gap-1">
-							${_availableTools.filter((t) => !currentTools.includes(t.name)).map((tool) => html`
-								<button
-									class="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-									title="${tool.description}"
-									@click=${() => {
-										const newTools = [...currentTools, tool.name];
-										state.rolePreviewTools = newTools.join(", ");
-										state.rolePreviewToolsEdited = true;
-										const sid = activeSessionId();
-										if (sid) saveRoleDraft(sid);
-										renderApp();
-									}}
-								>+ ${tool.name}</button>
-							`)}
-						</div>
-					` : ""}
-				</div>
-				<div class="flex-1 flex flex-col min-h-0">
-					<div class="flex items-center justify-between mb-1.5">
-						<div class="flex items-center gap-1">
-							<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
-							${!state.rolePreviewPromptEditMode && _roleAnnCount > 0 ? html`
-								<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
-									data-testid="proposal-comment-count">
-									${_roleAnnCount} comment${_roleAnnCount === 1 ? "" : "s"}
-								</span>
-							` : ""}
-						</div>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Toggle edit/preview mode"
-							@click=${() => { state.rolePreviewPromptEditMode = !state.rolePreviewPromptEditMode; renderApp(); }}
-						>
-							${state.rolePreviewPromptEditMode ? "Preview" : "Edit"}
-						</button>
-					</div>
-					${state.rolePreviewPromptEditMode
-						? html`<textarea
-								${ref(rolePromptTextareaRef)}
-								class="flex-1 min-h-[200px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
-								.value=${state.rolePreviewPrompt}
-								@input=${(e: Event) => {
-									state.rolePreviewPrompt = (e.target as HTMLTextAreaElement).value;
-									state.rolePreviewPromptEdited = true;
-									const sid = activeSessionId();
-									if (sid) saveRoleDraft(sid);
-								}}
-							></textarea>`
-						: html`<div ${ref(rolePromptPreviewRef)} class="flex-1 min-h-[200px] p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}">
-								<commentable-markdown
-									${ref(rolePromptCommentableRef)}
-									.markdown=${state.rolePreviewPrompt || "_No prompt content yet_"}
-									.sessionId=${activeSessionId() || ""}
-									.bucket=${"proposal:role"}
-									@annotation-change=${(e: CustomEvent) => { _roleAnnCount = e.detail?.count ?? 0; renderApp(); }}
-								></commentable-markdown>
-							</div>`
-					}
-				</div>
-			</div>
-			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${streaming ? streamingBadge() : ""}
-				${_roleAnnCount > 0 && !streaming ? Button({
-					variant: "secondary",
-					onClick: () => {
-						const el = rolePromptCommentableRef.value;
-						if (!el) return;
-						const text = el.sendFeedback();
-						if (text && state.remoteAgent) {
-							state.remoteAgent.prompt(text);
-						}
-						_roleAnnCount = 0;
-						renderApp();
-					},
-					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_roleAnnCount})</span>`,
-				}) : ""}
-				${!state.assistantType ? Button({ variant: "ghost", onClick: () => dismissTypedProposal("role"), children: "Dismiss" }) : ""}
-				<span data-testid="proposal-primary-submit">${Button({
-					variant: "default",
-					onClick: handleCreateRole,
-					disabled: !state.rolePreviewName.trim() || !state.rolePreviewLabel.trim() || streaming,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Users, "sm")} Create Role</span>`,
-				})}</span>
-			</div>
-		</div>
-	`;
-}
-
-// ============================================================================
-// TOOL PREVIEW PANEL (tool assistant split-screen)
-// ============================================================================
-
-function toolPreviewPanel() {
-	ensureMarkdownBlock();
-	const streaming = isProposalStreaming("tool_proposal");
-	queueMicrotask(() => {
-		reconcileFollowTail(toolDocsPreviewRef.value);
-		reconcileFollowTail(toolRendererPreviewRef.value);
-		reconcileFollowTail(toolOuterScrollRef.value);
-	});
-	const handleDone = () => {
-		if (state.assistantType === "tool") {
-			backToSessions();
-			return;
-		}
-		dismissTypedProposal("tool");
-	};
-
-	const handleViewTool = async () => {
-		const toolName = state.toolPreviewName.trim();
-		if (!toolName) return;
-		const { loadToolPageData } = await import("./tool-manager-page.js");
-		await loadToolPageData();
-		setHashRoute("tool-edit", toolName);
-		renderApp();
-	};
-
-	const checklist = state.toolPreviewChecklist;
-	const checklistItems = [
-		{ key: "docs" as const, label: "Documentation", desc: "Usage examples, parameter descriptions" },
-		{ key: "renderer" as const, label: "Renderer", desc: "Custom tool call display component" },
-		{ key: "tests" as const, label: "Tests", desc: "Unit and E2E test coverage" },
-		{ key: "config" as const, label: "Configuration", desc: "Tool metadata, groups, role access" },
-	];
-
-	const statusIcon = (s: "pending" | "in-progress" | "done") =>
-		s === "done" ? html`<span class="text-green-500">&#10003;</span>`
-		: s === "in-progress" ? html`<span class="text-yellow-500 animate-pulse">&#9679;</span>`
-		: html`<span class="text-muted-foreground">&#9675;</span>`;
-
-	const doneCount = Object.values(checklist).filter((s) => s === "done").length;
-	const total = checklistItems.length;
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel="tool-proposal">
-			<div ${ref(toolOuterScrollRef)} class="flex-1 overflow-y-auto p-5 flex flex-col gap-4 ${streaming ? STREAMING_BORDER : ""}">
-				<!-- Tool name header -->
-				<div>
-					<div class="text-xs text-muted-foreground mb-1">Tool</div>
-					<div class="text-lg font-semibold">${state.toolPreviewName || html`<span class="text-muted-foreground italic">Waiting for assistant...</span>`}</div>
-				</div>
-
-				<!-- Progress bar -->
-				<div>
-					<div class="flex items-center justify-between mb-1.5">
-						<span class="text-xs text-muted-foreground font-medium">Progress</span>
-						<span class="text-xs text-muted-foreground">${doneCount}/${total}</span>
-					</div>
-					<div class="h-1.5 rounded-full bg-secondary overflow-hidden">
-						<div class="h-full rounded-full bg-primary transition-all duration-500" style="width: ${(doneCount / total) * 100}%"></div>
-					</div>
-				</div>
-
-				<!-- Checklist -->
-				<div class="flex flex-col gap-2">
-					${checklistItems.map((item) => html`
-						<div class="flex items-start gap-2.5 p-2.5 rounded-md border border-border ${checklist[item.key] === "done" ? "bg-green-500/5" : ""}">
-							<div class="mt-0.5 text-sm">${statusIcon(checklist[item.key])}</div>
-							<div class="flex-1 min-w-0">
-								<div class="text-sm font-medium">${item.label}</div>
-								<div class="text-xs text-muted-foreground">${item.desc}</div>
-							</div>
-						</div>
-					`)}
-				</div>
-
-				<!-- Documentation preview -->
-				${state.toolPreviewDocs ? html`
-					<div>
-						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Documentation Preview</div>
-						<div ${ref(toolDocsPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[200px] ${streaming ? STREAMING_BORDER : ""}">
-							<markdown-block .content=${state.toolPreviewDocs}></markdown-block>
-						</div>
-					</div>
-				` : ""}
-
-				<!-- Renderer preview -->
-				${state.toolPreviewRendererHtml ? html`
-					<div>
-						<div class="text-xs text-muted-foreground mb-1.5 font-medium">Renderer Preview</div>
-						<div ${ref(toolRendererPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm max-h-[300px] ${streaming ? STREAMING_BORDER : ""}">
-							<markdown-block .content=${state.toolPreviewRendererHtml}></markdown-block>
-						</div>
-					</div>
-				` : ""}
-			</div>
-
-			<!-- Footer -->
-			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${streaming ? streamingBadge() : ""}
-				${Button({ variant: "ghost", onClick: handleDone, children: state.assistantType === "tool" ? "Close" : "Dismiss" })}
-				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
-					variant: "default",
-					onClick: handleViewTool,
-					disabled: streaming,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} View Tool</span>`,
-				})}</span>` : ""}
-			</div>
-		</div>
-	`;
-}
-
-// ============================================================================
-// STAFF PREVIEW PANEL (staff assistant split-screen)
-// ============================================================================
-
-import { createStaffAgent } from "./api.js";
-import { reloadStaffList } from "./sidebar.js";
-
-interface TriggerDef {
-	type: string;
-	config: Record<string, any>;
-	enabled: boolean;
-	prompt?: string;
-}
-
-function parseTriggers(json: string): TriggerDef[] {
-	try {
-		const arr = JSON.parse(json);
-		return Array.isArray(arr) ? arr : [];
-	} catch {
-		return [];
-	}
-}
-
-function updateTrigger(index: number, updater: (t: TriggerDef) => void) {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	if (triggers[index]) {
-		updater(triggers[index]);
-		state.staffPreviewTriggers = JSON.stringify(triggers);
-		state.staffPreviewTriggersEdited = true;
-		renderApp();
-	}
-}
-
-function removeTrigger(index: number) {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	triggers.splice(index, 1);
-	state.staffPreviewTriggers = JSON.stringify(triggers);
-	state.staffPreviewTriggersEdited = true;
-	renderApp();
-}
-
-function renderTriggersEditor() {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	if (triggers.length === 0) {
-		return html`<div class="text-xs text-muted-foreground italic p-3 border border-dashed border-border rounded-md">No triggers configured. Add one above.</div>`;
-	}
-	return html`<div class="flex flex-col gap-2">${triggers.map((t, i) => renderTriggerCard(t, i))}</div>`;
-}
-
-function renderTriggerCard(trigger: TriggerDef, index: number) {
-	const typeLabel: Record<string, string> = { schedule: "⏰ Schedule", git: "🔀 Git", manual: "👆 Manual" };
-	const typeOptions = ["schedule", "git", "manual"];
-	const inputClass = "w-full h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
-
-	const onTypeChange = (e: Event) => {
-		const newType = (e.target as HTMLSelectElement).value;
-		updateTrigger(index, (t) => {
-			t.type = newType;
-			if (newType === "schedule") t.config = { cron: "0 9 * * *" };
-			else if (newType === "git") t.config = { event: "push", branch: "master" };
-			else t.config = {};
-		});
-	};
-
-	return html`
-		<div class="rounded-md border border-border bg-secondary/20 p-3">
-			<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px">
-				<select
-					class="text-xs px-2 py-1 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-					.value=${trigger.type}
-					@change=${onTypeChange}
-				>
-					${typeOptions.map((opt) => html`<option value=${opt} ?selected=${trigger.type === opt}>${typeLabel[opt] || opt}</option>`)}
-				</select>
-				<label style="display:flex; align-items:center; gap:4px; margin-left:auto; font-size:11px" class="text-muted-foreground cursor-pointer select-none">
-					<input
-						type="checkbox"
-						class="accent-primary"
-						.checked=${trigger.enabled !== false}
-						@change=${(e: Event) => updateTrigger(index, (t) => { t.enabled = (e.target as HTMLInputElement).checked; })}
-					/> Enabled
-				</label>
-				<button
-					class="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-					title="Remove trigger"
-					@click=${() => removeTrigger(index)}
-				>✕</button>
-			</div>
-
-			${trigger.type === "schedule" ? html`
-				<div style="margin-bottom:4px">
-					<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Cron expression (UTC)</label>
-					<input
-						type="text"
-						class=${inputClass}
-						placeholder="0 9 * * *"
-						.value=${trigger.config?.cron || ""}
-						@input=${(e: Event) => updateTrigger(index, (t) => { t.config.cron = (e.target as HTMLInputElement).value; })}
-					/>
-				</div>
-				<div class="text-[10px] text-muted-foreground" style="margin-bottom:8px">${describeCron(trigger.config?.cron || "")}</div>
-			` : ""}
-
-			${trigger.type === "git" ? html`
-				<div style="display:grid; grid-template-columns:100px 1fr; gap:8px; margin-bottom:8px">
-					<div>
-						<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Event</label>
-						<select
-							class=${inputClass}
-							.value=${trigger.config?.event || "push"}
-							@change=${(e: Event) => updateTrigger(index, (t) => { t.config.event = (e.target as HTMLSelectElement).value; })}
-						>
-							<option value="push" ?selected=${trigger.config?.event === "push"}>push</option>
-						</select>
-					</div>
-					<div>
-						<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Branch</label>
-						<input
-							type="text"
-							class=${inputClass}
-							placeholder="master"
-							.value=${trigger.config?.branch || ""}
-							@input=${(e: Event) => updateTrigger(index, (t) => { t.config.branch = (e.target as HTMLInputElement).value; })}
-						/>
-					</div>
-				</div>
-			` : ""}
-
-			<div style="margin-top:${trigger.type === "manual" ? "0" : "0"}">
-				<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Wake prompt (optional)</label>
-				<textarea
-					class="w-full p-2 text-xs rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-					rows="2"
-					placeholder="Message sent to the agent when this trigger fires"
-					.value=${trigger.prompt || ""}
-					@input=${(e: Event) => updateTrigger(index, (t) => { t.prompt = (e.target as HTMLTextAreaElement).value; })}
-				></textarea>
-			</div>
-		</div>
-	`;
-}
-
-/** Produce a human-readable description of a cron expression. */
-function describeCron(cron: string): string {
-	const parts = cron.trim().split(/\s+/);
-	if (parts.length !== 5) return cron ? `Custom: ${cron}` : "";
-	const [min, hour, dom, mon, dow] = parts;
-
-	const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-	let timeStr = "";
-	if (min !== "*" && hour !== "*") {
-		const h = parseInt(hour, 10);
-		const m = parseInt(min, 10);
-		if (!isNaN(h) && !isNaN(m)) {
-			const ampm = h >= 12 ? "PM" : "AM";
-			const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-			timeStr = `${h12}:${m.toString().padStart(2, "0")} ${ampm}`;
-		}
-	}
-
-	// Every N hours
-	if (hour.startsWith("*/")) {
-		const n = hour.slice(2);
-		const base = min === "0" ? "on the hour" : `at :${min.padStart(2, "0")}`;
-		return `Every ${n} hour${n === "1" ? "" : "s"}, ${base}`;
-	}
-
-	// Every N minutes
-	if (min.startsWith("*/")) {
-		const n = min.slice(2);
-		return `Every ${n} minute${n === "1" ? "" : "s"}`;
-	}
-
-	// Daily
-	if (dom === "*" && mon === "*" && dow === "*" && timeStr) {
-		return `Daily at ${timeStr}`;
-	}
-
-	// Weekdays only
-	if (dom === "*" && mon === "*" && dow === "1-5" && timeStr) {
-		return `Weekdays at ${timeStr}`;
-	}
-
-	// Specific day of week
-	if (dom === "*" && mon === "*" && dow !== "*" && timeStr) {
-		const dowNum = parseInt(dow, 10);
-		const dayName = !isNaN(dowNum) && dowNum >= 0 && dowNum <= 6 ? dayNames[dowNum] : dow;
-		return `Every ${dayName} at ${timeStr}`;
-	}
-
-	// Specific day of month
-	if (dom !== "*" && mon === "*" && dow === "*" && timeStr) {
-		const suffix = dom === "1" ? "st" : dom === "2" ? "nd" : dom === "3" ? "rd" : "th";
-		return `${dom}${suffix} of each month at ${timeStr}`;
-	}
-
-	return cron ? `Custom: ${cron}` : "";
-}
-
-function staffPreviewSessionId(): string | undefined {
-	return state.activeProposals.staff?.sessionId || activeSessionId();
-}
-
-function staffPreviewProjectId(sessionId = staffPreviewSessionId()): string | undefined {
-	if (!sessionId) return undefined;
-	const session = state.gatewaySessions.find(s => s.id === sessionId)
-		|| state.archivedSessions.find(s => s.id === sessionId);
-	if (session?.projectId) return session.projectId;
-	const activeId = activeSessionId();
-	if (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId) {
-		return state.chatPanel?.agentInterface?.projectId || undefined;
-	}
-	return undefined;
-}
-
-function activeProjectForStaffPreview() {
-	const projectId = staffPreviewProjectId();
-	return projectId
-		? state.projects.find(p => p.id === projectId)
-		: undefined;
-}
-
-function effectiveStaffPreviewCwd(project = activeProjectForStaffPreview()): string | undefined {
-	const explicitCwd = state.staffPreviewCwd.trim();
-	if (explicitCwd) return explicitCwd;
-	return project?.rootPath || undefined;
-}
-
-function seedStaffPreviewCwdFromProject(project = activeProjectForStaffPreview()): void {
-	if (state.staffPreviewCwdEdited || state.staffPreviewCwd.trim()) return;
-	if (project?.rootPath) state.staffPreviewCwd = project.rootPath;
-}
-
-function staffPreviewPanel() {
-	ensureMarkdownBlock();
-	ensureSandboxStatusLoaded();
-	const staffProject = activeProjectForStaffPreview();
-	seedStaffPreviewCwdFromProject(staffProject);
-	const streaming = isProposalStreaming("staff_proposal");
-	const effectiveCwd = effectiveStaffPreviewCwd(staffProject);
-	queueMicrotask(() => {
-		reconcileFollowTail(staffPromptPreviewRef.value);
-		reconcileFollowTail(staffPromptTextareaRef.value);
-	});
-	const handleCreateStaff = async () => {
-		const trimmedName = state.staffPreviewName.trim();
-		if (!trimmedName) return;
-		const proposalSessionId = staffPreviewSessionId();
-		const isStaffAssistant = state.assistantType === "staff";
-
-		let triggers: any[] = [];
-		try {
-			triggers = JSON.parse(state.staffPreviewTriggers);
-		} catch { /* keep empty */ }
-
-		const sandboxed = _staffSandboxed;
-		const submitProjectId = staffPreviewProjectId();
-		const submitProject = submitProjectId
-			? state.projects.find(p => p.id === submitProjectId)
-			: undefined;
-		const cwd = effectiveStaffPreviewCwd(submitProject);
-		const result = await createStaffAgent({
-			name: trimmedName,
-			description: state.staffPreviewDescription,
-			systemPrompt: state.staffPreviewPrompt,
-			cwd,
-			worktree: state.staffPreviewWorktree,
-			triggers,
-			projectId: submitProjectId,
-			sandboxed,
-		});
-		if (!result) return;
-
-		_staffSandboxed = false;
-		state.staffPreviewWorktree = true;
-		clearProposalReviewState(proposalSessionId, "staff");
-		delete state.activeProposals.staff;
-		recomputeAssistantHasProposal();
-		clampUnifiedTabsAfterProposalRemoved("staff");
-		if (proposalSessionId) void deleteProposalFile(proposalSessionId, "staff");
-
-		// Notify the proposing agent (fire-and-forget) — only when mid-session,
-		// since the assistant-context flow ends the session right here.
-		if (!isStaffAssistant && proposalSessionId) {
-			void notifyProposalDecision(proposalSessionId, "staff", "accepted", trimmedName);
-		}
-
-		if (isStaffAssistant) {
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.assistantType = null;
-			localStorage.removeItem("gateway.sessionId");
-			setHashRoute("landing");
-			state.appView = "authenticated";
-			if (proposalSessionId && !isSessionArchived(proposalSessionId)) {
-				await gatewayFetch(`/api/sessions/${proposalSessionId}`, { method: "DELETE" });
-				clearSessionModel(proposalSessionId);
-			}
-		}
-
-		reloadStaffList();
-		await refreshSessions();
-		if (isStaffAssistant && result?.currentSessionId) {
-			await connectToSession(result.currentSessionId, false);
-		}
-		renderApp();
-	};
-
-	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="staff-proposal">
-			${proposalToast()}
-			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
-					${Input({
-						type: "text",
-						value: state.staffPreviewName,
-						placeholder: "Staff agent name",
-						onInput: (e: Event) => {
-							state.staffPreviewName = (e.target as HTMLInputElement).value;
-							state.staffPreviewNameEdited = true;
-						},
-					})}
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Description</label>
-					<textarea
-						class="w-full p-2 text-sm rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-						rows="2"
-						placeholder="What does this staff agent do?"
-						.value=${state.staffPreviewDescription}
-						@input=${(e: Event) => {
-							state.staffPreviewDescription = (e.target as HTMLTextAreaElement).value;
-							state.staffPreviewDescriptionEdited = true;
-						}}
-					></textarea>
-				</div>
-				<div data-testid="staff-proposal-cwd-field">
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
-					<input
-						type="text"
-						data-testid="staff-proposal-cwd-input"
-						class="flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm md:text-sm text-foreground shadow-xs transition-[color,box-shadow] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30"
-						.value=${state.staffPreviewCwd}
-						placeholder=${staffProject?.rootPath || "Project working directory"}
-						@input=${(e: Event) => {
-							state.staffPreviewCwd = (e.target as HTMLInputElement).value;
-							state.staffPreviewCwdEdited = true;
-						}}
-					/>
-					<p class="mt-1 text-[11px] text-muted-foreground" data-testid="staff-proposal-cwd-hint">
-						${staffProject
-							? html`Selected project: <span class="font-medium text-foreground/80">${staffProject.name}</span> · <code class="text-[10px]">${staffProject.rootPath}</code>`
-							: effectiveCwd
-								? html`Using <code class="text-[10px]">${effectiveCwd}</code>`
-								: "No project cwd is available; the server will validate the request."}
-					</p>
-				</div>
-				<div data-testid="staff-proposal-worktree-control">
-					<label class="flex items-center gap-2 cursor-pointer">
-						<input
-							type="checkbox"
-							data-testid="staff-proposal-worktree-checkbox"
-							.checked=${state.staffPreviewWorktree}
-							@change=${(e: Event) => {
-								state.staffPreviewWorktree = (e.target as HTMLInputElement).checked;
-								renderApp();
-							}}
-						/>
-						<span class="text-xs text-muted-foreground font-medium">Create worktree when supported</span>
-						<span title="Uses an isolated project worktree for git-backed projects. Turn off to run directly in the project directory."
-							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-					</label>
-					<p class="mt-1 text-[11px] text-muted-foreground" data-testid="staff-proposal-worktree-mode">
-						${state.staffPreviewWorktree
-							? "Auto: Bobbit will use a project worktree when supported."
-							: "Opt-out: this staff agent will run in the project directory."}
-					</p>
-				</div>
-				<div>
-					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists) ? "opacity-40 pointer-events-none" : ""}">
-						<input type="checkbox" class="toggle-switch" .checked=${_staffSandboxed}
-							?disabled=${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists)}
-							@change=${(e: Event) => { _staffSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
-						<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
-						<span title=${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists)
-							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
-							: "Runs this staff agent in an isolated Docker container with restricted filesystem and network access"}
-							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-					</label>
-				</div>
-				<div>
-					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">Triggers</label>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Add trigger"
-							@click=${() => {
-								const triggers = parseTriggers(state.staffPreviewTriggers);
-								triggers.push({ type: "manual", config: {}, enabled: true, prompt: "" });
-								state.staffPreviewTriggers = JSON.stringify(triggers);
-								state.staffPreviewTriggersEdited = true;
-								renderApp();
-							}}
-						>+ Add trigger</button>
-					</div>
-					${renderTriggersEditor()}
-				</div>
-				<div>
-					<div class="flex items-center justify-between mb-1.5">
-						<div class="flex items-center gap-1">
-							<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
-							${!state.staffPreviewPromptEditMode && _staffAnnCount > 0 ? html`
-								<span class="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
-									data-testid="proposal-comment-count">
-									${_staffAnnCount} comment${_staffAnnCount === 1 ? "" : "s"}
-								</span>
-							` : ""}
-						</div>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Toggle edit/preview mode"
-							@click=${() => { state.staffPreviewPromptEditMode = !state.staffPreviewPromptEditMode; renderApp(); }}
-						>
-							${state.staffPreviewPromptEditMode ? "Preview" : "Edit"}
-						</button>
-					</div>
-					${state.staffPreviewPromptEditMode
-						? html`<textarea
-								${ref(staffPromptTextareaRef)}
-								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring ${streaming ? STREAMING_BORDER : ""}"
-								style="min-height:150px; max-height:400px; width:100%"
-								.value=${state.staffPreviewPrompt}
-								@input=${(e: Event) => {
-									state.staffPreviewPrompt = (e.target as HTMLTextAreaElement).value;
-									state.staffPreviewPromptEdited = true;
-								}}
-							></textarea>`
-						: html`<div ${ref(staffPromptPreviewRef)} class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm ${streaming ? STREAMING_BORDER : ""}" style="min-height:150px; max-height:400px">
-								<commentable-markdown
-									${ref(staffPromptCommentableRef)}
-									.markdown=${state.staffPreviewPrompt || "_No prompt content yet_"}
-									.sessionId=${activeSessionId() || ""}
-									.bucket=${"proposal:staff"}
-									@annotation-change=${(e: CustomEvent) => { _staffAnnCount = e.detail?.count ?? 0; renderApp(); }}
-								></commentable-markdown>
-							</div>`
-					}
-				</div>
-			</div>
-			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${streaming ? streamingBadge() : ""}
-				${_staffAnnCount > 0 && !streaming ? Button({
-					variant: "secondary",
-					onClick: () => {
-						const el = staffPromptCommentableRef.value;
-						if (!el) return;
-						const text = el.sendFeedback();
-						if (text && state.remoteAgent) {
-							state.remoteAgent.prompt(text);
-						}
-						_staffAnnCount = 0;
-						renderApp();
-					},
-					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_staffAnnCount})</span>`,
-				}) : ""}
-				${!state.assistantType ? Button({ variant: "ghost", onClick: () => dismissTypedProposal("staff"), children: "Dismiss" }) : ""}
-				<span data-testid="proposal-primary-submit">${Button({
-					variant: "default",
-					onClick: handleCreateStaff,
-					disabled: !state.staffPreviewName.trim() || streaming,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(UserCheck, "sm")} Create Staff</span>`,
-				})}</span>
-			</div>
-		</div>
-	`;
-}
-
-// ============================================================================
-// ASSISTANT PREVIEW DISPATCH
-// ============================================================================
-
-/** Editable scalars shown in the proposal panel's Settings tab.
- *  Components are the canonical home for build/test/typecheck/setup commands —
- *  those legacy keys are still accepted on the wire (back-compat) but hidden
- *  from this panel to avoid duplication. They render via the Components tab. */
-const PROJECT_LEGACY_COMMAND_KEYS = new Set([
-	"build_command",
-	"test_command",
-	"typecheck_command",
-	"test_unit_command",
-	"test_e2e_command",
-	"worktree_setup_command",
-]);
-/** Native-YAML structured fields. Stored as objects/arrays/numbers, not
- *  strings — the panel has no inline editor for them, so we hide them rather
- *  than render `[object Object]`. They round-trip via the wire format on
- *  accept (PUT /api/projects/:id/config) without panel involvement. */
-const PROJECT_STRUCTURED_FIELD_KEYS = new Set([
-	"config_directories",
-	"sandbox_tokens",
-	"components",
-	"workflows",
-]);
-/** Legacy top-level QA keys — moved to components[].config[] in the
- *  component-config-map migration. Hidden from this panel; the migration
- *  rejects them on the wire (see PUT /api/projects/:id/config). */
-const PROJECT_LEGACY_QA_KEYS = new Set([
-	"qa_start_command",
-	"qa_build_command",
-	"qa_health_check",
-	"qa_browser_entry",
-	"qa_env",
-	"qa_max_duration_minutes",
-	"qa_max_scenarios",
-]);
-/** Fields managed exclusively in Settings → Project (not editable in the
- *  proposal panel). Hidden from the panel even if the agent or current config
- *  carries them. */
-const PROJECT_PANEL_HIDDEN_KEYS = new Set([
-	"sandbox",
-	"sandbox_image",
-	"sandbox_mounts",
-	"sandbox_credentials",
-	"sandbox_github_token",
-	"sandbox_host_token_overrides",
-]);
-const PROJECT_EDITABLE_FIELDS: Array<{ key: string; label: string }> = [
-	{ key: "name", label: "Project Name" },
-	{ key: "worktree_root", label: "Worktree Root" },
-	{ key: "worktree_pool_size", label: "Worktree Pool Size" },
-];
-
-// Module-level state for the project proposal panel's tab UI.
-let _projectProposalView: ProjectViewMode = "components";
-
-/** Reset module-level proposal panel state. Called on session disconnect. */
-export function resetProjectProposalPanel(): void {
-	_projectProposalView = "components";
-}
-
-function projectProposalPanel() {
-	const proposal = state.activeProposals.project;
-	const streaming = isProposalStreaming("project_proposal");
-	queueMicrotask(() => {
-		reconcileFollowTail(projectOuterScrollRef.value);
-	});
-
-	if (!proposal) {
-		const sessId = activeSessionId();
-		const accepted = sessId ? state.projectProposalAcceptedBySessionId[sessId] : false;
-		if (accepted && sessId) {
-			const handleTerminate = async () => {
-				const ok = await confirmAction(
-					"Terminate Project Assistant",
-					"End this assistant session and return to the dashboard?",
-					"Terminate",
-					true,
-				);
-				if (!ok) return;
-				await terminateProjectAssistantSession(sessId);
-			};
-			return html`
-				<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal" data-state="accepted">
-					<div class="flex-1 flex items-center justify-center p-5">
-						<div class="flex flex-col items-center gap-3 text-center max-w-sm">
-							<div class="text-base font-medium" data-testid="project-changes-saved-heading">Changes Saved</div>
-							<p class="text-sm text-muted-foreground">Your project configuration has been updated.</p>
-							${Button({
-								variant: "default",
-								onClick: handleTerminate,
-								children: "Terminate Project Assistant",
-							})}
-						</div>
-					</div>
-				</div>
-			`;
-		}
-		return html`
-			<div class="flex-1 flex flex-col min-h-0 w-full" data-panel="project-proposal">
-				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
-					Waiting for project analysis…
-				</div>
-			</div>
-		`;
-	}
-
-	// `fields` carries structured `components` / `workflows` blocks alongside
-	// flat string fields. The legacy collapsed-fields loop below operates on
-	// strings only — `components` / `workflows` are partitioned OUT and handed
-	// to dedicated views. Other non-string values are JSON-stringified for the
-	// flat Input rows; the original structured value is preserved on
-	// `proposal.fields`.
-	const rawFields = proposal.fields as Record<string, unknown>;
-	const structuredComponents = (rawFields.components as ProposalComponent[] | undefined) ?? [];
-	const structuredWorkflows = (rawFields.workflows as Record<string, ProposalWorkflow> | undefined) ?? {};
-	const fields: Record<string, string> = {};
-	for (const [k, v] of Object.entries(rawFields)) {
-		if (k === "components" || k === "workflows") continue;
-		if (typeof v === "string") fields[k] = v;
-		else if (v == null) fields[k] = "";
-		else {
-			try { fields[k] = JSON.stringify(v); } catch { fields[k] = String(v); }
-		}
-	}
-	const mode = proposal.mode ?? "provisional";
-	const isRegistered = mode === "registered";
-
-	/** Build union of keys to render: known editable + proposal fields. */
-	const knownKeys = new Set(PROJECT_EDITABLE_FIELDS.map(f => f.key));
-	const extraKeys: string[] = [];
-	for (const k of Object.keys(fields)) {
-		if (k === "root_path") continue;
-		if (PROJECT_LEGACY_COMMAND_KEYS.has(k)) continue;
-		if (PROJECT_STRUCTURED_FIELD_KEYS.has(k)) continue;
-		if (PROJECT_LEGACY_QA_KEYS.has(k)) continue;
-		if (PROJECT_PANEL_HIDDEN_KEYS.has(k)) continue;
-		if (!knownKeys.has(k)) extraKeys.push(k);
-	}
-
-	const handleAccept = async () => {
-		await acceptProjectProposal();
-	};
-
-	const handleDismiss = () => {
-		if (proposal?.sessionId) deleteProjectDraft(proposal.sessionId);
-		dismissTypedProposal("project");
-	};
-
-	const onFieldInput = (key: string, value: string) => {
-		const slot = state.activeProposals.project;
-		if (!slot) return;
-		// Bug B guard: `components` and `workflows` are structured side-tables
-		// owned by dedicated views — never let an Input row clobber them with a
-		// string keystroke value.
-		if (key === "components" || key === "workflows") return;
-		(slot.fields as Record<string, unknown>)[key] = value;
-		// Only persist edits for project-assistant sessions; non-assistant
-		// sessions follow the goal-proposal model (transient, not restored).
-		if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
-			saveProjectDraft(slot.sessionId);
-		}
-		renderApp();
-	};
-
-	/** Per-field placeholders — concrete examples, not just the key name repeated. */
-	const PLACEHOLDERS: Record<string, string> = {
-		name: "my-project",
-		worktree_root: "C:\\Users\\me\\my-project-wt   (default: <root>-wt)",
-		worktree_pool_size: "2",
-	};
-
-	const renderRow = (key: string, label: string) => {
-		const proposed = fields[key] ?? "";
-		const placeholder = PLACEHOLDERS[key] ?? "";
-		const inputType = key === "worktree_pool_size" ? "number" : "text";
-		return html`
-			<div data-field=${key}>
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${label}</label>
-				${Input({
-					type: inputType,
-					value: proposed,
-					placeholder,
-					onInput: (e: Event) => onFieldInput(key, (e.target as HTMLInputElement).value),
-				})}
-			</div>
-		`;
-	};
-
-	const curatedKeys: string[] = PROJECT_EDITABLE_FIELDS.map(f => f.key);
-	const labelFor = (key: string): string => {
-		const known = PROJECT_EDITABLE_FIELDS.find(f => f.key === key);
-		return known?.label ?? key;
-	};
-
-	const acceptLabel = isRegistered ? "Apply Changes" : "Accept Project";
-	const acceptDisabled = !fields.name?.trim();
-
-	const activeView = _projectProposalView;
-	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
-
-	const settingsView = html`
-		<div data-testid="settings-view" class="flex flex-col gap-4">
-			${renderRow("name", "Project Name")}
-			<div data-field="root_path" data-readonly="true">
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Root Path</label>
-				<div class="px-3 py-1.5 text-sm font-mono rounded-md border border-border bg-secondary/30 text-foreground/80 truncate" title=${fields.root_path || ""}>
-					${fields.root_path || "—"}
-				</div>
-			</div>
-			${curatedKeys.filter(k => k !== "name").map(k => renderRow(k, labelFor(k)))}
-			${extraKeys.length > 0 ? html`
-				<details data-testid="other-settings-group" class="border-t border-border pt-3">
-					<summary class="text-xs text-muted-foreground cursor-pointer select-none font-medium">
-						Other settings (${extraKeys.length})
-					</summary>
-					<p class="text-[11px] text-muted-foreground mt-2 mb-3">
-						Non-standard project.yaml fields. The agent or a previous user added these; edit them here or remove the entry by clearing the value.
-					</p>
-					<div class="flex flex-col gap-4">
-						${extraKeys.map(k => renderRow(k, k))}
-					</div>
-				</details>
-			` : ""}
-		</div>
-	`;
-
-	return html`
-		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode}>
-			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
-				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
-				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}
-				<div class="text-[11px] text-muted-foreground font-mono truncate min-w-0" title=${fields.root_path || ""}>${fields.root_path || ""}</div>
-			</div>
-			${projectViewTabs(activeView, onView, {
-				components: structuredComponents.length,
-				workflows: Object.keys(structuredWorkflows).length,
-			})}
-			<div ${ref(projectOuterScrollRef)} class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-5 ${streaming ? STREAMING_BORDER : ""}">
-				${activeView === "components"
-					? projectComponentsView(structuredComponents)
-					: activeView === "workflows"
-					? projectWorkflowsView(structuredWorkflows, structuredComponents)
-					: settingsView}
-			</div>
-			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
-				${streaming ? streamingBadge() : ""}
-				${Button({ variant: "ghost", onClick: handleDismiss, children: "Dismiss" })}
-				<span data-testid="proposal-primary-submit">${Button({
-					variant: "default",
-					onClick: handleAccept,
-					disabled: acceptDisabled || streaming,
-					children: html`<span class="inline-flex items-center gap-1.5" data-testid="accept-label">${icon(FolderOpen, "sm")} ${acceptLabel}</span>`,
-				})}</span>
-			</div>
-		</div>
-	`;
-}
-
-function proposalPanelForType(type: ProposalType) {
-	switch (type) {
-		case "goal": return goalProposalPanel();
-		case "project": return projectProposalPanel();
-		case "role": return rolePreviewPanel();
-		case "tool": return toolPreviewPanel();
-		case "staff": return staffPreviewPanel();
-		default: return "";
-	}
-}
-
-function getAssistantPreviewPanel(type: string) {
-	const requested = state.previewPanelTab as ProposalType;
-	if (PROPOSAL_TYPES.includes(requested) && state.activeProposals[requested] != null && !(requested === "goal" && type === "goal")) {
-		return proposalPanelForType(requested);
-	}
-	switch (type) {
-		case "goal": return goalPreviewPanel();
-		case "role": return rolePreviewPanel();
-		case "tool": return toolPreviewPanel();
-		case "staff": return staffPreviewPanel();
-		case "project":
-		case "project-scaffolding":
-			return projectProposalPanel();
-		default: return "";
-	}
-}
-
-// ============================================================================
-// GOAL PROPOSAL PANEL (non-assistant inline panel)
-// ============================================================================
-
-/** Module-level form state for the goal proposal panel. */
-let _proposalTitle = "";
-let _proposalCwd = "";
-let _proposalParentGoalId: string = "";
-let _proposalSpec = "";
-let _proposalWorkflowId = "";
-let _proposalSpecEditMode = false;
-let _proposalCwdDropdownOpen = false;
-let _proposalCwdHighlightIndex = -1;
-let _proposalSaving = false;
-let _proposalSandboxed = false;
-let _proposalAutoStartTeam = true;
-let _proposalEnabledOptionalSteps: string[] = [];
-let _proposalInitializedFrom: string | null = null;
-/**
- * Identity key for resetting proposal-tab + inline-customisation state.
- *
- * Reset is keyed by the proposal slot's `sessionId` (and the *initial*
- * inlineWorkflow/inlineRoles hydration payload) — NOT by mutable title/spec/
- * cwd/workflow fields. Otherwise every keystroke that streams in from the
- * agent (or any same-proposal field bump) would wipe the user's active tab
- * and any draft workflow/role customisations. Same proposal => keep tabs.
- */
-let _proposalTabsInitializedFrom: string | null = null;
-// Per-goal subgoal controls. null means "inherit system preference" — only forwarded
-// to createGoal when the user actually touched the control.
-let _proposalSubgoalsAllowed: boolean | null = null;
-let _proposalMaxNestingDepth: number | null = null;
-
-// ----------------------------------------------------------------------------
-// Proposal-modal tabs state (Goal / Workflow / Roles).
-//
-// `_proposalInlineWorkflow` is the draft-scoped customised workflow — when
-// non-null, the submit path forwards it as `workflow` instead of
-// `workflowId`. `_proposalInlineRoles` is the draft-scoped per-role override
-// map keyed by role name; the submit path forwards it as `inlineRoles` when
-// non-empty. Neither mutates the project workflow/role store.
-//
-// Regression context: commit 46e21256 silently dropped the inline-workflow
-// + inline-roles editor surface from this file. This is its replacement —
-// a tabbed UI reusing the main Workflows/Roles page renderers. Pinned by
-// tests/source-pin-merge-invariants.test.ts.
-// ----------------------------------------------------------------------------
-type ProposalTab = "goal" | "workflow" | "roles";
-let _proposalActiveTab: ProposalTab = "goal";
-let _proposalInlineWorkflow: Workflow | null = null;
-let _proposalInlineRoles: Record<string, RoleData> = {};
-let _proposalSelectedRoleName: string | null = null;
-let _proposalCustomizingWorkflow = false;
-let _proposalCustomizingRole = false;
-// Role-editor draft state for the role currently being customised in the
-// goal-draft modal scope (separate from the page-shell module state in
-// role-manager-page.ts).
-let _proposalRoleEditTab: "prompt" | "tools" | "model" = "prompt";
-let _proposalRoleCollapsedGroups = new Set<string>();
-// Role data caches for the modal, project-scoped: roles can be customised per
-// project, so we must key the cache by `projectId` ("" for system scope) and
-// re-fetch when the selected project changes. Mirrors the main Roles page's
-// `fetchRolesScoped()` semantics — must use `/api/roles?projectId=...`, not
-// the global `/api/roles`, otherwise project overrides aren't visible.
-const _proposalRolesCacheByProject = new Map<string, RoleData[]>();
-const _proposalRolesLoadingByProject = new Set<string>();
-let _proposalGroupPoliciesCache: Record<string, string> | null = null;
-let _proposalGroupPoliciesLoading = false;
-
-function proposalRolesProjectKey(): string {
-	return state.previewProjectId || "";
-}
-
-/** Read-only accessor: roles list for the modal's currently-selected project. */
-function proposalRolesList(): RoleData[] {
-	return _proposalRolesCacheByProject.get(proposalRolesProjectKey()) ?? [];
-}
-
-function proposalRolesLoading(): boolean {
-	return _proposalRolesLoadingByProject.has(proposalRolesProjectKey());
-}
-
-function ensureProposalRolesLoaded(): void {
-	const key = proposalRolesProjectKey();
-	if (_proposalRolesCacheByProject.has(key) || _proposalRolesLoadingByProject.has(key)) return;
-	_proposalRolesLoadingByProject.add(key);
-	fetchRolesForProject(key || undefined)
-		.then((list) => {
-			_proposalRolesCacheByProject.set(key, list);
-			_proposalRolesLoadingByProject.delete(key);
-			// Only update selection / re-render if the user hasn't switched
-			// projects since this fetch started.
-			if (proposalRolesProjectKey() === key && !_proposalSelectedRoleName && list.length > 0) {
-				_proposalSelectedRoleName = list[0].name;
-			}
-			renderApp();
-		})
-		.catch(() => {
-			_proposalRolesCacheByProject.set(key, []);
-			_proposalRolesLoadingByProject.delete(key);
-			renderApp();
-		});
-}
-
-function ensureProposalGroupPoliciesLoaded(): void {
-	if (_proposalGroupPoliciesCache !== null || _proposalGroupPoliciesLoading) return;
-	_proposalGroupPoliciesLoading = true;
-	fetchGroupPolicies().then((gp) => {
-		_proposalGroupPoliciesCache = gp;
-		_proposalGroupPoliciesLoading = false;
-		renderApp();
-	}).catch(() => {
-		_proposalGroupPoliciesCache = {};
-		_proposalGroupPoliciesLoading = false;
-		renderApp();
-	});
-}
-
-/** Deep-clone a Workflow so editor mutations never touch the cached library copy. */
-function cloneWorkflow(wf: Workflow): Workflow {
-	return {
-		...wf,
-		gates: (wf.gates || []).map((g) => ({
-			...g,
-			dependsOn: [...(g.dependsOn || [])],
-			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
-			metadata: g.metadata ? { ...g.metadata } : undefined,
-		})),
-	};
-}
-
-/** Deep-clone a RoleData so editor mutations never touch the cached library copy. */
-function cloneRole(r: RoleData): RoleData {
-	return {
-		...r,
-		toolPolicies: { ...(r.toolPolicies ?? {}) },
-	};
-}
-
-/** Reset all proposal-tab module state. Called when the proposal is dismissed
- *  or successfully accepted, and when syncing from a new proposal payload.
- *
- *  Also clears the hydration identity keys (`_proposalTabsInitializedFrom`,
- *  `_previewProposalInlineKey`) so that the *next* proposal in the same
- *  session re-hydrates even when its inline workflow/roles payload happens
- *  to match the previous one byte-for-byte. Forgetting to clear these keys
- *  caused a silent regression: dismiss/accept left the stale key in place,
- *  so a follow-up proposal with identical inline payload but a different
- *  title/spec was treated as "same proposal", hydration was skipped, and
- *  the inline workflow/roles were silently omitted on accept. */
-function resetProposalTabsState(): void {
-	_proposalActiveTab = "goal";
-	_proposalInlineWorkflow = null;
-	_proposalInlineRoles = {};
-	_proposalSelectedRoleName = null;
-	_proposalCustomizingWorkflow = false;
-	_proposalCustomizingRole = false;
-	_proposalRoleEditTab = "prompt";
-	_proposalRoleCollapsedGroups = new Set<string>();
-	_proposalTabsInitializedFrom = null;
-	_previewProposalInlineKey = null;
-	clearWorkflowEditorController();
-}
-
-/** Sync module-level form state from the active goal proposal when it changes. */
-function syncProposalFormState(): void {
-	const slot = state.activeProposals.goal;
-	const proposal = slot?.fields as undefined | {
-		title: string;
-		spec: string;
-		cwd?: string;
-		workflow?: string;
-		options?: string;
-		parentGoalId?: string;
-		inlineWorkflow?: Workflow;
-		inlineRoles?: Record<string, RoleData>;
-	};
-	if (!slot || !proposal) return;
-
-	// --- Tab + inline-customisation reset identity ---------------------------
-	// Keyed by sessionId + initial inline payload. Mutable title/spec/cwd/
-	// workflow/options must NOT trigger a tab reset, otherwise the user loses
-	// their active tab + draft workflow/role edits every time the agent streams
-	// a token. See `_proposalTabsInitializedFrom` comment above.
-	const inlineKey = proposal.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
-	const rolesKey = proposal.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
-	const tabsKey = `${slot.sessionId}|${inlineKey}|${rolesKey}`;
-	if (_proposalTabsInitializedFrom !== tabsKey) {
-		// Hydrate proposal-tab state: agent-supplied inlineWorkflow / inlineRoles
-		// pre-populate the Workflow / Roles tabs so the user can inspect and tweak
-		// the customisations before accepting. Reset every other tab control to
-		// defaults so a fresh proposal (different sessionId) doesn't leak prior
-		// draft state.
-		// NOTE: resetProposalTabsState() also clears _proposalTabsInitializedFrom,
-		// so we must set it AFTER the reset, not before.
-		resetProposalTabsState();
-		_proposalTabsInitializedFrom = tabsKey;
-		if (proposal.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
-			_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
-			_proposalCustomizingWorkflow = true;
-		}
-		if (proposal.inlineRoles && typeof proposal.inlineRoles === "object") {
-			for (const [name, role] of Object.entries(proposal.inlineRoles)) {
-				if (role && typeof role === "object") {
-					_proposalInlineRoles[name] = cloneRole(role as RoleData);
-				}
-			}
-			const firstCustomized = Object.keys(_proposalInlineRoles)[0];
-			if (firstCustomized) {
-				_proposalSelectedRoleName = firstCustomized;
-			}
-		}
-	}
-
-	// --- Mutable field sync (title/spec/cwd/workflow/options/parent) ---------
-	// This is allowed to refresh on every proposal update; it does NOT touch
-	// tab state or inline-customisation drafts.
-	const key = `${slot.sessionId}|${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}`;
-	if (_proposalInitializedFrom === key) return;
-	_proposalInitializedFrom = key;
-	_proposalTitle = proposal.title;
-	_proposalSpec = proposal.spec;
-	_proposalParentGoalId = proposal.parentGoalId || "";
-	// Preserve project rootPath when proposal doesn't specify cwd
-	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
-	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
-	_proposalWorkflowId = proposal.workflow || "";
-	if (!_proposalWorkflowId && _proposalInlineWorkflow) {
-		_proposalWorkflowId = _proposalInlineWorkflow.id;
-	}
-	_proposalSpecEditMode = false;
-	_proposalEnabledOptionalSteps = proposal.options
-		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
-		: [];
-	_proposalSaving = false;
-	_proposalSubgoalsAllowed = null;
-	_proposalMaxNestingDepth = null;
-}
-
-function goalProposalPanel() {
-	// Populate previewProjectId for re-attempt / assistant sessions where it
-	// wasn't seeded by the +New Goal picker. Resolution order:
-	// 1. Active session's projectId (server inherits this for re-attempts).
-	// 2. Original goal's projectId via reattemptGoalId.
-	// 3. Match proposal cwd against a registered project's rootPath.
-	if (!state.previewProjectId) {
-		const sid = activeSessionId();
-		const sess = sid ? state.gatewaySessions.find(s => s.id === sid) : undefined;
-		let candidate = sess?.projectId;
-		if (!candidate && sess?.reattemptGoalId) {
-			candidate = state.goals.find(g => g.id === sess.reattemptGoalId)?.projectId;
-		}
-		if (!candidate) {
-			const cwd = (state.activeProposals.goal?.fields as any)?.cwd as string | undefined;
-			if (cwd) {
-				const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-				const target = norm(cwd);
-				candidate = state.projects.find(p => norm(p.rootPath) === target)?.id;
-			}
-		}
-		if (candidate && state.projects.some(p => p.id === candidate)) {
-			state.previewProjectId = candidate;
-		}
-	}
-	syncProposalFormState();
-	ensureWorkflowsLoaded(state.previewProjectId || undefined);
-	ensureSandboxStatusLoaded();
-	ensureProposalRolesLoaded();
-	ensureProposalGroupPoliciesLoaded();
-	ensureToolsLoaded();
-	const subgoalsEnabled = document.documentElement.dataset.subgoalsEnabled === "true";
-	const maxNestingDepth = parseInt(document.documentElement.dataset.maxNestingDepth || "3", 10);
-
-	const handleCreateGoal = async () => {
-		const trimmedTitle = _proposalTitle.trim();
-		if (!trimmedTitle || _proposalSaving) return;
-		if (!state.previewProjectId) {
-			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
-			return;
-		}
-		if (workflowStateFor(state.previewProjectId) === "empty") {
-			showConnectionError(
-				"This project has no workflows yet",
-				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
-			);
-			return;
-		}
-
-		// Snapshot form state so a retry after a server reject re-reads the
-		// latest values (workflow id, sandboxed, etc).
-		const sandboxed = _proposalSandboxed;
-		const autoStartTeam = _proposalAutoStartTeam;
-		const workflowId = _proposalWorkflowId || undefined;
-		const enabledOptionalSteps = _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined;
-		const projectId = state.previewProjectId || undefined;
-
-		_proposalSaving = true;
-		renderApp();
-
-		let goal;
-		try {
-			try {
-				const subgoalsAllowedField = subgoalsEnabled && _proposalSubgoalsAllowed !== null
-					? _proposalSubgoalsAllowed
-					: undefined;
-				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
-					? _proposalMaxNestingDepth
-					: undefined;
-				// Customised inline workflow takes precedence over the library
-				// workflowId. inlineRoles is only forwarded when non-empty.
-				const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
-				const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
-					? _proposalInlineRoles as Record<string, unknown>
-					: undefined;
-				goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
-					spec: _proposalSpec,
-					workflowId: inlineWorkflowField ? undefined : workflowId,
-					workflow: inlineWorkflowField,
-					inlineRoles: inlineRolesField,
-					sandboxed,
-					projectId,
-					enabledOptionalSteps,
-					autoStartTeam,
-					parentGoalId: _proposalParentGoalId || undefined,
-					subgoalsAllowed: subgoalsAllowedField,
-					maxNestingDepth: maxNestingDepthField,
-				});
-			} catch (err) {
-				const { message, code, stack } = errorDetails(err);
-				showConnectionError("Failed to create goal", message, { code, stack });
-				return;
-			}
-			if (!goal) return;
-
-			// --- Success: clear the proposal and navigate. ---
-			delete state.activeProposals.goal;
-			_proposalEnabledOptionalSteps = [];
-			_proposalInitializedFrom = null;
-			_proposalSandboxed = false;
-			_proposalAutoStartTeam = true;
-			_proposalParentGoalId = "";
-			_proposalSubgoalsAllowed = null;
-			_proposalMaxNestingDepth = null;
-			resetProposalTabsState();
-			setHashRoute("goal-dashboard", goal.id, true);
-		} finally {
-			_proposalSaving = false;
-			renderApp();
-		}
-	};
-
-	const handleOpenProjectAssistant = async () => {
-		const linked = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
-		if (!linked) return;
-		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
-	};
-
-	const handleDismiss = () => {
-		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
-		const sidEarly = activeSessionId();
-		if (sidEarly) clearProposalAnnotations(sidEarly, "goal");
-		resetProposalAnnCount("goal");
-		delete state.activeProposals.goal;
-		_proposalInitializedFrom = null;
-		_proposalEnabledOptionalSteps = [];
-		_proposalAutoStartTeam = true;
-		_proposalParentGoalId = "";
-		_proposalSubgoalsAllowed = null;
-		_proposalMaxNestingDepth = null;
-		resetProposalTabsState();
-		// Persist dismiss so it survives reconnect
-		const sid = activeSessionId();
-		if (sid && dismissed) {
-			markProposalDismissed(sid, dismissed);
-			void deleteProposalFile(sid, "goal");
-		}
-		recomputeAssistantHasProposal();
-		// If preview tab still available, switch to it; otherwise back to chat
-		if (state.isPreviewSession) {
-			state.previewPanelActiveTab = "preview";
-			if (state.previewPanelTab === "goal") state.previewPanelTab = "preview";
-		} else {
-			if (state.previewPanelTab === "goal") state.previewPanelTab = "chat";
-		}
-		renderApp();
-	};
-
-	return renderGoalForm({
-		title: _proposalTitle,
-		spec: _proposalSpec,
-		cwd: _proposalCwd,
-		workflowId: _proposalWorkflowId,
-		sandboxed: _proposalSandboxed,
-		specEditMode: _proposalSpecEditMode,
-		enabledOptionalSteps: _proposalEnabledOptionalSteps,
-		linkedProjectId: state.previewProjectId || undefined,
-		workflowState: workflowStateFor(state.previewProjectId || undefined),
-		onOpenProjectAssistant: handleOpenProjectAssistant,
-		onTitleChange: (e: Event) => { _proposalTitle = (e.target as HTMLInputElement).value; },
-		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
-		onCwdChange: (v) => { _proposalCwd = v; renderApp(); },
-		onCwdSelect: (v) => { _proposalCwd = v; renderApp(); },
-		onWorkflowChange: (e: Event) => {
-			_proposalWorkflowId = (e.target as HTMLSelectElement).value;
-			// Changing the picker selects a different library workflow; any
-			// prior goal-draft inline workflow customisation is for the old
-			// selection and must be cleared so submit doesn't ship stale
-			// inline content alongside the newly-selected workflowId.
-			_proposalInlineWorkflow = null;
-			_proposalCustomizingWorkflow = false;
-			clearWorkflowEditorController();
-			renderApp();
-		},
-		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
-		onSpecEditToggle: () => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); },
-		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
-		autoStartTeam: _proposalAutoStartTeam,
-		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
-		cwdDropdownOpen: _proposalCwdDropdownOpen,
-		cwdHighlightIndex: _proposalCwdHighlightIndex,
-		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
-		onCwdHighlight: (i) => { _proposalCwdHighlightIndex = i; },
-		onCreate: handleCreateGoal,
-		onDismiss: handleDismiss,
-		saving: _proposalSaving,
-		createDisabled: (() => {
-			if (!_proposalTitle.trim() || _proposalSaving) return true;
-			// Disable Create when parent is selected but at depth cap.
-			if (_proposalParentGoalId && maxNestingDepth !== undefined) {
-				const pDepth = computeGoalDepth(_proposalParentGoalId, state.goals);
-				if (pDepth + 1 > maxNestingDepth) return true;
-			}
-			return false;
-		})(),
-		streaming: isProposalStreaming("goal_proposal"),
-		commentable: true,
-		parentGoalId: _proposalParentGoalId || undefined,
-		onParentGoalChange: (id) => { _proposalParentGoalId = id || ""; renderApp(); },
-		subgoalsEnabled,
-		maxNestingDepth,
-		subgoalsAllowedValue: _proposalSubgoalsAllowed,
-		maxNestingDepthValue: _proposalMaxNestingDepth,
-		onSubgoalsAllowedChange: (value: boolean) => {
-			_proposalSubgoalsAllowed = value;
-			renderApp();
-		},
-		onMaxNestingDepthChange: (value: number | null) => {
-			_proposalMaxNestingDepth = value;
-			renderApp();
-		},
-
-		// ---- Proposal-modal tabs wiring ----
-		tabbed: true,
-		activeTab: _proposalActiveTab,
-		onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
-
-		inlineWorkflow: _proposalInlineWorkflow,
-		customizingWorkflow: _proposalCustomizingWorkflow,
-		onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
-		onCustomizeWorkflow: () => {
-			const src = _cachedWorkflows.find((w) => w.id === _proposalWorkflowId) ?? _cachedWorkflows[0];
-			if (!src) return;
-			_proposalInlineWorkflow = cloneWorkflow(src);
-			_proposalCustomizingWorkflow = true;
-			clearWorkflowEditorController();
-			renderApp();
-		},
-		onResetWorkflow: () => {
-			_proposalInlineWorkflow = null;
-			_proposalCustomizingWorkflow = false;
-			// Normalize a stale inline-only id back to a real library workflow
-			// — otherwise submit forwards the seeded inline workflow's id as
-			// `workflowId` even though the inline content has been discarded.
-			// See goal-proposal-tabs spec — "Reset to selected normalizes stale
-			// inline id".
-			if (!_cachedWorkflows.some((w) => w.id === _proposalWorkflowId)) {
-				_proposalWorkflowId = _cachedWorkflows[0]?.id ?? "";
-			}
-			clearWorkflowEditorController();
-			renderApp();
-		},
-
-		inlineRoles: _proposalInlineRoles,
-		selectedRoleName: _proposalSelectedRoleName,
-		onSelectRole: (name) => {
-			_proposalSelectedRoleName = name;
-			_proposalCustomizingRole = !!_proposalInlineRoles[name];
-			renderApp();
-		},
-		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
-		onCustomizeRole: () => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			const src = proposalRolesList().find((r) => r.name === name);
-			if (!src) return;
-			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
-			_proposalCustomizingRole = true;
-			_proposalRoleEditTab = "prompt";
-			renderApp();
-		},
-		onResetRole: () => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			delete _proposalInlineRoles[name];
-			_proposalCustomizingRole = false;
-			renderApp();
-		},
-		onRoleDraftChange: (patch) => {
-			const name = _proposalSelectedRoleName;
-			if (!name) return;
-			const current = _proposalInlineRoles[name];
-			if (!current) return;
-			const next: RoleData = { ...current };
-			if (patch.label !== undefined) next.label = patch.label;
-			if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
-			if (patch.accessory !== undefined) next.accessory = patch.accessory;
-			if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
-			if (patch.model !== undefined) next.model = patch.model;
-			if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
-			_proposalInlineRoles[name] = next;
-			renderApp();
-		},
-		onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
-		onRoleToggleToolGroup: (group) => {
-			if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
-			else _proposalRoleCollapsedGroups.add(group);
-			renderApp();
-		},
-		roleEditTab: _proposalRoleEditTab,
-		roleCollapsedGroups: _proposalRoleCollapsedGroups,
-		roleList: proposalRolesList(),
-		roleListLoading: proposalRolesLoading(),
-		availableTools: _availableTools,
-		groupPolicies: _proposalGroupPoliciesCache ?? {},
-	});
-}
 
 // ============================================================================
 // PREVIEW THEME BRIDGE
@@ -3573,65 +705,521 @@ function goalProposalPanel() {
 // the inline `srcdoc=` iframe are gone. The gateway now injects them
 // server-side on text/html responses through the `/preview/<sid>/` mount.
 
-type UnifiedPanelTab = "chat" | "preview" | "review" | "inbox" | ProposalType;
-type UnifiedContentTab = Exclude<UnifiedPanelTab, "chat">;
-
-const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
-	goal: "Goal",
-	project: "Project",
-	role: "Role",
-	tool: "Tool",
-	staff: "Staff",
+type UnifiedPanelTab = PanelWorkspaceTab;
+type UnifiedContentTab = PanelWorkspaceTab;
+type MobilePaneTab = UnifiedPanelTab | {
+	id: "__mobile_chat_pane__";
+	kind: "chat";
+	title: "Chat";
+	label: "Chat";
+	legacyTab: "chat";
+	source: { type: "chat"; sessionId?: string };
 };
 
 function activeProposalTypes(): ProposalType[] {
-	return PROPOSAL_TYPES.filter((type) => state.activeProposals[type] != null);
+	const sid = activeSessionId();
+	return PROPOSAL_TYPES.filter((type) => {
+		const slot = state.activeProposals[type];
+		return slot != null && (!sid || slot.sessionId === sid);
+	});
 }
 
-function hasActiveProposalPanel(): boolean {
-	return activeProposalTypes().length > 0;
+function currentAssistantProposalType(): ProposalType | null {
+	return assistantProposalType(state.assistantType);
 }
 
-/** Whether the unified panel is active for the current non-assistant session. */
-function hasUnifiedPanel(): boolean {
-	return !state.assistantType && (
-		state.isPreviewSession ||
-		state.reviewPanelOpen ||
-		state.inboxPanelOpen ||
-		hasActiveProposalPanel()
-	);
+export function workspaceSessionId(): string {
+	// On the standalone `/walkthrough` route there is no connected session
+	// (`activeSessionId()` is undefined), but the walkthrough's owning session
+	// is carried in the URL. The standalone panel content (e.g. the lazy payload
+	// restore in `walkthroughPanelContent`) must key off the SAME session id the
+	// panel tab is stored under — otherwise it reads a key the renderer never
+	// sees and the walkthrough never hydrates.
+	const route = getRouteFromHash();
+	if (route.view === "walkthrough" && route.walkthroughSessionId) {
+		return panelWorkspaceSessionKey(route.walkthroughSessionId);
+	}
+	return panelWorkspaceSessionKey(activeSessionId());
+}
+
+let mountedPreviewTabId = "";
+const previewRestoreInFlight = new Set<string>();
+let mobileSelectedPaneIndex = 0;
+let mobileSelectedSideTabId = "";
+// SortableJS instance attached to the unified tab bar inner container. We
+// recreate it whenever the container DOM node changes (which happens when the
+// workspace switches sessions). During a drag, renderApp is suppressed so
+// lit-html doesn't fight Sortable's DOM mutations; on drop we read the new
+// DOM order and commit it back to state.
+//
+// SortableJS itself is split into its own vendor chunk (see vite.config.ts
+// manualChunks) so the ~46 kB / ~13 kB gz body lands outside the entry chunk.
+let panelSortable: Sortable | null = null;
+let panelSortableContainer: HTMLElement | null = null;
+let draggingPanelTabId = "";
+// When true, the current drag at any point tried to land on/before a pinned
+// tab. SortableJS's onMove returns false for that single candidate target, but
+// earlier non-pinned candidates in the same drag may have already swapped the
+// DOM. To honour the pinned invariant strictly, we cancel the entire drag on
+// drop and let lit-html restore the canonical order from state.
+let panelSortablePinnedBlocked = false;
+// Initial DOM order of tab ids captured at onStart. When a drag is cancelled
+// (e.g. pinned-blocked at any point), we restore this order manually because
+// SortableJS's DOM mutations during the drag have already diverged from state,
+// and lit-html's `repeat` reconciliation does not always restore element
+// positions after external DOM moves.
+let panelSortableStartIds: string[] = [];
+// rAF handle for the Y-axis lock loop that keeps the dragged clone glued to
+// its original vertical position (Chrome-style tab drag).
+let panelDragLockRaf = 0;
+
+// Chrome-style axis lock: while the user drags a tab, SortableJS positions the
+// floating clone (Sortable.ghost) via `transform: matrix(a,b,c,d,e,f)` where
+// `e` is translateX and `f` is translateY. We run a requestAnimationFrame loop
+// that, each frame, zeroes out `f` so the clone only ever slides horizontally
+// regardless of how the cursor moves vertically. Sortable.ghost is the static
+// property SortableJS exposes for the active drag clone.
+function startPanelDragYLock(): void {
+	cancelAnimationFrame(panelDragLockRaf);
+	const tick = () => {
+		const ghost = (Sortable as unknown as { ghost: HTMLElement | null }).ghost;
+		if (ghost && ghost.style.transform) {
+			const t = ghost.style.transform;
+			const m = /matrix\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/.exec(t);
+			if (m && m[6] !== "0") {
+				ghost.style.transform = `matrix(${m[1]},${m[2]},${m[3]},${m[4]},${m[5]},0)`;
+			}
+		}
+		panelDragLockRaf = requestAnimationFrame(tick);
+	};
+	panelDragLockRaf = requestAnimationFrame(tick);
+}
+
+function stopPanelDragYLock(): void {
+	cancelAnimationFrame(panelDragLockRaf);
+	panelDragLockRaf = 0;
+}
+
+function recordValue(record: Record<string, unknown>, key: string): string {
+	const value = record[key];
+	return typeof value === "string" ? value : "";
+}
+
+function safeDecode(value: string): string {
+	try { return decodeURIComponent(value); } catch { return value; }
+}
+
+function previewEntryFromTab(tab: PanelWorkspaceTab): string {
+	const source = tab.source as Record<string, unknown>;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	const direct = recordValue(tabState, "entry") || recordValue(source, "entry");
+	if (direct) return direct;
+	const url = recordValue(tabState, "url") || recordValue(source, "url");
+	const match = /^\/preview\/[^/]+\/(.+)$/.exec(url);
+	return match ? safeDecode(match[1]) : "";
+}
+
+function previewSessionIdFromTab(tab: PanelWorkspaceTab): string {
+	const source = tab.source as Record<string, unknown>;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	const direct = recordValue(source, "sessionId") || recordValue(tabState, "sessionId");
+	if (direct) return direct;
+	const url = recordValue(tabState, "url") || recordValue(source, "url");
+	const match = /^\/preview\/([^/]+)\//.exec(url);
+	return match ? safeDecode(match[1]) : "";
+}
+
+function previewSourceTitle(tab: PanelWorkspaceTab): string {
+	if (tab.kind !== "preview") return tab.title || tab.label || "";
+	const entry = previewEntryFromTab(tab);
+	return previewTabDisplayTitle(entry || tab.title || tab.label || "inline.html", previewTabVersion(tab), isHistoricalPreviewTab(tab));
+}
+
+function currentMountedPreviewTabId(): string {
+	return typeof (state as any).previewPanelMountedTabId === "string" ? (state as any).previewPanelMountedTabId : mountedPreviewTabId;
+}
+
+type PreviewRestoreError = { message?: string; detail?: string; status?: number; retryable?: boolean };
+
+function previewRestoreError(tab: PanelWorkspaceTab | undefined | null): PreviewRestoreError | null {
+	const error = tab?.state?.restoreError;
+	return error && typeof error === "object" ? error as PreviewRestoreError : null;
+}
+
+function setPreviewTabRestoreError(sessionId: string, tabId: string, restoreError: PreviewRestoreError | null): PanelWorkspaceTab | undefined {
+	const tabs = panelTabsForSession(state, sessionId);
+	let updated: PanelWorkspaceTab | undefined;
+	const next = tabs.map((candidate) => {
+		if (candidate.id !== tabId) return candidate;
+		const nextState = { ...(candidate.state || {}) } as Record<string, unknown>;
+		if (restoreError) nextState.restoreError = restoreError;
+		else delete nextState.restoreError;
+		updated = { ...candidate, state: nextState };
+		return updated;
+	});
+	setPanelTabsForSession(state, sessionId, next);
+	return updated;
+}
+
+function clearPreviewTabRestoreError(sessionId: string, tabId: string): PanelWorkspaceTab | undefined {
+	return setPreviewTabRestoreError(sessionId, tabId, null);
+}
+
+function markPreviewTabMounted(tab: PanelWorkspaceTab): void {
+	if (tab.kind !== "preview") return;
+	mountedPreviewTabId = tab.id;
+	(state as any).previewPanelMountedTabId = tab.id;
+}
+
+function archiveLivePreviewBeforeHistoricalRestore(_sessionId: string, _nextContentHash: string): void {
+	// Current preview tabs are keyed by filename and keep their own restore
+	// metadata. Do not synthesize extra snapshot tabs merely because the user
+	// switches to another preview; versioned tabs are created only when a user
+	// explicitly opens an older preview_open card.
+}
+
+function markPreviewTabLiveForSession(sessionId: string, tab: PanelWorkspaceTab): void {
+	if (!sessionId || tab.kind !== "preview") return;
+	const tabs = panelTabsForSession(state, sessionId);
+	let changed = false;
+	const nextTabs = tabs.map((candidate) => {
+		if (candidate.kind !== "preview") return candidate;
+		const shouldBeLive = candidate.id === tab.id && !isHistoricalPreviewTab(tab);
+		const source = candidate.source as Record<string, unknown>;
+		if (source.live === shouldBeLive) return candidate;
+		changed = true;
+		return { ...candidate, source: { ...source, live: shouldBeLive } as PanelWorkspaceTab["source"] };
+	});
+	if (changed) setPanelTabsForSession(state, sessionId, nextTabs);
+}
+
+function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
+	if (tab.kind !== "preview") return;
+	const sessionId = activeSessionId() || previewSessionIdFromTab(tab);
+	if (!sessionId) return;
+	if (previewRestoreError(tab)) return;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	const source = tab.source as Record<string, unknown>;
+	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
+	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
+	const tabArtifactIdEarly = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+
+	// Fast path: any preview tab that has a persisted artifact is served
+	// directly from `/preview/<sid>/_artifact/<artifactId>/...`. This bypasses
+	// the single-slot live mount entirely so switching between artifact-backed
+	// preview tabs is instant (no POST restore round-trip, no iframe blanking).
+	// We skip this only for the canonical live tab id, which intentionally
+	// follows the live mount slot's changing bytes.
+	const isLiveTab = isLivePreviewTab(tab);
+	if (!isLiveTab && tabArtifactIdEarly) {
+		if (state.previewPanelEntry === entry && state.previewPanelArtifactId === tabArtifactIdEarly && currentMountedPreviewTabId() === tab.id) {
+			clearPreviewTabRestoreError(sessionId, tab.id);
+			markPreviewTabMounted(tab);
+			return;
+		}
+		state.isPreviewSession = true;
+		state.previewPanelEntry = entry;
+		state.previewPanelArtifactId = tabArtifactIdEarly;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : Date.now();
+		(state as any).previewPanelContentHash = contentHash;
+		clearPreviewTabRestoreError(sessionId, tab.id);
+		markPreviewTabMounted(tab);
+		renderApp();
+		return;
+	}
+
+	if (isLiveTab || !isHistoricalPreviewTab(tab)) {
+		const liveEntry = previewEntryFromTab(tab);
+		const liveHash = previewContentHashFromTab(tab);
+		// Coming back to the live tab from an artifact-served tab — clear the
+		// artifact id so the iframe URL falls back to the live mount slot.
+		state.previewPanelArtifactId = "";
+		// IMPORTANT: setUnifiedActiveTab runs on every render via ensureUnifiedActiveTab,
+		// which calls this function. If this tab is already the mounted live preview and
+		// state.previewPanelEntry already matches, skip the state.previewPanelMtime/Entry/
+		// ContentHash assignment so an out-of-band refresh (which bumps previewPanelMtime)
+		// is not clobbered by stale tabState values on the next render. Pinned by
+		// tests/e2e/ui/preview-refresh.spec.ts and preview-happy-path.spec.ts.
+		const alreadyMounted = currentMountedPreviewTabId() === tab.id
+			&& !!liveEntry
+			&& state.previewPanelEntry === liveEntry;
+		if (alreadyMounted) {
+			clearPreviewTabRestoreError(sessionId, tab.id);
+			markPreviewTabMounted(tab);
+			return;
+		}
+		const liveMountHash = normalizePreviewContentHash((state as any).previewPanelContentHash);
+		const tabArtifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+		// If the live server mount currently holds bytes for a DIFFERENT version
+		// than this current/filename tab represents (e.g. user just viewed a
+		// historical tab which rehydrated older bytes into the live mount), we
+		// must re-mount this tab's own artifact so the iframe shows the correct
+		// content. Otherwise just refresh state metadata.
+		if (liveHash && liveMountHash && liveHash !== liveMountHash && tabArtifactId && !previewRestoreInFlight.has(tab.id)) {
+			state.isPreviewSession = true;
+			state.previewPanelEntry = "";
+			state.previewPanelMtime = 0;
+			(state as any).previewPanelContentHash = liveHash;
+			try {
+				document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
+					.forEach((iframe) => { iframe.src = "about:blank"; });
+			} catch { /* best-effort stale-content guard while the remount POST is in flight */ }
+			previewRestoreInFlight.add(tab.id);
+			void (async () => {
+				try {
+					const response = await gatewayFetch(
+						`/api/preview/artifacts/${encodeURIComponent(tabArtifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`,
+						{ method: "POST", body: JSON.stringify({ artifactId: tabArtifactId }) },
+					);
+					if (!response.ok) throw new Error(`preview restore failed: ${response.status}`);
+					const data = await response.json().catch(() => ({} as any));
+					if (state.selectedSessionId !== sessionId || activeSessionId() !== sessionId || activeSidePanelTabIdForSession(state, sessionId) !== tab.id) return;
+					state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : (liveEntry || state.previewPanelEntry || "inline.html");
+					state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
+					(state as any).previewPanelContentHash = normalizePreviewContentHash(data?.contentHash) || liveHash;
+					clearPreviewTabRestoreError(sessionId, tab.id);
+					markPreviewTabMounted(tab);
+					renderApp();
+				} catch (err) {
+					console.error("[panel-workspace] current preview tab restore failed", err);
+					setPreviewTabRestoreError(sessionId, tab.id, {
+						message: "Preview artifact unavailable",
+						detail: err instanceof Error ? err.message : String(err),
+						retryable: true,
+					});
+					renderApp();
+				} finally {
+					previewRestoreInFlight.delete(tab.id);
+				}
+			})();
+			return;
+		}
+		if (liveEntry) state.previewPanelEntry = liveEntry;
+		if (liveHash) (state as any).previewPanelContentHash = liveHash;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : (state.previewPanelMtime || Date.now());
+		clearPreviewTabRestoreError(sessionId, tab.id);
+		markPreviewTabMounted(tab);
+		return;
+	}
+
+	const snapshotKind = recordValue(tabState, "snapshotKind") || recordValue(source, "snapshotKind");
+	const snapshotHtml = recordValue(tabState, "snapshotHtml");
+	const snapshotFile = recordValue(tabState, "snapshotFile") || recordValue(source, "path");
+	const artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+	markPreviewTabLiveForSession(sessionId, tab);
+	if (currentMountedPreviewTabId() === tab.id && state.previewPanelEntry === entry && state.previewPanelArtifactId === (artifactId || "")) return;
+
+	// Fast path: artifact-backed tabs are served directly from
+	// `/preview/<sid>/_artifact/<artifactId>/...` so there's no mount/restore
+	// round-trip. Just point the iframe at the artifact URL and we're done.
+	if (artifactId) {
+		state.isPreviewSession = true;
+		state.previewPanelEntry = entry;
+		state.previewPanelArtifactId = artifactId;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : Date.now();
+		(state as any).previewPanelContentHash = contentHash;
+		clearPreviewTabRestoreError(sessionId, tab.id);
+		markPreviewTabMounted(tab);
+		renderApp();
+		return;
+	}
+
+	archiveLivePreviewBeforeHistoricalRestore(sessionId, contentHash);
+
+	state.isPreviewSession = true;
+	if (previewRestoreInFlight.has(tab.id)) return;
+
+	let body: Record<string, unknown> | null = null;
+	let restoreUrl = `/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`;
+	if (artifactId) {
+		restoreUrl = `/api/preview/artifacts/${encodeURIComponent(artifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`;
+		body = { artifactId };
+	} else if (snapshotKind === "inline" && snapshotHtml) {
+		body = { html: snapshotHtml };
+		if (entry && !entry.includes("/") && !entry.includes("\\")) body.entry = entry;
+	} else if (snapshotKind === "file" && snapshotFile) {
+		body = { file: snapshotFile };
+	}
+
+	if (!body) {
+		setPreviewTabRestoreError(sessionId, tab.id, {
+			message: "Preview artifact unavailable",
+			detail: "This preview tab has no immutable restore source.",
+			retryable: false,
+		});
+		try {
+			document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
+				.forEach((iframe) => { iframe.src = "about:blank"; });
+		} catch { /* best-effort stale-content guard */ }
+		renderApp();
+		return;
+	}
+
+	state.previewPanelEntry = "";
+	state.previewPanelMtime = 0;
+	state.previewPanelArtifactId = "";
+	(state as any).previewPanelContentHash = contentHash;
+	try {
+		document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
+			.forEach((iframe) => { iframe.src = "about:blank"; });
+	} catch { /* best-effort stale-content guard while the remount POST is in flight */ }
+	previewRestoreInFlight.add(tab.id);
+	void (async () => {
+		try {
+			const response = await gatewayFetch(restoreUrl, {
+				method: "POST",
+				body: JSON.stringify(body),
+			});
+			if (!response.ok) throw new Error(`preview restore failed: ${response.status}`);
+			const data = await response.json().catch(() => ({} as any));
+			if (state.selectedSessionId !== sessionId || activeSessionId() !== sessionId || activeSidePanelTabIdForSession(state, sessionId) !== tab.id) return;
+			state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : entry;
+			state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
+			state.previewPanelArtifactId = "";
+			(state as any).previewPanelContentHash = normalizePreviewContentHash(data?.contentHash) || contentHash;
+			const updatedTab = clearPreviewTabRestoreError(sessionId, tab.id) ?? tab;
+			markPreviewTabMounted(updatedTab);
+			renderApp();
+		} catch (err) {
+			console.error("[panel-workspace] preview tab restore failed", err);
+			setPreviewTabRestoreError(sessionId, tab.id, {
+				message: "Preview artifact unavailable",
+				detail: err instanceof Error ? err.message : String(err),
+				retryable: true,
+			});
+			renderApp();
+		} finally {
+			previewRestoreInFlight.delete(tab.id);
+		}
+	})();
+}
+
+export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
+	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
+	const sid = workspaceSessionId();
+	setActivePanelTabIdForSession(state, sid, tab.id);
+	(state as any).previewPanelTab = tab.legacyTab;
+	(state as any).previewPanelActiveTab = tab.kind === "preview" ? "preview" : tab.legacyTab;
+	if (state.assistantType) state.assistantTab = "preview";
+	if (tab.kind === "preview") {
+		state.isPreviewSession = true;
+		restoreHistoricalPreviewTab(tab);
+	}
+	if (tab.kind === "review") {
+		state.reviewActiveTab = reviewTitleFromPanelTab(tab);
+	}
+}
+
+function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
+	const sid = workspaceSessionId();
+	const storedId = activeSidePanelTabIdForSession(state, sid);
+	const storedTab = findPanelTab(tabs, storedId);
+	if (storedTab) {
+		setUnifiedActiveTab(storedTab);
+		return;
+	}
+	const fallback = tabs[0];
+	if (fallback) {
+		setUnifiedActiveTab(fallback);
+		return;
+	}
+	setActivePanelTabIdForSession(state, sid, "");
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): UnifiedPanelTab[] {
-	const tabs: UnifiedPanelTab[] = ["chat"];
-	if (state.isPreviewSession) tabs.push("preview");
-	if (state.reviewPanelOpen) tabs.push("review");
-	if (state.inboxPanelOpen) tabs.push("inbox");
-	tabs.push(...activeProposalTypes());
+export function unifiedPanelTabs(): UnifiedPanelTab[] {
+	const sessionId = workspaceSessionId();
+	const activeGatewaySession = state.gatewaySessions.find((session) => session.id === sessionId) as any;
+	if (activeGatewaySession?.walkthroughJobId || activeGatewaySession?.childKind === "pr-walkthrough") {
+		restorePrWalkthroughJobForSession(state, sessionId);
+	}
+	const derivedTabs = buildPanelWorkspaceTabs({
+		sessionId,
+		isPreviewSession: state.isPreviewSession,
+		previewEntry: state.previewPanelEntry,
+		// Use the registry's latest registered contentHash as the source of truth
+		// for the current/filename tab. The transient `state.previewPanelContentHash`
+		// may briefly hold older bytes while a historical artifact is mounted, and
+		// using it here would clobber the stored filename tab's v2 metadata when
+		// `mergeDerivedMetadata` merges the derived tab over it.
+		previewContentHash: (state.previewPanelEntry ? previewVersionRecordFor(state, sessionId, state.previewPanelEntry)?.latestContentHash : undefined)
+			|| (state as any).previewPanelContentHash,
+		activeProposalTypes: activeProposalTypes(),
+		assistantProposalType: currentAssistantProposalType(),
+		reviewTitles: [...state.reviewDocuments.keys()],
+		reviewPanelOpen: state.reviewPanelOpen,
+		inboxPanelOpen: state.inboxPanelOpen,
+		inboxHasPending: state.inboxEntries.some((e) => e.state === "pending"),
+	});
+	const tabs = normalizeSidePanelTabs(state, sessionId, derivedTabs);
+	setPanelTabsForSession(state, sessionId, tabs);
+	ensureUnifiedActiveTab(tabs);
 	return tabs;
 }
 
 function unifiedPanelContentTabs(): UnifiedContentTab[] {
-	return unifiedPanelTabs().filter((tab): tab is UnifiedContentTab => tab !== "chat");
+	return panelContentTabs(unifiedPanelTabs());
 }
 
 function setUnifiedMobileTab(tab: UnifiedPanelTab): void {
-	(state as any).previewPanelTab = tab;
+	setUnifiedActiveTab(tab);
+	const tabs = unifiedPanelTabs();
+	const idx = tabs.findIndex((candidate) => candidate.id === tab.id);
+	mobileSelectedPaneIndex = idx >= 0 ? idx + 1 : 0;
+	mobileSelectedSideTabId = idx >= 0 ? tab.id : mobileSelectedSideTabId;
 }
 
 function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
-	(state as any).previewPanelActiveTab = tab;
+	setUnifiedActiveTab(tab);
 }
 
-/** Index of the current previewPanelTab within unifiedPanelTabs(). Clamps to valid range. */
-function unifiedTabIndex(): number {
-	const tabs = unifiedPanelTabs();
-	const current = state.previewPanelTab as UnifiedPanelTab;
-	const idx = tabs.indexOf(current);
-	if (idx >= 0) return idx;
-	setUnifiedMobileTab(tabs[tabs.length - 1]);
-	return tabs.length - 1;
+/** Whether the unified panel is active for the current session. */
+function hasUnifiedPanel(): boolean {
+	return unifiedPanelContentTabs().length > 0;
+}
+
+function mobileChatPaneTab(): MobilePaneTab {
+	return {
+		id: "__mobile_chat_pane__",
+		kind: "chat",
+		title: "Chat",
+		label: "Chat",
+		legacyTab: "chat",
+		source: { type: "chat", sessionId: workspaceSessionId() },
+	};
+}
+
+function unifiedMobilePanes(): MobilePaneTab[] {
+	return [mobileChatPaneTab(), ...unifiedPanelTabs()];
+}
+
+function unifiedMobilePaneIndex(): number {
+	const sideTabs = unifiedPanelTabs();
+	if (sideTabs.length === 0) {
+		mobileSelectedPaneIndex = 0;
+		return 0;
+	}
+	const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+	if (activeId && activeId !== mobileSelectedSideTabId) {
+		const activeIndex = sideTabs.findIndex((tab) => tab.id === activeId);
+		if (activeIndex >= 0) {
+			mobileSelectedPaneIndex = activeIndex + 1;
+			mobileSelectedSideTabId = activeId;
+		}
+	}
+	if (mobileSelectedPaneIndex < 0 || mobileSelectedPaneIndex > sideTabs.length) mobileSelectedPaneIndex = activeId ? Math.max(1, sideTabs.findIndex((tab) => tab.id === activeId) + 1) : 0;
+	return mobileSelectedPaneIndex;
+}
+
+function setUnifiedMobilePaneByIndex(index: number): void {
+	const sideTabs = unifiedPanelTabs();
+	if (index <= 0) {
+		mobileSelectedPaneIndex = 0;
+		renderApp();
+		return;
+	}
+	const tab = sideTabs[index - 1];
+	if (tab) setUnifiedMobileTab(tab);
 }
 
 /** Compute slider translateX% for the given tab index and pane count. */
@@ -3641,7 +1229,7 @@ function unifiedSlideX(index: number, count: number): number {
 }
 
 /** Listen for postMessage from the preview iframe and drive the slider track.
- *  Also handles touch swipes on the chat / preview / goal panes. */
+ *  Also handles touch swipes on the chat / content panes. */
 function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
@@ -3651,14 +1239,15 @@ function setupPreviewSwipe(): void {
 	// === iframe -> parent: swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
 		if (!hasUnifiedPanel()) return;
-		const tabs = unifiedPanelTabs();
-		const curIdx = unifiedTabIndex();
-		if (state.previewPanelTab !== "preview") return;
+		const panes = unifiedMobilePanes();
+		const curIdx = unifiedMobilePaneIndex();
+		const activeTab = panes[curIdx];
+		if (activeTab?.kind !== "preview") return;
 		const track = getTrack();
 		if (!track) return;
 
 		const paneW = track.parentElement!.clientWidth;
-		const count = tabs.length;
+		const count = panes.length;
 		const baseX = unifiedSlideX(curIdx, count);
 
 		if (e.data?.type === "preview-swipe-start") {
@@ -3675,18 +1264,17 @@ function setupPreviewSwipe(): void {
 			let newIdx = curIdx;
 			if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
 			else if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
-			setUnifiedMobileTab(tabs[newIdx]);
+			setUnifiedMobilePaneByIndex(newIdx);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
-			renderApp();
 		}
 	});
 
-	// === touch swipe on non-iframe panes (chat, goal) ===
+	// === touch swipe on non-iframe panes (chat, proposals, reviews, inbox) ===
 	let startX = 0, startY = 0, captured = false, decided = false;
 	const el = document.getElementById("app")!;
 
 	el.addEventListener("touchstart", (e: TouchEvent) => {
-		if (!hasUnifiedPanel() || state.assistantType) return;
+		if (!hasUnifiedPanel()) return;
 		startX = e.touches[0].clientX;
 		startY = e.touches[0].clientY;
 		captured = false;
@@ -3694,15 +1282,15 @@ function setupPreviewSwipe(): void {
 	}, { passive: true });
 
 	el.addEventListener("touchmove", (e: TouchEvent) => {
-		if (!hasUnifiedPanel() || state.assistantType) return;
+		if (!hasUnifiedPanel()) return;
 		if (decided && !captured) return;
 		const dx = e.touches[0].clientX - startX;
 		const dy = e.touches[0].clientY - startY;
 		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
 			decided = true;
-			const tabs = unifiedPanelTabs();
-			const curIdx = unifiedTabIndex();
-			if (dx < 0 && Math.abs(dx) > Math.abs(dy) && curIdx < tabs.length - 1) {
+			const panes = unifiedMobilePanes();
+			const curIdx = unifiedMobilePaneIndex();
+			if (dx < 0 && Math.abs(dx) > Math.abs(dy) && curIdx < panes.length - 1) {
 				captured = true;
 			} else if (dx > 0 && Math.abs(dx) > Math.abs(dy) && curIdx > 0) {
 				captured = true;
@@ -3715,9 +1303,9 @@ function setupPreviewSwipe(): void {
 		if (captured) {
 			const track = getTrack();
 			if (track) {
-				const tabs = unifiedPanelTabs();
-				const count = tabs.length;
-				const curIdx = unifiedTabIndex();
+				const panes = unifiedMobilePanes();
+				const count = panes.length;
+				const curIdx = unifiedMobilePaneIndex();
 				const baseX = unifiedSlideX(curIdx, count);
 				const dragPercent = (dx / track.parentElement!.clientWidth) * (100 / count);
 				const target = Math.max(unifiedSlideX(count - 1, count), Math.min(0, baseX + dragPercent));
@@ -3732,14 +1320,14 @@ function setupPreviewSwipe(): void {
 		if (track) {
 			track.style.transition = "transform 0.3s ease-out";
 			const dx = e.changedTouches[0].clientX - startX;
-			const tabs = unifiedPanelTabs();
-			const count = tabs.length;
-			const curIdx = unifiedTabIndex();
+			const panes = unifiedMobilePanes();
+			const count = panes.length;
+			const curIdx = unifiedMobilePaneIndex();
 			const threshold = track.parentElement!.clientWidth * 0.2;
 			let newIdx = curIdx;
 			if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
 			else if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
-			setUnifiedMobileTab(tabs[newIdx]);
+			setUnifiedMobilePaneByIndex(newIdx);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 		}
 		captured = false;
@@ -3747,6 +1335,181 @@ function setupPreviewSwipe(): void {
 		renderApp();
 	}, { passive: true });
 }
+
+function samePanelTabOrder(a: PanelWorkspaceTab[], b: PanelWorkspaceTab[]): boolean {
+	return a.length === b.length && a.every((tab, index) => tab.id === b[index]?.id);
+}
+
+// Restore the DOM order of `.goal-tab-pill` children inside `host` to match
+// `expectedIds`. Used to revert SortableJS's drag DOM mutations when the
+// drop is rejected (e.g. pinned-blocked). Appending an already-attached node
+// moves it without re-creating it, so this is cheap and leaves event listeners
+// intact. Any pills not in `expectedIds` keep their relative tail position.
+function revertPanelTabDomOrder(host: HTMLElement, expectedIds: string[]): void {
+	if (!host || expectedIds.length === 0) return;
+	const pillsById = new Map<string, HTMLElement>();
+	for (const pill of Array.from(host.querySelectorAll<HTMLElement>(".goal-tab-pill"))) {
+		const id = pill.getAttribute("data-panel-tab-id") || "";
+		if (id) pillsById.set(id, pill);
+	}
+	for (const id of expectedIds) {
+		const pill = pillsById.get(id);
+		if (pill) host.appendChild(pill);
+	}
+}
+
+// Attach a SortableJS instance to the unified tab bar's inner container. Idempotent:
+// if the container DOM node is the same as last time, we keep the existing instance.
+// If the container was replaced (e.g. workspace switched sessions), we destroy the
+// old instance and rebuild.
+//
+// SortableJS handles all the hard parts of Chrome-style tab dragging — dragged item
+// follows cursor 1:1, siblings slide via CSS, midpoint hysteresis to prevent flicker,
+// touch and accessibility support, edge cases like fast sweeps. We integrate by:
+//   - filter: pinned tabs can't be picked up
+//   - onMove: forbid drops in front of pinned tabs (returns false to cancel)
+//   - onStart: suppress lit-html renders so Sortable owns the DOM during the drag
+//   - onEnd: read the new DOM order, commit to state, resume renders
+function ensurePanelSortable(container: HTMLElement | null): void {
+	if (!container) {
+		if (panelSortable) {
+			panelSortable.destroy();
+			panelSortable = null;
+			panelSortableContainer = null;
+		}
+		return;
+	}
+	if (panelSortableContainer === container && panelSortable) return;
+	if (panelSortable) {
+		panelSortable.destroy();
+		panelSortable = null;
+	}
+	panelSortableContainer = container;
+
+	panelSortable = Sortable.create(container, {
+		animation: 180,
+		easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+		draggable: ".goal-tab-pill",
+		filter: ".goal-tab-pill--pinned, .goal-tab-close",
+		preventOnFilter: false,
+		ghostClass: "goal-tab-pill--ghost",
+		chosenClass: "goal-tab-pill--chosen",
+		dragClass: "goal-tab-pill--drag",
+		forceFallback: true,
+		fallbackTolerance: 4,
+		delay: 0,
+		onMove: (evt) => {
+			// Forbid dropping in front of (or onto) a pinned tab. Returning false
+			// cancels this candidate move; SortableJS keeps trying as the cursor
+			// moves. We also remember that the user *attempted* a pinned-blocked
+			// move so onEnd can cancel the whole drag — otherwise an earlier
+			// non-pinned swap during the same drag would silently commit.
+			const relatedRaw = evt.related as HTMLElement | null;
+			const related = relatedRaw?.closest(".goal-tab-pill") as HTMLElement | null;
+			if (!related) return true;
+			if (related.classList.contains("goal-tab-pill--pinned")) {
+				panelSortablePinnedBlocked = true;
+				return false;
+			}
+			return true;
+		},
+		onStart: (evt) => {
+			draggingPanelTabId = (evt.item as HTMLElement).getAttribute("data-panel-tab-id") || "";
+			panelSortablePinnedBlocked = false;
+			panelSortableStartIds = Array.from(
+				(evt.from as HTMLElement).querySelectorAll<HTMLElement>(".goal-tab-pill"),
+			)
+				.map((el) => el.getAttribute("data-panel-tab-id") || "")
+				.filter((id) => id.length > 0);
+			document.documentElement.classList.add("dragging-panel-tab");
+			setRenderSuppressed(true);
+			startPanelDragYLock();
+			// Tag the floating clone so CSS can override SortableJS's inline
+			// opacity: 0.8 (we want it to look like a real tab, not a ghost),
+			// while the source tab (.goal-tab-pill--ghost) becomes invisible —
+			// the user should perceive the tab itself moving, not a clone.
+			const ghost = (Sortable as unknown as { ghost: HTMLElement | null }).ghost;
+			if (ghost) ghost.classList.add("goal-tab-pill--floating");
+		},
+		onEnd: (evt) => {
+			draggingPanelTabId = "";
+			document.documentElement.classList.remove("dragging-panel-tab");
+			stopPanelDragYLock();
+			const pinnedBlocked = panelSortablePinnedBlocked;
+			const startIds = panelSortableStartIds;
+			panelSortablePinnedBlocked = false;
+			panelSortableStartIds = [];
+			try {
+				const host = evt.from as HTMLElement;
+				const sid = workspaceSessionId();
+				const currentTabs = panelTabsForSession(state, sid);
+
+				// If the drag attempted a pinned-blocked move at any point,
+				// cancel the entire drag — otherwise an earlier non-pinned swap
+				// during the same drag would silently commit and the user would
+				// see tabs reorder despite SortableJS rejecting the final drop.
+				// Manually restore the DOM order from the snapshot captured at
+				// onStart: lit-html's `repeat` does not always reconcile element
+				// positions back to canonical when SortableJS has shuffled them.
+				if (pinnedBlocked) {
+					revertPanelTabDomOrder(host, startIds);
+					return;
+				}
+
+				// Read the new tab id order directly off the DOM children.
+				const newIds = Array.from(host.querySelectorAll<HTMLElement>(".goal-tab-pill"))
+					.map((el) => el.getAttribute("data-panel-tab-id") || "")
+					.filter((id) => id.length > 0);
+				const byId = new Map(currentTabs.map((tab) => [tab.id, tab]));
+				const reordered: PanelWorkspaceTab[] = [];
+				for (const id of newIds) {
+					const tab = byId.get(id);
+					if (tab) reordered.push(tab);
+				}
+				// Append any tabs that weren't in the DOM order (defensive).
+				for (const tab of currentTabs) {
+					if (!newIds.includes(tab.id)) reordered.push(tab);
+				}
+
+				// Defense-in-depth: refuse to commit a reordering that places any
+				// non-pinned tab before any pinned tab. onMove should already have
+				// flagged such an attempt via panelSortablePinnedBlocked, but if a
+				// future change to SortableJS or our predicate misses an edge
+				// case, this guard ensures the pinned invariant still holds.
+				let seenNonPinned = false;
+				let pinnedAfterNonPinned = false;
+				for (const tab of reordered) {
+					if (isPinnedPanelTab(tab)) {
+						if (seenNonPinned) {
+							pinnedAfterNonPinned = true;
+							break;
+						}
+					} else {
+						seenNonPinned = true;
+					}
+				}
+				if (pinnedAfterNonPinned) {
+					revertPanelTabDomOrder(host, startIds);
+					return;
+				}
+
+				if (!samePanelTabOrder(currentTabs, reordered)) {
+					setPanelTabsForSession(state, sid, reordered);
+				}
+			} finally {
+				setRenderSuppressed(false);
+				// Always trigger a render: when we took an early `return` above
+				// (pinned-blocked or invariant-violation revert), state was not
+				// mutated and lit-html will restore the canonical DOM order.
+				// When we committed setPanelTabsForSession, it already triggers a
+				// render — an extra one here is harmless.
+				renderApp();
+			}
+		},
+	});
+}
+
+
 
 // ============================================================================
 // RENDER APP
@@ -4024,64 +1787,230 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const assistantTabBar = () => {
-		if (!state.assistantType) return "";
-		if (!getAssistantPreviewPanel(state.assistantType)) return "";
-		return html`
-			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
-				<button
-					class="goal-tab-pill ${state.assistantTab === "chat" ? "goal-tab-pill--active" : ""}"
-					title="Chat"
-					@click=${() => { state.assistantTab = "chat"; renderApp(); }}
-				>Chat</button>
-				<button
-					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
-					title="Preview"
-					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
-				>
-					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
-				</button>
-			</div>
-		`;
+	const reviewPaneUnsentCountForDocument = (sessionId: string, title: string): number => {
+		const pane = document.querySelector("review-pane") as (HTMLElement & { _unsentCommentCountForDocument?: (title: string) => number }) | null;
+		if (pane && typeof pane._unsentCommentCountForDocument === "function") {
+			const count = Number(pane._unsentCommentCountForDocument(title));
+			if (Number.isFinite(count)) return count;
+		}
+		return getDocumentAnnotationCount(sessionId, title);
 	};
 
-	const unifiedTabLabel = (tab: UnifiedPanelTab): string => {
-		if (tab === "chat") return "Chat";
-		if (tab === "preview") return "Preview";
-		if (tab === "review") return "Review";
-		if (tab === "inbox") return "Inbox";
-		return PROPOSAL_TAB_LABELS[tab];
+	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
+		event?.preventDefault();
+		event?.stopPropagation();
+		if ((tab as any).kind === "chat" || isPinnedPanelTab(tab)) return;
+		const sid = workspaceSessionId();
+		const activeId = activeSidePanelTabIdForSession(state, sid);
+		const wasActive = activeId === tab.id;
+		const tabsBefore = unifiedPanelTabs();
+		const nextId = nextActivePanelTabId(tabsBefore, tab.id);
+		const nextCandidate = nextId ? findPanelTab(tabsBefore, nextId) : undefined;
+
+		if (tab.kind === "proposal" && tab.source.type === "proposal" && !isHistoricalProposalTab(tab)) {
+			lazyProposalPanels.dismissTypedProposal(tab.source.proposalType);
+			setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
+			if (wasActive) {
+				if (nextCandidate) setUnifiedActiveTab(nextCandidate);
+				else setActivePanelTabIdForSession(state, sid, "");
+			}
+			renderApp();
+			return;
+		}
+		if (tab.kind === "review") {
+			const title = reviewTitleFromPanelTab(tab);
+			if (title) {
+				const sid = activeSessionId() || "";
+				if (event?.type !== "review-close-tab") {
+					const count = reviewPaneUnsentCountForDocument(sid, title);
+					if (count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+				}
+				clearAnnotations(sid, title);
+				removePersistedReviewDocument(sid, title);
+				state.reviewDocuments = new Map(state.reviewDocuments);
+				state.reviewDocuments.delete(title);
+				if (state.reviewActiveTab === title) {
+					const nextReview = nextCandidate?.kind === "review" ? reviewTitleFromPanelTab(nextCandidate) : "";
+					state.reviewActiveTab = nextReview || [...state.reviewDocuments.keys()][0] || "";
+				}
+				state.reviewPanelOpen = state.reviewDocuments.size > 0;
+			}
+		}
+		if (tab.kind === "preview") {
+			if (!isHistoricalPreviewTab(tab)) markPreviewContentDismissed(sid, previewEntryFromTab(tab), previewContentHashFromTab(tab));
+			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
+			if (remainingPreviewTabs.length === 0) {
+				state.isPreviewSession = false;
+				state.previewPanelEntry = "";
+				state.previewPanelMtime = 0;
+				(state as any).previewPanelContentHash = "";
+				(state as any).previewPanelMountedTabId = "";
+				mountedPreviewTabId = "";
+			} else {
+				// `buildPanelWorkspaceTabs` derives a current preview tab from
+				// `state.previewPanelEntry`. If we just closed the tab for that
+				// entry, point `previewPanelEntry` at a remaining preview so the
+				// builder doesn't re-emit the closed tab on the next render. The
+				// closed tab might be the historical version of an entry whose
+				// current/filename tab still exists — preserve that case.
+				const closedEntry = previewEntryFromTab(tab);
+				const remainingEntryStillPresent = remainingPreviewTabs.some((candidate) => previewEntryFromTab(candidate) === closedEntry);
+				if (!remainingEntryStillPresent && state.previewPanelEntry && previewEntryFromTab(tab) === state.previewPanelEntry) {
+					const fallback = remainingPreviewTabs.find((candidate) => !!previewEntryFromTab(candidate));
+					const fallbackEntry = fallback ? previewEntryFromTab(fallback) : "";
+					const fallbackHash = fallback ? previewContentHashFromTab(fallback) : "";
+					state.previewPanelEntry = fallbackEntry || "";
+					(state as any).previewPanelContentHash = fallbackHash || "";
+					state.previewPanelMtime = fallback && typeof (fallback.state as any)?.mtime === "number"
+						? (fallback.state as any).mtime
+						: state.previewPanelMtime;
+				}
+			}
+		}
+
+		setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
+		if (wasActive) {
+			if (nextCandidate) setUnifiedActiveTab(nextCandidate);
+			else setActivePanelTabIdForSession(state, sid, "");
+		}
+		renderApp();
 	};
 
-	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => {
-		const label = unifiedTabLabel(tab);
-		const isProposalTab = PROPOSAL_TYPES.includes(tab as ProposalType);
-		const inboxDot = tab === "inbox" && state.inboxEntries.some((e) => e.state === "pending");
+	const panelTabHasDot = (tab: UnifiedPanelTab): boolean => {
+		if (tab.kind === "inbox") return state.inboxEntries.some((e) => e.state === "pending");
+		if (tab.kind !== "proposal" || tab.source.type !== "proposal") return false;
+		const type = tab.source.proposalType;
+		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
+	};
+
+	const walkthroughTabButtonLabel = (tab: UnifiedPanelTab): string | undefined => {
+		if (tab.kind !== "walkthrough") return undefined;
+		const record = { ...((tab.state || {}) as Record<string, unknown>), ...((tab.source || {}) as Record<string, unknown>) };
+		const rawNumber = record.prNumber;
+		const number = typeof rawNumber === "number" && Number.isFinite(rawNumber)
+			? String(Math.trunc(rawNumber))
+			: typeof rawNumber === "string" && rawNumber.trim()
+				? rawNumber.trim().replace(/^#/, "")
+				: "";
+		return number ? `PR: #${number}` : undefined;
+	};
+
+	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
+		walkthroughTabButtonLabel(tab) || tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
+	);
+
+	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
+		const label = panelTabButtonLabel(tab);
+		const sourceTitle = tab.kind === "preview" ? previewSourceTitle(tab) : "";
+		const tooltip = sourceTitle || label;
+		const dataTitle = sourceTitle || tab.title;
+		const closable = !isPinnedPanelTab(tab);
+		const draggable = isDesktop() && !isPinnedPanelTab(tab);
+		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+		// On mobile, when the slider is on the chat pane (index 0) no panel tab
+		// should be highlighted — the pinned chat pill owns the active state.
+		const mobileChatActive = !isDesktop() && mobileSelectedPaneIndex === 0;
+		const tabIsActive = !mobileChatActive && activeId === tab.id;
 		return html`
-			<button
-				class="goal-tab-pill ${(state.previewPanelTab as UnifiedPanelTab) === tab ? "goal-tab-pill--active" : ""}"
-				title=${label}
-				data-testid=${tab === "inbox" ? "inbox-tab-pill" : ""}
-				@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-			>${label}${isProposalTab || inboxDot ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+		<div
+			role="button"
+			tabindex="0"
+			class="goal-tab-pill ${tabIsActive ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
+			title=${tooltip}
+			data-panel-tab-id=${tab.id}
+			data-panel-tab-kind=${tab.kind}
+			data-panel-tab-title=${dataTitle}
+			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
+			data-testid=${testId}
+			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
+		><span class="goal-tab-pill-label">${label}</span>${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
+				class="goal-tab-close"
+				role="button"
+				aria-label=${`Dismiss ${label}`}
+				title=${`Dismiss ${label}`}
+				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
+			>${icon(X, "xs")}</span>` : ""}</div>
+	`;
+	};
+
+	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => panelTabButton(
+		tab,
+		tab.kind === "inbox" ? "inbox-tab-pill" : "",
+	);
+
+	const mobileChatTabPill = () => {
+		const isChatActive = mobileSelectedPaneIndex === 0;
+		return html`
+			<div
+				role="button"
+				tabindex="0"
+				class="goal-tab-pill goal-tab-pill--pinned ${isChatActive ? "goal-tab-pill--active" : ""}"
+				title="Chat"
+				data-panel-tab-id="__mobile_chat_pane__"
+				data-panel-tab-kind="chat"
+				data-panel-tab-pinned="true"
+				@click=${() => { setUnifiedMobilePaneByIndex(0); }}
+				@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobilePaneByIndex(0); } }}
+			><span class="goal-tab-pill-label">Chat</span></div>
 		`;
 	};
 
 	const unifiedTabBar = () => {
 		if (!hasUnifiedPanel()) return "";
+		// Refresh mobileSelectedPaneIndex BEFORE rendering the tab bar so both
+		// the chat pill and the panel pills see the same value. Otherwise on
+		// first load the bar renders with paneIndex=0 (chat highlighted) while
+		// the slider then advances to the active panel tab — leaving both
+		// visually highlighted until the next render.
+		void unifiedMobilePaneIndex();
+		// Mirror the desktop tab strip: muted background, tabs flush at the
+		// bottom via items-end + pt-1 (no bottom padding), no border-b. The
+		// active tab's background matches the content panel below so the two
+		// merge seamlessly (Chrome-style), with the curve pseudo-elements
+		// providing the outward flare at the bottom corners.
 		return html`
-			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
-				${unifiedPanelTabs().map((tab) => unifiedMobileTabButton(tab))}
+			<div class="goal-tab-bar goal-tab-bar--mobile shrink-0 overflow-x-auto" style="scrollbar-width:thin; background: var(--muted, var(--color-muted));">
+				<div
+					class="flex items-end gap-1 px-3 pt-1 min-w-max"
+					data-panel-tab-bar="true"
+				>
+					${mobileChatTabPill()}
+					${repeat(unifiedPanelTabs(), (tab) => tab.id, (tab) => unifiedMobileTabButton(tab))}
+				</div>
 			</div>
 		`;
 	};
 
-	const previewCollapseKey = () => `bobbit-preview-collapsed-${activeSessionId()}`;
+	const previewCollapseKey = () => `bobbit-preview-collapsed-${workspaceSessionId()}`;
 	const isPreviewCollapsed = () => localStorage.getItem(previewCollapseKey()) === "true";
 	const togglePreviewCollapse = () => {
 		const next = !isPreviewCollapsed();
 		localStorage.setItem(previewCollapseKey(), String(next));
 		renderApp();
+	};
+
+	const previewRestoreErrorContent = (tab: UnifiedContentTab) => {
+		const restoreError = previewRestoreError(tab);
+		if (!restoreError) return "";
+		const retry = () => {
+			const sid = activeSessionId() || previewSessionIdFromTab(tab);
+			const nextTab = sid ? clearPreviewTabRestoreError(sid, tab.id) ?? tab : tab;
+			restoreHistoricalPreviewTab(nextTab);
+			renderApp();
+		};
+		return html`
+			<div class="preview-restore-error flex-1 min-h-0 flex items-center justify-center p-6" data-testid="preview-restore-error" data-panel-tab-id=${tab.id}>
+				<div class="preview-restore-error-card">
+					<div class="preview-restore-error-title">Preview artifact unavailable</div>
+					<div class="preview-restore-error-body">${restoreError.detail || restoreError.message || "This preview could not be restored."}</div>
+					<div class="preview-restore-error-actions">
+						${restoreError.retryable !== false ? html`<button class="preview-restore-error-button" @click=${retry}>Retry</button>` : ""}
+						<button class="preview-restore-error-button" @click=${(event: Event) => closeUnifiedPanelTab(tab, event)}>Close tab</button>
+					</div>
+				</div>
+			</div>
+		`;
 	};
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
@@ -4093,8 +2022,27 @@ export function doRenderApp(): void {
 	// which forces the iframe to reload via the `#mtime=<n>` hash.
 	const htmlPreviewContent = () => {
 		const sid = activeSessionId() || "";
-		const entry = state.previewPanelEntry || "inline.html";
 		const v = state.previewPanelMtime || 0;
+		// Derive artifactId and entry from the active panel tab rather than
+		// mirroring them in global state. Many code paths (SSE preview-changed,
+		// bootstrap fetch, PreviewRenderer, session-manager) update
+		// `previewPanelEntry` without knowing about artifactId; reading directly
+		// from the active tab keeps entry+artifactId always paired.
+		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+		const panelTabs = unifiedPanelContentTabs();
+		const activeTab = panelTabs.find((t) => t.id === activeId);
+		let artifactId = "";
+		let entry = state.previewPanelEntry || "inline.html";
+		if (activeTab && activeTab.kind === "preview") {
+			const tabState = (activeTab.state || {}) as Record<string, unknown>;
+			const source = activeTab.source as Record<string, unknown>;
+			const isLiveTab = isLivePreviewTab(activeTab);
+			if (!isLiveTab) {
+				artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+				const tabEntry = previewEntryFromTab(activeTab);
+				if (tabEntry) entry = tabEntry;
+			}
+		}
 		if (!sid || !state.previewPanelEntry) {
 			// Empty-state until the first SSE `preview-changed` event lands.
 			return html`
@@ -4103,13 +2051,20 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
+		// When the active tab is backed by a persisted artifact, serve directly
+		// from `/preview/<sid>/_artifact/<artifactId>/<entry>` — each artifact's
+		// bytes live at a stable URL, so switching tabs requires no mount POST
+		// (just an iframe src change, which the browser caches across switches).
+		const src = artifactId
+			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}?mtime=${v}`
+			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`;
 		return html`
 			<div style="position:relative;flex:1;min-height:0;">
 				<iframe
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts allow-same-origin"
-					src=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`}
+					src=${src}
 				></iframe>
 			</div>
 		`;
@@ -4123,13 +2078,20 @@ export function doRenderApp(): void {
 				.documents=${state.reviewDocuments}
 				.activeTab=${state.reviewActiveTab}
 				.sessionId=${activeSessionId() || ""}
-				@review-tab-change=${(e: CustomEvent) => { state.reviewActiveTab = e.detail.title; renderApp(); }}
+				@review-tab-change=${(e: CustomEvent) => {
+					const title = e.detail.title as string;
+					state.reviewActiveTab = title;
+					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					if (tab) setUnifiedActiveTab(tab);
+					renderApp();
+				}}
 				@review-submit=${async (e: CustomEvent) => {
 					const agent = state.remoteAgent;
 					if (agent) {
 						agent.prompt(e.detail.feedback);
 						const sid = activeSessionId() || "";
 						clearAllAnnotations(sid);
+						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
 						await flushPendingWrites();
 						state.reviewDocuments = new Map();
@@ -4138,23 +2100,52 @@ export function doRenderApp(): void {
 						renderApp();
 					}
 				}}
-			@review-close-tab=${(e: CustomEvent) => {
+				@review-decision=${async (e: CustomEvent) => {
+					e.preventDefault();
 					const sid = activeSessionId() || "";
-					const title = e.detail.title as string;
-					clearAnnotations(sid, title);
-					state.reviewDocuments = new Map(state.reviewDocuments);
-					state.reviewDocuments.delete(title);
-					if (state.reviewActiveTab === title) {
-						const keys = [...state.reviewDocuments.keys()];
-						state.reviewActiveTab = keys[0] || "";
+					const doc = reviewDocumentFromDecisionDetail(e.detail);
+					const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
+					if (!doc || !payload) {
+						showHeaderToast("Could not submit review decision");
+						return;
 					}
-					state.reviewPanelOpen = state.reviewDocuments.size > 0;
-					renderApp();
+					try {
+						await submitReviewDecision(doc, payload, {
+							sessionId: sid,
+							prompt: async (feedback) => {
+								const agent = state.remoteAgent;
+								if (!agent) throw new Error("No active agent is available for this review.");
+								agent.prompt(feedback);
+							},
+						});
+					} catch (err) {
+						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
+					}
+				}}
+				@review-close-tab=${(e: CustomEvent) => {
+					const title = e.detail.title as string;
+					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					if (tab) closeUnifiedPanelTab(tab, e);
+					else {
+						const sid = activeSessionId() || "";
+						clearAnnotations(sid, title);
+						removePersistedReviewDocument(sid, title);
+						state.reviewDocuments = new Map(state.reviewDocuments);
+						state.reviewDocuments.delete(title);
+						if (state.reviewActiveTab === title) {
+							const keys = [...state.reviewDocuments.keys()];
+							state.reviewActiveTab = keys[0] || "";
+						}
+						state.reviewPanelOpen = state.reviewDocuments.size > 0;
+						renderApp();
+					}
 				}}
 				@review-dismiss=${() => {
 					const sid = activeSessionId() || "";
+					const hasMarkdownReview = [...state.reviewDocuments.values()].some((doc) => !doc.source || doc.source.kind === "markdown-review");
 					clearAllAnnotations(sid);
-					markReviewSubmitted(sid);
+					clearPersistedReviewDocuments(sid);
+					if (hasMarkdownReview) markReviewSubmitted(sid);
 					state.reviewDocuments = new Map();
 					state.reviewPanelOpen = false;
 					state.reviewActiveTab = "";
@@ -4182,6 +2173,21 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const walkthroughControlButtons = (tab: UnifiedContentTab) => {
+		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
+		const standaloneUrl = prWalkthroughStandaloneHref(sid, tab.id);
+		return html`
+			<button
+				type="button"
+				class="text-muted-foreground hover:text-foreground"
+				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
+				title="Open walkthrough in new tab"
+				data-testid="pr-walkthrough-open-in-new-tab"
+				@click=${() => window.open(`${window.location.origin}${standaloneUrl}`, "_blank", "noopener")}
+			>${icon(ExternalLink, "sm")}</button>
+		`;
+	};
+
 	const inboxPaneContent = () => {
 		const sid = activeSessionId() || "";
 		const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
@@ -4201,61 +2207,163 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const proposalPanelContent = (type: ProposalType) => {
-		if (state.activeProposals[type] == null) return "";
-		return proposalPanelForType(type);
+	const proposalPanelContent = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
+		const type = tab.source.proposalType;
+		// Skip lazy-loading the proposal-panels chunk when there's nothing to
+		// render. Historical tabs always have content (the field snapshot),
+		// so they proceed regardless of the live activeProposals slot.
+		if (!isHistoricalProposalTab(tab) && state.activeProposals[type] == null && type !== currentAssistantProposalType()) return "";
+		return lazyProposalPanels.proposalPanelContent(tab, currentAssistantProposalType);
+	};
+
+	const walkthroughChangesetFromTab = (tab: UnifiedContentTab): PrWalkthroughChangesetRef => {
+		const source = (tab.source || {}) as Record<string, unknown>;
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const stored = tabState.changeset;
+		if (stored && typeof stored === "object") return stored as PrWalkthroughChangesetRef;
+		return {
+			baseSha: typeof source.baseSha === "string" && source.baseSha ? source.baseSha : "fixture-base",
+			headSha: typeof source.headSha === "string" && source.headSha ? source.headSha : "fixture-head",
+			provider: typeof source.provider === "string" ? source.provider : undefined,
+			externalUrl: typeof source.externalUrl === "string" ? source.externalUrl : typeof source.prUrl === "string" ? source.prUrl : undefined,
+			prUrl: typeof source.prUrl === "string" ? source.prUrl : typeof source.externalUrl === "string" ? source.externalUrl : undefined,
+			prNumber: typeof source.prNumber === "string" || typeof source.prNumber === "number" ? source.prNumber : undefined,
+			prTitle: typeof source.prTitle === "string" ? source.prTitle : undefined,
+			prBody: typeof source.prBody === "string" ? source.prBody : undefined,
+			title: typeof source.title === "string" ? source.title : tab.title,
+			filesChanged: typeof source.filesChanged === "number" ? source.filesChanged : undefined,
+			additions: typeof source.additions === "number" ? source.additions : undefined,
+			deletions: typeof source.deletions === "number" ? source.deletions : undefined,
+		};
+	};
+
+	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "walkthrough") return "";
+		void ensurePrWalkthroughPanel();
+		const changeset = walkthroughChangesetFromTab(tab);
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const cards = Array.isArray(tabState.cards) ? tabState.cards as PrWalkthroughCard[] : undefined;
+		const status = typeof tabState.status === "string" ? tabState.status : "fixture";
+		const warnings = Array.isArray(tabState.warnings) ? tabState.warnings : [];
+		const error = typeof tabState.error === "string" ? tabState.error : undefined;
+		const exportCapability = tabState.exportCapability;
+		const validationError = tabState.validationError || tabState.lastValidationError;
+		const jobId = typeof tabState.jobId === "string" ? tabState.jobId : undefined;
+		if (status === "ready" && !cards?.length) {
+			queueMicrotask(() => restorePrWalkthroughPanel(state, workspaceSessionId(), tab.id));
+		}
+		return html`
+			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id} data-walkthrough-status=${status}>
+				<pr-walkthrough-panel
+					.changeset=${changeset}
+					.cards=${cards ?? []}
+					.status=${status}
+					.warnings=${warnings}
+					.error=${error}
+					.exportCapability=${exportCapability}
+					.validationError=${validationError}
+					.jobId=${jobId}
+					.persistenceKey=${tab.id}
+				></pr-walkthrough-panel>
+			</div>
+		`;
+	};
+
+	const standaloneWalkthroughPanel = () => {
+		const route = getRouteFromHash();
+		const sid = route.walkthroughSessionId || workspaceSessionId();
+		const rawTabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, sid);
+		const tabId = rawTabId && rawTabId.startsWith("walkthrough:") && !rawTabId.includes("%")
+			? walkthroughPanelTabId(rawTabId.slice("walkthrough:".length))
+			: rawTabId;
+		const tabCandidates = [tabId, rawTabId].filter(Boolean);
+		const storedTab = panelTabsForSession(state, sid).find((candidate) => tabCandidates.includes(candidate.id) && candidate.kind === "walkthrough") as UnifiedContentTab | undefined;
+		const fallbackTabId = tabId && tabId.startsWith("walkthrough:") ? tabId : "walkthrough:fixture";
+		const fallbackChangesetId = walkthroughChangesetIdFromPanelTabId(fallbackTabId);
+		const tab = storedTab
+			? (tabId && storedTab.id !== tabId ? { ...storedTab, id: tabId } as UnifiedContentTab : storedTab)
+			: {
+				id: fallbackTabId,
+				kind: "walkthrough" as const,
+				title: "PR Walkthrough",
+				label: "Walkthrough",
+				legacyTab: "walkthrough" as const,
+				source: { type: "walkthrough" as const, sessionId: sid, title: "PR Walkthrough", changesetId: fallbackChangesetId },
+				state: { changesetId: fallbackChangesetId },
+			} as UnifiedContentTab;
+		if (route.walkthroughSessionId) restorePrWalkthroughJobForSession(state, sid);
+		if (storedTab) {
+			restorePrWalkthroughPanel(state, sid, storedTab.id);
+		} else if (fallbackChangesetId && fallbackChangesetId !== "fixture") {
+			setPanelTabsForSession(state, sid, [...panelTabsForSession(state, sid), tab as PanelWorkspaceTab]);
+			restorePrWalkthroughPanel(state, sid, tab.id);
+		}
+		// A popped-out standalone walkthrough IS the whole window — there is no
+		// adjacent chat pane to hide — so it carries no panel-level fullscreen /
+		// collapse chrome. It simply fills the window. The component's own internal
+		// rail toggle (rendered inside <pr-walkthrough-panel>) still works.
+		return html`
+			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
+				${walkthroughPanelContent(tab)}
+			</div>
+		`;
 	};
 
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
-		if (tab === "preview" && state.isPreviewSession) return htmlPreviewContent();
-		if (tab === "review" && state.reviewPanelOpen) return reviewPaneContent();
-		if (tab === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
-		return proposalPanelContent(tab as ProposalType);
+		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
+		if (tab.kind === "review" && state.reviewPanelOpen) {
+			const reviewTitle = reviewTitleFromPanelTab(tab);
+			if (reviewTitle && state.reviewActiveTab !== reviewTitle) {
+				state.reviewActiveTab = reviewTitle;
+			}
+			return reviewPaneContent();
+		}
+		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
+		if (tab.kind === "proposal" && tab.source.type === "proposal") {
+			return proposalPanelContent(tab);
+		}
+		if (tab.kind === "walkthrough") return walkthroughPanelContent(tab);
+		return "";
 	};
 
-	const unifiedDesktopTabButton = (tab: UnifiedContentTab) => {
-		const label = unifiedTabLabel(tab);
-		const isProposalTab = PROPOSAL_TYPES.includes(tab as ProposalType);
-		const inboxDot = tab === "inbox" && state.inboxEntries.some((e) => e.state === "pending");
-		return html`
-			<button
-				class="goal-tab-pill ${(state.previewPanelActiveTab as UnifiedContentTab) === tab ? "goal-tab-pill--active" : ""}"
-				title=${label}
-				data-testid=${tab === "inbox" ? "inbox-tab-unified" : ""}
-				@click=${() => { setUnifiedDesktopTab(tab); setUnifiedMobileTab(tab); renderApp(); }}
-			>${label}${isProposalTab || inboxDot ? html` <span class="goal-tab-dot"></span>` : ""}</button>
-		`;
-	};
+	const unifiedDesktopTabButton = (tab: UnifiedContentTab) => panelTabButton(
+		tab,
+		tab.kind === "inbox" ? "inbox-tab-unified" : "",
+	);
 
 	const unifiedPreviewPanel = () => {
 		const contentTabs = unifiedPanelContentTabs();
 		if (contentTabs.length === 0) return "";
 
-		// Archived/resubmit flows historically set previewPanelTab. Honour that
-		// request on desktop too, then clamp if the requested tab is unavailable.
-		const requestedMobileTab = state.previewPanelTab as UnifiedPanelTab;
-		if (requestedMobileTab !== "chat" && contentTabs.includes(requestedMobileTab as UnifiedContentTab)) {
-			setUnifiedDesktopTab(requestedMobileTab as UnifiedContentTab);
+		let activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+		let activeTab = contentTabs.find((tab) => tab.id === activeId) ?? contentTabs[0];
+		if (activeId !== activeTab.id) {
+			setUnifiedDesktopTab(activeTab);
+			activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+			activeTab = contentTabs.find((tab) => tab.id === activeId) ?? activeTab;
 		}
-		if (!contentTabs.includes(state.previewPanelActiveTab as UnifiedContentTab)) {
-			setUnifiedDesktopTab(contentTabs[0]);
-		}
-
-		const activeTab = state.previewPanelActiveTab as UnifiedContentTab;
-		const showPreviewTab = contentTabs.includes("preview");
+		const activeTabCanFullscreen = activeTab.kind === "preview" || activeTab.kind === "walkthrough";
 
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
-				<!-- Tab header -->
-				<div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-					<div class="flex items-center gap-1">
-						${contentTabs.map((tab) => unifiedDesktopTabButton(tab))}
+			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
+				<!-- Chrome-style tab strip: muted bg distinct from the panel below.
+				     Tabs sit flush at the strip's bottom via items-end + no pb.
+				     The active tab's background matches the panel so it visually
+				     bridges the color boundary (curve pseudo-elements in CSS do
+				     the outward-curve flourish at the bottom corners). */ -->
+				<div class="flex items-end justify-between px-3 pt-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
+					<div class="flex-1 min-w-0">
+						<div class="flex items-end gap-1" data-panel-tab-bar="true">
+							${repeat(contentTabs, (tab) => tab.id, (tab) => unifiedDesktopTabButton(tab))}
+						</div>
 					</div>
-					<div class="flex items-center gap-0.5">
-						${activeTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-						${showPreviewTab ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
-							${icon(Maximize2, "sm")}
+					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
+						${activeTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
+						${activeTab.kind === "walkthrough" ? walkthroughControlButtons(activeTab) : ""}
+						${activeTabCanFullscreen ? html`
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`${activeTab.kind === "walkthrough" ? "Fullscreen walkthrough" : "Fullscreen preview"}${shortcutHint("toggle-sidebar")}`} data-testid=${activeTab.kind === "walkthrough" ? "pr-walkthrough-fullscreen" : "preview-fullscreen"}>
+							${icon(PanelRightOpen, "sm")}
 						</button>` : ""}
 						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 							${icon(PanelRightClose, "sm")}
@@ -4274,10 +2382,10 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: UnifiedPanelTab) => {
-		if (tab === "chat") return state.chatPanel;
-		const content = unifiedPanelContent(tab as UnifiedContentTab);
-		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${content}</div>`;
+	const mobilePaneContent = (tab: MobilePaneTab) => {
+		if (tab.kind === "chat") return state.chatPanel;
+		const content = unifiedPanelContent(tab);
+		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
 
 	const mainArea = () => {
@@ -4290,6 +2398,9 @@ export function doRenderApp(): void {
 		}
 		// Goal dashboard route
 		const route = getRouteFromHash();
+		if (route.view === "walkthrough") {
+			return standaloneWalkthroughPanel();
+		}
 		if (route.view === "goal-dashboard" && route.goalId) {
 			return lazyPage("goal-dashboard", () => import("./goal-dashboard.js"), "renderGoalDashboard");
 		}
@@ -4308,6 +2419,9 @@ export function doRenderApp(): void {
 		if (route.view === "skills") {
 			return lazyPage("skills", () => import("./skills-page.js"), "renderSkillsPage");
 		}
+		if (route.view === "market") {
+			return lazyPage("marketplace", () => import("./marketplace-page.js"), "renderMarketplacePage");
+		}
 		if (route.view === "settings") {
 			return lazyPage("settings", () => import("./settings-page.js"), "renderSettingsPage");
 		}
@@ -4319,52 +2433,30 @@ export function doRenderApp(): void {
 			lazyPageCall("search", () => import("./search-page.js"), "resetSearchPage", false);
 		}
 
-		if (connected && state.assistantType) {
-			const previewPanel = getAssistantPreviewPanel(state.assistantType);
-			if (!previewPanel) {
-				// No preview panel — use full-width chat
-				return html`
-					${reconnectBanner()}
-					<div class="flex-1 flex flex-col min-h-0">${state.chatPanel}</div>
-				`;
-			}
-			if (desktop) {
-				return html`
-					${reconnectBanner()}
-					<div class="flex-1 flex min-h-0 overflow-hidden">
-						<div class="goal-chat-panel flex-1 min-w-0 flex flex-col">${state.chatPanel}</div>
-						${previewPanel}
-					</div>
-				`;
-			}
-			const aSlideX = state.assistantTab === "chat" ? 0 : -50;
-			return html`
-				${reconnectBanner()}
-				<div class="assistant-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
-					<div class="assistant-slider__track" style="display:flex;width:200%;height:100%;transform:translateX(${aSlideX}%);transition:transform 0.3s ease-out;will-change:transform;">
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${state.chatPanel}</div>
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${previewPanel}</div>
-					</div>
-				</div>
-			`;
-		}
 		if (connected && hasUnifiedPanel()) {
-			if (desktop && state.previewPanelFullscreen && state.isPreviewSession) {
+			const fullscreenTabs = unifiedPanelContentTabs();
+			const fullscreenActiveId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+			const fullscreenTab = fullscreenTabs.find((tab) => tab.id === fullscreenActiveId) ?? fullscreenTabs[0];
+			const fullscreenContent = fullscreenTab?.kind === "walkthrough"
+				? walkthroughPanelContent(fullscreenTab)
+				: htmlPreviewContent();
+			if (desktop && state.previewPanelFullscreen && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 						<!-- Fullscreen preview header -->
 						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
-							<span class="text-xs font-medium text-muted-foreground">Preview</span>
+							<span class="text-xs font-medium text-muted-foreground">${fullscreenTab.kind === "walkthrough" ? "Walkthrough" : "Preview"}</span>
 							<div class="flex items-center gap-0.5">
-								${state.previewPanelEntry ? previewControlButtons() : ""}
+								${fullscreenTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
+								${fullscreenTab.kind === "walkthrough" ? walkthroughControlButtons(fullscreenTab) : ""}
 								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 									${icon(PanelRightClose, "sm")}
 								</button>
 							</div>
 						</div>
-						<!-- Preview iframe fills available space -->
-						${htmlPreviewContent()}
+						<!-- Preview content fills available space -->
+						${fullscreenContent}
 						<!-- Compact prompt bar at bottom -->
 						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
 							${state.chatPanel}
@@ -4376,15 +2468,15 @@ export function doRenderApp(): void {
 				const collapsed = isPreviewCollapsed();
 				return html`
 					${reconnectBanner()}
-					<div class="flex-1 flex min-h-0 overflow-hidden">
+					<div class="goal-split-layout flex-1 flex min-h-0 overflow-hidden">
 						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
 						${collapsed ? previewExpandButton() : unifiedPreviewPanel()}
 					</div>
 				`;
 			}
-			const tabs = unifiedPanelTabs();
-			const count = tabs.length;
-			const curIdx = unifiedTabIndex();
+			const panes = unifiedMobilePanes();
+			const count = panes.length;
+			const curIdx = unifiedMobilePaneIndex();
 			const slideX = unifiedSlideX(curIdx, count);
 			const trackW = count * 100;
 			const paneW = 100 / count;
@@ -4392,7 +2484,7 @@ export function doRenderApp(): void {
 				${reconnectBanner()}
 				<div class="preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
 					<div class="preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
-						${tabs.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
+						${panes.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
 					</div>
 				</div>
 			`;
@@ -4423,6 +2515,22 @@ export function doRenderApp(): void {
 
 	if (desktop) {
 		teardownMobileScrollTracking();
+		if (getRouteFromHash().view === "walkthrough") {
+			render(html`
+				<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
+					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5" data-testid="pr-walkthrough-standalone-topbar">
+						<div class="flex items-center gap-2 min-w-0">
+							${bobbitIcon}
+							<span class="text-sm font-semibold text-foreground">Bobbit</span>
+							<span class="text-xs text-muted-foreground">PR Walkthrough</span>
+						</div>
+						<theme-toggle></theme-toggle>
+					</div>
+					<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
+				</div>
+			`, app);
+			return;
+		}
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
@@ -4469,12 +2577,11 @@ export function doRenderApp(): void {
 				data-mobile-header>
 				${headerToast()}
 				<div id="app-header"
-					class="fixed top-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-sm border-b border-border flex flex-col header-shadow">
-					<div class="flex items-center justify-between">
+					class="fixed top-0 left-0 right-0 z-50 bg-background flex flex-col">
+					<div class="flex items-center justify-between border-b border-border">
 						${headerLeft()}
 						${headerRight()}
 					</div>
-					${state.assistantType ? assistantTabBar() : ""}
 					${hasUnifiedPanel() ? unifiedTabBar() : ""}
 				</div>
 				<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
@@ -4501,4 +2608,12 @@ export function doRenderApp(): void {
 			</div>
 		`, app);
 	}
+
+	// Attach SortableJS to the panel tab bar (if present). We look up the
+	// element after each render rather than relying on lit's ref directive
+	// (which proved unreliable with the no-name attribute placement on a
+	// multi-line tag). ensurePanelSortable is idempotent — it no-ops if the
+	// container is unchanged.
+	const tabBar = document.querySelector<HTMLElement>("[data-panel-tab-bar]");
+	ensurePanelSortable(tabBar);
 }

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export type StaffState = "active" | "paused" | "retired";
-export type TriggerType = "schedule" | "git" | "manual";
+export type TriggerType = "schedule" | "git" | "manual" | "goal_created" | "goal_archived";
 
 export interface TriggerConfig {
 	cron?: string;
@@ -22,6 +22,40 @@ export interface StaffTrigger {
 	lastSeenSha?: string;
 }
 
+const STAFF_ACCESSORY_IDS = new Set([
+	"none",
+	"crown",
+	"bandana",
+	"magnifier",
+	"palette",
+	"pencil",
+	"shield",
+	"set-square",
+	"flask",
+	"wizard-hat",
+	"wand",
+	"stamp",
+	"clipboard",
+]);
+
+export function normalizeStaffAccessory(value: unknown): string {
+	if (typeof value !== "string") return "none";
+	const id = value.trim();
+	return STAFF_ACCESSORY_IDS.has(id) ? id : "none";
+}
+
+function normalizeStaffRecord(staff: PersistedStaff): PersistedStaff {
+	// Legacy records lack `sandboxed`; normalise to false.
+	staff.sandboxed = !!staff.sandboxed;
+	// Legacy records lack `contextPolicy`; normalise to "compact".
+	if (staff.contextPolicy !== "preserve" && staff.contextPolicy !== "compact") {
+		staff.contextPolicy = "compact";
+	}
+	// Legacy/malformed records lack a valid accessory; normalise to "none".
+	staff.accessory = normalizeStaffAccessory((staff as { accessory?: unknown }).accessory);
+	return staff;
+}
+
 export interface PersistedStaff {
 	id: string;
 	name: string;
@@ -32,6 +66,8 @@ export interface PersistedStaff {
 	triggers: StaffTrigger[];
 	memory: string;
 	roleId?: string;
+	/** Pixel-art accessory ID for the staff identity/avatar. */
+	accessory: string;
 	createdAt: number;
 	updatedAt: number;
 	lastWakeAt?: number;
@@ -86,13 +122,7 @@ export class StaffStore {
 				if (Array.isArray(data)) {
 					for (const s of data) {
 						if (s.id) {
-							// Legacy records lack `sandboxed`; normalise to false.
-							s.sandboxed = !!s.sandboxed;
-							// Legacy records lack `contextPolicy`; normalise to "compact".
-							if (s.contextPolicy !== "preserve" && s.contextPolicy !== "compact") {
-								s.contextPolicy = "compact";
-							}
-							this.staff.set(s.id, s);
+							this.staff.set(s.id, normalizeStaffRecord(s));
 						}
 					}
 				}
@@ -115,12 +145,9 @@ export class StaffStore {
 	}
 
 	put(staff: PersistedStaff): void {
-		// Normalise contextPolicy on every write so the in-memory record
-		// always carries a real value. Mirrors the load-side normalisation.
-		if (staff.contextPolicy !== "preserve" && staff.contextPolicy !== "compact") {
-			staff.contextPolicy = "compact";
-		}
-		this.staff.set(staff.id, staff);
+		// Normalise on every write so the in-memory record always carries
+		// real values. Mirrors the load-side normalisation.
+		this.staff.set(staff.id, normalizeStaffRecord(staff));
 		this.save();
 	}
 
@@ -152,6 +179,7 @@ export class StaffStore {
 			}
 		}
 		existing.updatedAt = Date.now();
+		normalizeStaffRecord(existing);
 		this.save();
 		return true;
 	}

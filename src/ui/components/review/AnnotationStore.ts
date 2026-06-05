@@ -1,3 +1,10 @@
+import type {
+  ReviewDecision,
+  ReviewDecisionPayload,
+  ReviewDocumentModel,
+  ReviewInlineCommentPayload,
+} from "./review-types.js";
+
 /**
  * AnnotationStore — Pure data module for managing review annotations.
  * No Lit dependency. Uses in-memory cache with server-side persistence.
@@ -234,12 +241,66 @@ export function clearReviewSubmitted(sessionId: string): void {
 
 // ── Aggregate helpers ────────────────────────────────────────────────
 
+type ReviewDocumentCollection = ReadonlyMap<string, Pick<ReviewDocumentModel, "title" | "markdown">>;
+
+function _displayTitle(key: string, doc: Pick<ReviewDocumentModel, "title" | "markdown">): string {
+  return doc.title || key;
+}
+
+function _documentForComment(
+  comment: ReviewInlineCommentPayload,
+  documents: ReviewDocumentCollection,
+): Pick<ReviewDocumentModel, "title" | "markdown"> | undefined {
+  const directMatch = documents.get(comment.documentTitle);
+  if (directMatch) return directMatch;
+  for (const [key, doc] of documents) {
+    if (_displayTitle(key, doc) === comment.documentTitle) return doc;
+  }
+  return undefined;
+}
+
+function _lineNumberForComment(
+  comment: ReviewInlineCommentPayload,
+  documents: ReviewDocumentCollection,
+): number | undefined {
+  if (comment.start == null) return undefined;
+  const doc = _documentForComment(comment, documents);
+  return doc?.markdown.substring(0, comment.start).split("\n").length;
+}
+
+function _formatInlineCommentSections(
+  inlineComments: ReviewInlineCommentPayload[],
+  documents: ReviewDocumentCollection,
+): string[] {
+  const commentsByTitle = new Map<string, ReviewInlineCommentPayload[]>();
+  for (const comment of inlineComments) {
+    commentsByTitle.set(comment.documentTitle, [...(commentsByTitle.get(comment.documentTitle) || []), comment]);
+  }
+
+  const sections: string[] = [];
+  for (const [title, comments] of commentsByTitle) {
+    const commentWord = comments.length === 1 ? "comment" : "comments";
+    sections.push(`### "${title}" — ${comments.length} ${commentWord}`);
+
+    for (const comment of comments) {
+      const quotedText = comment.isCode ? `\`${comment.quote}\`` : `"${comment.quote}"`;
+      const lineNum = _lineNumberForComment(comment, documents);
+      const locationParts: string[] = [];
+      if (lineNum != null) locationParts.push(`line ${lineNum}`);
+      if (comment.start != null) locationParts.push(`offset ${comment.start}-${comment.end}`);
+      const location = locationParts.length > 0 ? ` (${locationParts.join(", ")})` : "";
+      sections.push(`> ${quotedText}${location}\n${comment.comment}`);
+    }
+  }
+  return sections;
+}
+
 /**
  * Count total annotations across all open documents for a session.
  */
 export function getTotalAnnotationCount(
   sessionId: string,
-  documents: Map<string, { title: string; markdown: string }>,
+  documents: ReviewDocumentCollection,
 ): number {
   let total = 0;
   const sessionCache = _annotationCache.get(sessionId);
@@ -250,37 +311,123 @@ export function getTotalAnnotationCount(
   return total;
 }
 
+export function getDocumentAnnotationCount(sessionId: string, documentTitle: string): number {
+  return getAnnotations(sessionId, documentTitle).length;
+}
+
+function _inlineCommentPayloadsForEntries(
+  sessionId: string,
+  entries: Iterable<readonly [string, Pick<ReviewDocumentModel, "title" | "markdown">]>,
+): ReviewInlineCommentPayload[] {
+  const inlineComments: ReviewInlineCommentPayload[] = [];
+
+  for (const [title, doc] of entries) {
+    for (const ann of getAnnotations(sessionId, title)) {
+      inlineComments.push({
+        documentTitle: _displayTitle(title, doc),
+        quote: ann.quote,
+        comment: ann.comment,
+        prefix: ann.prefix,
+        suffix: ann.suffix,
+        start: ann.start,
+        end: ann.end,
+        isCode: ann.isCode,
+      });
+    }
+  }
+
+  return inlineComments;
+}
+
+/**
+ * Return structured inline-comment payloads for all annotations across open documents.
+ */
+export function getInlineCommentPayloads(
+  sessionId: string,
+  documents: ReviewDocumentCollection,
+): ReviewInlineCommentPayload[] {
+  return _inlineCommentPayloadsForEntries(sessionId, documents);
+}
+
+export function getInlineCommentPayloadsForDocument(
+  sessionId: string,
+  documentTitle: string,
+  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+): ReviewInlineCommentPayload[] {
+  return _inlineCommentPayloadsForEntries(sessionId, [[documentTitle, document]]);
+}
+
 /**
  * Compose all annotations across all documents into a structured review feedback string.
  */
 export function composeReviewFeedback(
   sessionId: string,
-  documents: Map<string, { title: string; markdown: string }>,
+  documents: ReviewDocumentCollection,
 ): string {
-  const sections: string[] = [];
+  const inlineComments = getInlineCommentPayloads(sessionId, documents);
+  const sections = _formatInlineCommentSections(inlineComments, documents);
+  if (sections.length === 0) return "";
+  return `## Review Feedback\n\n${sections.join("\n\n")}`;
+}
 
-  for (const [title, doc] of documents) {
-    const annotations = getAnnotations(sessionId, title);
-    if (annotations.length === 0) continue;
+export function composeReviewDecisionFeedback(
+  decision: ReviewDecision,
+  finalComment: string,
+  inlineComments: ReviewInlineCommentPayload[],
+  documents: ReviewDocumentCollection,
+): string {
+  const heading = decision === "approve" ? "Review Approved" : "Review Rejected";
+  const sections: string[] = [`## ${heading}`];
+  const trimmedFinalComment = finalComment.trim();
 
-    const commentWord = annotations.length === 1 ? "comment" : "comments";
-    sections.push(`### "${title}" — ${annotations.length} ${commentWord}`);
-
-    for (const ann of annotations) {
-      const quotedText = ann.isCode ? `\`${ann.quote}\`` : `"${ann.quote}"`;
-      // Compute line number from character offset
-      const lineNum = ann.start != null ? doc.markdown.substring(0, ann.start).split("\n").length : undefined;
-      const locationParts: string[] = [];
-      if (lineNum != null) locationParts.push(`line ${lineNum}`);
-      if (ann.start != null) locationParts.push(`offset ${ann.start}-${ann.end}`);
-      const location = locationParts.length > 0 ? ` (${locationParts.join(", ")})` : "";
-      sections.push(`> ${quotedText}${location}\n${ann.comment}`);
-    }
+  if (trimmedFinalComment) {
+    sections.push(`### Final comment\n\n${trimmedFinalComment}`);
   }
 
-  if (sections.length === 0) return "";
+  const inlineSections = _formatInlineCommentSections(inlineComments, documents);
+  if (inlineSections.length > 0) {
+    sections.push(`### Inline comments\n\n${inlineSections.join("\n\n")}`);
+  }
 
-  return `## Review Feedback\n\n${sections.join("\n\n")}`;
+  if (sections.length === 1) {
+    sections.push(decision === "approve" ? "Approved with no comments." : "Rejected.");
+  }
+
+  return sections.join("\n\n");
+}
+
+export function buildReviewDecisionPayload(
+  sessionId: string,
+  documents: ReviewDocumentCollection,
+  decision: ReviewDecision,
+  finalComment: string,
+): ReviewDecisionPayload {
+  const normalizedFinalComment = finalComment.trim();
+  const inlineComments = getInlineCommentPayloads(sessionId, documents);
+  return {
+    decision,
+    finalComment: normalizedFinalComment,
+    inlineComments,
+    feedback: composeReviewDecisionFeedback(decision, normalizedFinalComment, inlineComments, documents),
+  };
+}
+
+export function buildReviewDecisionPayloadForDocument(
+  sessionId: string,
+  documentTitle: string,
+  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+  decision: ReviewDecision,
+  finalComment: string,
+): ReviewDecisionPayload {
+  const documents = new Map([[documentTitle, document]]);
+  const normalizedFinalComment = finalComment.trim();
+  const inlineComments = getInlineCommentPayloadsForDocument(sessionId, documentTitle, document);
+  return {
+    decision,
+    finalComment: normalizedFinalComment,
+    inlineComments,
+    feedback: composeReviewDecisionFeedback(decision, normalizedFinalComment, inlineComments, documents),
+  };
 }
 
 // ── Default backend adapter (REST-backed review-pane store) ─────────

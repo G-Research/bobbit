@@ -1,10 +1,10 @@
 /**
  * Token-cost regression for criterion 7 of the embedded-preview rewrite.
  *
- * The v3 marker block is JSON-only ({kind:"preview", url, path}); the html
- * payload never appears in the tool result. To prove this, we issue 50
+ * The v3 marker block is JSON-only ({kind:"preview", url, path, entry, contentHash, artifactId});
+ * the html payload never appears in the tool result. To prove this, we issue 50
  * POST /api/preview/mount calls with a 100 KB html body each, build the v3
- * snapshot block from the returned {url, relPath}, and assert:
+ * snapshot block from the returned {url, relPath, entry, contentHash, artifactId}, and assert:
  *   - every block ≤ 250 bytes  (the canonical v3 contract from snapshot.ts)
  *   - sum across 50 iterations ≤ 50 × 250 = 12 500 bytes
  *
@@ -31,7 +31,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createSession, deleteSession } from "./e2e-setup.js";
-import { buildPreviewSnapshotV3Block } from "../../defaults/tools/html/snapshot.ts";
+import { buildPreviewSnapshotV3Block, parseSnapshot } from "../../defaults/tools/html/snapshot.ts";
 
 let sessionId: string;
 
@@ -64,19 +64,35 @@ test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 25
 			`iteration ${i}: response should include relPath`,
 		).toBe("string");
 		expect(body.relPath.length).toBeGreaterThan(0);
+		expect(typeof body.contentHash).toBe("string");
+		expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(typeof body.artifactId).toBe("string");
+		expect(body.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
+		expect(body.entry).toBe(`iter-${i}.html`);
 		// relPath is host-invariant: always `<sid>/<entry>` with forward slashes.
 		expect(body.relPath).toBe(`${sessionId}/iter-${i}.html`);
 
 		// Build the v3 block the way the agent tool does in production:
 		// feed the relPath (not the host-abs path) so the block size is
 		// bounded by content shape, not install location.
-		const block = buildPreviewSnapshotV3Block(body.url, body.relPath);
+		const block = buildPreviewSnapshotV3Block(body.url, body.relPath, body.contentHash, {
+			artifactId: body.artifactId,
+			entry: body.entry,
+		});
 		expect(
 			block.length,
 			`iteration ${i}: v3 block must be ≤ 250 bytes, got ${block.length}`,
 		).toBeLessThanOrEqual(250);
-		// Block payload must not echo the input HTML.
+		// Block payload must not echo the input HTML, but must retain immutable
+		// restore identity.
 		expect(block).not.toContain("xxxxx");
+		const parsed = parseSnapshot(block);
+		expect(parsed?.kind).toBe("preview");
+		if (parsed?.kind === "preview") {
+			expect(parsed.entry).toBe(body.entry);
+			expect(parsed.artifactId).toBe(body.artifactId);
+			expect(parsed.contentHash).toBe(body.contentHash);
+		}
 		blocks.push(block);
 		total += block.length;
 	}

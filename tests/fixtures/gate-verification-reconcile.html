@@ -37,15 +37,32 @@ function shouldReconcile(overallStatus, goalId, gateId, signalId) {
  * GateSignalStep: { name, type, passed (bool|null), output, duration_ms }
  * VerificationStep: { name, type, status ("running"|"passed"|"failed"), durationMs, output, startedAt }
  */
-function mapGateSignalStep(gateStep) {
-	let status;
-	if (gateStep.skipped) status = "skipped";
-	else if (gateStep.passed === true) status = "passed";
-	else if (gateStep.passed === false) status = "failed";
-	else status = "running";
+function normalizeStepStatus(gateStep, fallback) {
+	fallback = fallback || "running";
+	if (typeof gateStep.status === "string") {
+		const key = gateStep.status.toLowerCase().replace(/_/g, "-");
+		if (key === "passed" || key === "success" || key === "completed") return "passed";
+		if (key === "failed" || key === "failure" || key === "error" || key === "timeout") return "failed";
+		if (key === "skipped") return "skipped";
+		if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
+		if (key === "blocked" || key === "blocked-by-earlier-failure") return "blocked";
+		if (key === "running" || key === "in-progress" || key === "starting") return "running";
+	}
+	if (gateStep.skipped) return "skipped";
+	if (gateStep.passed === true) return "passed";
+	if (gateStep.passed === false) return fallback;
+	if (gateStep.passed === null) return "running";
+	return fallback;
+}
 
-	const durationMs = gateStep.duration_ms ?? 0;
-	const startedAt = durationMs > 0 ? Date.now() - durationMs : 0;
+function hasExplicitStepStatus(gateStep) {
+	return typeof gateStep.status === "string" && gateStep.status.length > 0;
+}
+
+function mapGateSignalStep(gateStep, fallback) {
+	const status = normalizeStepStatus(gateStep, fallback || "failed");
+	const durationMs = gateStep.durationMs ?? gateStep.duration_ms ?? 0;
+	const startedAt = gateStep.startedAt || (durationMs > 0 ? Date.now() - durationMs : status === "running" ? Date.now() : 0);
 
 	return {
 		name: gateStep.name,
@@ -54,6 +71,7 @@ function mapGateSignalStep(gateStep) {
 		durationMs: durationMs,
 		output: gateStep.output,
 		startedAt: startedAt,
+		sessionId: gateStep.sessionId,
 	};
 }
 
@@ -80,18 +98,27 @@ function reconcileFromGateData(componentState, gateData, signalId) {
 
 	const verificationStatus = signal.verification.status;
 
-	// Only reconcile if the REST data shows a terminal state
-	if (verificationStatus !== "passed" && verificationStatus !== "failed") {
-		return { steps: componentState.steps, overallStatus: componentState.overallStatus };
+	const signalSteps = signal.verification.steps || [];
+
+	// Terminal REST state is authoritative.
+	if (verificationStatus === "passed" || verificationStatus === "failed") {
+		const fallback = verificationStatus === "passed" ? "passed" : "failed";
+		return {
+			steps: signalSteps.map(s => mapGateSignalStep(s, fallback)),
+			overallStatus: verificationStatus,
+		};
 	}
 
-	// Map steps from GateSignalStep format to VerificationStep format
-	const reconciledSteps = (signal.verification.steps || []).map(mapGateSignalStep);
+	// Running REST state only reconciles if explicit active snapshot statuses are present.
+	// This prevents legacy passed:false seed rows from flickering to failed/0ms.
+	if (verificationStatus === "running" && signalSteps.some(hasExplicitStepStatus)) {
+		return {
+			steps: signalSteps.map(s => mapGateSignalStep(s, "running")),
+			overallStatus: "running",
+		};
+	}
 
-	return {
-		steps: reconciledSteps,
-		overallStatus: verificationStatus,
-	};
+	return { steps: componentState.steps, overallStatus: componentState.overallStatus };
 }
 
 // Expose functions globally for Playwright tests

@@ -52,14 +52,18 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 
 	// Per-session scratch — relevant while the server is running
 	"state/preview/",             // src/server/preview/mount.ts
+	"state/preview-artifacts/",   // src/server/preview/artifacts.ts
 	"state/tool-guard/",          // src/server/agent/tool-activation.ts
 	"state/mcp-extensions/",      // src/server/agent/tool-activation.ts, rpc-bridge.ts
 	"state/html-snapshots/",      // server.ts
 	"state/proposal-drafts/",     // server.ts / session-manager.ts
+	"state/pr-walkthrough/",      // src/server/pr-walkthrough/routes.ts persisted walkthrough payloads
 	"state/model-name-*",         // src/server/agent/session-manager.ts per-session model-name files
 	"state/sessions/",            // per-session JSONL transcripts (rpc-bridge.ts container mount)
 	"state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)
+	"state/sandbox-agent-auth/",  // scoped sandbox auth mounts (host-tokens.ts)
 	"state/system-project/",      // synthetic system-project anchor (server.ts)
+	"state/marketplace-cache/",   // server.ts (marketplace source git-clone cache; server-global)
 ];
 
 export interface ArchiveResult {

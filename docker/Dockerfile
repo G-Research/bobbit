@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # Install build tools, git, curl, gh CLI, ripgrep.
 #
@@ -55,13 +55,63 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 ARG PI_AGENT_VERSION=0.74.0
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
+RUN node --input-type=module <<'NODE'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { execSync } from "node:child_process";
+const marker = "bobbit-pi-ai-bedrock-headers-patch-v1";
+const helper = `
+const BOBBIT_PI_AI_BEDROCK_HEADERS_PATCH = "${marker}";
+function applyBobbitBedrockRequestHeaders(client, model, options) {
+    if (model?.provider !== "aigw") return;
+    const headerSource = options?.headers;
+    if (!headerSource || typeof headerSource !== "object") return;
+    const headerEntries = Object.entries(headerSource).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0);
+    if (headerEntries.length === 0) return;
+    const middleware = (next) => async (args) => {
+        const requestHeaders = args?.request?.headers;
+        if (requestHeaders && typeof requestHeaders === "object") {
+            for (const [key, value] of headerEntries) {
+                const lowerKey = key.toLowerCase();
+                for (const existingKey of Object.keys(requestHeaders)) {
+                    if (existingKey.toLowerCase() === lowerKey) delete requestHeaders[existingKey];
+                }
+                requestHeaders[key] = value;
+            }
+        }
+        return next(args);
+    };
+    try {
+        client.middlewareStack.addRelativeTo(middleware, { relation: "after", toMiddleware: "getUserAgentMiddleware", name: "bobbitBedrockRequestHeadersMiddleware", override: true });
+    }
+    catch {
+        client.middlewareStack.add(middleware, { step: "build", priority: "low", name: "bobbitBedrockRequestHeadersMiddleware", override: true });
+    }
+}
+`;
+const npmRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
+const candidates = [
+  path.join(npmRoot, "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"),
+  path.join(npmRoot, "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "amazon-bedrock.js"),
+];
+for (const file of candidates) {
+  if (!existsSync(file)) continue;
+  const source = readFileSync(file, "utf8");
+  if (source.includes(marker)) continue;
+  const importAnchor = `import { transformMessages } from "./transform-messages.js";\n`;
+  const clientAnchor = `            const client = new BedrockRuntimeClient(config);\n`;
+  if (!source.includes(importAnchor) || !source.includes(clientAnchor)) throw new Error(`Unsupported pi-ai Bedrock provider shape: ${file}`);
+  writeFileSync(file, source.replace(importAnchor, `${importAnchor}${helper}`).replace(clientAnchor, `${clientAnchor}            applyBobbitBedrockRequestHeaders(client, model, options);\n`));
+}
+NODE
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
+LABEL bobbit.pi-ai-bedrock-ua-patch=1
 
 # TypeScript compiler — needed for `npm run check` in worktrees.
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
 RUN npm install -g typescript typescript-language-server --no-audit --no-fund 2>/dev/null
 
-# Run as non-root user. node:20-slim includes a 'node' user (uid=1000).
+# Run as non-root user. node:22-slim includes a 'node' user (uid=1000).
 # This ensures files created in /workspace via bind mount are owned by uid=1000
 # on the host, matching typical developer user IDs.
 USER node

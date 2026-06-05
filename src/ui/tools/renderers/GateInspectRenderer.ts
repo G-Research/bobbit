@@ -20,18 +20,81 @@ function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
+const STATUS_LABELS: Record<string, string> = {
+	passed: "passed",
+	failed: "failed",
+	skipped: "skipped",
+	running: "running",
+	waiting: "waiting",
+	blocked: "blocked",
+};
+
+function normalizeStatus(status: unknown): string | undefined {
+	if (typeof status !== "string") return undefined;
+	const key = status.toLowerCase().replace(/_/g, "-");
+	if (key === "passed" || key === "success" || key === "completed") return "passed";
+	if (key === "failed" || key === "failure" || key === "error" || key === "timeout") return "failed";
+	if (key === "skipped") return "skipped";
+	if (key === "running" || key === "in-progress" || key === "starting") return "running";
+	if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
+	if (key === "blocked" || key === "blocked-by-earlier-failure") return "blocked";
+	return undefined;
+}
+
 function stepStatusIcon(status: string): TemplateResult {
 	if (status === "passed") return html`<span class="text-green-600 dark:text-green-400">✓</span>`;
 	if (status === "failed") return html`<span class="text-red-600 dark:text-red-400">✗</span>`;
 	if (status === "skipped") return html`<span class="text-muted-foreground">⊘</span>`;
+	if (status === "waiting") return html`<span class="text-muted-foreground">○</span>`;
+	if (status === "blocked") return html`<span class="text-muted-foreground">—</span>`;
 	return html`<span class="text-blue-600 dark:text-blue-400">●</span>`;
 }
 
+function stepStatusClass(status: string): string {
+	if (status === "passed") return "bg-green-500/15 text-green-700 dark:text-green-300";
+	if (status === "failed") return "bg-red-500/15 text-red-700 dark:text-red-300";
+	if (status === "running") return "bg-blue-500/15 text-blue-700 dark:text-blue-300";
+	return "bg-muted text-muted-foreground";
+}
+
 function deriveStepStatus(step: any): string {
+	const explicitStatus = normalizeStatus(step?.status);
+	if (explicitStatus) return explicitStatus;
 	if (step.skipped) return "skipped";
 	if (step.passed === true) return "passed";
 	if (step.passed === false) return "failed";
 	return "running";
+}
+
+function shouldShowDuration(status: string, durationMs: unknown): durationMs is number {
+	if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) return false;
+	if ((status === "waiting" || status === "blocked" || status === "skipped") && durationMs <= 0) return false;
+	return status === "running" || status === "passed" || status === "failed" || durationMs > 0;
+}
+
+function formatCountSummary(counts: Record<string, unknown> | undefined): string {
+	if (!counts) return "";
+	const order = ["passed", "failed", "running", "waiting", "blocked", "skipped"];
+	return order
+		.map((status) => {
+			const value = Number(counts[status] ?? 0);
+			return value > 0 ? `${value} ${STATUS_LABELS[status]}` : "";
+		})
+		.filter(Boolean)
+		.join(", ");
+}
+
+function verificationSummary(data: any, steps: any[]): string {
+	if (typeof data?.summary === "string") return data.summary;
+	const counts = data?.statusCounts || data?.counts || data?.summary?.counts;
+	const explicitSummary = formatCountSummary(counts);
+	if (explicitSummary) return explicitSummary;
+	const derivedCounts: Record<string, number> = {};
+	for (const step of steps) {
+		const status = deriveStepStatus(step);
+		derivedCounts[status] = (derivedCounts[status] || 0) + 1;
+	}
+	return formatCountSummary(derivedCounts);
 }
 
 // ── Renderer ─────────────────────────────────────────────────────────
@@ -101,6 +164,7 @@ export class GateInspectRenderer implements ToolRenderer {
 		const signalIndex = data?.signalIndex ?? "?";
 		const signalId = data?.signalId || "";
 		const steps: any[] = data?.steps || [];
+		const summary = verificationSummary(data, steps);
 
 		const toggleStep = (e: Event) => {
 			const card = (e.currentTarget as HTMLElement).parentElement!;
@@ -115,12 +179,13 @@ export class GateInspectRenderer implements ToolRenderer {
 		return {
 			content: html`<div>
 				${renderHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — verification`)}
-				<div class="text-xs text-muted-foreground mt-1">Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}</div>
+				<div class="text-xs text-muted-foreground mt-1">Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}${summary ? html` · ${summary}` : nothing}</div>
 				<div class="mt-2 space-y-1">
 					${steps.map((step: any, _i: number) => {
 						const status = deriveStepStatus(step);
 						const hasOutput = !!step.output;
 						const isFailed = status === "failed";
+						const statusLabel = STATUS_LABELS[status] || status;
 						const typeBadgeCls = step.type === "command"
 							? "bg-muted text-muted-foreground"
 							: "bg-purple-500/20 text-purple-600 dark:text-purple-400";
@@ -133,8 +198,9 @@ export class GateInspectRenderer implements ToolRenderer {
 								>
 									${stepStatusIcon(status)}
 									<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name}</span>
+									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusClass(status)}">${statusLabel}</span>
 									<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
-									${step.duration_ms != null ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
+									${shouldShowDuration(status, step.duration_ms) ? html`<span class="text-xs text-muted-foreground tabular-nums">${formatDuration(step.duration_ms)}</span>` : nothing}
 									${hasOutput ? html`<span data-step-chevron class="text-muted-foreground text-[10px] shrink-0">${isFailed ? "▴" : "▾"}</span>` : nothing}
 								</div>
 								${hasOutput ? (

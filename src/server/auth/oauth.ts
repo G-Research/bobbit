@@ -206,6 +206,19 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 		rejectStarted = reject;
 	});
 
+	// `started` can only resolve once. Wrap so that whichever of `onAuth` /
+	// `onDeviceCode` fires first wins; subsequent calls are logged only. This
+	// matches the documented contract that Bobbit surfaces the *initial*
+	// browser URL or device-code prompt to the UI dialog, and avoids the
+	// unhandled-rejection / silent-drop hazard that comes from calling a
+	// settled resolver again.
+	let startedResolved = false;
+	const safeResolveStarted = (info: { url: string; instructions?: string }) => {
+		if (startedResolved) return;
+		startedResolved = true;
+		resolveStarted(info);
+	};
+
 	// Initialise the flow record up-front so the `loginPromise.then/catch`
 	// callbacks below always see a fully-constructed `flow` reference — even if
 	// pi-ai resolves synchronously before this scope finishes evaluating.
@@ -221,9 +234,32 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 	// Construct the real loginPromise; the .then/.catch callbacks reference
 	// `flow` (already in scope above) without TDZ risk.
 	const loginPromise = oauthProvider.login({
-		onAuth: (info) => resolveStarted(info),
+		onAuth: (info) => safeResolveStarted(info),
+		onDeviceCode: (info) => {
+			// Device Authorization Grant: surface user-code + verification URI
+			// both to the server log AND through the started promise so the UI
+			// dialog can display them. Bobbit does not currently render a
+			// dedicated device-code dialog, so we reuse the existing
+			// { url, instructions } shape by pointing url at the verification
+			// URI and packing the user code into instructions.
+			const instructions = `Visit ${info.verificationUri} and enter code ${info.userCode}`;
+			console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(instructions)}`);
+			safeResolveStarted({ url: info.verificationUri, instructions });
+		},
 		onPrompt: async () => manualCodePromise,
 		onManualCodeInput: async () => manualCodePromise,
+		onSelect: async (prompt) => {
+			// Bobbit has no generic OAuth selection UI today. If the provider
+			// presents a single option, auto-pick it deterministically (this is
+			// safe — there is nothing for the user to choose). Otherwise fail
+			// loudly so the flow surfaces a clear error rather than hanging
+			// indefinitely waiting for a UI that does not exist.
+			if (prompt.options.length === 1) return prompt.options[0].id;
+			const available = prompt.options.map((o) => o.label).join(", ");
+			throw new Error(
+				`OAuth provider requested a selection Bobbit does not support yet (\"${prompt.message}\"; options: ${available || "none"})`,
+			);
+		},
 		onProgress: (message) => console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(message)}`),
 	}).then((credentials) => {
 		storeOAuthCredentials(provider, credentials);

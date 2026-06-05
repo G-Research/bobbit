@@ -53,6 +53,8 @@ The two categories that must stay clean:
 
 **Rule:** if a module appears in both a `lazyPage` / `registerLazyToolRenderer` call AND a top-of-file `import`, the lazy call is stale — remove it and keep only the static import. If a module has zero static importers, the dynamic boundary is real — leave it alone.
 
+**Follow-up:** a second pass landed in [shrink-initial-bundle.md](./shrink-initial-bundle.md) (HEAD `ed850b65`) that dropped the entry chunk further to ~150 kB gz and the artifacts chunk to ~44 kB gz — lazy `pi-ai` catalog, `highlight.js` core + lazy grammars, lazy `qrcode` / `jszip`, vendor-chunk split, and a proposal-panels extraction. A third pass — [shrink-main-ui-manualchunks.md](./shrink-main-ui-manualchunks.md) (HEAD `11278c43`) — later peeled the app-shell SCC out of the entry chunk with app-seam `manualChunks` rules after it regressed past the 600 kB raw budget.
+
 ## Problem
 
 `npm run build:ui` emits a 3.6 MB / 999 kB-gzipped main chunk. The chunk dominates cold-launch parse-and-execute time and PWA snapshot resume. The goal spec mandates main chunk ≤ 600 kB gzipped (≥40% reduction) without architectural rewrites or new deps.

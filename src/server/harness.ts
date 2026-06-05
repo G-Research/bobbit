@@ -22,7 +22,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir } from "./bobbit-dir.js";
+import { restartSentinelPath } from "./harness-signal.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -38,7 +38,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const CLI_PATH = path.join(__dirname, "cli.js");
 
 /** Sentinel file — any write triggers a restart */
-const SENTINEL = path.join(bobbitStateDir(), "gateway-restart");
+const SENTINEL = restartSentinelPath();
 
 // Ensure the sentinel directory exists
 const sentinelDir = path.dirname(SENTINEL);
@@ -112,7 +112,7 @@ function launchServer(): void {
 	child = spawn(process.execPath, [CLI_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
-		env: { ...process.env },
+		env: { ...process.env, BOBBIT_DEV_HARNESS: "1" },
 	});
 
 	child.on("exit", (code, signal) => {

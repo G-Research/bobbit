@@ -534,21 +534,35 @@ export function partitionOptionalSteps(
  * that share the same commit SHA.
  *
  * Only steps with `passed: true` from completed (non-running) verifications
- * are cached. The current signal is excluded from the search.
+ * are cached. The current signal is excluded from the search. When a reset
+ * invalidation timestamp is provided, signals at or before that boundary are
+ * excluded so audit history remains intact without making stale results
+ * cache-eligible.
+ *
+ * `human-signoff` steps are **always excluded** — a prior approval is not
+ * consent for a re-signal. Humans must re-confirm any time the gate is
+ * re-signalled, even when the commit SHA hasn't changed. This was the
+ * Bug-1 defense-in-depth fix in the "Re-attempt: Sign-Off Gates" goal:
+ * without this filter, a single approval at SHA X would silently satisfy
+ * every subsequent re-signal at the same SHA.
  */
 export function buildStepCache(
 	signals: GateSignal[],
 	currentSignalId: string,
 	commitSha?: string,
+	verificationCacheInvalidatedAt?: number,
 ): Map<string, GateSignalStep> {
 	const cache = new Map<string, GateSignalStep>();
 	if (!commitSha) return cache;
 
 	for (const prev of signals) {
 		if (prev.id === currentSignalId) continue;
+		if (verificationCacheInvalidatedAt !== undefined && prev.timestamp <= verificationCacheInvalidatedAt) continue;
 		if (prev.commitSha !== commitSha) continue;
 		if (!prev.verification?.status || prev.verification.status === "running") continue;
 		for (const s of prev.verification.steps) {
+			// Never reuse a prior human approval — humans must re-confirm.
+			if (s.type === "human-signoff") continue;
 			if (s.passed && !cache.has(s.name)) {
 				cache.set(s.name, s);
 			}

@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
+import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -98,6 +100,46 @@ export interface IRpcBridge {
 
 export type RpcBridgeFactory = (options: RpcBridgeOptions) => IRpcBridge | null;
 
+/**
+ * Synthetic text body injected for attachment-only prompts. The model API
+ * rejects a user message whose ContentBlock has a blank `text` field (next to
+ * an image block, or as a standalone empty text block), so when the user sends
+ * only an image/attachment with no text we substitute this phrase.
+ *
+ * Exported so the transcript sanitizer can use the exact same phrase when
+ * un-poisoning already-committed blank-text user messages.
+ */
+export const ATTACHMENT_ONLY_TEXT = "Attachments:";
+
+/**
+ * Pure helper: decide the model-facing text for a prompt.
+ *
+ * Returns the synthetic `ATTACHMENT_ONLY_TEXT` ("Attachments:") when `text` is
+ * blank/whitespace-only AND at least one image or attachment is present;
+ * otherwise returns `text` unchanged.
+ *
+ * This is the single source of truth for "image/attachment-only prompts must
+ * carry a non-blank text body". It is applied at the dispatch boundary
+ * (session-manager `enqueuePrompt`) so every dispatch path — direct dispatch,
+ * queued drain, error-recovery prefix, retry — sees valid text, and defensively
+ * at the bridge `prompt()` (image case) as a backstop.
+ *
+ * Trims before deciding so whitespace-only text counts as blank (R4). Normal
+ * text, text+image, and empty-with-no-attachments are all returned unchanged
+ * (R5).
+ */
+export function synthesizeAttachmentText(
+	text: string,
+	images?: Array<unknown> | null,
+	attachments?: Array<unknown> | null,
+): string {
+	if (text && text.trim() !== "") return text;
+	const hasImages = Array.isArray(images) && images.length > 0;
+	const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+	if (hasImages || hasAttachments) return ATTACHMENT_ONLY_TEXT;
+	return text;
+}
+
 let _factory: RpcBridgeFactory | null = null;
 
 /**
@@ -143,6 +185,12 @@ export class RpcBridge {
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<typeof setTimeout> }>();
 	private eventListeners: RpcEventListener[] = [];
 	private lineBuffer = "";
+	/** Persistent UTF-8 decoders so a multibyte char split across two stdout/
+	 *  stderr reads is reassembled instead of corrupted into U+FFFD (S14 — the
+	 *  agent's own stdin reader uses StringDecoder; we mirror it here). A per-
+	 *  chunk `chunk.toString("utf-8")` would mojibake long CJK/emoji output. */
+	private stdoutDecoder = new StringDecoder("utf8");
+	private stderrDecoder = new StringDecoder("utf8");
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
 
@@ -163,6 +211,7 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
+		ensurePiAiBedrockHeadersPatch();
 		const cliPath = this.options.cliPath || findAgentCli();
 		const args = buildAgentArgs(this.options);
 
@@ -299,13 +348,15 @@ export class RpcBridge {
 	 */
 	private _attachProcessHandlers(): void {
 		this.process!.stdout!.on("data", (chunk: Buffer) => {
-			this.handleData(chunk.toString("utf-8"));
+			// S14: decode through a persistent StringDecoder so a multibyte char
+			// straddling a chunk boundary is reassembled, not corrupted.
+			this.handleData(this.stdoutDecoder.write(chunk));
 		});
 
 		this.process!.stderr!.on("data", (chunk: Buffer) => {
 			process.stderr.write(chunk);
 			// Keep last 20 lines of stderr for diagnostics on unexpected exit
-			const lines = chunk.toString("utf-8").split("\n").filter(l => l.trim());
+			const lines = this.stderrDecoder.write(chunk).split("\n").filter(l => l.trim());
 			this.stderrTail.push(...lines);
 			if (this.stderrTail.length > 20) {
 				this.stderrTail = this.stderrTail.slice(-20);
@@ -392,10 +443,16 @@ export class RpcBridge {
 	// --- Convenience methods matching the RPC protocol ---
 
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>) {
+		// Defensive backstop: if a prompt carries image(s) but blank text, the
+		// model API rejects the blank ContentBlock. The primary fix synthesizes
+		// text upstream in session-manager.enqueuePrompt (where non-image
+		// attachments are also visible); this guard covers the image case for any
+		// direct bridge caller that bypasses that path.
+		const effectiveText = synthesizeAttachmentText(text, images);
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: text, ...(images?.length ? { images } : {}) });
+		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) });
 	}
 
 	steer(text: string) {

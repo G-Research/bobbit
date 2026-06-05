@@ -7,6 +7,9 @@
  *   - have target="_blank" + rel="noopener noreferrer"
  *   - href = /preview/<sid>/<entry>  (no #mtime cache-buster)
  *   - actually load to 200 in a new context.waitForEvent("page") tab
+ *
+ * Standalone theme-token injection is covered faster by
+ * `tests/e2e/search-preview-api.spec.ts`.
  */
 import { test, expect } from "../gateway-harness.js";
 import { openApp, createSessionViaUI } from "./ui-helpers.js";
@@ -116,89 +119,4 @@ test.describe("Preview Open-in-new-tab (criterion 5)", () => {
 		expect(verify.body).toContain(`<base href="/preview/${sessionId}/">`);
 	});
 
-	/**
-	 * Reproducing test for Bug 3 — Standalone tab loses CSS theme tokens.
-	 *
-	 * In the embedded iframe the PREVIEW_THEME_BRIDGE pulls --background etc.
-	 * from parent.document.documentElement. In a standalone tab parent === window,
-	 * so the bridge silently no-ops and the served HTML has no inline theme
-	 * snapshot — `var(--background)` resolves to empty.
-	 *
-	 * After the fix the served HTML must carry an inline <style> block defining
-	 * the canonical theme tokens, so getComputedStyle reports a non-empty colour.
-	 */
-	test("standalone tab document has --background defined (Bug 3)", async ({ page, context }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-
-		await page.waitForFunction(() => /#\/session\/[\w-]+/.test(location.hash), null, { timeout: 10_000 });
-		const sessionId = await page.evaluate(() => {
-			const m = location.hash.match(/#\/session\/([\w-]+)/);
-			return m?.[1] ?? "";
-		});
-		expect(sessionId).toMatch(/^[a-f0-9-]{36}$/);
-		const baseUrl = new URL(page.url()).origin;
-
-		const patchResp = await page.evaluate(async ({ baseUrl, sessionId }) => {
-			const r = await fetch(`${baseUrl}/api/sessions/${sessionId}`, {
-				method: "PATCH",
-				credentials: "include",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ preview: true }),
-			});
-			return { status: r.status };
-		}, { baseUrl, sessionId });
-		expect(patchResp.status).toBe(200);
-
-		await expect.poll(
-			async () => await page.evaluate(() => {
-				const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
-				return s.isPreviewSession === true;
-			}),
-			{ timeout: 10_000 },
-		).toBe(true);
-
-		await page.evaluate(() => {
-			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
-			s.previewPanelActiveTab = "preview";
-		});
-
-		const mountResp = await page.evaluate(async ({ baseUrl, sessionId }) => {
-			const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
-				method: "POST",
-				credentials: "include",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					html: `<!DOCTYPE html><html><head></head><body><div id="box" style="background:var(--background);color:var(--foreground);">themed</div></body></html>`,
-					entry: "report.html",
-				}),
-			});
-			return { status: r.status };
-		}, { baseUrl, sessionId });
-		expect(mountResp.status).toBe(200);
-
-		const link = page.locator('a[title="Open preview in new tab"]').first();
-		await expect.poll(async () => link.count(), { timeout: 15_000 }).toBeGreaterThan(0);
-		await expect(link).toBeVisible({ timeout: 10_000 });
-
-		const [newPage] = await Promise.all([
-			context.waitForEvent("page", { timeout: 10_000 }),
-			link.click(),
-		]);
-		await newPage.waitForLoadState("domcontentloaded");
-		await newPage.waitForLoadState("load");
-
-		// Read the standalone document's --background custom property.
-		const bg = await newPage.evaluate(() =>
-			getComputedStyle(document.documentElement).getPropertyValue("--background").trim(),
-		);
-		const fg = await newPage.evaluate(() =>
-			getComputedStyle(document.documentElement).getPropertyValue("--foreground").trim(),
-		);
-
-		expect(bg, "--background must be defined in the standalone preview document").not.toEqual("");
-		expect(fg, "--foreground must be defined in the standalone preview document").not.toEqual("");
-		// Sanity: the resolved value should look like a colour (oklch / rgb / hsl / # / color()).
-		expect(bg).toMatch(/^(oklch|rgb|rgba|hsl|hsla|color)\(|^#[0-9a-fA-F]{3,8}$/);
-	});
 });

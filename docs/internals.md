@@ -76,8 +76,8 @@ Each registered project is a self-contained unit on disk. State (goals, sessions
     team-state.json # Team state
     gates.json     # Gate state and signals
     staff.json     # Staff agents
-    search.flex/   # Lexical search index for THIS project (FlexSearch JSON)
-    costs/         # Cost tracking
+    search.flex/       # Lexical search index for THIS project (FlexSearch JSON)
+    session-costs.json # Cost tracking (see session-cost.md)
 
 <server-cwd>/.bobbit/
   state/
@@ -242,6 +242,8 @@ Two resolution modes:
 
 The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above - it resolves entire config objects by name, not individual settings keys.
 
+> **Roles, tools, and skills now resolve through the unified `PackResolver`.** As of the [pack-based marketplace](marketplace.md), the installable entity types are resolved by a single pipeline over one ordered list of *packs* (directories laid out like `defaults/`). `ConfigCascade.resolveRoles()`/`resolveTools()` and `slash-skills.ts::discoverSlashSkills()` are now thin **adapters** over that resolver — they build the ordered list via `pack-list.ts::buildPackList()` and resolve through `PackResolver`. With zero market packs installed, the list reproduces the legacy three-layer cascade and the legacy skill scan order exactly, so resolution is byte-for-byte identical. `resolveWorkflows()` and `resolveToolGroupPolicies()` are **not** routed through the resolver (no workflow/policy loaders) and keep their implementations below. **MCP** (`mcp-manager.ts`) and **AGENTS.md** (`system-prompt.ts`) keep their own loaders and are explicitly out of scope. See [docs/marketplace.md](marketplace.md) for the pack model, scopes/precedence, the legacy→unified mapping, and the install engine.
+
 The global `system-prompt.md` template participates in the same builtin → user-override pattern but via a dedicated path resolver rather than the `ConfigCascade` class. `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` returns `<bobbitConfigDir()>/system-prompt.md` when present and falls back to the shipped `dist/server/defaults/system-prompt.md`. The file is **not** copied to `.bobbit/config/` on startup; users opt into customisation explicitly via the Settings → General → "Customise system prompt" button (which calls `POST /api/system-prompt/customise` to copy the default into place). Existence of `.bobbit/config/system-prompt.md` is itself the customisation signal used by `isSetupComplete()` (in `src/server/setup-status.ts`).
 
 > **Workflows are NOT in the cascade.** Workflows live exclusively inline in each registered project's `project.yaml::workflows` block - there is no system-scope or builtin workflow layer. `ConfigCascade.resolveWorkflows(projectId)` reads only the project layer; without a `projectId` it returns `[]`. See [Workflows are project-scoped only](#workflows-are-project-scoped-only) below for the rationale.
@@ -398,7 +400,7 @@ The marker is `.bobbit/config/project.yaml` rather than the mere presence of a `
 
 Each registered project can override system-level settings (from `project.yaml`). This allows different projects to use different build commands, default models, sandbox settings, etc., while inheriting everything they don't explicitly override.
 
-A notable config key is `base_ref` — the branch ref new worktrees branch off, used as upstream and as the `{{baseBranch}}` template variable. Empty/unset preserves today's `resolveRemotePrimary()` behaviour. PUT-time validation rejects tags, SHAs, invalid grammar, non-`origin` prefixes, and (for sandboxed projects) local refs, with a structured `{ field, error, details? }` payload. See [design/base-ref.md](design/base-ref.md).
+A notable config key is `base_ref` — the branch ref new worktrees branch off and the source for the `{{baseBranch}}` template variable. It also drives status baselines; branch publication still targets the work branch with explicit refspecs. Empty/unset preserves today's `resolveRemotePrimary()` behaviour. PUT-time validation rejects tags, SHAs, invalid grammar, non-`origin` prefixes, and (for sandboxed projects) local refs, with a structured `{ field, error, details? }` payload. See [design/base-ref.md](design/base-ref.md).
 
 **Resolution cascade**: For each config key, `resolveScalarConfig()` checks project → server → global → built-in default. The first defined value wins. This reuses the same `config-resolver.ts` infrastructure described in [Config resolution](#config-resolution-3-tier-hierarchy) above.
 
@@ -648,12 +650,13 @@ The agent's cwd in multi-repo mode is the per-branch container, mirroring the pr
 
 **Pool claim sequence (sessions and goals).** Both flows route through `WorktreePool.claim()`:
 
-1. `git branch -m pool/_pool-<id> <target>` - atomic, ~10ms.
-2. `git worktree move <pool-path> <target-path>` - atomic, updates both gitdir pointers (git ≥ 2.17). On directory-rename failure (e.g. Windows file lock) for **single-repo** sessions, `claim()` reverts the branch rename and returns null; the caller falls back to a fresh `createWorktree`. (Multi-repo claims may surface a transient `degraded` warning when only one of N repos fails to move - see `PoolClaimResult.degraded`.)
-3. `git fetch origin` + `git reset --hard <remote-primary>` - backgrounded after handoff, so claim itself is fast.
-4. `git push -u origin <target>` - fire-and-forget, non-blocking.
+1. `git branch -m pool/_pool-<id> <target>` - atomic, local ref rename.
+2. Clear any inherited upstream unless it already points at `origin/<target>`. This is synchronous so a claimed branch never returns while still tracking `origin/master` or another base branch.
+3. `git worktree move <pool-path> <target-path>` - atomic, updates both gitdir pointers (git ≥ 2.17). On directory-rename failure (e.g. Windows file lock) for **single-repo** sessions, `claim()` reverts the branch rename and returns null; the caller falls back to a fresh `createWorktree`. (Multi-repo claims may surface a transient `degraded` warning when only one of N repos fails to move - see `PoolClaimResult.degraded`.)
+4. `git fetch origin` + `git reset --hard <base-ref>` - backgrounded after handoff, so claim itself is fast. The base ref is the project `base_ref` when configured, otherwise the remote primary.
+5. `git push origin <target>:refs/heads/<target>` + fetch `refs/remotes/origin/<target>` + set upstream to `origin/<target>` - fire-and-forget, non-blocking, and independent of local upstream config.
 
-Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per configured repo, including data-only-component repos) sharing a `pool/_pool-<id>` branch name across repos. Claim fans out steps 1-4 in parallel across all repos in the entry. Pool target size is configurable via `worktree_pool_size`.
+Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per configured repo, including data-only-component repos) sharing a `pool/_pool-<id>` branch name across repos. Claim fans out the same sequence in parallel across all repos in the entry. Pool target size is configurable via `worktree_pool_size`.
 
 **Goal flow (Phase 3 fix).** `goal-manager.setupWorktree()` calls `pool.claim(goal.branch)` first and falls back to `createWorktree` only if the pool is empty. Multi-repo goals get the worktree set in one claim. Previously goals bypassed the pool entirely and were observably slower than session start - they now share the same warm-pool benefit.
 
@@ -749,7 +752,7 @@ Bobbit creates four classes of remote branch and is responsible for deleting eac
 |---|---|---|---|
 | `session/*` | Auto worktree on session create | `eagerDeleteRemoteSessionBranch` (fire-and-forget from `session-manager.ts::terminateSession`) | On archive, iff non-delegate AND fully merged into `origin/<primary>`. Unmerged branches fall back to the 7-day `purgeOneSession` cleanup. |
 | `goal/<branch-name>` | Goal creation | `deleteRemoteGoalBranches` in `server.ts` (DELETE `/api/goals/:id` handler) | On goal archive. |
-| `goal-goal-<slug>-<id>-<role>-<short>` | Per-role team agent worktree | Same handler - agent branch names are **snapshotted into a `string[]` before `teamManager.teardownTeam` runs**, because teardown mutates `entry.agents` in place via `dismissRole`'s `splice`. | On goal archive. |
+| `goal/<goalId8>/<role>-<short4>` | Per-role team agent worktree | Same handler - agent branch names are **snapshotted into a `string[]` before `teamManager.teardownTeam` runs**, because teardown mutates `entry.agents` in place via `dismissRole`'s `splice`. The handler is branch-shape agnostic (it consumes the snapshotted strings), so legacy `goal-goal-<slug>-<id>-<role>-<short>` branches from before the `pithier-te` rename are cleaned up by the same path. | On goal archive. |
 | `staff-*` | Staff agent creation when worktree auto/explicit mode is supported | `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` | On staff dismiss. |
 
 **Test-mode gate:** every push-delete call - existing (`cleanupWorktree`) and new (`deleteRemoteGoalBranches`, `eagerDeleteRemoteSessionBranch`) - short-circuits when `shouldSkipRemotePush()` returns true (`BOBBIT_TEST_NO_PUSH=1`). The eager session helper checks this flag *before* invoking `git merge-base --is-ancestor`, so test mode never touches git at all.
@@ -883,6 +886,8 @@ When only one project is registered, its folder row defaults to expanded so ther
 | 2+ | Opens `<project-picker-popover>` (`src/ui/components/ProjectPickerPopover.ts`) anchored beneath the button, listing every registered project with its color dot. Clicking a project starts goal creation scoped to it; Esc / click-outside closes; arrow keys + Enter navigate. On mobile (viewport < 640px) the popover renders as a centered sheet. |
 
 The per-project "+ goal" button on each project row bypasses the popover - the project is already unambiguous. Goal creation is centralized in `startNewGoalFlow(anchorEl)` in `src/app/goal-entry.ts` so every call site (toolbar button, mobile nav, empty-state CTA, `Alt+G` shortcut) stays in sync.
+
+**Goal badges.** `renderGoalBadge()` treats workflow progress as primary: workflow goals show PR status only after the gate summary exists and every gate has passed, so an open PR cannot mask incomplete verification. Non-workflow goals have no gate summary to wait for, so their sidebar badge can fall back to PR status as soon as `state.prStatusCache` has an entry.
 
 #### Staff agents in the sidebar
 
@@ -1061,11 +1066,11 @@ LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId
 
 `state.activeProposals[type]` is the routing source for every proposal surface. A proposal is openable when the active session has a slot for one of the supported `ProposalType`s (`goal`, `project`, `role`, `tool`, `staff`); `assistantType` does not filter the slot.
 
-Normal sessions render active slots in the unified panel. Tab order is deterministic: `Chat`, then `Preview`, `Review`, and `Inbox` when those surfaces are present, then active proposal tabs in `PROPOSAL_TYPES` order. Proposal labels are `Goal`, `Project`, `Role`, `Tool`, and `Staff`; each proposal tab shows the existing proposal dot. Desktop tabs and the mobile slider use the same tab list.
+Normal and assistant sessions render active slots through the same workspace dispatcher. Tab order is deterministic: `Chat`, then `Preview` when present, active proposal tabs in `PROPOSAL_TYPES` order, then `Review` and `Inbox` tabs when those surfaces are present. Proposal labels are `Goal`, `Project`, `Role`, `Tool`, and `Staff`; each live proposal tab shows the existing proposal dot. Desktop tabs and the mobile slider use the same tab list.
 
-Assistant sessions keep the split chat/preview UX, but the preview pane can render any active proposal slot. Matching assistant types use their normal preview surface; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
+Matching assistant types use their normal preview surface; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
 
-The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, reveals the same tab/pane routing, then either restores the requested snapshot (`rev`) or replays legacy `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and archived-session resubmit/continue flows feed the same `remote.onProposal(type, fields, ...)` path, so restored sessions do not need type-specific reopen code.
+The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, selects the live proposal tab for the current rev, or reads an older snapshot into a read-only historical workspace tab. Legacy archived cards without a rev marker still replay `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and archived-session resubmit/continue flows feed the same `remote.onProposal(type, fields, ...)` path, so restored sessions do not need type-specific reopen code.
 
 ### Flow: `propose_*` → file-seed → broadcast → parsed projection
 
@@ -1111,24 +1116,25 @@ Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementatio
 
 ### REST endpoints
 
-Five endpoints, full reference in [docs/rest-api.md - Proposal drafts](rest-api.md#proposal-drafts):
+Six endpoints, full reference in [docs/rest-api.md - Proposal drafts](rest-api.md#proposal-drafts):
 
 - `GET /api/sessions/:id/proposal/:type` - read raw body
+- `GET /api/sessions/:id/proposal/:type/snapshot?rev=N` - read a historical snapshot without mutating the live draft
 - `POST /api/sessions/:id/proposal/:type/seed` - called by `propose_*` `execute()`
 - `POST /api/sessions/:id/proposal/:type/edit` - surgical edit
-- `POST /api/sessions/:id/proposal/:type/restore` - restore prior revision snapshot (writes new snapshot at `currentRev+1`)
+- `POST /api/sessions/:id/proposal/:type/restore` - explicit mutating rollback (writes new snapshot at `currentRev+1`)
 - `DELETE /api/sessions/:id/proposal/:type` - clean up after accept
 
 ### Revision snapshots
 
-Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also writes an immutable per-rev snapshot alongside the live draft. This makes the chat transcript a navigable timeline: the "Open proposal" button on every `propose_*` and `edit_proposal` tool card restores the panel to *exactly* the revision that existed immediately after that call.
+Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also writes an immutable per-rev snapshot alongside the live draft. This makes the chat transcript a navigable timeline: the "Open proposal" button on current cards selects the live editable proposal tab, while older cards open read-only historical tabs populated from the exact snapshot that existed immediately after that call.
 
-**Why.** Before snapshots, the panel only ever held the latest revision on disk. Users couldn't tell which revision was live, and clicking the *original* propose card after later edits silently re-dispatched the original payload - destroying every later edit. Snapshots make rollback explicit (a real `rev = currentRev + 1` write that appears in the timeline) and reversible.
+**Why.** Before snapshots, the panel only ever held the latest revision on disk. Users couldn't tell which revision was live, and clicking the *original* propose card after later edits silently re-dispatched the original payload - destroying every later edit. Snapshot reads let users inspect history without clobbering live drafts; the explicit restore API remains available when a caller really wants to roll the live draft back.
 
 - **On-disk layout.** Snapshots live under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>`. Filename grammar `^(\d+)\.(md|yaml)$`; integer rev recovered by `readdir` + `parseInt` (no metadata file). Cleaned up with the rest of the per-session draft directory on session terminate - no separate retention logic.
 - **Rev counter source of truth.** Server-side, implicit. `latestRev()` scans the history dir; `writeSnapshot` writes `latestRev() + 1`. The server stamps `rev` on every `proposal_update` WS event (`source: "seed" | "edit" | "restore" | "rehydrate"`) - clients overwrite `slot.rev` with the server value, never client-increment.
-- **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult` and route the "Open proposal" button through `POST /api/sessions/:id/proposal/:type/restore` `{rev}`. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
-- **Restore semantics.** `restoreSnapshot` reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The rollback itself is therefore a real revision - monotonic counter, no silent state loss.
+- **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult`. Latest/current cards select the live proposal tab; older cards call `GET /api/sessions/:id/proposal/:type/snapshot?rev=<n>` and populate a read-only `proposal:<type>:rev:<n>` tab. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
+- **Restore semantics.** `restoreSnapshot` remains the explicit mutating rollback API: it reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The normal UI history-browsing path does not call it.
 - **Non-fatal snapshot failures.** Snapshot-write failures (disk full, permission denied) leave the live draft committed and broadcast `rev: 0`. Clients treat `rev: 0` as "snapshot system unavailable" - the panel still renders, but the rev badge and "Open proposal" snapshot path are disabled. Mid-restore crash between live rename and snapshot write is benign: the next write recomputes `latestRev` from the dir and picks the same number, overwriting consistently.
 - **Edit failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot - the rev counter only advances on successful disk writes. The `EditProposalRenderer` shows the error code on failed cards but no "Open proposal" button.
 - **Streaming partials don't bump rev.** The dual-fire `_checkToolProposals` streaming path emits in-memory `proposal_update` events from in-flight tool calls; only the gateway-side `seed` POST writes the file. Rev advances exactly once per completed tool call.
@@ -1203,7 +1209,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 Two invariants live in `hasUnseenActivity` and must be preserved by any future refactor:
 
 - **The active session is never "unseen".** Otherwise the user would see a dot on the very session they are looking at.
-- **The dot only surfaces when a human is actually needed.** The shared `needsHumanAttention` predicate in `src/app/notification-policy.ts` is the gate. Team members and delegates never surface; a team lead surfaces only when the goal is `complete` or the lead is stuck (no live downstream work and no in-flight verification). The same predicate also gates the polling beep in `src/app/api.ts` and the active-session `agent_end` beep in `src/app/remote-agent.ts`, so the three surfaces can't drift. See [design/notification-policy.md](design/notification-policy.md).
+- **The dot only surfaces when a human is actually needed.** The shared notification policy in `src/app/notification-policy.ts` is the gate. Team members and delegates never surface; a team lead surfaces when the goal is `complete`, needs immediate human action, or is persistently stuck. Polling and active-session beeps use the idle-transition variant so they do not fire merely because a team lead went idle to wait for workers or verification. See [design/notification-policy.md](design/notification-policy.md).
 
 ### Legacy localStorage migration
 
@@ -1248,7 +1254,7 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
-| `src/app/notification-policy.ts` | `needsHumanAttention` — shared predicate consulted by the unread dot, the polling beep, and the active-session `agent_end` beep |
+| `src/app/notification-policy.ts` | Shared notification predicates for unread state and one-shot idle-transition beeps |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
@@ -1259,7 +1265,7 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 
 ## Archived-session state push on auth
 
-Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame - the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder (`claude-opus-4-6`) until a manual reload.
+Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame - the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder until a manual reload. This is part of the no-flash contract for persisted models such as `anthropic/claude-opus-4-8`.
 
 ### Helper and call sites
 
@@ -1270,7 +1276,7 @@ Loading an archived session needs to show its real model in the footer on first 
 
 The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow, maxTokens, reasoning}` from `inferMeta(archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. Persisted `modelProvider`/`modelId` come from the archived row in the session store.
 
-The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from `tests/e2e/ui/archived-session-model.spec.ts`.
+The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from archived-footer model E2E coverage.
 
 Client-side, the `claude-opus-4-6` placeholder default in `src/app/remote-agent.ts` is unchanged - it only matters before the server `state` frame arrives, which is now immediate.
 
@@ -1441,9 +1447,9 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 
 ## Spawn-time model pinning
 
-Without spawn-time pinning, every session emitted two `model_change` events at startup - pi-coding-agent booted with its CLI default (`anthropic/claude-opus-4-7`) and Bobbit then called `setModel` ~13 ms later - which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
+Without spawn-time pinning, every session emitted two `model_change` events at startup - pi-coding-agent booted with its CLI default and Bobbit then called `setModel` shortly afterward - which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
 
-Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single `model_change` event. The legacy path - boot with the CLI default, then call `setModel` post-spawn - still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
+Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single matching `model_change` event. For the Pi 0.77 / Opus 4.8 upgrade, that means a persisted or selected `anthropic/claude-opus-4-8` session starts on Opus 4.8 rather than flashing an older Pi default. The legacy path - boot with the CLI default, then call `setModel` post-spawn - still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
 
 ### Bridge options and CLI flags
 
@@ -1492,58 +1498,112 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
 | `src/server/agent/team-manager.ts` | `_startTeamImpl` (team-lead) and `spawnRole` (workers) pass cascade-resolved `role.model` / `role.thinkingLevel` as `initialModel` / `initialThinkingLevel` |
-| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection |
+| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection, including Opus 4.8 + `xhigh` |
 | `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
+
+For the Pi 0.77 / Opus 4.8 compatibility contract, see [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md).
 
 ---
 
-## AI Gateway per-session header (`x-opencode-session`)
+## AI Gateway request headers (`User-Agent`, `x-opencode-session`)
 
-When Bobbit talks to an on-prem model through the AI Gateway, the gateway's token caches are keyed per upstream caller. Without a per-session discriminator every Bobbit session would share one cache bucket, so cache hits collapse and the gen-AI team's routing loses its signal. To partition cleanly, every aigw request carries an `x-opencode-session: <bobbit-session-id>` header - or, when no session id is available, **no header at all**. A constant fallback would defeat the whole point: it would re-collapse buckets onto a single key.
+Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns:
 
-### Where it's emitted
+- `User-Agent: Bobbit/<version>` identifies the Bobbit build. The `<version>` comes from Bobbit's current `package.json`, not a duplicated literal.
+- `x-opencode-session: <session-id>` partitions agent inference cache/routing per Bobbit session. It is emitted only when an agent subprocess has `BOBBIT_SESSION_ID` set.
 
-`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `~/.bobbit/agent/models.json`. The `aigw` provider entry now carries a provider-level `headers` block:
+The canonical user-agent string lives in `src/server/agent/aigw-user-agent.ts` as `BOBBIT_AIGW_USER_AGENT`. The direct AI Gateway request paths covered here attach it through `aigwUserAgentHeaders()`, which removes any incoming `user-agent` key case-insensitively and then writes exactly one `User-Agent` key with the canonical `Bobbit/<version>` value. This keeps the format stable on version bumps and prevents accidental overrides or duplicate user-agent variants.
 
-- Key: `x-opencode-session`.
-- Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
+### Covered request paths
 
-Provider-level (not per-model) is deliberate - it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
+The Bobbit AI Gateway user agent is sent only on requests whose target is the configured or tested AI Gateway URL:
 
-### Startup refresh of `models.json`
+| Path | How the header is applied |
+|---|---|
+| Model discovery | `discoverAigwModels()` calls the gateway `/v1/models` endpoint through `httpGet()`, which uses `aigwUserAgentHeaders()`. |
+| `/api/aigw/status` | If a gateway is configured, the route discovers fresh models, so the discovery request carries the header. |
+| `/api/aigw/test` | Tests the submitted URL by running discovery against that URL with the header. |
+| `/api/aigw/configure` | Runs discovery with the header, persists `aigw.url`, and rewrites `models.json`. |
+| `/api/aigw/refresh` | Re-runs the configure flow for the stored gateway URL, so discovery and the generated provider config are refreshed together. |
+| Startup refresh / auto-detect | `startupAigwCheck()` uses discovery for existing gateway refreshes and local gateway probing; reachable configured gateways are rewritten with the current headers. |
+| `/api/aigw/v1/*` proxy | `proxyRequest()` forwards to the configured gateway with `User-Agent: Bobbit/<version>` alongside content headers. |
+| Direct title / goal-summary generation | The gateway title paths in `title-generator.ts` use `aigwUserAgentHeaders()` for both `/v1/models` model-id resolution and `/v1/chat/completions` generation calls. |
+| Agent inference | `writeAigwModelsJson()` writes provider-level `providers.aigw.headers`, so pi-coding-agent sends the header on inference traffic routed through the generated `aigw` provider. |
 
-On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `~/.bobbit/agent/models.json` doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` - which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
+### AI Gateway model pricing
 
-If the gateway is unreachable at startup (network error / HTTP failure / timeout), the function logs `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json` and leaves the file untouched - staleness is preferred to wiping a working file with a stub. The `BOBBIT_SKIP_AIGW_DISCOVERY=1` test/CI escape hatch skips only the network call: when aigw is already configured, the Bedrock env vars are still applied and the existing `models.json` is kept as-is. The not-configured branch (auto-probing for a local gateway) is unchanged.
+AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing. `discoverAigwModels()` reads the optional `pricing` object returned by the gateway `/v1/models` response and converts it locally because completion responses include token counts but no cost, and the gateway aggregate endpoints are not reliable for Bobbit usage accounting.
 
-### Resolver semantics (pi-coding-agent contract surface)
+The gateway reports `pricing.prompt` and `pricing.completion` in USD per token. Bobbit converts them to the per-million-token `cost` shape expected by pi-ai:
 
-The pi-coding-agent CLI evaluates header values via `resolveConfigValue` (in `dist/core/resolve-config-value.js`):
+```ts
+input = pricing.prompt * 1_000_000
+output = pricing.completion * 1_000_000
+cacheRead = pricing.prompt * 0.1 * 1_000_000
+cacheWrite = pricing.prompt * 1.25 * 1_000_000
+```
 
-- A plain string `"X"` falls back to `process.env["X"] || "X"` - i.e. it can leak the literal key name. **Unsafe for our requirement.**
-- A `"!cmd"` string runs `cmd` via `child_process.exec` (shell-interpreted) and returns the trimmed stdout, or `undefined` when stdout is empty.
-- `resolveHeaders` (in `dist/core/model-registry.js`) drops any header whose resolved value is falsy.
+Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and safely falls back to `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from `/v1/models` metadata plus token counts.
 
-So the `!node -e ...` form gives us exactly "send the header iff `BOBBIT_SESSION_ID` is set to a non-empty value, otherwise omit it." That is the only behaviour we want.
+The converted `cost` values flow through two surfaces:
 
-### Per-session env injection
+- `GET /api/models` returns them in each `ApiModel.cost` entry so the UI and server model registry see non-zero AIGW pricing when the gateway provides it.
+- `writeAigwModelsJson()` persists them on generated `providers.aigw.models[]` entries in `~/.bobbit/agent/models.json`, including both OpenAI-compatible models and Claude models routed through Bedrock Converse. Agent subprocesses can then compute usage cost locally from token-count usage data.
 
-Every agent-CLI spawn path (`session-setup.ts`, `session-manager.ts`, the rpc-bridge child spawn) injects `BOBBIT_SESSION_ID=<sessionId>` into the subprocess env. Each Bobbit session owns its own subprocess with its own env, so values are correctly partitioned at the OS level and never leak across sessions.
+### Generated `providers.aigw.headers`
 
-### Performance: one shell exec per session, not per request
+`writeAigwModelsJson()` writes the AI Gateway provider into `~/.bobbit/agent/models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
 
-`resolveConfigValue` caches `!cmd` results in a module-level `commandResultCache` `Map` keyed by the command string. The first LLM request in a session pays a one-time ~50 ms `node -e` startup; every subsequent request in that same subprocess reuses the cached value. Because each Bobbit session spawns its own agent subprocess, the cache is naturally per-session - no cross-contamination, no repeated process spawns within a session.
+```json
+{
+  "providers": {
+    "aigw": {
+      "headers": {
+        "User-Agent": "Bobbit/<version>",
+        "x-opencode-session": "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
+      }
+    }
+  }
+}
+```
 
-### Cross-shell quoting
+Provider-level headers are deliberate: they cover every model exposed through `providers.aigw` without duplicating fields on each model entry. The `User-Agent` value is a plain string because it is build-wide. The `x-opencode-session` value remains the existing pi-coding-agent `!cmd` resolver literal; pi-coding-agent executes it inside the agent subprocess, trims stdout, and drops the header when stdout is empty. That preserves the exact old behavior: sessions with `BOBBIT_SESSION_ID` send their session id, while non-session calls do not fall back to a shared constant.
 
-`child_process.exec` runs the command through `cmd.exe` on Windows and `/bin/sh` on POSIX. The chosen quoting - outer `"` for the JS argument, inner `'` for the empty-string default - is interpreted identically by both shells (cmd.exe and sh both treat `''` as an empty string literal in this position). The JSON-encoded value in `models.json` is `"!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""`.
+Every agent session gets its own subprocess environment with `BOBBIT_SESSION_ID=<sessionId>`, so the shell-resolved header is naturally partitioned per session. The command result is cached inside that subprocess, so only the first inference request in a session pays the resolver cost.
 
-### Out of scope
+### Bedrock-routed Claude models
 
-- The `/api/aigw/v1/*` passthrough proxy used for UI model-list/test calls - it never carries a session id and isn't on the request path that needs cache routing.
-- The title generator and other one-shot gateway calls - single-call, no cache benefit.
-- Bedrock/Claude routing - driver ignores `model.headers`, and on-prem models don't route to Bedrock anyway.
-- Custom local providers configured outside the aigw block - the `headers` block is scoped to the `aigw` provider entry only.
+Claude models exposed by the gateway are stored under `providers.aigw` but routed through `api: "bedrock-converse-stream"` for Bedrock Converse feature parity. Those model entries also get a per-model `baseUrl` pointing at the gateway `/aws` subtree, while the provider `baseUrl` stays on the OpenAI-compatible root for non-Claude models.
+
+pi-ai's Bedrock provider does not normally forward provider-level `headers` into the AWS SDK request. Bobbit applies a narrow compatibility patch before model-completion and agent subprocess startup: `ensurePiAiBedrockHeadersPatch()` injects a middleware hook into pi-ai's Bedrock provider that copies `options.headers` into the outgoing Bedrock request **only when `model.provider === "aigw"`**. The hook is intentionally not global:
+
+- aigw-routed Claude/Bedrock traffic receives `User-Agent: Bobbit/<version>` and the resolved `x-opencode-session` when present.
+- Public Amazon Bedrock providers, Anthropic providers, and other non-aigw providers are left untouched.
+- Existing AWS user-agent middleware is not globally replaced; the Bobbit headers are applied only to the specific aigw Bedrock client request.
+
+### Startup refresh behavior
+
+On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites `~/.bobbit/agent/models.json` with:
+
+- the current gateway model list,
+- the current gateway-derived per-model `cost` values when `/v1/models` provides pricing,
+- the current canonical `User-Agent: Bobbit/<version>`,
+- the unchanged `x-opencode-session` resolver literal,
+- existing non-aigw providers and user `modelOverrides` preserved.
+
+This means users with older `models.json` files pick up the user-agent header after restart or manual refresh without reconfiguring the gateway. If the configured gateway is unreachable, Bobbit logs the startup warning and leaves the existing file untouched rather than replacing a working cached configuration with a partial one. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
+
+### No-leakage boundaries
+
+The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It is attached only by AI Gateway-specific helpers or by the generated `providers.aigw` entry:
+
+- `aigwUserAgentHeaders()` is used for AI Gateway discovery, proxying, and gateway title/goal-summary calls.
+- `writeAigwModelsJson()` writes headers only under `providers.aigw`; non-aigw providers are preserved as-is.
+- `removeAigwModelsJson()` removes the entire `aigw` provider block and leaves no orphan AI Gateway headers on other providers.
+- Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
+- The Bedrock patch exits immediately for any model whose provider is not `aigw`.
+
+These boundaries are why the same Bobbit process can talk to an AI Gateway and public providers without leaking `User-Agent: Bobbit/<version>` to public endpoints unless that request is actually routed through the configured gateway.
 
 ---
 
@@ -1799,11 +1859,11 @@ curl -sk -H "Authorization: Bearer $TOKEN" \
 
 ## Image generation routing
 
-Bobbit ships a `generate_image` tool that fans out to multiple image providers (OpenAI Images / DALL-E, Google Gemini Flash Image, Google Imagen 4, OpenAI-Codex driver models) behind a single contract. The selected model is **per-session, not per-call** - the agent only specifies `model=...` when the user explicitly names a non-default provider; otherwise the gateway resolves to whatever the user picked in the footer image-model picker. This mirrors how the chat session model works and avoids the agent guessing at provider availability on every call.
+Bobbit ships a `generate_image` tool that fans out to multiple image providers (OpenAI Images / DALL-E, Google Gemini Flash Image, Google Imagen 4, OpenAI-Codex driver models) behind a single contract. The selected model is **per-session, not per-call**, and the **session image-model selector (footer picker) / `default.imageModel` settings default is the single source of truth** - the `generate_image` tool has no `model` parameter and the gateway always resolves the model from session state, never from the tool call or prompt text. This mirrors how the chat session model works, avoids the agent guessing at provider availability on every call, and guarantees that neither an agent argument nor a human naming a model in their prompt can override the user's selection.
 
 ### Per-session state
 
-`SessionStore` rows carry the selected image model as **two separate optional fields**: `imageModelProvider` (e.g. `"openai"`) and `imageModelId` (e.g. `"gpt-image-2"`). They are set by the user via the footer picker (see `set_image_model` below) and read by the gateway when the agent calls `generate_image` without an explicit `model` argument. Splitting provider and id avoids parsing a `provider/id` string at every read - the WS handler validated both halves against the registry once on write, and downstream code consumes the parsed pair directly.
+`SessionStore` rows carry the selected image model as **two separate optional fields**: `imageModelProvider` (e.g. `"openai"`) and `imageModelId` (e.g. `"gpt-image-2"`). They are set by the user via the footer picker (see `set_image_model` below) and read by the gateway every time the agent calls `generate_image` (the tool has no `model` argument to override them). Splitting provider and id avoids parsing a `provider/id` string at every read - the WS handler validated both halves against the registry once on write, and downstream code consumes the parsed pair directly.
 
 Key resolver: `SessionManager.getImageModelForSession(sessionId)` - returns `{ provider, id }` for the session if both fields are set, otherwise falls back to the system-default preference at key **`default.imageModel`** (full `provider/id` string, e.g. `"openai/gpt-image-2"`). If the preference is unset, `defaultImageModelPref()` returns the built-in default. There is no 503 "image generation unavailable" path on `POST /api/image-generation/generate` - if the resolved model has no credentials, the provider helper throws and the endpoint returns `500 { error: "<provider message>" }`.
 
@@ -1822,13 +1882,11 @@ A confirmation snapshot is broadcast back as a normal session-update so all atta
 ### Tool resolution & routing
 
 1. Agent calls `generate_image` (built-in tool, `defaults/tools/images/generate_image.yaml`).
-2. Tool extension (`defaults/tools/images/extension.ts`) reads `.bobbit/state/gateway-url` + `.bobbit/state/token` and POSTs to `/api/image-generation/generate` with the prompt, optional `model` override, `n`, `imageSize`, and the session ID.
+2. Tool extension (`defaults/tools/images/extension.ts`) reads `.bobbit/state/gateway-url` + `.bobbit/state/token` and POSTs to `/api/image-generation/generate` with the prompt, `n`, `imageSize`, size/quality/format hints, and the session ID. The tool does **not** send a `model` — there is no `model` parameter.
 3. Server endpoint (`src/server/server.ts::handleApiRoute` for `POST /api/image-generation/generate`):
    - Validates `prompt` length (≤8192 chars) and `n` range (`[1, 4]`).
-   - If `model` is omitted, looks up `getImageModelForSession(sessionId)`.
-   - Canonicalises both the request `model` and the session model through the same helper before comparing - prevents `OpenAI/GPT-Image-2` from being treated as a different model than `openai/gpt-image-2`.
-   - **Override resolution.** A request `model` is honoured when (a) it canonicalises equal to the session's selected model, (b) there is no `sessionId`, **or** (c) `imageModelMentionedInText` finds the request model id in the user's most-recent prompt text. Otherwise the request `model` is silently ignored and the session's selected model is used. This last-prompt check is why an explicit override sometimes "works" and sometimes doesn't - it must be named in the user's text, not just sent in the API body.
-   - If a request `model` is supplied that doesn't match any registered image model, the canonical helper returns `undefined` and the request silently falls back to the session's selected model. There is no 4xx response for unknown image models on this endpoint.
+   - **Model resolution (single source of truth).** The model is *always* resolved from `getImageModelForSession(sessionId)`, else the `default.imageModel` preference, else `defaultImageModelPref()`. Any `body.model` is **ignored on purpose** — the UI image-model selector / settings default is the only way to choose the model. Never reintroduce a tool- or prompt-driven override. Pinned by `tests/e2e/image-generation-providers.spec.ts::"body.model is ignored"` and `tests/image-generate-no-model-param.test.ts`.
+   - The resolved pref is canonicalised through `canonicalImageModelPref` so `OpenAI/GPT-Image-2` resolves to `openai/gpt-image-2`, and Google aliases (e.g. `google/nano-banana`) map to their API model IDs.
    - Dispatches to one of `generateOpenAIImage`, `generateGeminiImage`, `generateImagenImage`, or `generateOpenAICodexImage` in `src/server/agent/image-generation.ts`.
 4. The provider helper makes the upstream HTTP call and returns `{ images, format }`. Any error thrown from a helper is caught by the endpoint and surfaced as `500 { error: err?.message || "Image generation failed" }`. Helpers throw arbitrary `new Error(...)` strings (missing credentials, upstream HTTP failures, the Codex `n=1` clamp, the 25 MB remote-image cap, etc.) - there is no required prefix format, and the API surface never emits `502` or `503`.
 
@@ -1949,7 +2007,7 @@ Bobbit server                           /workspace        (repo clone, native Li
 ```
 
 - **One container per project**, created when sandbox is enabled, lives until disabled/removed
-- **Container clones its own repo** from the real remote - no host-side clone, no cross-OS bind mounts for workspace
+- **Container clones its own repo** — from the real remote when one exists, otherwise from a read-only bind-mount of the host repo root (see [Sandbox clone source](#sandbox-clone-source)). No host-side clone; the `/workspace` clone itself is always a native Linux clone, never a bind-mounted host directory
 - **`npm ci`, Playwright install, and build happen inside the container** on native Linux filesystem
 - **Agents use git worktrees** inside the container - identical to non-sandbox mode
 - **One scoped token per project container** (not per-agent/session)
@@ -1961,9 +2019,15 @@ All settings in `project.yaml` (Settings → Project → Docker Sandbox):
 ```yaml
 sandbox: "docker"                      # "none" (default) or "docker"
 sandbox_image: "bobbit-agent"          # must be pre-built
-sandbox_credentials: '{"GITHUB_TOKEN": "ghp_..."}'  # env vars for container
+sandbox_tokens:
+  - key: GITHUB_TOKEN
+    enabled: true
+  - key: OPENAI_CODEX_AUTH              # allows generated Codex auth.json
+    enabled: true
 sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 ```
+
+`sandbox_credentials`, `sandbox_github_token`, and `sandbox_host_token_overrides` are legacy fallbacks. New configuration should use structured `sandbox_tokens`, whose secret `value` fields are stored in `SecretsStore` rather than persisted inline in `project.yaml`.
 
 ### Docker image
 
@@ -1971,7 +2035,7 @@ sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 docker build -t bobbit-agent docker/
 ```
 
-Auto-built on startup if image missing but `docker/Dockerfile` exists (120s timeout). Includes Node.js 20, git, curl, gh, build-essential. Agent CLI bind-mounted at runtime.
+Auto-built on startup if image missing but `docker/Dockerfile` exists (120s timeout). Includes Node.js 20, git, curl, gh, build-essential, and the pinned `pi-coding-agent` package used by sandboxed agents.
 
 ### How it works
 
@@ -1992,7 +2056,7 @@ A sandbox is never created for a project that has not asked for one. The image b
    - **Found running** → reconnect (reuse container ID)
    - **Found stopped** → restart via `docker start`
    - **Not found** → create new container with named Docker volumes (`bobbit-workspace-<projectId>` for `/workspace`, `bobbit-worktrees-<projectId>` for `/workspace-wt`)
-3. On first create, the container runs an init sequence: `git clone <repoUrl>`, `npm ci`, optional Playwright install, `npm run build`
+3. On first create, the container runs an init sequence: `git clone <repoUrl>`, `npm ci`, optional Playwright install, `npm run build`. `<repoUrl>` is chosen by the clone-source resolver — see [Sandbox clone source](#sandbox-clone-source) for how a remote, remote-less, or local-only project each resolve.
 4. Container runs with `--restart=unless-stopped` so it survives Docker daemon restarts
 
 **Agent spawn:**
@@ -2006,6 +2070,23 @@ A sandbox is never created for a project that has not asked for one. The image b
 **Session termination:**
 
 1. `ProjectSandbox.removeWorktree(name)` removes the worktree inside the container via `docker exec git worktree remove`
+
+### Sandbox clone source
+
+The sandbox container is a native Linux box with its own filesystem and its own git ref visibility — it does **not** share the host's working tree. So before the init sequence can `git clone`, the host has to answer one question: *what source can git reach from inside the container?* That decision lives in `resolveSandboxCloneSource` (`src/server/agent/sandbox-clone-source.ts`), called from the `sandboxBootstrap` closure in `server.ts`. The resolver is pure (no filesystem access) and returns one of three outcomes.
+
+**1. Network `origin` remote → clone it directly.** If `origin` is an `https`/`ssh`/`git`/`git+ssh` URL or scp-style `[user@]host:path`, the container clones that URL. The token is stripped from the URL before it lands in `.git/config` (so credentials never persist in the clone); the container's git credential helper supplies auth from `GITHUB_TOKEN` at runtime instead. This is the common case and is unchanged from the project's normal behaviour.
+
+**2. No `origin` → bind-mount the main repo root and clone via `file://`.** When the project has no `origin` remote, there is no URL to clone, so the host's canonical **main repo root** is bind-mounted **read-only** into the container at a fixed path (`/workspace-src`) and cloned via `file:///workspace-src`. Two subtleties:
+
+- The mount source is the *main* repo root, not the session's worktree. A session runs in a **linked git worktree** whose `.git` is a gitdir-*file* pointing at the main repo's object store; bind-mounting just the worktree would clone successfully but find no objects. `resolveSandboxMountRoot` (`src/server/skills/git.ts`) resolves the canonical main working tree via `git rev-parse --git-common-dir` (and always returns a realpath), so the clone works regardless of which worktree triggered the sandbox.
+- **Multi-repo** projects mount each component's main root at a per-repo path (`/workspace-src/<repo>`) and clone each from its own `file://` URL. `_createContainer` de-dupes mounts by container path so two components can't collide.
+
+  *Tradeoff:* the read-only mount exposes the project's **entire working tree — including untracked files** — to the sandbox. That is intentional for remote-less projects (it is the only reachable source), but it means the sandbox sees more than a clean clone of committed history would. Projects that want strict isolation should configure a network remote.
+
+**3. Local-only `origin` (a `file://` URL or any absolute/relative/UNC/drive-letter path) → fail fast.** The resolver throws a clear, actionable error instead of attempting the clone. This is the bug fix that motivated this design: the old code silently fell back to the **raw host path** as the clone URL. On Windows, a drive-letter path (`C:/Users/...`) was misparsed by git as scp/SSH syntax (`host:path`) and failed with `cannot run ssh` / `unable to fork`; on any OS the host path was simply unreachable from inside the container. Failing fast with "configure a clonable network remote, or remove the origin to use the mounted project repo" is far more useful than an opaque clone failure. Note the resolver never derives a mount path from the `origin` value — only from the caller-canonicalized repo root — which also closes the door on an in-repo symlink being used to bind-mount an arbitrary host path.
+
+**Failure isolation.** A sandbox that can't initialise must never take down the gateway for *other* projects' sessions. `ProjectSandbox.init()` exposes its readiness through an internal `_readyPromise` that only `getContainerId()` awaits; when init fails with no concurrent awaiter, that promise would reject with no handler and surface as a global `unhandledRejection` — which under load was observed to wedge the gateway for unrelated sessions. The fix attaches a no-op `.catch` to `_readyPromise` so the rejection is always "handled", while the real error is still re-thrown on the **awaited** `init()` boundary. Session setup observes it there, records a setup failure, and ends the session cleanly. The same guarantee holds at the manager level: `SandboxManager.ensureForProject` rejects on the awaited boundary, clears its in-flight entry (so the project can be retried), and a different project's sandbox keeps working. Pinned by `tests/sandbox-init-rejection.test.ts` and `tests/sandbox-manager-init-failure.test.ts`.
 
 ### Network
 
@@ -2024,6 +2105,20 @@ Each sandboxed project gets a single 256-bit token shared by all sessions in tha
 **Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview/mount`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
+
+### Sandbox agent auth.json
+
+Sandbox containers need Pi's agent auth path for OpenAI Codex models, but mounting the host `~/.bobbit/agent/auth.json` would expose unrelated provider credentials. Bobbit therefore mounts only `~/.bobbit/agent/sessions/` from the host agent directory and writes a generated auth file under `.bobbit/state/sandbox-agent-auth/`.
+
+The generated file is scoped by project id (`<projectId>.auth.json`) and mounted read-only at `/home/node/.bobbit/agent/auth.json`. Separate files matter because sandbox policy is project-scoped: one project can allow Codex credentials while another denies them without sharing a stale mount.
+
+Policy rules:
+
+- no `sandbox_tokens` configured: preserve the legacy fallback and include Codex auth when available;
+- `sandbox_tokens` configured: include Codex auth only when an enabled `OPENAI_CODEX_AUTH` or `OPENAI_API_KEY` entry is present;
+- policy denied or no credential found: write `{}` so Pi gets a valid auth path with no secret.
+
+Credential source order is deliberate. `providerKey.openai-codex` from preferences wins first, then sanitized host `openai-codex` auth, then legacy ChatGPT OAuth stored under `openai`. This lets Settings-backed credentials work in Docker while keeping the mounted file minimal (`type`, key/access, refresh, expires only).
 
 ### Resource limits
 
@@ -2064,7 +2159,7 @@ Sandboxed agents use standard git worktrees inside the project container when th
 **Worktree creation** (`ProjectSandbox.createWorktree()`):
 
 1. Creates a worktree at `/workspace-wt/<name>` branching from the specified base
-2. Installs a post-commit hook that pushes to the remote after every commit (durability - ensures commits survive container loss)
+2. Installs a post-commit hook that pushes `HEAD:refs/heads/<branch>` after every commit (durability - ensures commits survive container loss without relying on local upstream config)
 3. Called during agent spawn via `applySandboxWiring()` only when the session/staff runtime carries a sandbox branch
 
 **Multi-repo containers.** Multi-repo projects mount `rootPath` (the container of sibling repos) at `/workspace`; each repo lives at `/workspace/<repo>/`. `docker-args.ts` host-path rewriting understands the new layout. `ProjectSandbox.createWorktree()` returns a worktree set in multi-repo mode. Per-component `worktree_setup_command` runs inside the container at the component's path. The pool prebuild also works inside the sandbox.
@@ -2076,7 +2171,7 @@ Sandboxed agents use standard git worktrees inside the project container when th
 
 **Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 - it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence (single rename at claim time, no first-prompt rename - see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)). Pools are **per-project** - `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` - sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
 
-**Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the configured base ref (project `base_ref`, falling back to the dynamically-resolved remote primary via `git symbolic-ref refs/remotes/origin/HEAD`, then `origin/master`). This prevents stale worktrees when the base has advanced since the pool entry was created. The pool reads the current `base_ref` on every fill/claim via a live `baseRefResolver` (sibling of `componentsResolver`) — pool entries auto-adopt the new value when the setting changes, no drain needed. The fetch+reset is non-fatal: if it fails, the worktree is still usable but may be behind. Full design: [design/base-ref.md](design/base-ref.md).
+**Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the configured base ref (project `base_ref`, falling back to the dynamically-resolved remote primary via `git symbolic-ref refs/remotes/origin/HEAD`, then `origin/master`). This prevents stale worktrees when the base has advanced since the pool entry was created. The pool reads the current `base_ref` on every fill/claim via a live `baseRefResolver` (sibling of `componentsResolver`) — pool entries auto-adopt the new value when the setting changes, no drain needed. The fetch+reset is non-fatal: if it fails, the worktree is still usable but may be behind. Branch publication is separate from freshness and always uses an explicit destination refspec for the target branch. Full design: [design/base-ref.md](design/base-ref.md).
 
 **Inter-agent coordination:** Because all agents share the same `/workspace` clone, they can fetch each other's branches directly (`git fetch origin <branch>`). The team lead merges agent branches locally, same as non-sandboxed teams.
 
@@ -2236,7 +2331,7 @@ Agent process → message_update (full content)
 
 ## Preview snapshots & reopening
 
-The `preview_open` tool drives a single live preview side-panel in the UI. Each call overwrites the panel - there are no tabs, no history slots. But every past `preview_open` widget in chat history renders an **Open** button that re-hydrates the preview on demand by re-posting to the same mount endpoint, so users can flip between previous previews without re-running the agent.
+The `preview_open` tool drives one live server mount per session, rendered through the dynamic side-panel workspace. Each new call updates the live preview tab through SSE, and past `preview_open` widgets render an **Open** button that restores a source-derived historical preview tab from an **immutable preview artifact** captured at the original mount time. Reopening an older card therefore shows the bytes that were live then — not whatever happens to be in the source file now. New `preview_open` calls always select the unversioned filename tab; older differing artifacts open a versioned tab (`file.html (vN)`). Full tab semantics live in [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md).
 
 ### Why
 
@@ -2249,23 +2344,44 @@ Agent calls preview_open({html|file})
    └─→ extension (defaults/tools/html/extension.ts)
         1. PATCH /api/sessions/:id {preview:true}
         2. POST  /api/preview/mount?sessionId=... {html} or {file}
-           - server writes into <stateDir>/preview/<sid>/, broadcasts
-             preview-changed via subscribePreviewChanged
+           - server writes into <stateDir>/preview/<sid>/
+           - persistPreviewArtifact() copies the populated mount into
+             <stateDir>/preview-artifacts/<sid>/<artifactId>/ as an
+             immutable snapshot (dedupes by contentHash within session)
+           - broadcastPreviewChanged emits {entry, mtime, url, path,
+             contentHash, artifactId}
         tool_result = [
           {type:"text", text:"Preview panel is open ..."},
-          {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON {kind:"preview", url, path}}
+          {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON
+             {kind:"preview", url, path, entry?, contentHash?, artifactId?}}
         ]  // path = relPath: "<sid>/<entry>", host-invariant, forward slashes on all OSes
-   └─→ session.jsonl persists both blocks (each ≤ 250 bytes total)
+   └─→ session.jsonl persists both blocks (snapshot block ≤ 250 bytes
+       — builder uses `aid` alias for artifactId when needed to fit budget)
    └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
-       {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
+       {entry, mtime, url, path, contentHash, artifactId?}; iframe src bumps
+       `?mtime=<n>` and reloads.
 
 User clicks Open on widget #N (PreviewRenderer.ts):
-   └─→ parse v3 marker → POST /api/preview/mount?sessionId=... {html|file}
-   └─→ same endpoint the extension uses; SSE picks up; iframe re-renders.
+   └─→ parse v3 marker (artifactId, contentHash, entry)
+   └─→ if snapshot.contentHash equals the current filename tab's hash:
+          select preview:entry:<entry> and skip remount.
+   └─→ else open/select preview:entry:<entry>:v:<N> historical tab and:
+        - v3 marker with artifactId: POST /api/preview/artifacts/<id>/restore
+        - legacy v1/v2 (or v3 missing artifactId): POST /api/preview/mount
+          with the original {html} / {file} payload (best-effort — source
+          files may have been deleted)
 ```
+
+The server persists an artifact on every successful mount regardless of marker
+version, so legacy markers also pick up an `artifactId` from the POST response
+and store it on the tab for later restore. Artifacts survive across reloads and
+session archival; they are removed only when the owning session is purged
+(`removeArtifacts(sid)` in `src/server/agent/session-manager.ts`) or by the
+explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 
 ### Key design decisions
 
+- **Dynamic side-panel workspace** - regular and assistant sessions share the same tab model for chat, previews, proposals, reviews, and inbox. The live preview tab tracks SSE updates; historical `preview_open` cards create/select distinct preview tabs while still rendering through the one live server mount per session.
 - **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The `path` field is the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes) rather than the host-absolute path — keeping block size bounded by content shape, not install location. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
@@ -2277,15 +2393,18 @@ User clicks Open on widget #N (PreviewRenderer.ts):
 
 | File | Purpose |
 |---|---|
-| `src/server/preview/mount.ts` | Per-session mount lifecycle (write/copy/remove/watch) |
+| `src/server/preview/mount.ts` | Per-session mount lifecycle (write/copy/remove/watch); exports `mountPath(sid)` for side-effect-free path lookup |
+| `src/server/preview/artifacts.ts` | Immutable preview artifact store — `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash` (dedupe), `removeArtifacts`, `sweepOrphanArtifacts` |
 | `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
-| `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel |
+| `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel (payload now includes `contentHash` + `artifactId`) |
 | `src/server/auth/cookie.ts` | `bobbit_session` cookie store and verifier |
 | `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
 | `defaults/tools/html/extension.ts` | Tool extension emits `[status, v3-snapshot]` tool_result after PATCH + POST mount |
 | `src/server/agent/truncate-large-content.ts` | Recognises v1/v2/v3 markers (via `PREVIEW_SNAPSHOT_MARKERS`); v3 blocks always small so lazy-load only fires on legacy archived sessions |
-| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button dispatch: v3 → mount endpoint; v1/v2 → mount endpoint with `{html}`/`{file}` (read-only legacy) |
-| `src/app/preview-panel.ts` | EventSource SSE subscription + bootstrap GET |
+| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button dispatch; creates/selects source-derived preview tabs; remounts v1/v2 and restorable v3 inline/file snapshots |
+| `src/app/panel-workspace.ts` | Per-session tab IDs/source metadata for chat, preview, proposal, review, and inbox tabs |
+| `src/app/preview-panel.ts` | EventSource SSE subscription, bootstrap GET, and workspace tab selection helpers |
+| `src/app/render.ts` | Shared side-panel dispatcher, desktop tab strip, mobile tab bar/slider |
 | `tests/preview-{mount,cookie,content-route,extension,renderer}*`, `tests/e2e/preview-{mount-route,token-cost}.spec.ts`, `tests/e2e/ui/preview-{happy-path,new-tab,archived-snapshot}.spec.ts` | Unit, API E2E, browser E2E coverage |
 
 ---
@@ -2411,6 +2530,28 @@ For the parallel pattern on the agent stream (different event family, same shape
 
 ---
 
+## Background process runtime snapshots
+
+Background process pills render live state from `BgProcessManager` snapshots, not from browser-local assumptions. This matters because an exited process may remain visible for hours, survive reconnects, or be rehydrated through REST; using `Date.now() - startTime` after exit makes old processes look like they ran until the current page render.
+
+**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps.
+
+- While `status === "running"`, `endTime` is `null` and the UI may render a live elapsed timer from `startTime`.
+- On child `exit`, the server updates `status`, `exitCode`, and `endTime` once before resolving waiters or broadcasting the exit event.
+- Exited processes with a numeric `endTime` render fixed runtime as `endTime - startTime`; the value must not grow after re-render, reconnect, REST hydration, or page reload.
+- Legacy exited snapshots with missing/null/invalid `endTime` render runtime as unavailable (`—`) instead of falling back to time-since-start.
+
+### Surfaces
+
+- `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for initial hydration and reconnect refresh.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited. This is a long-poll — it streams chunked with a periodic heartbeat to survive undici's ~300 s `headersTimeout` (see [Long-poll heartbeat (chunked keep-alive)](#long-poll-heartbeat-chunked-keep-alive)).
+- `bg_process_created` carries the full running `process` snapshot with `endTime: null`.
+- `bg_process_exited` carries `processId`, `exitCode`, and `endTime` so the client can freeze an existing pill immediately.
+
+The REST and WS contracts are additive for older clients, but new clients must treat missing `endTime` as unknown rather than deriving a misleading final duration from the current clock.
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved - the agent is stuck mid tool-call and the steer feels ignored.
@@ -2462,11 +2603,33 @@ Net result: `bgProcessManager.abortAllWaits(sessionId)` has exactly two call sit
 
 ---
 
+## Long-poll heartbeat (chunked keep-alive)
+
+Several endpoints hold an HTTP request open for minutes while they wait for a server-side event. The HTTP client (undici, used both by the in-process agent tools and by tests) enforces a default `headersTimeout` of ~300 s: if the server writes **no bytes** before that elapses, undici aborts the request and the caller sees `TypeError: fetch failed`. A handler that simply `await`s and then writes a single JSON response can therefore never safely block for ~300 s or longer.
+
+**Pattern.** A long-poll handler must flush a response head early and keep the socket warm:
+
+- Respond with `Transfer-Encoding: chunked` and write a heartbeat newline (`\n`) on a periodic interval (60 s) while the work is pending. Leading whitespace before a JSON value is valid JSON, so a client that does `res.json()` parses the body unchanged regardless of how many heartbeat newlines preceded it.
+- Send the terminal payload with `res.end(JSON.stringify(...))` once the awaited work resolves (or times out), and clear the heartbeat interval in a `finally`.
+
+**Why heartbeat at 60 s, head before 300 s.** The heartbeat interval only needs to be comfortably below undici's ~300 s `headersTimeout`; 60 s keeps the connection alive across the full configurable wait timeout, not just the first 300 s. Once a single byte (or the head) has been written, the client's headers timer is satisfied and can never fire for the rest of the request.
+
+**Consumers.** Two endpoints implement this pattern (both in `src/server/server.ts`):
+
+- `POST /api/sessions/:id/wait` — blocks on `SessionManager.waitForIdle` and writes the head eagerly (it always returns a `200`). This is the original consumer.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` — blocks on `BgProcessManager.waitForExit`; the response logic lives in `src/server/agent/bg-wait-response.ts::streamBgWaitResponse` (`heartbeatMs` is injectable for tests). Here the head flush is **lazy** — driven by the first heartbeat tick rather than written eagerly — specifically so the not-found case can still return a real `404`: `waitForExit` resolves `null` synchronously for an unknown pid, long before the first tick, so no bytes have been written and the status can still be set. A real pending wait flushes the `200`/chunked head on the first 60 s tick, well inside undici's timeout. See [debugging.md — `bash_bg wait` returns `fetch failed`](debugging.md#bash_bg-wait-returns-fetch-failed-on-long-running-processes).
+
+The bg-wait endpoint was the second consumer and originally shipped without the heartbeat (it post-dated the session `/wait` fix), which is why `bash_bg wait` on a ≥300 s process threw `fetch failed` until `streamBgWaitResponse` brought it in line. Regression coverage: `tests/bg-wait-response.test.ts` pins the mechanism (head flushed, heartbeat on tick, terminal JSON parses, `404` preserved) in milliseconds with an injected interval — never on a real ~300 s wall clock.
+
+---
+
 ## Chat surface UI invariants
 
 Two surfaces in the chat client previously relied on time-based heuristics that gave intermittent, hard-to-repro misbehaviour (scroll snap-back / vibration in idle sessions, stale messages trailing after newer ones on session navigate). Both have been replaced with deterministic invariants the implementation must preserve.
 
 ### Chat scroll lock invariant
+
+User-facing documentation of the two transcript navigation buttons (jump-to-bottom and jump-to-last-prompt) lives in [chat-scroll-controls.md](chat-scroll-controls.md). This section covers the mechanism that backs them.
 
 **What this is for.** The chat surface in `AgentInterface` (`src/ui/components/AgentInterface.ts`) is a streaming transcript: tool-use cards appear, tool-result blocks expand asynchronously as their content lands, markdown highlights and lazy-loaded images reflow, and the whole viewport must continue tracking the bottom of the conversation while the agent is talking. "Tail-chat" is the user-facing contract that says *if I am at the bottom when content arrives, I stay at the bottom*. The mechanism that enforces this contract is the scroll lock - a single boolean intent flag plus the bookkeeping needed to grow the scroll container without confusing browser-emitted echo events for user intent.
 
@@ -2625,6 +2788,12 @@ This is strictly better than the pre-fix state: one-off glitches self-heal on th
 
 The old `if (teamLeadSession.lastTurnErrored) { suppress }` guard in `team-manager.ts` existed solely because a nudge to an errored team lead would vanish into the queue forever. With implicit unstick + the cap, `SessionManager` is the single source of truth for error-state policy: the nudge either unsticks the lead (≤ 3 errors) or parks (≥ 3). TeamManager no longer second-guesses, which closes the "worker idle → nudge dropped → team stalls" path.
 
+### Prompt dispatch failure recovery
+
+Direct prompts and queued prompts mark the session `streaming` optimistically before calling Pi. If `rpcClient.prompt()` rejects, or resolves `{ success: false, error }`, Bobbit assumes the agent did not accept the text and re-enqueues the same rows at the front of `PromptQueue` in original order. A zero-delay follow-up drain lets Pi finish any abort/cleanup microtasks before Bobbit tries again.
+
+The recovery path deliberately does **not** re-enqueue when the failure is a child-exit path and the session is already `terminated` or `aborting`. In that state the bridge is gone; sandbox recovery, force-abort recovery, or explicit user retry owns the next live process. This prevents a dead child from causing an immediate redispatch loop while still preserving prompts rejected by transient dispatch races.
+
 ### Key files
 
 | File | Role |
@@ -2638,7 +2807,7 @@ The old `if (teamLeadSession.lastTurnErrored) { suppress }` guard in `team-manag
 
 ## Viewer WebSocket
 
-The `/ws/viewer` endpoint provides a read-only, sessionless WebSocket connection for the goal dashboard to receive live gate verification events.
+The `/ws/viewer` endpoint provides a sessionless WebSocket connection for the goal dashboard to receive live gate and team events while no agent session is active.
 
 ### Why a separate endpoint?
 
@@ -2646,22 +2815,23 @@ The main `/ws/:sessionId` endpoint binds a WebSocket to a specific agent session
 
 ### Protocol
 
-1. Client opens `ws(s)://<host>/ws/viewer`
-2. Client sends `{ type: "auth", token: "<gateway-token>" }` - same auth as session connections
-3. Server validates the token and responds with `{ type: "auth_ok" }`. The connection is marked as authenticated but is **not** associated with any session
-4. Server broadcasts via `broadcastToGoal()`, which has a fallback path that sends to all authenticated clients with no session ID - this is how events reach the viewer
-5. All client-to-server messages after auth are ignored (read-only)
+1. Client opens `ws(s)://<host>/ws/viewer`.
+2. Client sends `{ type: "auth", token: "<gateway-token>", goalId?: "<goal-id>" }` - same auth as session connections, with an optional initial goal subscription.
+3. Server validates the token, marks the socket as a viewer, seeds its `viewerGoalIds` set from `goalId` when present, and responds with `{ type: "auth_ok" }`. The socket is authenticated but **not** associated with any session.
+4. After auth, the viewer socket accepts `{ type: "subscribe_goal", goalId }`, `{ type: "unsubscribe_goal", goalId }`, `{ type: "clear_goal_subscriptions" }`, and `{ type: "ping" }`. Messages outside that set have no effect.
+5. `broadcastToGoal()` delivers goal/team/gate events to matching goal session sockets plus viewer sockets subscribed to that `goalId`. There is no fallback that sends all goal events to unaffiliated viewers.
+6. Search/index events (`index:*`) use project-level broadcast, not goal-level broadcast, so they still reach viewer sockets regardless of the viewer's goal subscriptions.
 
 ### Client lifecycle
 
-- **Connect on mount**: `loadDashboardData()` in `goal-dashboard.ts` opens the viewer WS after setting the current goal ID
-- **Dispatch events**: Incoming messages are dispatched as `gate-verification-event` CustomEvents on `document`, matching the same pattern `RemoteAgent` uses - so `VerificationOutputModal` and `handleLiveVerificationEvent` work without modification
-- **Disconnect on unmount**: `clearDashboardState()` closes the connection and clears the reconnect timer
-- **Auto-reconnect**: On unexpected close, reconnects after a 3s delay (only if the dashboard is still mounted). Brief gaps are acceptable because the dashboard also polls gate status periodically
+- **Connect on mount**: `loadDashboardData()` in `goal-dashboard.ts` closes any previous viewer socket, opens a new one after setting the current goal ID, includes that goal in the auth frame, and sends `subscribe_goal` again after `auth_ok`.
+- **Dispatch events**: Incoming messages with a mismatched `goalId` are ignored. Remaining verification messages are routed through the shared verification event bus before document-level listeners handle them.
+- **Disconnect on unmount**: `clearDashboardState()` closes the connection and clears the reconnect timer.
+- **Auto-reconnect**: On unexpected close, reconnects after a 3s delay (only if the dashboard is still mounted). Brief gaps are acceptable because the dashboard also polls gate status periodically.
 
 ### Server handling
 
-The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionId`. The WS handler in `handler.ts` recognizes the `__viewer__` sentinel session ID: after successful auth, it sends `auth_ok` and returns immediately without calling `sessionManager.addClient()` or syncing session state. No changes to `broadcastToGoal()` were needed - the existing fallback path already sends to authenticated clients with no session association.
+The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionId`. The WS handler in `handler.ts` recognizes the `__viewer__` sentinel session ID: after successful auth, it sends `auth_ok` and returns without calling `sessionManager.addClient()` or syncing session state. Goal event delivery is explicit: `broadcastToGoal()` checks `viewerGoalIds` for viewer sockets and skips unsubscribed viewers, while `broadcastToProject()` continues to send search/index status to authenticated viewer sockets.
 
 ## Goals, workflows, tasks & gates
 
@@ -2729,7 +2899,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` | FlexSearch index (JSON files under `index/` plus `meta.json`). See [Semantic search](#semantic-search). |
-| `costs/` | `CostTracker` | Token/cost data |
+| `session-costs.json` | `CostTracker` | Token/cost data. See [Session cost display](session-cost.md). |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
 ### `<server-cwd>/.bobbit/state/` - global, gitignored
@@ -2749,6 +2919,7 @@ Only truly global state lives in the server's central state directory.
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
+| `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 | `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
 
 ### Global

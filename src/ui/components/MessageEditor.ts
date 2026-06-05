@@ -18,7 +18,21 @@ interface SlashSkillInfo {
 	name: string;
 	description: string;
 	argumentHint?: string;
-	source: "project" | "personal" | "legacy";
+	source: "project" | "personal" | "legacy" | "built-in";
+}
+
+const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [
+	{
+		name: "walkthrough-pr",
+		argumentHint: "<GitHub PR URL or #>",
+		description: "Launch a guided PR walkthrough child session.",
+		source: "built-in",
+	},
+];
+
+function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
+	const names = new Set(skills.map((skill) => skill.name.toLowerCase()));
+	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name.toLowerCase())), ...skills];
 }
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
@@ -34,6 +48,30 @@ export interface QueuedMessage {
 
 @customElement("message-editor")
 export class MessageEditor extends LitElement {
+	/** Reject a send whose serialized prompt frame would exceed this (S31). Kept
+	 *  safely below the gateway's WS_MAX_PAYLOAD_BYTES (256 MiB) so an oversized
+	 *  multi-image send is reported with a clear error instead of tearing the
+	 *  socket down (close-1009). Static so tests can lower it without 200 MB of
+	 *  fixture data. */
+	static MAX_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
+
+	/** Bytes of the serialized prompt frame RemoteAgent.prompt() will send, given
+	 *  the current text + attachments. Mirrors that frame exactly: each image
+	 *  rides ~3× base64 (images[].data + attachments[].content + attachments[].preview).
+	 *  base64 is ASCII so JSON string length ≈ byte length. Pure — testable. */
+	static serializedSendBytes(text: string, attachments: Attachment[]): number {
+		const imageData = attachments
+			.filter((a) => a.type === "image" && a.content)
+			.map((a) => ({ type: "image", data: a.content, mimeType: a.mimeType }));
+		const frame = {
+			type: "prompt",
+			text,
+			...(imageData.length ? { images: imageData } : {}),
+			...(attachments.length ? { attachments } : {}),
+		};
+		return JSON.stringify(frame).length;
+	}
+
 	private _value = "";
 	private textareaRef = createRef<HTMLTextAreaElement>();
 
@@ -80,6 +118,9 @@ export class MessageEditor extends LitElement {
 
 	@state() processingFiles = false;
 	@state() isDragging = false;
+	/** Non-empty when the last send was rejected for exceeding the aggregate
+	 *  payload limit (S31). Shown as an inline error; cleared on the next edit. */
+	@state() private _sendSizeError = "";
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
 
@@ -89,7 +130,7 @@ export class MessageEditor extends LitElement {
 	private _savedDraft = ""; // draft saved when entering history mode
 
 	// Slash skill autocomplete state
-	@state() private _slashSkills: SlashSkillInfo[] = [];
+	@state() private _slashSkills: SlashSkillInfo[] = mergeBuiltInSlashCommands([]);
 	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
 	@state() private _slashMenuOpen = false;
 	@state() private _slashSelectedIndex = 0;
@@ -97,6 +138,19 @@ export class MessageEditor extends LitElement {
 	private _slashSkillsLoaded = false;
 	private _slashSkillsCwd?: string;
 	private _slashSkillsProjectId?: string;
+
+	// @-mention file autocomplete state (parallel to the _slash* fields above).
+	@state() private _atFiles: string[] = [];
+	@state() private _atFilteredFiles: string[] = [];
+	@state() private _atMenuOpen = false;
+	@state() private _atSelectedIndex = 0;
+	@state() private _atTokenStart = 0;
+	/** The query (path fragment) typed after the most recent `@`. */
+	private _atQuery = "";
+	/** Cache invalidation keys — refetch when cwd/project changes. */
+	private _atFilesCwd?: string;
+	private _atFilesProjectId?: string;
+	private _atLoadTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Drag-to-reorder state
 	private _draggedPillId: string | null = null;
@@ -144,7 +198,10 @@ export class MessageEditor extends LitElement {
 	}
 
 	private async _loadSlashSkills() {
-		if (!this.cwd) return;
+		if (!this.cwd) {
+			this._slashSkills = mergeBuiltInSlashCommands([]);
+			return;
+		}
 		if (this._slashSkillsLoaded && this._slashSkillsCwd === this.cwd && this._slashSkillsProjectId === this.projectId) return;
 		try {
 			let url = `/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`;
@@ -152,10 +209,11 @@ export class MessageEditor extends LitElement {
 			const res = await gatewayFetch(url);
 			if (res.ok) {
 				const data = await res.json();
-				this._slashSkills = data.skills || [];
+				this._slashSkills = mergeBuiltInSlashCommands(data.skills || []);
 			}
 		} catch {
 			// Best effort
+			this._slashSkills = mergeBuiltInSlashCommands([]);
 		}
 		this._slashSkillsCwd = this.cwd;
 		this._slashSkillsProjectId = this.projectId;
@@ -203,6 +261,97 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	/** Fetch the file list for the current `@` query from the server (debounced).
+	 *  Mirrors `_loadSlashSkills` but is query-scoped because the file tree can be
+	 *  large/remote, so the server does the filtering + ranking. */
+	private async _loadFileMentions(query: string) {
+		if (!this.cwd) {
+			this._atFiles = [];
+			this._atFilteredFiles = [];
+			return;
+		}
+		// Invalidate the local cache key so a later cwd/project change refetches.
+		this._atFilesCwd = this.cwd;
+		this._atFilesProjectId = this.projectId;
+		try {
+			let url = `/api/file-mentions?cwd=${encodeURIComponent(this.cwd)}`;
+			if (this.projectId) url += `&projectId=${encodeURIComponent(this.projectId)}`;
+			// Let the server resolve the session's real host worktree (autocomplete
+			// must be scoped to the session cwd, not the project root).
+			if (this.sessionId) url += `&sessionId=${encodeURIComponent(this.sessionId)}`;
+			if (query) url += `&q=${encodeURIComponent(query)}`;
+			url += `&limit=50`;
+			const res = await gatewayFetch(url);
+			if (res.ok) {
+				const data = await res.json();
+				this._atFiles = Array.isArray(data.files)
+					? (data.files as Array<{ path: string }>).map((f) => f.path).filter((p) => typeof p === "string")
+					: [];
+				// Re-apply the current (possibly newer) token filter so the menu
+				// reflects what the user has typed since this fetch was scheduled.
+				this._applyAtFilter();
+			}
+		} catch {
+			// Best effort — leave the last results in place.
+		}
+	}
+
+	private _scheduleLoadFileMentions(query: string) {
+		if (this._atLoadTimer) clearTimeout(this._atLoadTimer);
+		this._atLoadTimer = setTimeout(() => {
+			this._atLoadTimer = null;
+			this._loadFileMentions(query);
+		}, 120);
+	}
+
+	/** Filter the cached file list by the current `@` query for an instant menu. */
+	private _applyAtFilter() {
+		const q = this._atQuery.toLowerCase();
+		const files = q ? this._atFiles.filter((p) => p.toLowerCase().includes(q)) : this._atFiles;
+		this._atFilteredFiles = files;
+		this._atMenuOpen = files.length > 0;
+		// Reset to the top-ranked match on every recompute (mirrors the slash
+		// menu) so a changed query never leaves a stale highlight that Enter/Tab
+		// would select.
+		this._atSelectedIndex = 0;
+	}
+
+	private _updateAtAutocomplete() {
+		const textarea = this.textareaRef.value;
+		if (!textarea) { this._atMenuOpen = false; return; }
+		const cursorPos = textarea.selectionStart;
+		const textBeforeCursor = this.value.substring(0, cursorPos);
+		// Trigger on an `@` at a word boundary (start, whitespace, or newline)
+		// followed by a path fragment with no whitespace or further `@`.
+		const match = textBeforeCursor.match(/(^|[\s])@([^\s@]*)$/);
+		if (match) {
+			this._atTokenStart = cursorPos - match[2].length - 1; // position of "@"
+			this._atQuery = match[2];
+			// Instant filter from cache, then refresh from the server (debounced).
+			this._applyAtFilter();
+			this._scheduleLoadFileMentions(this._atQuery);
+		} else {
+			this._atMenuOpen = false;
+		}
+	}
+
+	private _selectFileMention(filePath: string) {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return;
+		const before = this.value.substring(0, this._atTokenStart);
+		const after = this.value.substring(textarea.selectionStart);
+		this.value = before + `@${filePath} ` + after;
+		this._atMenuOpen = false;
+		this.onInput?.(this.value);
+		// Update textarea and move cursor after the inserted path + trailing space.
+		if (textarea) {
+			textarea.value = this.value;
+			const newPos = before.length + filePath.length + 2; // "@" + path + " "
+			textarea.focus();
+			textarea.setSelectionRange(newPos, newPos);
+		}
+	}
+
 	private _isCursorOnVisualTopRow(): boolean {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return true;
@@ -243,20 +392,27 @@ export class MessageEditor extends LitElement {
 		return (fullHeight - cursorHeight) <= singleRowHeight;
 	}
 
-	private _getSlashMenuLeft(): number {
+	/** Horizontal pixel offset of the autocomplete menu for a token starting at
+	 *  `tokenStart` — measures the rendered width of the text from the start of
+	 *  the visual line up to the token. Shared by the slash and `@` menus. */
+	private _getMenuLeft(tokenStart: number): number {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return 0;
 		const style = getComputedStyle(textarea);
 		const mirror = document.createElement("span");
 		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;font:${style.font};letter-spacing:${style.letterSpacing};`;
 		mirror.textContent = this.value.substring(
-			this.value.lastIndexOf("\n", this._slashTokenStart - 1) + 1,
-			this._slashTokenStart,
+			this.value.lastIndexOf("\n", tokenStart - 1) + 1,
+			tokenStart,
 		);
 		document.body.appendChild(mirror);
 		const leftOffset = mirror.offsetWidth;
 		document.body.removeChild(mirror);
 		return leftOffset;
+	}
+
+	private _getSlashMenuLeft(): number {
+		return this._getMenuLeft(this._slashTokenStart);
 	}
 
 	/** Live preview order of pill IDs while dragging. Null when not dragging. */
@@ -313,11 +469,20 @@ export class MessageEditor extends LitElement {
 	private handleTextareaInput = (e: Event) => {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
+		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
+		this._updateAtAutocomplete();
 	};
 
 	private handleKeyDown = (e: KeyboardEvent) => {
+		// IME composition guard (S3): while composing CJK/dead-key text, the Enter
+		// that COMMITS the candidate must not send the message. WebKit reports
+		// `isComposing===true` with key "Enter"; Chromium/Firefox report keyCode 229
+		// ("Process"). Bail before any Enter/Tab/slash handling so the composition
+		// commit is left to the IME. Zero effect for non-IME users.
+		if (e.isComposing || e.keyCode === 229) return;
+
 		// Slash autocomplete keyboard handling
 		if (this._slashMenuOpen) {
 			if (e.key === "ArrowDown") {
@@ -337,6 +502,30 @@ export class MessageEditor extends LitElement {
 			} else if (e.key === "Escape") {
 				e.preventDefault();
 				this._slashMenuOpen = false;
+				return;
+			}
+		}
+
+		// @-mention file autocomplete keyboard handling. Mutually exclusive with
+		// the slash menu — a trailing token can only be `/...` or `@...`, never both.
+		if (this._atMenuOpen) {
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				this._atSelectedIndex = Math.min(this._atSelectedIndex + 1, this._atFilteredFiles.length - 1);
+				return;
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				this._atSelectedIndex = Math.max(this._atSelectedIndex - 1, 0);
+				return;
+			} else if (e.key === "Enter" || e.key === "Tab") {
+				e.preventDefault();
+				if (this._atFilteredFiles[this._atSelectedIndex]) {
+					this._selectFileMention(this._atFilteredFiles[this._atSelectedIndex]);
+				}
+				return;
+			} else if (e.key === "Escape") {
+				e.preventDefault();
+				this._atMenuOpen = false;
 				return;
 			}
 		}
@@ -435,6 +624,20 @@ export class MessageEditor extends LitElement {
 
 	private handleSend = () => {
 		const text = this.value;
+		// S31: reject an oversized send BEFORE anything irreversible (the
+		// 'message-send' event below tombstones the saved draft, and onSend clears
+		// the composer). Over the limit → inline error, retain everything.
+		if (this.attachments.length > 0) {
+			const limit = MessageEditor.MAX_SERIALIZED_SEND_BYTES;
+			const serializedBytes = MessageEditor.serializedSendBytes(text, this.attachments);
+			if (serializedBytes > limit) {
+				const mb = Math.ceil(serializedBytes / 1024 / 1024);
+				const capMb = Math.floor(limit / 1024 / 1024);
+				this._sendSizeError = `Attachments too large to send (${mb} MB > ${capMb} MB). Remove some and try again.`;
+				return;
+			}
+		}
+		this._sendSizeError = "";
 		// Dispatch a composed event that escapes shadow DOM — used by
 		// session-manager for draft cleanup without monkey-patching.
 		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
@@ -699,6 +902,7 @@ export class MessageEditor extends LitElement {
 		super.disconnectedCallback();
 		document.removeEventListener("keydown", this.handleGlobalKeyDown);
 		document.removeEventListener("keyup", this.handleGlobalKeyUp);
+		if (this._atLoadTimer) { clearTimeout(this._atLoadTimer); this._atLoadTimer = null; }
 		this.stopSpeechRecognition();
 	}
 
@@ -720,6 +924,15 @@ export class MessageEditor extends LitElement {
 		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
 			this._slashSkillsLoaded = false;
 			this._loadSlashSkills();
+		}
+
+		if (changed.has("cwd") || changed.has("projectId")) {
+			// Invalidate the @-mention file cache so the next `@` refetches.
+			if (this._atFilesCwd !== this.cwd || this._atFilesProjectId !== this.projectId) {
+				this._atFiles = [];
+				this._atFilteredFiles = [];
+				this._atMenuOpen = false;
+			}
 		}
 	}
 
@@ -857,6 +1070,7 @@ export class MessageEditor extends LitElement {
 						${this._slashFilteredSkills.map((skill, i) => html`
 							<button
 								class="w-full text-left px-3 py-2 flex items-start gap-2 cursor-pointer transition-colors ${i === this._slashSelectedIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}"
+								data-testid=${`slash-command-${skill.name}`}
 								@mousedown=${(e: Event) => { e.preventDefault(); this._selectSlashSkill(skill); }}
 								@mouseenter=${() => { this._slashSelectedIndex = i; }}
 							>
@@ -868,10 +1082,38 @@ export class MessageEditor extends LitElement {
 					</div>
 				` : nothing}
 
+				<!-- @-mention file autocomplete (reuses slash-menu styling) -->
+				${this._atMenuOpen ? html`
+					<div class="slash-menu at-menu border-b border-border max-h-48 overflow-y-auto" style="margin-left: ${this._getMenuLeft(this._atTokenStart)}px">
+						${this._atFilteredFiles.map((filePath, i) => {
+							const slash = filePath.lastIndexOf("/");
+							const dir = slash >= 0 ? filePath.slice(0, slash + 1) : "";
+							const base = slash >= 0 ? filePath.slice(slash + 1) : filePath;
+							return html`
+							<button
+								class="w-full text-left px-3 py-2 flex items-center gap-2 cursor-pointer transition-colors ${i === this._atSelectedIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}"
+								data-testid=${`file-mention-${filePath}`}
+								@mousedown=${(e: Event) => { e.preventDefault(); this._selectFileMention(filePath); }}
+								@mouseenter=${() => { this._atSelectedIndex = i; }}
+							>
+								<span class="font-mono text-sm truncate"><span class="text-muted-foreground">@${dir}</span><span class="text-primary">${base}</span></span>
+							</button>
+						`;
+						})}
+					</div>
+				` : nothing}
+
 				<!-- Compact input row: [attach] [textarea] [mic] [send]
 				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
 				     own GPU compositing layer the textarea caret is invisible in this position
 				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
+				${this._sendSizeError
+					? html`<div
+							data-testid="composer-size-error"
+							class="mx-2 mb-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive"
+							role="alert"
+						>${this._sendSizeError}</div>`
+					: nothing}
 				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}
 					<textarea

@@ -104,6 +104,31 @@ The goal-assistant accept flow (both the goal-preview panel handler and the `pro
 
 On failure (any rejection from `createGoal`), the assistant session, chat history, draft, `gatewaySessions` entry, and form state are left intact. The standard `showConnectionError("Failed to create goal", …)` toast surfaces the error message — the user can edit the proposal (e.g. pick a different workflow, fix the title) and click Accept again, or ask the assistant to revise. This avoids the prior failure mode where a 400 response (typically `Workflow not found: …` or `NO_WORKFLOWS_MSG`) would dismiss the assistant and force the user to start over with no context. Re-attempt sessions (with `reattemptGoalId`) go through the same accept handler and benefit from the same guarantee. Browser E2E coverage lives in [`tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts`](../tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts).
 
+#### Validating a proposed workflow at proposal time
+
+The goal assistant emits a goal via the `propose_goal` tool, which names a `workflow` ID and optional `options` (comma-separated optional-step names). Because the assistant's prompt is seeded with the project's workflow list at session-creation time, that list can go stale — a project's workflows may be renamed or removed after the session started — and an LLM can hallucinate IDs outright. **Why this matters:** without validation a stale or invented workflow silently produces a broken proposal that only fails much later at goal-creation submit, by which point the assistant has already torn down its rationale. Worse, the `propose_goal` tool used to swallow the rejection and report a false `"Proposal submitted"` ack, so the agent never learned it needed to correct itself.
+
+Validation now happens **at seed time**, the moment the proposal is written. The `POST /api/sessions/:id/proposal/goal/seed` handler (which the tool calls to persist the draft) resolves the session's project workflows — mirroring goal creation: `configCascade.resolveWorkflows(projectId)`, falling back to the project context `workflowStore` — and runs `validateGoalProposalWorkflow()` **before** writing the file, so an invalid workflow never produces a draft at all.
+
+Rejections are structured `400` JSON so the agent can self-correct:
+
+- **`UNKNOWN_WORKFLOW`** — `workflow` is explicitly named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
+- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step. When `workflow` is omitted, `options` are validated against the project's default (first) workflow, consistent with [Default workflow resolution](#default-workflow-resolution).
+
+**Validation is skipped** (no error) when:
+
+- The session has no resolvable `projectId` — workflows can't be resolved, so there is nothing to check.
+- The project has **zero workflows** — the empty-workflows state is preserved (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)); the UI dropdown supplies a default.
+- `workflow` is **empty or omitted** — not an error; the UI dropdown supplies the default, so only explicitly-named unknown IDs are rejected.
+
+On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
+
+#### Phantom workflow IDs in the proposal panel
+
+A second failure mode lived in the proposal panel's workflow `<select>` (`src/app/proposal-panels.ts`). The dropdown binds its value to the proposed workflow ID. When that ID isn't among the project's loaded workflows, no `<option>` matches, so the browser visually falls back to the first option while the form state still holds the **phantom** (not-in-list) value. Re-selecting the displayed option fires no `change` event, so the phantom persists and Create submits the invalid workflow — the dropdown appears to "have no effect."
+
+The fix is `normalizeWorkflowSelections()`: once the workflow list is loaded, any empty or phantom selection is reset to the first available ID so the rendered option and the underlying state always agree. A value already present in the list is never clobbered. It runs from the cached and async paths of `ensureWorkflowsLoaded`, from `syncProposalFormState()` (the inline goal-proposal panel's `_proposalWorkflowId`), and from `setSelectedWorkflowId()` (the assistant preview panel's `_selectedWorkflowId`). Because workflows load asynchronously, the post-load pass is the safety net for a phantom ID present before the list arrived; stale async loads for a project the user has navigated away from never clobber the active selection. Browser E2E for both panels: [`tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts`](../tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts).
+
 **Removed runtime concepts:**
 
 - `.bobbit/config/workflows/<id>.yaml` is no longer read at runtime. The first-boot migration in `migrate-project-yaml.ts` folds any pre-existing files into the inline `workflows:` block and removes the directory.
@@ -114,7 +139,7 @@ On failure (any rejection from `createGoal`), the assistant session, chat histor
 ```typescript
 interface VerifyStep {
   name: string;
-  type: "command" | "llm-review" | "agent-qa" | "subgoal";
+  type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
   // For type: "command" — three exclusive shapes:
   component?: string; // Component name to resolve against components[]
   command?: string;   // Named command on that component (component.commands[command])
@@ -126,7 +151,8 @@ interface VerifyStep {
   timeout?: number;
   phase?: number;     // Execution phase (default 0). See "Phased verification" below.
   optional?: boolean; // If true, step runs only when enabled per-goal. See "Optional verify steps".
-  label?: string;     // Human-readable label for the toggle in goal creation UI.
+  optionalLabel?: string; // Human-readable label for the goal-creation toggle.
+  label?: string;     // Human-signoff card title only (type: "human-signoff").
   description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
   // For type: "subgoal":
   subgoal?: { planId: string; title: string; spec: string; workflowId?: string; suggestedRole?: string; dependsOn?: string[] };
@@ -198,7 +224,7 @@ workflows:
         depends_on: [implementation]
         verify:
           # Pure free-form (cwd = per-branch container root):
-          - { name: "Branch pushed", type: command, run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Branch pushed", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
 **Why structural references.** Editing `components[name].commands[name]` updates every workflow step that references it — no regeneration required for command edits. Validation at load time catches typos and stale references (component renamed, command removed) before the agent runs anything. Cleaner audit trail in gate output: shows the `(component, command)` pair, not just a literal shell string.
@@ -212,9 +238,17 @@ workflows:
 
 The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{goal_title}}`, etc.) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
 
+#### Workflow editor authoring
+
+Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, and `optionalLabel`; and `human-signoff`-specific `label` and `prompt` fields.
+
+The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
+
 #### Dependency DAG
 
-Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be signaled. This serves two purposes:
+Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be signaled. An empty list is explicit and valid: it makes the gate an independent root/parallel gate. The workflow editor preserves `dependsOn: []` instead of silently converting it into a dependency on the previous gate.
+
+This serves two purposes:
 
 1. **Signal gating** — the server returns 409 if you try to signal a gate before its dependencies have passed.
 2. **Context injection** — when an agent is spawned to produce work for a gate, the passed content of upstream gates is automatically injected into the agent's system prompt.
@@ -223,11 +257,78 @@ Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be s
 
 Each gate has a status: `pending`, `passed`, or `failed`.
 
-- **`pending`** — initial state; the gate has not been signaled, or was reset after an upstream re-signal.
+- **`pending`** — initial state; the gate has not been signaled, or was reset after an upstream re-signal or explicit reset.
 - **`passed`** — the gate was signaled and all verification steps succeeded (or no verification was defined).
 - **`failed`** — the gate was signaled but verification failed.
 
 When a previously-passed gate is re-signaled, all transitive downstream gates are cascade-reset to `pending`.
+
+### Viewing and resetting passed gates
+
+The chat-header `<goal-status-widget>` is the compact workflow surface for the current goal. Its popover lists every gate, but only `passed` rows show gate actions:
+
+- **View** — opens the goal dashboard Gates tab for that gate and expands the gate detail section.
+- **Reset** — asks for confirmation, then clears the selected gate and downstream dependent gates back to `pending`.
+
+Pending, running, and failed rows do not show these actions. This keeps the popover focused on completed approvals that can be inspected or invalidated.
+
+#### Dashboard focus route
+
+The View action navigates with hash-query state so browser Back and reload can restore the focused gate:
+
+```text
+#/goal/<goalId>?tab=gates&gate=<gateId>&signal=<signalId|latest-passed>
+```
+
+The dashboard reads `tab`, `gate`, and `signal` from the route. It switches to the Gates tab, expands the gate row, highlights it briefly, scrolls it into view, and expands/focuses the requested signal entry. `signal=latest-passed` is a convenience token used when the caller does not already know the concrete latest passed signal; after gate data loads, the dashboard replaces it with the resolved signal id when possible.
+
+Manual gate or signal expansion on the dashboard updates the same route state. This makes focused dashboard views shareable and resilient enough for reload/back navigation without introducing separate UI state storage.
+
+#### Reset invalidation semantics
+
+`POST /api/goals/:id/gates/:gateId/reset` resets the selected gate plus every transitive downstream dependent discovered from the workflow DAG (`dependsOn`), not from display order. Independent gates are untouched.
+
+Each affected `GateState` also receives `verificationCacheInvalidatedAt`, set to the reset timestamp. Verification cache selection treats that timestamp as a boundary: passed step results from signals at or before the marker are ineligible for same-commit reuse, while later signals remain eligible. This makes the next post-reset signal run active verification steps normally even when the commit SHA is unchanged.
+
+Reset is safe to repeat:
+
+- gates already `pending` stay pending and are reported as unchanged;
+- failed downstream gates are also reset to `pending`, because their result may have depended on the invalidated upstream output;
+- active verifications for any affected gate are cancelled before statuses are rewritten;
+- verification-step cache eligibility is invalidated for both changed and already-pending affected gates;
+- only gates whose stored status actually changes are counted in `changedGateIds`.
+
+The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so the status widget, sidebar badge, dashboard pipeline, and team lead view refresh promptly.
+
+#### History and audit preservation
+
+Reset invalidates the current pass state and old cache eligibility; it does **not** delete audit data. Gate signal history, verification output, content, content version, and metadata remain in the gate store. Consumers must treat `status` as the source of truth for whether preserved content is currently approved. In other words, a reset gate may still have historical content attached, but downstream context injection and user trust decisions should require the gate to be `passed` again.
+
+`human-signoff` steps are never reused from cache, regardless of reset state. Prior human approvals stay inspectable in signal history, but every re-signal must obtain a fresh human decision.
+
+After a fresh post-reset signal passes, normal cache behavior resumes from that new signal forward: later non-reset re-signals at the same commit may reuse the post-reset passed step output and show `[cached from prior signal]` for reused non-human steps.
+
+#### Team lead notification
+
+After a reset, Bobbit sends the team lead session a system-origin message when a live team lead exists. The message names:
+
+- the selected gate that was reset;
+- downstream dependent gates invalidated by the DAG traversal;
+- which gates had passed state cleared;
+- which affected gates were already not passed;
+- why downstream implementation, review, or verification work may need to be revisited.
+
+If the team lead is streaming, the server delivers the notice as a live steer; otherwise it queues it as a steered prompt. The reset response includes `teamLeadNotified` so callers can tell whether a live lead received the message. Goals without an active team lead still reset normally.
+
+#### Usage and test coverage
+
+Use Reset when an approved upstream artifact is no longer trustworthy and downstream work may have been built on it. Use a new gate signal instead when the gate has fresh replacement evidence ready to verify immediately.
+
+Coverage lives in:
+
+- [`tests/gate-store-logic.test.ts`](../tests/gate-store-logic.test.ts) — gate-store reset and dependency behavior.
+- [`tests/e2e/gate-reset-api.spec.ts`](../tests/e2e/gate-reset-api.spec.ts) — DAG invalidation, idempotency, preserved history/content, active verification cancellation, sandbox denial, team lead notification.
+- [`tests/e2e/ui/goal-status-widget.spec.ts`](../tests/e2e/ui/goal-status-widget.spec.ts) — passed-gate View/Reset controls, dashboard focus route reload/back behavior, confirmation guard, widget/sidebar/dashboard refresh, and team lead message visibility.
 
 ### Signaling a gate
 
@@ -247,9 +348,41 @@ Gates can define automated verification that runs when signaled:
 - **Command** — runs shell commands, checks exit codes (e.g. `npm run check`)
 - **LLM review** — spawns a sub-agent for qualitative review against a prompt
 - **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
+- **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+#### Active verification snapshots
+
+While verification is running, the gate store contains seeded step rows so history is never empty. Those rows are not authoritative for live progress: they may carry placeholder values before a step starts. Agent tools and UI surfaces therefore read a shared active snapshot that overlays the persisted signal with `VerificationHarness` state for the latest running signal.
+
+`gate_status` and `gate_inspect section=verification` use the same snapshot, so they agree on step status, summary counts, durations, bounded output, and active metadata. Final completed signals still read from the persisted verification result.
+
+Step `status` is explicit:
+
+| Status | Meaning |
+|---|---|
+| `passed` | Step completed successfully. |
+| `failed` | Step completed unsuccessfully. |
+| `skipped` | Step was intentionally skipped, such as a disabled optional step. |
+| `running` | Step is executing now; duration is elapsed time so far. |
+| `waiting` | Step has not started yet. This is also the API representation for "yet to run". |
+| `blocked` | Step did not run because an earlier phase failed. |
+
+For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. `passed` is only meaningful on final `passed`, `failed`, or `skipped` steps.
+
+Verification log output is bounded by default: `gate_status` and `gate_inspect section=verification` return the last 20 lines per step, not full logs. Agents that need deeper evidence should call `gate_inspect` with a targeted selection mode:
+
+- `mode=tail&lines=N` for more trailing context;
+- `mode=head&lines=N` for startup output;
+- `mode=slice&from=A&to=B` for an exact line range;
+- `mode=grep&pattern=...&context=N` for focused failure searches;
+- `full` only when a broad read is needed. Normal line, byte, and tool-result caps still apply.
+
+Running command steps can include live stdout/stderr tails. The server reads those log files with bounded byte limits before applying the same selection and aggregate response budgets used for persisted output.
+
+The UI uses the same explicit-status model. Gate status cards, the `gate_inspect` renderer, and signaled gate live cards reconcile WebSocket events, active-verification fetches, and persisted signal rows without flickering back to placeholder failed or `0ms` states while verification is still running.
 
 #### Gate verification baselines
 
@@ -270,6 +403,16 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 **Primary branch detection:** the harness calls `detectPrimaryBranch(cwd)` from `src/server/skills/git.ts`, which uses `git symbolic-ref refs/remotes/origin/HEAD` with a `master` → `main` fallback. Never hardcode `"master"` in new gate logic — always resolve via this helper. The resolved baseline (e.g. `origin/main@abc1234`) is printed into every review prompt's "Signal Context" so failures are trivial to diagnose.
 
 **Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — the bare branch name derived from `base_ref` (or `detectPrimaryBranch()` when unset). `{{master}}` is intentionally unchanged and continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+
+**Branch publication safety:** Ready-to-Merge templates publish the goal branch with an explicit destination refspec:
+
+```bash
+git push origin {{branch}}:refs/heads/{{branch}}
+```
+
+Do not use bare forms such as `git push origin {{branch}}` in verification. Bare branch pushes can be redirected by inherited upstream config or `push.default=upstream` (for example, to `origin/master`). Bobbit-owned branch publication for goal/session/team worktrees uses the same rule (`<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`), so `base_ref` controls baselines and status comparisons but never the remote push destination.
+
+**Verification push guard:** before running any command step, the harness checks substituted shell text for unsafe `git push` invocations. From a non-primary goal/session branch it rejects pushes with no explicit refspec, bare branch refspecs, `--all`/`--mirror`, and explicit destinations that update the protected base/primary branch (`{{baseBranch}}`, `{{master}}`, or the primary fallback). The check also catches the wrapper forms covered by regression tests, such as absolute `git` executable paths and `env ... git push ...`. Safe publication to the current branch (`{{branch}}:refs/heads/{{branch}}`) is allowed.
 
 **How the harness enforces this per-gate:** reviewer/architect/spec-auditor role YAMLs contain a `{{REVIEW_CONTEXT}}` placeholder in their preamble. `buildReviewPrompt()` in `src/server/agent/verification-harness.ts` substitutes it with either (a) an "implementation review" block containing the concrete `origin/<primary>...HEAD` diff instructions and the resolved baseline SHA, or (b) a "pre-implementation" notice that explicitly forbids `git diff` / `git log` and reminds the reviewer that zero goal-unique commits is the normal state. The branching decision uses `isPreImplementationGate()` on the signalled gate — role YAMLs never hardcode diff commands.
 
@@ -337,7 +480,9 @@ interface GateSignalStep {
 
 #### Optional verify steps
 
-Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when no component in the project has `config.qa_start_command` set (driven by `isQaConfiguredOnAnyComponent()` via `GET /api/projects/:id/qa-testing-config`), and the tooltip is overridden with a configuration hint.
+Verify steps can be marked `optional: true` with a human-readable `optionalLabel` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when no component in the project has `config.qa_start_command` set (driven by `isQaConfiguredOnAnyComponent()` via `GET /api/projects/:id/qa-testing-config`), and the tooltip is overridden with a configuration hint.
+
+`label` is reserved for `type: human-signoff` card titles. Legacy optional non-human steps that used `label` are migrated to `optionalLabel` on load and written back in canonical shape on save.
 
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
@@ -356,7 +501,7 @@ verify:
     type: agent-qa
     phase: 2
     optional: true
-    label: "Enable QA Testing"
+    optionalLabel: "Enable QA Testing"
     description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios."
     prompt: |
       You are performing QA testing for this goal...
@@ -423,6 +568,40 @@ verify:
 
 **`goal-plan` gate freeze:** when the parent goal's `goal-plan` gate is signalled, the per-goal workflow snapshot's `executionGate.metadata.frozen = "true"`. Subsequent mutations to `execution.verify[]` route through the mutation classifier (`src/server/agent/plan-mutation.ts`); see [nested-goals.md — Mutation classifier](nested-goals.md#mutation-classifier).
 
+#### Human sign-off steps
+
+A `human-signoff` verification step parks the gate on a deferred resolver until a human approves or rejects it via the UI. It reuses the same async-verification machinery as `llm-review` and `agent-qa` — the only difference is *who* resolves the await: a REST submission from the browser rather than a reviewer agent's `verification_result` call.
+
+**Why it exists.** Some gates need an authoritative human decision — a design review, a release sign-off, a security exception — without coupling the decision to the team lead's liveness or context-window budget. A dedicated step type keeps approval state on the verification record (restart-safe, cancellable, persisted) and emits the same `{ passed, output, artifact }` shape every other step produces, so failed sign-off feedback flows back through the team lead's normal "consume failed reviewer findings" path.
+
+**YAML shape:**
+
+```yaml
+verify:
+  - name: design-approval
+    type: human-signoff
+    phase: 1
+    label: "Approve design doc"
+    prompt: |
+      Review the design doc for {{branch}} and approve or reject.
+```
+
+Both `label` and `prompt` are required (the validator rejects the step on load otherwise). `{{branch}}`, `{{master}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` tokens are substituted before the prompt is shown to the user — same machinery as the other step types.
+
+**Lifecycle.** When the harness reaches the step it broadcasts `gate_verification_awaiting_human` (see [websocket-protocol.md](websocket-protocol.md)), sets `awaitingHuman: true` on the active step, persists, and `await`s a deferred resolver. The chat-header `<goal-status-widget>` (mounted on any session with a goal id) surfaces the pending request and its **View content** action opens the submitted gate content in the review pane. The review pane owns inline comments, final comment, Approve / Reject validation, and decision submission. The browser POSTs to `/api/goals/:id/gates/:gateId/signoff` with `{ signalId, stepName, decision, feedback? }`; the harness builds a step result (passed = `decision === "pass"`; `output` and a `text/markdown` artifact carry the composed final/inline feedback when present) and the gate completes through the standard phase machinery. See [Review Pane Sign-Off](review-pane-signoff.md) for the review-source model, validation rules, persistence, and sanitization constraints.
+
+**Resume / cancellation.**
+
+- Server restart re-broadcasts `gate_verification_awaiting_human` from the resume path; the persisted `humanPrompt` / `humanLabel` survive intact. No data loss, no duplicate UI prompt — the widget reconciles by `(signalId, stepName)`.
+- Re-signaling the gate while a sign-off is pending drains the resolver with `{ cancelled: true }`; the failed step result is suppressed and the fresh signal opens a new request.
+- `POST /signoff` is idempotent — already-resolved or cancelled steps respond `409 { error: "step is no longer awaiting human input", status }`.
+
+**Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Bobbit has no user-identity model today; submission records only a server-side timestamp. Sandboxed sub-agents are blocked from POSTing to `/signoff` at the `sandbox-guard` layer so a sandboxed agent cannot self-approve a sign-off step that gates its own work.
+
+**Test bypass.** Only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes the step. There is **no** fallback to `BOBBIT_LLM_REVIEW_SKIP`: a "human" gate must not share a bypass with `agent-qa` / `llm-review`, otherwise the global E2E harness (which sets `BOBBIT_LLM_REVIEW_SKIP=1`) would silently auto-approve every human gate. With `BOBBIT_HUMAN_SIGNOFF_SKIP` unset or `=0`, the step parks awaiting a real human decision.
+
+Feature behavior: [Review Pane Sign-Off](review-pane-signoff.md). Full design: [design/human-signoff-gates.md](design/human-signoff-gates.md). UI-side notification rules: [design/notification-policy.md](design/notification-policy.md).
+
 ### Gate Re-Signal Cancellation
 
 When a gate is re-signaled while a previous verification is still running:
@@ -472,7 +651,7 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. Those safety-net publishes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
 
 #### Multi-repo git handoff
 
@@ -602,12 +781,13 @@ All mutations require `projectId` (400 otherwise). Reads without `projectId` ret
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval — content, verification, or signal history |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate — triggers verification |
+| `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to pending |
 | `GET` | `/api/goals/:id/gates/:gateId/signals` | Get signal history for a gate |
 | `GET` | `/api/goals/:id/gates/:gateId/content` | Get the current passed content of a gate |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 | `GET` | `/api/goals/:id/verifications/active` | Get in-flight verification state (running steps, sessions) |
 
-The gate list, gate detail, and task list endpoints support `?view=summary` for slim agent-facing responses. See [rest-api.md — Summary views](rest-api.md#summary-views-viewsummary) for response shapes and the [Gate inspect endpoint](rest-api.md#gate-inspect-endpoint) for the `/inspect` endpoint.
+The gate list, gate detail, and task list endpoints support `?view=summary` for slim agent-facing responses. See [rest-api.md — Summary views](rest-api.md#summary-views-viewsummary) for response shapes, the [Gate reset endpoint](rest-api.md#gate-reset-endpoint) for reset response details, and the [Gate inspect endpoint](rest-api.md#gate-inspect-endpoint) for the `/inspect` endpoint.
 
 ### Tasks (gate-linked)
 
@@ -642,10 +822,12 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
 | `src/server/agent/verification-harness.ts` | Async verification orchestration (command + LLM review + agent-qa, session lifecycle, artifact population) |
 | `src/server/agent/verification-logic.ts` | Pure verification logic — variable substitution, phase grouping, optional step skipping, cache reuse, error pattern matching (unit-testable without server state) |
-| `src/server/agent/gate-store.ts` | Gate state and signal history persistence |
+| `src/server/agent/gate-store.ts` | Gate state, reset, and signal history persistence |
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
+| `src/app/goal-dashboard.ts` | Goal dashboard gate pipeline, focused route state, expanded gate/signal sections |
+| `src/ui/components/GoalStatusWidget.ts` | Chat-header gate popover, passed-gate View/Reset controls, sign-off launcher |
 | `defaults/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `gate_inspect`, `task_create` |
 | `defaults/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
 | `defaults/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |

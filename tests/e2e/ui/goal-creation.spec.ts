@@ -3,8 +3,8 @@
  * optional steps toggle, and dismiss button behavior.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, nonGitCwd } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
+import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for title input. */
 async function openGoalAssistantProposal(page: import("@playwright/test").Page) {
@@ -64,6 +64,16 @@ async function openRegularSessionProposal(page: import("@playwright/test").Page)
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 }
 
+async function mockQaTestingConfigured(page: import("@playwright/test").Page): Promise<void> {
+	await page.route(/\/api\/projects\/[^/]+\/qa-testing-config(?:\?.*)?$/, async (route) => {
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({ configured: true }),
+		});
+	});
+}
+
 /** Helper: find the last created goal matching a title via API. */
 async function findGoalByTitle(title: string) {
 	const resp = await apiFetch("/api/goals");
@@ -84,27 +94,38 @@ async function deleteGoal(goalId: string) {
  * silently swallowing clicks in the assistant-panel test that linked a project.
  */
 test.beforeAll(async () => {
-	const projectsResp = await apiFetch("/api/projects");
-	const projects = await projectsResp.json();
-	if (!Array.isArray(projects) || projects.length === 0) return;
-	const projectId = projects[0].id;
+	const projectId = await defaultProjectId();
+	expect(projectId, "harness default project must be registered").toBeTruthy();
+
 	// QA settings live on a component's `config` map now (not top-level).
 	// Read existing components, set qa_start_command on the first, write back.
-	const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`).catch(() => null);
-	if (!structuredResp || !structuredResp.ok) return;
+	const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`);
+	expect(structuredResp.status).toBe(200);
 	const data = await structuredResp.json();
 	const comps = Array.isArray(data.components) ? data.components : [];
-	if (comps.length === 0) return;
+	expect(comps.length, "default project must have at least one component").toBeGreaterThan(0);
 	comps[0].config = { ...(comps[0].config || {}), qa_start_command: "echo ready" };
-	await apiFetch(`/api/projects/${projectId}/config`, {
+	const putResp = await apiFetch(`/api/projects/${projectId}/config`, {
 		method: "PUT",
 		body: JSON.stringify({ components: comps }),
-	}).catch(() => {});
+	});
+	expect(putResp.status).toBe(200);
+
+	await expect.poll(async () => {
+		const verifyResp = await apiFetch(`/api/projects/${projectId}/structured`);
+		if (!verifyResp.ok) return null;
+		const verifyData = await verifyResp.json();
+		return verifyData.components?.[0]?.config?.qa_start_command ?? null;
+	}, { timeout: 5_000 }).toBe("echo ready");
 });
 
 test.describe("Goal creation (full-stack UI) @quarantine", () => {
 	test("create goal via assistant flow @quarantine", async ({ page }) => {
 		await openGoalAssistantProposal(page);
+
+		// The assistant-embedded panel intentionally has no dismiss button.
+		const assistantPanel = page.locator(".goal-preview-panel").first();
+		await expect(assistantPanel.locator("button").filter({ hasText: "Dismiss" })).toHaveCount(0);
 
 		// Now the Create Goal button should be enabled
 		const createGoalBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
@@ -136,6 +157,7 @@ test.describe("Goal creation (full-stack UI) @quarantine", () => {
 	});
 
 	test("optional steps toggle in assistant panel", async ({ page }) => {
+		await mockQaTestingConfigured(page);
 		await openGoalAssistantProposal(page);
 
 		// The mock agent uses workflow "general" which has no optional steps.
@@ -181,6 +203,7 @@ test.describe("Goal creation (full-stack UI) @quarantine", () => {
 	});
 
 	test("optional steps toggle in proposal panel", async ({ page }) => {
+		await mockQaTestingConfigured(page);
 		await openRegularSessionProposal(page);
 
 		// The mock agent uses workflow "general" — no optional steps yet.
@@ -220,15 +243,6 @@ test.describe("Goal creation (full-stack UI) @quarantine", () => {
 		if (createdGoal) await deleteGoal(createdGoal.id);
 	});
 
-	test("dismiss button absent in assistant panel", async ({ page }) => {
-		await openGoalAssistantProposal(page);
-		const assistantPanel = page.locator(".goal-preview-panel").first();
-		await expect(assistantPanel).toBeVisible({ timeout: 5_000 });
-
-		// Verify dismiss button does NOT exist in the assistant panel
-		const dismissInAssistant = assistantPanel.locator("button").filter({ hasText: "Dismiss" });
-		await expect(dismissInAssistant).toHaveCount(0);
-	});
 
 	test("dismiss button present in proposal panel", async ({ page }) => {
 		await openRegularSessionProposal(page);

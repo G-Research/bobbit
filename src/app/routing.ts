@@ -2,26 +2,72 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "settings" | "search" | "walkthrough";
 
+export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
 
+export interface AppRoute {
+	view: RouteView;
+	sessionId?: string;
+	goalId?: string;
+	roleName?: string;
+	toolName?: string;
+	workflowId?: string;
+	staffId?: string;
+	settingsScope?: string;
+	settingsTab?: SettingsTabId;
+	searchQuery?: string;
+	walkthroughSessionId?: string;
+	walkthroughTabId?: string;
+	dashboardTab?: DashboardTabId;
+	focusGateId?: string;
+	focusSignalId?: string;
+}
+
+const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "commits", "gates", "plan", "children"]);
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "components", "workflows", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
+export function getRouteFromHash(): AppRoute {
+	const path = window.location.pathname || "";
+	if (path === "/walkthrough" || path.endsWith("/walkthrough")) {
+		const params = new URLSearchParams(window.location.search || "");
+		return {
+			view: "walkthrough",
+			walkthroughSessionId: params.get("session") || undefined,
+			walkthroughTabId: params.get("tab") || undefined,
+		};
+	}
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
 		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
 		return { view: "search", searchQuery: params?.get("q") || undefined };
 	}
+	if (hash === "#/walkthrough" || hash.startsWith("#/walkthrough?")) {
+		const qIdx = hash.indexOf("?");
+		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
+		return {
+			view: "walkthrough",
+			walkthroughSessionId: params?.get("session") || undefined,
+			walkthroughTabId: params?.get("tab") || undefined,
+		};
+	}
 	const sessionMatch = hash.match(/^#\/session\/([a-zA-Z0-9_-]+)$/i);
 	if (sessionMatch) {
 		return { view: "session", sessionId: sessionMatch[1] };
 	}
-	const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)$/i);
+	const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)(?:\?(.*))?$/i);
 	if (goalMatch) {
-		return { view: "goal-dashboard", goalId: goalMatch[1] };
+		const params = goalMatch[2] ? new URLSearchParams(goalMatch[2]) : null;
+		const tab = params?.get("tab") || undefined;
+		return {
+			view: "goal-dashboard",
+			goalId: goalMatch[1],
+			dashboardTab: tab && DASHBOARD_TABS.has(tab as DashboardTabId) ? tab as DashboardTabId : undefined,
+			focusGateId: params?.get("gate") || undefined,
+			focusSignalId: params?.get("signal") || undefined,
+		};
 	}
 	const roleEditMatch = hash.match(/^#\/roles\/([a-zA-Z0-9_-]+)$/);
 	if (roleEditMatch) {
@@ -54,6 +100,9 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (hash === "#/skills") {
 		return { view: "skills" };
 	}
+	if (hash === "#/market") {
+		return { view: "market" };
+	}
 	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z0-9-]+))?(?:\/([a-z]+))?$/);
 	if (settingsMatch) {
 		const first = settingsMatch[1] as string | undefined;
@@ -70,7 +119,44 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 		const tab = second as SettingsTabId | undefined;
 		return { view: "settings", settingsScope: first, settingsTab: tab && SETTINGS_TABS.has(tab) ? tab : undefined };
 	}
+	if (hash) {
+		return { view: "landing" };
+	}
+	const pathSessionMatch = path.match(/^\/session\/([a-zA-Z0-9_-]+)$/i);
+	if (pathSessionMatch) {
+		return { view: "session", sessionId: pathSessionMatch[1] };
+	}
 	return { view: "landing" };
+}
+
+export function setGoalDashboardRoute(
+	goalId: string,
+	params?: { tab?: DashboardTabId; gate?: string; signal?: string },
+	replace?: boolean,
+	silent?: boolean,
+): void {
+	const query = new URLSearchParams();
+	if (params?.tab) query.set("tab", params.tab);
+	if (params?.gate) query.set("gate", params.gate);
+	if (params?.signal) query.set("signal", params.signal);
+	const suffix = query.toString();
+	const newHash = `#/goal/${goalId}${suffix ? `?${suffix}` : ""}`;
+	if (window.location.hash !== newHash) {
+		if (replace) {
+			history.replaceState({}, "", newHash);
+			if (!silent) window.dispatchEvent(new HashChangeEvent("hashchange"));
+		} else {
+			window.location.hash = newHash;
+		}
+	}
+}
+
+export function canonicalizePathSessionRoute(sessionId: string): void {
+	const expectedPath = `/session/${sessionId}`;
+	const expectedHash = `#/session/${sessionId}`;
+	if (window.location.pathname !== expectedPath || window.location.hash !== expectedHash) return;
+	// replaceState avoids a hashchange while cleaning up path-style deep links.
+	history.replaceState(history.state ?? {}, "", `/#/session/${sessionId}`);
 }
 
 export function setHashRoute(view: RouteView, id?: string, replace?: boolean): void {
@@ -97,8 +183,12 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = "#/staff";
 	} else if (view === "skills") {
 		newHash = "#/skills";
+	} else if (view === "market") {
+		newHash = "#/market";
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
+	} else if (view === "walkthrough") {
+		newHash = id ? `#/walkthrough?${id}` : "#/walkthrough";
 	} else if (view === "settings") {
 		if (id) {
 			// Compound id like "system/models" or "<uuid>/project" → emit as-is
@@ -128,7 +218,7 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 /** Config page route views (not landing, session, or goal-dashboard). */
 const CONFIG_VIEWS: Set<RouteView> = new Set([
 	"roles", "role-edit", "tools", "tool-edit", "workflows", "workflow-edit",
-	"skills", "settings", "staff", "staff-edit",
+	"skills", "market", "settings", "staff", "staff-edit",
 	"search",
 ]);
 
@@ -141,6 +231,11 @@ export function isConfigPageRoute(): boolean {
 export function isRouteActive(...views: RouteView[]): boolean {
 	const current = getRouteFromHash().view;
 	return views.some(v => v === current);
+}
+
+/** Returns true if the marketplace surface is the active route. */
+export function isMarketActive(): boolean {
+	return isRouteActive("market");
 }
 
 /** Shared previous-hash for all config page toggle buttons. */

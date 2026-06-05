@@ -19,7 +19,7 @@ Goals are a task-tracking layer on top of sessions. A goal has a title, spec (ma
 - **Proposal modal tabs**: The goal-proposal modal (from the assistant or `+New Goal`) renders three tabs — **Goal** (the main form), **Workflow** (list + inspect + optional goal-draft customization), and **Roles** (list + inspect + per-role goal-draft customization). The Workflow and Roles tabs reuse the exact same renderer functions as the main Workflows and Roles pages (`renderWorkflowList`, `renderWorkflowInspector`, `renderWorkflowEditor`, `renderRoleList`, `renderRoleInspector`, `renderRoleEditor`). Customizations made in the modal are scoped to the goal draft and submitted as `workflow` (inline snapshot) or `inlineRoles` (subset map) — the project library is never modified. Agent proposals that include `inlineWorkflow` or `inlineRoles` in their payload hydrate the Workflow/Roles tabs so the user can inspect and further customize before accepting. See [docs/design/proposal-modal-tabs.md](design/proposal-modal-tabs.md).
 - **Auto-transition**: Goals move from `todo` to `in-progress` when their first session starts.
 - **Worktrees**: Goals can optionally create a dedicated git worktree for isolated work. After creating the worktree, Bobbit runs the `worktree_setup_command` from `.bobbit/config/project.yaml` to install dependencies (if configured). No setup runs by default — you must explicitly configure it for your project's package manager.
-- **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architecture.
+- **Workflows**: Goals can optionally attach a workflow — a DAG of gates with dependency ordering, quality criteria, and automated verification. Human sign-off steps use the review pane for submitted content, inline/final comments, and approve/reject decisions. See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [review-pane-signoff.md](review-pane-signoff.md) for the full architecture.
 
 ## Teams
 
@@ -57,6 +57,10 @@ Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 - **Catalog budget**: The catalog is capped in bytes to keep the system prompt small. Default is **16 KB**; configurable per-user via Settings → General → "Skills catalog budget" within **1–128 KB**. The preference is stored as `skillsCatalogBudget` (bytes) via `PUT /api/preferences`; absent or `null` falls back to the default. When skills exceed the budget, the list is sorted alphabetically by name and the tail is dropped with a `_… (N more skills omitted, alphabetically truncated)_` footer so the agent knows more exist (it can still invoke them by name). A `[system-prompt] Skills catalog exceeded <budget>B budget — truncated N skill(s).` warning is logged. Tuning bounds are enforced server-side in `resolveSkillsCatalogBudget` (`src/server/agent/system-prompt.ts`) and mirrored by the Settings input.
 - **API**: `GET /api/slash-skills` for autocomplete data, `GET /api/slash-skills/details` for full content, file paths, and scanned directories.
 
+## File References (`@`-mentions)
+
+Type `@` in the prompt composer to reference a file by path, mirroring the `/` slash-skill menu. On send the server resolves each `@path` token: text files are inlined into the model-facing prompt as `<file-reference>` blocks, images route through the `images[]` frame, and other binaries become document attachments. Unresolvable / oversized / out-of-cwd references degrade gracefully to the literal `@path`. Content is snapshotted at send time, so chips and original text replay stably via the shared skill sidecar. Backed by `GET /api/file-mentions`. See [at-mention-file-references.md](at-mention-file-references.md) for the full behaviour, caps, path-safety, and source map.
+
 ## Cost Tracking
 
 Per-session token usage and cost tracking, aggregated to goal and task level.
@@ -65,6 +69,14 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 - Updated via `cost_update` WebSocket events broadcast to connected clients.
 - Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost`.
 - **Tree rollup**: `GET /api/goals/:id/tree-cost` returns cost aggregated across the entire descendant tree, including archived children. Each child's line appears in the breakdown regardless of whether it has been archived — costs are attributed at record time via `goalId` stamping and are never dropped on archive. See [nested-goals.md — Cost rollup](nested-goals.md#cost-rollup) and [rest-api.md](rest-api.md) for the full endpoint contract.
+- Persists cumulative session totals through `CostTracker`; this is the authoritative display source when present.
+- Derives a **`cacheHitRate`** (`cacheReadTokens / (cacheReadTokens + inputTokens)`) on every read — not stored on disk. `null` for cold sessions or providers that don't report cache counters; rendered as `—` in the UI.
+- Hydrates dashboard cost summaries via `cost_update` WebSocket events and `state.serverCost`, including reconnect and post-compaction refresh paths.
+- `CostPopover` fetches `/cost/breakdown` when opened and shows the **Cache hit** row from that response; it is not directly live-updated by `cost_update` frames.
+- Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost` — all responses include `cacheHitRate: number | null`.
+
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
+See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.
 
 ## Prompt Queue
 
@@ -83,6 +95,10 @@ See [prompt-queue.md](prompt-queue.md) for the full architecture.
 ## Workflows
 
 Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no system-scope or builtin layer, and no workflows are seeded at project registration time. (UX safety net: the first time a user creates a goal in a project with no workflows at all, `POST /api/goals` lazy-seeds the built-in `general`/`feature`/`bug-fix`/`parent` workflows into the project’s store so the goal can succeed — see [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).) Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md).
+
+## PR Walkthrough Panel
+
+The PR walkthrough panel is a guided pull-request or changeset review surface. For GitHub PRs, `/walkthrough-pr <url|number>` launches or focuses a read-only child walkthrough agent session; that child owns the waiting panel, publishes cards only through validated `submit_pr_walkthrough_yaml`, and remains available for follow-up chat. Ready walkthroughs can be reviewed in the side panel, fullscreen/wide mode, or a standalone `/walkthrough?...` route. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
 
 ## Assistant Registry
 
@@ -133,4 +149,4 @@ When the agent finishes a turn, the browser client notifies the user via:
 3. **Audio beep** — Two-tone sine wave (880 Hz, 1046 Hz) via Web Audio API
 4. **Favicon badge + sidebar unread dot** — Persists until the user opens the session
 
-These cues are scoped to **human attention**: standalone sessions notify on idle (as before), team members and delegates stay silent (they escalate to their team lead, not the user), and a team lead notifies only when the goal is `complete` or when it is stuck (no live downstream work and no in-flight verification). All three surfaces (polling beep, active-session beep, sidebar dot) consult the single predicate in `src/app/notification-policy.ts`. See [design/notification-policy.md](design/notification-policy.md).
+These cues are scoped to **human attention**: standalone sessions notify on idle (as before), team members and delegates stay silent (they escalate to their team lead, not the user), and a team lead notifies when the goal is `complete`, needs immediate human action, or is persistently stuck. One-shot beeps do not fire merely because a team lead went idle to wait for workers or verification. Notification surfaces consult the predicates in `src/app/notification-policy.ts`. See [design/notification-policy.md](design/notification-policy.md).

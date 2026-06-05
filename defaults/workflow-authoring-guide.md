@@ -202,7 +202,7 @@ Practical implications when authoring workflows:
 
 ## 4. Verification step shapes
 
-There are three step `type:` values: `command`, `llm-review`, `agent-qa`.
+There are four step `type:` values: `command`, `llm-review`, `agent-qa`, `human-signoff`.
 
 ### 4.1 `type: command` — three shapes
 
@@ -214,8 +214,14 @@ There are three step `type:` values: `command`, `llm-review`, `agent-qa`.
 - { name: "Custom api thing", type: command, component: "api", run: "./scripts/special.sh" }
 
 # Shape C: pure free-form, working dir = per-branch container root
-- { name: "Push branch", type: command, run: "git push origin {{branch}}" }
+- { name: "Push branch", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
+
+Use an explicit destination refspec for branch publication. Do **not** use a
+branch-only `git push` command: inherited upstream config and
+`push.default=upstream` can redirect it to the base/primary branch. The
+verification runner rejects unsafe bare pushes and direct updates to protected
+base branches before executing command steps.
 
 Validator rules:
 
@@ -231,7 +237,14 @@ Common optional fields (apply to all three shapes):
 | `phase: <int>` | groups parallel-runnable steps; phases run in ascending order |
 | `expect: success \| failure` | flips pass/fail (use `failure` for TDD reproducing-tests) |
 | `timeout: <seconds>` | per-step timeout (default 300s) |
-| `optional: true` + `label:` + `description:` | renders as a user-toggleable "Enable X" affordance |
+| `optional: true` + `optionalLabel:` + `description:` | renders as a user-toggleable "Enable X" affordance |
+
+> **Field split.** `optionalLabel:` is the goal-creation opt-in toggle
+> label for any `optional: true` step. `label:` is reserved exclusively
+> for the sign-off card title on `type: human-signoff` steps. Older YAML
+> that overloaded `label:` for the opt-in toggle on non-human-signoff
+> steps is migrated forward by the workflow loader and rewritten in canonical
+> shape on next save. See `docs/goals-workflows-tasks.md` for durable details.
 
 ### 4.2 `type: llm-review`
 
@@ -257,12 +270,39 @@ QA agent. Stands up the owning component's `config.qa_start_command` testbed (as
   component: web                   # which component's config.qa_start_command testbed to start
   phase: 3
   optional: true
-  label: Enable QA Testing
+  optionalLabel: Enable QA Testing
   description: Spawn a QA agent that builds, starts the server, and drives a real browser through scenarios.
   prompt: |
     Stand up the ephemeral testbed (the owning component's `config.qa_start_command`),
     plan 3-5 scenarios, drive the browser, submit `verification_result`.
 ```
+
+### 4.4 `type: human-signoff`
+
+Parks the gate on a deferred resolver until a human approves or rejects via the chat-header `<goal-status-widget>`. Reuses the async-verification machinery from `llm-review` / `agent-qa` — restart-safe, cancellable on re-signal, and emits the same `{ passed, output, artifact }` shape every other step produces.
+
+```yaml
+- name: design-approval
+  type: human-signoff
+  phase: 1
+  label: "Approve design doc"
+  prompt: |
+    Review the design doc for {{branch}} and approve or reject.
+    Pay attention to the cancellation semantics in §3.
+```
+
+Required: `label` (non-empty) and `prompt` (non-empty). The validator rejects the step on load otherwise. `{{branch}}`, `{{master}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` are substituted before the prompt is shown to the user.
+
+Behavior contract:
+
+- **No timeout.** The step waits indefinitely. Cancel via the dashboard's `Cancel verification` button if a request becomes irrelevant.
+- **Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve their own gating step.
+- **Test bypass.** Only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a human-signoff step. There is **no** fallback to `BOBBIT_LLM_REVIEW_SKIP` — a "human" gate must not share a bypass with `agent-qa` / `llm-review`, otherwise the global E2E harness (which sets `BOBBIT_LLM_REVIEW_SKIP=1`) would silently auto-approve every human gate.
+- **Rejection feedback.** When the user rejects with feedback, the text lands in the step `output` and a `text/markdown` artifact. The team lead consumes a failed sign-off identically to a failed `llm-review`.
+
+Use sparingly. Most quality concerns are better served by `llm-review` or a command check; reserve `human-signoff` for decisions that genuinely require human judgement (release approval, security exception, design ratification).
+
+Full docs: [docs/goals-workflows-tasks.md — Human sign-off steps](../docs/goals-workflows-tasks.md#human-sign-off-steps).
 
 ## 5. Runtime context tokens
 
@@ -355,8 +395,8 @@ components:
     commands:
       build: npm run build
       check: npm run check
-      unit:  npx playwright test --config tests/playwright.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
-      e2e:   npx playwright test --grep-invert 'mcp-integration|session-lifecycle-ui' --config playwright-e2e.config.ts --reporter=json 2>/dev/null | node scripts/test-filter.mjs
+      unit:  npx playwright test --config tests/playwright.config.ts --reporter=line
+      e2e:   npx playwright test --grep-invert 'mcp-integration|session-lifecycle-ui' --config playwright-e2e.config.ts --reporter=line
     config:
       # QA testbed config — read by the /qa-test skill via the agent-qa step's component field.
       # Env vars are inlined into qa_start_command itself; there is no separate qa_env field.
@@ -397,7 +437,7 @@ workflows:
         name: Ready to Merge
         depends_on: [documentation]
         verify:
-          - { name: "Branch pushed to remote",   type: command, run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Branch pushed to remote",   type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
           - { name: "Master merged into branch", type: command, run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}" }
           - { name: "PR raised",                 type: command, run: "gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q ." }
 ```
@@ -449,8 +489,8 @@ workflows:
         name: Ready to Merge
         depends_on: [implementation]
         verify:
-          - { name: "Push api", type: command, component: "api", run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
-          - { name: "Push web", type: command, component: "web", run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Push api", type: command, component: "api", run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Push web", type: command, component: "web", run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
 The `shared` data-only component generates no workflow steps. It's only present so the worktree pool checks it out alongside `api` and `web` on every goal/session branch — the e2e harness in `api` (or a separate `e2e` component) can then `cd ../shared/...` and consume its fixtures at the right revision.

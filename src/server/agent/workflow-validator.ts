@@ -29,7 +29,10 @@ export interface ValidatorVerifyStep {
 	prompt?: string;
 	role?: string;
 	optional?: boolean;
+	/** Human-signoff card title. Legacy optional-step toggle label may still appear here on old configs. */
 	label?: string;
+	/** Optional-step opt-in toggle label (canonical after the label/optionalLabel split). */
+	optionalLabel?: string;
 	[k: string]: unknown;
 }
 
@@ -144,9 +147,12 @@ export function validateWorkflow(
 				}));
 			};
 
-			// `optional: true` requires `label:` so the UI can render the toggle.
-			if (step.optional === true && !step.label) {
-				fail(`step is optional: true but has no label.`);
+			// `optional: true` requires a goal-creation toggle label. The canonical
+			// field is `optionalLabel`; accept legacy `label` as a backwards-compatible
+			// read path for old configs that have not yet been migrated by
+			// workflow-store::normalizeStep.
+			if (step.optional === true && !step.optionalLabel && !step.label) {
+				fail(`step is optional: true but has no optionalLabel.`);
 			}
 
 			const stepType = step.type ?? "command";
@@ -215,8 +221,18 @@ export function validateWorkflow(
 				if (typeof step.prompt !== "string" || step.prompt.length === 0) {
 					fail(`type: ${stepType} step requires a non-empty "prompt".`);
 				}
+			} else if (stepType === "human-signoff") {
+				// Human sign-off steps surface to the user via the goal-status widget;
+				// the prompt is rendered as markdown context and the label is shown as
+				// the card header. Both are mandatory.
+				if (typeof step.prompt !== "string" || step.prompt.length === 0) {
+					fail(`type: human-signoff step requires a non-empty "prompt".`);
+				}
+				if (typeof step.label !== "string" || step.label.length === 0) {
+					fail(`type: human-signoff step requires a non-empty "label".`);
+				}
 			} else {
-				fail(`unknown step type "${stepType}"; expected one of: command, llm-review, agent-qa.`);
+				fail(`unknown step type "${stepType}"; expected one of: command, llm-review, agent-qa, human-signoff.`);
 			}
 		}
 	}

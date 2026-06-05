@@ -330,8 +330,15 @@ function dynamicGatewayProxy(): Plugin {
 	};
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
 	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
+	// Expose a dev-mode boolean via globalThis so code that needs to gate
+	// dev-only behaviour can read `(globalThis as any).__BOBBIT_DEV__` without
+	// touching `import.meta.env` — important for test fixtures that bundle
+	// via esbuild iife (which doesn't support `import.meta`).
+	define: {
+		"globalThis.__BOBBIT_DEV__": JSON.stringify(mode !== "production"),
+	},
 	build: {
 		outDir: "dist/ui",
 		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)
@@ -345,14 +352,73 @@ export default defineConfig({
 		// Emit `dist/ui/.vite/manifest.json` so the SW plugin can resolve hashed
 		// paths for route-chunk precache (see `bobbitSwVersion`).
 		manifest: true,
+		rollupOptions: {
+			output: {
+				/**
+				 * Pin large, slow-changing vendor deps and stable app seams into
+				 * their own chunks so (a) the entry chunk stays small and (b)
+				 * returning users keep cached vendor bundles across deploys when
+				 * only app code changes. Order matters: more specific paths first.
+				 *
+				 * Anything not matched here falls through to Vite's default
+				 * dependency-graph chunking (lazy provider chunks, dynamic
+				 * imports for pi-ai/qrcode/jszip/highlight.js, etc.).
+				 */
+				manualChunks: (id) => {
+					const normalizedId = id.replace(/\\/g, "/");
+					if (normalizedId.endsWith("/src/app/message-reducer.ts")) return "app-message-reducer";
+					if (normalizedId.endsWith("/src/app/panel-workspace.ts")) return "app-panel-workspace";
+					if (normalizedId.endsWith("/src/app/routing.ts")) return "app-routing";
+					// Additional stable app seams peeled out of the entry chunk to keep
+					// its raw size under the 600 KB budget (see tests/bundle-size.test.ts).
+					// These stay in the eager import graph (entry chunk imports them);
+					// modulePreload covers the extra requests. Packaging change only.
+					if (normalizedId.endsWith("/src/app/session-manager.ts") || normalizedId.endsWith("/src/app/remote-agent.ts")) return "app-session-runtime";
+					if (normalizedId.endsWith("/src/app/pr-walkthrough.ts")) return "app-pr-walkthrough";
+					if (
+						normalizedId.endsWith("/src/app/review-sources.ts") ||
+						normalizedId.endsWith("/src/app/preview-panel.ts") ||
+						normalizedId.endsWith("/src/ui/components/review/ReviewPane.ts") ||
+						normalizedId.endsWith("/src/ui/components/review/AnnotationStore.ts")
+					) return "app-review";
+					if (
+						normalizedId.endsWith("/src/ui/inbox/InboxPanel.ts") ||
+						normalizedId.endsWith("/src/ui/inbox/AddToInboxDialog.ts") ||
+						normalizedId.endsWith("/src/ui/inbox/InboxEntry.ts")
+					) return "app-inbox";
+					if (!normalizedId.includes("node_modules")) return;
+					if (normalizedId.includes("/@sinclair/typebox/")) return "vendor-typebox";
+					if (normalizedId.includes("/marked")) return "vendor-marked";
+					if (normalizedId.includes("/@mariozechner/mini-lit/")) return "vendor-mini-lit";
+					if (normalizedId.includes("/lucide")) return "vendor-lucide";
+					if (normalizedId.includes("/sortablejs/")) return "vendor-sortable";
+					if (normalizedId.includes("/@recogito/") || normalizedId.includes("/@annotorious/") || normalizedId.includes("/rbush")) return "vendor-annotator";
+					if (normalizedId.includes("/lit-html/") || normalizedId.includes("/lit-element/") || normalizedId.includes("/@lit/") || /\/lit\//.test(normalizedId)) return "vendor-lit";
+					return undefined;
+				},
+			},
+		},
 	},
 	server: {
 		host,
 		watch: {
-			// Exclude worktree directories — test runners and agent sessions create
-			// clones under these dirs, and Vite's watcher triggers page reloads for
-			// every file in them.
-			ignored: ["**/.e2e-*/**", "**/bobbit-wt/**", "**/*-wt/**"],
+			// Keep Vite's watcher scoped to source files. Bobbit's runtime writes
+			// heavily under these generated/state directories; watching them causes
+			// idle chokidar churn and thousands of FSWatcher handles on Windows.
+			ignored: [
+				"**/.bobbit/**",
+				"**/.bobbit-*/**",
+				"**/.e2e-*/**",
+				"**/.e2e-fullstack/**",
+				"**/.playwright-mcp/**",
+				"**/.bobbit-qa/**",
+				"**/bobbit-wt/**",
+				"**/*-wt/**",
+				"**/dist/**",
+				"**/coverage/**",
+				"**/playwright-report/**",
+				"**/test-results/**",
+			],
 		},
 		fs: {
 			deny: [".bobbit", "node_modules/.vite"],
@@ -367,4 +433,4 @@ export default defineConfig({
 			}
 			: {}),
 	},
-});
+}));

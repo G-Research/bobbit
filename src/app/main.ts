@@ -10,7 +10,14 @@ import "./app.css";
 import "./workflow-page.css";
 import "./role-manager.css";
 import "./tool-manager.css";
+import "./marketplace.css";
 import "./storage.js"; // must initialize before anything else
+// Eagerly register <bg-process-pill> so it's available the moment the chat
+// view mounts. Lazy-loading via `ensureBgProcessPill()` (lazy-widgets.ts) was
+// 9.3 kB cheaper but produced occasional pill-overflow test flakes during the
+// first paint on cold start, before the chunk had landed. Trading 9 kB raw
+// (still well under the 600 kB entry budget) for deterministic upgrade.
+import "../ui/components/BgProcessPill.js";
 import { ChatPanel } from "../ui/index.js";
 import {
 	state,
@@ -25,7 +32,8 @@ import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
-import { doRenderApp, showHeaderToast } from "./render.js";
+import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
+import { doRenderApp, showHeaderToast, workspaceSessionId } from "./render.js";
 import { renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
@@ -45,12 +53,18 @@ function clearDashboardState(): void {
 	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
+import { activeSidePanelTabIdForSession, loadPersistedPanelWorkspace } from "./panel-workspace.js";
 
 // ============================================================================
 // WIRE UP RENDER
 // ============================================================================
 
 setRenderApp(doRenderApp);
+
+// Restore side-pane tab order, active tab, and preview-version registry from
+// localStorage so user reorders survive reload. Persistence is keyed per
+// session; the corresponding writes live in panel-workspace.ts.
+loadPersistedPanelWorkspace(state);
 
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
@@ -71,6 +85,13 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 
 function hasActiveProposalPanel(): boolean {
 	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
+}
+
+function hasActiveWalkthroughPanel(): boolean {
+	// Used by the in-app resize keyboard shortcuts to recognise the unified panel
+	// as a fullscreen-able walkthrough. The standalone `/walkthrough` route has no
+	// panel-level resize chrome, so it intentionally has no special-case here.
+	return activeSidePanelTabIdForSession(state, workspaceSessionId()).startsWith("walkthrough:");
 }
 
 // ============================================================================
@@ -239,6 +260,19 @@ async function handleHashChange(): Promise<void> {
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
 			renderApp();
+			await refreshSessions();
+		} else if (route.view === "walkthrough") {
+			clearDashboardState();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
+			renderApp();
+			await refreshSessions();
 		} else if (route.view === "roles") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -346,6 +380,20 @@ async function handleHashChange(): Promise<void> {
 			loadSkillsPageData();
 			renderApp();
 			await refreshSessions();
+		} else if (route.view === "market") {
+			clearDashboardState();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
+			const { loadMarketplaceData } = await import("./marketplace-page.js");
+			loadMarketplaceData();
+			renderApp();
+			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -450,6 +498,11 @@ async function initApp() {
 		state.appView = "gateway-starting";
 	}
 	renderApp();
+	// Signal boot intent. renderApp() defers the real Lit render to a rAF, so
+	// #app may still be empty right now — markAppBooted() does NOT clear the
+	// index.html boot watchdog until #app ACTUALLY paints (via MutationObserver).
+	// See pwa-lifecycle.ts.
+	markAppBooted();
 
 	// Listen for browser back/forward navigation — register early so hash changes
 	// during async init (gateway wait, session refresh) are not silently missed.
@@ -505,6 +558,10 @@ async function initApp() {
 				loadDashboardData(route.goalId);
 				renderApp();
 				await refreshSessions();
+			} else if (route.view === "walkthrough") {
+				state.appView = "authenticated";
+				renderApp();
+				await refreshSessions();
 			} else if (route.view === "roles") {
 				const { loadRolePageData } = await import("./role-manager-page.js");
 				loadRolePageData();
@@ -534,6 +591,9 @@ async function initApp() {
 			} else if (route.view === "skills") {
 				const { loadSkillsPageData } = await import("./skills-page.js");
 				loadSkillsPageData();
+			} else if (route.view === "market") {
+				const { loadMarketplaceData } = await import("./marketplace-page.js");
+				loadMarketplaceData();
 			} else if (route.view === "staff") {
 				const { loadStaffPageData } = await import("./staff-page.js");
 				loadStaffPageData();
@@ -613,10 +673,10 @@ async function initApp() {
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
+			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel());
 			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
-				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
 				if (collapsed) {
 					// level 0 → 1: uncollapse to half view
@@ -673,9 +733,9 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel() || hasActiveProposalPanel());
 			if (!hasPanel) return;
-			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+			const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 			if (state.previewPanelFullscreen) {
 				// level 2 → 1: exit fullscreen, keep half view
 				state.previewPanelFullscreen = false;
@@ -697,15 +757,16 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
+			const hasWalkthroughPanel = hasActiveWalkthroughPanel();
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasWalkthroughPanel || hasActiveProposalPanel());
 			if (hasPanel) {
-				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				if (state.previewPanelFullscreen) {
 					// level 2 → 0: exit fullscreen and collapse
 					state.previewPanelFullscreen = false;
 					localStorage.setItem(key, "true");
 					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-				} else if (state.isPreviewSession) {
+				} else if (state.isPreviewSession || hasWalkthroughPanel) {
 					// any non-fullscreen level → 2: jump to fullscreen
 					localStorage.setItem(key, "false");
 					state.previewPanelFullscreen = true;
@@ -838,6 +899,22 @@ initApp();
 if ('serviceWorker' in navigator) {
 	navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+
+// iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).
+// All paths are gated on standalone display mode, so a normal browser tab and
+// the dev server are unaffected. Division of labor: this recovers a DEAD/FROZEN
+// page (force reload to re-bootstrap); the existing `visibilitychange` handler
+// above and `_onVisibilityChange` in remote-agent.ts recover a dead WebSocket on
+// a LIVE page. The two are disjoint and must not be conflated. See
+// src/app/pwa-lifecycle.ts.
+if (import.meta.hot) {
+	// Never let the inline boot watchdog fight Vite HMR full-reloads in dev.
+	if (typeof window !== "undefined" && window.__bobbitBootWatchdog != null) {
+		clearTimeout(window.__bobbitBootWatchdog as ReturnType<typeof setTimeout>);
+		window.__bobbitBootWatchdog = undefined;
+	}
+}
+installPwaLifecycleRecovery();
 
 // Vite HMR hot-reload detection
 if (import.meta.hot) {

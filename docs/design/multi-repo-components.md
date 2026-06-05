@@ -44,6 +44,8 @@ multi-repo:    <rootPath>/                 ← container dir (NOT a repo)
 
 The agent's cwd in multi-repo is `<branchSlug>/` (the per-branch container), mirroring `rootPath`'s structure exactly.
 
+A single resolver — `worktree-support.ts::resolveWorktreeSupport` — decides worktree capability for the session, staff, and goal paths alike, and `createWorktreeSet` only worktrees component dirs that are real git repo roots (skipping the non-git poly-repo container). See §4.4 / §4.5.
+
 ---
 
 ## 1. Project model — components as first-class
@@ -223,8 +225,9 @@ Surface the warning in the project assistant chat and in Settings → project ta
 3. **Workflow gate semantics:** id, name, depends_on, content, inject_downstream, optional, manual (see §3.6), metadata schema, signal contracts.
 4. **Verification step shapes:**
    - `type: command` — structural `{ component, command }`, structural `{ component, run }`, or pure `{ run }`.
-   - `type: llm-review` — `role`, `prompt`, `phase`, `expect`, `optional`, `label`, `description`, `timeout`.
+   - `type: llm-review` — `role`, `prompt`, `phase`, `expect`, `optional`, `optionalLabel`, `description`, `timeout`.
    - `type: agent-qa` — same plus implicit dependency on project-level `qa_*` fields.
+   - `type: human-signoff` — `label` (sign-off card title), `prompt`, `phase`, `role`, `optional`, `optionalLabel`, `description`; no timeout.
 5. **Runtime context tokens:** `{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{agent.<key>}}`, `{{<gate_id>.meta.<key>}}`. **No `{{project.<key>}}`** (replaced by structural references).
 6. **Pattern library** — typical gates per workflow style: general / feature / bug-fix / quick-fix / pr-review. The bobbit appendix in the goal spec is reproduced as a worked single-repo example; multi-repo and monorepo worked examples follow the same shape.
 7. **Anti-patterns:** literal shell strings instead of structural refs; copy-paste of step bodies; over-broad `expect: failure`.
@@ -240,27 +243,33 @@ Stored in `project.yaml`. Discriminated union for steps:
 export type CommandStep =
   | { name: string; type: "command"; component: string; command: string;
       phase?: number; expect?: "success" | "failure"; timeout?: number;
-      optional?: boolean; label?: string; description?: string }
+      optional?: boolean; optionalLabel?: string; description?: string }
   | { name: string; type: "command"; component: string; run: string;
       phase?: number; expect?: "success" | "failure"; timeout?: number;
-      optional?: boolean; label?: string; description?: string }
+      optional?: boolean; optionalLabel?: string; description?: string }
   | { name: string; type: "command"; run: string;
       phase?: number; expect?: "success" | "failure"; timeout?: number;
-      optional?: boolean; label?: string; description?: string };
+      optional?: boolean; optionalLabel?: string; description?: string };
 
 export type LlmReviewStep = {
   name: string; type: "llm-review"; prompt: string;
   role?: string; phase?: number; expect?: "success" | "failure";
-  timeout?: number; optional?: boolean; label?: string; description?: string;
+  timeout?: number; optional?: boolean; optionalLabel?: string; description?: string;
 };
 
 export type AgentQaStep = {
   name: string; type: "agent-qa"; prompt: string;
   role?: string; phase?: number; timeout?: number;
-  optional?: boolean; label?: string; description?: string;
+  optional?: boolean; optionalLabel?: string; description?: string;
 };
 
-export type VerifyStep = CommandStep | LlmReviewStep | AgentQaStep;
+export type HumanSignoffStep = {
+  name: string; type: "human-signoff"; label: string; prompt: string;
+  role?: string; phase?: number;
+  optional?: boolean; optionalLabel?: string; description?: string;
+};
+
+export type VerifyStep = CommandStep | LlmReviewStep | AgentQaStep | HumanSignoffStep;
 
 export interface WorkflowGate {
   id: string;
@@ -345,7 +354,7 @@ Rules:
   - `command` step with neither `command` nor `run` → reject.
   - `command`/`component` pair where component or command name is unknown → reject (with "did you mean" suggestion via Levenshtein on the available set).
 - Free-form `run:` strings and `prompt:` strings → **not** validated for tokens. Runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{agent.x}}`, `{{<gate>.meta.x}}`) pass through to `verification-logic.ts::substituteVars`. Anything else fails at shell-time as a typo. (Acceptance criterion 6.)
-- `optional` step requires `label`.
+- `optional` step requires `optionalLabel` (legacy non-human `label` is migrated on load and saved canonically).
 - `agent-qa` step requires the project to have `qa_start_command` configured (warn, don't reject — runtime already returns "QA not configured").
 
 Error format (acceptance criterion 8):
@@ -380,11 +389,12 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 | 9 | Step `type: command` with `{{project.X}}` | implementation gates | **Replaced by** `{ component, command }` | `step-component-resolution.spec.ts` |
 | 10 | Step `type: llm-review` with `prompt` | many | Same shape; structural refs not relevant | `llm-review-step.spec.ts` |
 | 11 | Step `type: agent-qa` with `prompt` | feature, bug-fix | Same shape | `agent-qa-step.spec.ts` |
-| 12 | Step `role:` (architect, code-reviewer, security-reviewer, spec-auditor, qa-tester) | many | Unchanged | covered by 10/11 |
+| 11a | Step `type: human-signoff` with `label` + `prompt` | human approval gates | First-class workflow step; parks verification until the chat-header goal-status widget receives approve/reject. `label` is the sign-off card title. | `human-signoff.spec.ts`, `goal-status-widget.spec.ts` |
+| 12 | Step `role:` (architect, code-reviewer, security-reviewer, spec-auditor, qa-tester) | many | Unchanged | covered by 10/11/11a |
 | 13 | Step `expect: failure` | bug-fix `reproducing-test` (and TDD) | Unchanged on all `command` shapes | `step-expect-failure.spec.ts` |
 | 14 | Step `timeout:` (seconds) | build/E2E steps | Unchanged | `step-timeout.spec.ts` |
 | 15 | Step `phase:` (parallel grouping) | many | Unchanged | `phased-verification.spec.ts` (existing) |
-| 16 | Step `optional: true` + `label` + `description` | feature/bug-fix QA testing | Unchanged | `optional-step-toggle.spec.ts` (existing) |
+| 16 | Step `optional: true` + `optionalLabel` + `description` | feature/bug-fix QA testing | `optionalLabel` is canonical for goal-creation toggles; legacy non-human `label` is migrated on load/save. `label` is reserved for human-signoff card titles. | `optional-step-toggle.spec.ts` (existing) |
 | 17 | `{{branch}}` / `{{master}}` runtime tokens | many | Unchanged in `run:` and `prompt:` | `template-vars.spec.ts` (existing) |
 | 18 | `{{goal_spec}}` injection | many | Unchanged | existing |
 | 19 | `{{agent.X}}` from signal metadata | bug-fix `{{agent.test_command}}` | Unchanged | existing |
@@ -456,6 +466,41 @@ In multi-repo, the container directory is created (`mkdir -p`) but is not itself
 
 All paths in `src/server/agent/{goal-manager,session-manager,session-setup,worktree-pool}.ts` and `src/server/skills/git.ts` that currently compute `<repoPath>-wt/<branchSlug>` must call `branchContainer()` / `repoWorktreePath()` instead. Search guard: grep for `-wt`, `path.basename(repoPath)`, `path.resolve(repoPath, "..")` — replace with helpers.
 
+### 4.4 Worktree-capability resolution — single source of truth
+
+**Problem.** "Does this project support a worktree, and what is the container `repoPath`?" was answered in three places with three different rules — the session REST path (`server.ts` `POST /api/sessions`), the staff path (`staff-manager.ts`), and the goal path (`goal-manager.ts::createGoal`). The staff rule was the buggy outlier: it iterated `repoNames()` and required **every** declared repo — including a non-git `.` container in a poly-repo — to pass `isGitRepo`. In a poly-repo (a project whose root is *not* a git repo but contains git sub-repos as components), that either bailed to `supported:false` or, worse, drove `git worktree add` against the non-git container root and failed with `fatal: not a git repository`. Staff creation diverged from session creation for the same project — the opposite of the stated staff↔session parity premise.
+
+**Fix.** `src/server/agent/worktree-support.ts::resolveWorktreeSupport(components, projectRoot, cwd)` is now the single source of truth. It returns `{ supported, repoPath?, multiRepo }` and is called identically by all three paths (session, staff, goal). Centralising the decision is the whole point: a poly-repo now resolves the same way no matter who asks, so staff behaves exactly like a regular session.
+
+The decision rule:
+
+- **Multi-repo** (any component `repo !== "."`): worktrees anchor at `projectRoot` **only**. `supported` is true iff `projectRoot` is known **and** at least one distinct component repo resolves to a git repo **root** beneath it (probed with `isGitRepoRoot`, see §4.5). On success: `repoPath = projectRoot`, `multiRepo: true`. Multi-repo **never** falls through to a `cwd`/ancestor probe — doing so would let a non-git container nested inside an *unrelated* parent git repo resolve to that parent and reintroduce the bug.
+- **Single-repo** (no component `repo !== "."`): if `cwd` is inside a git repo, `repoPath = getRepoRoot(cwd)`, `multiRepo: false`, `supported: true`; otherwise unsupported.
+- **Otherwise unsupported** → callers proceed with **no worktree** (run in the original `cwd`), never throw.
+
+Call sites: `server.ts` (session) sets `worktreeOpts.repoPath` from `support.repoPath` when supported; `staff-manager.ts::projectSupportsWorktree` delegates wholesale and forwards `components`; `goal-manager.ts::createGoal` sets `repoPath` from it.
+
+### 4.5 `createWorktreeSet` skips non-git component dirs; graceful no-worktree fallback
+
+**`isGitRepoRoot` vs `isGitRepo` (`src/server/skills/git.ts`).** `isGitRepo(dir)` runs `git rev-parse --is-inside-work-tree`, which returns true for **any** path *inside* a repo — including a non-git poly-repo container that merely happens to sit under an unrelated parent git repo (the "nested-parent false positive"). `isGitRepoRoot(dir)` instead compares the canonicalized `git rev-parse --show-toplevel` against the canonicalized input dir, so it is true **only when `dir` is itself a repo root** (canonicalization is win32 case-insensitive). The distinction matters because acting on the false positive would run `git worktree add` against a directory that is not a worktree-able repo.
+
+**Skip rule.** In multi-repo mode, `createWorktreeSet(rootPath, components, branch, …)` now keeps a distinct repo only if its source dir (`<rootPath>/<repo>`) passes `isGitRepoRoot`. One rule covers four cases that must all be skipped:
+
+- the non-git `.` container in a poly-repo (the original `fatal: not a git repository` crash),
+- the nested-parent false positive (non-git container under an unrelated parent git repo),
+- non-git, data-only components, and
+- components whose source dir is missing.
+
+A `.` entry whose source *is* a git repo root (a genuine single-repo / container-root component) is still kept, so single-repo and normal all-git multi-repo behaviour is unchanged.
+
+**Graceful no-worktree fallback.** If no worktree-able git repo remains after the skip pass, `createWorktreeSet` short-circuits and returns an empty `worktrees: []` **without creating the container directory** — it never runs `git worktree add` against the non-git root. Each caller treats an empty set (or `supported:false` from §4.4) as "no worktree": run in the original `cwd`, leave `worktreePath` / `repoWorktrees` unset.
+
+- `staff-manager.ts::provisionStaffWorktree` → returns `{ sessionCwd: cwd }`.
+- `session-setup.ts::executeWorktreeAsync` → sets `noWorktreeFallback`, skips per-component setup and sandbox-branch wiring, leaves `plan.cwd` unchanged.
+- `goal-manager.ts::_doSetupWorktree` → calls `_restoreNoWorktree`, which clears the precomputed `worktreePath`/`repoWorktrees` and resets the goal `cwd` to its original (un-offset) project path.
+
+**Net effect.** Staff creation in a poly-repo now produces one worktree per git sub-repo under the branch container — byte-for-byte the same shape a regular session produces for the same project. Projects with no worktree-able git repo fall back to no-worktree instead of throwing.
+
 ---
 
 ## 5. Worktree pool fixes
@@ -497,12 +542,13 @@ class WorktreePool {
 
 For each repo in the pool entry, in parallel:
 
-1. `git branch -m pool/<poolId> <targetBranch>` (fast, <50 ms).
-2. `git worktree move <pool-path> <target-path>` — atomic since git 2.17. On failure (typically Windows file locks), **degraded fallback**: skip the move; log `[worktree-pool] degraded: dir kept at pool path for <repo>`. The branch rename succeeded so the agent can still work; only the directory name is stale. The boot sweeper will reclaim it later.
+1. `git branch -m pool/<poolId> <targetBranch>` (fast, local ref rename).
+2. Clear any inherited upstream unless it already points at `origin/<targetBranch>`. This happens before the caller receives the claimed worktree, so a pool branch that tracked `origin/master` cannot leak that upstream into a goal/session branch.
+3. `git worktree move <pool-path> <target-path>` — atomic since git 2.17. On failure (typically Windows file locks), **degraded fallback**: skip the move; log `[worktree-pool] degraded: dir kept at pool path for <repo>`. The branch rename succeeded so the agent can still work; only the directory name is stale. The boot sweeper will reclaim it later.
 
-3. **Hand control to the caller now.** The remaining steps run in the background:
-   - `git fetch origin` then `git reset --hard <remote-primary>`.
-   - `git push -u origin <targetBranch>` (fire-and-forget, skipped under `BOBBIT_TEST_NO_PUSH=1`).
+4. **Hand control to the caller now.** The remaining steps run in the background:
+   - `git fetch origin` then `git reset --hard <base-ref>`.
+   - `git push origin <targetBranch>:refs/heads/<targetBranch>` (fire-and-forget, skipped under `BOBBIT_TEST_NO_PUSH=1`), then fetch the remote-tracking ref and set upstream to `origin/<targetBranch>`.
 
 Replenishment kicks off immediately. Pool target is `worktree_pool_size` × number of distinct repos (so pool slot count is per-set, not per-repo).
 
@@ -621,13 +667,15 @@ export function readHandoff(task: PersistedTask, repo: string):
 - `GET /api/goals/:id/git-diff?repo=<name>` → diff scoped to a repo. Without `?repo=`, returns concatenated diff with per-repo headers.
 - `batchGitStatus()` (existing) is reused per-repo and aggregated.
 
+The matching **session-context** endpoints (`GET /api/sessions/:id/git-status` and `git-diff`) reached parity in a follow-up — see §13 for the session envelope, the synthesized aggregate for non-git branch containers, per-repo diff routing, and the container-diff security hardening.
+
 ### 6.3 PR-per-repo
 
-Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
+Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}:refs/heads/{{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
 
 ```yaml
 - { name: "Push api", type: command, component: "api",
-    run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+    run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 - { name: "Push web", type: command, component: "web", run: "…" }
 ```
 
@@ -896,6 +944,62 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 1. **Manual gates (§3.6)** — UI affordance is "Mark passed" button. Confirm whether we want a comment field on manual-pass for an audit trail. Default: yes, store `metadata.note`.
 2. **Pool sizing for multi-repo** — `worktree_pool_size` is per-set today. For an N-repo project, this means N×size physical worktrees. If memory/disk pressure becomes an issue we can introduce `worktree_pool_repo_concurrency` later.
 3. **`worktree_root` + sandbox** — currently warned and ignored. If users push back, we can mount a host bind under `/workspace-wt-host` and reroute. Not in the AC.
+
+---
+
+## 13. Session git-status / git-diff parity (addendum, 2026-06)
+
+§6.2 described the **goal** dashboard's aggregated git status/diff. This section documents the matching **session-context** work: the per-session pill + popover above the composer now show the same multi-repo aggregate that the goal dashboard does. Goal and single-repo behaviour are byte-for-byte unchanged; only the session code path gained multi-repo awareness.
+
+**Why this was needed.** A polyrepo session's worktrees live one level under a non-git *branch container* (see §4.2). The session widget previously statused only the container `cwd` and rendered a flat single-repo result — so a true polyrepo session showed just a branch name with no per-repo breakdown and no aggregated dirty/ahead/behind/diff counts. The goal path already solved this; sessions were the remaining gap.
+
+### 13.1 Envelope shape (`GET /api/sessions/:id/git-status`)
+
+The handler in `src/server/server.ts` (the `/api/sessions/:id/git-status` branch) mirrors the goal handler's envelope:
+
+- **Single-repo / no `repoWorktrees`** → unchanged flat shape plus back-compat keys: `{ ...result, aggregate: result, repos: { ".": result } }`. The existing 400 `{ error: "Not a git repository" }` and 500 paths are preserved, and the auto-push of unpushed feature/`session/…` branches still runs on `result`.
+- **Multi-repo** (`session.repoWorktrees.length > 1`) → `{ ...aggregate, aggregate, repos }`, where `repos` is keyed by **repo name** and each entry is a full `GitStatusResult`.
+
+**Shape note.** In-memory `session.repoWorktrees` is an **array** `Array<{ repo, repoPath, worktreePath }>` (see `session-manager.ts`), unlike the goal's `Record<string, string>` (`goal.repoWorktrees`). The session handler iterates the array and statuses each entry's `worktreePath` (sandboxed sessions route through the container via the `containerId` argument, exactly as the flat path does). Per-repo failures are swallowed (`try/catch`, skip the entry) so one broken sub-repo cannot 500 the whole status. Each per-repo `batchGitStatus` call honours the project `base_ref` config (`configuredBaseRef`), matching the goal handler and `docs/design/base-ref.md` §5.
+
+### 13.2 Synthesized aggregate for non-git containers
+
+The root container status comes from `batchGitStatus(cwd, …)`. In a **true polyrepo** the container `cwd` is *not* itself a git repo (§4.2), so this returns `null` / throws. That is **non-fatal in multi-repo mode** — the per-repo worktrees are the source of truth. The aggregate is resolved as:
+
+1. **Root `result` exists** (the container is itself a git repo — e.g. a `repo: "."` component, or a single-repo collapse) → use it as the aggregate, for back-compat with the flat shape.
+2. **Root `result` is null** (genuine non-git container) → **synthesize** an aggregate from the per-repo results. All sub-repos share the same session branch, so `branch` / `primaryBranch` / `primaryRef` / `isOnPrimary` / `hasUpstream` / `mergedIntoPrimary` are taken from the **first** repo, while the numeric counters (`ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `insertionsVsPrimary`, `deletionsVsPrimary`) are **summed** across repos. `clean` is the **AND** across repos (clean only if every repo is clean), `unpushed` is the **OR**, `status` is `[]` (the flat file list is suppressed — the per-repo popover sections are authoritative), and `summary` is `"<N> repos"`.
+
+If neither a root `result` nor any per-repo result is available, the handler returns the same 400 `{ error: "Not a git repository" }` as the flat path.
+
+**Why synthesize rather than 400.** Without the synthesized aggregate, a polyrepo session whose container is non-git would have no top-level status object at all, so the pill would fall back to rendering only the branch name — the exact gap this work closes. Synthesizing lets the pill show real aggregated stats even though the directory the agent's `cwd` points at is not a git repo.
+
+**Auto-push** only runs when the root `result` exists. For a non-git-container polyrepo there is no root repo to push, and the individual session branches are already published at worktree-claim time (§5.2 / `docs/design/remove-session-worktree-rename.md`), so skipping container auto-push is correct.
+
+### 13.3 Per-repo diff routing (`GET /api/sessions/:id/git-diff`)
+
+Clicking a file inside a per-repo popover section opens that repo's diff. The widget's `_openDiffModal(file, repo?)` (`src/ui/components/GitStatusWidget.ts`) appends `?repo=<name>` to the diff URL when the file came from a multi-repo section. The session `git-diff` handler resolves `?repo=` against `session.repoWorktrees` (find the array entry whose `repo` matches) and diffs that entry's `worktreePath`; an absent or `.` repo param (or an unknown name) falls back to the container `cwd`. This mirrors the goal `git-diff` handler's `?repo=` resolution.
+
+### 13.4 Container-path security: argument-vector exec
+
+`getGitDiff`'s container branch previously built a `/bin/sh -c "git diff … -- <file>"` string with the user-supplied `file` interpolated in, a command-injection vector. It now uses **argument-vector execution** via `execGitArgsSafe` → `execGitArgs`, which runs `docker exec -w <cwd> <containerId> git <args…>` with `file` passed as a distinct argv element — never parsed by a shell. (Path-traversal / absolute / drive-letter `file` values are still rejected up front with `INVALID_PATH`.)
+
+**Why argv instead of a shell string.** Passing `file` through `/bin/sh -c` meant any shell metacharacters in the filename were interpreted by the container's shell. Argv execution removes the shell entirely, so the diff target is always treated as literal data regardless of its contents — closing the injection vector without changing behaviour for legitimate paths.
+
+### 13.5 Widget rendering
+
+`src/ui/components/GitStatusWidget.ts` already rendered per-repo sections and a multi-repo pill label; this work completed the aggregation:
+
+- **Pill** — in multi-repo mode (`repos` has >1 entry) the pill shows `"<N> changed across <M> repos"` (dirty-file count summed across repos, `M` = count of dirty repos) **plus** full aggregated primary-comparison segments. `_aggregatePrimaryStats()` sums `aheadOfPrimary` / `behindPrimary` / `insertionsVsPrimary` / `deletionsVsPrimary` across the `repos` envelope entries, and `_segmentSpans()` renders the shared coloured `↓behind ↑ahead +ins -del` markup (the same helper the flat `_pillSegments()` uses, so styling never diverges).
+- **Clean collapse** — multi-repo clean state (every repo clean *and* all summed primary stats zero, with no PR) collapses to the single green "clean" indicator. This is derived from the **aggregate**, **independent of `isOnPrimary`** — a clean `session/…` branch must still collapse to "clean" even though it is not on the primary branch. Flat/single-repo collapse logic is unchanged (it still considers `isOnPrimary` / `mergedIntoPrimary`).
+- **Popover** — `_renderMultiRepoSections()` renders one collapsible section per repo with per-repo counts; dirty repos auto-expand, clean ones stay collapsed.
+
+The per-repo envelope entries already carried `aheadOfPrimary` / `behindPrimary` / `insertionsVsPrimary` / `deletionsVsPrimary` (added by the line-counts work in `docs/design/git-status-widget-reliability.md` §13), so the pill aggregation reuses those fields directly rather than recomputing anything server-side.
+
+### 13.6 Tests
+
+- **Widget unit / file-fixture** — the `git-status-widget-multi-repo` bundle (`tests/fixtures/build-bundle.ts`) covers the full-aggregate pill (summed dirty + ahead/behind/+/−) and the clean-collapse case.
+- **API E2E** — `GET /api/sessions/:id/git-status` returns `{ repos, aggregate }` for a multi-repo session and the unchanged flat + `repos: { ".": result }` shape for single-repo.
+- **Browser E2E** (`tests/e2e/ui/`) — a polyrepo session shows aggregated pill stats; the popover shows one section per repo with correct counts; a clean repo renders collapsed; clicking a file opens that repo's diff; state persists across reload.
 
 ---
 

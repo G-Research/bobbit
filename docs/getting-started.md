@@ -6,7 +6,7 @@ Bobbit is a tool that lets you run an AI coding agent on your machine and contro
 
 ## Prerequisites
 
-- **Node.js 18+** (check with `node --version`)
+- **Node.js 22.19 or later** (check with `node --version`) — required by the bundled `@earendil-works/pi-*` runtime
 - A modern browser (Chrome, Firefox, Safari, Edge)
 
 ## Installation

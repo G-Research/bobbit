@@ -13,7 +13,7 @@
  *  STAY_BUSY:<ms>           Emit one Bash tool_execution_start, tick <ms>,
  *                           then tool_execution_end. Default for prompts
  *                           with no other trigger is busyMs=10.
- *  STAY_BUSY:propose_<type>:<n>
+ *  STAY_BUSY:propose_<type>:<n>[:<intervalMs>]
  *                           Emit N message_update deltas streaming a
  *                           propose_<type> tool_use, then message_end +
  *                           tool_execution_* lifecycle. Stable block id
@@ -61,6 +61,7 @@
  * UI primitives
  * -------------
  *  ask_user_choices         Single-select widget.
+ *  ask_user_choices_composite Single-select widget with composite tool_use_id.
  *  ask_user_choices_multi   Multi-select widget.
  *
  * Steer (RPC, not a prompt-text trigger)
@@ -90,6 +91,14 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { execSync } from "node:child_process";
+
+// Keep explicitly aligned with src/shared/ask-envelope.ts. This file is .mjs
+// and is used directly by E2E mock-agent processes, so it cannot import the TS
+// shared module without extra loader wiring.
+const ASK_TOOL_USE_ID_PATTERN = "[A-Za-z0-9_|-]+";
+const ASK_RESPONSE_ENVELOPE_REGEX = new RegExp(
+	`^\\[ask_user_choices_response tool_use_id=(${ASK_TOOL_USE_ID_PATTERN})\\]\\n([\\s\\S]+)$`,
+);
 
 /**
  * @typedef {Object} MockAgentOptions
@@ -435,6 +444,9 @@ export class MockAgentCore {
 		if (lower.includes("ask_user_choices_multi")) {
 			return { askUserChoices: "multi" };
 		}
+		if (lower.includes("ask_user_choices_composite") || lower.includes("ask user choices composite")) {
+			return { askUserChoices: "composite" };
+		}
 		if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
 			// Signals the mock agent to emit a non-blocking ask_user_choices tool_use.
 			// The tool returns {status:"posted", tool_use_id} synchronously; answers arrive
@@ -458,11 +470,31 @@ export class MockAgentCore {
 	}
 
 	/** Simulate a full agent turn: streaming start → tool calls → assistant text → end */
-	async handlePrompt(text) {
+	async handlePrompt(text, images) {
 		this.currentAbortController = new AbortController();
 
-		// Echo back the user message (real agent does this)
-		const userMsg = { role: "user", content: [{ type: "text", text }] };
+		// Echo back the user message (real agent does this).
+		//
+		// Image fidelity (WP0 / PR-0): the real pi-agent builds the user echo as
+		// {role:"user", content:[text, ...imageBlocks]} via normalizePromptInput
+		// (pi-agent-core/dist/agent.js:248-259) and persists it to .jsonl. The
+		// default mock echoed text-only and discarded forwarded images, which
+		// structurally excised the image round-trip from the e2e tier (hid
+		// S1/S6/S18/S26 — see docs/design/comms-stack/02-analysis.md §4 P0). Opt
+		// in via the ECHO_IMAGE_BLOCK trigger so the default path stays
+		// byte-identical for every existing test.
+		const echoImages = /ECHO_IMAGE_BLOCK/.test(text) && Array.isArray(images) && images.length
+			? images.map((im) => ({ type: "image", data: im.data, mimeType: im.mimeType || "image/png" }))
+			: [];
+		const userMsg = { role: "user", content: [{ type: "text", text }, ...echoImages] };
+		// Optional echo-delay knob to widen the optimistic→echo race window for
+		// timing tests (env MOCK_USER_ECHO_DELAY_MS, or inline USER_ECHO_DELAY=<ms>
+		// so it survives the spawned/in-process boundary). Default: synchronous.
+		const echoDelayMs = (() => {
+			const m = /USER_ECHO_DELAY=(\d+)/.exec(text);
+			return m ? parseInt(m[1], 10) : parseInt(this.env.MOCK_USER_ECHO_DELAY_MS || "0", 10);
+		})();
+		if (echoDelayMs > 0) await new Promise((r) => setTimeout(r, echoDelayMs));
 		this.conversationMessages.push(userMsg);
 		this.emit({ type: "message_end", message: userMsg });
 
@@ -546,13 +578,17 @@ export class MockAgentCore {
 			return;
 		}
 
-		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>.
+		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>[:<intervalMs>].
 		// Emits N message_update deltas (each with a single tool_use whose input
 		// grows on each delta), then message_end + tool_execution_* + agent_end.
 		// Block id is stable so RemoteAgent's _processedProposalIds dedup engages.
-		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)/);
+		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)(?::(\d+))?/);
 		if (proposeStreamMatch) {
-			await this._handleStreamingProposal(proposeStreamMatch[1], parseInt(proposeStreamMatch[2], 10));
+			await this._handleStreamingProposal(
+				proposeStreamMatch[1],
+				parseInt(proposeStreamMatch[2], 10),
+				proposeStreamMatch[3] ? parseInt(proposeStreamMatch[3], 10) : undefined,
+			);
 			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
 				this.currentAbortController = null;
 				return;
@@ -571,7 +607,10 @@ export class MockAgentCore {
 			if (toolAction.askUserChoices === "errorThenRetry") {
 				await this._handleAskUserChoicesErrorThenRetry();
 			} else {
-				await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+				await this._handleAskUserChoices(
+					toolAction.askUserChoices === "multi",
+					{ compositeId: toolAction.askUserChoices === "composite" },
+				);
 			}
 		} else if (toolAction && toolAction.liveUpdateProposal) {
 			await this._handleLiveUpdateProposal();
@@ -1105,12 +1144,14 @@ export class MockAgentCore {
 		}
 	}
 
-	async _handleAskUserChoices(multi = false) {
+	async _handleAskUserChoices(multi = false, { compositeId = false } = {}) {
 		// Non-blocking model: the ask_user_choices tool returns immediately with
 		// a `{status:"posted", tool_use_id}` stub and the turn ends. The user's
 		// answers arrive in a *later* prompt as an envelope user message — see
 		// `_handleAskResponseEnvelope` below.
-		const toolId = `tool_ask_${Date.now()}`;
+		const toolId = compositeId
+			? `tool_ask_${Date.now()}|fc_${Math.random().toString(36).slice(2, 8)}`
+			: `tool_ask_${Date.now()}`;
 
 		const questions = multi
 			? [
@@ -1234,7 +1275,7 @@ export class MockAgentCore {
 	 * text message so E2E tests can observe the round-trip.
 	 */
 	async _handleAskResponseEnvelope(text) {
-		const m = /^\[ask_user_choices_response tool_use_id=([A-Za-z0-9_-]+)\]\n([\s\S]+)$/.exec(text);
+		const m = ASK_RESPONSE_ENVELOPE_REGEX.exec(text);
 		if (!m) return;
 		const toolUseId = m[1];
 		let answers = null;
@@ -1575,7 +1616,7 @@ export class MockAgentCore {
 
 	/** Stream a propose_<type> tool_use across N message_update deltas, then
 	 *  emit message_end + tool_execution_start/end. */
-	async _handleStreamingProposal(type, n) {
+	async _handleStreamingProposal(type, n, intervalMs = 60) {
 		const toolId = `tool_propose_${type}_${Date.now()}`;
 		const toolName = `propose_${type}`;
 		// Per-type input shape — keep the title/name field stable after first delta.
@@ -1613,7 +1654,7 @@ export class MockAgentCore {
 				],
 			};
 			this.emit({ type: "message_update", message: assistantMsg });
-			await this.tick(60);
+			await this.tick(intervalMs);
 		}
 
 		if (this.currentAbortController?.signal.aborted) return;
@@ -1805,9 +1846,12 @@ export class MockAgentCore {
 				// rather than interleave (which would double-assign
 				// currentAbortController and scramble event ordering).
 				const text = msg.message || "";
+				// Forward images so the echo can build image content blocks under the
+				// ECHO_IMAGE_BLOCK trigger (default text-only echo discarded them).
+				const images = Array.isArray(msg.images) ? msg.images : undefined;
 				this._promptChain = this._promptChain
 					.catch(() => {})
-					.then(() => this.handlePrompt(text))
+					.then(() => this.handlePrompt(text, images))
 					.catch(err => {
 						console.error("[mock-agent-core] Prompt error:", err);
 					});
@@ -1957,6 +2001,32 @@ export class MockAgentCore {
 
 			case "compact":
 				return { success: true };
+
+			case "switch_session": {
+				// Faithful to the real pi-agent CLI: rehydrate the conversation from
+				// the given `.jsonl` transcript. Used by restore, Continue-Archived,
+				// and Fork. Without this the mock would drop the cloned history and
+				// forked/continued sessions would open empty in the E2E tier (the
+				// real CLI loads it; the mock previously no-op'd here). The file is
+				// written by `get_state` as newline-delimited {type:"message",message}.
+				try {
+					const sp = msg.sessionPath;
+					if (sp && fs.existsSync(sp)) {
+						const loaded = [];
+						for (const line of fs.readFileSync(sp, "utf-8").split("\n")) {
+							const trimmed = line.trim();
+							if (!trimmed) continue;
+							try {
+								const parsed = JSON.parse(trimmed);
+								if (parsed && parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+							} catch { /* skip malformed line */ }
+						}
+						this.conversationMessages = loaded;
+						this.sessionFilePath = sp;
+					}
+				} catch { /* best-effort — leave existing conversation intact */ }
+				return { success: true };
+			}
 
 			default:
 				return { success: true };

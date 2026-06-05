@@ -11,7 +11,8 @@
  *  1. Happy path: /submit appends the envelope; the mock agent wakes and
  *     echoes the answers as an assistant message.
  *  2. Idempotency: a second /submit for the same toolUseId returns
- *     `{ ok: true, alreadySubmitted: true }` and does not append again.
+ *     `{ ok: true, alreadySubmitted: true }` and does not append again,
+ *     including transcript-fallback detection for composite tool IDs.
  *  3. 404 when no matching tool_use is in the transcript.
  *  4. 400 on malformed answers.
  *  5. Legacy `POST /api/internal/user-question` endpoint is gone (404).
@@ -171,6 +172,64 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 				expect(first.status).toBe(200);
 				expect(await first.json()).toEqual({ ok: true });
 
+				const second = await postSubmit(sessionId, toolUseId, answers);
+				expect(second.status).toBe(200);
+				expect(await second.json()).toEqual({ ok: true, alreadySubmitted: true });
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("composite toolUseId transcript-fallback idempotency returns alreadySubmitted:true", async () => {
+		const sessionId = await createSession();
+		try {
+			const conn = await connectWs(sessionId);
+			try {
+				conn.send({ type: "prompt", text: "please use ask_user_choices_composite" });
+				await conn.waitFor(toolStartPredicate("ask_user_choices"), 10_000);
+				const stubResult = await conn.waitFor(
+					(m) => messageEndPredicate("toolResult")(m)
+						&& m.data?.message?.toolName === "ask_user_choices",
+					10_000,
+				);
+				const toolUseId = JSON.parse(stubResult.data.message.content[0].text).tool_use_id as string;
+				expect(toolUseId).toContain("|");
+
+				await conn.waitFor(
+					(m) => m.type === "session_status" && (m as any).status === "idle",
+					10_000,
+				);
+
+				const answers = [
+					{ question: "Favorite color?", selected: "green", other_text: null },
+					{ question: "Team size?", selected: "medium", other_text: null },
+				];
+				const envelope = `[ask_user_choices_response tool_use_id=${toolUseId}]\n${JSON.stringify({ answers })}`;
+				conn.send({ type: "prompt", text: envelope });
+
+				// The mock parser must also accept the composite id and echo it back.
+				const echo = await conn.waitFor(
+					(m) => {
+						if (!messageEndPredicate("assistant")(m)) return false;
+						const blocks = m.data?.message?.content || [];
+						const text = blocks.find((b: any) => b.type === "text")?.text || "";
+						return text.includes("gotAnswersFor") && text.includes(toolUseId);
+					},
+					10_000,
+				);
+				const echoText = echo.data?.message?.content?.find((b: any) => b.type === "text")?.text || "";
+				expect(JSON.parse(echoText).gotAnswersFor).toBe(toolUseId);
+
+				await conn.waitFor(
+					(m) => m.type === "session_status" && (m as any).status === "idle",
+					10_000,
+				);
+
+				// This submit has no in-memory dedup flag, so it must be caught by
+				// findAskResponseAnswers scanning the transcript envelope above.
 				const second = await postSubmit(sessionId, toolUseId, answers);
 				expect(second.status).toBe(200);
 				expect(await second.json()).toEqual({ ok: true, alreadySubmitted: true });

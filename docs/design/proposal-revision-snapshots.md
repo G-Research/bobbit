@@ -1,6 +1,6 @@
 # Proposal Revision Snapshots
 
-Status: design — ready to implement.
+Status: implemented. Dynamic Chat Tabs changed historical reopen from mutating restore to read-only tab-local snapshots.
 Owner: single-coder task.
 Related: [docs/design/editable-proposals.md](./editable-proposals.md), [docs/internals.md — Editable proposals](../internals.md#editable-proposals).
 
@@ -13,7 +13,17 @@ When an agent emits multiple `propose_*` and `edit_proposal` calls in the same s
 
 ## Goal
 
-Every proposal-mutating tool call (`propose_*` and `edit_proposal`) renders a card whose "Open proposal" button restores the proposal panel to *exactly* the revision that existed immediately after that call. Clicking an older card writes the snapshot's contents back to the live draft as a *new* snapshot (`rev = currentRev + 1`) — discoverable history, monotonic counter, no silent rollback.
+Every proposal-mutating tool call (`propose_*` and `edit_proposal`) renders a
+card whose **Open proposal** button can show the revision that existed
+immediately after that call without destroying later work. Latest/current cards
+open the live editable proposal tab. Older revisions open read-only, tab-local
+historical tabs (`<type> Proposal rev N`) populated from the snapshot read
+endpoint; they do **not** mutate the live draft, increment the rev counter, or
+clobber `state.activeProposals`.
+
+The mutating restore endpoint still exists for explicit API rollback flows, but
+normal chat-card browsing uses non-mutating snapshot reads so history is safe to
+inspect.
 
 ## Non-goals
 
@@ -138,11 +148,17 @@ No new event type. Restore reuses `proposal_update` with `source: "restore"`. Th
 
 ## REST endpoint — `src/server/server.ts`
 
-Add inside the existing proposal route block (~L5750), update the regex to accept the new suffix:
+Add inside the existing proposal route block, accepting both mutating and
+non-mutating snapshot suffixes:
 
 ```
-^/api/sessions/([^/]+)/proposal/([^/]+)(/edit|/seed|/restore)?$
+^/api/sessions/([^/]+)/proposal/([^/]+)(/edit|/seed|/restore|/snapshot)?$
 ```
+
+`GET /api/sessions/:id/proposal/:type/snapshot?rev=N` reads a historical
+snapshot, parses it through the per-type plugin, and returns `{ ok: true, rev,
+fields }` without touching the live draft or broadcasting `proposal_update`.
+This is the endpoint used by historical proposal tabs.
 
 `POST /api/sessions/:id/proposal/:type/restore`
 
@@ -153,12 +169,12 @@ Responses:
 | Status | Body |
 |---|---|
 | 200 | `{ ok: true, newRev: number, fields: Record<string, unknown> }` |
-| 400 | `{ ok: false, code: "INVALID_BODY", message }` (rev not a non-negative integer) |
+| 400 | `{ ok: false, code: "INVALID_BODY", message }` (rev not a positive integer) |
 | 404 | `{ ok: false, code: "SNAPSHOT_NOT_FOUND", message }` |
 | 400 | `ParseError` shape on snapshot parse failure |
 | 500 | `{ error }` on unexpected throw |
 
-On 200, broadcast a `proposal_update` with `source: "restore"`, `fields = result.fields`, `rev = result.newRev`. The client's existing `onProposal` callback handles the panel rebuild — no extra plumbing.
+On 200, broadcast a `proposal_update` with `source: "restore"`, `fields = result.fields`, `rev = result.newRev`. This path is a mutating API rollback; the dynamic-tab UI uses `GET /snapshot` for read-only historical browsing.
 
 ### Stamping `rev` on the existing seed/edit broadcasts
 
@@ -275,43 +291,24 @@ registerToolRenderer("edit_proposal", new EditProposalRenderer());
 
 ## Client wiring — `src/app/session-manager.ts`
 
-`proposalOpenHandler` (~L1227) gains a branch on `detail.rev`:
+The `proposal-open` event now treats `detail.rev` as a request to open a
+workspace tab, not as an instruction to restore the live draft.
 
-```ts
-const proposalOpenHandler = (async (e: CustomEvent) => {
-  if (activeSessionId() !== sessionId) return;
-  const { type, fields, rev } = e.detail || {};
-  if (!type || !isProposalType(type)) return;
-  clearProposalDismissedTyped(sessionId, type);
+1. Clear the dismissal fingerprint for the proposal type.
+2. If `rev` matches the active live slot's server-stamped `slot.rev`, select the
+   live editable proposal tab (`proposal:<type>`).
+3. Otherwise, create/select `proposal:<type>:rev:<n>` with `historical: true`
+   and a loading state.
+4. Fetch `GET /api/sessions/:id/proposal/:type/snapshot?rev=<n>`. On success,
+   store the parsed `fields` on the tab's local `state` and render the
+   read-only historical panel. `state.activeProposals[type]` is not touched.
+5. On `SNAPSHOT_NOT_FOUND`, parse failure, or network error, remove the loading
+   historical tab, fall back to the live proposal tab if one exists (otherwise
+   the next content tab or chat), and show a small warning/toast.
 
-  if (typeof rev === "number" && Number.isFinite(rev) && rev > 0) {
-    // Snapshot restore — server is authoritative; broadcast rebuilds the slot.
-    try {
-      const res = await api.restoreProposalSnapshot(sessionId, type, rev);
-      if (!res.ok) {
-        // Surface SNAPSHOT_NOT_FOUND as a small toast or console.warn —
-        // do not fall back to legacy fields path (snapshot really is gone).
-        console.warn(`[proposal] restore failed: ${res.code}`);
-      }
-      // proposal_update broadcast handles slot population via remote.onProposal.
-    } catch (err) {
-      console.warn("[proposal] restore threw:", err);
-    }
-    return;
-  }
-
-  // Legacy path (archived sessions with no rev marker): existing fields fan-out.
-  if (!fields) return;
-  const callbackMap = { goal: remote.onGoalProposal, role: remote.onRoleProposal,
-    tool: remote.onToolProposal, staff: remote.onStaffProposal,
-    project: remote.onProjectProposal };
-  const cb = callbackMap[type];
-  if (cb) cb(fields, false);
-  if (remote.onProposal) remote.onProposal(type, fields, false);
-}) as EventListener;
-```
-
-Add `restoreProposalSnapshot(sessionId, type, rev)` to `src/app/api.ts` — POSTs to `/api/sessions/:id/proposal/:type/restore` with `{ rev }` body, returns the typed JSON.
+Legacy archived cards with no `__proposal_rev_v1__` marker still dispatch
+`{ type, fields }` and use the pre-snapshot fields round-trip for graceful
+degradation.
 
 ### Slot rev field
 
@@ -343,9 +340,10 @@ Place adjacent to the existing title heading. No clickable affordance — purely
 | Failed `edit_proposal` (e.g. `OLD_TEXT_NOT_FOUND`) | Atomic rollback already in place; no snapshot written; renderer shows error code without "Open proposal" button. |
 | Concurrent edits | Out of scope. |
 | Workflow type | Excluded — codebase has 5 types. |
-| Restore of nonexistent rev | `SNAPSHOT_NOT_FOUND` 404; client logs warning, does not fall back to legacy `fields` path. |
+| Historical tab read of nonexistent rev | `SNAPSHOT_NOT_FOUND` 404; client removes the loading historical tab, falls back to live/other/chat, and shows a warning/toast. |
+| Direct API restore of nonexistent rev | `SNAPSHOT_NOT_FOUND` 404; live draft untouched. |
 | Mid-restore crash between live rename and snapshot write | Live draft is 1 rev ahead of dir; next write picks `currentRev + 1` (same number) and overwrites — observable state remains consistent. |
-| Snapshot file corruption | `restoreSnapshot` returns `ParseError`; live draft untouched. |
+| Snapshot file corruption | `GET /snapshot` or `restoreSnapshot` returns the per-type `ParseError`; live draft untouched. |
 | Legacy archived sessions (no `__proposal_rev_v1__` marker on old transcripts) | Renderer falls back to dispatching `{ type, fields }`; existing fields-roundtrip behavior preserved. No new bug, no new fix path needed. |
 | Snapshot dir disk-full / write fails | Snapshot write is non-fatal — live draft committed, `rev: 0` returned, broadcast carries `rev: 0`, client treats slot as "snapshot disabled". User experience degrades to current behavior; no crash. |
 
@@ -370,22 +368,22 @@ Place adjacent to the existing title heading. No clickable affordance — purely
 Four-step pattern:
 
 1. **Navigate** — open a session, mock-agent emits `propose_goal` then two `edit_proposal` calls. Three cards appear in the transcript.
-2. **Happy path** — click the *first* propose card → panel shows fields from rev 1, header reads `rev 3` (restore writes rev 3 with rev 1's contents). Click the second edit card → panel shows rev 2 contents, header reads `rev 4`. Accept proceeds via the existing flow.
-3. **Persistence** — reload the page; the panel rehydrates with the latest rev (rev 4). Earlier-card clicks still work.
+2. **Happy path** — click the *first* propose card → a read-only historical tab shows fields from rev 1 while the live editable tab remains on the latest draft. Click the second edit card → a separate historical tab shows rev 2. Accept from the live tab proceeds via the existing flow.
+3. **Persistence** — reload the page; the live panel rehydrates with the latest rev. Earlier-card clicks still reopen historical tabs without mutating the live draft.
 4. **Cleanup** — terminate the session; assert `<stateDir>/proposal-drafts/<sessionId>/` is gone (history subdirs included).
 
 ## Implementation checklist
 
 1. `src/server/proposals/proposal-files.ts` — add `writeSnapshot`, `readSnapshot`, `latestRev`, `restoreSnapshot`; extend `writeProposalFile` and `editProposalFile` signatures to return `rev`.
-2. `src/server/server.ts` — extend proposal regex; add `/restore` handler; stamp `rev` on `seed` and `edit` JSON bodies and broadcasts.
+2. `src/server/server.ts` — extend proposal regex; add `/snapshot` and `/restore` handlers; stamp `rev` on `seed` and `edit` JSON bodies and broadcasts.
 3. `src/server/ws/protocol.ts` — add `rev: number` and `"restore"` source variant to `proposal_update`.
 4. `src/server/ws/handler.ts` — stamp `rev` on rehydrate broadcast.
 5. `defaults/tools/proposals/extension.ts` — `seedProposal` returns rev; both ack texts include `__proposal_rev_v1__:N`; `edit_proposal` execute appends marker on success.
 6. `src/ui/tools/renderers/ProposalRenderer.ts` — parse marker; conditional `rev` vs `fields` dispatch.
 7. `src/ui/tools/renderers/EditProposalRenderer.ts` — new file.
 8. `src/ui/tools/index.ts` — register `edit_proposal` renderer.
-9. `src/app/api.ts` — `restoreProposalSnapshot` helper.
-10. `src/app/session-manager.ts` — `proposalOpenHandler` rev branch.
+9. `src/app/api.ts` — proposal snapshot read / restore helpers.
+10. `src/app/session-manager.ts` — `proposalOpenHandler` rev branch creates read-only historical tabs and falls back cleanly on failed reads.
 11. `src/app/proposal-helpers.ts` (or wherever `onProposal` reducer lives) — slot.rev := event.rev.
 12. `src/app/render.ts` — `rev N` badge in each proposal panel.
 13. Tests as above.

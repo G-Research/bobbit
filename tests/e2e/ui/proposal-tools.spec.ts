@@ -43,68 +43,35 @@ async function deleteGoalByTitle(title: string) {
 }
 
 test.describe("Proposal tool blocks @quarantine", () => {
-	test("propose_goal tool block renders in message history @smoke", async ({ page }) => {
+	test("goal proposal tool card renders, persists, and reopens @smoke", async ({ page }) => {
 		await triggerGoalProposal(page);
 
-		// The message area should contain a tool card for propose_goal
-		// The ProposalRenderer renders with "Goal Proposal" label
+		// The message area should contain a completed tool card for propose_goal.
+		// The ProposalRenderer renders with the "Goal Proposal" label and title summary.
 		const proposalCard = page.getByText("Goal Proposal").first();
 		await expect(proposalCard).toBeVisible({ timeout: 10_000 });
-
-		// The card should show the title in the tool card summary
 		await expect(page.getByText("E2E Test Goal").first()).toBeVisible({ timeout: 5_000 });
-	});
 
-	test("Open proposal button appears on completed tool block", async ({ page }) => {
-		await triggerGoalProposal(page);
-
-		// Wait for the tool block to complete and show "Open proposal" button
-		const openBtn = page.getByText("Open proposal").first();
+		// Completed proposal tool blocks expose an "Open proposal" button.
+		const openBtn = page.locator('[data-testid="proposal-open-button"]').first();
 		await expect(openBtn).toBeVisible({ timeout: 10_000 });
-	});
+		await expect(openBtn).toHaveText(/Open proposal/);
 
-	test("navigate away and back — tool block persists with Open proposal button", async ({ page }) => {
-		await triggerGoalProposal(page);
-
-		// Wait for the "Open proposal" button to appear (tool block completed)
-		const openBtn = page.getByText("Open proposal").first();
-		await expect(openBtn).toBeVisible({ timeout: 10_000 });
-
-		// Navigate away to settings
+		// Navigate away to settings.
 		await navigateToHash(page, "#/settings");
 		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 5_000 });
 
 		// Navigate back using browser back; the next visibility assertion auto-retries.
 		await page.goBack();
 
-		// The tool block should still be visible with the "Open proposal" button
-		const openBtnAfter = page.getByText("Open proposal").first();
+		// The tool block should persist with the "Open proposal" button and label.
+		const openBtnAfter = page.locator('[data-testid="proposal-open-button"]').first();
 		await expect(openBtnAfter).toBeVisible({ timeout: 15_000 });
-
-		// The "Goal Proposal" label should also be visible
+		await expect(openBtnAfter).toHaveText(/Open proposal/);
 		await expect(page.getByText("Goal Proposal").first()).toBeVisible({ timeout: 5_000 });
-	});
 
-	test("click Open proposal button reopens proposal panel", async ({ page }) => {
-		await triggerGoalProposal(page);
-
-		// Wait for tool block to complete
-		const openBtn = page.getByText("Open proposal").first();
-		await expect(openBtn).toBeVisible({ timeout: 10_000 });
-
-		// Navigate away to settings to close the proposal panel
-		await navigateToHash(page, "#/settings");
-		await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 5_000 });
-
-		// Navigate back; the next visibility assertion auto-retries.
-		await page.goBack();
-
-		// Click the "Open proposal" button
-		const reopenBtn = page.getByText("Open proposal").first();
-		await expect(reopenBtn).toBeVisible({ timeout: 15_000 });
-		await reopenBtn.click();
-
-		// The proposal panel should reopen with the title populated
+		// Click the "Open proposal" button to reopen the proposal panel.
+		await openBtnAfter.click();
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
 		await expect(titleInput).toBeVisible({ timeout: 10_000 });
 		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 10_000 });

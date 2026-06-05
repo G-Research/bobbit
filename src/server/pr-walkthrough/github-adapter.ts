@@ -1,0 +1,734 @@
+import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
+import { isTrustedExternalHost, safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
+import { execFileSafe } from "../exec-file-safe.js";
+
+export type GithubDiffLineSide = "old" | "new" | "context";
+export type GithubDiffLineKind = "context" | "add" | "del";
+
+export interface GithubDiffLine {
+	id: string;
+	side: GithubDiffLineSide;
+	oldLine?: number;
+	newLine?: number;
+	text: string;
+	kind: GithubDiffLineKind;
+}
+
+export interface GithubDiffHunk {
+	id: string;
+	header: string;
+	lines: GithubDiffLine[];
+}
+
+export type GithubWalkthroughFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "binary";
+
+export interface GithubDiffBlock {
+	id: string;
+	filePath: string;
+	oldPath?: string;
+	status?: GithubWalkthroughFileStatus;
+	isBinary?: boolean;
+	isGenerated?: boolean;
+	isTruncated?: boolean;
+	hunks: GithubDiffHunk[];
+	externalUrl?: string;
+	blobUrl?: string;
+	rawUrl?: string;
+	contentsUrl?: string;
+}
+
+export interface GithubWalkthroughChangesetRef {
+	baseSha: string;
+	headSha: string;
+	provider: "github";
+	externalUrl: string;
+	prUrl: string;
+	prNumber: number;
+	prTitle: string;
+	prBody?: string;
+	title: string;
+	filesChanged?: number;
+	additions?: number;
+	deletions?: number;
+	owner: string;
+	repo: string;
+}
+
+export interface GithubWalkthroughFile {
+	filePath: string;
+	oldPath?: string;
+	status: GithubWalkthroughFileStatus;
+	additions: number;
+	deletions: number;
+	changes: number;
+	patch?: string;
+	blobUrl?: string;
+	rawUrl?: string;
+	contentsUrl?: string;
+	isBinary?: boolean;
+	isGenerated?: boolean;
+	isTruncated?: boolean;
+	warnings?: GithubWalkthroughWarning[];
+	diffBlocks: GithubDiffBlock[];
+}
+
+export interface GithubWalkthroughWarning {
+	code: string;
+	severity: "info" | "warning" | "error";
+	message: string;
+	filePath?: string;
+}
+
+export interface GithubWalkthroughExportCapability {
+	provider: "github";
+	available: boolean;
+	owner: string;
+	repo: string;
+	prNumber: number;
+	url: string;
+	reason?: string;
+}
+
+export interface GithubResolvedPr {
+	changesetId: string;
+	changeset: GithubWalkthroughChangesetRef;
+	files: GithubWalkthroughFile[];
+	warnings: GithubWalkthroughWarning[];
+	export: GithubWalkthroughExportCapability;
+	provider: {
+		name: "github";
+		owner: string;
+		repo: string;
+		prNumber: number;
+		prUrl: string;
+		apiUrl: string;
+		baseSha: string;
+		headSha: string;
+	};
+}
+
+export interface ResolveGithubPrOptions {
+	cwd?: string;
+	prUrl?: string;
+	prNumber?: string | number;
+	token?: string;
+	fetch?: FetchLike;
+	apiBaseUrl?: string;
+	maxFiles?: number;
+	maxPatchBytes?: number;
+	maxLinesPerFile?: number;
+	trustedHosts?: string[];
+}
+
+export interface ParsedGithubPrReference {
+	owner?: string;
+	repo?: string;
+	number?: number;
+	host?: string;
+	url?: string;
+}
+
+interface GithubApiPullRequest {
+	number: number;
+	title: string;
+	body?: string | null;
+	html_url: string;
+	base: { sha: string };
+	head: { sha: string };
+	changed_files?: number;
+	additions?: number;
+	deletions?: number;
+}
+
+interface GithubApiChangedFile {
+	filename: string;
+	previous_filename?: string;
+	status: string;
+	additions?: number;
+	deletions?: number;
+	changes?: number;
+	blob_url?: string;
+	raw_url?: string;
+	contents_url?: string;
+	patch?: string;
+}
+
+interface FetchHeadersLike {
+	get(name: string): string | null;
+}
+
+interface FetchResponseLike {
+	ok: boolean;
+	status: number;
+	statusText: string;
+	headers: FetchHeadersLike;
+	json(): Promise<unknown>;
+	text(): Promise<string>;
+}
+
+type FetchLike = (url: string, init?: {
+	method?: string;
+	headers?: Record<string, string>;
+	body?: string;
+	signal?: AbortSignal;
+}) => Promise<FetchResponseLike>;
+
+const DEFAULT_MAX_PATCH_BYTES = 1_000_000;
+const DEFAULT_MAX_LINES_PER_FILE = 2_000;
+
+export class GithubPrAdapterError extends Error {
+	readonly status: number;
+	readonly code: string;
+	readonly warnings: GithubWalkthroughWarning[];
+	readonly host?: string;
+
+	constructor(message: string, options: { status?: number; code?: string; warnings?: GithubWalkthroughWarning[]; host?: string } = {}) {
+		super(message);
+		this.name = "GithubPrAdapterError";
+		this.status = options.status ?? 500;
+		this.code = options.code ?? "github_pr_error";
+		this.warnings = options.warnings ?? [];
+		this.host = options.host;
+	}
+}
+
+export function parseGithubPrReference(input: { prUrl?: string; prNumber?: string | number }, trustedHosts?: string[]): ParsedGithubPrReference {
+	const number = normalizePrNumber(input.prNumber);
+	const prUrl = cleanString(input.prUrl);
+	if (!prUrl) return { number };
+
+	let parsed: URL;
+	try {
+		parsed = new URL(prUrl);
+	} catch {
+		throw new GithubPrAdapterError(`Invalid GitHub PR URL: ${prUrl}`, { status: 400, code: "invalid_github_pr_url" });
+	}
+
+	const host = normalizeHost(parsed.hostname);
+	if (!isTrustedGithubHost(host, trustedHosts)) {
+		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host", host });
+	}
+
+	const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
+	if (!match) {
+		throw new GithubPrAdapterError(`URL is not a GitHub pull request: ${prUrl}`, { status: 400, code: "not_github_pull_request" });
+	}
+
+	return {
+		owner: decodeURIComponent(match[1]),
+		repo: stripGitSuffix(decodeURIComponent(match[2])),
+		number: Number(match[3]),
+		host,
+		url: safeGithubUrl(prUrl, trustedHosts),
+	};
+}
+
+export function parseGithubRemoteUrl(remoteUrl: string): { owner: string; repo: string; host: string } | null {
+	const trimmed = remoteUrl.trim();
+	const scpLike = /^(?:git@)?([^:]+):([^/]+)\/(.+?)(?:\.git)?$/i.exec(trimmed);
+	if (scpLike) return { host: scpLike[1], owner: scpLike[2], repo: stripGitSuffix(scpLike[3]) };
+
+	try {
+		const url = new URL(trimmed);
+		const parts = url.pathname.replace(/^\/+/, "").split("/").filter(Boolean);
+		if (parts.length >= 2) return { host: url.hostname, owner: parts[0], repo: stripGitSuffix(parts[1]) };
+	} catch {
+		return null;
+	}
+	return null;
+}
+
+export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<GithubResolvedPr> {
+	const warnings: GithubWalkthroughWarning[] = [];
+	const trustedHosts = options.trustedHosts;
+	const parsed = parseGithubPrReference(options, trustedHosts);
+	const inferred = parsed.owner && parsed.repo ? undefined : await inferGithubRepository(options.cwd);
+	const owner = parsed.owner ?? inferred?.owner;
+	const repo = parsed.repo ?? inferred?.repo;
+	const host = normalizeHost(parsed.host ?? inferred?.host ?? "github.com");
+	const number = parsed.number;
+
+	if (!isTrustedGithubHost(host, trustedHosts)) {
+		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host", host });
+	}
+
+	if (!owner || !repo) {
+		throw new GithubPrAdapterError("A GitHub PR number requires a GitHub origin remote to infer owner/repo", {
+			status: 400,
+			code: "github_repository_required",
+		});
+	}
+	if (!number) {
+		throw new GithubPrAdapterError("GitHub PR number is required", { status: 400, code: "github_pr_number_required" });
+	}
+
+	const token = await resolveGithubToken(options, host);
+
+	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? apiBaseUrlForHost(host);
+	const fetchImpl = options.fetch ?? fetch;
+	const headers = githubHeaders(token);
+	const prApiUrl = `${apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`;
+	const pr = await fetchGithubJson<GithubApiPullRequest>(fetchImpl, prApiUrl, headers, warnings);
+	const files = await fetchGithubFiles(fetchImpl, prApiUrl, headers, options.maxFiles ?? 300, warnings);
+	const resolvedFiles = await enrichFilesWithDiffs({
+		cwd: options.cwd,
+		baseSha: pr.base.sha,
+		headSha: pr.head.sha,
+		files,
+		warnings,
+		maxPatchBytes: options.maxPatchBytes ?? DEFAULT_MAX_PATCH_BYTES,
+		maxLinesPerFile: options.maxLinesPerFile ?? DEFAULT_MAX_LINES_PER_FILE,
+		trustedHosts,
+	});
+	const prUrl = safeGithubUrl(pr.html_url, trustedHosts) ?? parsed.url ?? safeGithubUrl(`https://${host}/${owner}/${repo}/pull/${number}`, trustedHosts) ?? `https://github.com/${owner}/${repo}/pull/${number}`;
+	const changesetId = changesetIdForGithub(host, owner, repo, number, pr.head.sha);
+	const exportAvailable = Boolean(token);
+
+	return {
+		changesetId,
+		changeset: {
+			baseSha: pr.base.sha,
+			headSha: pr.head.sha,
+			provider: "github",
+			externalUrl: prUrl,
+			prUrl,
+			prNumber: pr.number,
+			prTitle: pr.title,
+			prBody: cleanString(pr.body),
+			title: `PR #${pr.number}: ${pr.title}`,
+			filesChanged: pr.changed_files,
+			additions: pr.additions,
+			deletions: pr.deletions,
+			owner,
+			repo,
+		},
+		files: resolvedFiles,
+		warnings,
+		export: {
+			provider: "github",
+			available: exportAvailable,
+			owner,
+			repo,
+			prNumber: pr.number,
+			url: prUrl,
+			reason: exportAvailable ? undefined : "Set GITHUB_TOKEN or GH_TOKEN to submit a review back to GitHub.",
+		},
+		provider: {
+			name: "github",
+			owner,
+			repo,
+			prNumber: pr.number,
+			prUrl,
+			apiUrl: prApiUrl,
+			baseSha: pr.base.sha,
+			headSha: pr.head.sha,
+		},
+	};
+}
+
+async function inferGithubRepository(cwd: string | undefined): Promise<{ owner: string; repo: string; host: string } | undefined> {
+	if (!cwd) return undefined;
+	try {
+		const { stdout } = await execFileSafe("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000, encoding: "utf8" });
+		return parseGithubRemoteUrl(stdout) ?? undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function fetchGithubFiles(
+	fetchImpl: FetchLike,
+	prApiUrl: string,
+	headers: Record<string, string>,
+	maxFiles: number,
+	warnings: GithubWalkthroughWarning[],
+): Promise<GithubApiChangedFile[]> {
+	const result: GithubApiChangedFile[] = [];
+	let maybeMorePages = false;
+	for (let page = 1; result.length <= maxFiles; page++) {
+		const pageUrl = `${prApiUrl}/files?per_page=100&page=${page}`;
+		const batch = await fetchGithubJson<GithubApiChangedFile[]>(fetchImpl, pageUrl, headers, warnings);
+		result.push(...batch);
+		if (batch.length < 100) break;
+		if (result.length >= maxFiles) {
+			maybeMorePages = true;
+			break;
+		}
+	}
+	if (result.length > maxFiles || maybeMorePages) {
+		warnings.push({ code: "github_files_truncated", severity: "warning", message: `GitHub changed files were truncated at ${maxFiles} files.` });
+	}
+	return result.slice(0, maxFiles);
+}
+
+async function fetchGithubJson<T>(
+	fetchImpl: FetchLike,
+	url: string,
+	headers: Record<string, string>,
+	warnings: GithubWalkthroughWarning[],
+): Promise<T> {
+	const response = await fetchImpl(url, { method: "GET", headers, signal: AbortSignal.timeout(20_000) });
+	if (!response.ok) {
+		const message = await response.text().catch(() => response.statusText);
+		const warning = warningForGithubHttpFailure(response.status, response.headers);
+		if (warning) warnings.push(warning);
+		throw new GithubPrAdapterError(`GitHub API request failed (${response.status}): ${message || response.statusText}`, {
+			status: response.status,
+			code: response.status === 404 ? "github_pr_not_found" : warning?.code ?? "github_api_error",
+			warnings,
+		});
+	}
+	return await response.json() as T;
+}
+
+async function enrichFilesWithDiffs(input: {
+	cwd?: string;
+	baseSha: string;
+	headSha: string;
+	files: GithubApiChangedFile[];
+	warnings: GithubWalkthroughWarning[];
+	maxPatchBytes: number;
+	maxLinesPerFile: number;
+	trustedHosts?: string[];
+}): Promise<GithubWalkthroughFile[]> {
+	const trustedHosts = input.trustedHosts;
+	const localDiffAvailable = await hasLocalCommit(input.cwd, input.baseSha) && await hasLocalCommit(input.cwd, input.headSha);
+	const enriched: GithubWalkthroughFile[] = [];
+	for (const file of input.files) {
+		const rawPatch = localDiffAvailable
+			? await readLocalPatchForFile(input.cwd, input.baseSha, input.headSha, file).catch(() => cleanString(file.patch))
+			: cleanString(file.patch);
+		const normalized = normalizeGithubPatch(rawPatch, input.maxPatchBytes);
+		const patch = normalized.patch;
+		const status = normalizeGithubFileStatus(file.status);
+		const isGenerated = isLikelyGeneratedPath(file.filename) || Boolean(file.previous_filename && isLikelyGeneratedPath(file.previous_filename));
+		const block = parsePatchToDiffBlock({
+			filePath: file.filename,
+			oldPath: file.previous_filename,
+			patch,
+			status,
+			isGenerated,
+			maxLinesPerFile: input.maxLinesPerFile,
+			externalUrl: safeGithubUrl(file.blob_url, trustedHosts),
+			blobUrl: safeGithubUrl(file.blob_url, trustedHosts),
+			rawUrl: safeGithubUrl(file.raw_url, trustedHosts),
+			contentsUrl: safeGithubUrl(file.contents_url, trustedHosts),
+		});
+		const likelyTruncated = isPatchLikelyTruncated(file, block, patch);
+		if (normalized.truncated || likelyTruncated || block.truncated) block.isTruncated = true;
+		const fileWarnings = githubFileWarnings(file, {
+			status,
+			isGenerated,
+			patch,
+			block,
+			patchByteTruncated: normalized.truncated,
+			patchLikelyTruncated: likelyTruncated,
+			maxPatchBytes: input.maxPatchBytes,
+			maxLinesPerFile: input.maxLinesPerFile,
+		});
+		input.warnings.push(...fileWarnings);
+		enriched.push({
+			filePath: file.filename,
+			oldPath: file.previous_filename,
+			status,
+			additions: file.additions ?? 0,
+			deletions: file.deletions ?? 0,
+			changes: file.changes ?? ((file.additions ?? 0) + (file.deletions ?? 0)),
+			patch,
+			blobUrl: safeGithubUrl(file.blob_url, trustedHosts),
+			rawUrl: safeGithubUrl(file.raw_url, trustedHosts),
+			contentsUrl: safeGithubUrl(file.contents_url, trustedHosts),
+			isBinary: status === "binary",
+			isGenerated,
+			isTruncated: block.isTruncated === true,
+			warnings: fileWarnings,
+			diffBlocks: block.hunks.length > 0 ? [block] : [],
+		});
+	}
+	return enriched;
+}
+
+async function hasLocalCommit(cwd: string | undefined, sha: string): Promise<boolean> {
+	if (!cwd || !sha) return false;
+	try {
+		await execFileSafe("git", ["rev-parse", "--verify", `${sha}^{commit}`], { cwd, timeout: 5_000, encoding: "utf8" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function readLocalPatchForFile(cwd: string | undefined, baseSha: string, headSha: string, file: GithubApiChangedFile): Promise<string | undefined> {
+	if (!cwd) return undefined;
+	const paths = file.previous_filename && file.previous_filename !== file.filename ? [file.previous_filename, file.filename] : [file.filename];
+	const { stdout } = await execFileSafe("git", ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", baseSha, headSha, "--", ...paths], {
+		cwd,
+		timeout: 20_000,
+		maxBuffer: 10 * 1024 * 1024,
+		encoding: "utf8",
+	});
+	return extractPatchBody(stdout) || undefined;
+}
+
+function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patch?: string; status: GithubWalkthroughFile["status"]; isGenerated?: boolean; maxLinesPerFile?: number; externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string }): GithubDiffBlock & { truncated?: boolean } {
+	const blockId = stableBlockId(input.filePath, input.oldPath);
+	const hunks: GithubDiffHunk[] = [];
+	const lines = (input.patch ?? "").split(/\r?\n/);
+	let current: GithubDiffHunk | undefined;
+	let oldLine = 0;
+	let newLine = 0;
+	let diffLineCount = 0;
+	let truncated = false;
+	for (const rawLine of lines) {
+		const hunkMatch = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*$/.exec(rawLine);
+		if (hunkMatch) {
+			oldLine = Number(hunkMatch[1]);
+			newLine = Number(hunkMatch[2]);
+			current = { id: `${blockId}:h${hunks.length}`, header: rawLine, lines: [] };
+			hunks.push(current);
+			continue;
+		}
+		if (!current || rawLine === "" || rawLine.startsWith("\\ No newline")) continue;
+		const prefix = rawLine[0];
+		const text = rawLine.slice(1);
+		if (prefix === "+" || prefix === "-" || prefix === " ") {
+			if (input.maxLinesPerFile !== undefined && diffLineCount >= input.maxLinesPerFile) {
+				truncated = true;
+				if (prefix === "+") newLine += 1;
+				else if (prefix === "-") oldLine += 1;
+				else {
+					oldLine += 1;
+					newLine += 1;
+				}
+				continue;
+			}
+			diffLineCount += 1;
+		}
+		const lineIndex = current.lines.length;
+		if (prefix === "+") {
+			current.lines.push({ id: `${current.id}:l${lineIndex}`, side: "new", newLine, kind: "add", text });
+			newLine += 1;
+		} else if (prefix === "-") {
+			current.lines.push({ id: `${current.id}:l${lineIndex}`, side: "old", oldLine, kind: "del", text });
+			oldLine += 1;
+		} else {
+			current.lines.push({ id: `${current.id}:l${lineIndex}`, side: "context", oldLine, newLine, kind: "context", text: prefix === " " ? text : rawLine });
+			oldLine += 1;
+			newLine += 1;
+		}
+	}
+	return {
+		id: blockId,
+		filePath: input.filePath,
+		oldPath: input.oldPath,
+		status: input.status,
+		isBinary: input.status === "binary",
+		isGenerated: input.isGenerated,
+		isTruncated: truncated,
+		hunks,
+		externalUrl: input.externalUrl,
+		blobUrl: input.blobUrl,
+		rawUrl: input.rawUrl,
+		contentsUrl: input.contentsUrl,
+		...(truncated ? { truncated } : {}),
+	};
+}
+
+function normalizeGithubPatch(patch: string | undefined, maxPatchBytes: number): { patch?: string; truncated: boolean } {
+	if (!patch) return { patch, truncated: false };
+	const bytes = Buffer.byteLength(patch, "utf8");
+	if (bytes <= maxPatchBytes) return { patch, truncated: false };
+	return {
+		patch: Buffer.from(patch, "utf8").subarray(0, maxPatchBytes).toString("utf8"),
+		truncated: true,
+	};
+}
+
+function githubFileWarnings(file: GithubApiChangedFile, input: {
+	status: GithubWalkthroughFileStatus;
+	isGenerated: boolean;
+	patch?: string;
+	block: GithubDiffBlock & { truncated?: boolean };
+	patchByteTruncated: boolean;
+	patchLikelyTruncated: boolean;
+	maxPatchBytes: number;
+	maxLinesPerFile: number;
+}): GithubWalkthroughWarning[] {
+	const warnings: GithubWalkthroughWarning[] = [];
+	if (input.isGenerated) {
+		warnings.push({ code: "github_generated_file", severity: "info", message: `${file.filename} looks generated and may be low-signal for review.`, filePath: file.filename });
+	}
+	if (!input.patch) {
+		warnings.push({
+			code: input.status === "binary" ? "github_binary_file" : "github_patch_unavailable",
+			severity: input.status === "binary" ? "warning" : "warning",
+			message: input.status === "binary" ? "Binary file has no reviewable text diff." : "GitHub did not provide a text patch for this file; it may be too large or truncated.",
+			filePath: file.filename,
+		});
+	}
+	if (input.patchByteTruncated) {
+		warnings.push({ code: "github_patch_truncated", severity: "warning", message: `${file.filename} patch exceeded ${input.maxPatchBytes} bytes and was truncated.`, filePath: file.filename });
+	}
+	if (input.block.truncated) {
+		warnings.push({ code: "github_file_lines_truncated", severity: "warning", message: `${file.filename} was truncated after ${input.maxLinesPerFile} diff lines.`, filePath: file.filename });
+	}
+	if (!input.patchByteTruncated && !input.block.truncated && input.patchLikelyTruncated) {
+		warnings.push({ code: "github_patch_truncated", severity: "warning", message: `${file.filename} patch appears truncated compared with GitHub changed-line counts.`, filePath: file.filename });
+	}
+	return dedupeGithubWarnings(warnings);
+}
+
+function isPatchLikelyTruncated(file: GithubApiChangedFile, block: GithubDiffBlock, patch?: string): boolean {
+	if (!patch) return (file.changes ?? ((file.additions ?? 0) + (file.deletions ?? 0))) > 0;
+	const expectedAdditions = file.additions ?? 0;
+	const expectedDeletions = file.deletions ?? 0;
+	if (expectedAdditions === 0 && expectedDeletions === 0) return false;
+	let additions = 0;
+	let deletions = 0;
+	for (const line of block.hunks.flatMap(hunk => hunk.lines)) {
+		if (line.kind === "add") additions += 1;
+		else if (line.kind === "del") deletions += 1;
+	}
+	return additions < expectedAdditions || deletions < expectedDeletions;
+}
+
+function dedupeGithubWarnings(warnings: GithubWalkthroughWarning[]): GithubWalkthroughWarning[] {
+	const seen = new Set<string>();
+	return warnings.filter(warning => {
+		const key = `${warning.code}:${warning.filePath ?? ""}:${warning.message}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+function extractPatchBody(diff: string): string {
+	const lines = diff.split(/\r?\n/);
+	const firstHunk = lines.findIndex(line => line.startsWith("@@ "));
+	return firstHunk >= 0 ? lines.slice(firstHunk).join("\n") : "";
+}
+
+function normalizeGithubFileStatus(status: string): GithubWalkthroughFile["status"] {
+	if (/binary/i.test(status)) return "binary";
+	switch (status) {
+		case "added": return "added";
+		case "removed":
+		case "deleted": return "deleted";
+		case "renamed": return "renamed";
+		case "copied": return "copied";
+		case "modified":
+		case "changed":
+		default:
+			return "modified";
+	}
+}
+
+async function resolveGithubToken(options: ResolveGithubPrOptions, host: string): Promise<string | undefined> {
+	const explicit = cleanString(options.token);
+	if (explicit) return explicit;
+	// The global GITHUB_TOKEN/GH_TOKEN env tokens are github.com credentials. Never
+	// forward them to enterprise hosts (that would leak a github.com secret). For any
+	// non-github.com host, fall through to the host-scoped gh CLI token instead.
+	const normalized = normalizeHost(host);
+	if (normalized === "github.com") {
+		const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
+		if (envToken) return envToken;
+	}
+	return githubCliAuthToken(options.cwd, normalized);
+}
+
+async function githubCliAuthToken(cwd: string | undefined, host: string): Promise<string | undefined> {
+	const args = ["auth", "token"];
+	if (host && host !== "github.com") args.push("--hostname", host);
+	try {
+		const command = cleanString(process.env.BOBBIT_GH_COMMAND) || "gh";
+		const { stdout } = await execFileSafe(command, args, {
+			cwd,
+			encoding: "utf8",
+			timeout: 5_000,
+			windowsHide: true,
+			maxBuffer: 1024 * 1024,
+			...(process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command) ? { shell: true } : {}),
+		});
+		return cleanString(stdout);
+	} catch {
+		return undefined;
+	}
+}
+
+function warningForGithubHttpFailure(status: number, headers: FetchHeadersLike): GithubWalkthroughWarning | undefined {
+	if (status === 401) return { code: "github_auth_failed", severity: "error", message: "GitHub rejected the configured token. Check GITHUB_TOKEN/GH_TOKEN or gh auth status." };
+	if (status === 403) {
+		const remaining = headers.get("x-ratelimit-remaining");
+		return remaining === "0"
+			? { code: "github_rate_limited", severity: "error", message: "GitHub API rate limit exceeded. Configure GITHUB_TOKEN/GH_TOKEN, run gh auth login, or retry after the reset time." }
+			: { code: "github_permission_denied", severity: "error", message: "GitHub denied access to this pull request or repository." };
+	}
+	return undefined;
+}
+
+function githubHeaders(token: string | undefined): Record<string, string> {
+	return {
+		Accept: "application/vnd.github+json",
+		"User-Agent": "bobbit-pr-walkthrough",
+		"X-GitHub-Api-Version": "2022-11-28",
+		...(token ? { Authorization: `Bearer ${token}` } : {}),
+	};
+}
+
+function apiBaseUrlForHost(host: string): string {
+	const normalized = normalizeHost(host);
+	// Treat both github.com and its www alias as the public GitHub API host.
+	return normalized === "github.com" || normalized === "www.github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
+}
+
+function normalizeHost(host: string | undefined): string {
+	return (host ?? "github.com").trim().replace(/\.$/, "").toLowerCase();
+}
+
+function isTrustedGithubHost(host: string, trustedHosts?: string[]): boolean {
+	// Delegate to the shared allowlist so ALL DEFAULT_TRUSTED_HOSTS (github.com,
+	// www.github.com, api.github.com, raw/gist hosts) plus managed extra hosts are
+	// honored. Keeps this check in lockstep with the synchronous launch trust-check.
+	return isTrustedExternalHost(normalizeHost(host), trustedHosts ?? []);
+}
+
+// github.com / www.github.com keep the legacy un-prefixed id; other hosts are
+// host-qualified so enterprise PRs sharing owner/repo/number do not collide.
+function changesetIdForGithub(host: string, owner: string, repo: string, number: number, headSha?: string): string {
+	const normalized = (host || "github.com").replace(/\.$/, "").toLowerCase();
+	const prefix = normalized === "github.com" || normalized === "www.github.com" ? "" : `${normalized}/`;
+	return `github:${prefix}${owner}/${repo}#${number}:${shortSha(headSha) ?? "unknown"}`;
+}
+
+export const changesetIdForGithubForTesting = changesetIdForGithub;
+
+function stableBlockId(filePath: string, oldPath: string | undefined): string {
+	const raw = oldPath && oldPath !== filePath ? `${oldPath}->${filePath}` : filePath;
+	return `github:${raw.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "file"}`;
+}
+
+function shortSha(value: string | undefined): string | undefined {
+	const cleaned = cleanString(value);
+	return cleaned ? cleaned.slice(0, 7) : undefined;
+}
+
+function normalizePrNumber(value: string | number | undefined): number | undefined {
+	const raw = typeof value === "number" ? String(Math.trunc(value)) : cleanString(value);
+	if (!raw) return undefined;
+	const normalized = raw.replace(/^#/, "").trim();
+	if (!/^\d+$/.test(normalized)) return undefined;
+	return Number(normalized);
+}
+
+function cleanString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function safeGithubUrl(value: unknown, trustedHosts?: string[]): string | undefined {
+	return safeExternalUrl(value, trustedHosts ?? []);
+}
+
+function stripGitSuffix(repo: string): string {
+	return repo.replace(/\.git$/i, "");
+}

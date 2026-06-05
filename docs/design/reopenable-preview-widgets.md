@@ -4,15 +4,41 @@
 > markers are preserved by the renderer for archived sessions only; new code
 > emits only v3.
 
+> **Current behavior after Dynamic Chat Tabs** — `preview_open` tool cards open
+> source-derived tabs in the per-session side-panel workspace. There is still
+> one live server mount per session, but the UI can keep a live preview tab and
+> multiple historical preview tabs beside proposals, reviews, inbox, and chat.
+
 # Reopenable Preview Widgets — Design Doc
+
+## Current behavior
+
+- The live tab is `preview:live`, titled from the current entry (`Preview:
+  inline.html`, `Preview: report.html`, etc.) and updated by preview SSE.
+- Each restorable `preview_open` card can create/select its own historical tab,
+  keyed by tool call and snapshot block. The title comes from the file param,
+  v3 entry/path, or `inline.html`.
+- Selecting a historical inline/file snapshot remounts it into the live
+  per-session mount before rendering the tab. A v3 snapshot that cannot be
+  remounted still selects by recorded entry/mtime and points the iframe at the
+  existing mount.
+- Errors are local to the card/tab: failed parses or fetches leave the Open
+  button retryable, missing file snapshots disable with "File no longer
+  available", and background remount failures are logged without altering the
+  content-origin contract.
+
+The original single-slot plan below is retained for context only.
 
 ## Problem
 
 `preview_open` writes HTML into a single, session-scoped preview panel. Every subsequent call overwrites the panel — historical payloads are lost. Users cannot re-load a past preview (e.g. an earlier mockup variant) without asking the agent to regenerate it.
 
-## Goal
+## Original goal (superseded)
 
-Add an **Open in preview panel** button to the `preview_open` widget in `PreviewRenderer` that works for both live and archived tool calls. Clicking it hydrates the original HTML snapshot from the session transcript and POSTs it to the existing `/api/preview` endpoint — no new panels, no tabs, no server architectural changes.
+The initial plan added an **Open in preview panel** button that restored one
+single preview slot. Dynamic Chat Tabs superseded that UI shape: the same button
+now selects or creates a source-derived preview tab, while the server still
+keeps one live mount per session.
 
 ## Architecture summary
 
@@ -22,7 +48,7 @@ Three-legged change:
 2. **Truncation** (`src/server/agent/truncate-large-content.ts`) — extend to also scan `tool_result` content blocks (both streaming events and persisted messages) so the snapshot doesn't re-enter the agent's context window.
 3. **Renderer** (`src/ui/tools/renderers/PreviewRenderer.ts`) — add an Open button. Click → lazy-load full snapshot via extended `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` → POST to `/api/preview?sessionId=...`.
 
-The existing `/api/preview` GET/POST pipeline and `preview-panel.ts` polling loop stay untouched — we're just giving the UI a second way to publish HTML into the same single-slot panel.
+In the original implementation plan, the existing `/api/preview` GET/POST pipeline and `preview-panel.ts` polling loop stayed untouched — the UI got a second way to publish HTML into the same single-slot panel. Dynamic Chat Tabs later replaced that finite UI slot with source-derived preview tabs over the same one live mount.
 
 ## File-level plan
 
@@ -296,7 +322,7 @@ The button lives inside the standard card wrapper (isCustom: false). No style cu
 
 - **Multiple rapid clicks**: `btn.disabled = true` immediately on click. Re-enabled on error or 1.5s after success.
 - **Sandboxed sessions**: both `/api/preview` POST and `/api/sessions/:id/tool-content/...` already work for sandboxed callers through normal gateway auth — no sandbox-guard additions needed (confirmed by reading `src/server/auth/sandbox-guard.ts` which allows `/api/preview` POST explicitly).
-- **Concurrent opens from different history rows**: last-write-wins at the panel; fine — that's the single-slot semantic.
+- **Concurrent opens from different history rows**: last remount wins at the server mount, but each tool-card tab keeps its own source identity and can be selected again.
 - **Session not a preview session**: PATCH `preview: true` before POST. This mirrors what the extension already does on first call.
 - **Snapshot marker collision**: an agent-generated HTML document starting with the literal string `__preview_snapshot_v1__\n` would be mistakenly re-extracted. Probability is negligible, but make the marker a content prefix rather than a content substring to keep false positives to zero. Future-proofed by the `_v1_` version segment.
 - **Live call in flight**: button disabled with "Waiting…" tooltip until `result` arrives. Matches `write`'s streaming behavior.
@@ -341,9 +367,9 @@ The button lives inside the standard card wrapper (isCustom: false). No style cu
 
 ## Out of scope
 
-- Tabs / multi-panel preview UI.
+- A separate server mount per preview tab. Dynamic Chat Tabs are a UI workspace over the one live per-session mount.
 - Preview thumbnails or inline mini-iframes in the chat row.
-- Server-side persistence of previews outside the `.jsonl` (the transcript is the canonical store).
+- Server-side persistence of previews outside the `.jsonl` and preview mount metadata.
 - Rewriting historical tool calls to backfill snapshots — disabled-button UX is the contract for legacy calls.
 
 ## Risk register

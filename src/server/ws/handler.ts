@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
@@ -11,10 +12,12 @@ import type { ClientMessage, ServerMessage } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
+import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
+import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
+import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -56,50 +59,16 @@ function stampSnapshotOrder(data: unknown): unknown {
  * Merge persisted skill-expansion sidecar entries into a list of agent
  * messages. For each user message whose text body equals a sidecar
  * `modelText`, rewrite the body to `originalText` and attach
- * `skillExpansions`. Idempotent: messages without matching sidecar entries
- * pass through unchanged.
+ * `skillExpansions` AND `fileMentions` (mirroring the live broadcast splice
+ * in `spliceSkillExpansionsIntoEvent`, so @-mention chips survive reload /
+ * the authoritative post-turn snapshot). Idempotent: messages without
+ * matching sidecar entries pass through unchanged.
  */
 function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[] {
 	if (!Array.isArray(messages) || messages.length === 0) return messages;
 	const entries = readSkillSidecarEntries(sessionId);
 	if (entries.length === 0) return messages;
-	// Build a queue of envelopes per modelText so duplicate identical
-	// messages each get matched in FIFO order.
-	const queues = new Map<string, typeof entries>();
-	for (const e of entries) {
-		const arr = queues.get(e.modelText) ?? [];
-		arr.push(e);
-		queues.set(e.modelText, arr);
-	}
-	let changed = false;
-	const out = messages.map((msg: any) => {
-		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
-		let body: string;
-		if (typeof msg.content === "string") body = msg.content;
-		else if (Array.isArray(msg.content)) {
-			const block = msg.content.find((c: any) => c?.type === "text");
-			body = block?.text ?? "";
-		} else body = "";
-		const q = queues.get(body);
-		if (!q || q.length === 0) return msg;
-		const envelope = q.shift()!;
-		changed = true;
-		let newContent: any;
-		if (typeof msg.content === "string") {
-			newContent = envelope.originalText;
-		} else if (Array.isArray(msg.content)) {
-			newContent = msg.content.map((c: any) =>
-				c?.type === "text" ? { ...c, text: envelope.originalText } : c,
-			);
-			if (!newContent.some((c: any) => c?.type === "text")) {
-				newContent.unshift({ type: "text", text: envelope.originalText });
-			}
-		} else {
-			newContent = envelope.originalText;
-		}
-		return { ...msg, content: newContent, skillExpansions: envelope.skillExpansions };
-	});
-	return changed ? out : messages;
+	return mergeSidecarEntriesIntoMessages(entries, messages);
 }
 
 /** Send persisted model info as fallback when getState() is unavailable. */
@@ -120,14 +89,24 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 	if (imageModel) {
 		data.imageGenerationModel = imageModel;
 	}
-	if (Object.keys(data).length > 0) {
-		send(ws, { type: "state", data });
+	const withCost = sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
+	if (Object.keys(withCost).length > 0) {
+		send(ws, { type: "state", data: withCost });
 	}
 }
 
 function sendImageModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
-	if (imageModel) send(ws, { type: "state", data: { imageGenerationModel: imageModel } });
+	if (imageModel) sendStateWithCost(ws, sessionManager, sessionId, { imageGenerationModel: imageModel });
+}
+
+function sendStateWithCost(ws: WebSocket, sessionManager: SessionManager, sessionId: string, data: unknown): void {
+	send(ws, { type: "state", data: sessionManager.withSessionCostInState(sessionId, data) });
+}
+
+function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
+	const update = sessionManager.getSessionCostUpdate(sessionId);
+	if (update) send(ws, update);
 }
 
 /**
@@ -161,21 +140,79 @@ function buildArchivedStateData(
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) data.imageGenerationModel = imageModel;
-	return data;
+	return sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
+	if (!cpuDiagnosticsEnabled()) {
+		const data = JSON.stringify(msg);
+		for (const client of clients) {
+			if (client.readyState === 1) {
+				client.send(data);
+			}
+		}
+		return;
+	}
+
+	const stringifyStart = performance.now();
 	const data = JSON.stringify(msg);
+	const stringifyMs = performance.now() - stringifyStart;
+	const sendStart = performance.now();
+	let scanned = 0;
+	let recipients = 0;
+	let skipped = 0;
 	for (const client of clients) {
+		scanned++;
 		if (client.readyState === 1) {
 			client.send(data);
+			recipients++;
+		} else {
+			skipped++;
 		}
 	}
+	getCpuDiagnostics().recordWsBroadcast("ws-handler:broadcast", (msg as { type?: string }).type || "unknown", {
+		frames: 1,
+		scanned,
+		recipients,
+		skipped,
+		bytes: Buffer.byteLength(data) * recipients,
+		stringifyMs,
+		sendMs: performance.now() - sendStart,
+	});
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
 	if (ws.readyState === 1) {
 		ws.send(JSON.stringify(msg));
+	}
+}
+
+function getViewerGoalIds(ws: WebSocket): Set<string> {
+	const existing = (ws as any).viewerGoalIds;
+	if (existing instanceof Set) return existing;
+	const next = new Set<string>();
+	(ws as any).viewerGoalIds = next;
+	return next;
+}
+
+function handleViewerMessage(ws: WebSocket, msg: ClientMessage): void {
+	const viewerMsg = msg as unknown as { type?: string; goalId?: unknown };
+	if (viewerMsg.type === "subscribe_goal") {
+		if (typeof viewerMsg.goalId === "string" && viewerMsg.goalId.trim()) {
+			getViewerGoalIds(ws).add(viewerMsg.goalId);
+		}
+		return;
+	}
+	if (viewerMsg.type === "unsubscribe_goal") {
+		if (typeof viewerMsg.goalId === "string") getViewerGoalIds(ws).delete(viewerMsg.goalId);
+		return;
+	}
+	if (viewerMsg.type === "clear_goal_subscriptions") {
+		getViewerGoalIds(ws).clear();
+		return;
+	}
+	if (viewerMsg.type === "ping") {
+		send(ws, { type: "pong" });
 	}
 }
 
@@ -254,9 +291,15 @@ export function handleWebSocketConnection(
 
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
+				(ws as any).isViewer = true;
+				(ws as any).viewerGoalIds = new Set<string>();
+				const initialGoalId = (msg as unknown as { goalId?: unknown }).goalId;
+				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
+					getViewerGoalIds(ws).add(initialGoalId);
+				}
 				send(ws, { type: "auth_ok" });
-				// Do NOT set (ws as any).sessionId — broadcastToGoal fallback will include this client
-				// Read-only: ignore all subsequent messages
+				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
+				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
 			}
 
@@ -268,6 +311,7 @@ export function handleWebSocketConnection(
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
 					send(ws, { type: "auth_ok" });
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
 					// Push persisted model + image model immediately. Without this, the
@@ -283,10 +327,14 @@ export function handleWebSocketConnection(
 				return;
 			}
 
-			// Register client in session
+			// Register client in session. Server-level broadcast helpers use this
+			// tag to avoid falling back regular session sockets into unrelated goal
+			// dashboard events.
+			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
 			send(ws, { type: "auth_ok" });
+			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
 			// client sets _isCompacting before a racing get_messages response.
@@ -300,12 +348,17 @@ export function handleWebSocketConnection(
 			// sessions with no history (avoids sending getState ahead of the
 			// user's first prompt on the agent's sequential RPC pipeline).
 			if (session.status !== "preparing" && session.eventBuffer.size > 0) {
+				const diagEnabled = cpuDiagnosticsEnabled();
+				const diagStart = diagEnabled ? performance.now() : 0;
 				session.rpcClient.getState().then((stateResponse) => {
+					if (diagEnabled) {
+						getCpuDiagnostics().recordTimer("ws-handler:attachGetState", performance.now() - diagStart, { success: stateResponse.success ? 1 : 0 });
+					}
 					if (stateResponse.success) {
 						// Splice canonical session status + version so the client's `case "state"`
 						// can prime `_lastStatusVersion` from the snapshot.
 						const spliced = { ...(stateResponse.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
-						send(ws, { type: "state", data: spliced });
+						sendStateWithCost(ws, sessionManager, sessionId, spliced);
 						sendImageModelState(ws, sessionManager, sessionId);
 						// If agent state lacks model info, supplement with persisted data
 						const data = stateResponse.data as Record<string, unknown> | undefined;
@@ -316,6 +369,7 @@ export function handleWebSocketConnection(
 						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
 				}).catch(() => {
+					if (diagEnabled) getCpuDiagnostics().recordTimer("ws-handler:attachGetState", performance.now() - diagStart, { errors: 1 });
 					sendFallbackModelState(ws, sessionManager, sessionId);
 				});
 			} else {
@@ -376,10 +430,17 @@ export function handleWebSocketConnection(
 			return;
 		}
 
+		// Viewer-only connections receive project broadcasts plus explicitly subscribed goal broadcasts.
+		if ((ws as any).isViewer) {
+			handleViewerMessage(ws, msg);
+			return;
+		}
+
 		// Handle archived session commands (read-only)
 		if ((ws as any).isArchived) {
 			switch (msg.type) {
 				case "get_state": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const archived = sessionManager.getArchivedSession(sessionId);
 					if (archived) {
 						send(ws, { type: "state", data: buildArchivedStateData(archived, sessionManager, sessionId) });
@@ -387,6 +448,7 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_messages": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const messages = await sessionManager.getArchivedMessages(sessionId);
 					send(ws, { type: "messages", data: stampSnapshotOrder(messages) as unknown[] });
 					break;
@@ -417,9 +479,11 @@ export function handleWebSocketConnection(
 					send(ws, { type: "pong" });
 					return;
 				case "get_state":
-					send(ws, { type: "state", data: { preparing: true } });
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					sendStateWithCost(ws, sessionManager, sessionId, { preparing: true });
 					return;
 				case "get_messages":
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "messages", data: stampSnapshotOrder([]) as unknown[] });
 					return;
 				case "prompt":
@@ -469,7 +533,7 @@ export function handleWebSocketConnection(
 							return null;
 						}
 						: undefined;
-					const { originalText, modelText, expansions, unknown } = resolveSkillExpansions(
+					const { originalText, expansions, unknown } = resolveSkillExpansions(
 						msg.text,
 						skillCwd,
 						resolvedConfigStore,
@@ -482,11 +546,76 @@ export function handleWebSocketConnection(
 						console.log(`[ws-handler] Resolved ${expansions.length} slash-skill expansion(s) for session ${sessionId}`);
 					}
 
+					// Resolve `@path` file mentions on the SAME verbatim text. The
+					// `/` and `@` token sets are disjoint by construction, so the
+					// two resolvers never produce overlapping ranges. A bad
+					// reference never tears down the send — it degrades to a
+					// literal `@path` plus a warning.
+					//
+					// IMPORTANT: file mentions resolve against the session's HOST
+					// worktree, NOT skillCwd. skillCwd redirects to the project
+					// rootPath for SKILL discovery (correct there), but that tree
+					// misses the goal/session worktree's branch-local, untracked
+					// and gitignored files. worktreePath is the host path; for
+					// sandboxed sessions session.cwd is a container path, so
+					// worktreePath is required to reach the real files.
+					const fileMentionCwd = session.worktreePath || session.cwd;
+					const fileMentionResult = resolveFileMentions(msg.text, fileMentionCwd);
+					for (const w of fileMentionResult.warnings) {
+						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
+					}
+					if (fileMentionResult.mentions.length > 0) {
+						console.log(`[ws-handler] Resolved ${fileMentionResult.mentions.length} file mention(s) for session ${sessionId}`);
+					}
+
+					// Merge skill expansions + text file mentions into one
+					// right-to-left splice over the original text. Prefix-only
+					// slash skills overlap any @file token; on overlap the skill
+					// wins and the file mention is not inlined (chip still
+					// renders). See buildMergedModelText for the full rationale.
+					const mergedModelText = buildMergedModelText(originalText, expansions, fileMentionResult.mentions);
+
+					// Route image mentions through the image frame and binary
+					// mentions through the document-attachment pipeline (text
+					// mentions are inlined into modelText above). Binary mentions
+					// are attached for UI chip + snapshot parity with
+					// user-uploaded documents; model-side delivery of document
+					// bytes is an existing platform concern (the prompt RPC
+					// carries text + images), NOT a regression of this feature.
+					const sendImages = msg.images ? [...msg.images] : [];
+					const sendAttachments = msg.attachments ? [...msg.attachments] : [];
+					for (const mention of fileMentionResult.mentions) {
+						if (mention.kind === "image" && mention.data && mention.mimeType) {
+							sendImages.push({ type: "image", data: mention.data, mimeType: mention.mimeType });
+						} else if (mention.kind === "binary" && mention.data) {
+							const norm = mention.path.replace(/\\/g, "/");
+							sendAttachments.push({
+								id: `mention-${Date.now()}-${mention.range[0]}`,
+								type: "document",
+								fileName: norm.slice(norm.lastIndexOf("/") + 1) || norm,
+								mimeType: mention.mimeType ?? "application/octet-stream",
+								size: mention.bytes ?? 0,
+								content: mention.data,
+							});
+						}
+					}
+
+					const hasFileMentions = fileMentionResult.mentions.length > 0;
+					const modelChanged = mergedModelText !== originalText;
+
+					// Strip the internal canonical `absPath` before the mention
+					// crosses the wire / is persisted to the sidecar — the UI
+					// never needs it and it would leak host filesystem layout.
+					const wireFileMentions = hasFileMentions
+						? fileMentionResult.mentions.map(toWireMention)
+						: undefined;
+
 					await sessionManager.enqueuePrompt(sessionId, originalText, {
-						images: msg.images,
-						attachments: msg.attachments,
+						images: sendImages.length ? sendImages : undefined,
+						attachments: sendAttachments.length ? sendAttachments : undefined,
 						skillExpansions: expansions.length ? expansions : undefined,
-						modelText: expansions.length ? modelText : undefined,
+						fileMentions: wireFileMentions,
+						modelText: modelChanged ? mergedModelText : undefined,
 					});
 					break;
 				}
@@ -638,14 +767,20 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_state": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					const diagEnabled = cpuDiagnosticsEnabled();
+					const diagStart = diagEnabled ? performance.now() : 0;
 					try {
 						const stateResp = await session.rpcClient.getState();
+						if (diagEnabled) {
+							getCpuDiagnostics().recordTimer("ws-handler:getState", performance.now() - diagStart, { success: stateResp.success ? 1 : 0 });
+						}
 						if (stateResp.success) {
 							// Splice canonical session status + version into the snapshot so
 							// the client's `case "state"` can prime `_lastStatusVersion` from
 							// the snapshot path (e.g. on reconnect via get_state).
 							const spliced = { ...(stateResp.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
-							send(ws, { type: "state", data: spliced });
+							sendStateWithCost(ws, sessionManager, sessionId, spliced);
 							sendImageModelState(ws, sessionManager, sessionId);
 							// If agent state lacks model info, supplement with persisted data
 							const data = stateResp.data as Record<string, unknown> | undefined;
@@ -656,6 +791,7 @@ export function handleWebSocketConnection(
 							sendFallbackModelState(ws, sessionManager, sessionId);
 						}
 					} catch {
+						if (diagEnabled) getCpuDiagnostics().recordTimer("ws-handler:getState", performance.now() - diagStart, { errors: 1 });
 						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
 					break;
@@ -673,7 +809,13 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_messages": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					const diagEnabled = cpuDiagnosticsEnabled();
+					const diagStart = diagEnabled ? performance.now() : 0;
 					const msgsResp = await session.rpcClient.getMessages();
+					if (diagEnabled) {
+						getCpuDiagnostics().recordTimer("ws-handler:getMessages", performance.now() - diagStart, { success: msgsResp.success ? 1 : 0 });
+					}
 					if (msgsResp.success) {
 						const raw = msgsResp.data as any;
 						// msgsResp.data may be an array or { messages: [...] }
@@ -794,18 +936,37 @@ export function handleWebSocketConnection(
 					send(ws, { type: "pong" });
 					break;
 				case "resume": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					// Client requesting resume-from-seq. If the requested seq is
 					// still in the EventBuffer window, replay buffered entries as
 					// individual {type:"event"} frames with their original seq/ts
 					// so the client can dedupe. Otherwise signal a gap — the client
 					// will fall back to a full get_messages snapshot.
+					const diagEnabled = cpuDiagnosticsEnabled();
+					const diagStart = diagEnabled ? performance.now() : 0;
+					let replayed = 0;
+					let bytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
 					if (!session.eventBuffer.canResumeFrom(fromSeq)) {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
+						if (diagEnabled) {
+							getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "resume_gap", { frames: 1, recipients: 1, bytes: 0, replayed: 0, gaps: 1, sendMs: performance.now() - diagStart });
+						}
 						break;
 					}
 					for (const entry of session.eventBuffer.since(fromSeq)) {
-						send(ws, { type: "event", data: entry.event, seq: entry.seq, ts: entry.ts });
+						if (diagEnabled) {
+							const frame = { type: "event" as const, data: entry.event, seq: entry.seq, ts: entry.ts };
+							const data = JSON.stringify(frame);
+							if (ws.readyState === 1) ws.send(data);
+							bytes += Buffer.byteLength(data);
+						} else {
+							send(ws, { type: "event", data: entry.event, seq: entry.seq, ts: entry.ts });
+						}
+						replayed++;
+					}
+					if (diagEnabled) {
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}

@@ -20,59 +20,57 @@ import { openApp, navigateToHash } from "./ui-helpers.js";
 import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 // ---------------------------------------------------------------------------
-// SB-27: Toggle "Show archived"
+// SB-27/SB-29: Toggle archived and archived goals
 // ---------------------------------------------------------------------------
-test.describe("SB-27: Toggle Show archived", () => {
+test.describe("SB-27/SB-29: Toggle Show archived", () => {
 	let sessionId: string;
+	const goalIds: string[] = [];
 
 	test.beforeAll(async () => {
-		// Create a session, send a message via API to make it non-empty, then archive it
 		sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
-		await deleteSession(sessionId); // archives the session
+		await deleteSession(sessionId);
+
+		for (let i = 0; i < 2; i++) {
+			const goal = await createGoal({
+				title: `Archive Goal ${i + 1}`,
+				worktree: false,
+			});
+			goalIds.push(goal.id);
+			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		}
 	});
 
-	test("toggle archived on → section appears, persists across reload, toggle off hides", async ({ page }) => {
+	test.afterAll(async () => {
+		if (sessionId) await deleteSession(sessionId).catch(() => {});
+		for (const id of goalIds) await deleteGoal(id).catch(() => {});
+	});
+
+	test("toggle archived on shows archived content/goals, persists across reload, and toggle off hides", async ({ page }) => {
 		await openApp(page);
 
-		// Archived section should not be visible initially
 		const archivedHeader = page.locator("span.uppercase").filter({ hasText: "Archived" });
-
-		// Open Filters popover and toggle Show Archived
 		const seeArchivedBtn = filtersButton(page);
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
 		await clickShowArchivedToggle(page);
 
-		// Archived section should appear
 		await expect(archivedHeader.first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(".opacity-60").first()).toBeVisible({ timeout: 5_000 });
+		for (let i = 0; i < 2; i++) {
+			await expect(
+				page.getByText(`Archive Goal ${i + 1}`, { exact: false }).first(),
+			).toBeVisible({ timeout: 10_000 });
+		}
 
-		// Items in the archived section should have reduced opacity (greyscale styling)
-		// The archived section wraps items in opacity-60 containers
-		const archivedContainer = page.locator(".opacity-60").first();
-		await expect(archivedContainer).toBeVisible({ timeout: 5_000 });
-
-		// Reload — toggle state should persist
 		await page.reload();
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 15_000 });
-
-		// Archived section should still be visible after reload
 		await expect(archivedHeader.first()).toBeVisible({ timeout: 10_000 });
 
-		// Toggle off
-		const seeArchivedBtnAfter = filtersButton(page);
 		await clickShowArchivedToggle(page);
-
-		// Archived section content should disappear — the "Load more" buttons and
-		// archived session/goal sublists should be hidden.
-		// Verify that the "Sessions" or "Goals" sub-headers inside the archived block are gone.
-		await expect(
-			page.locator("button").filter({ hasText: "Load more" }),
-		).toHaveCount(0, { timeout: 5_000 });
-
-		// The archived section toggle button should no longer have the active highlight
-		await expect(seeArchivedBtnAfter).not.toHaveClass(/text-primary/, { timeout: 3_000 });
+		await expect(page.locator("button").filter({ hasText: "Load more" })).toHaveCount(0, { timeout: 5_000 });
+		await expect(seeArchivedBtn).not.toHaveClass(/text-primary/, { timeout: 3_000 });
 	});
 });
 
@@ -136,51 +134,6 @@ test.describe("SB-28: Archived team structure", () => {
 		// .opacity-60 class — match on the inline style attribute instead.
 		const archivedSessions = page.locator("[style*='grayscale(1)']");
 		await expect(archivedSessions.first()).toBeVisible({ timeout: 10_000 });
-	});
-});
-
-// ---------------------------------------------------------------------------
-// SB-29: Archived goals appear when toggled
-// ---------------------------------------------------------------------------
-test.describe("SB-29: Archived goals visible", () => {
-	const goalIds: string[] = [];
-
-	test.afterAll(async () => {
-		for (const id of goalIds) {
-			await deleteGoal(id).catch(() => {});
-		}
-	});
-
-	test("archived goals appear in archived section", async ({ page }) => {
-		// Create 2 goals and archive them (DELETE archives, doesn't hard-delete)
-		for (let i = 0; i < 2; i++) {
-			const goal = await createGoal({
-				title: `Archive Goal ${i + 1}`,
-				worktree: false,
-			});
-			goalIds.push(goal.id);
-			// Archive the goal via DELETE
-			await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
-		}
-
-		await openApp(page);
-
-		// Toggle "Show archived" on via the Filters popover
-		const seeArchivedBtn = filtersButton(page);
-		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
-		await clickShowArchivedToggle(page);
-
-		// Wait for archived section
-		await expect(
-			page.locator("span.uppercase").filter({ hasText: "Archived" }).first(),
-		).toBeVisible({ timeout: 10_000 });
-
-		// Both archived goals should appear
-		for (let i = 0; i < 2; i++) {
-			await expect(
-				page.getByText(`Archive Goal ${i + 1}`, { exact: false }).first(),
-			).toBeVisible({ timeout: 10_000 });
-		}
 	});
 });
 

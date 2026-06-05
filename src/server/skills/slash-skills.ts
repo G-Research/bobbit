@@ -15,11 +15,14 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { parseCustomDirectories as parseCustomDirsFromConfig } from "../agent/config-directories.js";
+import { parseCustomDirectories as parseCustomDirsFromConfig, type ProjectConfigReader } from "../agent/config-directories.js";
+import { buildPackList } from "../agent/pack-list.js";
+import { PackResolver, SkillLoader } from "../agent/pack-resolver.js";
+import type { PackEntry, LoadedEntity, ResolvedEntity } from "../agent/pack-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-/** Built-in skills shipped with Bobbit in defaults/skills/ (copied to dist/server/defaults/skills/ at build time). */
-const BUILTIN_SKILLS_DIR = path.join(__dirname, "..", "defaults", "skills");
+/** The builtin pack root (dist/server/defaults). Its skills/ subtree is the builtin-file skill source. */
+const BUILTINS_DIR = path.join(__dirname, "..", "defaults");
 
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
@@ -44,6 +47,31 @@ export interface SlashSkill {
 	context?: string;
 	/** Optional agent type for forked context */
 	agent?: string;
+	/** Market pack `name` when this skill resolved from a market pack; null otherwise (design §5.2). */
+	originPackName?: string | null;
+	/** Market {@link PackEntry.id} when this skill resolved from a market pack; null otherwise (design §5.2). Mirrors roles/tools. */
+	originPackId?: string | null;
+}
+
+/**
+ * Explicit market-scope wiring for skill discovery — mirrors the roles/tools
+ * `marketScopeContext()` in `server.ts`. Threads each scope's on-disk base +
+ * `pack_order` store so server-scope market skill packs resolve even when the
+ * project root differs from the server cwd, and global-user `pack_order` is
+ * read from the SERVER store (not the project store). When omitted, discovery
+ * falls back to `cwd` for all scopes (back-compat; design §6.5, finding #3).
+ */
+export interface SkillMarketContext {
+	/** `<server-cwd>` — base for the server scope. */
+	serverBase: string;
+	/** `os.homedir()` — base for the global-user scope. */
+	globalUserBase: string;
+	/** `<project root>` — base for the project scope. */
+	projectBase?: string;
+	/** Reads `pack_order.{server,global-user}` (server config store). */
+	serverConfigStore?: ProjectConfigReader;
+	/** Reads `pack_order.project` + legacy keys (project config store). */
+	projectConfigStore?: ProjectConfigReader;
 }
 
 interface FrontMatter {
@@ -102,8 +130,11 @@ export function applySubstitutions(content: string, args: string): string {
 	return result;
 }
 
-/** Scan a directory for SKILL.md files (each in a subdirectory). */
-function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
+/**
+ * Scan a directory for SKILL.md files (each in a subdirectory).
+ * Exported so the pack resolver's SkillLoader reuses identical parse logic.
+ */
+export function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 	const skills: SlashSkill[] = [];
 	if (!fs.existsSync(dir)) return skills;
 
@@ -152,8 +183,11 @@ function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
 	return skills;
 }
 
-/** Scan legacy .claude/commands/ directory for .md files. */
-function scanCommandsDir(dir: string): SlashSkill[] {
+/**
+ * Scan legacy .claude/commands/ directory for .md files.
+ * Exported so the pack resolver's SkillLoader reuses identical parse logic.
+ */
+export function scanCommandsDir(dir: string): SlashSkill[] {
 	const skills: SlashSkill[] = [];
 	if (!fs.existsSync(dir)) return skills;
 
@@ -248,56 +282,94 @@ let _cache: { skills: SlashSkill[]; cwd: string; configVal: string; ts: number }
 const CACHE_TTL_MS = 5_000;
 
 /**
+ * Drop the slash-skill discovery TTL cache. Called by the REST layer after a
+ * marketplace install/uninstall/update/pack-order change so the next
+ * `/api/slash-skills` reflects the new pack list synchronously (design §9.1).
+ */
+export function invalidateSlashSkillsCache(): void {
+	_cache = null;
+}
+
+/**
+ * The single ordered pack list for skill discovery: the in-code static skill
+ * (lowest, §6.2 row 1) prepended to the unified pack list (§6.2 rows 2–8).
+ */
+function buildSkillPackList(
+	cwd: string,
+	projectConfigStore?: ProjectConfigReader,
+	marketContext?: SkillMarketContext,
+): PackEntry[] {
+	const staticEntry: PackEntry = {
+		id: "builtin-skills-static",
+		kind: "builtin",
+		scope: "builtin",
+		path: "",
+		readOnly: true,
+		onlyTypes: ["skills"],
+		layout: "defaults-tree",
+		skillSource: "built-in",
+		preloaded: {
+			skills: BUILTIN_SKILLS.map((s): LoadedEntity<SlashSkill> => ({ name: s.name, item: s })),
+		},
+	};
+	// With an explicit market context, thread each scope's real base + store
+	// (finding #3) so server-scope market skill packs resolve when the project
+	// root != server cwd, and global-user pack_order comes from the server
+	// store. Without it, fall back to `cwd` for every scope (back-compat).
+	const list = buildPackList({
+		builtinsDir: BUILTINS_DIR,
+		serverBase: marketContext?.serverBase ?? cwd,
+		globalUserBase: marketContext?.globalUserBase ?? os.homedir(),
+		projectBase: marketContext?.projectBase ?? cwd,
+		cwd,
+		serverConfigStore: marketContext?.serverConfigStore ?? projectConfigStore,
+		projectConfigStore: marketContext?.projectConfigStore ?? projectConfigStore,
+	});
+	return [staticEntry, ...list];
+}
+
+/**
  * Discover all slash skills for a given working directory.
- * Merges project, personal, legacy, custom, and built-in sources.
- * Priority (highest wins): project > bobbit project > personal > bobbit personal > legacy > custom > built-in.
+ *
+ * Adapter over the single {@link PackResolver}: builds the unified pack list
+ * (§6.2 order preserved) and resolves the `skills` type, then applies the
+ * `userInvocable !== false` filter, alphabetical sort, and TTL cache exactly
+ * as before. Resolution is byte-identical to the legacy merge with zero
+ * market packs installed.
  */
 export function discoverSlashSkills(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
+	marketContext?: SkillMarketContext,
 ): SlashSkill[] {
-	const configVal = (projectConfigStore?.get("skill_directories") ?? "") + "|" + (projectConfigStore?.get("config_directories") ?? "");
+	const store = projectConfigStore as ProjectConfigReader | undefined;
+	const configVal =
+		(store?.get("skill_directories") ?? "") + "|" +
+		(store?.get("config_directories") ?? "") + "|" +
+		(store?.get("disabled_config_directories") ?? "") + "|" +
+		// Server/global-user market packs depend on the market context's bases
+		// + server pack_order — include them so the TTL cache can't serve a
+		// stale list across differently-wired projects (finding #3).
+		(marketContext?.serverBase ?? "") + "|" +
+		(marketContext?.projectBase ?? "") + "|" +
+		(marketContext?.serverConfigStore?.get("pack_order") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
 		return _cache.skills;
 	}
 
-	const projectSkillsDir = path.join(cwd, ".claude", "skills");
-	const personalSkillsDir = path.join(os.homedir(), ".claude", "skills");
-	const bobbitProjectSkillsDir = path.join(cwd, ".bobbit", "skills");
-	const bobbitPersonalSkillsDir = path.join(os.homedir(), ".bobbit", "skills");
-	const legacyCommandsDir = path.join(cwd, ".claude", "commands");
+	const resolved = discoverSlashSkillsResolved(cwd, store, marketContext);
 
-	const projectSkills = scanSkillDir(projectSkillsDir, "project");
-	const personalSkills = scanSkillDir(personalSkillsDir, "personal");
-	const bobbitProjectSkills = scanSkillDir(bobbitProjectSkillsDir, "project");
-	const bobbitPersonalSkills = scanSkillDir(bobbitPersonalSkillsDir, "personal");
-	const legacyCommands = scanCommandsDir(legacyCommandsDir);
-
-	// Scan custom directories
-	const customSkills: SlashSkill[] = [];
-	for (const entry of parseCustomSkillDirectories(projectConfigStore)) {
-		customSkills.push(...scanSkillDir(entry.path, "custom"));
-	}
-
-	// Scan builtin skills shipped with Bobbit (defaults/skills/)
-	const builtinFileSkills = scanSkillDir(BUILTIN_SKILLS_DIR, "built-in" as SlashSkill["source"]);
-
-	// Merge with priority (lowest to highest — later insertions overwrite):
-	// built-in → builtin-file → custom → legacy → bobbit personal → claude personal → bobbit project → claude project
-	const byName = new Map<string, SlashSkill>();
-	for (const skill of BUILTIN_SKILLS) byName.set(skill.name, skill);
-	for (const skill of builtinFileSkills) byName.set(skill.name, skill);
-	for (const skill of customSkills) byName.set(skill.name, skill);
-	for (const skill of legacyCommands) byName.set(skill.name, skill);
-	for (const skill of bobbitPersonalSkills) byName.set(skill.name, skill);
-	for (const skill of personalSkills) byName.set(skill.name, skill);
-	for (const skill of bobbitProjectSkills) byName.set(skill.name, skill);
-	for (const skill of projectSkills) byName.set(skill.name, skill);
-
-	// Filter to user-invocable skills only (default is true)
-	const skills = Array.from(byName.values()).filter(
-		(s) => s.userInvocable !== false
-	);
+	// Stamp the origin pack id + name (market packs only) so config pages can
+	// show the pack chip; filter to user-invocable skills only (default true).
+	const skills = resolved
+		.map((r) => {
+			const item = r.item;
+			const isMarket = r.origin.kind === "market";
+			item.originPackName = isMarket ? (r.origin.manifest?.name ?? null) : null;
+			item.originPackId = isMarket ? r.origin.id : null;
+			return item;
+		})
+		.filter((s) => s.userInvocable !== false);
 
 	// Sort alphabetically
 	skills.sort((a, b) => a.name.localeCompare(b.name));
@@ -306,9 +378,29 @@ export function discoverSlashSkills(
 	return skills;
 }
 
+/**
+ * Resolve slash skills as raw {@link ResolvedEntity} records (winner + shadows),
+ * unfiltered and unsorted. Used by the conflicts endpoint to surface same-name
+ * shadows that the flat {@link discoverSlashSkills} list discards.
+ */
+export function discoverSlashSkillsResolved(
+	cwd: string,
+	projectConfigStore?: { get(key: string): string | undefined },
+	marketContext?: SkillMarketContext,
+): ResolvedEntity<SlashSkill>[] {
+	const store = projectConfigStore as ProjectConfigReader | undefined;
+	const entries = buildSkillPackList(cwd, store, marketContext);
+	return new PackResolver(entries, [new SkillLoader()]).resolve<SlashSkill>("skills");
+}
+
 /** Look up a single slash skill by name. */
-export function getSlashSkill(cwd: string, name: string, projectConfigStore?: { get(key: string): string | undefined }): SlashSkill | undefined {
-	return discoverSlashSkills(cwd, projectConfigStore).find((s) => s.name === name);
+export function getSlashSkill(
+	cwd: string,
+	name: string,
+	projectConfigStore?: { get(key: string): string | undefined },
+	marketContext?: SkillMarketContext,
+): SlashSkill | undefined {
+	return discoverSlashSkills(cwd, projectConfigStore, marketContext).find((s) => s.name === name);
 }
 
 /**

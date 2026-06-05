@@ -69,6 +69,8 @@ If the CA ends up under "Personal" instead of "Trusted Root", the browser will s
 - **Production**: `https://yourname.dedyn.io:3001` (built UI served by gateway)
 - **PWA**: Install from the browser (requires trusted CA — no security warnings)
 
+> On iOS, the installed standalone PWA recovers automatically from iOS freezing/killing it in the background (no more blank grey screen on relaunch). See [pwa-lifecycle-recovery.md](pwa-lifecycle-recovery.md).
+
 ## Troubleshooting
 
 ### "Failed to fetch" in Connect dialog

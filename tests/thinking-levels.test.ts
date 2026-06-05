@@ -29,6 +29,8 @@ interface MatrixRow {
 
 const matrix: MatrixRow[] = [
 	// Anthropic Opus 4.6+ → xhigh
+	{ label: "Claude Opus 4-8", model: { id: "claude-opus-4-8-20260528", provider: "anthropic", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "Claude Opus 4.8 dotted", model: { id: "claude-opus-4.8-20260528", provider: "anthropic", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "Claude Opus 4-7", model: { id: "claude-opus-4-7-20251101", provider: "anthropic", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "Claude Opus 4-6", model: { id: "claude-opus-4-6-20251015", provider: "anthropic", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	// Future Opus 4-10 should also get xhigh (digit-range regex).
@@ -54,7 +56,9 @@ const matrix: MatrixRow[] = [
 	{ label: "gpt-4o (non-reasoning)", model: { id: "gpt-4o", provider: "openai", reasoning: false }, expected: ["off"] },
 	// Google / other.
 	{ label: "Gemini 3.1 Pro", model: { id: "gemini-3.1-pro", provider: "google", reasoning: true }, expected: ALL_BASE },
-	// aigw-routed Opus 4-7 — provider is "aigw" but id carries the canonical family.
+	// aigw-routed Opus 4.8 / 4-7 — provider is "aigw" but id carries the canonical family.
+	{ label: "aigw/claude-opus-4-8", model: { id: "claude-opus-4-8-20260528", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "aigw/claude-opus-4.8", model: { id: "claude-opus-4.8-20260528", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "aigw/claude-opus-4-7", model: { id: "claude-opus-4-7-20251101", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	// aigw-routed gpt-5.2 / gpt-5.4 — same rule.
 	{ label: "aigw/gpt-5.2", model: { id: "gpt-5.2", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
@@ -93,6 +97,10 @@ test("supportsXHigh: cross-provider id collision fails closed", () => {
 });
 
 test("supportsXHigh: uses metadata first, else Opus 4.6+ and gpt-5.1-codex-max / gpt-5.2* / gpt-5.4* / gpt-5.5* fallback", () => {
+	assert.equal(supportsXHigh({ id: "claude-opus-4-8-x", provider: "anthropic" }), true);
+	assert.equal(supportsXHigh({ id: "claude-opus-4.8-x", provider: "anthropic" }), true);
+	assert.equal(supportsXHigh({ id: "claude-opus-4-8-x", provider: "aigw" }), true);
+	assert.equal(supportsXHigh({ id: "claude-opus-4.8-x", provider: "aigw" }), true);
 	assert.equal(supportsXHigh({ id: "claude-opus-4-7-x", provider: "anthropic" }), true);
 	assert.equal(supportsXHigh({ id: "claude-opus-4-6-x", provider: "anthropic" }), true);
 	assert.equal(supportsXHigh({ id: "claude-opus-4-5-x", provider: "anthropic" }), false);
@@ -121,9 +129,20 @@ test("clampThinkingLevel: returns input unchanged when supported", () => {
 	}
 });
 
-test("clampThinkingLevel: xhigh on Opus 4.5 clamps to high", () => {
+test("clampThinkingLevel: xhigh on unsupported reasoning models clamps to high", () => {
 	const opus45: ModelLike = { id: "claude-opus-4-5-20250920", provider: "anthropic", reasoning: true };
+	const crossProviderOpus48: ModelLike = { id: "claude-opus-4-8", provider: "openai", reasoning: true };
 	assert.equal(clampThinkingLevel("xhigh", opus45), "high");
+	assert.equal(clampThinkingLevel("xhigh", crossProviderOpus48), "high");
+});
+
+test("clampThinkingLevel: xhigh on Opus 4.8 stays xhigh", () => {
+	const opus48: ModelLike = { id: "claude-opus-4-8", provider: "anthropic", reasoning: true };
+	const dottedOpus48: ModelLike = { id: "claude-opus-4.8", provider: "anthropic", reasoning: true };
+	const aigwOpus48: ModelLike = { id: "claude-opus-4-8", provider: "aigw", reasoning: true };
+	assert.equal(clampThinkingLevel("xhigh", opus48), "xhigh");
+	assert.equal(clampThinkingLevel("xhigh", dottedOpus48), "xhigh");
+	assert.equal(clampThinkingLevel("xhigh", aigwOpus48), "xhigh");
 });
 
 test("clampThinkingLevel: xhigh on Opus 4.7 stays xhigh", () => {

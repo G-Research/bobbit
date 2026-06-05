@@ -218,16 +218,34 @@ export class GoalStore {
 	/** Optional callback invoked after any goal mutation (put/update/archive). */
 	onIndexUpdate?: (goal: PersistedGoal) => void;
 
+	/**
+	 * Called once when a goal id appears in the store for the first time.
+	 * Wired by `ProjectContext.setGoalTriggerDispatcher` from `server.ts`.
+	 * MUST be assigned independently of `onIndexUpdate` — the search index
+	 * relies on the latter and must not be stomped.
+	 */
+	onGoalCreated?: (goal: PersistedGoal) => void;
+
+	/**
+	 * Called once per archive transition (false → true). Idempotent —
+	 * a second `archive` call on an already-archived goal does NOT fire.
+	 */
+	onGoalArchived?: (goal: PersistedGoal) => void;
+
 	/** Bump generation without mutating goal data (e.g. when gate status changes). */
 	bumpGeneration(): void {
 		this.generation++;
 	}
 
 	put(goal: PersistedGoal): void {
+		// Detect "new id" BEFORE the set so the goal_created callback fires
+		// exactly once per id. Subsequent puts (updates) skip the callback.
+		const isNew = !this.goals.has(goal.id);
 		this.generation++;
 		this.goals.set(goal.id, goal);
 		this.save();
 		this.onIndexUpdate?.(goal);
+		if (isNew) this.onGoalCreated?.(goal);
 	}
 
 	get(id: string): PersistedGoal | undefined {
@@ -247,11 +265,16 @@ export class GoalStore {
 	archive(id: string): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
+		// Capture the transition BEFORE mutating so onGoalArchived fires only
+		// once. Idempotent: re-archiving an already-archived goal still returns
+		// true (back-compat with existing callers) but does NOT re-fire.
+		const wasAlreadyArchived = existing.archived === true;
 		this.generation++;
 		existing.archived = true;
 		existing.archivedAt = Date.now();
 		this.save();
 		this.onIndexUpdate?.(existing);
+		if (!wasAlreadyArchived) this.onGoalArchived?.(existing);
 		return true;
 	}
 

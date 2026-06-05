@@ -2,7 +2,8 @@
  * API E2E for WP-H: the v3 mount endpoint + content origin route.
  *
  * Validates:
- *   - POST /api/preview/mount?sessionId=<sid>  with {html} → 200 + {url, path, entry, mtime}
+ *   - POST /api/preview/mount?sessionId=<sid>  with {html} → 200 + {url, path, entry, mtime, contentHash}
+ *   - GET  /api/preview/mount?sessionId=<sid> after a mount → 200 + 64-hex contentHash
  *   - GET  /preview/<sid>/inline.html with valid cookie → 200 text/html + bridge inject
  *   - GET  /preview/<sid>/inline.html without cookie (forced auth) → 401
  *   - GET  /preview/<sid>/../../etc/passwd → 403 (or 400)
@@ -51,7 +52,7 @@ async function mintCookie(): Promise<string> {
 }
 
 test.describe("POST /api/preview/mount (v3)", () => {
-	test("html body → 200 with {url, path, entry, mtime}", async () => {
+	test("html body → 200 with {url, path, entry, mtime, contentHash, artifactId}", async () => {
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			body: JSON.stringify({ html: "<h1>x</h1>" }),
@@ -65,9 +66,72 @@ test.describe("POST /api/preview/mount (v3)", () => {
 		expect(body.path.length).toBeGreaterThan(0);
 		expect(typeof body.mtime).toBe("number");
 		expect(body.mtime).toBeGreaterThan(0);
+		expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(body.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
 	});
 
-	test("missing both html and file → 400", async () => {
+	test("artifactId restore rehydrates immutable mounted bytes and rejects wrong sessions", async () => {
+		const restoreSessionId = await createSession();
+		const otherSessionId = await createSession();
+		try {
+			const v1Resp = await apiFetch(`/api/preview/mount?sessionId=${restoreSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<!doctype html><body>artifact-v1</body>", entry: "artifact.html" }),
+			});
+			expect(v1Resp.status).toBe(200);
+			const v1 = await v1Resp.json();
+			expect(v1.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
+
+			const v2Resp = await apiFetch(`/api/preview/mount?sessionId=${restoreSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<!doctype html><body>current-v2</body>", entry: "artifact.html" }),
+			});
+			expect(v2Resp.status).toBe(200);
+			const v2 = await v2Resp.json();
+			expect(v2.contentHash).not.toBe(v1.contentHash);
+
+			const otherMount = await apiFetch(`/api/preview/mount?sessionId=${otherSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<!doctype html><body>other-stable</body>", entry: "artifact.html" }),
+			});
+			expect(otherMount.status).toBe(200);
+			const otherBefore = await otherMount.json();
+
+			const wrongSessionRestore = await apiFetch(`/api/preview/artifacts/${encodeURIComponent(v1.artifactId)}/restore?sessionId=${otherSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ artifactId: v1.artifactId }),
+			});
+			expect(wrongSessionRestore.status).toBe(404);
+			const otherAfterResp = await apiFetch(`/api/preview/mount?sessionId=${otherSessionId}`);
+			expect(otherAfterResp.status).toBe(200);
+			const otherAfter = await otherAfterResp.json();
+			expect(otherAfter.contentHash).toBe(otherBefore.contentHash);
+
+			const restoreResp = await apiFetch(`/api/preview/artifacts/${encodeURIComponent(v1.artifactId)}/restore?sessionId=${restoreSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ artifactId: v1.artifactId }),
+			});
+			expect(restoreResp.status).toBe(200);
+			const restored = await restoreResp.json();
+			expect(restored.artifactId).toBe(v1.artifactId);
+			expect(restored.contentHash).toBe(v1.contentHash);
+			expect(restored.entry).toBe("artifact.html");
+
+			const cookie = await mintCookie();
+			const contentResp = await fetch(`${base()}/preview/${restoreSessionId}/artifact.html`, {
+				headers: { Cookie: cookie },
+			});
+			expect(contentResp.status).toBe(200);
+			const html = await contentResp.text();
+			expect(html).toContain("artifact-v1");
+			expect(html).not.toContain("current-v2");
+		} finally {
+			await deleteSession(restoreSessionId).catch(() => {});
+			await deleteSession(otherSessionId).catch(() => {});
+		}
+	});
+
+	test("missing html, file, and artifactId → 400", async () => {
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			body: JSON.stringify({}),
@@ -224,6 +288,34 @@ test.describe("POST /api/preview/mount (v3)", () => {
 			expect(resp.status).toBe(404);
 		} finally {
 			rmSync(src, { recursive: true, force: true });
+		}
+	});
+});
+
+test.describe("GET /api/preview/mount (v3)", () => {
+	test("current mount response includes a 64-hex contentHash", async () => {
+		const currentSessionId = await createSession();
+		try {
+			const mountResp = await apiFetch(`/api/preview/mount?sessionId=${currentSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<h1>bootstrap hash</h1>", entry: "current.html" }),
+			});
+			expect(mountResp.status).toBe(200);
+
+			const resp = await apiFetch(`/api/preview/mount?sessionId=${currentSessionId}`);
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.url).toBe(`/preview/${currentSessionId}/current.html`);
+			expect(body.relPath).toBe(`${currentSessionId}/current.html`);
+			expect(body.entry).toBe("current.html");
+			expect(typeof body.path).toBe("string");
+			expect(body.path.length).toBeGreaterThan(0);
+			expect(typeof body.mtime).toBe("number");
+			expect(body.mtime).toBeGreaterThan(0);
+			expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+			expect(body.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
+		} finally {
+			await deleteSession(currentSessionId).catch(() => {});
 		}
 	});
 });

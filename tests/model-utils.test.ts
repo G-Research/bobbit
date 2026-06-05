@@ -7,6 +7,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { getModels } from "@earendil-works/pi-ai";
 import { inferMeta } from "../src/server/agent/aigw-manager.ts";
 import { modelRecencyRank } from "../src/server/agent/model-registry.ts";
 
@@ -68,17 +69,17 @@ describe("inferMeta()", () => {
 		assert.equal(meta.contextWindow, 400_000);
 	});
 
-	it("GPT-5.4 → reasoning=true so xhigh does not clamp to off", () => {
+	it("GPT-5.4 → 272K context and reasoning=true so xhigh does not clamp to off", () => {
 		const meta = inferMeta("gpt-5.4");
-		assert.equal(meta.contextWindow, 1_050_000);
+		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
 		assert.ok(meta.input!.includes("image"));
 	});
 
-	it("GPT-5.5 → 1M context, 128K max, reasoning=true", () => {
+	it("GPT-5.5 → 272K context, 128K max, reasoning=true", () => {
 		const meta = inferMeta("gpt-5.5");
-		assert.equal(meta.contextWindow, 1_000_000);
+		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
 		assert.ok(meta.input!.includes("image"));
@@ -149,6 +150,27 @@ describe("inferMeta()", () => {
 	});
 });
 
+// ── Pi model catalog tests ─────────────────────────────────────────
+
+const piAnthropicOpus48 = (() => {
+	try {
+		return getModels("anthropic" as any).find((model) => model.id.includes("claude-opus-4-8"));
+	} catch {
+		return undefined;
+	}
+})();
+
+describe("pi-ai model catalog", () => {
+	it("exposes Claude Opus 4.8 metadata", { skip: piAnthropicOpus48 ? false : "requires pi-ai 0.77.0+ catalog" }, () => {
+		const model = piAnthropicOpus48!;
+		assert.match(model.id, /claude-opus-4-8/);
+		assert.equal(model.name, "Claude Opus 4.8");
+		assert.equal(model.contextWindow, 1_000_000);
+		assert.equal(model.maxTokens, 128_000);
+		assert.equal(model.reasoning, true);
+	});
+});
+
 // ── modelRecencyRank tests ─────────────────────────────────────────
 
 describe("modelRecencyRank()", () => {
@@ -158,6 +180,18 @@ describe("modelRecencyRank()", () => {
 		const opus45 = modelRecencyRank("claude-opus-4-5");
 		assert.ok(opus46 > sonnet46);
 		assert.ok(sonnet46 > opus45);
+	});
+
+	it("Claude: parsed Opus 4 minors rank newer versions above older ones", () => {
+		assert.ok(modelRecencyRank("claude-opus-4-8") > modelRecencyRank("claude-opus-4-7"));
+		assert.equal(modelRecencyRank("claude-opus-4.8"), modelRecencyRank("claude-opus-4-8"));
+		assert.ok(modelRecencyRank("claude-opus-4-10") > modelRecencyRank("claude-opus-4-8"));
+		assert.ok(modelRecencyRank("claude-opus-4-8") > modelRecencyRank("claude-sonnet-4-6"));
+	});
+
+	it("Claude: date-only Opus 4 IDs stay in the generic Opus 4 tier", () => {
+		assert.equal(modelRecencyRank("claude-opus-4-20250514"), modelRecencyRank("claude-opus-4"));
+		assert.ok(modelRecencyRank("claude-opus-4-5") > modelRecencyRank("claude-opus-4-20250514"));
 	});
 
 	it("Claude: sonnet-4-5 > sonnet-4 > haiku-4-5", () => {

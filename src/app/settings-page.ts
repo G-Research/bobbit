@@ -6,6 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
+import { live } from "lit/directives/live.js";
 import { ArrowLeft, Brain, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import {
 	getShortcuts,
@@ -36,7 +37,7 @@ import {
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
-import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
@@ -110,6 +111,10 @@ let settingsMaxNestingDepth: number | null = null;
 const MAX_NESTING_DEPTH_DEFAULT = 3;
 const MAX_NESTING_DEPTH_MIN = 1;
 const MAX_NESTING_DEPTH_MAX = 10;
+let harnessStatusLoaded = false;
+let harnessRestartAvailable = false;
+let harnessRestartState: "idle" | "requesting" | "requested" | "error" = "idle";
+let harnessRestartError = "";
 // Skills-catalog byte budget override. `null` means "use server default" (no preference set).
 let settingsSkillsCatalogBudget: number | null = null;
 
@@ -117,7 +122,53 @@ let settingsSkillsCatalogBudget: number | null = null;
 const SKILLS_CATALOG_BUDGET_DEFAULT_BYTES = 16384;
 const SKILLS_CATALOG_BUDGET_MIN_BYTES = 1024;
 const SKILLS_CATALOG_BUDGET_MAX_BYTES = 131072;
+// Extra trusted GitHub hosts for PR walkthroughs. Persisted under the `githubTrustedHosts`
+// preferences key; github.com and its API/raw hosts are always trusted by the server baseline.
+let settingsGithubTrustedHosts: string[] = [];
+let settingsGithubTrustedHostInput = "";
 let customisePromptStatus = "";
+
+// Always-trusted baseline hosts (mirror of DEFAULT_TRUSTED_HOSTS in
+// src/shared/pr-walkthrough/url-safety.ts). Kept as a local copy — NOT imported —
+// to preserve UI chunk independence (pr-walkthrough has a circular-chunk hazard).
+const GITHUB_DEFAULT_TRUSTED_HOSTS = new Set([
+	"github.com",
+	"www.github.com",
+	"api.github.com",
+	"raw.githubusercontent.com",
+	"gist.githubusercontent.com",
+]);
+
+/**
+ * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
+ * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
+ * rules MUST match the shared normalizer exactly so the UI never optimistically shows entries the
+ * server would silently drop. Baseline DEFAULT hosts are filtered out (the managed list holds only
+ * EXTRA hosts; baseline hosts are always trusted server-side regardless of this list).
+ */
+function normalizeTrustedHost(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	let candidate = value.trim();
+	if (!candidate) return undefined;
+	if (candidate.includes("://")) {
+		try {
+			candidate = new URL(candidate).hostname;
+		} catch {
+			return undefined;
+		}
+	}
+	candidate = candidate.trim().toLowerCase().replace(/\.$/, "");
+	if (!candidate) return undefined;
+	// Reject anything that is not a bare hostname (paths, whitespace, creds, ports).
+	if (/[\s/@:]/.test(candidate) || candidate.includes("://")) return undefined;
+	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
+	// Require EVERY label to be a valid DNS label: non-empty, <=63 chars, and no
+	// leading/trailing hyphen. Rejects ".example.com", "example..com", "-x.com", "bad-.example", etc.
+	if (!candidate.split(".").every((label) => label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"))) return undefined;
+	// Managed list holds only EXTRA hosts; baseline hosts are always trusted server-side.
+	if (GITHUB_DEFAULT_TRUSTED_HOSTS.has(candidate)) return undefined;
+	return candidate;
+}
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -136,6 +187,54 @@ const _projectScopePending = new Map<string, Record<string, any>>();
  *  `{ field: "base_ref", error, details? }`. Cleared on successful save or when
  *  the field is edited. Rendered inline below the base_ref input. */
 const _baseRefErrors = new Map<string, { error: string; details?: Array<{ component: string; message: string }> }>();
+/** Per-project cache of `GET /api/projects/:id/base-ref/detect`.
+ *  `resolved` is exactly what worktrees branch off (shown as the placeholder
+ *  for a blank `base_ref`); `detected` is the live remote detection (used to
+ *  fill the input on "Detect from remote", null when offline). A `null` cache
+ *  entry means a fetch is in flight. Mirrors the `_baseRefErrors` Map pattern. */
+const _baseRefDetect = new Map<string, { resolved: string; detected: string | null } | null>();
+
+/** Lazily fetch the resolved/detected base ref for a project (cached). Triggers
+ *  a single fetch + re-render when missing, mirroring `loadWorktreePoolStatus`. */
+function loadBaseRefDetect(projectId: string): void {
+	if (_baseRefDetect.has(projectId)) return; // loaded or loading
+	_baseRefDetect.set(projectId, null); // mark in-flight
+	gatewayFetch(`/api/projects/${projectId}/base-ref/detect`).then(async (res) => {
+		if (res.ok) {
+			const data = await res.json();
+			_baseRefDetect.set(projectId, {
+				resolved: typeof data.resolved === "string" ? data.resolved : "",
+				detected: typeof data.detected === "string" ? data.detected : null,
+			});
+		} else {
+			_baseRefDetect.set(projectId, { resolved: "", detected: null });
+		}
+		renderApp();
+	}).catch(() => {
+		_baseRefDetect.set(projectId, { resolved: "", detected: null });
+		renderApp();
+	});
+}
+
+/** Force a re-fetch of the detect endpoint (used by the "Detect from remote"
+ *  button so a click always queries the live remote). Returns the fresh data. */
+async function refetchBaseRefDetect(projectId: string): Promise<{ resolved: string; detected: string | null }> {
+	try {
+		const res = await gatewayFetch(`/api/projects/${projectId}/base-ref/detect`);
+		if (res.ok) {
+			const data = await res.json();
+			const parsed = {
+				resolved: typeof data.resolved === "string" ? data.resolved : "",
+				detected: typeof data.detected === "string" ? data.detected : null,
+			};
+			_baseRefDetect.set(projectId, parsed);
+			return parsed;
+		}
+	} catch { /* fall through */ }
+	const fallback = { resolved: "", detected: null };
+	_baseRefDetect.set(projectId, fallback);
+	return fallback;
+}
 /** Per-project transient state for the "Add custom key" composer in the Project tab. */
 const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
 
@@ -680,6 +779,14 @@ function renderWorktreeSection(
 	labelClass: string,
 ): import("lit").TemplateResult {
 	const baseRefError = _baseRefErrors.get(projectId);
+	const baseRefValue = pendingChanges.base_ref ?? resolved.base_ref?.value ?? "";
+	const baseRefBlank = !String(baseRefValue).trim();
+	// Only consult the detect endpoint for blank values — when a concrete value
+	// is set we don't clutter the field with the resolved-fallback hint.
+	if (baseRefBlank) loadBaseRefDetect(projectId);
+	const detect = baseRefBlank ? _baseRefDetect.get(projectId) : undefined;
+	const resolvedRef = detect?.resolved || "";
+	const detectedRef = detect?.detected ?? null;
 	return html`
 		<div class="flex flex-col gap-2">
 			<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree</div>
@@ -707,8 +814,8 @@ function renderWorktreeSection(
 					data-testid="base-ref-input"
 					type="text"
 					class="${inputClass}"
-					placeholder="origin/master (default)"
-					.value=${pendingChanges.base_ref ?? resolved.base_ref?.value ?? ""}
+					placeholder=${baseRefBlank && resolvedRef ? resolvedRef : "origin/master (default)"}
+					.value=${baseRefValue}
 					@input=${(e: Event) => {
 						pendingChanges.base_ref = (e.target as HTMLInputElement).value;
 						// Clear stale inline error as soon as the user edits the field.
@@ -719,6 +826,30 @@ function renderWorktreeSection(
 					}}
 				/>
 			</div>
+			${baseRefBlank ? html`
+				<div class="flex items-center gap-2 -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
+					<span data-testid="base-ref-using" class="text-[11px] text-muted-foreground">
+						using: <span class="font-mono">${resolvedRef || "origin/master"}</span>
+					</span>
+					<button
+						data-testid="base-ref-detect"
+						class="px-2 py-0.5 text-[11px] rounded-md border border-input text-foreground
+							hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						?disabled=${detect != null && detectedRef == null}
+						title=${detect != null && detectedRef == null
+							? "No remote detected (offline or no origin)"
+							: "Query the remote and fill the field with origin/<branch>"}
+						@click=${async () => {
+							const fresh = await refetchBaseRefDetect(projectId);
+							if (fresh.detected) {
+								pendingChanges.base_ref = fresh.detected;
+								if (_baseRefErrors.has(projectId)) _baseRefErrors.delete(projectId);
+							}
+							renderApp();
+						}}
+					>Detect from remote</button>
+				</div>
+			` : ""}
 			<p class="text-[11px] text-muted-foreground -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
 				Branch ref (local or <span class="font-mono">origin/...</span>) that new worktrees are based on and the
 				integration target for workflow gates. Empty = project primary. Per-component
@@ -789,6 +920,56 @@ function resetRebindState(): void {
 
 export function toggleSettings(): void {
 	toggleConfigPage(["settings"], () => setHashRoute("settings"));
+}
+
+function loadHarnessStatus(): void {
+	if (harnessStatusLoaded) return;
+	harnessStatusLoaded = true;
+	fetchHarnessStatus().then(status => {
+		harnessRestartAvailable = status.restartAvailable;
+		renderApp();
+	});
+}
+
+async function requestSettingsRestart(): Promise<void> {
+	if (!harnessRestartAvailable) return;
+	if (harnessRestartState !== "idle" && harnessRestartState !== "error") return;
+	harnessRestartState = "requesting";
+	harnessRestartError = "";
+	renderApp();
+
+	const result = await requestHarnessRestart();
+	if (result.ok) {
+		harnessRestartState = "requested";
+		harnessRestartError = "";
+	} else {
+		harnessRestartState = "error";
+		harnessRestartError = result.error || "Restart request failed";
+	}
+	renderApp();
+}
+
+function renderHarnessRestartControl() {
+	if (!harnessRestartAvailable) return "";
+	const requesting = harnessRestartState === "requesting";
+	const requested = harnessRestartState === "requested";
+	const label = requesting ? "Requesting..." : requested ? "Restart Requested" : "Restart Server";
+	return html`
+		<div class="ml-auto flex items-center gap-2">
+			${harnessRestartState === "error" && harnessRestartError ? html`
+				<span class="text-xs text-destructive max-w-[40vw] sm:max-w-[18rem] truncate" title=${harnessRestartError}>${harnessRestartError}</span>
+			` : ""}
+			<button
+				class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-60 disabled:pointer-events-none"
+				?disabled=${requesting || requested}
+				@click=${requestSettingsRestart}
+				title="Restart Server"
+			>
+				${requesting ? html`<span class="inline-flex animate-spin">${icon(Loader2, "xs")}</span>` : icon(RotateCcw, "xs")}
+				<span>${label}</span>
+			</button>
+		</div>
+	`;
 }
 
 function handleRebindKeydown(e: KeyboardEvent): void {
@@ -1940,6 +2121,9 @@ function loadGeneralSettings() {
 					settingsMaxNestingDepth = (typeof rawDepth === "number" && Number.isFinite(rawDepth)) ? rawDepth : null;
 					const raw = prefs.skillsCatalogBudget;
 					settingsSkillsCatalogBudget = (typeof raw === "number" && Number.isFinite(raw)) ? raw : null;
+					settingsGithubTrustedHosts = Array.isArray(prefs.githubTrustedHosts)
+						? prefs.githubTrustedHosts.filter((h: unknown): h is string => typeof h === "string")
+						: [];
 					renderApp();
 				}
 			} catch {}
@@ -2001,6 +2185,45 @@ async function resetSkillsCatalogBudget(): Promise<void> {
 			body: JSON.stringify({ skillsCatalogBudget: null }),
 		});
 	} catch {}
+}
+
+async function persistGithubTrustedHosts(): Promise<void> {
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ githubTrustedHosts: settingsGithubTrustedHosts }),
+		});
+		// The server normalize-and-stores (lossy); the GET readback is authoritative.
+		// Re-fetch so the UI never shows an entry the server silently dropped.
+		const res = await gatewayFetch("/api/preferences");
+		if (res.ok) {
+			const prefs = await res.json();
+			settingsGithubTrustedHosts = Array.isArray(prefs.githubTrustedHosts)
+				? prefs.githubTrustedHosts.filter((h: unknown): h is string => typeof h === "string")
+				: [];
+			renderApp();
+		}
+	} catch {}
+}
+
+async function addTrustedHost(): Promise<void> {
+	const normalized = normalizeTrustedHost(settingsGithubTrustedHostInput);
+	if (!normalized || settingsGithubTrustedHosts.includes(normalized)) {
+		// Invalid or duplicate — clear the input and re-render without persisting.
+		settingsGithubTrustedHostInput = "";
+		renderApp();
+		return;
+	}
+	settingsGithubTrustedHosts = [...settingsGithubTrustedHosts, normalized];
+	settingsGithubTrustedHostInput = "";
+	renderApp();
+	await persistGithubTrustedHosts();
+}
+
+async function removeTrustedHost(host: string): Promise<void> {
+	settingsGithubTrustedHosts = settingsGithubTrustedHosts.filter((h) => h !== host);
+	renderApp();
+	await persistGithubTrustedHosts();
 }
 
 async function togglePlayFinishSound(): Promise<void> {
@@ -2218,6 +2441,43 @@ function renderGeneralTab() {
 						?disabled=${settingsSkillsCatalogBudget === null}
 						@click=${resetSkillsCatalogBudget}
 					>Reset to default</button>
+				</div>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-sm font-medium text-foreground">Trusted GitHub hosts</span>
+				<p class="text-xs text-muted-foreground">
+					PR walkthroughs fetch repository and pull-request data (metadata and diffs) from these hosts.
+					github.com and its API/raw hosts are always trusted. Only add hosts you trust.
+				</p>
+				<div class="flex flex-col gap-1.5" data-testid="github-trusted-hosts-list">
+					${settingsGithubTrustedHosts.length === 0 ? html`
+						<p class="text-xs text-muted-foreground italic">No additional hosts trusted.</p>
+					` : settingsGithubTrustedHosts.map((host) => html`
+						<div class="flex items-center gap-2" data-testid="github-trusted-host-row" data-host=${host}>
+							<code class="text-sm text-foreground flex-1 truncate">${host}</code>
+							<button
+								class="text-xs text-muted-foreground hover:text-destructive underline"
+								data-testid="github-trusted-host-remove"
+								@click=${() => removeTrustedHost(host)}
+							>Remove</button>
+						</div>
+					`)}
+				</div>
+				<div class="flex items-center gap-2">
+					<input
+						type="text"
+						placeholder="ghe.example.com"
+						data-testid="github-trusted-host-input"
+						class="flex-1 px-2 py-1 rounded border border-input bg-background text-sm"
+						.value=${live(settingsGithubTrustedHostInput)}
+						@input=${(e: Event) => { settingsGithubTrustedHostInput = (e.target as HTMLInputElement).value; }}
+						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); void addTrustedHost(); } }}
+					/>
+					<button
+						class="px-3 py-1.5 rounded border border-input text-sm hover:bg-secondary"
+						data-testid="github-trusted-host-add"
+						@click=${() => void addTrustedHost()}
+					>Add</button>
 				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
@@ -3819,6 +4079,7 @@ function renderMaintenanceTab() {
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
+	loadHarnessStatus();
 
 	const currentScope = getActiveScope();
 	const tabs = getTabsForScope(currentScope);
@@ -3829,20 +4090,23 @@ export function renderSettingsPage() {
 		<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 			<!-- Header -->
 			<div class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
-				<button
-					class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
-					@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
-					title="Back"
-				>${icon(ArrowLeft, "sm")}</button>
-				<h1 class="text-lg font-semibold">Settings</h1>
+				<div class="flex items-center gap-3 min-w-0">
+					<button
+						class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
+						@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
+						title="Back"
+					>${icon(ArrowLeft, "sm")}</button>
+					<h1 class="text-lg font-semibold truncate">Settings</h1>
+				</div>
+				${renderHarnessRestartControl()}
 			</div>
 			<!-- Scope row -->
 			${renderScopeRow(currentScope, tabs)}
 			<!-- Tab bar -->
-			<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border bg-secondary/20">
+			<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border bg-secondary/20 overflow-x-auto" style="scrollbar-width:thin;" data-testid="settings-tab-bar">
 				${tabs.map((tab) => html`
 					<button
-						class="px-3 py-1.5 text-sm rounded-md transition-colors
+						class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
 							${currentTab === tab.id
 								? "bg-background text-foreground shadow-sm border border-border"
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"

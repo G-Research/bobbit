@@ -1,17 +1,5 @@
 /**
- * Reproducing test for Bug 1: Mobile archived search doesn't filter.
- *
- * On mobile (< 768px viewport), `renderMobileLanding()` in `src/app/render.ts`
- * applies the search filter only to `liveGoals` and `ungroupedSessions`. The
- * `archivedGoals` array is rendered unfiltered, so every archived goal appears
- * regardless of the search query. Desktop behaviour is correct.
- *
- * This test forces See Archived on via localStorage, renders at 375x667, and
- * types a query that matches exactly one of two archived goals. It expects the
- * non-matching goal to be hidden — which will FAIL on master.
- *
- * Uses per-test isolated setup (beforeEach/afterEach) to set a precedent for
- * the flaky-tests fix in Bug 2.
+ * Mobile archived search filtering through the real responsive sidebar.
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal, nonGitCwd, waitForHealth } from "../e2e-setup.js";
@@ -71,51 +59,7 @@ test.describe("Mobile sidebar archived search filtering", () => {
 		await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("typing a search query on mobile filters archived goals", async ({ page }) => {
-		// Open app at default viewport so openApp's Settings-button wait
-		// succeeds, set localStorage, then resize to mobile and reload.
-		await openApp(page);
-		await page.evaluate(() => {
-			localStorage.removeItem("bobbit-archived-collapsed-projects");
-			localStorage.setItem("bobbit-show-archived", "true");
-		});
-		await page.setViewportSize({ width: 375, height: 667 });
-		await page.reload();
-
-		// At mobile viewport renderMobileLanding() runs — it contains a
-		// <search-box> and the archived subsection (because showArchived=true).
-		await expect(page.locator("input[data-search]")).toBeVisible({ timeout: 20_000 });
-
-		// Wait for both archived goals to render (both should be visible initially
-		// with no search active).
-		await expect(page.getByText(matchingTitle, { exact: false }).first()).toBeVisible({
-			timeout: 15_000,
-		});
-		await expect(page.getByText(nonMatchingTitle, { exact: false }).first()).toBeVisible({
-			timeout: 10_000,
-		});
-
-		// Type query that matches only the first goal.
-		const searchInput = page.locator("input[data-search]");
-		await expect(searchInput).toBeVisible({ timeout: 5_000 });
-		await searchInput.click();
-		await searchInput.fill("story");
-
-		// Matching goal still visible (auto-retry absorbs debounce)
-		await expect(page.getByText(matchingTitle, { exact: false }).first()).toBeVisible({
-			timeout: 5_000,
-		});
-
-		// Non-matching goal must be hidden. On current master this FAILS because
-		// renderMobileLanding() renders archivedGoals unfiltered. Use toHaveCount(0)
-		// to wait for debounce + re-render rather than a hardcoded sleep.
-		await expect(
-			page.getByText(nonMatchingTitle, { exact: false }),
-			`Mobile archived search did not filter: non-matching goal "${nonMatchingTitle}" still visible after typing query "story"`,
-		).toHaveCount(0, { timeout: 5_000 });
-	});
-
-	test("matching substring is wrapped in a <strong class='font-semibold'> span", async ({ page }) => {
+	test("typing a search query filters archived goals and highlights the match", async ({ page }) => {
 		await openApp(page);
 		await page.evaluate(() => {
 			localStorage.removeItem("bobbit-archived-collapsed-projects");
@@ -126,13 +70,17 @@ test.describe("Mobile sidebar archived search filtering", () => {
 
 		await expect(page.locator("input[data-search]")).toBeVisible({ timeout: 20_000 });
 		await expect(page.getByText(matchingTitle, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.getByText(nonMatchingTitle, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
 
 		const searchInput = page.locator("input[data-search]");
-		await searchInput.click();
 		await searchInput.fill("story");
 
-		// At least one <strong class="font-semibold"> should exist wrapping the
-		// matched "story" substring inside the matching goal title.
+		await expect(page.getByText(matchingTitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
+		await expect(
+			page.getByText(nonMatchingTitle, { exact: false }),
+			`Mobile archived search did not filter: non-matching goal "${nonMatchingTitle}" still visible after typing query "story"`,
+		).toHaveCount(0, { timeout: 5_000 });
+
 		const strongs = page.locator("strong.font-semibold");
 		await expect.poll(async () => strongs.count(), { timeout: 5_000 }).toBeGreaterThan(0);
 		const strongTexts = await strongs.allTextContents();

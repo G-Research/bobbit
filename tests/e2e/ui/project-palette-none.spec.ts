@@ -49,7 +49,7 @@ test.describe('Per-project palette "None (use global)" card', () => {
 		// Create a project with no palette override.
 		const createResp = await apiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "palette-none-test", rootPath: projectDir }),
+			body: JSON.stringify({ name: "palette-none-test", rootPath: projectDir, __e2e_seed_skip__: true }),
 		});
 		expect(createResp.status).toBe(201);
 		const project = await createResp.json();

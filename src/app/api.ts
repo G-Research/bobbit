@@ -1,7 +1,7 @@
 import {
 	state,
 	renderApp,
-	setProjects,
+	setProjectsIfChanged,
 	expandedGoals,
 	saveExpandedGoals,
 	type GatewaySession,
@@ -19,14 +19,14 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
-import { needsHumanAttention } from "./notification-policy.js";
+import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
+import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 export { errorFromResponse, errorDetails };
 // Static import of dialogs creates a cycle (dialogs.ts imports from api.ts),
 // but neither module references the other at module-init time, so ESM's
 // live-binding semantics resolve it correctly at runtime.
 import {
-	showConnectionError,
 	confirmAction,
 	countDescendants,
 	showArchiveGoalDialog,
@@ -46,6 +46,214 @@ const PR_POLL_INTERVAL_MS = 60_000;
  *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
 export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
+}
+
+export type SidebarCopyLinkTitle = "Copy session link" | "Copy goal link";
+
+export function absoluteHashUrl(hash: string): string {
+	const route = hash.startsWith("#")
+		? hash
+		: hash.startsWith("/")
+			? `#${hash}`
+			: `#/${hash}`;
+	if (typeof location === "undefined") return route;
+	return `${location.origin}${location.pathname}${location.search}${route}`;
+}
+
+export function sessionDeepLink(sessionId: string): string {
+	return absoluteHashUrl(`/session/${encodeURIComponent(sessionId)}`);
+}
+
+export function goalDeepLink(goalId: string): string {
+	return absoluteHashUrl(`/goal/${encodeURIComponent(goalId)}`);
+}
+
+/** Copy text via the async Clipboard API, falling back to a legacy
+ *  execCommand("copy") path so links are still copied in insecure contexts
+ *  (e.g. plain http:// over NordLynx) where the Clipboard API is blocked. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+	try {
+		if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch {
+		// Clipboard API unavailable or rejected (insecure context) — fall through.
+	}
+	return legacyCopyText(text);
+}
+
+function legacyCopyText(text: string): boolean {
+	if (typeof document === "undefined") return false;
+	let ta: HTMLTextAreaElement | null = null;
+	try {
+		ta = document.createElement("textarea");
+		ta.value = text;
+		ta.setAttribute("readonly", "");
+		ta.style.position = "fixed";
+		ta.style.top = "-1000px";
+		ta.style.opacity = "0";
+		document.body.appendChild(ta);
+		ta.select();
+		ta.setSelectionRange(0, text.length);
+		return document.execCommand("copy");
+	} catch {
+		return false;
+	} finally {
+		ta?.remove();
+	}
+}
+
+// Standalone toast fallback. `showHeaderToast` only renders inside the session
+// header (active-session view); the landing / no-active-session sidebar has no
+// header, so we surface the SAME toast (identical `.review-toast` styling and
+// `data-testid="header-toast"`) appended to <body> when no header is mounted.
+let _sidebarToastEl: HTMLDivElement | null = null;
+let _sidebarToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function mountStandaloneSidebarToast(text: string): void {
+	if (typeof document === "undefined") return;
+	if (!_sidebarToastEl || !_sidebarToastEl.isConnected) {
+		_sidebarToastEl = document.createElement("div");
+		_sidebarToastEl.className = "review-toast";
+		_sidebarToastEl.setAttribute("data-testid", "header-toast");
+		document.body.appendChild(_sidebarToastEl);
+	}
+	_sidebarToastEl.textContent = text;
+	if (_sidebarToastTimer) clearTimeout(_sidebarToastTimer);
+	_sidebarToastTimer = setTimeout(() => {
+		_sidebarToastEl?.remove();
+		_sidebarToastEl = null;
+		_sidebarToastTimer = null;
+	}, 2500);
+}
+
+/** Flash the same "Link copied" toast the session header uses. When a session
+ *  header is mounted, reuse `showHeaderToast`; otherwise (landing / no active
+ *  session) mount a standalone toast so the flash is visible in every sidebar
+ *  context. The header's `[data-testid="copy-session-link"]` button renders
+ *  under the exact same condition as the header toast, so its presence is a
+ *  reliable, synchronous signal that the header toast will be visible. */
+async function flashSidebarToast(text: string): Promise<void> {
+	try {
+		const { showHeaderToast } = await import("./render.js");
+		showHeaderToast(text);
+	} catch {
+		// best-effort toast
+	}
+	if (typeof document === "undefined") return;
+	if (document.querySelector('[data-testid="copy-session-link"]')) return;
+	mountStandaloneSidebarToast(text);
+}
+
+export async function copySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
+	const copied = await copyTextToClipboard(url);
+	if (!copied) console.warn(`[sidebar] ${title}: failed to copy link`, url);
+	await flashSidebarToast(copied ? "Link copied" : "Couldn't copy link");
+}
+
+export type GoalGithubLinkResponse =
+	| { available: true; url: string; kind: "pr" | "branch" }
+	| { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+
+const GOAL_GITHUB_LINK_POSITIVE_TTL_MS = 60_000;
+const GOAL_GITHUB_LINK_NEGATIVE_TTL_MS = 10_000;
+
+type GoalGithubLinkCacheEntry = {
+	value: GoalGithubLinkResponse;
+	fetchedAt: number;
+};
+
+const goalGithubLinkCache = new Map<string, GoalGithubLinkCacheEntry>();
+const goalGithubLinkInFlight = new Map<string, Promise<GoalGithubLinkResponse>>();
+
+function sameGoalGithubLink(a: GoalGithubLinkResponse | undefined, b: GoalGithubLinkResponse): boolean {
+	if (!a || a.available !== b.available) return false;
+	if (a.available && b.available) return a.url === b.url && a.kind === b.kind;
+	if (!a.available && !b.available) return a.reason === b.reason;
+	return false;
+}
+
+function isGoalGithubLinkCacheEntryFresh(entry: GoalGithubLinkCacheEntry): boolean {
+	const ttl = entry.value.available ? GOAL_GITHUB_LINK_POSITIVE_TTL_MS : GOAL_GITHUB_LINK_NEGATIVE_TTL_MS;
+	return Date.now() - entry.fetchedAt < ttl;
+}
+
+function getFreshGoalGithubLinkCacheEntry(goalId: string): GoalGithubLinkCacheEntry | undefined {
+	const entry = goalGithubLinkCache.get(goalId);
+	if (!entry) return undefined;
+	if (isGoalGithubLinkCacheEntryFresh(entry)) return entry;
+	goalGithubLinkCache.delete(goalId);
+	return undefined;
+}
+
+function cacheGoalGithubLink(goalId: string, value: GoalGithubLinkResponse, skipRender = false): GoalGithubLinkResponse {
+	const changed = !sameGoalGithubLink(goalGithubLinkCache.get(goalId)?.value, value);
+	goalGithubLinkCache.set(goalId, { value, fetchedAt: Date.now() });
+	if (changed && !skipRender) renderApp();
+	return value;
+}
+
+function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
+	if (!value || typeof value !== "object") throw new Error("Invalid GitHub link response");
+	const data = value as Partial<GoalGithubLinkResponse>;
+	if (data.available === true) {
+		const url = (data as { url?: unknown }).url;
+		const kind = (data as { kind?: unknown }).kind;
+		if (typeof url === "string" && (kind === "pr" || kind === "branch")) return { available: true, url, kind };
+	}
+	if (data.available === false) {
+		const reason = (data as { reason?: unknown }).reason;
+		if (reason === "no-branch" || reason === "no-github-remote" || reason === "goal-not-found") return { available: false, reason };
+	}
+	throw new Error("Invalid GitHub link response");
+}
+
+export function getCachedGoalGithubLink(goalId: string): GoalGithubLinkResponse | undefined {
+	const prUrl = state.prStatusCache.get(goalId)?.url;
+	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
+	return getFreshGoalGithubLinkCacheEntry(goalId)?.value;
+}
+
+export function clearGoalGithubLinkCache(goalId?: string): void {
+	if (goalId) {
+		goalGithubLinkCache.delete(goalId);
+		goalGithubLinkInFlight.delete(goalId);
+	} else {
+		goalGithubLinkCache.clear();
+		goalGithubLinkInFlight.clear();
+	}
+}
+
+export async function fetchGoalGithubLink(goalId: string, opts?: { force?: boolean; skipRender?: boolean }): Promise<GoalGithubLinkResponse> {
+	const prUrl = state.prStatusCache.get(goalId)?.url;
+	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
+
+	if (!opts?.force) {
+		const cached = getFreshGoalGithubLinkCacheEntry(goalId)?.value;
+		if (cached) return cached;
+		const inFlight = goalGithubLinkInFlight.get(goalId);
+		if (inFlight) return inFlight;
+	}
+
+	const request = (async () => {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/github-link`);
+		if (res.status === 404) return cacheGoalGithubLink(goalId, { available: false, reason: "goal-not-found" }, opts?.skipRender);
+		if (!res.ok) throw new Error(`Failed to fetch goal GitHub link: ${res.status}`);
+		return cacheGoalGithubLink(goalId, parseGoalGithubLinkResponse(await res.json()), opts?.skipRender);
+	})();
+	goalGithubLinkInFlight.set(goalId, request);
+	try {
+		return await request;
+	} finally {
+		if (goalGithubLinkInFlight.get(goalId) === request) goalGithubLinkInFlight.delete(goalId);
+	}
+}
+
+// dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
+async function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): Promise<void> {
+	const { showConnectionError: show } = await import("./dialogs.js");
+	show(title, message, opts);
 }
 
 /**
@@ -113,6 +321,7 @@ export async function refreshSessions(): Promise<void> {
 
 	let sessionsChanged = false;
 	let goalsChanged = false;
+	let projectsChanged = false;
 
 	try {
 		// Build URLs with generation params for conditional fetch
@@ -127,14 +336,15 @@ export async function refreshSessions(): Promise<void> {
 			gatewayFetch(sessionsUrl),
 			gatewayFetch(goalsUrl),
 			// Fetch projects alongside sessions/goals so project grouping is
-			// available on the very first render — prevents sessions briefly
-			// appearing under the wrong project.
-			isInitial ? fetchProjects().catch((): null => null) : Promise.resolve(null),
+			// available on the very first render and landing/mobile pages without
+			// an active session still pick up cross-tab project reorder changes.
+			fetchProjectsSnapshot(),
 		]);
-		// Apply projects before processing sessions so the first renderApp()
-		// already has the correct project list for sidebar grouping.
-		if (projectsResult) {
-			setProjects(projectsResult);
+		// Apply projects before processing sessions so renderApp() already has
+		// the correct project list for sidebar grouping. The equality gate avoids
+		// repainting every 5s polling tick when order/content is unchanged.
+		if (projectsResult !== null) {
+			projectsChanged = setProjectsIfChanged(projectsResult);
 		}
 		// background polling: failures are silent (caller does not show a modal)
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
@@ -154,7 +364,8 @@ export async function refreshSessions(): Promise<void> {
 				if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
 					const goalId = s.teamGoalId || s.goalId;
 					const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-					if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)) {
+					if (needsHumanAttentionOnIdleTransition(s, goal, newSessions, state.gateStatusCache)
+						|| needsImmediateHumanAttention(s, state.gateStatusCache)) {
 						RemoteAgent.playNotificationBeep();
 						showFaviconBadge();
 					}
@@ -219,6 +430,10 @@ export async function refreshSessions(): Promise<void> {
 					(g) => g.archived && !incomingIds.has(g.id),
 				);
 				state.goals = [...incoming, ...preservedArchived];
+				// Goal branch/repo metadata drives the GitHub menu link; invalidate lazy
+				// lookups whenever the goal list changes so negative entries don't stick
+				// after a branch or remote becomes available.
+				clearGoalGithubLinkCache();
 				// Auto-expand only newly discovered goals that have sessions — never
 				// re-expand a goal the user has already seen (and may have collapsed).
 				for (const g of incoming) {
@@ -246,7 +461,7 @@ export async function refreshSessions(): Promise<void> {
 		}
 	} finally {
 		state.sessionsLoading = false;
-		if (sessionsChanged || goalsChanged || isInitial) {
+		if (sessionsChanged || goalsChanged || projectsChanged || isInitial) {
 			renderApp();
 		}
 	}
@@ -435,14 +650,36 @@ export async function cleanupOrphanedIndexRows(projectId?: string): Promise<numb
 // PROJECT API
 // ============================================================================
 
-export async function fetchProjects(): Promise<Project[]> {
+async function fetchProjectsSnapshot(): Promise<Project[] | null> {
   try {
     const res = await gatewayFetch("/api/projects");
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     const data = await res.json();
-    return data.projects || data || [];
+    if (Array.isArray(data?.projects)) return data.projects;
+    return Array.isArray(data) ? data : [];
   } catch {
-    return [];
+    return null;
+  }
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  return (await fetchProjectsSnapshot()) ?? [];
+}
+
+export async function saveProjectOrder(projectIds: string[]): Promise<Project[] | null> {
+  try {
+    const res = await gatewayFetch("/api/projects/order", {
+      method: "PUT",
+      body: JSON.stringify({ projectIds }),
+    });
+    if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
+    const data = await res.json().catch(() => null);
+    return data?.projects || data || [];
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    const { message, code, stack } = errorDetails(err);
+    showConnectionError("Failed to save project order", message, { code, stack });
+    return null;
   }
 }
 
@@ -467,14 +704,60 @@ export interface DetectedRepo {
   detectedCommands: Record<string, string>;
 }
 
-export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]> {
+/**
+ * Monorepo workspace frameworks detected at `rootPath`. Mirrors the server-
+ * side `MonorepoFramework` union (see `src/server/agent/monorepo-scan.ts`).
+ */
+export type MonorepoFramework =
+  | "pnpm"
+  | "npm-yarn-workspaces"
+  | "nx"
+  | "turbo"
+  | "lerna"
+  | "cargo"
+  | "go"
+  | "gradle";
+
+export interface MonorepoCandidate {
+  relativePath: string;
+  frameworks: MonorepoFramework[];
+  packageName?: string;
+}
+
+export interface MonorepoScanResult {
+  frameworks: MonorepoFramework[];
+  candidates: MonorepoCandidate[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export interface ProjectScanResult {
+  repos: DetectedRepo[];
+  monorepo?: MonorepoScanResult;
+}
+
+/**
+ * Full server payload from POST /api/projects/scan — `{ repos, monorepo }`.
+ * Use this when you need the monorepo block (V2 Add-Project flow); legacy
+ * call sites that only want `repos` should keep using `scanProjectRepos`.
+ */
+export async function scanProject(dirPath: string): Promise<ProjectScanResult> {
   const res = await gatewayFetch(`/api/projects/scan?path=${encodeURIComponent(dirPath)}`, {
     method: 'POST',
     body: JSON.stringify({ path: dirPath }),
   });
   if (!res.ok) throw new Error(`Scan failed (${res.status})`);
   const data = await res.json();
-  return Array.isArray(data?.repos) ? data.repos as DetectedRepo[] : [];
+  const repos = Array.isArray(data?.repos) ? data.repos as DetectedRepo[] : [];
+  const monorepo = data?.monorepo && typeof data.monorepo === "object"
+    ? data.monorepo as MonorepoScanResult
+    : undefined;
+  return { repos, monorepo };
+}
+
+export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]> {
+  const { repos } = await scanProject(dirPath);
+  return repos;
 }
 
 export async function browseDirectory(dirPath?: string): Promise<{
@@ -681,49 +964,152 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 	}
 }
 
+export interface GateStatusSummaryGate {
+	gateId: string;
+	name?: string;
+	status: "pending" | "passed" | "failed";
+	effectiveStatus: "pending" | "passed" | "failed" | "running";
+	running: boolean;
+	awaitingSignoffCount: number;
+	dependsOn: string[];
+	signalCount: number;
+	updatedAt?: number;
+	failedSteps?: string[];
+}
+
+export interface GateStatusSummary {
+	passed: number;
+	total: number;
+	verifying: boolean;
+	verifyingCount: number;
+	awaitingSignoffCount: number;
+	awaitingHumanSignoff: boolean;
+	runningGateIds: string[];
+	gates: GateStatusSummaryGate[];
+}
+
+function emptyGateStatusSummary(): GateStatusSummary {
+	return {
+		passed: 0,
+		total: 0,
+		verifying: false,
+		verifyingCount: 0,
+		awaitingSignoffCount: 0,
+		awaitingHumanSignoff: false,
+		runningGateIds: [],
+		gates: [],
+	};
+}
+
+function normalizeGateStatusSummary(data: any): GateStatusSummary {
+	const raw = data?.summary && typeof data.summary === "object" ? data.summary : data;
+	const awaitingSignoffCount = typeof raw?.awaitingSignoffCount === "number" ? raw.awaitingSignoffCount : 0;
+	const runningGateIds = Array.isArray(raw?.runningGateIds) ? raw.runningGateIds.filter((id: unknown): id is string => typeof id === "string") : [];
+	return {
+		passed: typeof raw?.passed === "number" ? raw.passed : 0,
+		total: typeof raw?.total === "number" ? raw.total : (Array.isArray(data?.gates) ? data.gates.length : 0),
+		verifying: typeof raw?.verifying === "boolean" ? raw.verifying : runningGateIds.length > 0,
+		verifyingCount: typeof raw?.verifyingCount === "number" ? raw.verifyingCount : runningGateIds.length,
+		awaitingSignoffCount,
+		awaitingHumanSignoff: typeof raw?.awaitingHumanSignoff === "boolean" ? raw.awaitingHumanSignoff : awaitingSignoffCount > 0,
+		runningGateIds,
+		gates: Array.isArray(raw?.gates) ? raw.gates : (Array.isArray(data?.gates) ? data.gates : []),
+	};
+}
+
+async function fetchGateStatusSummary(goalId: string): Promise<GateStatusSummary> {
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/gates?view=summary`);
+		if (!res.ok) return emptyGateStatusSummary();
+		return normalizeGateStatusSummary(await res.json());
+	} catch {
+		return emptyGateStatusSummary();
+	}
+}
+
+function applyGateStatusSummary(goalId: string, summary: GateStatusSummary): boolean {
+	const prev = state.gateStatusCache.get(goalId);
+	const next = {
+		passed: summary.passed,
+		total: summary.total,
+		verifying: summary.verifying,
+		verifyingCount: summary.verifyingCount,
+		awaitingSignoffCount: summary.awaitingSignoffCount,
+		awaitingHumanSignoff: summary.awaitingHumanSignoff,
+		runningGateIds: summary.runningGateIds,
+		gates: summary.gates,
+	};
+	if (!prev
+		|| prev.passed !== next.passed
+		|| prev.total !== next.total
+		|| prev.verifying !== next.verifying
+		|| prev.verifyingCount !== next.verifyingCount
+		|| prev.awaitingSignoffCount !== next.awaitingSignoffCount
+		|| prev.awaitingHumanSignoff !== next.awaitingHumanSignoff
+		|| JSON.stringify(prev.runningGateIds ?? []) !== JSON.stringify(next.runningGateIds)
+		|| JSON.stringify(prev.gates ?? []) !== JSON.stringify(next.gates)) {
+		state.gateStatusCache.set(goalId, next);
+		dispatchGateStatusCacheUpdated(goalId);
+		return true;
+	}
+	return false;
+}
+
 /** Fetch gate statuses for all goals with workflows and update the cache.
  *  Returns true if any data changed. When skipRender is true, the caller is responsible for renderApp(). */
 async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 	const goalsWithWorkflow = state.goals.filter(g => g.workflow && g.workflow.gates.length > 0);
 	if (goalsWithWorkflow.length === 0) return false;
 
-	const results = await Promise.all(
-		goalsWithWorkflow.map(async (g) => {
-			const gates = await fetchGoalGates(g.id);
-			const passed = gates.filter(gs => gs.status === "passed").length;
-			const total = g.workflow!.gates.length;
-			const verifying = gates.some(gs => gs.signals?.some(s => s.verification?.status === "running"));
-			const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some(s => s.verification?.status === "running")).length;
-			return { goalId: g.id, passed, total, verifying, verifyingCount };
-		})
-	);
+	const results = await Promise.all(goalsWithWorkflow.map(async (g) => {
+		const token = reserveGateStatusRefreshToken(g.id);
+		return {
+			goalId: g.id,
+			token,
+			summary: await fetchGateStatusSummary(g.id),
+		};
+	}));
 
 	let changed = false;
-	for (const { goalId, passed, total, verifying, verifyingCount } of results) {
-		const prev = state.gateStatusCache.get(goalId);
-		if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying || prev.verifyingCount !== verifyingCount) {
-			state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
-			changed = true;
-		}
+	for (const { goalId, token, summary } of results) {
+		if (!isLatestGateStatusRefresh(goalId, token)) continue;
+		changed = applyGateStatusSummary(goalId, summary) || changed;
 	}
 	if (changed && !skipRender) renderApp();
 	return changed;
 }
 
+const scheduledGateStatusRefreshes = new Map<string, ReturnType<typeof setTimeout>>();
+const gateStatusRefreshTokens = new Map<string, number>();
+
+function reserveGateStatusRefreshToken(goalId: string): number {
+	const next = (gateStatusRefreshTokens.get(goalId) ?? 0) + 1;
+	gateStatusRefreshTokens.set(goalId, next);
+	return next;
+}
+
+function isLatestGateStatusRefresh(goalId: string, token: number): boolean {
+	return gateStatusRefreshTokens.get(goalId) === token;
+}
+
+export function scheduleGateStatusRefreshForGoal(goalId: string | null | undefined, delayMs = 50): void {
+	if (!goalId) return;
+	const token = reserveGateStatusRefreshToken(goalId);
+	const existing = scheduledGateStatusRefreshes.get(goalId);
+	if (existing) clearTimeout(existing);
+	scheduledGateStatusRefreshes.set(goalId, setTimeout(() => {
+		scheduledGateStatusRefreshes.delete(goalId);
+		void refreshGateStatusForGoal(goalId, token);
+	}, delayMs));
+}
+
 /** Refresh gate status cache for a single goal (called from WS event handlers). */
-export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
+export async function refreshGateStatusForGoal(goalId: string, token = reserveGateStatusRefreshToken(goalId)): Promise<void> {
 	const goal = state.goals.find(g => g.id === goalId);
 	if (!goal?.workflow?.gates.length) return;
-	const gates = await fetchGoalGates(goalId);
-	const passed = gates.filter(gs => gs.status === "passed").length;
-	const total = goal.workflow.gates.length;
-	const verifying = gates.some(gs => gs.signals?.some((s: any) => s.verification?.status === "running"));
-	const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some((s: any) => s.verification?.status === "running")).length;
-	const prev = state.gateStatusCache.get(goalId);
-	if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying || prev.verifyingCount !== verifyingCount) {
-		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
-		renderApp();
-	}
+	const summary = await fetchGateStatusSummary(goalId);
+	if (!isLatestGateStatusRefresh(goalId, token)) return;
+	if (applyGateStatusSummary(goalId, summary)) renderApp();
 }
 
 /** Fetch PR status for all goals with branches and update the cache.
@@ -1210,15 +1596,23 @@ export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "human-signoff";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
 	phase?: number;
 	optional?: boolean;
+	/** Sign-off card title — only meaningful for `human-signoff` steps. */
 	label?: string;
+	/** Toggle label shown at goal creation — only meaningful for `optional` steps. */
+	optionalLabel?: string;
+	role?: string;
 	description?: string;
+	/** Structural reference: which component to run from (Phase 2). */
+	component?: string;
+	/** Structural reference: which command on that component to invoke (Phase 2). */
+	command?: string;
 }
 
 export interface WorkflowGate {
@@ -1227,6 +1621,8 @@ export interface WorkflowGate {
 	dependsOn: string[];
 	content?: boolean;
 	injectDownstream?: boolean;
+	optional?: boolean;
+	manual?: boolean;
 	metadata?: Record<string, string>;
 	verify?: VerifyStep[];
 }
@@ -1436,7 +1832,26 @@ export interface StaffAgent {
 	projectId?: string;
 	sandboxed?: boolean;
 	contextPolicy?: "preserve" | "compact";
+	accessory?: string;
 }
+
+export type CreateStaffAgentData = {
+	name: string;
+	description: string;
+	systemPrompt: string;
+	cwd?: string;
+	worktree?: boolean;
+	triggers?: any[];
+	projectId?: string;
+	sandboxed?: boolean;
+	accessory?: string;
+	/** Optional role to attach. `null`/omitted = no role. */
+	roleId?: string | null;
+};
+
+// `roleId` accepts `null` to explicitly clear the field; JSON.stringify keeps
+// nulls (it only strips `undefined`), so the server receives the clear signal.
+export type StaffAgentUpdate = Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy" | "accessory">> & { roleId?: string | null };
 
 export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
 	try {
@@ -1486,7 +1901,7 @@ export async function fetchStaffAgent(id: string): Promise<StaffAgent | null> {
 	}
 }
 
-export async function createStaffAgent(data: { name: string; description: string; systemPrompt: string; cwd?: string; worktree?: boolean; triggers?: any[]; projectId?: string; sandboxed?: boolean }): Promise<StaffAgent | null> {
+export async function createStaffAgent(data: CreateStaffAgentData): Promise<StaffAgent | null> {
 	try {
 		const res = await gatewayFetch("/api/staff", {
 			method: "POST",
@@ -1501,7 +1916,7 @@ export async function createStaffAgent(data: { name: string; description: string
 	}
 }
 
-export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy">>): Promise<boolean> {
+export async function updateStaffAgent(id: string, updates: StaffAgentUpdate): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/staff/${id}`, {
 			method: "PUT",
@@ -1698,9 +2113,10 @@ export async function fetchTools(): Promise<ToolInfo[]> {
 	}
 }
 
-export async function fetchToolDetail(name: string): Promise<ToolInfo | null> {
+export async function fetchToolDetail(name: string, projectId?: string): Promise<ToolInfo | null> {
 	try {
-		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}`);
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools/${encodeURIComponent(name)}${qs}`);
 		if (!res.ok) return null;
 		return await res.json();
 	} catch {
@@ -1846,6 +2262,37 @@ export async function dismissSetup(): Promise<void> {
 }
 
 // ============================================================================
+// HARNESS STATUS API
+// ============================================================================
+
+export interface HarnessStatus {
+	restartAvailable: boolean;
+}
+
+export async function fetchHarnessStatus(): Promise<HarnessStatus> {
+	try {
+		const res = await gatewayFetch("/api/harness-status");
+		if (!res.ok) return { restartAvailable: false };
+		const data = await res.json().catch(() => null);
+		return { restartAvailable: data?.restartAvailable === true };
+	} catch {
+		return { restartAvailable: false };
+	}
+}
+
+export async function requestHarnessRestart(): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await gatewayFetch("/api/harness/restart", { method: "POST" });
+		if (res.ok) return { ok: true };
+		const data = await res.json().catch(() => null);
+		const error = typeof data?.error === "string" ? data.error : `Restart request failed: ${res.status}`;
+		return { ok: false, error };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : "Restart request failed" };
+	}
+}
+
+// ============================================================================
 // SANDBOX STATUS API
 // ============================================================================
 
@@ -1883,6 +2330,24 @@ export async function loadDraftFromServer(sessionId: string, type: string): Prom
 		return body.data ?? null;
 	} catch (err) {
 		console.error("[draft-api] Failed to load draft:", err);
+		return null;
+	}
+}
+
+/** Read a proposal snapshot without mutating the live draft. Returns server JSON or null on error. */
+export async function readProposalSnapshot(
+	sessionId: string,
+	type: string,
+	rev: number,
+): Promise<{ ok: true; rev: number; fields: Record<string, unknown> } | { ok: false; code?: string; message?: string } | null> {
+	try {
+		const res = await gatewayFetch(
+			`/api/sessions/${encodeURIComponent(sessionId)}/proposal/${encodeURIComponent(type)}/snapshot?rev=${encodeURIComponent(String(rev))}`,
+		);
+		const body = await res.json().catch(() => null);
+		return body as any;
+	} catch (err) {
+		console.error("[proposal] readProposalSnapshot failed:", err);
 		return null;
 	}
 }
@@ -1951,4 +2416,161 @@ export async function notifyProposalDecision(
 		// is a separate concern.
 		console.warn("[proposal-notify] Failed to notify proposing session:", err);
 	}
+}
+
+// ============================================================================
+// MARKETPLACE API (Pack-Based Marketplace — see docs/design/pack-based-marketplace.md §9)
+// ============================================================================
+
+/** Install scopes a pack may target (wire form). */
+export type MarketScope = "global-user" | "server" | "project";
+
+export interface PackManifest {
+	name: string;
+	description: string;
+	version: string;
+	author?: string;
+	homepage?: string;
+	contents: {
+		roles: string[];
+		tools: string[];
+		skills: string[];
+	};
+}
+
+export interface PackMeta {
+	sourceUrl: string;
+	sourceRef: string;
+	commit: string;
+	packName: string;
+	version: string;
+	installedAt: string;
+	updatedAt: string;
+	scope: MarketScope;
+}
+
+export interface MarketplaceSource {
+	id: string;
+	url: string;
+	ref?: string;
+	addedAt: string;
+	lastSyncedAt?: string;
+	lastCommit?: string;
+}
+
+export interface BrowsePackWire extends PackManifest {
+	dirName: string;
+	hasTools: boolean;
+}
+
+export interface InstalledPackWire {
+	scope: MarketScope;
+	packName: string;
+	manifest: PackManifest;
+	meta: PackMeta;
+	status: "ok" | "corrupt";
+}
+
+export interface ConflictPackRef {
+	packEntryId: string;
+	scope: string;
+	label: string;
+}
+
+export interface ConflictWire {
+	type: "roles" | "tools" | "skills";
+	name: string;
+	winner: ConflictPackRef;
+	shadowed: ConflictPackRef[];
+}
+
+/** Discriminated result for marketplace calls so the UI can degrade gracefully
+ *  (show the server's error) while the REST backend is still being built. */
+export type MarketResult<T> =
+	| { ok: true; data: T }
+	| { ok: false; error: string; status: number };
+
+async function marketFetch<T>(
+	path: string,
+	init?: RequestInit,
+	emptyOk = false,
+): Promise<MarketResult<T>> {
+	try {
+		const res = await gatewayFetch(path, init);
+		if (!res.ok) {
+			let error = `HTTP ${res.status}`;
+			try {
+				const body = await res.json();
+				if (body && typeof body.error === "string") error = body.error;
+			} catch {
+				/* non-JSON error body */
+			}
+			return { ok: false, error, status: res.status };
+		}
+		if (emptyOk || res.status === 204) return { ok: true, data: undefined as unknown as T };
+		const data = (await res.json()) as T;
+		return { ok: true, data };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err), status: 0 };
+	}
+}
+
+function jsonInit(method: string, body?: unknown): RequestInit {
+	return {
+		method,
+		headers: { "Content-Type": "application/json" },
+		...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+	};
+}
+
+export function listMarketplaceSources(): Promise<MarketResult<{ sources: MarketplaceSource[] }>> {
+	return marketFetch("/api/marketplace/sources");
+}
+
+export function addMarketplaceSource(url: string, ref?: string): Promise<MarketResult<{ source: MarketplaceSource }>> {
+	return marketFetch("/api/marketplace/sources", jsonInit("POST", ref ? { url, ref } : { url }));
+}
+
+export function removeMarketplaceSource(id: string): Promise<MarketResult<void>> {
+	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}`, { method: "DELETE" }, true);
+}
+
+export function syncMarketplaceSource(id: string): Promise<MarketResult<{ source: MarketplaceSource }>> {
+	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/sync`, { method: "POST" });
+}
+
+export function browseMarketplacePacks(id: string): Promise<MarketResult<{ packs: BrowsePackWire[] }>> {
+	return marketFetch(`/api/marketplace/sources/${encodeURIComponent(id)}/packs`);
+}
+
+export function installMarketplacePack(opts: { sourceId: string; dirName: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
+	return marketFetch("/api/marketplace/install", jsonInit("POST", opts));
+}
+
+export function updateInstalledPack(opts: { scope: MarketScope; packName: string; projectId?: string }): Promise<MarketResult<{ installed: InstalledPackWire }>> {
+	return marketFetch("/api/marketplace/update", jsonInit("POST", opts));
+}
+
+export function uninstallMarketplacePack(opts: { scope: MarketScope; packName: string; projectId?: string }): Promise<MarketResult<void>> {
+	return marketFetch("/api/marketplace/installed", jsonInit("DELETE", opts), true);
+}
+
+export function listInstalledPacks(projectId?: string): Promise<MarketResult<{ installed: InstalledPackWire[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/marketplace/installed${qs}`);
+}
+
+export function getPackOrder(scope: MarketScope, projectId?: string): Promise<MarketResult<{ scope: MarketScope; order: string[] }>> {
+	const params = new URLSearchParams({ scope });
+	if (projectId) params.set("projectId", projectId);
+	return marketFetch(`/api/marketplace/pack-order?${params}`);
+}
+
+export function setPackOrder(opts: { scope: MarketScope; projectId?: string; order: string[] }): Promise<MarketResult<{ scope: MarketScope; order: string[] }>> {
+	return marketFetch("/api/marketplace/pack-order", jsonInit("PUT", opts));
+}
+
+export function getPackConflicts(projectId?: string): Promise<MarketResult<{ conflicts: ConflictWire[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/packs/conflicts${qs}`);
 }

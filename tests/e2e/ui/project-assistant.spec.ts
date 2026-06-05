@@ -1,31 +1,14 @@
 /**
  * Project assistant UX E2E tests — consolidated.
- * 4 essential tests covering critical paths:
- * 1. Happy path: create provisional → accept proposal → project promoted with config
- * 2. Dismiss/cleanup: dismiss proposal + provisional cleanup on delete
- * 3. Provisional project persistence across page refresh
- * 4. API basics: session types + provisional flag
+ *
+ * API basics coverage lives in tests/e2e/project-assistant-api.spec.ts.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, nonGitCwd, waitForSessionStatus, deleteSession } from "../e2e-setup.js";
+import { apiFetch, deleteSession } from "../e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 import { realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-/** Create a project assistant session via API and return session ID + provisional project info. */
-async function createProjectAssistantSession(
-	assistantType: "project" | "project-scaffolding",
-	cwd?: string,
-): Promise<{ sessionId: string; provisionalProjectId?: string }> {
-	const resp = await apiFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify({ assistantType, cwd: cwd || nonGitCwd() }),
-	});
-	expect(resp.status).toBe(201);
-	const data = await resp.json();
-	return { sessionId: data.id, provisionalProjectId: data.provisionalProjectId };
-}
 
 /** Create a unique temp dir for each test.
  *  Returns the canonical (realpath) form so the project-assistant flow
@@ -35,6 +18,15 @@ function uniqueDir(label: string): string {
 	const dir = join(tmpdir(), `bobbit-e2e-projast-${label}-${process.env.E2E_PORT}-${Date.now()}`);
 	mkdirSync(dir, { recursive: true });
 	return realpathSync(dir);
+}
+
+function ensureE2EAgentAuth(): void {
+	const agentDir = process.env.BOBBIT_AGENT_DIR;
+	if (!agentDir) return;
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
+		anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
+	}));
 }
 
 /** Get all projects from the API. */
@@ -89,7 +81,58 @@ async function findProvisionalProject(dir: string): Promise<any | undefined> {
 	return projects.find((p: any) => p.rootPath === dir && p.provisional);
 }
 
+/**
+ * Wait for the provisional accept cleanup to finish at the source of truth.
+ * The final sidebar assertion is intentionally after this API/client-state gate:
+ * Playwright's click returns before acceptProjectProposal() finishes its async
+ * promote → config write → terminate-session chain, so DOM-only polling can
+ * race a still-live assistant session under load.
+ */
+async function waitForProjectAssistantCleanup(
+	page: import("@playwright/test").Page,
+	sessionId: string,
+	projectId: string,
+): Promise<void> {
+	await expect(async () => {
+		const [sessionsResp, projects] = await Promise.all([
+			apiFetch("/api/sessions"),
+			getProjects(),
+		]);
+		expect(sessionsResp.ok).toBe(true);
+		const sessionsData = await sessionsResp.json();
+		const liveSessions = sessionsData.sessions || [];
+		const liveAssistant = liveSessions.find((s: any) =>
+			s.id === sessionId
+			|| (s.projectId === projectId && (s.assistantType === "project" || s.assistantType === "project-scaffolding")),
+		);
+		expect(liveAssistant, `project assistant session ${sessionId} should be gone from live sessions`).toBeUndefined();
+
+		const promoted = projects.find((p: any) => p.id === projectId);
+		expect(promoted, `project ${projectId} should still be registered`).toBeTruthy();
+		expect(promoted.provisional).toBeFalsy();
+	}).toPass({ timeout: 20_000 });
+
+	await page.waitForFunction(
+		({ sessionId: sid, projectId: pid }) => {
+			const state = (window as any).__bobbitState;
+			if (!state || !Array.isArray(state.gatewaySessions) || !Array.isArray(state.projects)) return false;
+			const liveAssistant = state.gatewaySessions.some((s: any) =>
+				s?.id === sid
+				|| (s?.projectId === pid && (s?.assistantType === "project" || s?.assistantType === "project-scaffolding")),
+			);
+			const promoted = state.projects.find((p: any) => p?.id === pid);
+			return !liveAssistant && !!promoted && !promoted.provisional;
+		},
+		{ sessionId, projectId },
+		{ timeout: 20_000 },
+	);
+}
+
 test.describe("Project assistant UX (consolidated) @quarantine", () => {
+	test.beforeEach(() => {
+		ensureE2EAgentAuth();
+	});
+
 	test("happy path — create provisional, accept proposal, project promoted with config", async ({ page }) => {
 		await openApp(page);
 
@@ -154,8 +197,16 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		// Sidebar should no longer show "(setting up)"
 		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 15_000 });
 
-		// Project assistant session should be removed from the sidebar immediately
-		await expect(sidebar.getByText("Project Assistant")).toHaveCount(0, { timeout: 10_000 });
+		// Wait on server + hydrated client state before checking the rendered row.
+		await waitForProjectAssistantCleanup(page, sessionId, projectId);
+
+		// Project assistant session should be removed from this project's sidebar bucket after cleanup.
+		// Browser workers share a gateway across multiple spec files, so a broad sidebar
+		// text count can see an unrelated leftover Project Assistant from another project.
+		const projectSection = sidebar.locator(`.project-reorder-section[data-project-id="${projectId}"]`);
+		await expect(projectSection).toHaveCount(1, { timeout: 5_000 });
+		await expect(projectSection.locator(`[data-session-id="${sessionId}"]`)).toHaveCount(0, { timeout: 5_000 });
+		await expect(projectSection.getByText("Project Assistant")).toHaveCount(0, { timeout: 5_000 });
 
 		// Cleanup
 		await deleteSession(sessionId);
@@ -288,36 +339,5 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
 
-	test("API basics — session types and provisional flag", async () => {
-		// Detection mode
-		const { sessionId: detectionId, provisionalProjectId: pp1 } = await createProjectAssistantSession("project");
-		const detResp = await apiFetch(`/api/sessions/${detectionId}`);
-		const detData = await detResp.json();
-		expect(detData.assistantType).toBe("project");
-
-		// Scaffolding mode
-		const { sessionId: scaffoldId, provisionalProjectId: pp2 } = await createProjectAssistantSession("project-scaffolding");
-		const scfResp = await apiFetch(`/api/sessions/${scaffoldId}`);
-		const scfData = await scfResp.json();
-		expect(scfData.assistantType).toBe("project-scaffolding");
-
-		// Verify provisional flag via projects API
-		if (pp1) {
-			const projects = await getProjects();
-			const provisional = projects.find((p: any) => p.id === pp1);
-			expect(provisional).toBeTruthy();
-			expect(provisional.provisional).toBe(true);
-		}
-
-		// Session terminate removes from active list
-		await deleteSession(detectionId);
-		const resp = await apiFetch("/api/sessions");
-		const data = await resp.json();
-		const sessions = data.sessions || [];
-		expect(sessions.find((s: { id: string }) => s.id === detectionId)).toBeFalsy();
-
-		await deleteSession(scaffoldId);
-		if (pp1) await cleanupProject(pp1);
-		if (pp2) await cleanupProject(pp2);
-	});
+	// API basics — session types and provisional flag — moved to tests/e2e/project-assistant-api.spec.ts.
 });

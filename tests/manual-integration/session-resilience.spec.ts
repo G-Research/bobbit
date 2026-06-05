@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { join, resolve, normalize } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 
@@ -88,6 +89,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	const proc = spawn(process.execPath, [
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
@@ -164,11 +166,15 @@ function api(gw: GW, path: string, opts: RequestInit = {}) {
 
 async function pollIdle(gw: GW, id: string, ms = 120_000) {
 	const t0 = Date.now();
+	let lastStatus = "unknown";
+	let lastSnapshot: Record<string, unknown> | null = null;
 	while (Date.now() - t0 < ms) {
 		let res: Response;
 		try { res = await api(gw, `/api/sessions/${id}`); } catch { await new Promise(r => setTimeout(r, 1_000)); continue; }
-		if (res.status === 404) { await new Promise(r => setTimeout(r, 1_000)); continue; }
+		if (res.status === 404) { lastStatus = "404"; await new Promise(r => setTimeout(r, 1_000)); continue; }
 		const s = await res.json();
+		lastStatus = s.status;
+		lastSnapshot = s;
 		if (s.status === "idle") return s;
 		if (s.status === "archived") throw new Error(`Session ${id} archived`);
 		if (s.status === "error" || s.status === "terminated") {
@@ -177,7 +183,19 @@ async function pollIdle(gw: GW, id: string, ms = 120_000) {
 		}
 		await new Promise(r => setTimeout(r, 1_000));
 	}
-	throw new Error(`Session ${id} not idle in ${ms}ms`);
+	// Diagnostic: dump the last observed status + a compact session snapshot so
+	// post-restart hangs (e.g. agent stuck in `streaming` after a restored
+	// session receives its first prompt) leave an actionable trail in the log.
+	const diag = lastSnapshot ? {
+		status: lastSnapshot.status,
+		cwd: lastSnapshot.cwd,
+		branch: (lastSnapshot as any).branch,
+		restoreError: (lastSnapshot as any).restoreError,
+		archived: (lastSnapshot as any).archived,
+		lastActivity: (lastSnapshot as any).lastActivity,
+		agentSessionFile: (lastSnapshot as any).agentSessionFile,
+	} : null;
+	throw new Error(`Session ${id} not idle in ${ms}ms (last status: ${lastStatus}, snapshot: ${JSON.stringify(diag)})`);
 }
 
 async function getSession(gw: GW, id: string) { return (await api(gw, `/api/sessions/${id}`)).json(); }
@@ -424,10 +442,12 @@ function initRepo(dir: string) {
 	}, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — exercising the working mounted-clone path. This
+	// is the safe default: a remote-less project is always its own clone source.
+	// (Adding an external `file://` bare-repo origin would now be rejected by the
+	// resolver as a local path outside the project root — a data-exposure guard.)
 
 	// Copy config files (workflows, roles, tools, etc.) so the gateway has them.
 	// Exclude project.yaml since we write our own.

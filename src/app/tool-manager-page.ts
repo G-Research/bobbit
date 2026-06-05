@@ -385,7 +385,7 @@ export function navigateToToolEdit(toolName: string): void {
 		saving = false;
 		renderApp();
 		// Also fetch full detail (may have docs)
-		fetchToolDetail(toolName).then((detail) => {
+		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
 			if (detail && selectedTool?.name === toolName) {
 				selectedTool = detail;
 				// Only update docs from detail if user hasn't changed it
@@ -403,7 +403,7 @@ export function navigateToToolEdit(toolName: string): void {
 		});
 	} else {
 		// Not in cache, fetch directly
-		fetchToolDetail(toolName).then((detail) => {
+		fetchToolDetail(toolName, getConfigProjectId()).then((detail) => {
 			if (detail) {
 				currentView = "edit";
 				selectedTool = detail;
@@ -477,7 +477,7 @@ async function handleSave(): Promise<void> {
 		const updated = tools.find((t) => t.name === selectedTool!.name);
 		if (updated) {
 			// Fetch full detail to get docs back
-			const detail = await fetchToolDetail(updated.name);
+			const detail = await fetchToolDetail(updated.name, getConfigProjectId());
 			if (detail) {
 				showEdit(detail);
 			} else {
@@ -751,7 +751,7 @@ function renderToolRow(tool: ToolInfo): TemplateResult {
 		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(tool)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
-			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides)}</span>
+			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides, (tool as any).originPackName)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
@@ -981,7 +981,7 @@ function renderEditView(): TemplateResult {
 			<div class="tools-edit-main">
 				<!-- Compact identity rows -->
 				<div class="tools-identity-section">
-					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides)}${renderCustomizeRevertButtons()}</div>` : ""}
+					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides, (selectedTool as any).originPackName)}${renderCustomizeRevertButtons()}</div>` : ""}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
@@ -1028,6 +1028,17 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!selectedTool) return "";
 	const origin = (selectedTool as any).origin as ConfigOrigin | undefined;
 	if (!origin) return "";
+
+	// Market-pack entities are read-only — managed via the Marketplace (install/
+	// uninstall), NOT the legacy customize/override endpoints (which can't remove
+	// an installed pack). Gate the actions off when the entity carries a pack tag.
+	// See docs/design/pack-based-marketplace.md §3.2 / finding #2.
+	const originPackName = (selectedTool as any).originPackName as string | null | undefined;
+	const originPackId = (selectedTool as any).originPackId as string | null | undefined;
+	if (originPackName || originPackId) {
+		return html`<span class="config-readonly-note" data-testid="market-readonly-note"
+			title="Installed from pack '${originPackName ?? originPackId}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
+	}
 
 	const scope = getConfigScope();
 	const projectId = getConfigProjectId();

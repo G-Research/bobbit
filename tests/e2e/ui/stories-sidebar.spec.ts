@@ -11,10 +11,7 @@
  *   cleanup → teardown (not tracked)
  */
 import { test, expect } from "../gateway-harness.js";
-import {
-	SpecContext,
-} from "./spec-framework.js";
-import { CT_03, CT_04 } from "./spec-contracts.js";
+import { SpecContext } from "./spec-framework.js";
 import {
 	STORY_SB02,
 	STORY_SB03,
@@ -29,6 +26,8 @@ import {
 	STORY_SB_CONCURRENT,
 } from "./story-registry.js";
 import {
+	base,
+	readE2ETokenAsync,
 	waitForHealth,
 	createSession,
 	deleteSession,
@@ -38,7 +37,23 @@ import {
 	nonGitCwd,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToHash } from "./ui-helpers.js";
+
+async function openStoryApp(s: SpecContext): Promise<void> {
+	await expect(async () => {
+		const resp = await apiFetch("/api/oauth/status?provider=anthropic");
+		expect(resp.ok).toBe(true);
+		const status = await resp.json();
+		expect(status.authenticated).toBe(true);
+	}).toPass({ timeout: 20_000 });
+
+	const page = s.page;
+	const token = await readE2ETokenAsync();
+	await page.goto(`${base()}/?token=${encodeURIComponent(token)}`);
+	await expect(
+		page.locator("button").filter({ hasText: "Settings" }).first(),
+	).toBeVisible({ timeout: 20_000 });
+}
 
 test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	let s: SpecContext;
@@ -51,7 +66,7 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 
 	test.beforeEach(async ({ page, gateway }) => {
 		s = new SpecContext(page, gateway);
-		await s.open();
+		await openStoryApp(s);
 	});
 
 	test.afterEach(async () => {
@@ -72,23 +87,30 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	// The page-reload variation for CT-03 is covered by SB-24, SB-27, and SB-32.
 
 	// ---------------------------------------------------------------
-	// SB-02: Goal team nesting and expand/collapse
+	// SB-02 + SB-03 + SB-09 + SB-12: Goal sidebar hierarchy
 	// ---------------------------------------------------------------
 
-	test("SB-02: Goal team nesting with expand and collapse @smoke", async ({ page }) => {
-		s.begin(STORY_SB02);
-
-		// setup — create a goal
-		const goal = await createGoal({ title: "Team Nesting Goal", cwd: nonGitCwd() });
+	test("SB-02/SB-03/SB-09/SB-12: Goal sidebar hierarchy survives deep links and completion @smoke", async ({ page }) => {
+		// shared setup — create one goal and one nested session for all goal-row stories
+		const goalTitle = `Sidebar Goal ${Date.now()}`;
+		let goal: { id: string; [k: string]: unknown };
+		try {
+			goal = await createGoal({ title: goalTitle, workflowId: "feature", cwd: nonGitCwd() });
+		} catch {
+			goal = await createGoal({ title: goalTitle, cwd: nonGitCwd() });
+		}
 		goalIds.push(goal.id);
 
-		// Reload to pick up the new goal in sidebar
+		const sessionId = await createSession({ goalId: goal.id, cwd: nonGitCwd() });
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
 		await s.reload();
+
+		s.begin(STORY_SB02);
 
 		// act — find the goal in sidebar by text
 		s.act();
-		const goalGroup = s.sidebar.goal_group("Team Nesting Goal");
-		const goalHeader = page.getByText("Team Nesting Goal", { exact: false }).first();
+		const goalHeader = page.getByText(goalTitle, { exact: false }).first();
 		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
 
 		// Check for expand/collapse chevrons
@@ -106,21 +128,8 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		// assert — goal is visible and interactive
 		s.assert();
 		await expect(goalHeader).toBeVisible();
-	});
 
-	// ---------------------------------------------------------------
-	// SB-03: Active session auto-expands parent group on deep link
-	// ---------------------------------------------------------------
-
-	test("SB-03: Auto-expand parent goal group on deep link navigation", async ({ page }) => {
 		s.begin(STORY_SB03);
-
-		// setup — create a goal and a session inside it
-		const goal = await createGoal({ title: "Deep Link Goal", cwd: nonGitCwd() });
-		goalIds.push(goal.id);
-		const sessionId = await createSession({ goalId: goal.id, cwd: nonGitCwd() });
-		sessionIds.push(sessionId);
-		await waitForSessionStatus(sessionId, "idle");
 
 		// act — navigate directly to the session via deep link
 		s.act();
@@ -131,17 +140,43 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await expect(page.locator("textarea").first())
 			.toBeVisible({ timeout: 15_000 });
 		await s.url_contains(sessionId);
+
+		s.begin(STORY_SB09);
+
+		// act — reload while the goal exists
+		s.act();
+		await s.reload();
+
+		// assert — goal text still visible after reload
+		s.assert();
+		await expect(page.getByText(goalTitle, { exact: false }).first())
+			.toBeVisible({ timeout: 15_000 });
+
+		s.begin(STORY_SB12);
+
+		// act — complete the goal via API and reload the sidebar
+		s.act();
+		await apiFetch(`/api/goals/${goal.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ status: "complete" }),
+		}).catch(() => {});
+		await s.reload();
+
+		// assert — sidebar is functional after goal completion
+		s.assert();
+		await s.sidebar.is_visible();
 	});
 
 	// ---------------------------------------------------------------
-	// SB-06: Idle time display on session rows
+	// SB-06 + CT-03: Session rows and active highlight
 	// ---------------------------------------------------------------
 
-	test("SB-06: Idle time display on session rows persists across reload", async ({ page }) => {
-		s.begin(STORY_SB06);
+	test("SB-06/CT-03-sidebar-highlight: Session rows persist and active highlight follows history", async ({ page }) => {
+		// shared setup — create two sessions once for row persistence and highlight checks
+		const idA = await s.createTestSession("A");
+		const idB = await s.createTestSession("B");
 
-		// setup — create a session (will be idle immediately)
-		const sessionId = await s.createTestSession("A");
+		s.begin(STORY_SB06);
 
 		// act — navigate to the session so it appears in sidebar
 		s.act();
@@ -150,110 +185,74 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		// assert — session is active (textarea visible), and sidebar shows it
 		s.assert();
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-		// The active row should be highlighted
-		const activeRow = s.sidebar.session_row();
-		await activeRow.is_visible();
+		await s.sidebar.session_row().is_visible();
 
 		// Reload and verify session row still visible
 		await s.reload();
-		// Navigate back to the session
-		await navigateToHash(page, `#/session/${sessionId}`);
+		await navigateToHash(page, `#/session/${idA}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		await s.sidebar.session_row().is_visible();
+
+		s.begin(STORY_CT03_HIGHLIGHT);
+
+		// act — navigate to session A, then B, then browser-back to A
+		s.act();
+		await navigateToHash(page, `#/session/${idA}`);
+		await expect(page.locator("textarea").first())
+			.toBeVisible({ timeout: 15_000 });
+		await s.sidebar.session_row().is_visible();
+
+		await navigateToHash(page, `#/session/${idB}`);
+		await expect(page.locator("textarea").first())
+			.toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(".sidebar-session-active")).toHaveCount(1, { timeout: 5_000 });
+
+		await s.navigate_back();
+
+		// assert — A should be highlighted again (url_contains polls)
+		s.assert();
+		await s.url_contains(idA);
 		await s.sidebar.session_row().is_visible();
 	});
 
 	// ---------------------------------------------------------------
-	// SB-09: Goal gate progress badge
+	// SB-24 + SB-concurrent: Search filtering over concurrent sessions
 	// ---------------------------------------------------------------
 
-	test("SB-09: Goal gate progress badge persists across reload", async ({ page }) => {
-		s.begin(STORY_SB09);
-
-		// setup — create a goal with a workflow that has gates
-		let goal: { id: string; [k: string]: unknown };
-		try {
-			goal = await createGoal({ title: "Gate Progress Goal", workflowId: "feature", cwd: nonGitCwd() });
-		} catch {
-			goal = await createGoal({ title: "Gate Progress Goal", cwd: nonGitCwd() });
-		}
-		goalIds.push(goal.id);
-
-		// Reload to pick up the new goal
-		await s.reload();
-
-		// act — find the goal row in sidebar by text
-		s.act();
-		const goalText = page.getByText("Gate Progress Goal", { exact: false }).first();
-		await expect(goalText).toBeVisible({ timeout: 15_000 });
-
-		// Check for a gate progress badge (e.g. "0/4" text)
-		const sidebar = page.locator(".sidebar-edge");
-		const hasBadge = await sidebar.getByText(/\d+\/\d+/).first().isVisible().catch(() => false);
-
-		// Reload and verify goal still visible
-		await s.reload();
-
-		// assert — goal text still visible after reload
-		s.assert();
-		await expect(page.getByText("Gate Progress Goal", { exact: false }).first())
-			.toBeVisible({ timeout: 15_000 });
-	});
-
-	// ---------------------------------------------------------------
-	// SB-12: Completed goal rendering
-	// ---------------------------------------------------------------
-
-	test("SB-12: Completed goal renders appropriately in sidebar", async ({ page }) => {
-		s.begin(STORY_SB12);
-
-		// setup — create a goal and complete it via API
-		const goal = await createGoal({ title: "Completed Goal Test", cwd: nonGitCwd() });
-		goalIds.push(goal.id);
-
-		// Try to complete the goal via API
-		await apiFetch(`/api/goals/${goal.id}`, {
-			method: "PUT",
-			body: JSON.stringify({ status: "complete" }),
-		}).catch(() => {});
-
-		await s.reload();
-
-		// act — verify sidebar renders without error
-		s.act();
-		await s.sidebar.is_visible();
-
-		// assert — sidebar is functional after goal completion
-		s.assert();
-		await s.sidebar.is_visible();
-	});
-
-	// ---------------------------------------------------------------
-	// SB-24: Filter sidebar by typing
-	// ---------------------------------------------------------------
-
-	test("SB-24: Filter sidebar sessions by typing in search @smoke", async ({ page }) => {
+	test("SB-24/SB-concurrent: Filter search narrows concurrently created sessions @smoke", async ({ page }) => {
 		s.begin(STORY_SB24);
 
-		// setup — create sessions with distinctive names
-		const sessionA = await createSession({ cwd: nonGitCwd() });
-		sessionIds.push(sessionA);
-		await apiFetch(`/api/sessions/${sessionA}`, {
-			method: "PATCH",
-			body: JSON.stringify({ title: "AlphaSBTest" }),
-		});
-
-		const sessionB = await createSession({ cwd: nonGitCwd() });
-		sessionIds.push(sessionB);
-		await apiFetch(`/api/sessions/${sessionB}`, {
-			method: "PATCH",
-			body: JSON.stringify({ title: "BravoSBTest" }),
-		});
+		// setup — create sessions concurrently with distinctive names
+		const [sessionA, sessionB, sessionC] = await Promise.all([
+			createSession({ cwd: nonGitCwd() }),
+			createSession({ cwd: nonGitCwd() }),
+			createSession({ cwd: nonGitCwd() }),
+		]);
+		sessionIds.push(sessionA, sessionB, sessionC);
+		await Promise.all([
+			waitForSessionStatus(sessionA, "idle"),
+			waitForSessionStatus(sessionB, "idle"),
+			waitForSessionStatus(sessionC, "idle"),
+		]);
+		await Promise.all([
+			apiFetch(`/api/sessions/${sessionA}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "AlphaSBTest" }),
+			}),
+			apiFetch(`/api/sessions/${sessionB}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "BravoSBTest" }),
+			}),
+			apiFetch(`/api/sessions/${sessionC}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "CharlieSBTest" }),
+			}),
+		]);
 
 		await s.reload();
-
-		// Wait for both sessions to appear
 		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByText("BravoSBTest")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("CharlieSBTest")).toBeVisible({ timeout: 5_000 });
 
 		// act — focus search with Ctrl+K and type a filter
 		s.act();
@@ -263,85 +262,45 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 		await searchInput.is_visible();
 		await page.locator("input[data-search]").fill("AlphaSB");
 
-		// assert — Alpha visible, Bravo hidden (filter debounce settles via auto-retry)
+		// assert — Alpha visible, non-matches hidden (filter debounce settles via auto-retry)
 		s.assert();
 		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("BravoSBTest")).not.toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("CharlieSBTest")).not.toBeVisible({ timeout: 5_000 });
 
-		// Clear search — both should reappear
+		// Clear search — all should reappear
 		await page.locator("input[data-search]").fill("");
 		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 5_000 });
 		await expect(page.getByText("BravoSBTest")).toBeVisible({ timeout: 5_000 });
-
-		// Press Escape to blur search
+		await expect(page.getByText("CharlieSBTest")).toBeVisible({ timeout: 5_000 });
 		await page.keyboard.press("Escape");
+
+		s.begin(STORY_SB_CONCURRENT);
+
+		// act
+		s.act();
+		await s.sidebar.is_visible();
+
+		// assert — all 3 concurrently-created sessions should be visible in sidebar
+		s.assert();
+		await expect(page.getByText("AlphaSBTest")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("BravoSBTest")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("CharlieSBTest")).toBeVisible({ timeout: 5_000 });
 	});
 
 	// ---------------------------------------------------------------
-	// SB-27: Show archived toggle
+	// SB-27 + SB-32 + SB-34: Sidebar chrome and shortcuts
 	// ---------------------------------------------------------------
 
-	test("SB-27: Show archived toggle reveals archived section", async ({ page }) => {
+	test("SB-27/SB-32/SB-34: Sidebar chrome, collapse persistence, and keyboard shortcuts", async ({ page }) => {
 		s.begin(STORY_SB27);
 
-		// setup
-		await s.sidebar.is_visible();
-
-		// act — look for "Archived" section text
+		// act — archived/sidebar chrome renders regardless of archived state
 		s.act();
-		const archivedHeader = page.getByText("Archived").first();
-		const hasArchived = await archivedHeader.isVisible().catch(() => false);
+		await s.sidebar.is_visible();
 
 		// assert — sidebar renders correctly regardless of archived state
 		s.assert();
-		await s.sidebar.is_visible();
-	});
-
-	// ---------------------------------------------------------------
-	// SB-32: Collapsed sidebar icon-only mode
-	// ---------------------------------------------------------------
-
-	test("SB-32: Sidebar collapses to icon-only mode and persists", async ({ page }) => {
-		s.begin(STORY_SB32);
-
-		// setup — verify sidebar is expanded
-		await s.sidebar.is_visible();
-		const fullSidebar = page.locator("[data-testid='sidebar-expanded']").first();
-		await expect(fullSidebar).toBeVisible({ timeout: 10_000 });
-
-		// act — click the collapse button
-		s.act();
-		const collapseBtn = page.locator("button[title*='Collapse sidebar']").first();
-		await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
-		await collapseBtn.click();
-
-		// Sidebar should now be collapsed (icon-only strip)
-		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
-
-		// Reload — collapsed state should persist
-		await s.reload();
-
-		// assert — sidebar still collapsed after reload
-		s.assert();
-		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
-
-		// Expand to restore state for other tests
-		const expandBtn = page.locator("button[title*='Expand sidebar']").first();
-		await expect(expandBtn).toBeVisible({ timeout: 5_000 });
-		await expandBtn.click();
-		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
-	});
-
-	// ---------------------------------------------------------------
-	// SB-34: Sidebar keyboard shortcuts
-	// ---------------------------------------------------------------
-
-	test("SB-34: Keyboard shortcuts for sidebar search and collapse", async ({ page }) => {
-		s.begin(STORY_SB34);
-
-		// setup
 		await s.sidebar.is_visible();
 
 		// Wait for shortcut listener to be attached.
@@ -362,100 +321,51 @@ test.describe("CT-03 & CT-04: Sidebar stories", () => {
 			}));
 		}, { key, code });
 
-		// act — test Ctrl+K focuses search
+		s.begin(STORY_SB34);
+
+		// act — test Ctrl+K focuses search, then Ctrl+[ toggles sidebar collapse
 		s.act();
 		await dispatchKey("k", "KeyK");
 		await s.sidebar.search_input().is_focused();
-
-		// Blur search
 		await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
-		// Test Ctrl+[ toggles sidebar collapse
 		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 		await dispatchKey("[", "BracketLeft");
-
-		// Sidebar should be collapsed
 		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 5_000 });
 
 		// assert — keyboard shortcuts work
 		s.assert();
-		// Toggle back to expanded
 		await dispatchKey("[", "BracketLeft");
 		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
-	});
 
-	// ---------------------------------------------------------------
-	// CT-03: Session highlight on navigation
-	// ---------------------------------------------------------------
+		s.begin(STORY_SB32);
 
-	test("CT-03-sidebar-highlight: Session highlight follows navigation", async ({ page }) => {
-		s.begin(STORY_CT03_HIGHLIGHT);
+		// setup — verify sidebar is expanded
+		await s.sidebar.is_visible();
+		const fullSidebar = page.locator("[data-testid='sidebar-expanded']").first();
+		await expect(fullSidebar).toBeVisible({ timeout: 10_000 });
 
-		// setup — create two sessions
-		const idA = await s.createTestSession("A");
-		const idB = await s.createTestSession("B");
-
-		// act — navigate to session A via deep link
+		// act — click the collapse button
 		s.act();
-		await navigateToHash(page, `#/session/${idA}`);
-		await expect(page.locator("textarea").first())
-			.toBeVisible({ timeout: 15_000 });
+		const collapseBtn = page.locator("button[title*='Collapse sidebar']").first();
+		await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
+		await collapseBtn.click();
 
-		// Session A should be highlighted
-		await s.sidebar.session_row().is_visible();
+		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
 
-		// Navigate to session B
-		await navigateToHash(page, `#/session/${idB}`);
-		await expect(page.locator("textarea").first())
-			.toBeVisible({ timeout: 15_000 });
-
-		// Only one row should be active
-		await expect(page.locator(".sidebar-session-active")).toHaveCount(1, { timeout: 5_000 });
-
-		// Press back — should return to session A
-		await s.navigate_back();
-
-		// assert — A should be highlighted again (url_contains polls)
-		s.assert();
-		await s.url_contains(idA);
-		await s.sidebar.session_row().is_visible();
-	});
-
-	// ---------------------------------------------------------------
-	// SB-concurrent: Multiple concurrent sessions in sidebar
-	// ---------------------------------------------------------------
-
-	test("SB-concurrent: Sidebar reflects multiple concurrent sessions", async ({ page }) => {
-		s.begin(STORY_SB_CONCURRENT);
-
-		// Create 3 sessions simultaneously
-		const [id1, id2, id3] = await Promise.all([
-			createSession({ cwd: nonGitCwd() }),
-			createSession({ cwd: nonGitCwd() }),
-			createSession({ cwd: nonGitCwd() }),
-		]);
-		sessionIds.push(id1, id2, id3);
-		await Promise.all([
-			waitForSessionStatus(id1, "idle"),
-			waitForSessionStatus(id2, "idle"),
-			waitForSessionStatus(id3, "idle"),
-		]);
-
-		// Reload to see all sessions
+		// Reload — collapsed state should persist
 		await s.reload();
 
-		s.act();
-		await s.sidebar.is_visible();
-
-		// assert — all 3 sessions should be visible in sidebar
+		// assert — sidebar still collapsed after reload
 		s.assert();
-		await expect(async () => {
-			const sessionRows = await page.locator(
-				".sidebar-session-active, .sidebar-edge [class*='cursor-pointer']",
-			).count();
-			expect(sessionRows).toBeGreaterThanOrEqual(3);
-		}).toPass({ timeout: 10_000 });
+		await expect(page.locator("[data-testid='sidebar-collapsed']").first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("[data-testid='sidebar-expanded']")).toHaveCount(0, { timeout: 3_000 });
+
+		// Expand to restore state for other tests
+		const expandBtn = page.locator("button[title*='Expand sidebar']").first();
+		await expect(expandBtn).toBeVisible({ timeout: 5_000 });
+		await expandBtn.click();
+		await expect(page.locator("[data-testid='sidebar-expanded']").first()).toBeVisible({ timeout: 5_000 });
 	});
 });
-
-

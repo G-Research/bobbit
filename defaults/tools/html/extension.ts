@@ -3,14 +3,14 @@
  *
  * Both `html=` and `file=` populate a per-session preview mount served at
  * `/preview/<sid>/`. Sibling assets resolve as relative URLs. The tool
- * result is a constant ~150-byte v3 snapshot regardless of HTML size.
+ * result is a constant-size v3 snapshot regardless of HTML size.
  *
  * Flow:
  *   1. Read sessionId from BOBBIT_SESSION_ID. (No-session fallback writes
  *      a local file and returns.)
  *   2. PATCH /api/sessions/:id { preview: true }.
  *   3. POST /api/preview/mount?sessionId=<sid> with one of {html} or
- *      {file: absolutePath}. Returns {url, path, entry, mtime}.
+ *      {file: absolutePath}. Returns {url, path, entry, mtime, contentHash, artifactId}.
  *   4. Stamp v3 marker into the tool result.
  */
 
@@ -161,6 +161,8 @@ const extension: ExtensionFactory = (pi) => {
 					relPath?: string;
 					entry?: string;
 					mtime?: number;
+					contentHash?: string;
+					artifactId?: string;
 				};
 				if (typeof mountResult.url !== "string" || mountResult.url.length === 0 ||
 					typeof mountResult.path !== "string" || mountResult.path.length === 0) {
@@ -185,7 +187,13 @@ const extension: ExtensionFactory = (pi) => {
 				return {
 					content: [
 						{ type: "text", text: "Preview panel is open and will auto-update." },
-						{ type: "text", text: buildPreviewSnapshotV3Block(mountResult.url, snapshotPath) },
+						{
+							type: "text",
+							text: buildPreviewSnapshotV3Block(mountResult.url, snapshotPath, mountResult.contentHash, {
+								artifactId: mountResult.artifactId,
+								entry: mountResult.entry,
+							}),
+						},
 					],
 				};
 			} catch (err: any) {

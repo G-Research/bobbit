@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import type { SessionManager } from "./session-manager.js";
 import type { StaffManager } from "./staff-manager.js";
 import type { InboxStore } from "./inbox-store.js";
@@ -50,6 +52,9 @@ export class InboxNudger {
 
 	start(): void {
 		if (this.intervalHandle) return;
+		if (cpuDiagnosticsEnabled()) {
+			getCpuDiagnostics().recordTimer("inbox-nudger:interval", 0, { starts: 1, intervalMs: InboxNudger.TICK_INTERVAL_MS });
+		}
 		this.intervalHandle = setInterval(() => {
 			this.tick();
 		}, InboxNudger.TICK_INTERVAL_MS);
@@ -59,6 +64,9 @@ export class InboxNudger {
 		if (this.intervalHandle) {
 			clearInterval(this.intervalHandle);
 			this.intervalHandle = null;
+			if (cpuDiagnosticsEnabled()) {
+				getCpuDiagnostics().recordTimer("inbox-nudger:interval", 0, { stops: 1 });
+			}
 		}
 	}
 
@@ -70,6 +78,9 @@ export class InboxNudger {
 	 * `tickOne` consults `nudgePending` exactly like the periodic tick.
 	 */
 	poke(staffId: string): void {
+		if (cpuDiagnosticsEnabled()) {
+			getCpuDiagnostics().recordTimer("inbox-nudger:poke", 0, { pokes: 1 });
+		}
 		queueMicrotask(() => {
 			try {
 				this.tickOne(staffId);
@@ -95,31 +106,73 @@ export class InboxNudger {
 	}
 
 	private tick(): void {
-		for (const staff of this.staffManager.listStaff()) {
-			try {
-				this.tickOne(staff.id, staff);
-			} catch (err) {
-				console.error(`[inbox-nudger] tickOne failed for staff ${staff.id}:`, err);
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		let staffScanned = 0;
+		let errors = 0;
+		try {
+			for (const staff of this.staffManager.listStaff()) {
+				if (diagEnabled) staffScanned++;
+				try {
+					this.tickOne(staff.id, staff);
+				} catch (err) {
+					if (diagEnabled) errors++;
+					console.error(`[inbox-nudger] tickOne failed for staff ${staff.id}:`, err);
+				}
+			}
+		} finally {
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("inbox-nudger:tick", performance.now() - diagStart, {
+					ticks: 1,
+					staffScanned,
+					errors,
+				});
 			}
 		}
 	}
 
 	private tickOne(staffId: string, staffArg?: PersistedStaff): void {
-		const staff = staffArg ?? this.staffManager.getStaff(staffId);
-		if (!staff || staff.state !== "active") return;
-		if (!staff.currentSessionId) return;
-		const session = this.sessionManager.getSession(staff.currentSessionId);
-		if (!session || session.status !== "idle") return; // mirrors team-manager.ts:388
-		if (this.nudgePending.get(staff.id)) return;
-		const pending = this.inboxStore.listPending(staff.id);
-		if (pending.length === 0) return;
-		void this.applyPolicyThenNudge(staff, pending.length);
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		const counters = diagEnabled ? {
+			tickOneCalls: 1,
+			skippedInactive: 0,
+			skippedNoSession: 0,
+			skippedNotIdle: 0,
+			skippedNudgePending: 0,
+			pendingListCalls: 0,
+			pendingEntries: 0,
+			skippedNoPending: 0,
+			nudgesScheduled: 0,
+		} : undefined;
+		try {
+			const staff = staffArg ?? this.staffManager.getStaff(staffId);
+			if (!staff || staff.state !== "active") { if (counters) counters.skippedInactive = 1; return; }
+			if (!staff.currentSessionId) { if (counters) counters.skippedNoSession = 1; return; }
+			const session = this.sessionManager.getSession(staff.currentSessionId);
+			if (!session || session.status !== "idle") { if (counters) counters.skippedNotIdle = 1; return; } // mirrors team-manager.ts:388
+			if (this.nudgePending.get(staff.id)) { if (counters) counters.skippedNudgePending = 1; return; }
+			if (counters) counters.pendingListCalls = 1;
+			const pending = this.inboxStore.listPending(staff.id);
+			if (counters) counters.pendingEntries = pending.length;
+			if (pending.length === 0) { if (counters) counters.skippedNoPending = 1; return; }
+			if (counters) counters.nudgesScheduled = 1;
+			void this.applyPolicyThenNudge(staff, pending.length);
+		} finally {
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("inbox-nudger:tickOne", performance.now() - diagStart, counters);
+			}
+		}
 	}
 
 	private async applyPolicyThenNudge(staff: PersistedStaff, count: number): Promise<void> {
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		const counters = diagEnabled ? { attempts: 1, compactCalls: 0, updateStaffErrors: 0, nudgesSent: 0, errors: 0 } : undefined;
 		this.nudgePending.set(staff.id, true);
 		try {
 			if (staff.contextPolicy === "compact") {
+				if (counters) counters.compactCalls = 1;
 				await this.runCompact(staff.currentSessionId!);
 			}
 			const word = count === 1 ? "item" : "items";
@@ -134,13 +187,20 @@ export class InboxNudger {
 			try {
 				this.staffManager.updateStaff(staff.id, { lastWakeAt: Date.now() });
 			} catch (err) {
+				if (counters) counters.updateStaffErrors = 1;
 				console.warn(`[inbox-nudger] updateStaff(lastWakeAt) failed for ${staff.id} (non-fatal):`, err);
 			}
 			await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true });
+			if (counters) counters.nudgesSent = 1;
 		} catch (err) {
+			if (counters) counters.errors = 1;
 			// Allow the next tick to retry.
 			this.nudgePending.delete(staff.id);
 			console.error(`[inbox-nudger] applyPolicyThenNudge failed for staff ${staff.id}:`, err);
+		} finally {
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("inbox-nudger:applyPolicyThenNudge", performance.now() - diagStart, counters);
+			}
 		}
 	}
 

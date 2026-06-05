@@ -3,6 +3,14 @@
  * Filters Playwright JSON reporter output to a compact summary.
  * Pipe test output in, get only what matters out.
  *
+ * REPO-LOCAL DEV HELPER — NOT SHIPPED. This script is a convenience for
+ * running tests locally inside the bobbit source repo. It is excluded from
+ * the published package (`package.json` `files` ships only `dist/`, `data/`,
+ * `README.md`), so it does NOT exist in bobbit installs. Do not reference it
+ * from shipped defaults or reproduce this pipe recipe in other projects —
+ * use a plain `--reporter=line` invocation, which `gate_inspect` can
+ * tail/grep/slice cleanly.
+ *
  * Usage:
  *   npx playwright test --reporter=json 2>/dev/null | node scripts/test-filter.mjs [OPTIONS]
  *

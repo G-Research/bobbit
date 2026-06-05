@@ -20,8 +20,12 @@ async function gotoAndWait(page: any) {
 
 const MARKER = "__preview_snapshot_v1__\n";
 const MARKER_V2 = "__preview_snapshot_v2__\n";
+const MARKER_V3 = "__preview_snapshot_v3__\n";
 const SESSION_ID = "11111111-1111-1111-1111-111111111111";
+const HASH = "b".repeat(64);
 const TOOL_USE_ID = "tool-1";
+const INLINE_TAB_ID = "preview:entry:inline.html";
+const ARTIFACT_ID = "artifact-inline";
 
 function makeResultWithSnapshot(html: string) {
 	return {
@@ -32,6 +36,31 @@ function makeResultWithSnapshot(html: string) {
 		content: [
 			{ type: "text", text: "Preview panel is open and will auto-update." },
 			{ type: "text", text: MARKER + html },
+		],
+		timestamp: Date.now(),
+	};
+}
+
+function makePreviewResultWithSnapshot(entry = "inline.html", contentHash = HASH, artifactId = ARTIFACT_ID) {
+	return makePreviewResult(entry, contentHash, artifactId);
+}
+
+function makePreviewResultWithoutArtifact(entry = "inline.html", contentHash = HASH) {
+	return makePreviewResult(entry, contentHash, undefined);
+}
+
+function makePreviewResult(entry: string, contentHash?: string, artifactId?: string) {
+	const snapshot: Record<string, string> = { kind: "preview", url: `/preview/${SESSION_ID}/${entry}`, path: `${SESSION_ID}/${entry}` };
+	if (contentHash) snapshot.contentHash = contentHash;
+	if (artifactId) snapshot.artifactId = artifactId;
+	return {
+		role: "toolResult",
+		toolCallId: TOOL_USE_ID,
+		toolName: "preview_open",
+		isError: false,
+		content: [
+			{ type: "text", text: "Preview panel is open and will auto-update." },
+			{ type: "text", text: MARKER_V3 + JSON.stringify(snapshot) + "\n" },
 		],
 		timestamp: Date.now(),
 	};
@@ -152,11 +181,17 @@ test.describe("PreviewOpenRenderer", () => {
 		await gotoAndWait(page);
 		const html = "<p>hello-world</p>";
 		await page.evaluate(
-			([params, result]) => {
+			([params, result, hash]) => {
 				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__setFetchResponse((url: string, init: any) => {
+					if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+						return { status: 200, body: { entry: "inline.html", mtime: 234, contentHash: hash } };
+					}
+					return { status: 200, body: { ok: true } };
+				});
 				(window as any).__resetFetchCalls();
 			},
-			[{ html }, makeResultWithSnapshot(html)],
+			[{ html }, makeResultWithSnapshot(html), HASH],
 		);
 
 		await page.locator("[data-preview-open-btn]").click();
@@ -175,6 +210,13 @@ test.describe("PreviewOpenRenderer", () => {
 		const postBody = JSON.parse(calls[1].body);
 		expect(postBody.html).toBe(html);
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
+
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(tabs[0].state.contentHash).toBe(HASH);
+		expect(tabs[0].label).toBe("inline.html");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
 	});
 
 	test("click with truncated snapshot: GET tool-content then PATCH then POST", async ({ page }) => {
@@ -221,11 +263,17 @@ test.describe("PreviewOpenRenderer", () => {
 		await gotoAndWait(page);
 		const filePath = "/abs/path/to/report.html";
 		await page.evaluate(
-			([params, result]) => {
+			([params, result, hash]) => {
 				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__setFetchResponse((url: string, init: any) => {
+					if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+						return { status: 200, body: { entry: "report.html", mtime: 345, contentHash: hash } };
+					}
+					return { status: 200, body: { ok: true } };
+				});
 				(window as any).__resetFetchCalls();
 			},
-			[{ file: filePath }, makeFileResultWithSnapshot(filePath)],
+			[{ file: filePath }, makeFileResultWithSnapshot(filePath), HASH],
 		);
 
 		await page.locator("[data-preview-open-btn]").click();
@@ -240,6 +288,252 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(postBody.file).toBe(filePath);
 		expect(postBody.html).toBeUndefined();
 		expect(postBody.kind).toBeUndefined();
+
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:entry:report.html"]);
+		expect(tabs[0].state.contentHash).toBe(HASH);
+		expect(tabs[0].label).toBe("report.html");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:report.html");
+	});
+
+	test("legacy v1/v2 markers: matching remount hash reuses the filename tab", async ({ page }) => {
+		await gotoAndWait(page);
+		const filePath = "/abs/path/to/report.html";
+		const cases = [
+			{ params: { html: "<p>legacy inline</p>" }, result: makeResultWithSnapshot("<p>legacy inline</p>") },
+			{ params: { file: filePath }, result: makeFileResultWithSnapshot(filePath) },
+		];
+
+		for (const legacy of cases) {
+			await page.evaluate(async ([sessionId, hash, params, result]) => {
+				await (window as any).__resetPreviewState();
+				await (window as any).__setPreviewWorkspace(sessionId, hash);
+				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__setFetchResponse((url: string, init: any) => {
+					if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+						return { status: 200, body: { entry: "inline.html", mtime: 456, contentHash: hash } };
+					}
+					return { status: 200, body: { ok: true } };
+				});
+				(window as any).__resetFetchCalls();
+			}, [SESSION_ID, HASH, legacy.params, legacy.result] as any);
+
+			const btn = page.locator("[data-preview-open-btn]");
+			await btn.click();
+			await expect(btn).toHaveText(/Opened/, { timeout: 3000 });
+
+			const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+			expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
+			const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+			const tabs = previewState.panelTabsBySession[SESSION_ID];
+			expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+			expect(tabs[0].state.contentHash).toBe(HASH);
+			expect(tabs[0].label).toBe("inline.html");
+			expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
+		}
+	});
+
+	test("v3 marker: identical content reuses the live preview tab without remounting relative files", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(async ([hash, sessionId, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, hash);
+			(window as any).__renderPreview(document.getElementById("container")!, { file: "relative/report.html" }, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 404, body: { error: "file no longer available" } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [HASH, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH)] as any);
+
+		const btn = page.locator("[data-preview-open-btn]");
+		await expect(btn).not.toHaveText(/File no longer available/);
+		await btn.click();
+		await expect(btn).toHaveText(/Opened/, { timeout: 3000 });
+		await expect(btn).not.toHaveText(/File no longer available/);
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
+		expect(calls.some((call: any) => call.method === "POST" && String(call.url).includes("/api/preview/mount"))).toBe(false);
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(tabs[0].label).toBe("inline.html");
+		expect(tabs[0].state.artifactId).toBe(ARTIFACT_ID);
+		expect(tabs[0].state.historical).toBe(false);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
+		expect(previewState.previewPanelContentHash).toBe(HASH);
+		expect(previewState.previewPanelMountedTabId).toBe(INLINE_TAB_ID);
+	});
+
+	test("v3 marker: latest card with prior versions still selects the filename tab", async ({ page }) => {
+		await gotoAndWait(page);
+		const oldHash = "a".repeat(64);
+		await page.evaluate(async ([hash, oldHash, sessionId, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, hash, "inline.html", [oldHash]);
+			(window as any).__renderPreview(document.getElementById("container")!, { html: "<p>latest</p>" }, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST") return { status: 500, body: { error: "unexpected restore" } };
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [HASH, oldHash, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH, ARTIFACT_ID)] as any);
+
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(tabs[0].label).toBe("inline.html");
+		expect(tabs[0].state.version).toBe(2);
+		expect(tabs[0].state.historical).toBe(false);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
+		expect(previewState.previewPanelMountedTabId).toBe(INLINE_TAB_ID);
+	});
+
+	test("v3 marker: differing artifact opens a versioned historical tab by artifact id", async ({ page }) => {
+		await gotoAndWait(page);
+		const oldHash = "c".repeat(64);
+		await page.evaluate(async ([oldHash, sessionId, result, hash, artifactId]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, oldHash);
+			(window as any).__renderPreview(document.getElementById("container")!, { html: "<p>old card</p>" }, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes(`/api/preview/artifacts/${artifactId}/restore`)) {
+					return { status: 200, body: { entry: "inline.html", mtime: 456, contentHash: hash, artifactId, url: `/preview/${sessionId}/inline.html` } };
+				}
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 500, body: { error: "unexpected mount fallback" } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [oldHash, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH, ARTIFACT_ID), HASH, ARTIFACT_ID] as any);
+
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
+		expect(calls[1].url).toContain(`/api/preview/artifacts/${ARTIFACT_ID}/restore?sessionId=${SESSION_ID}`);
+		expect(JSON.parse(calls[1].body)).toEqual({ artifactId: ARTIFACT_ID });
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID, "preview:entry:inline.html:v:2"]);
+		expect(tabs[0].state.contentHash).toBe(oldHash);
+		expect(tabs[0].label).toBe("inline.html");
+		expect(tabs[1].state.contentHash).toBe(HASH);
+		expect(tabs[1].state.artifactId).toBe(ARTIFACT_ID);
+		expect(tabs[1].label).toBe("inline.html (v2)");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:inline.html:v:2");
+		expect(previewState.previewPanelMountedTabId).toBe("preview:entry:inline.html:v:2");
+	});
+
+	test("legacy v3 marker: missing artifact id with restorable params remounts through preview mount", async ({ page }) => {
+		await gotoAndWait(page);
+		const oldHash = "d".repeat(64);
+		const html = "<p>legacy v3 inline</p>";
+		await page.evaluate(async ([oldHash, sessionId, result, html, hash]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, oldHash);
+			(window as any).__renderPreview(document.getElementById("container")!, { html }, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 200, body: { entry: "inline.html", mtime: 567, contentHash: hash, url: `/preview/${sessionId}/inline.html` } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [oldHash, SESSION_ID, makePreviewResultWithoutArtifact("inline.html", HASH), html, HASH] as any);
+
+		const btn = page.locator("[data-preview-open-btn]");
+		await btn.click();
+		await expect(btn).toHaveText(/Opened/, { timeout: 3000 });
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
+		expect(calls[1].url).toContain(`/api/preview/mount?sessionId=${SESSION_ID}`);
+		expect(JSON.parse(calls[1].body)).toEqual({ html });
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID, "preview:entry:inline.html:v:2"]);
+		expect(tabs[0].state.contentHash).toBe(oldHash);
+		expect(tabs[1].state.contentHash).toBe(HASH);
+		expect(tabs[1].state.snapshotHtml).toBe(html);
+		expect(tabs[1].state.restoreError).toBeUndefined();
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:inline.html:v:2");
+		expect(previewState.previewPanelMountedTabId).toBe("preview:entry:inline.html:v:2");
+	});
+
+	test("legacy v3 marker: missing artifact id without restorable params selects metadata without POST", async ({ page }) => {
+		await gotoAndWait(page);
+		const oldHash = "f".repeat(64);
+		await page.evaluate(async ([oldHash, sessionId, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, oldHash);
+			(window as any).__renderPreview(document.getElementById("container")!, {}, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST") return { status: 500, body: { error: "unexpected restore" } };
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [oldHash, SESSION_ID, makePreviewResultWithoutArtifact("inline.html", HASH)] as any);
+
+		const btn = page.locator("[data-preview-open-btn]");
+		await btn.click();
+		await expect(btn).toHaveText(/Opened/, { timeout: 3000 });
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID, "preview:entry:inline.html:v:2"]);
+		expect(tabs[0].state.contentHash).toBe(oldHash);
+		expect(tabs[1].state.contentHash).toBe(HASH);
+		expect(tabs[1].state.restoreError).toBeUndefined();
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:inline.html:v:2");
+		expect(previewState.previewPanelMountedTabId).toBe("preview:entry:inline.html:v:2");
+	});
+
+	test("v3 marker: artifact restore 404 keeps requested historical tab active with restoreError", async ({ page }) => {
+		await gotoAndWait(page);
+		const oldHash = "e".repeat(64);
+		await page.evaluate(async ([oldHash, sessionId, result, artifactId]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, oldHash);
+			(window as any).__renderPreview(document.getElementById("container")!, { html: "<p>must not fallback</p>" }, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes(`/api/preview/artifacts/${artifactId}/restore`)) {
+					return { status: 404, body: { error: "missing artifact" } };
+				}
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 200, body: { error: "unexpected mount fallback" } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [oldHash, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH, ARTIFACT_ID), ARTIFACT_ID] as any);
+
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Failed/, { timeout: 3000 });
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
+		expect(calls[1].url).toContain(`/api/preview/artifacts/${ARTIFACT_ID}/restore?sessionId=${SESSION_ID}`);
+		expect(calls.some((call: any) => String(call.url).includes("/api/preview/mount"))).toBe(false);
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID, "preview:entry:inline.html:v:2"]);
+		expect(tabs[1].state.restoreError.status).toBe(404);
+		expect(tabs[1].state.restoreError.artifactId).toBe(ARTIFACT_ID);
+		expect(tabs[0].state.contentHash).toBe(oldHash);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:inline.html:v:2");
 	});
 
 	test("v2 marker: server 404 → button shows 'File no longer available' and stays disabled", async ({ page }) => {

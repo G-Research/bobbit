@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, ExternalLink, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import { bucketTeamChildren } from "./team-archived-bucket.js";
@@ -15,6 +15,8 @@ import {
 	isTeamLeadExpanded,
 	toggleArchivedParentExpanded,
 	isArchivedParentExpanded,
+	toggleFirstClassParentExpanded,
+	isFirstClassParentExpanded,
 	isArchivedSectionExpanded,
 	setArchivedSectionExpanded,
 	type GatewaySession,
@@ -23,12 +25,15 @@ import {
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
 import { shortcutHint } from "./shortcut-registry.js";
-import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
-import { showRenameDialog } from "./dialogs.js";
+import { connectToSession, terminateSession, createAndConnectSession, startReattempt, forkSession } from "./session-manager.js";
+import { showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
+import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
-import { needsHumanAttention } from "./notification-policy.js";
+import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
+import "../ui/components/SidebarActionsPopover.js";
+import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
+import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 
 // ============================================================================
 // FORMATTING
@@ -78,6 +83,18 @@ export function bucketActiveArchived<T>(
 
 /** Guard set to prevent repeated on-demand child fetches per goal. */
 const _goalChildrenFetched = new Set<string>();
+
+export function sessionParentId(session: GatewaySession): string | undefined {
+	return session.parentSessionId || session.delegateOf;
+}
+
+export function isChildSession(session: GatewaySession): boolean {
+	return !!sessionParentId(session);
+}
+
+function isFirstClassChildSession(session: GatewaySession): boolean {
+	return !!session.parentSessionId && !session.delegateOf;
+}
 
 /** Clear the on-demand child fetch guard (called when archived state is reset). */
 export function clearGoalChildrenFetchedCache(): void {
@@ -150,7 +167,7 @@ export function filterArchivedGoalsByQuery(
 	const combined = [...liveSessions, ...archivedSessions];
 	return archivedGoals.filter(goal => {
 		if (goal.title.toLowerCase().includes(q)) return true;
-		const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+		const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s));
 		return affiliated.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 	});
 }
@@ -226,16 +243,30 @@ export function markSessionVisited(sessionId: string): void {
 /** Returns true if the session has activity the user hasn't seen yet.
  *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt
  *  AND the session warrants human attention (see `needsHumanAttention` —
- *  team members never surface, team leads only when goal is complete or stuck). */
+ *  team members never surface, team leads only when goal is complete or stuck).
+ *
+ *  Read-filter split (see `notification-policy.ts`):
+ *  — `needsImmediateHumanAttention` (pending sign-off, errored-and-parked)
+ *    bypasses the read-state filter — these states demand attention until
+ *    the user explicitly resolves them.
+ *  — `needsHumanAttention` (goal complete, idle stuck) is subject to the
+ *    normal read-state filter — once the user has visited the session, the
+ *    dot clears.
+ */
 export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Active sessions don't show unseen — user will see it when they connect
 	if (session.status === "streaming" || session.status === "busy") return false;
 	// Currently viewed session is never unseen
 	if (activeSessionId() === session.id) return false;
 
-	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
+	// Persistent attention predicate — beeps use the idle-transition variant.
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+
+	// Immediate predicate — short-circuits the read-state filter for states that
+	// require explicit user action (pending sign-off, errored-and-parked).
+	if (needsImmediateHumanAttention(session, state.gateStatusCache)) return true;
+
 	if (!needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)) return false;
 
 	const mirror = _readMirror.get(session.id) ?? 0;
@@ -376,6 +407,377 @@ export const INDENT = 5;
 export const CHEVRON_W = 14;
 /** Wider chevron slot for level-0 section headers (extra right breathing room). */
 export const HEADER_CHEVRON_W = 20;
+
+// ============================================================================
+// SIDEBAR ACTIONS MENU
+// ============================================================================
+
+export type SidebarActionEntityKind = "session" | "goal";
+
+export interface SidebarActionTrailingToggle {
+	id: string;
+	checked: boolean;
+	ariaLabel: string;
+	label?: string;
+	onToggle: () => void;
+}
+
+export interface SidebarActionItem {
+	id: string;
+	label: string;
+	title?: string;
+	icon: TemplateResult;
+	tone?: "default" | "danger";
+	quick: boolean;
+	run: (event: Event) => void | Promise<void>;
+	trailingToggle?: SidebarActionTrailingToggle;
+}
+
+// Fork's "New worktree" choice. Module-level so the popover checkbox toggle and
+// the Fork run handler share one source of truth; reset to the default (checked)
+// each time a session actions menu opens.
+let _forkNewWorktree = true;
+
+interface OpenSidebarActionsPopover {
+	kind: SidebarActionEntityKind;
+	entityId: string;
+	element: SidebarActionsPopover;
+	actions: SidebarActionItem[];
+	refresh: () => SidebarActionItem[];
+}
+
+let _openSidebarActionsPopover: OpenSidebarActionsPopover | null = null;
+
+function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: string): boolean {
+	return _openSidebarActionsPopover?.kind === kind
+		&& _openSidebarActionsPopover.entityId === entityId
+		&& _openSidebarActionsPopover.element.open;
+}
+
+function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
+	// Quick actions render left→right in the hover strip, so the right-most quick
+	// action is the LAST quick item. In the popover we surface quick actions in
+	// reverse strip order (right-most first/top), followed by menu-only actions in
+	// their existing order. FLIP stays keyed by action id, so reordering is safe.
+	const quick = actions.filter((a) => a.quick).reverse();
+	const menuOnly = actions.filter((a) => !a.quick);
+	return [...quick, ...menuOnly].map(({ id, label, icon, tone, quick, trailingToggle }) => ({ id, label, icon, tone, quick, trailingToggle }));
+}
+
+function closeSidebarActionsPopover(render = true): void {
+	const current = _openSidebarActionsPopover;
+	if (!current) return;
+	_openSidebarActionsPopover = null;
+	current.element.open = false;
+	if (render) renderApp();
+}
+
+function removeSidebarActionsPopoverElement(element: SidebarActionsPopover): void {
+	if (_openSidebarActionsPopover?.element === element) _openSidebarActionsPopover = null;
+	try { element.remove(); } catch { /* ignore */ }
+	renderApp();
+}
+
+function refreshOpenSidebarActionsPopover(): void {
+	const current = _openSidebarActionsPopover;
+	if (!current) return;
+	current.actions = current.refresh();
+	current.element.items = sidebarActionPopoverItems(current.actions);
+}
+
+function openSidebarActionsPopover(input: {
+	kind: SidebarActionEntityKind;
+	entityId: string;
+	trigger: HTMLElement;
+	actions: SidebarActionItem[];
+	refresh: () => SidebarActionItem[];
+	sourceRects: SidebarActionsFlipRect[];
+}): void {
+	if (isSidebarActionsPopoverOpen(input.kind, input.entityId)) {
+		closeSidebarActionsPopover();
+		return;
+	}
+	closeSidebarActionsPopover(false);
+	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
+	element.anchorEl = input.trigger;
+	element.items = sidebarActionPopoverItems(input.actions);
+	element.sourceRects = input.sourceRects;
+	element.open = true;
+	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
+		event.stopPropagation();
+		const current = _openSidebarActionsPopover;
+		const action = current?.actions.find((item) => item.id === event.detail.actionId);
+		void action?.run(event);
+	}) as EventListener);
+	element.addEventListener("close", () => removeSidebarActionsPopoverElement(element));
+	document.body.appendChild(element);
+	_openSidebarActionsPopover = {
+		kind: input.kind,
+		entityId: input.entityId,
+		element,
+		actions: input.actions,
+		refresh: input.refresh,
+	};
+	renderApp();
+}
+
+function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { mobile: boolean; btnPad: string }): TemplateResult {
+	return html`${actions.filter((action) => action.quick).map((action) => {
+		const danger = action.tone === "danger";
+		const colorClass = opts.mobile
+			? `text-muted-foreground ${danger ? "active:bg-destructive/10" : "active:bg-secondary/80"}`
+			: danger
+				? "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+				: "hover:bg-secondary/80 text-muted-foreground hover:text-foreground";
+		return html`
+			<button
+				class="${opts.btnPad} rounded ${colorClass}"
+				data-sidebar-action-id=${action.id}
+				data-sidebar-action-quick="true"
+				@click=${action.run}
+				title=${action.title || action.label}
+				aria-label=${action.label}
+			>${action.icon}</button>
+		`;
+	})}`;
+}
+
+function renderSidebarActionsTrigger(input: {
+	kind: SidebarActionEntityKind;
+	entityId: string;
+	actions: SidebarActionItem[];
+	mobile: boolean;
+	btnPad: string;
+	refresh: () => SidebarActionItem[];
+	onBeforeOpen?: () => void;
+}): TemplateResult | typeof nothing {
+	if (input.mobile) return nothing;
+	const expanded = isSidebarActionsPopoverOpen(input.kind, input.entityId);
+	const label = input.kind === "session" ? "Session actions" : "Goal actions";
+	const openFromTrigger = (event: Event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const trigger = event.currentTarget as HTMLElement;
+		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
+		input.onBeforeOpen?.();
+		const actions = input.refresh();
+		openSidebarActionsPopover({
+			kind: input.kind,
+			entityId: input.entityId,
+			trigger,
+			actions,
+			refresh: input.refresh,
+			sourceRects: row ? captureSidebarActionSourceRects(row) : [],
+		});
+	};
+	return html`
+		<button
+			class="${input.btnPad} rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground"
+			data-testid="sidebar-actions-trigger"
+			data-sidebar-actions-kind=${input.kind}
+			data-sidebar-actions-id=${input.entityId}
+			aria-haspopup="menu"
+			aria-expanded=${expanded ? "true" : "false"}
+			aria-label=${label}
+			title=${label}
+			@click=${openFromTrigger}
+			@keydown=${(event: KeyboardEvent) => {
+				if (event.key === "ArrowDown" || event.key === "ArrowUp") openFromTrigger(event);
+				else event.stopPropagation();
+			}}
+		>${icon(Menu, "xs")}</button>
+	`;
+}
+
+function buildSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
+	const staffId = session.staffId;
+	const modifyLabel = staffId ? "Edit staff" : "Modify";
+	const actions: SidebarActionItem[] = [
+		{
+			id: "modify",
+			label: modifyLabel,
+			title: modifyLabel,
+			icon: icon(Pencil, "xs"),
+			quick: true,
+			run: staffId
+				? (e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${staffId}`; }
+				: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
+		},
+		{
+			id: "terminate",
+			label: session.role === "team-lead" ? "End team" : "Terminate",
+			title: `${session.role === "team-lead" ? "End team" : "Terminate"}${shortcutHint("terminate-session")}`,
+			icon: icon(Trash2, "xs"),
+			tone: "danger",
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); terminateSession(session.id); },
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			icon: icon(Link, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
+		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			icon: icon(ExternalLink, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
+		},
+	];
+	if (canForkSidebarSession(session)) {
+		actions.push({
+			id: "fork",
+			label: "Fork",
+			icon: icon(GitFork, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void forkSession(session, { newWorktree: _forkNewWorktree }); },
+			trailingToggle: {
+				id: "fork-new-worktree",
+				checked: _forkNewWorktree,
+				ariaLabel: _forkNewWorktree ? "New worktree (on) — fork into a fresh worktree" : "New worktree (off) — reuse the source worktree",
+				label: "New worktree",
+				onToggle: () => { _forkNewWorktree = !_forkNewWorktree; refreshOpenSidebarActionsPopover(); },
+			},
+		});
+	}
+	return actions;
+}
+
+function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: string, goalId?: string): SidebarActionItem[] {
+	return [
+		{
+			id: "modify",
+			label: "Modify",
+			title: "Modify",
+			icon: icon(Pencil, "xs"),
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
+		},
+		{
+			id: "terminate",
+			label: "End team",
+			title: `End team${shortcutHint("terminate-session")}`,
+			icon: icon(Trash2, "xs"),
+			tone: "danger",
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); },
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			icon: icon(Link, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
+		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			icon: icon(ExternalLink, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
+		},
+	];
+}
+
+function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean; showArchive: boolean }): SidebarActionItem[] {
+	const actions: SidebarActionItem[] = [];
+	if (!input.hasActiveSession) {
+		actions.push({
+			id: "reattempt",
+			label: "Re-attempt",
+			title: "Re-attempt goal",
+			icon: icon(RotateCcw, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); startReattempt(goal.id); },
+		});
+	}
+	if (input.showArchive) {
+		actions.push({
+			id: "archive",
+			label: "Archive",
+			title: "Archive goal",
+			icon: icon(Trash2, "xs"),
+			tone: "danger",
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); deleteGoal(goal.id); },
+		});
+	}
+	actions.push(
+		{
+			id: "dashboard",
+			label: "Goal dashboard",
+			title: "Goal dashboard",
+			icon: icon(LayoutDashboard, "xs"),
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); },
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			icon: icon(Link, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(goalDeepLink(goal.id), "Copy goal link"); },
+		},
+	);
+	// Mirror the goal-row PR badge exactly: only offer "Open on GitHub" when that
+	// coloured PR icon is actually rendered (PR present, and for workflow goals
+	// all gates passed) and a PR url exists to link to. Branch-only goals show no
+	// badge, so they get no menu item either.
+	const prBadge = resolveGoalPrBadge(goal);
+	if (prBadge.show && prBadge.url) {
+		const url = prBadge.url;
+		actions.push({
+			id: "open-github",
+			label: "Open on GitHub",
+			icon: goalPrIconSvg(prBadge.color, "1.2em"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openExternalUrl(url); },
+		});
+	}
+	return actions;
+}
+
+function canForkSidebarSession(session: GatewaySession): boolean {
+	return session.status !== "terminated"
+		&& !session.archived
+		&& !session.readOnly
+		&& !session.nonInteractive
+		&& !isChildSession(session)
+		// Mirror the server guard isUnsupportedForkSource() in src/server/server.ts:
+		// among role-based sessions, only "team-lead" is non-forkable; "general" and
+		// "assistant" are forkable. Keep client and server consistent.
+		&& session.role !== "team-lead"
+		&& !session.teamGoalId
+		&& !session.teamLeadSessionId;
+}
+
+function openExternalUrl(url: string): void {
+	const opened = window.open(url, "_blank", "noopener");
+	try { if (opened) opened.opener = null; } catch { /* ignore */ }
+}
+
+function openSessionInNewWindow(sessionId: string): void {
+	openExternalUrl(sessionDeepLink(sessionId));
+}
+
+function prefetchGoalGithubLink(goalId: string): void {
+	const cached = getCachedGoalGithubLink(goalId);
+	if (cached?.available) return;
+	void fetchGoalGithubLink(goalId, { skipRender: true, force: cached?.available === false })
+		.then(() => {
+			if (_openSidebarActionsPopover?.kind === "goal" && _openSidebarActionsPopover.entityId === goalId) {
+				refreshOpenSidebarActionsPopover();
+				renderApp();
+			}
+		})
+		.catch(() => undefined);
+}
+
+// Keep the imported response type pinned to this module's action cache contract.
+void (undefined as GoalGithubLinkResponse | undefined);
 
 // ============================================================================
 // ARCHIVED BUCKETING (shared between desktop sidebar and mobile landing)
@@ -567,37 +969,21 @@ export function renderSessionRow(session: GatewaySession) {
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
-	// Check for children (live delegates + archived delegates)
-	const _bypassFilters = !!state.searchQuery.trim();
-	const liveDelegates = state.gatewaySessions.filter(s =>
-		s.delegateOf === session.id
-		&& (state.showArchived || s.status !== "terminated")
-		&& passesSidebarFilters(s, s.id === activeSessionId(), _bypassFilters));
-	const archivedDelegates = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf === session.id) : [];
-	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
-	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
+	// Check for children (live delegates + first-class child sessions + archived children)
+	const liveChildren = visibleLiveChildrenForParent(session.id);
+	const archivedChildren = state.showArchived ? archivedChildrenForParent(session.id) : [];
+	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
+	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession);
+	const childrenExpanded = hasChildren && (hasFirstClassChild
+		? isFirstClassParentExpanded(session.id)
+		: isArchivedParentExpanded(session.id));
 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
-	const isTeamLead = session.role === "team-lead";
-
-	// Desktop: hover-revealed gradient overlay. Mobile: always-visible inline buttons.
-	// Staff-backed sessions: route pencil to the staff editor instead of the
-	// rename dialog (per surface-staff-in-sessions design).
-	const staffId = session.staffId;
-	const pencilTitle = staffId ? "Edit staff" : "Modify";
-	const pencilHandler = staffId
-		? (e: Event) => { e.stopPropagation(); setHashRoute("staff-edit", staffId); }
-		: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); };
-	const buttons = html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${pencilHandler}
-			title=${pencilTitle}>${icon(Pencil, "xs")}</button>
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
-			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title=${(isTeamLead ? "End team" : "Terminate") + shortcutHint("terminate-session")}>${icon(Trash2, "xs")}</button>
-	`;
+	const actions = buildSessionSidebarActions(session, displayTitle);
+	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
+	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: () => { _forkNewWorktree = true; } })}`;
 
 	const navId = `session:${session.id}`;
 	// Keyboard nav can have moved the active row away from this session even
@@ -616,6 +1002,7 @@ export function renderSessionRow(session: GatewaySession) {
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-sidebar-actions-row-root
 			data-nav-id=${navId}
 			data-nav-active=${navActive ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
@@ -623,11 +1010,12 @@ export function renderSessionRow(session: GatewaySession) {
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;font-size: 1em;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				@click=${(e: Event) => { e.stopPropagation(); if (hasFirstClassChild) toggleFirstClassParentExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
 				${connecting || preparing
@@ -639,28 +1027,42 @@ export function renderSessionRow(session: GatewaySession) {
 			</div>
 			${mobile
 				? buttons
-				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					<span class="group-hover:hidden flex items-center">${renderSessionTime(session, active)}</span>
-					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+				: html`
+					<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1">${renderSessionTime(session, active)}</span>
+					<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
-					</div>
-				</div>`}
+					</div>`}
 		</div>
-		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${renderArchivedDelegates(session.id)}` : ""}
+		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${state.showArchived ? renderArchivedDelegates(session.id, true) : ""}` : ""}
 	`;
+}
+
+function isArchivedOrTerminalSession(session: GatewaySession): boolean {
+	return session.archived === true || session.status === "terminated" || session.status === "archived";
+}
+
+function visibleLiveChildrenForParent(parentSessionId: string): GatewaySession[] {
+	const bypassFilters = !!state.searchQuery.trim();
+	return state.gatewaySessions.filter(s =>
+		sessionParentId(s) === parentSessionId
+		&& (state.showArchived || !isArchivedOrTerminalSession(s))
+		&& (isFirstClassChildSession(s) || passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters)));
+}
+
+function archivedChildrenForParent(parentSessionId: string): GatewaySession[] {
+	const gatewayChildIds = new Set(state.gatewaySessions
+		.filter(s => sessionParentId(s) === parentSessionId)
+		.map(s => s.id));
+	return state.archivedSessions.filter(s => sessionParentId(s) === parentSessionId && !gatewayChildIds.has(s.id));
 }
 
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
-	const bypassFilters = !!state.searchQuery.trim();
-	const delegates = state.gatewaySessions.filter(s =>
-		s.delegateOf === parentSessionId
-		&& (state.showArchived || s.status !== "terminated")
-		&& passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
-	if (delegates.length === 0) return "";
+	const children = visibleLiveChildrenForParent(parentSessionId);
+	if (children.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-		${delegates.map(s => s.status === "terminated"
-			? html`${renderArchivedSessionRow(s)}${renderArchivedDelegates(s.id)}`
+		${children.map(s => isArchivedOrTerminalSession(s)
+			? html`${renderArchivedSessionRow(s)}${state.showArchived ? renderArchivedDelegates(s.id) : ""}`
 			: renderSessionRow(s))}
 	</div>`;
 }
@@ -673,7 +1075,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
-	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
+	const delegates = archivedChildrenForParent(session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
@@ -704,9 +1106,10 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 }
 
 /** Render any archived delegate sessions nested under a parent session. */
-export function renderArchivedDelegates(parentSessionId: string): TemplateResult | string {
-	if (!isArchivedParentExpanded(parentSessionId)) return "";
-	const delegates = state.archivedSessions.filter(s => s.delegateOf === parentSessionId);
+export function renderArchivedDelegates(parentSessionId: string, forceExpanded = false): TemplateResult | string {
+	if (!state.showArchived) return "";
+	if (!forceExpanded && !isArchivedParentExpanded(parentSessionId)) return "";
+	const delegates = archivedChildrenForParent(parentSessionId);
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => html`
@@ -736,14 +1139,9 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const goalId = session.goalId || session.teamGoalId;
 
-	const buttons = html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); }}
-			title="Modify">${icon(Pencil, "xs")}</button>
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
-			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); }}
-			title=${`End team${shortcutHint("terminate-session")}`}>${icon(Trash2, "xs")}</button>
-	`;
+	const actions = buildTeamLeadSidebarActions(session, displayTitle, goalId);
+	const actionRefresh = () => buildTeamLeadSidebarActions(session, displayTitle, goalId);
+	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh })}`;
 
 	const chevron = html`<span
 		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -757,12 +1155,15 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const tlNavId = `session:${session.id}`;
 	return html`
 		<div
+			data-session-id="${session.id}"
+			data-sidebar-actions-row-root
 			data-nav-id=${tlNavId}
 			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${chevron}
 			<div class="shrink-0 flex items-center justify-center">
@@ -773,12 +1174,11 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal" style="${mobile ? "font-size: 1.3333em;" : ""}"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
 			${mobile
 				? buttons
-				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					<span class="group-hover:hidden flex items-center">${renderSessionTime(session, active)}</span>
-					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+				: html`
+					<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1">${renderSessionTime(session, active)}</span>
+					<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
-					</div>
-				</div>`}
+					</div>`}
 		</div>
 	`;
 }
@@ -790,44 +1190,32 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 /** Track in-flight team start/stop (shared across desktop and mobile). */
 const teamLoading = new Set<string>();
 
-/** Render a PR icon or gate status badge next to a goal in the sidebar. */
-function renderGoalBadge(goalId: string) {
-	// PR status takes priority over gate counts
-	const pr = state.prStatusCache.get(goalId);
-	if (pr) {
-		let color: string;
-		if (pr.state === "MERGED") color = "#a87fd4";
-		else if (pr.state === "CLOSED") color = "#c47070";
-		else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
-		else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
-		else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
-		else color = "#6bc485";
-		const reviewLabel = pr.state === "OPEN" && pr.reviewDecision === "REVIEW_REQUIRED" ? " — awaiting review"
-			: pr.state === "OPEN" && pr.reviewDecision === "CHANGES_REQUESTED" ? " — changes requested"
-			: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
-			: "";
-		const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
-		const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
-		const prIcon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
-		if (pr.url) {
-			return html`<a class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
-		}
-		return html`<span class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" title=${label}>${prIcon}</span>`;
-	}
-
-	// Fall back to gate status
+/**
+ * Render the goal's `(passed/total)` gate-progress badge.
+ *
+ * Reads `state.gateStatusCache` + the live goal sessions exactly like the
+ * sidebar's `renderGoalBadge` did — extracted so the chat-header
+ * `<goal-status-widget>` can render the same badge with the same visual
+ * vocabulary. Returns "" when no gate-status entry is cached for the goal.
+ *
+ * Pinned by sidebar visual tests — the output here must stay byte-identical
+ * to the previous inline implementation when invoked from `renderGoalBadge`.
+ */
+export function renderGateProgressBadge(goalId: string): TemplateResult | string {
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
-	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !s.delegateOf);
+	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !isChildSession(s));
 	const hasTeam = goalAgents.some(s => s.role === "team-lead" && s.status !== "terminated");
 	const anyAgentWorking = goalAgents.some(s => s.status === "streaming" || s.status === "busy" || s.isCompacting);
 	const allPassed = gs.passed === gs.total;
 	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : anyAgentWorking ? "#3b82f6" : "#7a8ea8";
 	const baseStyle = `font-size:0.75em;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
 	if (gs.verifying && gs.verifyingCount > 0) {
-		// Verifying state is always blue — override the base color which may be muted when agents are idle
+		// Verifying state is always blue — override the base color which may be muted when agents are idle.
+		// Clamp the animated numerator because an already-passed gate can be re-signaled
+		// and running while the stored pass count is still true in server history.
 		const verifyStyle = `font-size:0.75em;color:#3b82f6;font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
-		const displayed = gs.passed + gs.verifyingCount;
+		const displayed = Math.min(gs.total, gs.passed + gs.verifyingCount);
 		return html`<span class="shrink-0" style="${verifyStyle}" title="${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})</span></span>`;
 	}
 	if (!allPassed && hasTeam) {
@@ -847,6 +1235,85 @@ function renderGoalBadge(goalId: string) {
 }
 
 /**
+ * Render a small per-gate status icon (check/dot/cross/spinner). Shared
+ * between the chat-header `<goal-status-widget>` popover and any other
+ * surfaces that need a compact per-gate indicator. Colors mirror the
+ * palette used by `renderGateProgressBadge` — green for passed, red for
+ * failed, blue for running, muted-foreground for pending.
+ */
+export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "running"): TemplateResult {
+	switch (status) {
+		case "passed":
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-label="passed"><polyline points="20 6 9 17 4 12"/></svg>`;
+		case "failed":
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#c47070" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-label="failed"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+		case "running":
+			return html`<svg class="shrink-0 animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="running"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
+		case "pending":
+		default:
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-label="pending" style="color:var(--muted-foreground);opacity:0.6"><circle cx="12" cy="12" r="4"/></svg>`;
+	}
+}
+
+interface GoalPrBadge {
+	show: boolean;
+	color: string;
+	url: string | null;
+	label: string;
+	hasConflicts: boolean;
+}
+
+/**
+ * Resolve whether the goal-row PR badge should render, and its derived color,
+ * url, and label. Single source of truth shared by `renderGoalBadge` (the
+ * sidebar row icon) and `buildGoalSidebarActions` (the "Open on GitHub" menu
+ * item) so the two never drift. Workflow progress is primary: PR status is
+ * only surfaced after a positive, fully-passed gate summary exists; before
+ * that, PR state must not mask incomplete/verifying/uncached workflow
+ * progress. Non-workflow goals have no gate summary to wait for, so they
+ * preserve the PR badge fallback.
+ */
+function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
+	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", hasConflicts: false };
+	const gs = state.gateStatusCache.get(goal.id);
+	const pr = state.prStatusCache.get(goal.id);
+	const hasWorkflowGates = !!goal.workflowId || (goal.workflow?.gates?.length ?? 0) > 0;
+	if (!pr || (hasWorkflowGates && (!gs || gs.total <= 0 || gs.passed !== gs.total))) return hidden;
+
+	let color: string;
+	if (pr.state === "MERGED") color = "#a87fd4";
+	else if (pr.state === "CLOSED") color = "#c47070";
+	else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
+	else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
+	else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
+	else color = "#6bc485";
+	const reviewLabel = pr.state === "OPEN" && pr.reviewDecision === "REVIEW_REQUIRED" ? " — awaiting review"
+		: pr.state === "OPEN" && pr.reviewDecision === "CHANGES_REQUESTED" ? " — changes requested"
+		: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
+		: "";
+	const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
+	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
+	return { show: true, color, url: pr.url ?? null, label, hasConflicts };
+}
+
+/** The goal-row pull-request SVG, in the state-derived stroke color. */
+function goalPrIconSvg(color: string, size = "12"): TemplateResult {
+	return html`<svg class="shrink-0" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
+}
+
+/** Render a PR icon or gate status badge next to a goal in the sidebar. */
+function renderGoalBadge(goal: Goal) {
+	const gateBadge = renderGateProgressBadge(goal.id);
+	const badge = resolveGoalPrBadge(goal);
+	if (!badge.show) return gateBadge;
+	const prIcon = goalPrIconSvg(badge.color);
+	if (badge.url) {
+		return html`<a class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" href=${badge.url} target="_blank" rel="noopener" title=${badge.label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
+	}
+	return html`<span class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" title=${badge.label}>${prIcon}</span>`;
+}
+
+/**
  * Expandable goal group used by both desktop sidebar and mobile landing.
  *
  * Layout: [▾/▸] [TITLE] [dashboard btn]
@@ -862,7 +1329,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	// goal. It drives badges, gate counts, `hasActiveTeam`, `isWorkMerged`,
 	// `hasActiveSession`, and the on-demand team-agents fetch below — all of
 	// which must reflect REAL goal state, not the user's current filter view.
-	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
+	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s)).sort((a, b) => a.createdAt - b.createdAt);
 	const isCreatingHere = state.creatingSessionForGoalId === goal.id;
 	const isTeamGoal = !!(goal as any).team;
 	const hasActiveTeam = isTeamGoal && goalSessions.some((s) => s.role === "team-lead" && s.status !== "terminated");
@@ -936,28 +1403,13 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	};
 
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
-
-	const dashboardBtn = html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); }}
-			title="Goal dashboard">${icon(LayoutDashboard, "xs")}</button>
-	`;
-
 	const pr = state.prStatusCache.get(goal.id);
 	const showArchive = !goal.archived;
 	const isWorkMerged = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
 	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
-	const reattemptBtn = !hasActiveSession ? html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}
-			title="Re-attempt goal">${icon(RotateCcw, "xs")}</button>
-	` : nothing;
-
-	const archiveBtn = showArchive ? html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-secondary-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}
-			title="Archive goal">${icon(Trash2, "xs")}</button>
-	` : nothing;
+	const goalActions = buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
+	const goalActionRefresh = () => buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
+	const goalButtons = html`${renderSidebarQuickActions(goalActions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
 
 	const emptyState = html`
 		<div class="pl-2 py-1 text-muted-foreground" style="${mobile ? "" : "font-size: 0.9167em;"}">
@@ -995,11 +1447,15 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		const archivedForLiveLead = state.showArchived
 			? state.archivedSessions.filter(s =>
 				s.teamGoalId === goal.id
-				&& !s.delegateOf
+				&& !isChildSession(s)
 				&& s.role !== "team-lead"
 				&& (s.teamLeadSessionId === teamLead.id || !s.teamLeadSessionId)
 			)
 			: [];
+		// Delegate sessions of this lead are rendered separately (renderLiveDelegates /
+		// renderArchivedDelegates); keep their counts for the team-lead row badge.
+		const liveLeadChildren = visibleLiveChildrenForParent(teamLead.id);
+		const archivedLeadChildren = state.showArchived ? archivedChildrenForParent(teamLead.id) : [];
 		// Sub-goals this team-lead spawned (via goal_spawn_child).
 		// They render INSIDE this team-lead's expanded block so collapsing
 		// the team-lead also hides them — matches the user's mental model
@@ -1055,7 +1511,8 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		const hasArchivedBelow = archivedBelow.length > 0 || archivedSpawned.length > 0;
 		const hasActiveAbove = liveTeamChildren.length > 0 || activeSpawned.length > 0;
 		return html`
-			${renderTeamLeadRow(teamLead, liveTeamChildren.length + archivedBelow.length, tlExpanded)}
+			${renderTeamLeadRow(teamLead, liveTeamChildren.length + archivedBelow.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
+			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${liveTeamChildren.map(renderSessionRow)}
@@ -1077,6 +1534,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
 			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${goalNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50")} transition-colors"
+				data-sidebar-actions-row-root
 				data-nav-id=${goalNavId}
 				data-nav-active=${goalNavActive ? "true" : "false"}
 				style="padding-left:${HEADER_CHEVRON_W}px;"
@@ -1095,11 +1553,11 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 						${opts!.descendantCount}
 					</span>
 				` : nothing}
-				${renderGoalBadge(goal.id)}
+				${renderGoalBadge(goal)}
 				${mobile
-					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
-					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-						${reattemptBtn}${archiveBtn}${dashboardBtn}
+					? goalButtons
+					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+						${goalButtons}
 					</div>`}
 			</div>
 			${isExpanded ? html`
@@ -1119,7 +1577,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 					</div>` : ""}
 					${teamControls}
 					${state.showArchived ? (() => {
-						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
+						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !isChildSession(s));
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
 

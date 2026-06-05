@@ -41,6 +41,7 @@ import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, cpSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -94,6 +95,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	// Bind to 0.0.0.0 so sandboxed containers can reach the gateway via
 	// host.docker.internal (which is --add-host'd into every sandbox by
 	// docker-args.ts). Without this, scenarios that exercise gateway-callback
@@ -103,7 +105,15 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		SERVER_CLI, "--host", "0.0.0.0", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
+		env: {
+			...process.env,
+			BOBBIT_DIR: join(dir, ".bobbit"),
+			NODE_ENV: "test",
+			// The tool-use canary is about the prompted agent turn. Title generation
+			// is a separate LLM call that can race/noise manual runs, especially when
+			// MANUAL_TEST_MODEL points at a slower non-default provider.
+			BOBBIT_SKIP_TITLE_GEN: "1",
+		},
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
@@ -190,9 +200,54 @@ async function getSession(gw: GW, id: string) { return (await api(gw, `/api/sess
 function appUrl(gw: GW) { return `${gw.base}/?token=${gw.token}`; }
 function sessionUrl(gw: GW, id: string) { return `${gw.base}/?token=${gw.token}#/session/${id}`; }
 
+async function waitForConnectedEditor(page: Page, id: string) {
+	await page.waitForSelector("message-editor textarea", { timeout: 30_000 });
+	await page.waitForFunction((sessionId) => {
+		const editor = document.querySelector("message-editor") as any;
+		return editor?.sessionId === sessionId;
+	}, id, { timeout: 30_000 });
+}
+
+async function sendPromptViaUi(page: Page, text: string) {
+	const textarea = page.locator("message-editor textarea").last();
+	await textarea.fill(text);
+	await expect(textarea, "composer should contain the prompt before sending").toHaveValue(text);
+	await textarea.press("Enter");
+	await expect(textarea, "composer should clear after the UI accepts the send").toHaveValue("", { timeout: 5_000 });
+}
+
+async function waitForTurnStartedOrRendered(page: Page, gw: GW, id: string, beforeToolCards: number, beforeAssistantMessages: number, timeoutMs: number) {
+	const startedDeadline = Date.now() + timeoutMs;
+	let lastStatus = "unknown";
+	while (Date.now() < startedDeadline) {
+		const info = await getSession(gw, id).catch(() => undefined);
+		lastStatus = info?.status || lastStatus;
+		if (info && info.status !== "idle") return;
+		const toolCards = await page.locator("div[data-tool-name]").count().catch(() => beforeToolCards);
+		if (toolCards > beforeToolCards) return;
+		const assistantMessages = await page.locator("assistant-message").count().catch(() => beforeAssistantMessages);
+		if (assistantMessages > beforeAssistantMessages) return;
+		await page.waitForTimeout(1_000);
+	}
+	throw new Error(`Session ${id} did not start or render an agent turn within ${timeoutMs}ms after prompt submission (last status: ${lastStatus})`);
+}
+
+async function dumpToolCardDiagnostics(page: Page, gw: GW, id: string, label: string) {
+	const info = await getSession(gw, id).catch((err) => ({ error: String(err) }));
+	const cards = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"))
+		.map(c => ({
+			name: c.getAttribute("data-tool-name") || "?",
+			text: (c.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
+		})));
+	const body = await page.locator("body").innerText().catch(() => "");
+	console.log(`[${label}] session=${JSON.stringify(info)} toolCards=${cards.length}`);
+	for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
+	console.log(`[${label}] body=${body.replace(/\s+/g, " ").slice(0, 1200)}`);
+}
+
 async function interruptAndSend(page: Page, gw: GW, id: string, text: string, idleTimeoutMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await page.waitForSelector("textarea", { timeout: 30_000 });
+	await waitForConnectedEditor(page, id);
 	const sessInfo = await getSession(gw, id);
 	if (sessInfo.status === "streaming") {
 		const stopBtn = page.locator('button[title="Stop streaming"]');
@@ -200,21 +255,23 @@ async function interruptAndSend(page: Page, gw: GW, id: string, text: string, id
 		await stopBtn.click();
 		await pollIdle(gw, id, 15_000);
 	}
-	await page.fill("textarea", text);
-	await page.press("textarea", "Enter");
-	await page.waitForTimeout(1_500);
+	const toolCountBefore = await page.locator("div[data-tool-name]").count().catch(() => 0);
+	const assistantCountBefore = await page.locator("assistant-message").count().catch(() => 0);
+	await sendPromptViaUi(page, text);
+	await waitForTurnStartedOrRendered(page, gw, id, toolCountBefore, assistantCountBefore, Math.min(idleTimeoutMs, 120_000));
 	await pollIdle(gw, id, idleTimeoutMs);
 	await page.waitForTimeout(2_000);
 }
 
 async function browserSend(page: Page, gw: GW, id: string, text: string, idleMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await page.waitForSelector("textarea", { timeout: 30_000 });
+	await waitForConnectedEditor(page, id);
 	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 8_000 }); } catch {}
 	await page.waitForTimeout(500);
-	await page.fill("textarea", text);
-	await page.press("textarea", "Enter");
-	await page.waitForTimeout(1_500);
+	const toolCountBefore = await page.locator("div[data-tool-name]").count().catch(() => 0);
+	const assistantCountBefore = await page.locator("assistant-message").count().catch(() => 0);
+	await sendPromptViaUi(page, text);
+	await waitForTurnStartedOrRendered(page, gw, id, toolCountBefore, assistantCountBefore, Math.min(idleMs, 120_000));
 	await pollIdle(gw, id, idleMs);
 	await page.waitForTimeout(2_000);
 }
@@ -241,10 +298,9 @@ function initRepo(dir: string) {
 	}, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — the working mounted-clone path on every OS.
 	const srcConfig = join(PROJECT_ROOT, ".bobbit", "config");
 	const dstConfig = join(dir, ".bobbit", "config");
 	if (existsSync(srcConfig)) {
@@ -320,12 +376,20 @@ async function createFreshSession(gw: GW): Promise<string> {
  * fooled by a substitute tool whose body happens to mention the same
  * filename/sentinel, which is exactly the regression that motivated this
  * spec rewrite.
+ *
+ * Uses `textContent` (not `innerText`) so collapsed renderers (e.g. the
+ * bash card, which renders with `max-h-0 overflow-hidden` after the
+ * command finishes — see `src/ui/tools/renderers/BashRenderer.ts`) are
+ * still matched. `innerText` excludes hidden content but the header's
+ * `summarizeCommand` summary keeps it non-empty, so the `|| textContent`
+ * fallback never fires. We want content-based matching, not
+ * visibility-based — intent is "did this tool card carry this string".
  */
 async function countToolCardsByName(page: Page, name: string, ...substrings: string[]): Promise<number> {
 	return page.evaluate(({ name, substrings }: { name: string; substrings: string[] }) => {
 		const cards = Array.from(document.querySelectorAll<HTMLElement>(`div[data-tool-name="${name}"]`));
 		return cards.filter(c => {
-			const t = (c.innerText || c.textContent || "");
+			const t = c.textContent || "";
 			return substrings.every(s => t.includes(s));
 		}).length;
 	}, { name, substrings });
@@ -349,7 +413,8 @@ async function assertNoOtherToolCards(page: Page, exceptName: string, ...substri
 		return cards
 			.filter(c => c.getAttribute("data-tool-name") !== exceptName)
 			.filter(c => {
-				const t = (c.innerText || c.textContent || "");
+				// textContent (not innerText) — see countToolCardsByName for rationale.
+				const t = c.textContent || "";
 				return substrings.every(s => t.includes(s));
 			})
 			.map(c => c.getAttribute("data-tool-name") || "<unknown>");
@@ -452,12 +517,17 @@ test.describe.serial("Agent tool use", () => {
 		const sentinel = `HELLO_${nonce}`;
 
 		await browserSend(page, gw, id,
-			`Run the bash tool exactly once with the command: echo ${sentinel} > marker.txt && cat marker.txt`,
+			`This is a deterministic tool-use canary. You must call the available tool named "bash" exactly once. ` +
+			`Set its command argument to exactly: echo ${sentinel} > marker.txt && cat marker.txt. ` +
+			`Do not answer from reasoning alone and do not use any other tool. After the bash tool result returns, reply with the sentinel ${sentinel}.`,
 			240_000);
 		await takeScreenshot(page, `tooluse-1-bash-${nonce}.png`);
 
 		// Positive: bash card with the command text + sentinel.
 		const bashCardCount = await countToolCardsByName(page, "bash", "marker.txt", sentinel);
+		if (bashCardCount === 0) {
+			await dumpToolCardDiagnostics(page, gw, id, `tooluse-1 ${sentinel}`);
+		}
 		expect(bashCardCount, "expected bash tool card with marker.txt + sentinel").toBeGreaterThan(0);
 
 		// Negative: no OTHER tool (write/read/edit/...) achieved the same effect.
@@ -554,8 +624,14 @@ test.describe.serial("Agent tool use", () => {
 	test("4. interrupt mid tool-use — pivot", async ({ page }) => {
 		const id = await createFreshSession(gw);
 
-		// Kick off a long-running bash command. Use a portable node one-liner
-		// to avoid POSIX/Windows shell quoting traps inside the prompt.
+		// Kick off a long-running bash command. Use a BOUNDED shell loop (not an
+		// infinite one): a never-terminating command combined with "don't reply
+		// until it finishes" is a contradiction that current models resolve by
+		// declining to call bash at all (turn ends idle, zero tool cards) — which
+		// is exactly the false-negative this canary used to suffer. A finite
+		// ~2-minute loop runs long enough for us to interrupt mid-execution while
+		// reading as a legitimate task the model will actually run. The sandbox
+		// shell is Linux bash, so a `for`/`sleep` loop needs no node/quoting gymnastics.
 		await page.goto(sessionUrl(gw, id));
 		await page.waitForSelector("textarea", { timeout: 30_000 });
 		await page.waitForTimeout(500);
@@ -563,25 +639,44 @@ test.describe.serial("Agent tool use", () => {
 		// long-running bash invocation (not any prior or later card).
 		const loopTag = `LOOPTAG_${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 		const longPrompt =
-			`Use the bash tool exactly once to run this command (do not modify it):\n` +
-			`bash -c 'node -e "let i=0;setInterval(()=>{require(\\"fs\\").writeFileSync(\\"step.txt\\",String(++i));console.log(\\"${loopTag}\\",i)},1000)"'\n` +
-			`Do not reply or summarise until the command finishes.`;
+			`Use the bash tool exactly once to run this command verbatim (do not modify it):\n` +
+			`bash -c 'for i in $(seq 1 120); do echo "${loopTag} $i"; sleep 1; done'\n` +
+			`It prints progress once a second for about two minutes. Start it now and let it run — do not summarise or reply while it is still running.`;
 		await page.fill("textarea", longPrompt);
 		await page.press("textarea", "Enter");
 
-		// Wait until the agent is actually streaming (it has called the tool
-		// and the bash process is running). The session starts in `idle`; the
-		// initial transition to `streaming` happens after the gateway picks up
-		// the message (typically ~1-3s). We need a streaming sample before we
-		// can interrupt — otherwise interruptAndSend's stop button never fires.
-		const streamDeadline = Date.now() + 60_000;
-		let sawStreaming = false;
-		while (Date.now() < streamDeadline) {
-			const s = await getSession(gw, id);
-			if (s.status === "streaming") { sawStreaming = true; break; }
+		// Wait until the bash tool card with our loop sentinel actually appears
+		// in the DOM. `streaming` status alone is not sufficient — the agent
+		// could be generating text without ever calling bash, which is the
+		// regression mode we want to detect HERE (loudly, before the pivot)
+		// rather than 90s later as an opaque "expected card, got 0".
+		const toolDeadline = Date.now() + 90_000;
+		let sawBashCard = false;
+		while (Date.now() < toolDeadline) {
+			const found = await page.evaluate((tag: string) => {
+				return Array.from(document.querySelectorAll<HTMLElement>('div[data-tool-name="bash"]'))
+					.some(c => (c.textContent || "").includes(tag));
+			}, loopTag);
+			if (found) { sawBashCard = true; break; }
 			await new Promise(r => setTimeout(r, 500));
 		}
-		expect(sawStreaming, "agent never reached streaming status within 60s — tool invocation likely broken").toBe(true);
+		if (!sawBashCard) {
+			// Diagnostic: dump current session status + every tool card so we
+			// can tell whether the agent (a) invoked nothing, (b) invoked the
+			// wrong tool, or (c) invoked bash with a modified command that
+			// stripped the loopTag.
+			const s = await getSession(gw, id);
+			const cards = await page.evaluate(() => {
+				return Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"))
+					.map(c => ({
+						name: c.getAttribute("data-tool-name") || "?",
+						text: (c.textContent || "").replace(/\s+/g, " ").trim().slice(0, 400),
+					}));
+			});
+			console.log(`[tooluse-4] pre-interrupt: status=${s.status} loopTag=${loopTag} cards=${cards.length}`);
+			for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
+		}
+		expect(sawBashCard, "agent never invoked bash with the loop sentinel within 90s — prompt-following or tool-activation broken").toBe(true);
 
 		// Pivot via the stop-and-resend flow.
 		await interruptAndSend(page, gw, id,
@@ -591,6 +686,23 @@ test.describe.serial("Agent tool use", () => {
 
 		// Positive: bash card carrying the loop sentinel.
 		const bashCardCount = await countToolCardsByName(page, "bash", loopTag);
+		if (bashCardCount === 0) {
+			// Diagnostic: dump every tool card on the page so we can see whether
+			// the agent invoked bash with a modified command, substituted a
+			// different tool, or never invoked anything at all.
+			const cards = await page.evaluate(() => {
+				const out: { name: string; text: string }[] = [];
+				for (const c of Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"))) {
+					out.push({
+						name: c.getAttribute("data-tool-name") || "?",
+						text: (c.textContent || "").replace(/\s+/g, " ").trim().slice(0, 400),
+					});
+				}
+				return out;
+			});
+			console.log(`[tooluse-4] loopTag=${loopTag} cards=${cards.length}`);
+			for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
+		}
 		expect(bashCardCount, "expected bash tool card with long-running loop sentinel").toBeGreaterThan(0);
 
 		// Negative: no other tool was substituted for the bash invocation

@@ -52,6 +52,8 @@ npm run restart-server
 
 This touches the sentinel file. The harness picks it up within ~500ms (polled on Windows, `fs.watch` elsewhere) and begins the restart cycle.
 
+When the gateway was launched by this harness, the Settings page also shows a top-right **Restart Server** button. The button is hidden in production and in `npm run dev` because those modes do not set `BOBBIT_DEV_HARNESS=1` and cannot be restarted safely by the harness. Clicking it calls `POST /api/harness/restart`, which is server-gated and touches the same `.bobbit/state/gateway-restart` sentinel as `npm run restart-server`.
+
 ---
 
 ## What changes require what
@@ -255,11 +257,30 @@ When you list `git branch` in a Bobbit-managed repo you'll see several namespace
 | `pool/_pool-<id>` | Worktree pool | Pre-built worktrees waiting to be claimed by a session or goal. Renamed atomically on claim. (Pre-Phase 3 these used `session/_pool-*`; both prefixes are recognised on startup for back-compat.) |
 | `session/<id8>` | Live regular session | A session worktree, named immediately on pool claim (no first-prompt rename). Cleaned up on session archive. See [internals.md — Session worktrees](internals.md#session-worktrees) and [design/remove-session-worktree-rename.md](design/remove-session-worktree-rename.md). |
 | `goal/<slug>-<id>` | Live goal | Spans every component repo in multi-repo projects. |
+| `goal/<goalId8>/<role>-<short4>` | Team-member agent | Per-role worktree under a live goal. Created on `team_spawn`, cleaned up on goal archive (alongside the goal branch) or agent dismiss. Legacy `goal-goal-<slug>-<id>-<role>-<short>` from before the `pithier-te` rename is recognised by the same cleanup path. |
 | `staff-<name>-<id>` | Staff agent worktree | Long-lived when the staff uses a worktree; rebased onto the primary branch/base ref on each wake. No-worktree staff have no staff branch. |
 
 The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted state on every server start — orphaned pool entries and renamed-but-unpersisted worktrees are cleaned up automatically. See [internals.md — Session worktrees](internals.md#session-worktrees) for the full lifecycle.
 
-**Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/master`/`origin/main`). The same value flows to upstream tracking (`git branch --set-upstream-to`), the `{{baseBranch}}` workflow variable, and the `aheadOfPrimary`/`behindPrimary` git-status comparator. `{{master}}` keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+**Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/master`/`origin/main`). The same value drives the `{{baseBranch}}` workflow variable and the `aheadOfPrimary`/`behindPrimary` git-status comparator. Some worktrees also use it as `@{u}` for local status, but Bobbit-owned branch publication never relies on upstream tracking: it pushes explicit destination refspecs such as `<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`. `{{master}}` keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+
+### Worktree-stash hazard — never `git stash` inside a session worktree
+
+**The hazard.** All worktrees of one repo share a single `.git` directory — including its stash stack. `git stash` in worktree A pushes onto the same stack that `git stash pop` in worktree B reads from. When multiple agents work on the same project in parallel (the normal team-goal case), an unscoped `stash` / `stash pop` pair in one worktree silently drags another worktree's uncommitted changes into the wrong branch. The receiving agent ends up with files it never wrote (and tests it wasn't expecting to pass), and the originating agent loses its work to a dangling stash entry that the next `stash pop` somewhere will accidentally apply.
+
+This is not a Bobbit bug — it's a git behaviour. There is no per-worktree stash stack. **Treat `git stash` as unsafe inside any goal / session / team-member / staff worktree.**
+
+**What hit us.** During the *Human Sign-Off Gates* goal, three parallel coder agents ran in sibling worktrees (`coder-abe0`, `coder-b42b`, `coder-933c`). One agent ran `git stash` to test a clean tree, another ran `git stash pop` shortly afterwards — and Track C's WIP landed on Track A's branch. The team lead had to inventory all three worktrees by hand, swap files back to their rightful branches, and restart two of the three tracks. Several hours lost.
+
+**Safe alternatives.**
+
+- **Commit instead of stash.** Make a throwaway WIP commit (`git commit -am wip`), do the experiment, then `git reset HEAD~1` (or amend) to restore the working state. The commit object stays scoped to the branch you're on.
+- **`git worktree add` a fresh temporary worktree** if you genuinely need a clean copy of the tree at a specific ref. Each worktree gets its own working copy with no stash interaction.
+- **`git diff > patch && git checkout .`** to save changes to a file, then `git apply patch` later. The patch file is a local artefact — no shared `.git` state involved.
+
+**If you must stash anyway**, pass `--include-untracked` and immediately pop in the same worktree before any other operation — do not leave entries on the stack that another agent could later pop by accident. The first `git stash list` from any sibling worktree will show the entries you created.
+
+**Diagnostic when this regresses.** `git status` in a worktree shows files you never edited, often touching paths that match another in-progress task. `git reflog show stash` lists every entry on the shared stack with its `WIP on <branch>` annotation — entries from a different branch than the worktree you're in are the smoking gun. Reconstruct by walking `git stash show -p stash@{N}` for each entry and applying to the correct worktree manually.
 
 ---
 
@@ -269,4 +290,5 @@ The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted stat
 - **[REST API](rest-api.md)** — Full REST API reference
 - **[Security Model](security.md)** — Auth, TLS, and security details
 - **[Networking](networking.md)** — Bind addresses, TLS, deSEC, QR codes
+- **[Bundle profile workflow](perf/bundle-profile.md)** — Diagnose UI bundle-size regressions; budget guard at `tests/bundle-size.test.ts`
 - **[AGENTS.md](../AGENTS.md)** — Agent context: repo layout, key concepts, common tasks, debugging tips

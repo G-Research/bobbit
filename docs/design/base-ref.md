@@ -10,7 +10,7 @@ hard-coded reference is also baked into:
 
 - workflow gate verify commands (`{{master}}` for the ready-to-merge gate),
 - the LLM-review prompts the project assistant seeds for new projects,
-- the per-branch upstream that `git push -u` sets at worktree-creation time,
+- the per-branch upstream used by status/ahead-behind checks after branch publication,
 - the "primary" comparator the git-status widget uses for the
   `aheadOfPrimary` / `behindPrimary` counters in `git-status-native.ts`.
 
@@ -33,8 +33,60 @@ base_ref: origin/develop
 | Type | string (optional) |
 | Accepted | a **branch** ref — local (`master`, `develop`) or remote (`origin/develop`, `origin/release/2026.05`) |
 | Whitespace | trimmed; empty after trim is treated as unset |
-| Default | unset → preserve today's behaviour (`resolveRemotePrimary()`) |
+| Default | pinned to live `origin/<branch>` at project-add time (see below); blank only when the remote was unreachable at add time, then falls back to `resolveRemotePrimary()` at runtime |
 | UI | Settings → General → Worktree section, immediately under `worktree_root` |
+
+### Add-time pinning (primary path)
+
+`base_ref` is **pinned to a concrete `origin/<branch>` at project-add time** so
+new projects never carry a blank, silently-resolved base. This is the primary
+way `base_ref` gets its value; the runtime resolver fallback below is back-compat
+only (for projects created before pinning, or when the remote was unreachable
+at add time).
+
+- **Where**: `POST /api/projects` and the provisional→promote path
+  `POST /api/projects/:id/promote` (`src/server/server.ts`). Both run a
+  best-effort pin, only when the stored `base_ref` is blank (an
+  explicitly-supplied value is respected). In `POST /api/projects` the pin runs
+  **before** worktree-pool initialisation — the pool's `baseRefResolver` reads
+  `base_ref` on each fill, so pinning the concrete value first prevents early
+  pool entries from being created off the old `origin/HEAD` fallback.
+- **How**: `detectBaseRefFromRemote(repoPath)` runs `git ls-remote --symref
+  origin HEAD` against the **live remote** (not the stale local `origin/HEAD`
+  cache), parses the first `ref: refs/heads/<branch>` line via the pure
+  `parseLsRemoteSymref`, and returns `origin/<branch>`. The result is validated
+  with `isValidBaseRefBranchGrammar` (so a pinned value can never fail later
+  save-time validation) and persisted.
+- **Multi-repo**: pinned from the **pool/primary repo only** (first declared
+  non-`.` component). Per-component overrides are not supported. The detected
+  ref is only persisted if it exists in **every** configured component repo
+  (`refExistsInRepo` per distinct repo, non-git paths skipped) — mirroring the
+  save-time validator, so a pinned value can never be one that a manual save
+  would have rejected or that would break worktree creation for a component
+  lacking the branch. If any component lacks the ref, `base_ref` stays blank.
+- **Failure handling**: if `git ls-remote` fails (offline, no remote, not a git
+  repo), `detectBaseRefFromRemote` returns null and `base_ref` stays blank —
+  identical to today's behaviour. Project creation/promotion never fails because
+  of pinning.
+- **Surfacing for existing blank projects**: the read-only endpoint
+  `GET /api/projects/:id/base-ref/detect` returns
+  `{ resolved, detected }` — `resolved` is `resolveBaseRef(primaryRepoPath,
+  storedValue).ref` (exactly what worktrees branch off right now), `detected` is
+  the live `detectBaseRefFromRemote` result **filtered to be saveable**: it is
+  nulled out unless it passes the same grammar + cross-component existence checks
+  add-time pinning applies. This guarantees any non-null `detected` the UI fills
+  via "Detect from remote" will pass save-time validation. Settings uses this to
+  show the resolved fallback as a placeholder and to drive a "Detect from remote"
+  action that fills and saves a concrete value.
+- **Reversible**: blanking the field in Settings opts back into the dynamic
+  runtime fallback (`resolveBaseRef`'s empty-config path).
+
+The two helpers `parseLsRemoteSymref` (pure) and `detectBaseRefFromRemote`
+(best-effort exec wrapper) live alongside the other resolvers in
+`src/server/skills/git.ts`. The runtime resolver chain
+(`parseBaseRef`/`resolveBaseRef`/`resolveBaseRefWithExec`/`resolveRemotePrimary`)
+is **unchanged** — pinning just stops the empty-config fallback from being the
+primary path for new projects.
 
 ### Save-time validation
 
@@ -184,10 +236,19 @@ design — there is an explicit `git fetch origin <goal-branch>` immediately
 preceding the `createWorktree` call. This is a different base concept (the
 goal's branch, not the project's integration target).
 
-### 2. Upstream tracking
+### 2. Upstream tracking and safe publication
 
-After the worktree is created (and after the existing `git push -u origin
-<branch>` runs for backup / origin visibility), `createWorktree` issues:
+After the worktree is created, `createWorktree` publishes the branch with an
+explicit destination refspec and then fetches the matching remote-tracking ref:
+
+```bash
+git -C <worktree> push origin <branch>:refs/heads/<branch>
+git -C <worktree> fetch origin refs/heads/<branch>:refs/remotes/origin/<branch>
+git -C <worktree> branch --set-upstream-to=origin/<branch> <branch>
+```
+
+If `base_ref` is configured, `createWorktree` then points `@{u}` at that base
+for status/ahead-behind semantics:
 
 ```bash
 git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
@@ -195,12 +256,17 @@ git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
 
 Effect:
 
-- Local base → local upstream. `git status` ahead/behind compares against the
-  local base. Push still happens (we keep `git push -u origin <branch>` for
-  crash-recovery / inspection), but `--set-upstream-to` then overrides what
-  `@{u}` resolves to.
-- Remote base (`origin/X`) → remote upstream. `git push` defaults work
-  normally.
+- Branch publication never depends on the local upstream or `push.default`.
+  Bobbit-owned publishes target `refs/heads/<branch>` directly, so an inherited
+  upstream such as `origin/master` cannot redirect the push.
+- Local base → local upstream for non-pool worktrees. `git status` ahead/behind
+  compares against the local base after the override.
+- Remote base (`origin/X`) → remote upstream for non-pool worktrees. Workflow
+  variables and merge-base checks still use `{{baseBranch}}` explicitly; the
+  push destination remains the work branch, not the base branch.
+- Pool-claimed worktrees are the exception: claim clears any inherited upstream
+  synchronously, then background publish repairs tracking to `origin/<branch>`.
+  The pool still resets to the current configured base before handoff.
 
 Save-time validation guarantees the base is a branch ref, so `--set-upstream-to`
 never fails on tag/SHA at runtime. Defence-in-depth error if it does fail
@@ -242,6 +308,7 @@ authoring guide documents the distinction:
 `{{baseBranch}}` instead of `{{master}}`:
 
 - Ready-to-Merge gate:
+  - `git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q .`
   - `git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}`
   - `gh pr list --head {{branch}} --base {{baseBranch}}`
 - Code-review / design / impl prompts: `origin/{{baseBranch}}` throughout.
@@ -375,6 +442,14 @@ new WorktreePool(
 - No drain on setting change.
 - Pool entries auto-adopt the current base whenever they're touched.
 
+On claim, a pool branch may have inherited upstream tracking from its prebuilt
+`pool/_pool-*` branch. `claim()` synchronously unsets any upstream that is not
+already `origin/<targetBranch>` before returning the worktree. The background
+freshen path then publishes with `git push origin <targetBranch>:refs/heads/<targetBranch>`,
+fetches the remote-tracking ref, and sets upstream to `origin/<targetBranch>`.
+This keeps claim fast while preventing a stale `origin/master` upstream from
+influencing later Bobbit-owned pushes.
+
 The unconditional `git fetch origin` in `freshenInBackground` stays — harmless
 when base is local, useful for refreshing any other tracking branches the
 session might want.
@@ -500,5 +575,5 @@ Unit (`tests/base-ref-parse.spec.ts`):
 - `docs/dev-workflow.md` — branch namespaces and worktree story.
 - `docs/internals.md` — config cascade, sandbox, git-status pipeline.
 - `docs/goals-workflows-tasks.md` — workflow gate definitions.
-- `docs/rest-api.md` — project-config PUT validation rules.
+- `docs/rest-api.md` — project-config PUT validation rules, add-time pinning on `POST /api/projects`, and the `GET /api/projects/:id/base-ref/detect` endpoint.
 - `AGENTS.md` — reference list addition.

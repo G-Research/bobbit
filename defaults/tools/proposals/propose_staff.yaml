@@ -1,7 +1,7 @@
 name: propose_staff
 description: "Submit staff proposal with name and prompt"
 summary: "Propose a staff member"
-params: [name, prompt, description?, triggers?, cwd?]
+params: [name, prompt, description?, triggers?, cwd?, role?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -17,9 +17,10 @@ docs: >-
   shape), cwd (project path the staff runs against — defaults to the
   registered project).
 
-  Roles for staff: a staff agent uses a role's prompt + tool policies via the
-  `roleId` field. Define a custom role first via propose_role if you need
-  bespoke behaviour, then reference it from the staff proposal.
+  Roles for staff: the optional `role` attaches a role to the staff agent — it
+  prepends the role's prompt context to the staff agent's system prompt and
+  pre-fills the accessory. Only pass a role that exists; define a custom role
+  first via propose_role if you need bespoke behaviour.
 
   Cascade: staff are project-scoped only — there is no builtin/server layer.
 

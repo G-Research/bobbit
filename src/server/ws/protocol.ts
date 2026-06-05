@@ -33,6 +33,16 @@ export interface QueuedMessage {
 	createdAt: number;
 }
 
+export interface SessionCostSnapshot {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalCost: number;
+	/** Derived on read by current servers; optional for older persisted/WS payloads. */
+	cacheHitRate?: number | null;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
 	| { type: "auth"; token: string }
@@ -93,13 +103,13 @@ export type ServerMessage =
 	| { type: "session_removed"; sessionId: string; projectId?: string; reason: "terminated" | "archived" | "purged" }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
-	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } }
+	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
 	| { type: "task_changed"; task: unknown }
 	| { type: "tasks_list"; tasks: unknown[] }
-	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: string; exitCode: number | null; startTime: number } }
+	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: "running" | "exited"; exitCode: number | null; startTime: number; endTime: number | null } }
 	| { type: "bg_process_output"; processId: string; stream: "stdout" | "stderr"; text: string; ts: number }
-	| { type: "bg_process_exited"; processId: string; exitCode: number | null }
+	| { type: "bg_process_exited"; processId: string; exitCode: number | null; endTime: number | null }
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }
 	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string; startedAt?: number; steps?: Array<{ name: string; type: string; phase?: number }>; seq?: number }
 	| { type: "gate_verification_phase_started"; goalId: string; gateId: string; signalId: string; phase: number; stepIndices: number[]; seq?: number }
@@ -108,6 +118,7 @@ export type ServerMessage =
 	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "skipped"; durationMs: number; output: string; sessionId?: string; phase?: number; seq?: number }
 	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string; seq?: number }
 	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
+	| { type: "gate_reset"; goalId: string; gateId: string; affectedGateIds: string[]; changedGateIds: string[]; unchangedGateIds: string[] }
 	| { type: "goal_setup_complete"; goalId: string }
 	| { type: "goal_setup_error"; goalId: string; error: string }
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }

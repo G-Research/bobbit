@@ -14,6 +14,21 @@ import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 
+function claudeOpus4Minor(id: string): number | undefined {
+	// Keep in lockstep with src/server/agent/model-registry.ts. Limit the minor
+	// capture to version-looking values so date-only IDs like
+	// claude-opus-4-20250514 remain the generic Opus 4 tier.
+	const match = id.toLowerCase().match(/claude-opus-4(?:-|\.)(\d{1,3})\b/);
+	return match ? Number(match[1]) : undefined;
+}
+
+function claudeOpus4Rank(id: string): number | undefined {
+	const minor = claudeOpus4Minor(id);
+	if (minor === undefined) return undefined;
+	if (minor === 1) return 96;
+	return 88 + minor * 2;
+}
+
 /**
  * Assign a recency/tier rank to a model ID so newer flagship models sort first.
  * Higher rank = shown higher in the list. Models not matching any pattern get 0.
@@ -22,13 +37,11 @@ function modelRecencyRank(id: string): number {
 	const s = id.toLowerCase();
 
 	// ── Anthropic Claude ──
-	if (s.includes("claude-opus-4-7") || s.includes("claude-opus-4.7")) return 102;
-	if (s.includes("claude-opus-4-6") || s.includes("claude-opus-4.6")) return 100;
+	const opus4Rank = claudeOpus4Rank(s);
+	if (opus4Rank !== undefined) return opus4Rank;
 	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
-	if (s.includes("claude-opus-4-5") || s.includes("claude-opus-4.5")) return 98;
 	if (s.includes("claude-sonnet-4-5") || s.includes("claude-sonnet-4.5")) return 97;
-	if (s.includes("claude-opus-4-1") || s.includes("claude-opus-4.1")) return 96;
-	if (s.includes("claude-opus-4") && !s.includes("4-1") && !s.includes("4.1") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6") && !s.includes("4-7") && !s.includes("4.7")) return 95;
+	if (s.includes("claude-opus-4")) return 95;
 	if (s.includes("claude-sonnet-4") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 94;
 	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
 	if (s.includes("claude-3-7-sonnet") || s.includes("claude-3.7-sonnet")) return 80;
@@ -341,6 +354,7 @@ export class ModelSelector extends DialogBase {
 						return html`
 							<div
 								data-model-item
+								data-model-id=${id}
 								class="px-4 py-3 ${
 									this.navigationMode === "mouse" ? "hover:bg-muted" : ""
 								} cursor-pointer border-b border-border ${isSelected ? "bg-accent" : ""} ${hasKey ? "" : "opacity-45"}"

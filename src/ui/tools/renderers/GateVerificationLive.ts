@@ -21,10 +21,26 @@ import {
 	renderSessionLink,
 } from "./delegate-cards.js";
 
+type VerificationStepStatus = "running" | "passed" | "failed" | "waiting" | "skipped" | "blocked";
+
+type InitialVerificationStep = {
+	name: string;
+	type: string;
+	status?: string;
+	passed?: boolean | null;
+	skipped?: boolean;
+	phase?: number;
+	durationMs?: number;
+	duration_ms?: number;
+	output?: string;
+	startedAt?: number;
+	sessionId?: string;
+};
+
 interface VerificationStep {
 	name: string;
 	type: string;
-	status: "running" | "passed" | "failed" | "waiting" | "skipped";
+	status: VerificationStepStatus;
 	phase?: number;
 	durationMs?: number;
 	output?: string;
@@ -32,21 +48,91 @@ interface VerificationStep {
 	sessionId?: string;
 }
 
+function normalizeStepStatus(step: Partial<InitialVerificationStep>, fallback: VerificationStepStatus = "running"): VerificationStepStatus {
+	if (typeof step.status === "string") {
+		const key = step.status.toLowerCase().replace(/_/g, "-");
+		if (key === "passed" || key === "success" || key === "completed") return "passed";
+		if (key === "failed" || key === "failure" || key === "error" || key === "timeout") return "failed";
+		if (key === "skipped") return "skipped";
+		if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
+		if (key === "blocked" || key === "blocked-by-earlier-failure") return "blocked";
+		if (key === "running" || key === "in-progress" || key === "starting") return "running";
+	}
+	if (step.skipped) return "skipped";
+	if (step.passed === true) return "passed";
+	if (step.passed === false) return fallback;
+	if (step.passed === null) return "running";
+	return fallback;
+}
+
+function mapVerificationStep(step: InitialVerificationStep, fallback: VerificationStepStatus = "running"): VerificationStep {
+	const status = normalizeStepStatus(step, fallback);
+	const durationMs = step.durationMs ?? step.duration_ms;
+	return {
+		name: step.name,
+		type: step.type,
+		status,
+		phase: step.phase,
+		durationMs,
+		output: step.output,
+		startedAt: step.startedAt || (durationMs && durationMs > 0 ? Date.now() - durationMs : status === "running" ? Date.now() : 0),
+		sessionId: step.sessionId,
+	};
+}
+
+function hasExplicitStepStatus(step: InitialVerificationStep): boolean {
+	return normalizeStepStatus({ status: step.status }, "running") !== "running" || step.status === "running" || step.status === "in-progress" || step.status === "in_progress" || step.status === "starting";
+}
+
 /** Map verification step status to delegate-cards status strings */
 function toDelegateStatus(status: string): string {
 	if (status === "passed") return "completed";
 	if (status === "failed") return "error";
 	if (status === "waiting") return "waiting";
-	if (status === "skipped") return "skipped";
+	if (status === "skipped" || status === "blocked") return "skipped";
 	return "running";
+}
+
+function stepStatusBadgeClass(status: VerificationStepStatus): string {
+	if (status === "passed") return "bg-green-500/15 text-green-700 dark:text-green-300";
+	if (status === "failed") return "bg-red-500/15 text-red-700 dark:text-red-300";
+	if (status === "running") return "bg-blue-500/15 text-blue-700 dark:text-blue-300";
+	return "bg-muted text-muted-foreground";
+}
+
+function statusSummary(steps: VerificationStep[]): string {
+	const counts = new Map<VerificationStepStatus, number>();
+	for (const step of steps) counts.set(step.status, (counts.get(step.status) || 0) + 1);
+	const labels: Array<[VerificationStepStatus, string]> = [
+		["passed", "passed"],
+		["failed", "failed"],
+		["running", "running"],
+		["waiting", "waiting"],
+		["blocked", "blocked"],
+		["skipped", "skipped"],
+	];
+	return labels
+		.map(([status, label]) => {
+			const count = counts.get(status) || 0;
+			return count > 0 ? `${count} ${label}` : "";
+		})
+		.filter(Boolean)
+		.join(", ");
+}
+
+function shouldRenderDuration(step: VerificationStep): boolean {
+	if (step.status === "waiting" || step.status === "blocked") return false;
+	if (step.status === "skipped" && !(step.durationMs && step.durationMs > 0)) return false;
+	if (step.status === "running") return !!step.startedAt || !!step.durationMs;
+	return step.durationMs != null;
 }
 
 /** Build a DelegateCardEntry-compatible object for renderDuration() */
 function toCardEntry(step: VerificationStep, index: number): DelegateCardEntry {
 	const delegateStatus = toDelegateStatus(step.status);
-	// For running steps, compute durationMs from startedAt so <live-timer> works
+	// For running steps, prefer the live startedAt clock and fall back to an API-provided elapsed duration.
 	const durationMs = step.status === "running"
-		? Date.now() - step.startedAt
+		? (step.startedAt ? Math.max(0, Date.now() - step.startedAt) : (step.durationMs ?? 0))
 		: (step.durationMs ?? 0);
 	return {
 		id: `step-${index}`,
@@ -64,8 +150,8 @@ export class GateVerificationLive extends LitElement {
 	@property() signalId = "";
 	/** If set, used to show static final state when no events arrive (e.g. chat history). */
 	@property() finalStatus: string | undefined;
-	/** Step definitions from signal response — used to seed placeholder cards before WS events arrive. */
-	@property({ type: Array }) initialSteps: Array<{ name: string; type: string }> = [];
+	/** Step definitions or active snapshot from signal response — used before WS events arrive. */
+	@property({ type: Array }) initialSteps: InitialVerificationStep[] = [];
 
 	@state() private steps: VerificationStep[] = [];
 	@state() private overallStatus: "idle" | "running" | "passed" | "failed" = "idle";
@@ -88,15 +174,15 @@ export class GateVerificationLive extends LitElement {
 	override createRenderRoot() { return this; }
 
 	override willUpdate(_changed: PropertyValues) {
-		// Seed steps from initialSteps once, before the gate_verification_started WS event arrives
+		// Seed steps from initialSteps once, before the gate_verification_started WS event arrives.
+		// Prefer explicit snapshot status semantics over legacy passed:false seed rows.
 		if (this.overallStatus === "idle" && this.steps.length === 0 && this.initialSteps.length > 0) {
-			this.steps = this.initialSteps.map(s => ({
-				name: s.name,
-				type: s.type,
-				status: "running" as const,
-				startedAt: Date.now(),
-			}));
-			this.overallStatus = "running";
+			const fallback = this.finalStatus === "passed" ? "passed" : this.finalStatus === "failed" ? "failed" : "running";
+			this.steps = this.initialSteps.map(s => mapVerificationStep(s, fallback));
+			this.overallStatus = this.finalStatus === "passed" || this.finalStatus === "failed" ? this.finalStatus : "running";
+			for (let i = 0; i < this.steps.length; i++) {
+				if (this.steps[i].output && !this._stepOutputs.has(i)) this._stepOutputs.set(i, this.steps[i].output!);
+			}
 		}
 	}
 
@@ -158,42 +244,45 @@ export class GateVerificationLive extends LitElement {
 			const vStatus = signal.verification.status;
 
 			if (vStatus === "passed" || vStatus === "failed") {
-				// Map GateSignalStep[] to VerificationStep[]
-				const steps: VerificationStep[] = (signal.verification.steps || []).map((s: any) => ({
-					name: s.name,
-					type: s.type,
-					status: s.skipped ? "skipped" as const : s.passed === true ? "passed" as const : s.passed === false ? "failed" as const : "running" as const,
-					durationMs: s.duration_ms ?? 0,
-					output: s.output,
-					startedAt: s.duration_ms ? Date.now() - s.duration_ms : 0,
-				}));
+				// Terminal gate state is authoritative: preserve final passed/failed behavior.
+				const fallback = vStatus === "passed" ? "passed" : "failed";
+				const steps: VerificationStep[] = (signal.verification.steps || []).map((s: InitialVerificationStep) => mapVerificationStep(s, fallback));
 				this.steps = steps;
 				this.overallStatus = vStatus;
 				return;
 			}
 
-			// Still running — try active verifications for real-time step state
+			// Still running — prefer active verifications for real-time step state.
+			// If the active endpoint is unavailable, only reconcile from gate data when
+			// it carries explicit status semantics; never reinterpret legacy passed:false
+			// seed rows as failed while the verification is still running.
 			if (vStatus === "running") {
-				const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
-				if (!activeRes.ok) return;
-				const activeData = await activeRes.json();
-				const active = activeData.verifications?.find(
-					(v: any) => v.signalId === this.signalId
-				);
-				if (active?.steps?.length) {
-					this.steps = active.steps.map((s: any) => ({
-						name: s.name,
-						type: s.type,
-						status: s.status,
-						phase: s.phase,
-						durationMs: s.durationMs,
-						output: s.output,
-						startedAt: s.startedAt || Date.now(),
-						sessionId: s.sessionId,
-					}));
-					this.currentPhase = active.currentPhase ?? 0;
+				let activeSteps: VerificationStep[] | undefined;
+				try {
+					const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
+					if (activeRes.ok) {
+						const activeData = await activeRes.json();
+						const active = activeData.verifications?.find(
+							(v: any) => v.signalId === this.signalId
+						);
+						if (active?.steps?.length) {
+							activeSteps = active.steps.map((s: InitialVerificationStep) => mapVerificationStep(s, "running"));
+							this.currentPhase = active.currentPhase ?? 0;
+						}
+					}
+				} catch {
+					// Gate snapshot fallback below is still safe when explicit statuses exist.
+				}
+
+				const signalSteps = (signal.verification.steps || []) as InitialVerificationStep[];
+				if (!activeSteps?.length && signalSteps.some(hasExplicitStepStatus)) {
+					activeSteps = signalSteps.map((s) => mapVerificationStep(s, "running"));
+				}
+
+				if (activeSteps?.length) {
+					this.steps = activeSteps;
 					this.overallStatus = "running";
-					// Seed _stepOutputs from API so modal has initial content
+					// Seed _stepOutputs from API so modal has initial content.
 					for (let i = 0; i < this.steps.length; i++) {
 						if (this.steps[i].output && !this._stepOutputs.has(i)) {
 							this._stepOutputs.set(i, this.steps[i].output!);
@@ -255,7 +344,8 @@ export class GateVerificationLive extends LitElement {
 					const updated = [...this.steps];
 					updated[idx] = {
 						...updated[idx],
-						startedAt: detail.startedAt || updated[idx].startedAt,
+						status: "running",
+						startedAt: detail.startedAt || updated[idx].startedAt || Date.now(),
 						sessionId: detail.sessionId,
 					};
 					this.steps = updated;
@@ -269,7 +359,7 @@ export class GateVerificationLive extends LitElement {
 					const updated = [...this.steps];
 					updated[idx] = {
 						...updated[idx],
-						status: detail.status,
+						status: normalizeStepStatus({ status: detail.status }, "failed"),
 						durationMs: detail.durationMs,
 						output: detail.output,
 						sessionId: detail.sessionId ?? updated[idx].sessionId,
@@ -284,7 +374,7 @@ export class GateVerificationLive extends LitElement {
 					updated[idx] = {
 						...updated[idx],
 						name: detail.stepName || updated[idx].name,
-						status: detail.status,
+						status: normalizeStepStatus({ status: detail.status }, "failed"),
 						durationMs: detail.durationMs,
 						output: detail.output,
 					};
@@ -347,6 +437,7 @@ export class GateVerificationLive extends LitElement {
 		const passedCount = this.steps.filter(s => s.status === "passed").length;
 		const failedCount = this.steps.filter(s => s.status === "failed").length;
 		const total = this.steps.length;
+		const summary = statusSummary(this.steps);
 
 		// Phase grouping
 		const phases = new Set(this.steps.map(s => s.phase ?? 0));
@@ -367,8 +458,8 @@ export class GateVerificationLive extends LitElement {
 		return html`
 			<div class="mt-2 space-y-1">
 				${isRunning
-					? html`<div class="flex items-center justify-end text-[10px] text-muted-foreground tabular-nums -mt-[1.35rem]">${completedCount}/${total}${failedCount > 0 ? html` <span class="text-red-500 ml-1">(${failedCount} failed)</span>` : nothing}</div>`
-					: this._renderHeader(passedCount, failedCount, total)
+					? html`<div class="flex items-center justify-end text-[10px] text-muted-foreground tabular-nums -mt-[1.35rem]">${summary || `${completedCount}/${total}`}</div>`
+					: this._renderHeader(passedCount, failedCount, total, summary)
 				}
 				${sortedPhases.map(phase => {
 					const phaseSteps = stepsByPhase.get(phase)!;
@@ -399,16 +490,16 @@ export class GateVerificationLive extends LitElement {
 		`;
 	}
 
-	private _renderHeader(passed: number, failed: number, total: number): TemplateResult {
+	private _renderHeader(passed: number, failed: number, total: number, summary: string): TemplateResult {
 		if (this.overallStatus === "passed") {
-			return html`<div class="text-xs font-medium ${statusColor("completed")} mb-1">${statusIcon("completed")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${passed}/${total} passed</span></div>`;
+			return html`<div class="text-xs font-medium ${statusColor("completed")} mb-1">${statusIcon("completed")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${summary || `${passed}/${total} passed`}</span></div>`;
 		}
 		if (this.overallStatus === "failed") {
-			return html`<div class="text-xs font-medium ${statusColor("error")} mb-1">${statusIcon("error")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${passed} passed</span>, <span class="text-red-500">${failed} failed</span></div>`;
+			return html`<div class="text-xs font-medium ${statusColor("error")} mb-1">${statusIcon("error")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${passed} passed</span>, <span class="text-red-500">${failed} failed</span>${summary ? html` <span class="text-muted-foreground">(${summary})</span>` : nothing}</div>`;
 		}
 		// Running
 		const completedCount = passed + failed;
-		return html`<div class="text-xs font-medium ${statusColor("running")} mb-1">Verifying <code class="text-[10px]">${this.gateId}</code> — <span class="text-xs">${completedCount}/${total} steps</span>${failed > 0 ? html` <span class="text-red-500">(${failed} failed)</span>` : nothing}</div>`;
+		return html`<div class="text-xs font-medium ${statusColor("running")} mb-1">Verifying <code class="text-[10px]">${this.gateId}</code> — <span class="text-xs">${summary || `${completedCount}/${total} steps`}</span></div>`;
 	}
 
 	private _openModal(index: number, name: string) {
@@ -456,8 +547,9 @@ export class GateVerificationLive extends LitElement {
 				>
 					<span class="${statusColor(dStatus)}">${statusIcon(dStatus)}</span>
 					<span class="font-mono text-xs flex-1 min-w-0 truncate">${step.name || "step"}</span>
+					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusBadgeClass(step.status)}">${step.status}</span>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
-					${dStatus !== "waiting" ? renderDuration(entry) : nothing}
+					${shouldRenderDuration(step) ? renderDuration(entry) : nothing}
 					${step.sessionId ? renderSessionLink(step.sessionId) : nothing}
 					${isRunningCommand ? html`<span class="text-muted-foreground text-[10px] shrink-0" title="View live output">▸</span>` : nothing}
 					${hasOutput ? html`<span class="text-muted-foreground text-[10px] shrink-0">${isExpanded ? "▴" : "▾"}</span>` : nothing}

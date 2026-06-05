@@ -94,10 +94,10 @@ draft on disk, `AgentInterface.ts` does a one-shot
 caches the resulting type list on `_archivedProposalTypes`. The
 archived footer then renders:
 
-- **"Resubmit `<type>` proposal"** — primary button. Flips
-  `state.previewPanelTab` (or, for assistant sessions,
-  `state.assistantTab`) so the existing proposal panel becomes
-  visible in the preview pane.
+- **"Resubmit `<type>` proposal"** — primary button. Selects the live
+  proposal tab in the session's side-panel workspace so the existing
+  proposal panel becomes visible beside the chat. Legacy `previewPanelTab`
+  / `assistantTab` mirrors are updated only for compatibility.
 - **"Continue in New Session"** — secondary button, kept for Path B.
 
 If no drafts are present, only "Continue in New Session" is rendered

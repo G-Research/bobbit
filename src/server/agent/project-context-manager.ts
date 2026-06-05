@@ -1,5 +1,6 @@
 import { ProjectContext } from "./project-context.js";
 import { ProjectRegistry } from "./project-registry.js";
+import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
@@ -23,9 +24,34 @@ export class ProjectContextManager {
   private registry: ProjectRegistry;
   private sessionResolver: SessionResolver | null = null;
   private _sessionResolverWarned = false;
+  /**
+   * Shared dispatcher for `goal_created` / `goal_archived` staff triggers.
+   * Wired post-boot by `server.ts` once the staff/inbox managers exist.
+   * Stored here so every existing AND every future-lazy-created
+   * ProjectContext gets the same dispatcher reference.
+   */
+  private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
+  /**
+   * Optional post-create configurator applied to every context (existing and
+   * lazily-created). `server.ts` uses it to wire each context's `toolManager`
+   * with its market-pack `tools/` roots provider so market-pack tools resolve
+   * at runtime (design §3.2 / finding #1).
+   */
+  private contextConfigurator: ((ctx: ProjectContext) => void) | null = null;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
+  }
+
+  /**
+   * Late-bind a configurator run against every context (existing + future).
+   * Idempotent and order-independent with respect to `initAll()`/`getOrCreate`.
+   */
+  setContextConfigurator(configurator: (ctx: ProjectContext) => void): void {
+    this.contextConfigurator = configurator;
+    for (const ctx of this.contexts.values()) {
+      try { configurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
+    }
   }
 
   /**
@@ -55,8 +81,28 @@ export class ProjectContextManager {
 
     ctx = new ProjectContext(project);
     ctx.open();
+    // Propagate any post-boot dispatcher wiring to lazily-created contexts.
+    if (this.goalTriggerDispatcher) {
+      ctx.setGoalTriggerDispatcher(this.goalTriggerDispatcher);
+    }
+    // Apply any post-boot context configurator (e.g. market tool roots).
+    if (this.contextConfigurator) {
+      try { this.contextConfigurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
+    }
     this.contexts.set(projectId, ctx);
     return ctx;
+  }
+
+  /**
+   * Late-bound: register the shared `GoalTriggerDispatcher` and wire it into
+   * every existing context. Subsequent `getOrCreate` calls will pick up the
+   * dispatcher automatically. Safe to call before or after `initAll()`.
+   */
+  setGoalTriggerDispatcher(dispatcher: GoalTriggerDispatcher | null): void {
+    this.goalTriggerDispatcher = dispatcher;
+    for (const ctx of this.contexts.values()) {
+      ctx.setGoalTriggerDispatcher(dispatcher);
+    }
   }
 
   /** Get the underlying project registry. */

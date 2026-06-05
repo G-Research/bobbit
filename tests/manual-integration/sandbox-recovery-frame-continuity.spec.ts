@@ -41,6 +41,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import WebSocket from "ws";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -62,6 +63,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	const proc = spawn(process.execPath, [
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
@@ -119,7 +121,21 @@ function api(gw: GW, path: string, opts: RequestInit = {}) {
 	});
 }
 
-async function pollIdle(gw: GW, id: string, ms = 180_000) {
+/**
+ * Poll until the session reports `idle`.
+ *
+ * `tolerateTransientTermination` is the load-bearing knob for the
+ * post-recovery wait. After `docker rm -f` kills the project container, the
+ * agent subprocess exits (code 137) and the session legitimately transitions
+ * to `terminated`. `recoverSandboxSessions` then recreates the container
+ * (~10-15s: container create + repo clone) and respawns the agent in place,
+ * bringing the session back to `idle`. During that window `terminated` is the
+ * EXPECTED state, not a failure — so callers waiting for recovery must keep
+ * polling through it and only give up on the overall timeout (or a hard
+ * `error`/`archived`). The pre-kill calls leave this off so a session that
+ * dies before we even start is still caught immediately.
+ */
+async function pollIdle(gw: GW, id: string, ms = 180_000, opts: { tolerateTransientTermination?: boolean } = {}) {
 	const t0 = Date.now();
 	while (Date.now() - t0 < ms) {
 		const res = await api(gw, `/api/sessions/${id}`);
@@ -127,8 +143,9 @@ async function pollIdle(gw: GW, id: string, ms = 180_000) {
 		const s = await res.json();
 		if (s.status === "idle") return s;
 		if (s.status === "archived") throw new Error(`Session ${id} archived`);
-		if (s.status === "error" || s.status === "terminated") {
-			throw new Error(`Session ${id} ${s.status}${s.restoreError ? `: ${s.restoreError}` : ""}`);
+		if (s.status === "error") throw new Error(`Session ${id} error${s.restoreError ? `: ${s.restoreError}` : ""}`);
+		if (s.status === "terminated" && !opts.tolerateTransientTermination) {
+			throw new Error(`Session ${id} terminated${s.restoreError ? `: ${s.restoreError}` : ""}`);
 		}
 		await new Promise(r => setTimeout(r, 1_000));
 	}
@@ -145,15 +162,10 @@ function initRepo(dir: string) {
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "p", version: "1.0.0" }, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	// Add a real origin so project-sandbox can clone the repo via https inside
-	// the Linux container. Without this, server.ts falls back to repoUrl =
-	// repoPath (a Windows host path like "C:/Users/..."), which git inside
-	// the container interprets as an ssh-style URL because of the colon and
-	// fails with "cannot run ssh: No such file or directory".
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — exercising the working mounted-clone path on
+	// every OS (no scp/ssh misparse of a host path, no unreachable host path).
 	const srcConfig = join(PROJECT_ROOT, ".bobbit", "config");
 	const dstConfig = join(dir, ".bobbit", "config");
 	if (existsSync(srcConfig)) {
@@ -356,25 +368,34 @@ test("sandbox-recovery preserves WS frame continuity (seq + statusVersion carry 
 		console.log(`  Killing container ${containerId.substring(0, 12)} …`);
 		execFileSync("docker", ["rm", "-f", containerId], { timeout: 15_000, stdio: "ignore" });
 
-		// 6. Wait for sandbox-status to report available again (server respawns container)
+		// 6. Confirm Docker itself is still healthy. NOTE: /api/sandbox-status
+		//    only reflects the Docker daemon + agent image — NOT whether THIS
+		//    project's container has been recreated or its sessions respawned.
+		//    Because `docker rm -f` only removes the project container (the daemon
+		//    stays up), this flips back to `available` almost immediately and is
+		//    therefore NOT a recovery signal — step 7 owns the real wait.
 		{
 			const t0 = Date.now();
-			let recovered = false;
+			let dockerHealthy = false;
 			while (Date.now() - t0 < 180_000) {
 				try {
 					const r = await (await api(gw, "/api/sandbox-status")).json();
-					if (r.available) { recovered = true; break; }
+					if (r.available) { dockerHealthy = true; break; }
 				} catch {}
 				await new Promise(r => setTimeout(r, 2_000));
 			}
-			expect(recovered).toBe(true);
-			console.log(`  Sandbox container recovered in ${Math.round((Date.now() - t0))}ms`);
+			expect(dockerHealthy).toBe(true);
+			console.log(`  Docker healthy after kill in ${Math.round((Date.now() - t0))}ms`);
 		}
 
-		// 7. Wait for the session to come back to idle. recoverSandboxSessions
-		//    respawns the agent and broadcasts a fresh "idle" status — this is
-		//    EXACTLY the frame the bug used to drop.
-		await pollIdle(gw, sessionId, 180_000);
+		// 7. Wait for the session to come back to idle. After the kill the agent
+		//    subprocess exits (code 137) and the session legitimately sits in
+		//    `terminated` for ~10-15s while recoverSandboxSessions recreates the
+		//    container (create + repo clone) and respawns the agent in place,
+		//    broadcasting a fresh "idle" status — EXACTLY the frame the bug used to
+		//    drop. Tolerate the transient `terminated` here; the overall timeout
+		//    (not the first terminated sample) is the real failure condition.
+		await pollIdle(gw, sessionId, 180_000, { tolerateTransientTermination: true });
 		console.log("  Session API status: idle (post-recovery) ✓");
 
 		// Brief settle so any post-recovery status frames have a chance to arrive.

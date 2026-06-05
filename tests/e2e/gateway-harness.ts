@@ -23,26 +23,15 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 
-// Enable a per-worker V8 compile cache before any dist/ import. A single
-// shared NODE_COMPILE_CACHE dir across 3 concurrent browser workers
-// cold-importing the same dist files produced spurious "SyntaxError:
-// module X does not provide an export Y" on the first run — partial cache
-// entries were served before the writer's atomic rename completed. Per-worker
-// subdirs eliminate the race. Idempotent if already enabled.
-{
-	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT || join(tmpdir(), "bobbit-e2e-v8cache");
-	// Per-process subdir keyed by pid — Playwright workers are separate
-	// processes so this gives a clean partition.
-	const workerCacheDir = join(cacheRoot, `w-${process.pid}`);
-	try { mkdirSync(workerCacheDir, { recursive: true }); } catch { /* best-effort */ }
-	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
-}
+// Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
+// workers cold-import dist/server once per process, so a per-worker cache gives
+// no useful same-run speedup; on Windows/Node 24 it intermittently returned
+// stale module metadata as false "does not provide an export" startup errors.
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
@@ -174,7 +163,7 @@ function _pushLog(line: string): void {
 	console.error = (...a: unknown[]) => { _pushLog(fmt("error", a)); origError(...a); };
 }
 
-export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; enableDevHarnessRestart: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -183,7 +172,10 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableWorktreePool: true })`.
 	enableWorktreePool: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool }, use, workerInfo) => {
+	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
+	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -236,6 +228,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Set env BEFORE importing server modules. Playwright workers are
 		// separate Node processes, so module singletons are per-worker — no
 		// cross-contamination.
+		const previousDevHarness = process.env.BOBBIT_DEV_HARNESS;
+		if (enableDevHarnessRestart) {
+			process.env.BOBBIT_DEV_HARNESS = "1";
+		} else {
+			delete process.env.BOBBIT_DEV_HARNESS;
+		}
 		process.env.BOBBIT_DIR = bobbitDir;
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
@@ -434,6 +432,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				console.warn(`[gateway-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
 			},
 		});
+		if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;
+		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

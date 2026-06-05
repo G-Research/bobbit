@@ -3,7 +3,8 @@
 The preview side-panel renders agent-authored HTML alongside the chat. This
 document covers the v3 architecture introduced by the embedded-html-preview
 rewrite — a per-session content mount served from a cookie-authed origin path,
-with SSE-driven hot reload.
+with SSE-driven hot reload. The browser renders that mount inside the dynamic
+per-session side-panel workspace shared by regular and assistant sessions.
 
 ## Mental model
 
@@ -22,12 +23,138 @@ Four pieces, one mount, one URL shape:
    `preview-changed` event whenever the gateway repopulates the mount. The panel
    bumps `#mtime=<n>` on the iframe `src` to force a reload.
 
+Every populated mount also has a `contentHash`: a lowercase SHA-256 identity for
+that mounted preview tree. The hash represents rendered content identity, not a
+workspace-tab id or a host filesystem path. `POST /api/preview/mount`,
+`GET /api/preview/mount`, and both bootstrap and live `preview-changed` SSE
+events carry it so the UI can collapse duplicate preview artifacts that have the
+same bytes.
+
 Old paths and concepts that are gone:
 
 - `<stateDir>/preview-<sid>.html` (single inline file)
 - `<stateDir>/preview-<sid>.meta.json` (file-mode sidecar)
 - `BOBBIT_HOST_CWD` translation in the `preview_open` extension
 - `/api/preview/render` and `/api/preview/asset` routes
+
+## Side-panel workspace integration
+
+The UI treats the side pane as a Chrome-style tab strip beside the chat
+(never above it). The shared strip can hold HTML preview, proposal,
+review, PR walkthrough, and inbox tabs at the same time. Chat is **not**
+a tab — there is no `chat` side-pane id, no Chat pill in the strip, and
+the side pane hides entirely when a non-staff session has no side-pane
+tabs. The full rules — id grammar, focus and ordering, drag reorder,
+pinned inbox, walkthrough tab identity, immutable artifact restore,
+per-filename version assignment — live in
+[`design/side-panel-tab-contract.md`](./design/side-panel-tab-contract.md).
+
+Preview tab identity in that contract:
+
+- The **current** preview tab for a filename is
+  `preview:entry:<encoded-filename>`. Label is unversioned (e.g.
+  `report.html`). Every `preview_open` for that filename updates this
+  tab in place — no duplicate, no reorder. SSE `preview-changed` updates
+  it the same way.
+- **Historical** preview tabs are `preview:entry:<encoded-filename>:v:<N>`.
+  Label is `report.html (vN)`. One per distinct past content version of
+  that filename. Versions are per-filename and assigned in chronological
+  content order (see
+  [`PreviewVersionRecord`](./design/side-panel-tab-contract.md#42-version-assignment)).
+- The live mount carries `contentHash`. When a v3 historical card's hash
+  matches the current filename tab's hash, the workspace **collapses**
+  to the current tab — no duplicate, no unnecessary remount. When hashes
+  differ, the historical `:v:N` tab opens beside the current tab.
+- Legacy v1/v2 markers (archived sessions) stay historical even when
+  their remount response includes `contentHash`. Only v3 markers opt
+  into same-content collapse.
+- Desktop renders the strip horizontally; mobile renders the same tab
+  set in the slide-pane header. There is no desktop-only preview
+  capability.
+
+Reopen failures stay local to the tab/card: missing file snapshots
+disable with "File no longer available", parse or fetch errors leave the
+button retryable and log `[PreviewRenderer] reopen failed`, and
+background tab-remount failures log `[panel-workspace] preview tab
+restore failed` without changing preview serving semantics.
+
+### Immutable preview artifacts
+
+A live preview mount (`<stateDir>/preview/<sid>/`) is mutable: every
+`preview_open` overwrites it, and `preview_open(file=…)` mutates a file
+on the host that the user may then edit out from under us. To make
+"reopen this old `preview_open` card and see what was mounted *then*"
+work, every successful mount is also captured into an immutable
+artifact store at `<stateDir>/preview-artifacts/<sid>/<artifactId>/`.
+Source of truth: `src/server/preview/artifacts.ts`.
+
+What the store records:
+
+```
+<stateDir>/preview-artifacts/<sid>/<artifactId>/
+    artifact.json       ← { artifactId, sessionId, entry, contentHash, files[], mtime, createdAt }
+    mount/              ← byte-identical copy of the live mount tree
+        report.html
+        styles.css
+        img/chart.png
+```
+
+- `artifactId` is 6 URL-safe random bytes (8 chars) — small enough to
+  fit inside the 250-byte v3 marker cap while preserving 48 bits of
+  entropy.
+- `persistPreviewArtifact` re-hashes the staged copy and verifies the
+  entry is present before committing the rename. A captured artifact is
+  byte-identical to what was mounted at that moment.
+- `findPreviewArtifactByHash(sessionId, contentHash)` deduplicates: a
+  repeated mount of identical content reuses the existing artifact id.
+- `removeArtifacts(sessionId)` runs when a session is purged.
+  `sweepOrphanArtifacts(knownSessionIds)` is the explicit maintenance
+  helper for removing artifact dirs whose session is gone.
+
+New endpoint:
+
+| Route | Behaviour |
+|---|---|
+| `POST /api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | `restorePreviewArtifact` rehydrates the named artifact into the single live mount and fires `broadcastPreviewChanged` so SSE subscribers see the restored content. Validation and staging happen before the live mount is touched, so missing / wrong-session / corrupt artifacts cannot alias to current content. Body may include `{ artifactId }` for symmetry but must match the route. |
+| `GET /preview/<sid>/_artifact/<artifactId>/<rel-path>` | Direct read from the per-artifact mount directory. Bypasses the single live mount slot, so switching between artifact-backed preview tabs is a pure iframe `src` change — no POST round-trip, no iframe blanking, no mount swap. Same `<base>` + theme-snapshot + bridge-script rewrites as `/preview/<sid>/...` (the base href is the artifact-prefixed path). Authoritative dir: `artifactMountDir(sid, artifactId)`. |
+
+Mount-endpoint extensions:
+
+- `POST /api/preview/mount` with `{ artifactId }` is an alternative
+  restore entry point that cannot be combined with `html` / `file` /
+  `assets` / `manifest`.
+- `POST /api/preview/mount` with `html` / `file` returns
+  `artifactId` alongside the existing response fields. The mount is
+  captured into the store atomically with the broadcast.
+- `GET /api/preview/mount` looks up the artifact whose `contentHash`
+  matches the current mounted content and includes that `artifactId`.
+- SSE `preview-changed` events (bootstrap and live) include `artifactId`
+  whenever a known artifact matches the broadcast `contentHash`.
+
+The live mount stays single — the artifact store is an additional
+immutable restore source, not a second live mount.
+
+For artifact-backed preview tabs, the client now uses the per-artifact
+URL (`/preview/<sid>/_artifact/<artifactId>/<entry>`) directly instead of
+restoring into the live mount. This is what powers instant switching
+between multiple preview tabs without re-mounting on every click. The
+active tab's `artifactId` is read off the panel-tab itself, not mirrored
+into global state, so SSE / bootstrap updates of `state.previewPanelEntry`
+can never desync the iframe `src` from the visible tab. The live mount
+slot remains the source for tabs without an `artifactId` (assistant /
+live preview).
+
+### Reopen-tab decision flow
+
+When the user clicks **Open** on a historical `preview_open` tool card
+(`src/ui/tools/renderers/PreviewRenderer.ts`):
+
+| Marker shape | Restore source | Tab behaviour |
+|---|---|---|
+| v3 with `artifactId` | `POST /api/preview/artifacts/<id>/restore` | Always restorable. If `contentHash` matches the current filename tab, collapse to it; otherwise open / select `preview:entry:<file>:v:N`. |
+| v3 without `artifactId`, with `html` / `file` original params | `POST /api/preview/mount {html\|file}` | Remount the original; the POST response's `artifactId` and `contentHash` are attached to the tab. Same collapse rule. |
+| v3 without `artifactId` and no remount body | None (recorded entry / mtime / url) | Select the recorded entry; iframe points at the existing mount path. Best-effort. |
+| Legacy v1 / v2 | `POST /api/preview/mount {html\|file}` | Stays historical even when the response includes `contentHash`. |
 
 ## Per-session mount
 
@@ -153,20 +280,24 @@ Single source of truth: route block in `src/server/server.ts`, channel in
 - `200 text/event-stream` with `Cache-Control: no-cache`, `Connection: keep-alive`,
   `X-Accel-Buffering: no`.
 - Initial frame: `event: hello\ndata: {ts}`.
-- Live frame: `event: preview-changed\ndata: {entry, mtime, url, path}` —
+- Live frame: `event: preview-changed\ndata: {entry, mtime, url, path, contentHash}` —
   emitted by `broadcastPreviewChanged()` after every successful
   `POST /api/preview/mount`. The full payload is forwarded verbatim so the
-  client can seed `entry` and `mtime` without a follow-up fetch.
+  client can seed `entry`, `mtime`, and content identity without a follow-up
+  fetch. SSE does not include `relPath`; only the mount REST responses do.
 - **Bootstrap on connect:** if a mount already exists for the session, the
   handler emits one `preview-changed` event synchronously after subscribing.
   This closes the race where a `broadcastPreviewChanged()` fires between
   EventSource open and listener registration. The bootstrap shape is
-  identical to a live event, so the client doesn't distinguish them.
+  identical to a live event, including `contentHash`, so the client doesn't
+  distinguish bootstrap from live events.
 - 25 s `:keepalive` comments to defeat idle proxies.
 - Cookie auth (or admin bearer); sandbox-token requests get `403`.
 
-The client subscribes via the standard EventSource and bumps
-`state.previewPanelMtime` on each `preview-changed` to force iframe reload.
+The client subscribes via the standard EventSource, records
+`state.previewPanelContentHash`, and bumps `state.previewPanelMtime` on each
+`preview-changed` to force iframe reload. Preview-tab selection uses the hash to
+collapse matching live/historical artifacts.
 
 ## Mount endpoints
 
@@ -256,44 +387,75 @@ Single-segment `*` and `?` globs match within one path segment only —
 
 ```json
 {
-  "url":   "/preview/3f2c…/report.html",
-  "path":  "C:/Users/.../bobbit/state/preview/3f2c…/report.html",
+  "url": "/preview/3f2c…/report.html",
+  "path": "C:/Users/.../bobbit/state/preview/3f2c…/report.html",
+  "relPath": "3f2c…/report.html",
   "entry": "report.html",
   "mtime": 1775853741666,
+  "contentHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "assets": ["img/chart.png", "styles.css"]
 }
 ```
 
-The `assets[]` field is echoed back only on the `file` form, sorted, and
-contains the resolved relative paths actually copied (after glob
-expansion and de-duplication). The inline `html` form omits it. Renderer
-reopen flows can round-trip this list back into a follow-up
-`POST /api/preview/mount` to re-stamp the same mount.
+The `relPath` field is the host-invariant `<sessionId>/<entry>` identifier used
+by new v3 snapshot blocks. `contentHash` is the mounted preview-tree SHA-256
+identity used by the workspace for same-content collapse. The `assets[]` field
+is echoed back only on the `file` form, sorted, and contains the resolved
+relative paths actually copied (after glob expansion and de-duplication). The
+inline `html` form omits it. Renderer reopen flows can round-trip this list back
+into a follow-up `POST /api/preview/mount` to re-stamp the same mount.
 
 After every success the server calls `broadcastPreviewChanged(sessionId, …)`
-to fan out a `preview-changed` SSE event to every subscribed tab.
+with `{entry, mtime, url, path, contentHash}` to fan out a `preview-changed` SSE
+event to every subscribed tab.
 
 ### `GET /api/preview/mount?sessionId=<sid>`
 
 Bootstrap probe used by the panel after session-select. Returns the same
-`{ url, path, entry, mtime }` shape as the `POST`, or `404 { error: "no
-preview mount" }` when the mount is missing or empty. Resolves the entry via
-the same `pickEntry()` helper the content route uses.
+`{ url, path, relPath, entry, mtime, contentHash }` shape as the `POST`, or
+`404 { error: "no preview mount" }` when the mount is missing or empty. Resolves
+the entry via the same `pickEntry()` helper the content route uses.
 
 ## Snapshot v3 marker
 
 Single source of truth: `defaults/tools/html/snapshot.ts`.
 
-The `preview_open` tool stamps the result with a constant-size marker block:
+The `preview_open` tool stamps the result with a constant-size marker block.
+The marker identifies the preview artifact for reopenable tool-card tabs; it
+does not create a second server mount.
 
 ```
 __preview_snapshot_v3__
-{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>"}
+{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
 ```
 
-≤ 250 bytes per block, regardless of HTML size. The renderer parses the
-marker via `parseSnapshot()` and uses `url` / `path` to drive the **Open**
-button on archived tool cards.
+≤ 250 bytes per block, regardless of HTML size. All of `entry`,
+`contentHash`, and `artifactId` are **optional** — the builder
+(`buildPreviewSnapshotV3Block`) tries progressively more compact
+payloads (long URL with full path, short URL with `entry` filename as
+`path`, alias keys like `aid` for `artifactId`) and emits whichever
+complete variant still fits the 250-byte cap. If even the compact form
+blows the cap, the builder falls back to the bare
+`{kind, url, path}` payload without identity fields. The cap is fixed
+by `tests/e2e/preview-token-cost.spec.ts` and must not be raised to
+make room for larger payloads.
+
+`artifactId` is what makes historical reopen byte-accurate after the
+user has overwritten the original source file: the renderer prefers
+`POST /api/preview/artifacts/<artifactId>/restore` over re-reading
+`html` / `file` params. See ["Immutable preview artifacts"](#immutable-preview-artifacts)
+for the store layout and validation contract.
+
+The renderer parses the marker via `parseSnapshot()` and uses `url` /
+`path`, optional `entry`, optional `contentHash`, optional `artifactId`,
+and the original tool params to drive the **Open** button on tool
+cards. Opening a card selects a source-derived preview tab immediately,
+keyed by filename via `previewEntryTabId(entry)` / `previewVersionedTabId(entry, N)`.
+The restore source preference is `artifactId` → original `html` / `file`
+params → recorded entry/mtime (best-effort). When the marker omitted
+`contentHash` to preserve the 250-byte cap, a successful remount `POST`
+returns the hash; the renderer attaches it to the tab so same-content
+collapse can still fire.
 
 **`path` is host-invariant.** The field carries the project-root-relative
 `<sessionId>/<entry>` identifier (forward slashes on every OS), not the
@@ -303,26 +465,29 @@ host-absolute path on disk. The single source of truth is
 host-absolute `path` when calling `buildPreviewSnapshotV3Block`. Bounding the
 payload by content shape (rather than by where `bobbitStateDir()` happens to
 live on disk) is what keeps the 250 B per-block cap holding on macOS
-(`/private/var/folders/...`) and Windows E2E harness paths. Archived sessions
-that recorded the legacy host-absolute form still parse — `parseSnapshot`
-only requires a non-empty string — but new blocks always use the relative
-form. Per-block size is pinned by `tests/e2e/preview-token-cost.spec.ts`.
+(`/private/var/folders/...`) and Windows E2E harness paths, even when the
+optional `contentHash` fits. Archived sessions that recorded the legacy
+host-absolute form still parse — `parseSnapshot` only requires a non-empty
+string — but new blocks always use the relative form. Per-block size is pinned by
+`tests/e2e/preview-token-cost.spec.ts`.
 
 **Legacy markers** are preserved in the parser **only** for archived
 sessions:
 
 | Marker | Payload | Renderer behaviour |
 |---|---|---|
-| `__preview_snapshot_v1__` | raw inline HTML | Reopen via `POST /api/preview/mount {html}` |
-| `__preview_snapshot_v2__` | `{kind:"file",path}` | Reopen via `POST /api/preview/mount {file}` |
-| `__preview_snapshot_v3__` | `{kind:"preview",url,path}` | Mount already populated; SSE will deliver the entry |
+| `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}`; the tab stays historical (does not collapse into the current filename tab) even when the remount response includes `contentHash` or `artifactId` |
+| `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}`; same historical-only rule as v1 |
+| `__preview_snapshot_v3__` | `{kind:"preview",url,path,entry?,contentHash?,artifactId?}` | Create/select a tab keyed by filename. Prefer `POST /api/preview/artifacts/<artifactId>/restore` when present, else remount from original `html`/`file` params, else select by recorded entry/mtime. Collapse to the current filename tab when `contentHash` already matches; otherwise open / select `preview:entry:<file>:v:N`. |
 
 The v1/v2 builder functions have been deleted — no new code path emits them.
 The marker constants are tagged `Read-only legacy support … Do not extend`
 in both `snapshot.ts` and `PreviewRenderer.ts`. Reopen flows for v1/v2 in
 `PreviewRenderer.ts::onClick` route through the unified mount endpoint, so
 WP-G's deletion of `/api/preview/render` and `/api/preview/asset` doesn't
-break old archived sessions.
+break old archived sessions. Those legacy flows preserve historical-tab
+semantics even though the unified mount endpoint now returns `contentHash`.
+Only v3 markers opt into live-tab collapse by content identity.
 
 ## Theme-token snapshot for standalone tabs
 
@@ -420,28 +585,53 @@ back the preview tree sees the same bytes the gateway just wrote.
 
 | File | Responsibility |
 |---|---|
-| `src/server/preview/mount.ts` | Per-session mount lifecycle, atomic writes, `mountFile` (explicit asset opt-in), watcher |
-| `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler, entry pick, `<base>` + bridge injection |
+| `src/server/preview/mount.ts` | Per-session mount lifecycle, atomic writes, `mountFile` (explicit asset opt-in), `contentHash` calculation, watcher |
+| `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler (live mount) and `/preview/<sid>/_artifact/<id>/<rel>` (per-artifact stable URL), entry pick, `<base>` + bridge injection |
 | `src/server/preview/path-guard.ts` | Path-traversal defence (realpath-based) |
 | `src/server/preview/mime.ts` | MIME-type lookup |
-| `src/server/preview/events.ts` | Per-session `preview-changed` channel |
+| `src/server/preview/events.ts` | Per-session `preview-changed` channel carrying mount identity payloads |
 | `src/server/auth/cookie.ts` | `bobbit_session` cookie issuance + verification, on-disk store |
 | `src/server/server.ts` | `POST/GET /api/preview/mount`, SSE route, broadcast on success |
 | `src/server/agent/docker-args.ts` | Sandbox bind mounts (`/bobbit/preview`, `/bobbit/preview-root`) |
 | `src/shared/preview-bridge-scripts.ts` | Theme/swipe bridge scripts injected into HTML responses |
-| `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps v3 marker |
-| `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot` |
-| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; v1/v2/v3 dispatch |
-| `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, mtime bump |
+| `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps v3 marker with optional `contentHash` |
+| `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot`, 250-byte v3 cap |
+| `src/server/preview/artifacts.ts` | Immutable artifact store — capture, restore, hash-based dedupe, orphan sweep |
+| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; artifact restore → source remount → recorded-entry fallback; live-hash remount skip; filename-keyed tab dispatch |
+| `src/app/panel-workspace.ts` | Side-pane tab id grammar (`preview:entry:<file>[:v:N]`, `proposal:<type>[:rev:N]`, `review:<title>`, `inbox`), per-filename version ledger, pinned-first ordering, drag reorder, persistence |
+| `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, current-vs-historical upsert, older-version-rehydration guard |
+| `src/app/render.ts` | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos), mobile pane bar with pinned Chat pill, SortableJS drag integration with X-axis lock, active-content lookup by id only, artifact-id derived from active tab so iframe src never desyncs from state.previewPanelEntry |
 
 ## Acceptance properties
 
-- Tool result is constant ~150 bytes regardless of HTML size — no HTML in the
-  conversation transcript.
+- Tool result is constant ≤250 bytes regardless of HTML size — no HTML in the
+  conversation transcript. Optional v3 `entry`, `contentHash`, and
+  `artifactId` fields are omitted (or compacted via the builder's progressive
+  fallback) rather than raising the cap.
+- Mount `POST` / `GET` responses and bootstrap/live `preview-changed` SSE events
+  expose a 64-hex `contentHash` for the current mounted preview tree, plus an
+  `artifactId` when a captured artifact matches the current content.
+- Every successful `POST /api/preview/mount` (html or file form) atomically
+  captures the mounted bytes into an immutable artifact under
+  `<stateDir>/preview-artifacts/<sid>/`.
+- `POST /api/preview/artifacts/<artifactId>/restore` rehydrates the named
+  artifact into the single live mount, validates and stages before touching the
+  live mount, and rolls back on failure.
 - Iframe link clicks navigate inside the preview origin; assets resolve via
   `<base href="/preview/<sid>/">`.
 - "Open in new tab" works because the cookie has `Path=/`.
 - Edits to the mount fan out via SSE within ~50 ms (debounce window in
   `watchMount`).
-- Archived sessions with v1 / v2 markers continue to render an Open button
-  that re-stamps the mount via `POST /api/preview/mount`.
+- The side-pane tab strip never contains a Chat pill; chat is rendered
+  outside the strip (see
+  [`design/side-panel-tab-contract.md`](./design/side-panel-tab-contract.md)).
+- The current preview tab for a filename is updated in place by new
+  `preview_open` calls and SSE — no duplicate, no reorder.
+- Opening a historical v3 card whose `contentHash` matches the current
+  filename tab collapses to that tab and skips the remount POST; otherwise it
+  opens `preview:entry:<file>:v:N` keyed off the per-filename version ledger.
+- Historical artifacts with different `contentHash` values remain separate
+  and independently restorable through the one live server mount.
+- Archived sessions with v1 / v2 markers continue to render an Open button that
+  re-stamps the mount via `POST /api/preview/mount` but stays historical even
+  when that response includes `contentHash` or `artifactId`.

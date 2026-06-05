@@ -1,5 +1,8 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { getToolRenderer, registerToolRenderer, registerLazyToolRenderer } from "./renderer-registry.js";
+// Eagerly registered renderers — these appear on virtually every cold
+// session view (the common shell/filesystem tools every agent uses) and
+// are tiny (~1–5 kB each). Heavier or rarer renderers below are lazy.
 import { BashRenderer } from "./renderers/BashRenderer.js";
 import { BrowserClickRenderer } from "./renderers/BrowserClickRenderer.js";
 import { BrowserEvalRenderer } from "./renderers/BrowserEvalRenderer.js";
@@ -7,7 +10,6 @@ import { BrowserNavigateRenderer } from "./renderers/BrowserNavigateRenderer.js"
 import { BrowserTypeRenderer } from "./renderers/BrowserTypeRenderer.js";
 import { BrowserWaitRenderer } from "./renderers/BrowserWaitRenderer.js";
 import { DefaultRenderer } from "./renderers/DefaultRenderer.js";
-import { DelegateRenderer } from "./renderers/DelegateRenderer.js";
 import { EditRenderer } from "./renderers/EditRenderer.js";
 import { FindRenderer } from "./renderers/FindRenderer.js";
 import { GrepRenderer } from "./renderers/GrepRenderer.js";
@@ -17,16 +19,9 @@ import { ScreenshotRenderer } from "./renderers/ScreenshotRenderer.js";
 import { WebFetchRenderer } from "./renderers/WebFetchRenderer.js";
 import { WebSearchRenderer } from "./renderers/WebSearchRenderer.js";
 import { WriteRenderer } from "./renderers/WriteRenderer.js";
-import { TeamSpawnRenderer, TeamListRenderer, TeamDismissRenderer, TeamCompleteRenderer, TeamSteerRenderer, TeamPromptRenderer, TeamAbortRenderer } from "./renderers/TeamToolRenderers.js";
-import { TaskListRenderer, TaskCreateRenderer, TaskUpdateRenderer } from "./renderers/TaskToolRenderers.js";
-import { GateListRenderer, GateSignalRenderer, GateStatusRenderer } from "./renderers/GateToolRenderers.js";
-import { InboxListRenderer, InboxCompleteRenderer, InboxDismissRenderer } from "./renderers/InboxToolRenderers.js";
-import { BgProcessRenderer } from "./renderers/BgProcessRenderer.js";
-import { ReviewOpenRenderer, ReviewCloseRenderer } from "./renderers/ReviewRenderer.js";
-import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
-import { EditProposalRenderer } from "./renderers/EditProposalRenderer.js";
-import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
-import { ActivateSkillRenderer } from "./renderers/ActivateSkillRenderer.js";
+// Eagerly-registered PR renderers (LSP + nested-goal children). The Team /
+// Task / Gate / Inbox / Review / Proposal / compaction renderers are loaded
+// lazily below (master's bundle-size work) so they need no static import here.
 import { GoalSpawnChildRenderer } from "./renderers/GoalSpawnChildRenderer.js";
 import { GoalPlanProposeRenderer } from "./renderers/GoalPlanProposeRenderer.js";
 import { GoalPlanStatusRenderer } from "./renderers/GoalPlanStatusRenderer.js";
@@ -35,7 +30,6 @@ import { GoalPauseRenderer, GoalResumeRenderer } from "./renderers/GoalPauseResu
 import { GoalArchiveChildRenderer } from "./renderers/GoalArchiveChildRenderer.js";
 import { GoalDecideMutationRenderer } from "./renderers/GoalDecideMutationRenderer.js";
 import { GoalSetPolicyRenderer } from "./renderers/GoalSetPolicyRenderer.js";
-import { CompactionSummaryRenderer } from "./renderers/CompactionSummaryRenderer.js";
 import { LspDefinitionRenderer } from "./renderers/LspDefinitionRenderer.js";
 import { LspReferencesRenderer } from "./renderers/LspReferencesRenderer.js";
 import { LspDiagnosticsRenderer } from "./renderers/LspDiagnosticsRenderer.js";
@@ -46,6 +40,7 @@ import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
 registerToolRenderer("bash", new BashRenderer());
+registerToolRenderer("readonly_bash", new BashRenderer());
 registerToolRenderer("read", new ReadRenderer());
 registerToolRenderer("write", new WriteRenderer());
 registerToolRenderer("edit", new EditRenderer());
@@ -60,33 +55,81 @@ registerToolRenderer("browser_eval", new BrowserEvalRenderer());
 registerToolRenderer("browser_wait", new BrowserWaitRenderer());
 registerToolRenderer("web_search", new WebSearchRenderer());
 registerToolRenderer("web_fetch", new WebFetchRenderer());
-registerToolRenderer("delegate", new DelegateRenderer());
 // Synthetic UI-only tool — emitted by the client on compaction_end. Never
 // registered as an LLM-facing tool, so no tool-description-budget impact.
-registerToolRenderer("__compaction_summary", new CompactionSummaryRenderer());
+// Lazy because compaction is a once-per-session event and the renderer
+// pulls `delegate-cards.ts` (3.2 kB) into the entry chunk otherwise.
+registerLazyToolRenderer("__compaction_summary", async () => {
+	const { CompactionSummaryRenderer } = await import("./renderers/CompactionSummaryRenderer.js");
+	return new CompactionSummaryRenderer();
+});
 
-// Team lead coordination tools
-registerToolRenderer("team_spawn", new TeamSpawnRenderer());
-registerToolRenderer("team_list", new TeamListRenderer());
-registerToolRenderer("team_dismiss", new TeamDismissRenderer());
-registerToolRenderer("team_complete", new TeamCompleteRenderer());
-registerToolRenderer("team_steer", new TeamSteerRenderer());
-registerToolRenderer("team_prompt", new TeamPromptRenderer());
-registerToolRenderer("team_abort", new TeamAbortRenderer());
-registerToolRenderer("task_list", new TaskListRenderer());
-registerToolRenderer("task_create", new TaskCreateRenderer());
-registerToolRenderer("task_update", new TaskUpdateRenderer());
-registerToolRenderer("bash_bg", new BgProcessRenderer());
-registerToolRenderer("gate_list", new GateListRenderer());
-registerToolRenderer("gate_signal", new GateSignalRenderer());
-registerToolRenderer("gate_status", new GateStatusRenderer());
-registerToolRenderer("inbox_list", new InboxListRenderer());
-registerToolRenderer("inbox_complete", new InboxCompleteRenderer());
-registerToolRenderer("inbox_dismiss", new InboxDismissRenderer());
-registerToolRenderer("review_open", new ReviewOpenRenderer());
-registerToolRenderer("review_close", new ReviewCloseRenderer());
-registerToolRenderer("ask_user_choices", new AskUserChoicesRenderer());
-registerToolRenderer("activate_skill", new ActivateSkillRenderer());
+// ── Lazy renderers — share one chunk per source file via dynamic import.
+// Each tool slot resolves through `import(...)` so all `team_*` slots land
+// in the same `TeamToolRenderers` chunk; the registry shows a placeholder
+// card until the chunk loads, then re-renders. Keeps these ~40 kB of
+// secondary-flow renderer code out of the entry bundle (the average chat
+// session never sees most of them in the first 30 seconds).
+//
+// To add a new tool, follow the existing pattern: one
+// `registerLazyToolRenderer` call per tool name, all reaching the same
+// `import("./renderers/<File>.js")`. Vite groups them automatically.
+function registerLazyClass<M, K extends keyof M>(toolName: string, loader: () => Promise<M>, exportName: K) {
+	registerLazyToolRenderer(toolName, async () => {
+		const mod = await loader();
+		const Cls = mod[exportName] as unknown as new () => import("./types.js").ToolRenderer;
+		return new Cls();
+	});
+}
+
+const loadTeamRenderers = () => import("./renderers/TeamToolRenderers.js");
+registerLazyClass("team_spawn", loadTeamRenderers, "TeamSpawnRenderer");
+registerLazyClass("team_list", loadTeamRenderers, "TeamListRenderer");
+registerLazyClass("team_dismiss", loadTeamRenderers, "TeamDismissRenderer");
+registerLazyClass("team_complete", loadTeamRenderers, "TeamCompleteRenderer");
+registerLazyClass("team_steer", loadTeamRenderers, "TeamSteerRenderer");
+registerLazyClass("team_prompt", loadTeamRenderers, "TeamPromptRenderer");
+registerLazyClass("team_abort", loadTeamRenderers, "TeamAbortRenderer");
+
+const loadTaskRenderers = () => import("./renderers/TaskToolRenderers.js");
+registerLazyClass("task_list", loadTaskRenderers, "TaskListRenderer");
+registerLazyClass("task_create", loadTaskRenderers, "TaskCreateRenderer");
+registerLazyClass("task_update", loadTaskRenderers, "TaskUpdateRenderer");
+
+const loadGateRenderers = () => import("./renderers/GateToolRenderers.js");
+registerLazyClass("gate_list", loadGateRenderers, "GateListRenderer");
+registerLazyClass("gate_signal", loadGateRenderers, "GateSignalRenderer");
+registerLazyClass("gate_status", loadGateRenderers, "GateStatusRenderer");
+
+const loadInboxRenderers = () => import("./renderers/InboxToolRenderers.js");
+registerLazyClass("inbox_list", loadInboxRenderers, "InboxListRenderer");
+registerLazyClass("inbox_complete", loadInboxRenderers, "InboxCompleteRenderer");
+registerLazyClass("inbox_dismiss", loadInboxRenderers, "InboxDismissRenderer");
+
+const loadReviewRenderers = () => import("./renderers/ReviewRenderer.js");
+registerLazyClass("review_open", loadReviewRenderers, "ReviewOpenRenderer");
+registerLazyClass("review_close", loadReviewRenderers, "ReviewCloseRenderer");
+
+registerLazyToolRenderer("bash_bg", async () => {
+	const { BgProcessRenderer } = await import("./renderers/BgProcessRenderer.js");
+	return new BgProcessRenderer();
+});
+registerLazyToolRenderer("delegate", async () => {
+	const { DelegateRenderer } = await import("./renderers/DelegateRenderer.js");
+	return new DelegateRenderer();
+});
+registerLazyToolRenderer("ask_user_choices", async () => {
+	const { AskUserChoicesRenderer } = await import("./renderers/AskUserChoicesRenderer.js");
+	return new AskUserChoicesRenderer();
+});
+registerLazyToolRenderer("activate_skill", async () => {
+	const { ActivateSkillRenderer } = await import("./renderers/ActivateSkillRenderer.js");
+	return new ActivateSkillRenderer();
+});
+registerLazyToolRenderer("edit_proposal", async () => {
+	const { EditProposalRenderer } = await import("./renderers/EditProposalRenderer.js");
+	return new EditProposalRenderer();
+});
 
 // LSP tool renderers — all eager except hover, which transitively pulls
 // the heavy `<markdown-block>` element graph (KaTeX/marked/highlight.js).
@@ -131,15 +174,18 @@ registerLazyToolRenderer("read_session", async () => {
 // gate_verification_live custom element is loaded lazily via
 // `src/ui/lazy/gate-verification-live.ts` from GateToolRenderers.
 
-// Proposal tools — one renderer per proposal type
+// Proposal tools — one renderer per proposal type, all sharing the same
+// lazy `ProposalRenderer` chunk via deduped `import()`.
 const PROPOSAL_TOOL_NAMES = [
 	"propose_goal", "propose_role", "propose_tool",
 	"propose_staff", "propose_project",
 ] as const;
 for (const name of PROPOSAL_TOOL_NAMES) {
-	registerToolRenderer(name, new ProposalRenderer(name));
+	registerLazyToolRenderer(name, async () => {
+		const { ProposalRenderer } = await import("./renderers/ProposalRenderer.js");
+		return new ProposalRenderer(name);
+	});
 }
-registerToolRenderer("edit_proposal", new EditProposalRenderer());
 
 // Children (nested-goal) tools — each renderer internally checks
 // isSubgoalsEnabled() and falls through to DefaultRenderer when off.

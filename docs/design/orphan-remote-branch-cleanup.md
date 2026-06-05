@@ -51,7 +51,9 @@ then 0). So `teamEntry.agents` is empty by the time
 
 Net effect: only `goal.branch` (the team-lead branch) gets push-deleted at
 `server.ts:96-101`. Every per-role `goal-goal-<slug>-<id>-<role>-<short>`
-branch leaks.
+branch leaks. (Legacy shape; current shape is `goal/<goalId8>/<role>-<short4>`
+after goal "pithier-te". Both are cleaned up by the same handler, which
+treats agent branch names as opaque strings.)
 
 ### Fix
 

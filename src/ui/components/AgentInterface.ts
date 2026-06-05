@@ -3,23 +3,46 @@ import { isAskResponseEnvelope } from "../../shared/ask-envelope.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
-import { streamSimple, type ToolResultMessage, type Usage } from "@earendil-works/pi-ai";
+import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { ArrowDown, Brain, Image as ImageIcon, Sparkles } from "lucide";
-import { ModelSelector } from "../dialogs/ModelSelector.js";
-import { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
+import { ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
+import type { ModelSelector } from "../dialogs/ModelSelector.js";
+import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
+
+// `ModelSelector` statically imports `modelsAreEqual` from `@earendil-works/pi-ai`,
+// which has a top-level side effect that materialises the 553 kB generated
+// model catalog. Static-importing it from this eagerly-loaded component would
+// drag the catalog into the entry chunk — see `src/app/pi-ai-lazy.ts` and
+// `docs/design/shrink-initial-bundle.md` (Task A). Lazy-load both dialogs at
+// click time instead. Type-only imports above are erased by `tsc`.
+async function openModelSelector(...args: Parameters<typeof ModelSelector.open>): Promise<void> {
+	const mod = await import("../dialogs/ModelSelector.js");
+	mod.ModelSelector.open(...args);
+}
+async function openImageModelSelector(...args: Parameters<typeof ImageModelSelector.open>): Promise<void> {
+	const mod = await import("../dialogs/ImageModelSelector.js");
+	mod.ImageModelSelector.open(...args);
+}
 import type { MessageEditor } from "./MessageEditor.js";
 import "./MessageEditor.js";
 import "./MessageList.js";
-import "./GitStatusWidget.js";
-import "./BgProcessPill.js";
+// <git-status-widget> is loaded on demand via `app/lazy-widgets.ts` to
+// keep its 52 kB chunk out of the entry bundle. AgentInterface's
+// connectedCallback fires the import; goal-dashboard mirrors the same
+// trigger. Lit upgrades the unknown `<git-status-widget>` tag once
+// the chunk lands; property bindings are preserved across upgrade.
+// All four of these elements are conditional-render (bg pill strip,
+// cost popover, continue-session chooser, git-status). Static imports
+// would force their chunks into the entry bundle even when the user
+// never sees them on a given session view. Lazy via `app/lazy-widgets`
+// instead — connectedCallback below fires the imports as fire-and-
+// forget, Lit upgrades the unknown tags when each chunk lands.
+import { ensureGitStatusWidget, ensureGoalStatusWidget, ensureBgProcessPill, ensureCostPopover, ensureContinueSessionChooser } from "../../app/lazy-widgets.js";
 import type { BgProcessInfo } from "./BgProcessPill.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
-import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
-import "./ContinueSessionChooser.js";
 import { state as appState, renderApp } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -183,11 +206,16 @@ export class AgentInterface extends LitElement {
 	 */
 	private _openProposalPanel(type: string): void {
 		const s = appState as any;
+		const sessionId = this.session?.sessionId || s.selectedSessionId || "";
+		s.previewPanelActiveTab = type;
+		s.previewPanelTab = type;
 		if (this.assistantType) {
 			s.assistantTab = "preview";
-		} else {
-			s.previewPanelTab = type;
 		}
+		void import("../../app/preview-panel.js")
+			.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab: true }))
+			.then(() => renderApp())
+			.catch(() => { /* legacy fields above still select the proposal */ });
 		renderApp();
 		this.requestUpdate();
 	}
@@ -319,10 +347,27 @@ export class AgentInterface extends LitElement {
 	 * hasn't ticked yet. */
 	private _imageLoadHandler?: (e: Event) => void;
 
-	/** Jump-to-bottom button visibility. Pure function of `!_isAtBottom`,
-	 * recomputed in the deferred scroll handler and at every RO/wheel/jump
-	 * touchpoint. NEVER mutates intent flags. */
+	/** Jump-to-bottom button visibility (single OR split-bottom variant).
+	 * Recomputed in `_refreshJumpToLastPromptButton` as a function of DOM
+	 * geometry: true iff at least one `<user-message>` is below the
+	 * viewport OR the scroll position is more than half a viewport away
+	 * from the bottom (`dist > clientHeight * 0.5`). The half-viewport
+	 * threshold (vs a strict `dist > 1`) preserves the pre-existing UX of
+	 * not flashing the big "Jump to bottom" pill on tiny scroll deltas;
+	 * the split-bottom and top-button variants still use pure-geometric
+	 * classification against the viewport edges. */
 	private _showJumpToBottom = false;
+
+	/** Jump-to-previous-prompt (top button) visibility. Pure function of
+	 * DOM geometry: true iff at least one `<user-message>` has its bottom
+	 * edge above the scroll container's top edge. */
+	private _showJumpToLastPrompt = false;
+
+	/** True iff the bottom button should render as the split "Next prompt |
+	 * Bottom" pill. Pure function of DOM geometry: true iff at least one
+	 * `<user-message>` has its top edge below the scroll container's bottom
+	 * edge. */
+	private _showSplitBottom = false;
 
 	// --- Legacy backward-compat shims ---
 	// Several E2E tests directly poke `ai._stickToBottom = true` and push
@@ -352,6 +397,16 @@ export class AgentInterface extends LitElement {
 	private _moreExpanded = false;
 	/** ResizeObserver for the pill container overflow check */
 	private _pillResizeObserver?: ResizeObserver;
+	/**
+	 * Last measured offsetWidth per pill id. We cache because hidden pills
+	 * (inside the "more" popover) aren't in the strip's flex flow and would
+	 * otherwise be invisible to the fit algorithm — preventing pills from
+	 * being promoted back when space frees up (e.g. after a pill is dismissed,
+	 * after a resize, or after the git-status-widget shrinks).
+	 */
+	private _pillWidths: Map<string, number> = new Map();
+	/** Coalesce multiple re-measure requests into one rAF. */
+	private _measureScheduled = false;
 	/** ID of a pill currently animating out */
 	private _dismissingId: string | null = null;
 	/** IDs of pills promoted from hidden to visible (animate in) */
@@ -407,6 +462,7 @@ export class AgentInterface extends LitElement {
 				"verification-output-modal",
 				"annotation-popover",
 				"project-picker-popover",
+				"sidebar-actions-popover",
 				"continue-session-chooser",
 				"copy-link-fallback-dialog",
 			].join(",");
@@ -516,8 +572,25 @@ export class AgentInterface extends LitElement {
 			}
 			return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 		}
-		// Spring animation path. Used only by the explicit jump-to-bottom
-		// click — gives the user a smooth-feel landing instead of a hard jump.
+		// Spring animation path — re-read the goalpost each tick so RO
+		// growth during animation can drag the target along (jump-to-bottom
+		// keeps chasing the new bottom if the transcript is still growing).
+		return this._springScrollTo(() => this._targetScrollTop());
+	}
+
+	/** Shared spring scroll animation. Used by the explicit jump-to-bottom
+	 * click (re-reading `_targetScrollTop()` each tick to chase RO growth)
+	 * and by the prompt-nav clicks (fixed target — pre-computed scrollTop
+	 * for the target <user-message>). Same damping/stiffness/mass constants for
+	 * both so the feel is identical.
+	 *
+	 * `targetGetter` can be a number (fixed target) or a function (re-read
+	 * each tick).
+	 */
+	private _springScrollTo(targetGetter: number | (() => number)): Promise<void> {
+		if (!this._scrollContainer) return Promise.resolve();
+		const el = this._scrollContainer;
+		const readTarget = typeof targetGetter === "function" ? targetGetter : () => targetGetter;
 		const DAMPING = 0.7;
 		const STIFFNESS = 0.05;
 		const MASS = 1.25;
@@ -528,9 +601,7 @@ export class AgentInterface extends LitElement {
 					return;
 				}
 				const anim = this._animation;
-				// Re-read target each tick — RO growth during animation can
-				// move the goalpost.
-				anim.target = this._targetScrollTop();
+				anim.target = readTarget();
 				const diff = anim.target - anim.current;
 				anim.velocity = (DAMPING * anim.velocity + STIFFNESS * diff) / MASS;
 				anim.current += anim.velocity;
@@ -545,7 +616,7 @@ export class AgentInterface extends LitElement {
 			};
 			this._animation = {
 				current: el.scrollTop,
-				target,
+				target: readTarget(),
 				velocity: 0,
 				rafId: requestAnimationFrame(step),
 				resolve,
@@ -554,33 +625,92 @@ export class AgentInterface extends LitElement {
 	}
 
 	/** Pin to bottom IFF intent says we want to be there. The single
-	 * programmatic re-pin gate. */
+	 * programmatic re-pin gate. Prompt-nav clicks set `_escapedFromLock`
+	 * so this short-circuits while the user is reading older history. */
 	private _pinIfSticking() {
 		if (!this._isAtBottom || this._escapedFromLock) return;
 		this._scrollToBottomNow({ animate: false });
 	}
 
-	/** Recompute jump-button visibility from `!_isAtBottom`. Closes Bug A
-	 * ("Jump button never recomputed on echo path") — every scroll-handler
-	 * tick, including echo + resize-skip paths, calls this. */
+	/** Recompute all three jump-button visibility booleans from pure DOM
+	 * geometry. Thin wrapper around `_refreshJumpToLastPromptButton` — the
+	 * latter is the single source of truth for `_showJumpToBottom`,
+	 * `_showJumpToLastPrompt`, and `_showSplitBottom`. Kept as a separate
+	 * entry point because many scroll-handler / RO / image-load sites call
+	 * it. */
 	private _refreshJumpButton() {
-		// Two-part visibility:
-		//   intent: `_isAtBottom` says we want to be there.
-		//   geometry: dist <= 50 % of viewport height (legacy threshold,
-		//             retained for jump-to-bottom.spec.ts contract).
-		// Button visible iff intent says NO and we're geometrically far
-		// from the bottom — so e.g. a programmatic scroll-down to within
-		// half a viewport hides the button even before any auto-relock
-		// mutation lands.
+		this._refreshJumpToLastPromptButton();
+	}
+
+	/** Recompute all jump-button visibility from pure DOM geometry.
+	 *
+	 * For each `<user-message>`, classify its rect vs the scroll container's:
+	 *   - above viewport: `userRect.bottom < containerRect.top`
+	 *   - below viewport: `userRect.top > containerRect.bottom`
+	 *   - in viewport: otherwise
+	 *
+	 * Then apply the spec rendering rules:
+	 *   1. Top button         visible iff `aboveExists` (pure geometry).
+	 *   2. Bottom-centre split visible iff `belowExists` (pure geometry).
+	 *   3. Bottom-centre single visible iff `farFromBottom && !belowExists`.
+	 *   4. Nothing rendered  iff neither `aboveExists` nor `belowExists`
+	 *                            and the scroll position is near the bottom.
+	 *
+	 * Combined: `_showJumpToBottom = belowExists || farFromBottom`, where
+	 * `farFromBottom` is the pre-existing half-viewport threshold
+	 * (`dist > clientHeight * 0.5`) carried over from the legacy
+	 * implementation. The threshold is intentionally scoped to the
+	 * bottom-single "Jump to bottom" variant only — it preserves the
+	 * UX of not flashing the big pill on tiny scroll deltas (pinned by
+	 * `tests/ui-fixtures/chat-scroll.spec.ts`). The top button and the
+	 * split-bottom variant remain purely geometric so they track
+	 * viewport edges with no state.
+	 *
+	 * No state machine — every scroll / resize / mutation tick recomputes
+	 * from current geometry. Intent flags (`_isAtBottom`,
+	 * `_escapedFromLock`) play no role in button visibility. */
+	private _refreshJumpToLastPromptButton() {
 		if (!this._scrollContainer) return;
-		const el = this._scrollContainer;
-		const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-		const geoFar = dist > el.clientHeight * 0.5;
-		const next = !this._isAtBottom && geoFar;
-		if (next !== this._showJumpToBottom) {
-			this._showJumpToBottom = next;
-			this.requestUpdate();
+		const container = this._scrollContainer;
+		const userMessages = container.querySelectorAll("user-message");
+		const containerRect = container.getBoundingClientRect();
+
+		let aboveExists = false;
+		let belowExists = false;
+		for (const node of userMessages) {
+			const r = (node as HTMLElement).getBoundingClientRect();
+			if (r.bottom < containerRect.top) aboveExists = true;
+			else if (r.top > containerRect.bottom) belowExists = true;
+			if (aboveExists && belowExists) break;
 		}
+
+		// Half-viewport "far from bottom" threshold for the bottom-single
+		// pill. `_targetScrollTop()` clamps to `scrollHeight - 1 -
+		// clientHeight` (the -1 absorbs sub-pixel rounding), so the
+		// canonical pinned state has `dist === 1`. The legacy
+		// `dist > clientHeight * 0.5` threshold is preserved here so the
+		// big "Jump to bottom" pill does not flash on tiny scroll deltas
+		// (pinned by `tests/ui-fixtures/chat-scroll.spec.ts`). The top
+		// button (`aboveExists`) and split-bottom variant (`belowExists`)
+		// keep pure-geometric semantics against the viewport edges.
+		const dist = container.scrollHeight - container.scrollTop - container.clientHeight;
+		const farFromBottom = dist > container.clientHeight * 0.5;
+		const nextBottom = belowExists || farFromBottom;
+
+		let changed = false;
+		if (aboveExists !== this._showJumpToLastPrompt) {
+			this._showJumpToLastPrompt = aboveExists;
+			changed = true;
+		}
+		if (belowExists !== this._showSplitBottom) {
+			this._showSplitBottom = belowExists;
+			changed = true;
+		}
+		if (nextBottom !== this._showJumpToBottom) {
+			this._showJumpToBottom = nextBottom;
+			changed = true;
+		}
+		if (changed) this.requestUpdate();
 	}
 
 	/**
@@ -592,7 +722,16 @@ export class AgentInterface extends LitElement {
 	 */
 	private _updateAndPin() {
 		this.requestUpdate();
-		this.updateComplete.then(() => this._pinIfSticking());
+		this.updateComplete.then(() => {
+			this._pinIfSticking();
+			// Transcript mutated — re-evaluate jump-button geometry after
+			// Lit commits. This is what makes "sending a new prompt hides the
+			// button" work: the new <user-message> is now the last one and
+			// lives at the bottom of the transcript. Call the parent
+			// (`_refreshJumpButton`) which chains into `_refreshJumpToLastPromptButton`
+			// so all three booleans are recomputed consistently.
+			this._refreshJumpButton();
+		});
 	}
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -621,6 +760,15 @@ export class AgentInterface extends LitElement {
 
 	override async connectedCallback() {
 		super.connectedCallback();
+		// Fire-and-forget the conditional-render widget chunks on first
+		// chat mount so they're ready by the time the corresponding
+		// state flips on (gitRepoKnown, bgProcesses populated, cost
+		// popover opened, continue-session prompt shown).
+		void ensureGitStatusWidget();
+		void ensureGoalStatusWidget();
+		void ensureBgProcessPill();
+		void ensureCostPopover();
+		void ensureContinueSessionChooser();
 
 		this.style.display = "flex";
 		this.style.flexDirection = "column";
@@ -674,6 +822,8 @@ export class AgentInterface extends LitElement {
 
 				if (delta > 0) {
 					// Positive growth — if intent says we want bottom, pin.
+					// `_escapedFromLock` gates this off while the user is
+					// reading history (prompt-nav clicks set it).
 					if (this._isAtBottom && !this._escapedFromLock) {
 						this._scrollToBottomNow({ animate: false });
 					}
@@ -815,6 +965,14 @@ export class AgentInterface extends LitElement {
 			this._showJumpToBottom = false;
 			this.requestUpdate();
 		}
+		if (this._showJumpToLastPrompt) {
+			this._showJumpToLastPrompt = false;
+			this.requestUpdate();
+		}
+		if (this._showSplitBottom) {
+			this._showSplitBottom = false;
+			this.requestUpdate();
+		}
 		// Single re-pin path on session navigate: instant scrollTo bottom
 		// once after Lit's first commit. Subsequent async growth (markdown,
 		// syntax highlighting, hydrated tool-content, image decode) is
@@ -822,12 +980,19 @@ export class AgentInterface extends LitElement {
 		// phase `load` handler, both of which call `_scrollToBottomNow`.
 		this.updateComplete.then(() => this._pinIfSticking());
 
-		// Set default streamFn with proxy support if not already set
-		if (this.session.streamFn === streamSimple) {
-			this.session.streamFn = createStreamFn(async () => {
+		// Set default streamFn with proxy support if not already set.
+		// We can't identity-compare against pi-ai's `streamSimple` without
+		// statically importing it (which pulls the 553 kB model catalog into
+		// the entry chunk — see src/app/pi-ai-lazy.ts). Instead, mark our
+		// wrapper with `__isDefault` at construction and re-check the flag
+		// on subsequent renders to avoid re-wrapping.
+		if (!(this.session.streamFn as { __isDefault?: boolean } | undefined)?.__isDefault) {
+			const wrapped = createStreamFn(async () => {
 				const enabled = await getAppStorage().settings.get<boolean>("proxy.enabled");
 				return enabled ? (await getAppStorage().settings.get<string>("proxy.url")) || undefined : undefined;
 			});
+			(wrapped as { __isDefault?: boolean }).__isDefault = true;
+			this.session.streamFn = wrapped;
 		}
 
 		// Set default getApiKey if not already set
@@ -1051,7 +1216,14 @@ export class AgentInterface extends LitElement {
 			// `_stickToBottom = true` plus a stray scroll event still keeps
 			// us pinned — exercised by tail-chat-jump-button-false-positive.
 			if (!gestureFresh) {
-				if (this._isAtBottom && !this._escapedFromLock && !this._isNearBottom()) {
+				// Suppress auto-relock while the user is reading history —
+				// prompt-nav clicks set `_escapedFromLock` so this branch is
+				// short-circuited.
+				if (
+					this._isAtBottom
+					&& !this._escapedFromLock
+					&& !this._isNearBottom()
+				) {
 					requestAnimationFrame(() => this._pinIfSticking());
 				}
 				this._refreshJumpButton();
@@ -1137,13 +1309,115 @@ export class AgentInterface extends LitElement {
 		}
 	};
 
-	/** Jump-to-bottom click handler. Spring-animated landing. */
+	/** Jump-to-bottom click handler. Spring-animated landing back to the
+	 * tail; clears the escape latch so subsequent transcript growth re-pins
+	 * automatically. */
 	private _handleJumpToBottomClick = () => {
 		this._isAtBottom = true;
 		this._escapedFromLock = false;
 		this._refreshJumpButton();
 		this._scrollToBottomNow({ animate: true });
 	};
+
+	private _hasMobileHeaderOverlay(): boolean {
+		if (typeof document === "undefined" || typeof window === "undefined") return false;
+		const header = document.getElementById("app-header");
+		return !!header && window.getComputedStyle(header).position === "fixed";
+	}
+
+	private _getMobileHeaderHeightPx(): number {
+		if (!this._hasMobileHeaderOverlay() || typeof window === "undefined") return 0;
+		const raw = window.getComputedStyle(document.documentElement).getPropertyValue("--mobile-header-height");
+		const parsed = Number.parseFloat(raw);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+	}
+
+	private _getTopPromptNavOffsetPx(): number {
+		return 16 + this._getMobileHeaderHeightPx();
+	}
+
+	private _getTopPromptNavOffsetCss(): string {
+		return this._hasMobileHeaderOverlay()
+			? "calc(var(--mobile-header-height, 60px) + 16px)"
+			: "16px";
+	}
+
+	/** Jump-to-previous-prompt click handler (top button). Walks the DOM
+	 * live to find the bottom-most `<user-message>` whose bottom edge is
+	 * above the viewport top — i.e. the one closest to the viewport top.
+	 * Springs the viewport up so that prompt lands below the visible top
+	 * chrome. Stateless: each click reads geometry fresh. */
+	private _handleJumpToLastPromptClick = (): void => {
+		if (!this._scrollContainer) return;
+		const container = this._scrollContainer;
+		const userMessages = container.querySelectorAll("user-message");
+		if (userMessages.length === 0) return;
+		const containerRect = container.getBoundingClientRect();
+		let target: HTMLElement | null = null;
+		// Walk forward; keep the LAST prompt that is above viewport (its
+		// bottom edge above containerRect.top). DOM order is top-to-bottom
+		// so the last match is the bottom-most above-viewport prompt.
+		for (const node of userMessages) {
+			const el = node as HTMLElement;
+			if (el.getBoundingClientRect().bottom < containerRect.top) {
+				target = el;
+			} else {
+				break;
+			}
+		}
+		if (!target) return;
+		// Mark the user as having escaped the tail-lock so `_pinIfSticking`
+		// and the no-gesture re-pin branch don't yank us back mid-spring.
+		this._isAtBottom = false;
+		this._escapedFromLock = true;
+		void this._scrollUserMessageIntoView(target);
+	};
+
+	/** Jump-to-next-prompt click handler (split-bottom left half). Walks the
+	 * DOM live to find the top-most `<user-message>` whose top edge is below
+	 * the viewport bottom — i.e. the one closest to the viewport bottom.
+	 * Stateless: each click reads geometry fresh. */
+	private _handleJumpToNextPromptClick = (): void => {
+		if (!this._scrollContainer) return;
+		const container = this._scrollContainer;
+		const userMessages = container.querySelectorAll("user-message");
+		if (userMessages.length === 0) return;
+		const containerRect = container.getBoundingClientRect();
+		let target: HTMLElement | null = null;
+		for (const node of userMessages) {
+			const el = node as HTMLElement;
+			if (el.getBoundingClientRect().top > containerRect.bottom) {
+				target = el;
+				break;
+			}
+		}
+		if (!target) return;
+		this._isAtBottom = false;
+		this._escapedFromLock = true;
+		void this._scrollUserMessageIntoView(target);
+	};
+
+	/** Spring-scroll the given `<user-message>` so its top edge lands
+	 * `TOP_MARGIN` below the scroll container's top. Cancels any in-flight
+	 * spring before starting. Stateless — no walk-cursor is maintained. */
+	private async _scrollUserMessageIntoView(targetEl: HTMLElement): Promise<void> {
+		if (!this._scrollContainer) return;
+		this._cancelAnimation();
+		const container = this._scrollContainer;
+		const containerRect = container.getBoundingClientRect();
+		const targetRect = targetEl.getBoundingClientRect();
+		const topMargin = this._getTopPromptNavOffsetPx(); // matches the button's top offset
+		const targetScrollTop = Math.max(
+			0,
+			Math.round(container.scrollTop + (targetRect.top - containerRect.top) - topMargin),
+		);
+		// Echo-latch: classify the resulting scroll event as programmatic so
+		// the deferred handler doesn't flip `_escapedFromLock = true`
+		// (the click handler already set it).
+		this._ignoreScrollToTop = targetScrollTop;
+		await this._springScrollTo(targetScrollTop);
+		this._refreshJumpButton();
+	}
 
 	public async sendMessage(input: string, attachments?: Attachment[]) {
 		if (!input.trim() && (!attachments || attachments.length === 0)) return;
@@ -1401,10 +1675,13 @@ export class AgentInterface extends LitElement {
 				} satisfies Usage,
 			);
 
-		// Prefer server-authoritative cost when available (via cost_update WS messages)
+		// Server-authoritative cumulative cost is the only session-cost source of truth.
+		// Visible message usage is a compacted-window subset and must not drive the footer.
 		const serverCost = (this.session as any)?.state?.serverCost;
-		const costValue = serverCost?.totalCost ?? totals.cost?.total;
-		const costText = costValue ? formatCost(costValue) : "";
+		const serverCostTotal = typeof serverCost?.totalCost === "number" && Number.isFinite(serverCost.totalCost)
+			? serverCost.totalCost
+			: undefined;
+		const costText = serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "";
 
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
@@ -1505,7 +1782,7 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					ModelSelector.open(state.model, (m) => {
+					void openModelSelector(state.model, (m) => {
 						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
 						else session.state.model = m;
 						// After model change, clamp the current thinking level to one
@@ -1537,7 +1814,7 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					ImageModelSelector.open(imageModel, (m) => {
+					void openImageModelSelector(imageModel, (m) => {
 						if (typeof (session as any).setImageGenerationModel === "function") {
 							(session as any).setImageGenerationModel(m);
 						} else {
@@ -1547,7 +1824,7 @@ export class AgentInterface extends LitElement {
 				},
 				children: html`
 					${icon(ImageIcon, "sm")}
-					${this._isNarrow ? "" : html`<span class="ml-0.5">${imageModel.id}</span>`}
+					<span class="ml-0.5 ${this._isNarrow ? "sr-only" : ""}" data-testid="footer-image-model-id">${imageModel.id}</span>
 				`,
 				className: "h-6 text-xs truncate",
 			})
@@ -1632,7 +1909,7 @@ export class AgentInterface extends LitElement {
 						<div style="font-weight:600;margin-bottom:6px;">Session</div>
 						${row("Messages", msgCount)}
 						${row("Turns", turnCount)}
-						${row("Total cost", totals.cost?.total ? formatCost(totals.cost.total) : "—")}
+						${row("Total cost", serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "—")}
 						${row("Total input", formatTokenCount(totals.input))}
 						${row("Total output", formatTokenCount(totals.output))}
 						${totals.cacheRead ? row("Total cache read", formatTokenCount(totals.cacheRead)) : nothing}
@@ -1706,21 +1983,46 @@ export class AgentInterface extends LitElement {
 					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
 					</div>
+					${this._renderJumpToLastPrompt()}
 					${this._renderJumpToBottom()}
 				</div>
 
 				<!-- Input Area -->
 				<div class="shrink-0 pt-0 pb-1">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
-						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html`
-						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
+						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' || this.goalId || this.teamGoalId ? html`
+						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:${this._isNarrow ? '75%' : 'calc(100% - 8rem)'}; --pill-h: 22px">
 							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow
 							     follows the actual rendered shape per-element, so wrapping or
 							     differently-sized children (git-status-widget vs bash_bg pills)
 							     stay aligned on every viewport — unlike the previous parallel
 							     glow-placeholder layer which mismatched on mobile. -->
-							<div data-pill-content class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1;filter:drop-shadow(0 0 4px var(--background)) drop-shadow(0 0 8px var(--background))">
+<!-- Wrap policy is viewport-dependent:
+							       Wide (>=640px host): flex-nowrap. The fit algorithm in
+							       _measurePillOverflow truncates pills into the "more" popover
+							       so the strip should never need to wrap. On the very first
+							       render after bgProcesses populates, _visiblePillCount is
+							       Infinity until rAF fires the measure — every pill is in the
+							       DOM for one frame. Without flex-nowrap they'd briefly spill
+							       onto a second row and the user would see a 2-line flash.
+							       With flex-nowrap they overflow horizontally (off the left
+							       edge of the strip's max-width box) for that frame instead,
+							       which is far less visible.
+							       Narrow (<640px, portrait/mobile): flex-wrap. On phones the
+							       "force everything into one row" trade-off hurts — vertical
+							       space is the cheap dimension, and pushing all pills into
+							       "more" hides info the user wants at a glance. Allow a second
+							       row instead.
+							     We deliberately do NOT add overflow:hidden on the strip — that
+							     would clip the in-tree "more" popover (absolute bottom-full
+							     inside the .relative wrapper inside the strip). -->
+							<div data-pill-content class="flex items-center gap-1.5 ${this._isNarrow ? 'flex-wrap' : 'flex-nowrap'} justify-end" style="position:relative;z-index:1;filter:drop-shadow(0 0 4px var(--background)) drop-shadow(0 0 8px var(--background))">
 							${this._renderPillStrip()}
+							${(this.goalId || this.teamGoalId) ? html`<goal-status-widget
+								.goalId=${this.teamGoalId || this.goalId || ''}
+								.token=${localStorage.getItem("gateway.token") || ""}
+								.branch=${this.gitStatus?.branch ?? ''}
+							></goal-status-widget>` : nothing}
 							${this.gitRepoKnown !== 'no' ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
 								.token=${localStorage.getItem("gateway.token") || ""}
@@ -1837,7 +2139,7 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								ModelSelector.open(state.model, (model) => {
+								void openModelSelector(state.model, (model) => {
 								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
 								else session.state.model = model;
 								// Clamp thinking-level against the newly selected model.
@@ -1867,18 +2169,83 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
-	// Jump-to-bottom floating button. Reuses small-floating-button vocabulary
-	// (rounded-full, border-input, bg-background, shadow-sm). Centred above
-	// the composer with the label always visible — previously sat bottom-right
-	// where it was hidden by the git-status widget / pill strip on mobile.
-	private _renderJumpToBottom() {
-		const show = this._showJumpToBottom;
-		// Base offset matches the pill strip's bottom-edge gap (1rem). When the
-		// strip is rendered, lift the button above its measured height plus an
-		// 8px breathing gap so wrapped/stacked pills don't obscure it.
+	// Jump-to-previous-prompt floating button. Mirror of jump-to-bottom,
+	// anchored to the TOP-CENTRE of the visible messages region. On mobile
+	// the app header is fixed over the chat, so offset below
+	// --mobile-header-height as well as the normal 16px breathing room.
+	// Visible iff at least one `<user-message>` is fully above the viewport.
+	private _renderJumpToLastPrompt() {
+		const show = this._showJumpToLastPrompt;
+		const topOffset = this._getTopPromptNavOffsetCss();
+		const text = "Jump to previous prompt";
+		return html`
+			<button
+				type="button"
+				data-testid="jump-to-previous-prompt"
+				aria-label=${text}
+				class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
+				style="top:${topOffset};opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, top 150ms ease-out"
+				tabindex="${show ? "0" : "-1"}"
+				@click=${this._handleJumpToLastPromptClick}
+			>
+				${icon(ArrowUp, "sm")}
+				<span>${text}</span>
+			</button>
+		`;
+	}
+
+	/** Shared bottom-offset math for jump-to-bottom (both single and split
+	 * variants). Base 16 px + pill-strip height + 8 px breathing gap when
+	 * the strip is rendered. */
+	private _getBottomButtonOffsetPx(): number {
 		const baseOffsetPx = 16;
 		const stripGapPx = this._pillStripHeight > 0 ? this._pillStripHeight + 8 : 0;
-		const bottomPx = baseOffsetPx + stripGapPx;
+		return baseOffsetPx + stripGapPx;
+	}
+
+	private _renderJumpToBottom() {
+		const show = this._showJumpToBottom;
+		const bottomPx = this._getBottomButtonOffsetPx();
+		if (this._showSplitBottom) {
+			// Split layout: one rounded-full pill, two inner buttons separated
+			// by a vertical divider. Each half is independently clickable +
+			// focusable. Each button carries its own inline opacity so tests
+			// (and AT trees) can query either half consistently with the
+			// single-button rendering.
+			const btnStyle = `opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out`;
+			return html`
+				<div
+					data-testid="jump-to-bottom-split"
+					class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-stretch rounded-full bg-background border border-input shadow-sm whitespace-nowrap overflow-hidden"
+					style="bottom:${bottomPx}px;opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, bottom 150ms ease-out"
+				>
+					<button
+						type="button"
+						data-testid="jump-to-next-prompt"
+						aria-label="Jump to next prompt"
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted text-foreground"
+						style=${btnStyle}
+						tabindex="${show ? "0" : "-1"}"
+						@click=${this._handleJumpToNextPromptClick}
+					>
+						${icon(ArrowDown, "sm")}
+						<span>Next prompt</span>
+					</button>
+					<button
+						type="button"
+						data-testid="jump-to-bottom"
+						aria-label="Jump to bottom"
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted text-foreground border-l border-input"
+						style=${btnStyle}
+						tabindex="${show ? "0" : "-1"}"
+						@click=${this._handleJumpToBottomClick}
+					>
+						${icon(ChevronsDown, "sm")}
+						<span>Bottom</span>
+					</button>
+				</div>
+			`;
+		}
 		return html`
 			<button
 				type="button"
@@ -2020,10 +2387,10 @@ export class AgentInterface extends LitElement {
 				}
 			</style>
 			${hidden.length > 0 ? html`
-				<div class="relative" style="display:inline-flex;align-items:center;position:relative;top:1px">
-					<span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" data-more-btn style="height:var(--pill-h, auto)">
+				<div class="relative" style="display:inline-flex;align-items:center;position:relative;flex-shrink:0;height:var(--pill-h, auto);line-height:1;vertical-align:middle">
+					<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight whitespace-nowrap" data-more-btn style="box-sizing:border-box;height:var(--pill-h, auto)">
 						<button
-							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full"
+							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full whitespace-nowrap"
 							@click=${this._toggleMore}
 							aria-expanded=${this._moreExpanded}
 							aria-haspopup="true"
@@ -2039,7 +2406,7 @@ export class AgentInterface extends LitElement {
 						><svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block${this._moreExpanded ? ';transform:rotate(180deg)' : ''}"><path d="M1.5 5.5L4 3L6.5 5.5"/></svg></button>
 					</span>
 					${this._moreExpanded ? html`
-						<div class="absolute bottom-full z-50 flex flex-col gap-1 pill-more-popover" style="left:-8px; min-width:max-content; padding:14px; margin:-8px; margin-bottom:-7px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); --m:linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent); -webkit-mask-image:var(--m); mask-image:var(--m); -webkit-mask-composite:destination-in; mask-composite:intersect">
+						<div class="absolute bottom-full z-50 flex flex-col items-start gap-1 pill-more-popover" style="left:-8px; min-width:max-content; padding:14px; margin:-8px; margin-bottom:-7px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); --m:linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent); -webkit-mask-image:var(--m); mask-image:var(--m); -webkit-mask-composite:destination-in; mask-composite:intersect">
 							${hidden.map((p) => html`
 								<bg-process-pill
 									data-id="${p.id}"
@@ -2158,52 +2525,122 @@ export class AgentInterface extends LitElement {
 
 	/**
 	 * Measure pill container vs parent and compute how many pills fit.
+	 *
+	 * Bugs this guards against:
+	 * 1. Stale-cached widths: pills hidden inside the "more" popover aren't
+	 *    in the strip's flex flow. We cache last-measured widths so the
+	 *    algorithm can grow the visible count back when space opens up
+	 *    (resize, pill dismissal, git-widget shrinking) — not just shrink it.
+	 * 2. Available-width underestimate: the strip's actual CSS constraint is
+	 *    `max-width: calc(100% - 1rem)`, not 75% of the parent.
+	 * 3. Child re-layout races: when the bg-process-pill custom element
+	 *    hasn't finished its own render cycle, its wrapper offsetWidth can be
+	 *    near zero. We refuse to commit cache entries for zero-width pills.
 	 */
 	private _measurePillOverflow() {
 		const parentContainer = this.querySelector('[data-input-container]') as HTMLElement;
 		if (!parentContainer) return;
-		let maxWidth = parentContainer.clientWidth * 0.75;
 
 		const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
 		if (!pillStrip) return;
 
-		// The content layer is the second child (z-index:1) inside the pill strip
 		const contentLayer = pillStrip.querySelector('[data-pill-content]') as HTMLElement;
 		if (!contentLayer) return;
 
 		const gap = 6; // gap-1.5 = 0.375rem ≈ 6px
 
-		// Subtract git-status-widget width from available space
+		// Total horizontal budget for pills + "more" + git-widget. Two modes:
+		//   Wide (>=640px host): strip CSS uses `max-width: calc(100% - 8rem)`.
+		//     Pill row is one line; algorithm packs content into
+		//     `parent.clientWidth - 128 - 2`. The 7.5rem left reserve (120px)
+		//     keeps the leftmost pill clear of the bobbit sprite that bleeds
+		//     down from the message area.
+		//   Narrow (<640px, portrait/mobile): strip CSS uses `max-width: 75%`.
+		//     Pills wrap onto up to TWO rows (content layer is `flex-wrap`),
+		//     so the algorithm budget is `1.85 * (parent.clientWidth * 0.75)`.
+		//     The 1.85 factor (not 2.0) carries a worst-case-slack margin:
+		//     flex-wrap wraps whole items, so when items don't pack tight
+		//     each row leaves a little unused width. A flat * 2 budget can
+		//     authorise content that overflows to a third row on cusp cases
+		//     where item widths differ — e.g. three items at 60 %, 60 %, 60 %
+		//     of the row each: total 180 % ≤ 2 * 100 % but only 1 item fits
+		//     per row, so 3 rows render. 1.85 buys back ~15 % of slack
+		//     headroom; content beyond that goes into "more" as intended.
+		//     The 25 % on the left stays clear for the bobbit sprite.
+		// Extra 2px is a safety margin for rounding/drop-shadow.
+		let maxWidth = this._isNarrow
+			? parentContainer.clientWidth * 0.75 * 1.85 - 2
+			: parentContainer.clientWidth - 128 - 2;
+
+		// Subtract git-status-widget width from available space.
 		const gitWidget = contentLayer.querySelector('git-status-widget') as HTMLElement;
 		if (gitWidget) {
-			maxWidth -= gitWidget.offsetWidth + gap;
+			const gw = gitWidget.offsetWidth;
+			if (gw > 0) maxWidth -= gw + gap;
+		}
+		// Subtract goal-status-widget width from available space (mirrors git widget).
+		const goalWidget = contentLayer.querySelector('goal-status-widget') as HTMLElement;
+		if (goalWidget) {
+			const gow = goalWidget.offsetWidth;
+			if (gow > 0) maxWidth -= gow + gap;
 		}
 
-		const pillWidths: number[] = [];
-
-		// Collect widths of visible pill wrappers — each visible pill is in a <div> wrapper
-		// The "more" button is in a <div class="relative">, skip it.
-		// git-status-widget is a direct child, skip it too.
-		for (const child of contentLayer.children) {
-			const el = child as HTMLElement;
-			if (el.querySelector('bg-process-pill') && !el.querySelector('.pill-more-popover')) {
-				pillWidths.push(el.offsetWidth);
+		// Refresh the per-id width cache from every bg-process-pill currently
+		// in the DOM — covers both the visible strip and the expanded popover.
+		//
+		// We measure the bg-process-pill custom element's own offsetWidth
+		// (NOT its parent's). In the visible strip the wrapper <div> is one
+		// per pill so parent-width happens to equal pill-width; but in the
+		// "more" popover every hidden pill shares the same parent (the
+		// `.pill-more-popover` flex-column container), so parent.offsetWidth
+		// would be the popover's own width — dramatically larger than any
+		// real pill — and writing that to the cache prevents promotion back
+		// into the strip when space frees up.
+		// Two further subtleties:
+		//   1. The popover container itself uses `items-start` (flex
+		//      align-items:flex-start), so individual `inline-flex` pill
+		//      hosts inside it are NOT stretched to the popover's content-
+		//      box width — each pill keeps its intrinsic width. Without that
+		//      class the default `align-items:stretch` would size every
+		//      popover pill to max(intrinsic widths), inflating the cache.
+		//   2. The pill's render() roots in `<span class="inline-flex …">`
+		//      so the custom element's own `offsetWidth` reflects that span's
+		//      rendered width in both contexts.
+		const allPillEls = pillStrip.querySelectorAll('bg-process-pill');
+		for (const pillEl of allPillEls) {
+			const id = pillEl.getAttribute('data-id');
+			if (!id) continue;
+			const measured = (pillEl as HTMLElement).offsetWidth;
+			if (measured > 0) {
+				this._pillWidths.set(id, measured);
 			}
 		}
 
-		if (pillWidths.length === 0) {
+		// Drop cache entries for pills no longer in bgProcesses.
+		const sorted = this._getSortedProcesses();
+		const liveIds = new Set(sorted.map((p) => p.id));
+		for (const id of Array.from(this._pillWidths.keys())) {
+			if (!liveIds.has(id)) this._pillWidths.delete(id);
+		}
+
+		if (sorted.length === 0) {
 			this._visiblePillCount = Infinity;
 			return;
 		}
 
-		// The "more" button itself takes ~60px when shown
+		// Default estimate for never-measured pills (e.g. just appeared
+		// before their first paint). The next measure pass will replace it.
+		const DEFAULT_PILL_WIDTH = 100;
+		const widths = sorted.map((p) => this._pillWidths.get(p.id) ?? DEFAULT_PILL_WIDTH);
+
+		// "more" button is ~60px when shown.
 		const moreBtnWidth = 60;
 
-		// Count from right (newest) how many pills fit
+		// Count from right (newest) how many pills fit.
 		let fitCount = 0;
 		let usedWidth = 0;
-		for (let i = pillWidths.length - 1; i >= 0; i--) {
-			const needed = pillWidths[i] + (fitCount > 0 ? gap : 0);
+		for (let i = widths.length - 1; i >= 0; i--) {
+			const needed = widths[i] + (fitCount > 0 ? gap : 0);
 			const wouldNeedMore = i > 0; // still have pills to hide
 			const reserveForMore = wouldNeedMore ? moreBtnWidth + gap : 0;
 			if (usedWidth + needed + reserveForMore <= maxWidth) {
@@ -2214,7 +2651,7 @@ export class AgentInterface extends LitElement {
 			}
 		}
 
-		// At least 1 pill must be visible
+		// At least 1 pill must be visible.
 		const newCount = Math.max(1, fitCount);
 		if (newCount !== this._visiblePillCount) {
 			this._visiblePillCount = newCount;
@@ -2224,6 +2661,19 @@ export class AgentInterface extends LitElement {
 		if (!this._pillsInitialized) {
 			this._pillsInitialized = true;
 		}
+	}
+
+	/**
+	 * Schedule a re-measure on the next animation frame, coalescing
+	 * multiple calls within the same tick into one.
+	 */
+	private _scheduleMeasurePillOverflow() {
+		if (this._measureScheduled) return;
+		this._measureScheduled = true;
+		requestAnimationFrame(() => {
+			this._measureScheduled = false;
+			this._measurePillOverflow();
+		});
 	}
 
 	override updated(changedProperties: Map<string, any>) {
@@ -2241,15 +2691,25 @@ export class AgentInterface extends LitElement {
 			const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
 			if (pillStrip && !this._pillResizeObserver) {
 				this._pillResizeObserver = new ResizeObserver(() => {
-					this._measurePillOverflow();
+					this._scheduleMeasurePillOverflow();
 				});
-				// Observe the input container for size changes
+				// Observe the input container for size changes (host width changes,
+				// virtual keyboard, side panel toggles).
 				const parent = this.querySelector('[data-input-container]') as HTMLElement;
 				if (parent) this._pillResizeObserver.observe(parent);
+				// Also observe the content layer — picks up child re-layouts the
+				// parent observer misses (git-status-widget badges appearing,
+				// bg-process-pill children doing their first paint, font changes).
+				const contentLayer = pillStrip.querySelector('[data-pill-content]') as HTMLElement | null;
+				if (contentLayer) this._pillResizeObserver.observe(contentLayer);
+				const gitWidget = pillStrip.querySelector('git-status-widget') as HTMLElement | null;
+				if (gitWidget) this._pillResizeObserver.observe(gitWidget);
+				const goalWidget = pillStrip.querySelector('goal-status-widget') as HTMLElement | null;
+				if (goalWidget) this._pillResizeObserver.observe(goalWidget);
 			}
-			// Measure after renders that change pill count
-			if (changedProperties.has('bgProcesses')) {
-				requestAnimationFrame(() => this._measurePillOverflow());
+			// Measure after renders that change pill count or visible set.
+			if (changedProperties.has('bgProcesses') || changedProperties.has('_moreExpanded')) {
+				this._scheduleMeasurePillOverflow();
 			}
 
 
@@ -2258,6 +2718,7 @@ export class AgentInterface extends LitElement {
 			this._visiblePillCount = Infinity;
 			this._moreExpanded = false;
 			this._pillsInitialized = false;
+			this._pillWidths.clear();
 			if (this._pillResizeObserver) {
 				this._pillResizeObserver.disconnect();
 				this._pillResizeObserver = undefined;

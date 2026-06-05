@@ -5,9 +5,26 @@
  * kill/dismiss buttons, outside-click close, Escape close, exit code display.
  */
 import { test, expect, type Page } from "@playwright/test";
+import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = `file://${path.resolve("tests/bg-process-states.html").replace(/\\/g, "/")}`;
+const TIMER_FIXTURE_PATH = path.resolve("tests/fixtures/bg-process-timer.html");
+const TIMER_FIXTURE = `file://${TIMER_FIXTURE_PATH.replace(/\\/g, "/")}`;
+const TIMER_ENTRY = path.resolve("tests/fixtures/bg-process-timer-entry.ts");
+const TIMER_BUNDLE = path.resolve("test-results/bg-process-timer-bundle.js");
+const BG_PROCESS_PILL_SRC = path.resolve("src/ui/components/BgProcessPill.ts");
+const LIVE_TIMER_SRC = path.resolve("src/ui/components/LiveTimer.ts");
+
+test.beforeAll(() => {
+	fs.mkdirSync(path.dirname(TIMER_BUNDLE), { recursive: true });
+	buildBundle({
+		entry: TIMER_ENTRY,
+		outfile: TIMER_BUNDLE,
+		deps: [TIMER_ENTRY, BG_PROCESS_PILL_SRC, LIVE_TIMER_SRC],
+	});
+});
 
 const RUNNING_PROCESS = {
 	id: "bg-run-1",
@@ -52,6 +69,28 @@ async function createPill(page: Page, processInfo: typeof RUNNING_PROCESS) {
 
 async function cleanup(page: Page) {
 	await page.evaluate(() => (window as any).clearPills());
+}
+
+async function readyTimerFixture(page: Page) {
+	await page.waitForFunction(() => (window as any).__bgTimerReady === true);
+}
+
+async function gotoTimerFixture(page: Page) {
+	await page.goto(TIMER_FIXTURE);
+	await page.addScriptTag({ path: TIMER_BUNDLE });
+	await readyTimerFixture(page);
+}
+
+async function createTimerPill(page: Page, processInfo: Record<string, unknown>) {
+	return page.evaluate((p) => {
+		const pill = (window as any).createPill(p);
+		return pill !== null;
+	}, processInfo);
+}
+
+async function openTimerDropdown(page: Page) {
+	await page.locator("bg-process-pill button").first().click();
+	await expect(page.locator("#bg-process-dropdown")).toBeVisible();
 }
 
 test.describe("BgProcessPill status indicators", () => {
@@ -236,7 +275,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		expect(await page.locator("#bg-process-dropdown [data-kill-btn]").count()).toBe(0);
 	});
 
-	test("Kill button fires onKill callback", async ({ page }) => {
+	test("Kill button fires onKill callback after confirmation", async ({ page }) => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
@@ -246,8 +285,28 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.locator("bg-process-pill [data-toggle-btn]").click();
 		await page.locator("#bg-process-dropdown [data-kill-btn]").click();
 
+		// Confirmation modal appears; onKill must not fire until confirmed.
+		await expect(page.locator("[data-kill-confirm]")).toBeVisible();
+		expect(await page.evaluate(() => (window as any).__killCalls)).toEqual([]);
+
+		await page.locator("[data-kill-confirm-yes]").click();
 		const killCalls = await page.evaluate(() => (window as any).__killCalls);
 		expect(killCalls).toEqual([RUNNING_PROCESS.id]);
+	});
+
+	test("cancelling the confirmation does not kill", async ({ page }) => {
+		await page.evaluate((p) => {
+			const pill = (window as any).createPill(p);
+			(window as any).__killCalls = [];
+			pill.onKill = (id) => (window as any).__killCalls.push(id);
+		}, RUNNING_PROCESS);
+
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+		await page.locator("#bg-process-dropdown [data-kill-btn]").click();
+		await page.locator("[data-kill-confirm-no]").click();
+
+		await expect(page.locator("[data-kill-confirm]")).toHaveCount(0);
+		expect(await page.evaluate(() => (window as any).__killCalls)).toEqual([]);
 	});
 
 	test("Remove button fires onDismiss callback", async ({ page }) => {
@@ -264,7 +323,18 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		expect(dismissCalls).toEqual([EXITED_OK_PROCESS.id]);
 	});
 
-	test("pill X button kills running process", async ({ page }) => {
+	test("running pill action button shows a skull icon", async ({ page }) => {
+		await createPill(page, RUNNING_PROCESS);
+		await expect(page.locator("bg-process-pill [data-x-btn] svg.lucide-skull")).toBeVisible();
+	});
+
+	test("exited pill action button shows an X icon", async ({ page }) => {
+		await createPill(page, EXITED_OK_PROCESS);
+		await expect(page.locator("bg-process-pill [data-x-btn]")).toHaveText("✕");
+		expect(await page.locator("bg-process-pill [data-x-btn] svg").count()).toBe(0);
+	});
+
+	test("pill skull button kills running process after confirmation", async ({ page }) => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
@@ -272,9 +342,34 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		}, RUNNING_PROCESS);
 
 		await page.locator("bg-process-pill [data-x-btn]").click();
+		await expect(page.locator("[data-kill-confirm]")).toBeVisible();
+		expect(await page.evaluate(() => (window as any).__killCalls)).toEqual([]);
 
+		await page.locator("[data-kill-confirm-yes]").click();
 		const killCalls = await page.evaluate(() => (window as any).__killCalls);
 		expect(killCalls).toEqual([RUNNING_PROCESS.id]);
+	});
+
+	test("confirmation modal renders above the expanded popover", async ({ page }) => {
+		await page.evaluate((p) => {
+			const pill = (window as any).createPill(p);
+			pill.onKill = () => {};
+		}, RUNNING_PROCESS);
+
+		// Expand the popover (z-50 portal), then trigger kill from inside it.
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+		await expect(page.locator("#bg-process-dropdown")).toBeVisible();
+		await page.locator("#bg-process-dropdown [data-kill-btn]").click();
+
+		const modal = page.locator("[data-kill-confirm]");
+		await expect(modal).toBeVisible();
+
+		// The modal's effective stacking must sit above the popover portal.
+		const modalZ = await modal.evaluate((el) => Number(getComputedStyle(el).zIndex) || 0);
+		const dropdownZ = await page
+			.locator("#bg-process-dropdown")
+			.evaluate((el) => Number(getComputedStyle(el).zIndex) || 0);
+		expect(modalZ).toBeGreaterThan(dropdownZ);
 	});
 
 	test("pill X button dismisses exited process", async ({ page }) => {
@@ -383,5 +478,86 @@ test.describe("BgProcessPill exit code display", () => {
 		const dropdown = page.locator("#bg-process-dropdown");
 		await expect(dropdown).toContainText("bg-run-1");
 		await expect(dropdown).toContainText("pid 12345");
+	});
+});
+
+test.describe("BG timer regression", () => {
+	test.beforeEach(async ({ page }) => {
+		await gotoTimerFixture(page);
+	});
+
+	test.afterEach(async ({ page }) => {
+		await page.evaluate(() => (window as any).clearPills());
+	});
+
+	test("exited process uses endTime runtime and stays fixed after re-render and reload", async ({ page }) => {
+		const startTime = Date.now() - 24 * 60 * 60 * 1000;
+		const processInfo = {
+			id: "bg-fixed-runtime",
+			name: "finished build",
+			command: "npm run build",
+			pid: 22222,
+			status: "exited" as const,
+			exitCode: 0,
+			startTime,
+			endTime: startTime + 120_000,
+		};
+
+		await createTimerPill(page, processInfo);
+		await openTimerDropdown(page);
+
+		const dropdown = page.locator("#bg-process-dropdown");
+		await expect(dropdown).toContainText(/\b2m 00s\b/);
+		const before = await dropdown.innerText();
+
+		await page.waitForTimeout(1100);
+		await page.evaluate(() => (window as any).forceBgTimerRerender());
+		await expect(dropdown).toContainText(/\b2m 00s\b/);
+		expect(await dropdown.innerText()).toBe(before);
+
+		await page.reload();
+		await page.addScriptTag({ path: TIMER_BUNDLE });
+		await readyTimerFixture(page);
+		await createTimerPill(page, processInfo);
+		await openTimerDropdown(page);
+		await expect(page.locator("#bg-process-dropdown")).toContainText(/\b2m 00s\b/);
+	});
+
+	test("legacy exited process without endTime does not show time since start", async ({ page }) => {
+		const processInfo = {
+			id: "bg-legacy-runtime",
+			name: "legacy build",
+			command: "npm run build",
+			pid: 22223,
+			status: "exited" as const,
+			exitCode: 0,
+			startTime: Date.now() - 24 * 60 * 60 * 1000,
+		};
+
+		await createTimerPill(page, processInfo);
+		await openTimerDropdown(page);
+
+		const text = await page.locator("#bg-process-dropdown").innerText();
+		expect(text).not.toMatch(/\b(?:\d{3,}m\s+\d{2}s|\d+h\b|\d+d\b)/i);
+	});
+
+	test("running process timer increments while running", async ({ page }) => {
+		const processInfo = {
+			id: "bg-running-runtime",
+			name: "dev server",
+			command: "npm run dev",
+			pid: 22224,
+			status: "running" as const,
+			exitCode: null,
+			startTime: Date.now() - 1000,
+			endTime: null,
+		};
+
+		await createTimerPill(page, processInfo);
+		await openTimerDropdown(page);
+
+		const timer = page.locator("#bg-process-dropdown live-timer");
+		const initial = ((await timer.textContent()) || "").trim();
+		await expect.poll(async () => ((await timer.textContent()) || "").trim(), { timeout: 2500 }).not.toBe(initial);
 	});
 });

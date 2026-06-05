@@ -4,7 +4,7 @@
  * Verifies the UI contract:
  *  - Switching model swaps the option list to the model's supported levels.
  *  - When the current level is no longer supported, it is clamped down to
- *    the displayed value (xhigh on Opus 4.7 → high on Opus 4.5, etc.).
+ *    the displayed value (xhigh on Opus 4.8 → high on Opus 4.5, etc.).
  *  - Non-reasoning models show only "off".
  *  - Reloading the fixture preserves selected level on a capable model.
  *
@@ -20,6 +20,30 @@ test.describe("Per-model thinking-level selector", () => {
 	test.beforeEach(async ({ page }) => {
 		await page.goto(FIXTURE);
 		await page.waitForFunction(() => (window as any)._testReady === true);
+	});
+
+	test("Opus 4.8 exposes xhigh option", async ({ page }) => {
+		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4-8-20260528|1"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+	});
+
+	test("dotted Opus 4.8 exposes xhigh option", async ({ page }) => {
+		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4.8-20260528|1"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+	});
+
+	test("AIGW-routed Opus 4.8 exposes xhigh option", async ({ page }) => {
+		await page.evaluate(() => (window as any).setModelByValue("aigw|claude-opus-4-8-20260528|1"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+	});
+
+	test("AIGW-routed dotted Opus 4.8 exposes xhigh option", async ({ page }) => {
+		await page.evaluate(() => (window as any).setModelByValue("aigw|claude-opus-4.8-20260528|1"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
 	});
 
 	test("Opus 4.7 exposes xhigh option", async ({ page }) => {
@@ -71,9 +95,9 @@ test.describe("Per-model thinking-level selector", () => {
 		expect(supported).toEqual(["off"]);
 	});
 
-	test("xhigh on Opus 4.7 clamps to high when switching to Opus 4.5", async ({ page }) => {
-		// Start on Opus 4.7, pick xhigh.
-		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4-7-20251101|1"));
+	test("xhigh on Opus 4.8 clamps to high when switching to Opus 4.5", async ({ page }) => {
+		// Start on Opus 4.8, pick xhigh.
+		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4-8-20260528|1"));
 		await page.evaluate(() => (window as any).pickLevel("xhigh"));
 		expect(await page.evaluate(() => (window as any).getCurrentLevel())).toBe("xhigh");
 
@@ -108,13 +132,13 @@ test.describe("Per-model thinking-level selector", () => {
 	});
 
 	test("xhigh persists across reload on a capable model", async ({ page }) => {
-		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4-7-20251101|1"));
+		await page.evaluate(() => (window as any).setModelByValue("anthropic|claude-opus-4-8-20260528|1"));
 		await page.evaluate(() => (window as any).pickLevel("xhigh"));
 		expect(await page.evaluate(() => (window as any).getCurrentLevel())).toBe("xhigh");
 
-		// Reload — the fixture re-initialises but on the same Opus 4.7 model
-		// (defaulted by selectedIndex). The point of this test is to confirm
-		// that "xhigh" is a valid option after a fresh page load on Opus 4.7
+		// Reload — the fixture re-initialises on the default Opus 4.8 model.
+		// The point of this test is to confirm
+		// that "xhigh" is a valid option after a fresh page load on Opus 4.8
 		// (regression guard: the option must not be filtered out).
 		await page.reload();
 		await page.waitForFunction(() => (window as any)._testReady === true);

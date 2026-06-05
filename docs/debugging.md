@@ -11,6 +11,28 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Confirm a kill**: poll `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`, so ~5s on timeout, ~1s on cancel). `ps -o pid= -g <pgid>` (POSIX) or `tasklist /FI "PID eq <pid>"` (Windows) should return empty in the same window. The failed step's `output` ends with `— killed subprocess tree`.
 - **Pinning tests**: `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E).
 
+## Gate verification stuck on a `human-signoff` step
+
+- **Symptom**: a gate's verification stays in `running` indefinitely; one of its steps is `type: human-signoff`. The chat-header `<goal-status-widget>` should be pulsing its primary-colour exclamation icon between the goal icon and gate counter, and its **View content** action should open a sign-off review document with Approve / Reject controls. Or: the review pane submits but never resolves the step.
+- **Architecture**: the harness parks on a deferred resolver keyed by `${signalId}::${stepName}` in `VerificationHarness.pendingSignoffs`. The user resolves it via the review pane, which POSTs to `/api/goals/:id/gates/:gateId/signoff`. The `awaitingHuman` bit on the step record is the source of truth; `gate_verification_awaiting_human` is broadcast on park and `gate_verification_step_complete` on resolve. Full design: [docs/design/human-signoff-gates.md](design/human-signoff-gates.md); review behavior: [docs/review-pane-signoff.md](review-pane-signoff.md).
+- **Diagnostic chain**:
+  1. `curl /api/goals/:id/verifications/active` — confirm the step shows `awaitingHuman: true` and the substituted `humanPrompt` / `humanLabel` are non-empty.
+  2. If the active record is missing entirely, the verification was cancelled (re-signal during park drains `pendingSignoffs` with `{ cancelled: true }`) or completed under a different signal id — check `gate.signals[]` history for a more recent signal.
+  3. Widget not pulsing despite `awaitingHuman: true` on the API? The sign-off cache bit (`state.gateStatusCache.<goalId>.awaitingHumanSignoff`) didn't reach the widget. Two pieces must line up: (a) the summary endpoint includes `awaitingSignoffCount`; (b) `src/app/gate-status-events.ts` classifies the park/resolve events so mounted session, widget, and dashboard paths refresh `state.gateStatusCache`.
+  4. Approve / Reject POSTs return 409 `step is no longer awaiting human input`? The step was already resolved (idempotent surface) or cancelled. Inspect the latest signal's `verification.steps[]` for the named step's `passed` / `skipped` status.
+  5. Approve / Reject POSTs return 403 for a sandboxed sub-agent? Expected — `sandbox-guard` blocks `/signoff` so an agent inside its own sandbox cannot self-approve a gating step.
+- **After a server restart**: the resume path re-broadcasts `gate_verification_awaiting_human` from `_resumeOneVerification`, re-creates the resolver in `pendingSignoffs`, and `await`s. The persisted `humanPrompt` / `humanLabel` survive intact. If a pending sign-off is missing after restart, check `active-verifications.json` for the entry and confirm `step.awaitingHuman === true` survived the persistence round-trip.
+- **Test bypass**: only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes `human-signoff` steps. There is **no** fallback to `BOBBIT_LLM_REVIEW_SKIP` — a "human" gate must not share a bypass with `agent-qa` / `llm-review`, or the global E2E harness would silently auto-approve every human gate. With `BOBBIT_HUMAN_SIGNOFF_SKIP` unset or `=0`, the step parks awaiting a real human decision.
+- **Pinning tests**: `tests/e2e/human-signoff.spec.ts` (REST end-to-end), `tests/e2e/ui/goal-status-widget.spec.ts` (browser).
+
+## Ready-to-merge fails with "Refusing unsafe git push"
+
+- **Symptom**: a command verification step fails before running and its output starts with `[verification] Refusing unsafe git push in verification command`.
+- **Cause**: the workflow contains a push that could update the protected base/primary branch from a goal/session branch. Common examples are `git push origin {{branch}}`, `git push` with no refspec, `git push --all`, or `git push origin {{branch}}:refs/heads/{{baseBranch}}`.
+- **Fix**: publish the work branch with an explicit destination refspec: `git push origin {{branch}}:refs/heads/{{branch}}`. The Ready-to-Merge template should keep the follow-up `git ls-remote --heads origin {{branch}} | grep -q .` check.
+- **Where to look**: custom workflow command steps in `project.yaml::workflows.*.gates.*.verify[].run`; runtime guard in `verification-harness.ts::validateVerificationPushSafety`; authoring guidance in [goals-workflows-tasks.md](goals-workflows-tasks.md#gate-verification-baselines).
+- **Pinning tests**: `tests/verification-push-guard.test.ts` and `tests/goal-push-safety-regression.test.ts`.
+
 ## Streaming performance (UI sluggishness)
 
 - **Architecture**: `StreamingMessageContainer` owns rendering during streaming via `setMessage()` with `requestAnimationFrame` batching. `AgentInterface` must NOT call `this.requestUpdate()` in the `message_update` event handler — only the streaming container updates on each token.
@@ -20,6 +42,33 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **toolResultsById memoization**: `AgentInterface._getToolResultsById()` caches the tool-results Map to avoid creating a new reference on every render, which would cause `MessageList` to re-render unnecessarily.
 - **content-visibility CSS**: `message-list > .flex > *` uses `content-visibility: auto` to skip layout/paint for off-screen messages in long conversations.
 - State-transition events (`message_start`, `message_end`, `agent_start`, `agent_end`, `turn_start`, `turn_end`) still call `requestUpdate()` — only `message_update` (the hot path) is excluded.
+
+## Pill strip layout (bash_bg pills + git-status-widget)
+
+The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measurePillOverflow`) has two viewport-conditional layout modes plus a width cache. Each piece pins a different invariant:
+
+- **Symptom**: pills wrap onto a second row in desktop / landscape mode.
+  - Content layer should be `flex-nowrap` when `_isNarrow === false`. Check `getComputedStyle([data-pill-content]).flexWrap` in DevTools.
+  - Strip CSS `max-width` should resolve to `parent.clientWidth - 128`. The algorithm in `_measurePillOverflow` uses `parent.clientWidth - 128 - 2`; the two values must stay in lockstep. If you change one, change both.
+  - Pinned by `tests/e2e/ui/pill-overflow-promotion.spec.ts → 'wide mode: strip stays on a single row even with many pills'`.
+
+- **Symptom**: pills wrap onto 3+ rows in mobile / portrait mode.
+  - Content layer should be `flex-wrap` when `_isNarrow === true`, strip `max-width: 75%`, algorithm budget `parent.clientWidth * 0.75 * 1.85`.
+  - The 1.85 factor (not 2.0) buys back worst-case-slack: flex-wrap wraps whole items, so on cusp cases (e.g. three items at 60 % of row width each) a flat `* 2` budget can authorise content that overflows to a third row.
+  - Pinned by `tests/e2e/ui/pill-overflow-promotion.spec.ts → 'narrow mode: strip never wraps to more than 2 rows'` (asserts `[data-pill-strip].offsetHeight ≤ 2 × 22px + gap`).
+
+- **Symptom**: hidden pills inside the "more" popover refuse to promote back into the strip when visible pills are dismissed (the original B-A1 regression).
+  - Root cause was twofold: (a) `_pillWidths` cache used `pillEl.parentElement.offsetWidth`, which for popover pills was the shared `.pill-more-popover` container, not the individual pill; (b) the popover's `flex flex-col` defaulted to `align-items: stretch`, so every pill inside got cross-axis-stretched to the popover content-box width.
+  - Fix on both sides: cache reads `(pillEl as HTMLElement).offsetWidth` (custom element's own width), AND the popover uses `flex flex-col items-start` so individual pills keep intrinsic widths.
+  - Pinned by `tests/e2e/ui/pill-overflow-promotion.spec.ts → 'narrow mode: hidden pills promote back into the strip after visible pills are dismissed'` (and the wide-mode equivalent in the same file).
+
+- **Symptom**: the "X more" pill label wraps to two lines (e.g. "4" / "more") on a narrow viewport.
+  - The inner button needs `whitespace-nowrap`; the outer relative wrapper needs `flex-shrink: 0` so a wide git-status-widget can't squeeze it.
+  - Pinned by `tests/e2e/ui/pill-overflow-promotion.spec.ts → "'X more' pill label stays on a single line"`.
+
+- **Sprite reserve**: the strip reserves `8rem` (128 px) on the left of the input container in wide mode so the bobbit sprite that bleeds down from the message area has clearance. The 25 % left reserve in narrow mode is the equivalent for mobile. Changing the sprite size or position needs a matching CSS + algorithm update.
+
+- **Width cache lifecycle**: `_pillWidths` is a `Map<id, px>` filled by every measure pass from `pillStrip.querySelectorAll('bg-process-pill')`. Entries for IDs that disappear from `bgProcesses` are pruned each pass; the map is fully cleared on `bgProcesses.length === 0`. Never-measured pills (e.g. just spawned, no paint yet) use `DEFAULT_PILL_WIDTH = 100` until first measure replaces it. Width cache contamination is the most likely root cause of "pills won't promote / wrap weirdly" reports — inspect `_pillWidths` in DevTools.
 
 ## Large file writes (agent writes >32KB)
 
@@ -86,8 +135,11 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 
 ## Gate status stale
 
-- `state.gateStatusCache` refreshed via: (1) `refreshGateStatusCache()` on initial load, (2) `refreshGateStatusForGoal()` on WS events `gate_status_changed` / `gate_verification_complete`
-- Dashboard gate polling also syncs to this cache
+- Server truth: `/api/goals/:id/gates?view=summary` is built by `src/server/gate-status-summary.ts` from `GateStore` plus `VerificationHarness` active verifications. It owns `passed`, `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and each gate's `effectiveStatus`.
+- Client cache: `src/app/api.ts` fetches that summary into `state.gateStatusCache`; `src/app/gate-status-events.ts` centralizes the gate lifecycle events that schedule targeted refreshes and the custom cache-updated/sign-off-resolved events used inside a browser tab.
+- Surfaces: sidebar badges and the `GoalStatusWidget` pill read `state.gateStatusCache`; the widget popover refreshes full gates plus active verifications for row detail; the dashboard refreshes full gate details/active verifications but uses the shared summary for counts and running overlays in rows and pipeline nodes.
+- If surfaces disagree, first compare the summary endpoint with `state.gateStatusCache` in the page. A stale cache usually means a missed `shouldRefreshGateStatusForEvent()` path; a wrong endpoint response points to `buildGateStatusSummary()` or active verification cleanup.
+- Regression coverage: `tests/gate-status-summary.test.ts`, `tests/e2e/gate-status-summary.spec.ts`, `tests/e2e/ui/gate-status-cross-surface.spec.ts`, and the sign-off/reset cases in `tests/e2e/ui/goal-status-widget.spec.ts`.
 
 ## Context bar / model state
 
@@ -220,6 +272,12 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
   4. Reload during preparing. The server replays current status on `auth_ok` (`src/server/ws/handler.ts`). If the banner still appears, the live-path bug is the regression; if it doesn't, the replay path also broke — inspect the `auth_ok` write path.
 - **Regression test**: `tests/e2e/ui/preparing-ux.spec.ts` (browser E2E). It artificially extends the preparing window so the banner is observable, asserts visibility + editor disabled, then asserts both clear once the session goes idle.
 
+## Staff/session creation in a poly-repo fails with `git worktree add ... fatal: not a git repository`, or staff silently gets no worktree
+
+- **Symptom**: creating a **staff** member (or session) in a **poly-repo** project — root is *not* a git repo, but contains git sub-repos registered as components with `repo != "."` — fails with a raw `Command failed: git worktree add -b ...` / `fatal: not a git repository`, or the staff agent silently lands with no worktree while a regular session for the same project gets one.
+- **Root cause**: worktree-capability resolution had diverged across the three creation paths. The staff path required **every** declared repo (including a non-git `.` container) to pass `isGitRepo`, so a poly-repo either bailed to unsupported or ran `git worktree add` against the non-git container root.
+- **Fix / where to look**: capability is now decided by the single source of truth `src/server/agent/worktree-support.ts::resolveWorktreeSupport(components, projectRoot, cwd)`, used identically by the session (`server.ts` `POST /api/sessions`), staff (`staff-manager.ts::projectSupportsWorktree`), and goal (`goal-manager.ts::createGoal`) paths. `createWorktreeSet` (`src/server/skills/git.ts`) keeps only component dirs that are git repo **roots** (via `isGitRepoRoot`, which distinguishes "is a repo root" from "inside a repo" — avoiding the nested-parent false positive), skipping the non-git container, data-only and missing dirs; if none remain it returns an empty set and callers fall back to no-worktree instead of throwing. Full rationale in [docs/design/multi-repo-components.md §4.4–4.5](design/multi-repo-components.md).
+
 ## Compaction
 
 - Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
@@ -316,6 +374,15 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 - **Pinning test**: `tests/shortcut-hint-titles-render.spec.ts` (with fixture `tests/fixtures/shortcut-hint-titles-render-entry.ts`). It simulates the boot order — first render with no shortcuts, then registration, then second render — and asserts the second render stamps the title with the `(Alt+G)` suffix. Deleting the post-registration `renderApp()` call must fail this test.
 - **Related flake cleanup**: this race was "flake category A" in the PR 600 investigation — ~10 e2e tests (`api-error-modal`, `goal-accept-failure-keeps-assistant`, `goal-creation`, `goal-form-tooltips`, `proposal-inline-comments`, `proposal-tools`, `stories-goal-routing`) that waited on `button[title='New goal (Alt+G)']`. Other flake categories (createSession 201→400 server race, tail-chat scroll drift, cold-start timeouts) are independent.
 
+## iOS PWA relaunch shows a blank grey screen
+
+- **Symptom**: relaunching the installed standalone PWA on iOS comes up as a blank dark-grey screen (the manifest `background_color` `#2b2d2b`) with no UI. The only manual workaround is to kill the app from the app switcher and relaunch. Does **not** reproduce in a normal browser tab or the dev server.
+- **Cause**: iOS froze or killed the WebKit process while the PWA was backgrounded, then restored a dead/frozen page snapshot — the JS event loop, render loop, and WebSocket are all dead, so the page is stuck painting only the background color. This is distinct from a dead-socket-on-a-live-page (which the `visibilitychange` resync handles).
+- **Where the fix lives**: `src/app/pwa-lifecycle.ts` (wired from `main.ts`, with an inline boot watchdog in `index.html`) force-reloads a dead/frozen standalone PWA via three layered, standalone-gated mechanisms: persisted `pageshow` → reload; a resume-staleness watchdog using a liveness heartbeat + the pure `shouldReloadOnResume()`; and an inline boot watchdog if `#app` never paints. Loop-guarded by a `sessionStorage` cooldown (`bobbit-pwa-reload-at`).
+- **Do not conflate** with the live-page WebSocket resync (`_onVisibilityChange` in `remote-agent.ts` + `visibilitychange` in `main.ts`) — that recovers a LIVE page; this recovers a DEAD one. The two are disjoint; don't add a reload path for the live case here.
+- **Full design**: [docs/pwa-lifecycle-recovery.md](pwa-lifecycle-recovery.md).
+- **Tests**: `tests/pwa-lifecycle.spec.ts` (pure `shouldReloadOnResume` + source/fixture drift guard), `tests/e2e/ui/pwa-lifecycle.spec.ts` (browser wiring incl. the real-reload cooldown-persistence test). End-to-end freeze/kill recovery is verified manually on a real iOS device.
+
 ## Scroll snap-back / vibration / tail-chat lost / false-positive Jump button
 
 - **Symptom (master pre-fix)**: in a streaming session, the chat stops following the bottom mid-stream, and/or the Jump-to-bottom pill appears even when scrollTop is already at the bottom. Both regressions also reproduce on iOS PWA.
@@ -367,6 +434,7 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 
 - **Dropdown renders via portal**: `BgProcessPill` appends its log dropdown to `document.body` instead of rendering it inline. This is necessary because the "More" overflow popover uses `backdrop-filter: blur()`, which creates a new CSS containing block — `position: fixed` children behave like `position: absolute` and `mask-image` clips them. If the dropdown appears mispositioned or clipped inside a popover, check that the portal is working (the `#bg-process-dropdown` element should be a direct child of `document.body`, not nested inside the pill or popover).
 - **Dismiss for popover pills skips animation**: Pills inside the "More" popover lack the animation wrapper that visible pills have. `_handlePillDismiss` in `AgentInterface` detects hidden (popover) pills and calls `onBgProcessDismiss()` directly instead of waiting for a `pill-fade-out` animation. If dismiss stops working for popover pills, check that the hidden-set detection still matches the overflow logic in `_renderPillStrip()`.
+- **Exited duration keeps growing**: exited process snapshots must include numeric `BgProcessInfo.endTime`; the UI renders `endTime - startTime`, while legacy missing/null `endTime` renders `—` rather than `Date.now() - startTime`. See [docs/internals.md — Background process runtime snapshots](internals.md#background-process-runtime-snapshots).
 
 ## Gates
 
@@ -403,6 +471,7 @@ Widget hides **only** when the server explicitly confirms "not a git repository"
 - **`partial: true` on every response?** Phase A (fast metadata: branch, upstream, master/main verify, porcelain) and Phase B (ahead/behind counts) each have a 3s per-call timeout. If Phase B counts time out the response carries `partial: true`; the client renders a yellow warning dot and the dropdown offers "Re-scan" which triggers `?untracked=1`. Persistent partials usually mean a huge repo or a held git lock.
 - **Server-side retries firing repeatedly / `runBatchGitStatusCount` higher than expected?** There are no in-server retries any more. Each `batchGitStatus` call increments `runBatchGitStatusCount` exactly once — a single `execFile` attempt per git invocation, 3s timeout, fast-fail. Resilience lives in the client (`git-status-refresh.ts`, 4 attempts at [0, 500, 2000, 5000]ms). Host path uses parallel `execFile` via `src/server/skills/git-status-native.ts` (no Git Bash); container path uses a single batched `docker exec sh -c`. If you see persistent server failures, look for a genuine git or Docker problem — don't reintroduce server-side retry.
 - **Test-only spawn hook**: `__setGitStatusFake(fn)` / `__clearGitStatusFake()` replace `runBatchGitStatus`'s git-spawn path with a deterministic function, and `__getGitStatusInvocationCount()` / `__resetGitStatusInvocationCount()` expose the real-invocation counter used by coalesce tests. These exist because under CI load the real `git status` spawn becomes flaky (EAGAIN / ENFILE / Windows ENOENT races) and makes retry / coalesce assertions non-deterministic. Production code never touches them.
+- **Multi-repo session shows only a branch name / no aggregate or per-repo sections?** A true polyrepo session's `cwd` is the non-git branch *container*, so `batchGitStatus(cwd)` returns null and there is no root result to render. In multi-repo mode (`session.repoWorktrees.length > 1`) the `/api/sessions/:id/git-status` handler treats that as non-fatal and **synthesizes** the aggregate from the per-repo results (branch/primary from the first repo; summed ahead/behind/aheadOfPrimary/behindPrimary/insertions/deletions; `clean` = AND across repos). If the pill shows only the branch, check that `repoWorktrees` actually has >1 entry and that per-repo `batchGitStatus` calls aren't all failing (each is swallowed individually). Full design in [docs/design/multi-repo-components.md §13](design/multi-repo-components.md#13-session-git-status--git-diff-parity-addendum-2026-06).
 
 ## Git status widget pill clicks do nothing / dropdown wedged after re-renders
 
@@ -415,6 +484,14 @@ The bug is a stale-state race between three fields on `GitStatusWidget` (`src/ui
 - **Dropdown opens but `git-status-dropdown-open` fires N times / untracked refetches stack?** `session-manager.ts` used to attach an anonymous listener on every `connectToSession`, with no matching `removeEventListener`. Cached session switch-backs piled them up (one extra refetch per past connect, plus a memory leak). The listener is now stored on the agent interface as `__gitStatusDropdownOpenHandler` and `removeEventListener`'d before the new one is wired. Pinned by `tests/session-manager-git-dropdown-listener.test.ts` (static source assertion — fails if anyone reverts to anonymous closures).
 - **Reproducing locally?** The Lit instance only runs `disconnectedCallback` when its host is actually removed from the DOM. The plain-JS replica fixture used by `git-status-interactions.spec.ts` does not exercise this — use `tests/git-status-widget-wedge.spec.ts` instead. It mounts the real widget via the `git-status-widget-states` bundle, opens the dropdown, starts the close animation, and either disconnects+reconnects the host, externally removes the portal, or dispatches `animationcancel`, then asserts the next click reopens. All three scenarios must reopen the dropdown and clear the `git-dropdown-closing` class.
 - **Skeleton state should still be inert.** `_toggle` early-returns when `loading && !branch` — the wedge fix preserves this. Outside-click (`document` capture-phase listener) and Escape still close via the normal animated path.
+
+## PR walkthrough pane blank/unresponsive after `ready` (hunkSignature TypeError)
+
+- **Symptom**: launching a walkthrough (Git Status Widget → Pull Request → **Walkthrough**, or `/walkthrough-pr <url>`) reaches `ready` and starts rendering diff cards, then the pane goes blank and nothing is interactive. Console shows `Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'match')` at `hunkSignature` → `sectionSignature` → `renderInlineHunk`/`renderSplitHunk` → `renderDiffBlock`.
+- **Two-part root cause**: (1) **UI fragility** — `hunkSignature(header)` called `header.match(...)` and threw when `header` was `undefined`; with no per-block error boundary, the single throw unwound the whole synchronous Lit `render()` and the component committed nothing, blanking the entire pane for one malformed hunk. (2) **Contract violation** — a hunk reached the UI with `header === undefined` even though `PrWalkthroughHunk.header` is typed required `string`. The header-less hunk came from the bundle-reconstruction path (`diffBlockFromBundleFile`, mirrored by the writer `bundleHunkFromDiffHunk`), which copied `header` verbatim from re-read bundle JSON with no coercion; the duplicated `isDiffBlock` guards never validated hunk `header`, so it rode a file-level/audit block all the way to the browser. Full analysis: [docs/design/pr-walkthrough-hunk-header-fix.md](design/pr-walkthrough-hunk-header-fix.md).
+- **Where the fix lives**: UI defensiveness in `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` — `hunkSignature` coerces a non-string `header` to `""`, `sectionSignature` forwards `hunk.header ?? ""`, and `renderCard` maps blocks through a new `renderDiffBlockSafe` error boundary that `try/catch`es `renderDiffBlock` and renders a local fallback (`data-testid="pr-walkthrough-diff-block-error"`) so one bad block degrades locally. Producer contract in `src/server/pr-walkthrough/walkthrough-analysis-bundle.ts` — `diffBlockFromBundleFile` and `bundleHunkFromDiffHunk` coerce `header` to a string, and the three `isDiffBlock` guards (`walkthrough-analysis-bundle.ts`, `walkthrough-yaml-schema.ts`, `routes.ts`) now require every hunk to be a record with a string `header`.
+- **Invariant**: `PrWalkthroughHunk.header` stays required `string` — the type was **not** weakened to `string | undefined`. The producer must honor the contract (coerce at the reconstruction/ingestion boundary) **and** the UI must additionally be defensive (guard + per-block error boundary). Don't relax the type or remove the error boundary to "simplify".
+- **Pinning tests**: `tests/pr-walkthrough-bundle-hunk-header.test.ts` (server unit — reconstructed hunks always carry a string `header`) and the *"renders cards and stays interactive when a diff hunk header is undefined (hunkSignature regression)"* case in `tests/e2e/ui/pr-walkthrough-panel.spec.ts` (browser — asserts no `hunkSignature` / `(reading 'match')` console errors).
 
 ## Sandbox sessions
 
@@ -916,7 +993,7 @@ See [internals.md — Per-component `worktree_setup_command`](internals.md#sessi
 
 ## Leaked remote branches
 
-Symptom: `origin` accumulates `session/*`, `goal/*`, `goal-goal-*-<role>-*`, or `staff-*` branches that should have been cleaned up when their owning session/goal/staff was archived.
+Symptom: `origin` accumulates `session/*`, `goal/*`, `goal/<id8>/<role>-*` (team-member; legacy `goal-goal-*-<role>-*` from before the `pithier-te` rename), or `staff-*` branches that should have been cleaned up when their owning session/goal/staff was archived.
 
 **Diagnose:**
 
@@ -929,22 +1006,22 @@ git ls-remote origin | grep -oE 'refs/heads/(session|goal|staff)[^[:space:]]*' |
 **Checklist:**
 
 1. Confirm `BOBBIT_TEST_NO_PUSH` is **unset** in the production env. Every push-delete is gated by `shouldSkipRemotePush()` in `src/server/skills/git.ts`; if the env var leaks into a real server (e.g. inherited from a test runner) all cleanup silently no-ops.
-2. For per-role goal branches (`goal-goal-<slug>-<id>-<role>-<short>`): verify the DELETE `/api/goals/:id` handler in `src/server/server.ts` snapshots `agentBranches` into a `string[]` **before** calling `teamManager.teardownTeam(id)`. Teardown's `dismissRole` mutates `entry.agents` in place — reading the entry afterwards sees an empty array.
+2. For per-role goal branches (`goal/<goalId8>/<role>-<short4>`, or legacy `goal-goal-<slug>-<id>-<role>-<short>` from before the `pithier-te` rename — the same cleanup path handles both because it consumes the branch names as opaque strings): verify the DELETE `/api/goals/:id` handler in `src/server/server.ts` snapshots `agentBranches` into a `string[]` **before** calling `teamManager.teardownTeam(id)`. Teardown's `dismissRole` mutates `entry.agents` in place — reading the entry afterwards sees an empty array.
 3. For `session/*` branches: verify `session-manager.ts::terminateSession` invokes `eagerDeleteRemoteSessionBranch` from `src/server/agent/session-eager-branch-delete.ts` for non-delegate sessions. The helper requires the branch to be fully merged into `origin/<primary>` (via `git merge-base --is-ancestor`); unmerged branches defer to the 7-day `purgeOneSession` worktree cleanup.
 4. For `staff-*` branches: `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` already push-deletes. If a staff branch leaks, check that `staff-manager.ts` is actually calling `cleanupWorktree` with `deleteBranch=true` on dismiss.
 5. Pre-existing backlog (predates the fix): drain with a one-shot script. Out of scope for the runtime cleanup contract.
 
 Full design + bug archaeology in [docs/design/orphan-remote-branch-cleanup.md](design/orphan-remote-branch-cleanup.md). Architecture summary: [docs/internals.md — Remote branch cleanup](internals.md#remote-branch-cleanup).
 
-## `models.json` stale / missing `x-opencode-session` header after gateway upgrade
+## `models.json` stale / missing AI Gateway headers after gateway upgrade
 
-Symptom: a new aigw-side model isn't selectable, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the `x-opencode-session` feature.
+Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the generated header block.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
 
 `BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
 
-See [docs/internals.md — Startup refresh of models.json](internals.md#startup-refresh-of-modelsjson).
+See [docs/internals.md — Startup refresh behavior](internals.md#startup-refresh-behavior).
 
 ## Review/naming model mismatch under AI Gateway
 
@@ -1158,6 +1235,14 @@ A steer should abort any in-flight `bash_bg wait` within ~100 ms. The bg process
 
 Tests: `tests/bg-process-manager.test.ts`, `tests/e2e/bg-wait-steer-abort.spec.ts`.
 
+## `bash_bg wait` returns `fetch failed` on long-running processes
+
+- **Symptom**: an agent calls `bash_bg wait` on a background process that runs for ≥~300 s and the tool throws `Error: fetch failed` (an undici `TypeError`) instead of returning an exit result or `{ timedOut: true }`. The errored tool result corrupts the agent turn and the UI can behave erratically afterwards. Monitoring the same process via `bash_bg logs` (short fetches) never fails — only the `wait` long-poll holds one connection open long enough to trip.
+- **Cause**: the bg-process wait endpoint `GET /api/sessions/:id/bg-processes/:pid/wait` (`src/server/server.ts`) used to write **no bytes** to the socket until `BgProcessManager.waitForExit` resolved. The HTTP client (undici, in `defaults/tools/shell/extension.ts::api()`) enforces a default `headersTimeout` of ~300 s; with no head flushed before that elapsed it aborted the request and the tool saw `fetch failed`. The default wait timeout is also 300 s, so the collision is deterministic at the 300 s boundary — the bug only fires once a process runs ~300 s **and** is monitored via `wait`. Latent since the bg-wait endpoint shipped (it never inherited the heartbeat the session `/wait` endpoint already had); not a recent regression.
+- **Fix**: the response logic was extracted into `src/server/agent/bg-wait-response.ts::streamBgWaitResponse`, which mirrors the session `/wait` endpoint — it flushes a `Transfer-Encoding: chunked` 200 head and writes a heartbeat `\n` on each `heartbeatMs` tick (default 60 s) while the wait is pending, then `res.end(JSON.stringify(result))`. The heartbeat keeps the connection alive well inside undici's ~300 s timeout, so the long-poll survives the full configurable wait timeout. Header flush is **lazy** (driven by the first 60 s tick) so a genuine `404` for an unknown pid — where `waitForExit` returns `null` synchronously before any tick — is preserved.
+- **Where to look**: `streamBgWaitResponse` (the fix site) and the `/bg-processes/:pid/wait` handler in `server.ts`; the heartbeat pattern it mirrors is the session `/wait` endpoint (also `server.ts`). See [docs/internals.md — Long-poll heartbeat (chunked keep-alive)](internals.md#long-poll-heartbeat-chunked-keep-alive).
+- **Regression test**: `tests/bg-wait-response.test.ts` — drives `streamBgWaitResponse` with a tiny injected `heartbeatMs` and asserts the head flushes, a heartbeat byte is written on tick, the terminal JSON payload still parses, and the unknown-pid path still emits a real `404`. It pins the *mechanism* in milliseconds — there is deliberately no wall-clock-bound test that waits near 300 s.
+
 ## Streaming dedup / reorder (events carry seq+ts)
 
 Events carry `seq`+`ts`; on reconnect the client sends `{type:"resume", fromSeq}`. See [docs/design/streaming-dedup-reorder.md](design/streaming-dedup-reorder.md) for the protocol and dedup ring.
@@ -1248,6 +1333,14 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
   3. In the failing scenario, inspect the rendered tool cards: every wrapper carries `data-tool-name="<name>"`. If the named tool's card is missing while a file-tool card with the same sentinel text is present, that is the substitution signature.
 - **If the symptom returns after another pi bump**: adapt Bobbit's activation contract to whatever the new pi line expects — do **not** relax either canary. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers).
 
+## `OAuthLoginCallbacks` missing `onDeviceCode` / `onSelect` after pi upgrade
+
+- **Symptom**: after bumping `@earendil-works/pi-ai` to `0.75.x`, `npm run check` fails with `TS2345` at `src/server/auth/oauth.ts` saying the object literal passed to `oauthProvider.login(...)` is missing properties `onDeviceCode` and `onSelect` from `OAuthLoginCallbacks`.
+- **Root cause**: pi-ai 0.75 made the OAuth Device Authorization Grant (`onDeviceCode`) and host-side selection prompt (`onSelect`) callbacks **required** on the login bag. Only `src/server/auth/oauth.ts::oauthStartExternal()` exercises this surface — Anthropic uses Bobbit's own PKCE flow and is unaffected.
+- **Rule**: wire `onDeviceCode` into the existing `started`-promise path via a single-shot resolver (whichever of `onAuth` / `onDeviceCode` fires first wins); wire `onSelect` to auto-pick a single option and throw a Bobbit-specific "OAuth provider requested a selection Bobbit does not support yet" error for multi-option prompts so the flow fails loudly rather than hanging on a missing UI.
+- **Reference**: [docs/design/pi-0.75-upgrade.md](design/pi-0.75-upgrade.md) — full contract + rationale.
+- **Pinning test**: `tests/oauth-external-callbacks.test.ts` covers single-shot device-code resolution, single-option auto-select, and multi-option rejection. Extend it rather than adding prose if a future pi-ai release reshapes the callbacks again.
+
 ## 60+ TSchema errors / typebox flavor mismatch after pi upgrade
 
 - **Symptom**: after bumping `@earendil-works/pi-ai` (or any `@earendil-works/pi-*` package that re-exports schema helpers), `npm run check` floods with structurally-incompatible-type errors against `TSchema`, `TObject`, `TProperties`, `Static<...>`, etc. Errors typically point at a file that mixes `Type.Object(...)` / `Static<typeof X>` with a pi-ai-returning helper like `StringEnum` or a tool whose `parameters` schema is consumed by pi-ai.
@@ -1258,8 +1351,7 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
 
 ## Bundle-size assertion fails
 
-`tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and asserts ≤ 600 kB gzipped, plus ≤ 500 kB gzipped for any non-worker chunk. Check `dist/ui/.vite/manifest.j
- manifest.json` exists; ensure `npm run build:ui` ran first; the test reads gzipped sizes directly from `dist/ui/assets/`. The `pdf.worker.min-*.mjs` chunk is whitelisted. See [docs/design/ui-bundle-size-reduction.md](design/ui-bundle-size-reduction.md).
+`tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and enforces three budgets: entry ≤ 250 kB gzipped, any non-worker chunk ≤ 200 kB gzipped, and no non-worker chunk > 600 kB raw (the raw guard pins Vite's `chunkSizeWarningLimit: 600`). Ensure `dist/ui/.vite/manifest.json` exists (`npm run build:ui` first — the test is skipped when `dist/ui` is absent); sizes are read directly from `dist/ui/assets/`. The `pdf.worker.min-*.mjs` chunk is whitelisted. Run the build-then-assert in one shot with `npm run test:bundle`. **Raw-guard regression?** The usual cause is the app-shell SCC growing back past 600 kB raw — split a stable app seam into its own chunk via `manualChunks` rather than raising the budget. Profile with [docs/perf/bundle-profile.md](perf/bundle-profile.md); see the bundle-shrink history in [docs/design/ui-bundle-size-reduction.md](design/ui-bundle-size-reduction.md) → [shrink-initial-bundle.md](design/shrink-initial-bundle.md) → [shrink-main-ui-manualchunks.md](design/shrink-main-ui-manualchunks.md).
 
 ## Markdown not rendering in chat / proposal panel
 
@@ -1369,3 +1461,11 @@ Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call si
 - **Symptom**: changing the Context Policy radio on the staff edit page and clicking Save shows the new value briefly, then the form re-renders with the old value.
 - **Fix shipped in the staff-inbox release**: `PUT /api/staff/:id` now forwards `contextPolicy` (`"preserve"` \| `"compact"`) through to `StaffStore.update`. Pre-fix builds dropped it on the allow-list.
 - **If seen again**: check `server.ts` `PUT /api/staff/:id` handler still threads `body.contextPolicy` into the update payload; `staff-store.ts` `update()` normalises any other value to `"compact"`. The radio binding is in `src/app/staff-page.ts` (`editContextPolicy` field).
+
+## "text field in the ContentBlock … is blank" (image/attachment-only prompt)
+
+- **Symptom**: sending a prompt with only an image/attachment and no typed text fails with `Validation error: the text field in the ContentBlock at messages … is blank.` The session then stays broken — even retries that include text re-fail with the same error.
+- **Cause**: the model API rejects a user message whose `ContentBlock` has a blank `text` field (next to an image, or standalone). The blank block was committed to the agent's `.jsonl` transcript, so every later turn replayed it. See [docs/image-attachment-only-prompts.md](image-attachment-only-prompts.md) for the full design.
+- **Source-prevention fix**: `synthesizeAttachmentText` (`rpc-bridge.ts`) substitutes the synthetic body `ATTACHMENT_ONLY_TEXT` (`"Attachments:"`) when text is blank/whitespace AND an image/attachment is present. Applied at the dispatch boundary in `SessionManager.enqueuePrompt` so direct/queued/recovery/retry paths all inherit valid text; backstopped in `RpcBridge.prompt` for the image case.
+- **Recovery fix (already-broken sessions)**: `isBlankContentBlockError` detects the poison; the transcript sanitizer (`transcript-sanitizer.ts`) rewrites blank-text user messages to `"Attachments:"` at the rehydration boundary (it never touches `tool_result` user messages and hardens the write path against symlink/traversal); `_recoverBlankTextPoison` respawns the live agent so it rehydrates from the clean transcript.
+- **Pinning tests**: `tests/synthesize-attachment-text.test.ts`, `tests/image-only-prompt-dispatch.test.ts`, `tests/image-only-prompt-unstick-recovery.test.ts`, `tests/transcript-sanitizer.test.ts`.

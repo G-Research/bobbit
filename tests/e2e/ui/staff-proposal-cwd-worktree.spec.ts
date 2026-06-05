@@ -30,7 +30,7 @@ async function waitForActiveProject(page: Page): Promise<UiProject> {
 async function openStaffProposalPanel(page: Page) {
 	const panel = page.locator('[data-panel="staff-proposal"]').first();
 	if (!(await panel.isVisible().catch(() => false))) {
-		const tab = page.locator('button.goal-tab-pill[title="Staff"]').first();
+		const tab = page.locator('.goal-tab-pill[title="Staff"]').first();
 		if (await tab.isVisible().catch(() => false)) {
 			await tab.click();
 		} else {

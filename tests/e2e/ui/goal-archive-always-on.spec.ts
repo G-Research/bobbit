@@ -67,6 +67,30 @@ async function teamLeadActiveForGoal(page: Page, goalId: string): Promise<boolea
 	}, goalId);
 }
 
+function sidebarGoalRow(page: Page, goalId: string) {
+	return page.locator(`[data-nav-id="goal:${goalId}"]`);
+}
+
+function confirmDialog(page: Page, title: string) {
+	return page.locator("body > div")
+		.filter({ has: page.getByRole("heading", { name: title, exact: true }) })
+		.last();
+}
+
+async function openSidebarArchiveDialog(page: Page, goalId: string, expectedTitle: string) {
+	const goalRow = sidebarGoalRow(page, goalId);
+	await expect(goalRow).toBeVisible({ timeout: 10_000 });
+	await goalRow.hover();
+
+	const archiveBtn = goalRow.locator('button[title="Archive goal"]').first();
+	await expect(archiveBtn).toBeVisible({ timeout: 5_000 });
+	await archiveBtn.click();
+
+	const dialog = confirmDialog(page, expectedTitle);
+	await expect(dialog.getByRole("heading", { name: expectedTitle, exact: true })).toBeVisible({ timeout: 5_000 });
+	return dialog;
+}
+
 test.describe("Goal archive button (always-on)", () => {
 	test("non-merged, no-team goal: archives via confirm modal and persists across reload", async ({ page }) => {
 		// Create a goal with no team, no worktree, no PR. Pre-fix this row had
@@ -78,36 +102,24 @@ test.describe("Goal archive button (always-on)", () => {
 		try {
 			await openApp(page);
 
-			// Find the goal row in the sidebar by its title.
-			const goalRow = page.locator("div", { hasText: title }).first();
-			await expect(goalRow).toBeVisible({ timeout: 10_000 });
-			await goalRow.hover();
-
-			// The action strip is hover-revealed (`hidden group-hover:flex`)
-			// on desktop — the button exists in the DOM regardless. Asserting
-			// on `count() > 0` proves the always-on render gate; clicks below
-			// dispatch programmatically to bypass the CSS hide.
-			const archiveButtons = page.locator('button[title="Archive goal"]');
-			await expect.poll(async () => archiveButtons.count(), { timeout: 5_000 }).toBeGreaterThan(0);
-			const archiveBtn = archiveButtons.first();
+			// The action strip is hover-revealed on desktop. Scope to the goal row
+			// by id so the sidebar quick action and modal confirm button don't race.
+			const archiveBtn = sidebarGoalRow(page, goalId).locator('button[title="Archive goal"]').first();
+			await expect(archiveBtn).toBeAttached({ timeout: 5_000 });
 
 			// --- Cancel path ---
-			await archiveBtn.evaluate((el: HTMLElement) => el.click());
-			const dialogTitle = page.getByText("Archive Goal", { exact: true }).first();
-			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(title, { exact: false }).first()).toBeVisible();
-			await page.getByRole("button", { name: "Cancel" }).first().click();
-			await expect(dialogTitle).toBeHidden({ timeout: 5_000 });
+			let dialog = await openSidebarArchiveDialog(page, goalId, "Archive Goal");
+			await expect(dialog).toContainText(title);
+			await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+			await expect(dialog).toBeHidden({ timeout: 5_000 });
 
 			const stillThere = await apiFetch(`/api/goals/${goalId}`);
 			expect(stillThere.ok).toBe(true);
 
 			// --- Confirm path ---
-			await goalRow.hover();
-			await archiveBtn.evaluate((el: HTMLElement) => el.click());
-			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
-			await page.getByRole("button", { name: "Archive", exact: true }).first().click();
-			await expect(dialogTitle).toBeHidden({ timeout: 5_000 });
+			dialog = await openSidebarArchiveDialog(page, goalId, "Archive Goal");
+			await dialog.getByRole("button", { name: "Archive", exact: true }).click();
+			await expect(dialog).toBeHidden({ timeout: 5_000 });
 
 			// Goal flagged archived server-side.
 			await expect.poll(async () => {
@@ -177,24 +189,18 @@ test.describe("Goal archive button (always-on)", () => {
 				{ timeout: 15_000 },
 			).toBe(true);
 
-			const goalRow = page.locator("div", { hasText: title }).first();
-			await expect(goalRow).toBeVisible({ timeout: 10_000 });
-			await goalRow.hover();
-
-			const archiveButtons = page.locator('button[title="Archive goal"]');
-			await expect.poll(async () => archiveButtons.count(), { timeout: 5_000 }).toBeGreaterThan(0);
-			await archiveButtons.first().evaluate((el: HTMLElement) => el.click());
+			const archiveBtn = sidebarGoalRow(page, goalId).locator('button[title="Archive goal"]').first();
+			await expect(archiveBtn).toBeAttached({ timeout: 5_000 });
 
 			// Team-active modal copy.
-			const teamDialogTitle = page.getByText("Stop team and archive goal?", { exact: true }).first();
-			await expect(teamDialogTitle).toBeVisible({ timeout: 5_000 });
-			await expect(page.getByText(title, { exact: false }).first()).toBeVisible();
-			const confirmBtn = page.getByRole("button", { name: "Stop & Archive", exact: true }).first();
+			const dialog = await openSidebarArchiveDialog(page, goalId, "Stop team and archive goal?");
+			await expect(dialog).toContainText(title);
+			const confirmBtn = dialog.getByRole("button", { name: "Stop & Archive", exact: true });
 			await expect(confirmBtn).toBeVisible();
 
 			// Confirm — teardown then DELETE.
 			await confirmBtn.click();
-			await expect(teamDialogTitle).toBeHidden({ timeout: 10_000 });
+			await expect(dialog).toBeHidden({ timeout: 10_000 });
 
 			// Server-side: goal archived.
 			await expect.poll(async () => {
@@ -249,17 +255,10 @@ test.describe("Goal archive button (always-on)", () => {
 
 			await archiveBtn.click();
 
-			const dialogTitle = page.getByText("Archive Goal", { exact: true }).first();
-			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
-
-			// The dashboard renders an "Archive" button (the trash icon we
-			// just clicked) and the modal renders its own confirm "Archive"
-			// button — both match `getByRole("button", { name: "Archive" })`.
-			// confirmAction() wires Enter to confirm and Escape to cancel, so
-			// pressing Enter is the cleanest, ambiguity-free way to confirm
-			// from a focused dialog.
-			await page.keyboard.press("Enter");
-			await expect(dialogTitle).toBeHidden({ timeout: 5_000 });
+			const dialog = confirmDialog(page, "Archive Goal");
+			await expect(dialog.getByRole("heading", { name: "Archive Goal", exact: true })).toBeVisible({ timeout: 5_000 });
+			await dialog.getByRole("button", { name: "Archive", exact: true }).click();
+			await expect(dialog).toBeHidden({ timeout: 5_000 });
 
 			await expect.poll(async () => {
 				const r = await apiFetch(`/api/goals/${goalId}`);

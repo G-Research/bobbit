@@ -93,10 +93,11 @@ export class ProposalRenderer implements ToolRenderer {
 			e.preventDefault();
 			e.stopPropagation();
 			const detail: Record<string, unknown> = { type: meta.type };
+			if (fields) detail.fields = fields;
 			if (typeof rev === "number" && rev > 0) {
 				detail.rev = rev;
-			} else {
-				detail.fields = fields || {};
+			} else if (!fields) {
+				detail.fields = {};
 			}
 			document.dispatchEvent(new CustomEvent("proposal-open", { detail }));
 		};

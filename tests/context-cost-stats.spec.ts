@@ -134,6 +134,32 @@ test.describe("PI-18: Cost display", () => {
 		expect(text).toBe("");
 	});
 
+	test("visible-message cost alone is not shown without authoritative server cost", async ({ page }) => {
+		await page.evaluate(() => {
+			(window as any).setUsage(5000, 3000, 200000);
+			(window as any).setVisibleCost(0.4);
+			(window as any).setServerCost(null);
+		});
+
+		expect(await page.evaluate(() => (window as any).getCostText())).toBe("");
+
+		await page.click("#context-area");
+		expect(await page.evaluate(() => (window as any).getContextTotalCostText())).toBe("—");
+	});
+
+	test("server cost wins over reduced visible-message cost in footer and session popover", async ({ page }) => {
+		await page.evaluate(() => {
+			(window as any).setUsage(5000, 3000, 200000);
+			(window as any).setVisibleCost(0.4);
+			(window as any).setServerCost(2.5);
+		});
+
+		expect(await page.evaluate(() => (window as any).getCostText())).toBe("$3");
+
+		await page.click("#context-area");
+		expect(await page.evaluate(() => (window as any).getContextTotalCostText())).toBe("$3");
+	});
+
 	test("click toggles cost popover open", async ({ page }) => {
 		await page.evaluate(() => (window as any).setCost(1.5));
 		expect(await page.evaluate(() => (window as any).isPopoverOpen())).toBe(false);

@@ -1,6 +1,7 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
+import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 
 // ============================================================================
@@ -39,6 +40,16 @@ export interface GatewaySession {
 	colorIndex?: number;
 	/** If this is a delegate session, the parent session ID */
 	delegateOf?: string;
+	/** First-class parent session ID for visible child sessions (not delegate lifecycle). */
+	parentSessionId?: string;
+	/** Kind discriminator for first-class child sessions, e.g. "pr-walkthrough". */
+	childKind?: string;
+	/** Whether the session should be treated as read-only by clients/tools. */
+	readOnly?: boolean;
+	/** PR walkthrough job metadata for session-hosted walkthrough children. */
+	walkthroughJobId?: string;
+	walkthroughChangesetId?: string;
+	walkthroughTargetKey?: string;
 	/** Role in a team goal */
 	role?: string;
 	/** The team goal this agent belongs to */
@@ -65,6 +76,12 @@ export interface GatewaySession {
 	sandboxed?: boolean;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
+	/** Server-emitted: true when the most recent turn produced an error frame.
+	 *  Used by `notification-policy.ts` rule 3 (errored-and-parked). */
+	lastTurnErrored?: boolean;
+	/** Server-emitted: count of consecutive errored turns. Compared against
+	 *  `MAX_CONSECUTIVE_ERROR_TURNS` (3 today) by notification-policy.ts rule 3. */
+	consecutiveErrorTurns?: number;
 }
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
@@ -132,6 +149,56 @@ export interface Goal {
 }
 
 export type AppView = "disconnected" | "gateway-starting" | "authenticated";
+
+export type ReviewDecision = "approve" | "reject";
+
+export interface ReviewInlineCommentPayload {
+	documentTitle: string;
+	quote: string;
+	comment: string;
+	prefix?: string;
+	suffix?: string;
+	start?: number;
+	end?: number;
+	isCode?: boolean;
+}
+
+export interface ReviewDecisionPayload {
+	decision: ReviewDecision;
+	finalComment: string;
+	inlineComments: ReviewInlineCommentPayload[];
+	feedback: string;
+}
+
+export type ReviewSource =
+	| { kind: "markdown-review"; sessionId: string }
+	| {
+		kind: "verification-signoff-markdown";
+		goalId: string;
+		gateId: string;
+		signalId: string;
+		stepName: string;
+		goalTitle?: string;
+		gateName?: string;
+		stepLabel?: string;
+	}
+	| {
+		kind: "verification-signoff-pr";
+		goalId: string;
+		gateId: string;
+		signalId: string;
+		stepName: string;
+		prUrl: string;
+		goalTitle?: string;
+		gateName?: string;
+		stepLabel?: string;
+	};
+
+export interface ReviewDocumentModel {
+	title: string;
+	markdown: string;
+	source?: ReviewSource;
+}
 
 // ============================================================================
 // SIDEBAR WIDTH (user-resizable) — helpers declared before `state` so the
@@ -227,8 +294,25 @@ export const state = {
 	sessionsGeneration: -1,
 	/** Server generation counter for goals — used to skip redundant refreshes */
 	goalsGeneration: -1,
-	/** Gate status cache: goalId → { passed, total, verifying } */
-	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean; verifyingCount: number }>(),
+	/** Gate status cache: goalId → server-authoritative gate summary.
+	 *  `awaitingHumanSignoff` is denormalised (= awaitingSignoffCount > 0) so the
+	 *  notification-policy hot path can do an O(1) check without recounting. */
+	gateStatusCache: new Map<string, {
+		passed: number;
+		total: number;
+		verifying: boolean;
+		verifyingCount: number;
+		awaitingSignoffCount: number;
+		awaitingHumanSignoff: boolean;
+		runningGateIds?: string[];
+		gates?: Array<{
+			gateId: string;
+			status: "pending" | "passed" | "failed";
+			effectiveStatus?: "pending" | "passed" | "failed" | "running";
+			running?: boolean;
+			awaitingSignoffCount?: number;
+		}>;
+	}>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
 	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string }>(),
 	sessionsLoading: false,
@@ -334,13 +418,29 @@ export const state = {
 	previewPanelMtime: 0 as number,
 	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
 	previewPanelEntry: "" as string,
+	// SHA-256 identity for the currently mounted preview content tree.
+	previewPanelContentHash: "" as string,
+	// When the active preview tab is a historical artifact, the iframe is served
+	// directly from `/preview/<sid>/_artifact/<artifactId>/...` without needing
+	// a server-side mount/restore round-trip. Empty string means the live mount
+	// slot is being used.
+	previewPanelArtifactId: "" as string,
 	previewPanelFullscreen: false,
 
-	// Unified preview panel tab (for non-assistant sessions with preview or proposal of any type)
+	// Dynamic per-session side-panel workspace. panelTabs / activePanelTabId are
+	// compatibility mirrors for the active session's keyed workspace below.
+	panelTabsBySession: {} as Record<string, PanelWorkspaceTab[]>,
+	panelTabs: [] as PanelWorkspaceTab[],
+	activePanelTabId: "chat",
+	panelWorkspaceActiveBySession: {} as Record<string, string>,
+	panelWorkspacePreviewKeyBySession: {} as Record<string, string>,
+	previewVersionsBySession: {} as Record<string, Record<string, { latestVersion: number; latestContentHash?: string; hashToVersion: Record<string, number> }>>,
+
+	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
 	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 
-	// Review pane state (agent-initiated markdown review documents)
-	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
+	// Review pane state (agent-initiated markdown and verification sign-off documents)
+	reviewDocuments: new Map() as Map<string, ReviewDocumentModel>,
 	reviewActiveTab: "" as string,
 	reviewPanelOpen: false,
 
@@ -487,17 +587,37 @@ export function saveExpandedGoals(): void {
 }
 
 
-export function toggleTeamLeadExpanded(sessionId: string): void {
-	if (collapsedTeamLeadSessions.has(sessionId)) {
-		collapsedTeamLeadSessions.delete(sessionId);
-	} else {
-		collapsedTeamLeadSessions.add(sessionId);
-	}
+export function setTeamLeadExpanded(sessionId: string, expanded: boolean): void {
+	if (expanded) collapsedTeamLeadSessions.delete(sessionId);
+	else collapsedTeamLeadSessions.add(sessionId);
 	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+}
+
+export function toggleTeamLeadExpanded(sessionId: string): void {
+	setTeamLeadExpanded(sessionId, collapsedTeamLeadSessions.has(sessionId));
 }
 
 export function isTeamLeadExpanded(sessionId: string): boolean {
 	return !collapsedTeamLeadSessions.has(sessionId);
+}
+
+const COLLAPSED_FIRST_CLASS_PARENTS_KEY = "bobbit-collapsed-first-class-parents";
+export let collapsedFirstClassParents: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY) || "[]"),
+);
+
+export function setFirstClassParentExpanded(sessionId: string, expanded: boolean): void {
+	if (expanded) collapsedFirstClassParents.delete(sessionId);
+	else collapsedFirstClassParents.add(sessionId);
+	localStorage.setItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
+}
+
+export function toggleFirstClassParentExpanded(sessionId: string): void {
+	setFirstClassParentExpanded(sessionId, collapsedFirstClassParents.has(sessionId));
+}
+
+export function isFirstClassParentExpanded(sessionId: string): boolean {
+	return !collapsedFirstClassParents.has(sessionId);
 }
 
 const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
@@ -505,13 +625,14 @@ const expandedDelegateParents: Set<string> = new Set(
 	JSON.parse(localStorage.getItem(EXPANDED_DELEGATE_PARENTS_KEY) || "[]"),
 );
 
-export function toggleArchivedParentExpanded(sessionId: string): void {
-	if (expandedDelegateParents.has(sessionId)) {
-		expandedDelegateParents.delete(sessionId);
-	} else {
-		expandedDelegateParents.add(sessionId);
-	}
+export function setArchivedParentExpanded(sessionId: string, expanded: boolean): void {
+	if (expanded) expandedDelegateParents.add(sessionId);
+	else expandedDelegateParents.delete(sessionId);
 	localStorage.setItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
+}
+
+export function toggleArchivedParentExpanded(sessionId: string): void {
+	setArchivedParentExpanded(sessionId, !expandedDelegateParents.has(sessionId));
 }
 
 export function isArchivedParentExpanded(sessionId: string): boolean {
@@ -534,6 +655,10 @@ export function resetArchivedExpandState(): void {
 	for (const id of archivedSessionIds) collapsedTeamLeadSessions.delete(id);
 	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
 
+	// Reset archived first-class parent sessions from collapsedFirstClassParents
+	for (const id of archivedSessionIds) collapsedFirstClassParents.delete(id);
+	localStorage.setItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
+
 	// Free memory — archived sessions will be re-fetched on next toggle-on
 	state.archivedSessions = [];
 }
@@ -544,18 +669,38 @@ export function resetArchivedExpandState(): void {
 
 let _renderApp: () => void = () => {};
 let _renderScheduled = false;
+let _renderSuppressed = false;
+let _renderPendingWhileSuppressed = false;
 
 export function setRenderApp(fn: () => void): void {
 	_renderApp = fn;
 }
 
 export function renderApp(): void {
+	if (_renderSuppressed) {
+		// While suppression is active (e.g. SortableJS is mid-drag and owns the
+		// DOM), buffer the request. On resume we flush exactly one render.
+		_renderPendingWhileSuppressed = true;
+		return;
+	}
 	if (_renderScheduled) return;
 	_renderScheduled = true;
 	requestAnimationFrame(() => {
 		_renderScheduled = false;
 		_renderApp();
 	});
+}
+
+/** Suspend renderApp() while an external system (e.g. SortableJS) owns the
+ *  DOM during a drag. Any renderApp() calls during the suspension are
+ *  collapsed into a single render that runs immediately when resumed. */
+export function setRenderSuppressed(suppressed: boolean): void {
+	if (_renderSuppressed === suppressed) return;
+	_renderSuppressed = suppressed;
+	if (!suppressed && _renderPendingWhileSuppressed) {
+		_renderPendingWhileSuppressed = false;
+		renderApp();
+	}
 }
 
 // ============================================================================
@@ -569,6 +714,30 @@ export function setProjects(projects: Project[]): void {
 	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
 		state.activeProjectId = projects[0]?.id ?? null;
 	}
+}
+
+function projectSignature(project: Project): string {
+	const record = project as unknown as Record<string, unknown>;
+	const sorted: Record<string, unknown> = {};
+	for (const key of Object.keys(record).sort()) {
+		sorted[key] = record[key];
+	}
+	return JSON.stringify(sorted);
+}
+
+export function projectsEqual(a: Project[], b: Project[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].id !== b[i].id) return false;
+		if (projectSignature(a[i]) !== projectSignature(b[i])) return false;
+	}
+	return true;
+}
+
+export function setProjectsIfChanged(projects: Project[]): boolean {
+	if (projectsEqual(state.projects, projects)) return false;
+	setProjects(projects);
+	return true;
 }
 
 // ============================================================================
@@ -653,14 +822,14 @@ let _sidebarCacheKey: string = "";
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.archived ? "A" : "")).join(",")}:${state.staffList.map(s => s.currentSessionId).join(",")}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
 	// Exclude staff sessions even before state.staffList loads by also checking
 	// assistantType. Without this, a race between fetchStaff() and initial render
 	// shows staff sessions in the Sessions bucket until the staff list arrives.
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id) && (s as any).assistantType !== "staff").sort((a, b) => a.createdAt - b.createdAt);
+	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !s.parentSessionId && !staffSessionIds.has(s.id) && (s as any).assistantType !== "staff").sort((a, b) => a.createdAt - b.createdAt);
 	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
 	const liveGoals = sortedGoals.filter(g => !g.archived);
 	const archivedGoals = sortedGoals.filter(g => g.archived);

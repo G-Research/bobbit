@@ -12,9 +12,18 @@
  */
 
 import { state } from "./state.js";
-import { showGoalDialog, showProjectDialog } from "./dialogs.js";
-import "../ui/components/ProjectPickerPopover.js";
+import { showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
+// Lazy-load the popover element on click. The custom-element tag stays
+// unknown until the chunk lands; once defined the element is
+// constructed normally via `document.createElement(...)`.
 import type { ProjectPickerPopover } from "../ui/components/ProjectPickerPopover.js";
+
+let _popoverLoaded: Promise<unknown> | null = null;
+function ensureProjectPickerPopover(): Promise<unknown> {
+	if (_popoverLoaded) return _popoverLoaded;
+	_popoverLoaded = import("../ui/components/ProjectPickerPopover.js");
+	return _popoverLoaded;
+}
 
 /**
  * Mount the project picker popover anchored to `anchorEl`. Fires `onPick`
@@ -31,6 +40,11 @@ export function showProjectPickerPopover(
 	for (const stale of Array.from(document.querySelectorAll("project-picker-popover"))) {
 		stale.remove();
 	}
+
+	// Fire-and-forget the dynamic import. The element is mounted as an
+	// HTMLUnknownElement and upgraded once the chunk's customElements.define
+	// resolves; property bindings on `picker` are preserved across the upgrade.
+	void ensureProjectPickerPopover();
 
 	const picker = document.createElement("project-picker-popover") as ProjectPickerPopover;
 	picker.projects = state.projects.map(p => ({

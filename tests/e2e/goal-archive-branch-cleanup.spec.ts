@@ -6,7 +6,9 @@
  *
  * Strategy: stand up a real local bare-repo origin, register the clone as
  * a project, create a team goal, spawn 2 role agents (each gets its own
- * `goal-goal-<slug>-<id>-<role>-<short>` branch pushed to origin), archive
+ * `goal/<id8>/<role>-<short4>` branch pushed to origin — legacy
+ * `goal-goal-<slug>-<id>-<role>-<short>` branches from before the
+ * `pithier-te` rename are recognised by the same cleanup path), archive
  * the goal, then poll `git ls-remote --heads <bare>` until every per-role
  * branch is gone (≤55s).
  *

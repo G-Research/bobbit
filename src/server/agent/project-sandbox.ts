@@ -14,19 +14,76 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs } from "./docker-args.js";
+import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
+import type { SandboxCloneSource } from "./sandbox-clone-source.js";
 
 const execFileAsync = promisify(execFileCb);
+const DOCKER_BIN = "docker";
 
 /** Env config for docker commands — suppresses MSYS path mangling on Windows. */
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
+
+function childErrorCode(err: unknown): string {
+	const code = (err as { code?: unknown } | null)?.code;
+	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
+}
+
+function dockerOperation(args: readonly string[]): string {
+	const cmd = args[0] || "docker";
+	if (cmd !== "exec") return cmd;
+	let i = 1;
+	while (i < args.length) {
+		const arg = args[i];
+		if (arg === "-w" || arg === "-e" || arg === "-u") { i += 2; continue; }
+		if (arg?.startsWith("-")) { i += 1; continue; }
+		break;
+	}
+	const inner = args[i + 1] || "unknown";
+	const innerSub = args[i + 2];
+	if (inner === "git" && innerSub) return `exec git ${innerSub}`;
+	return `exec ${inner}`;
+}
+
+function dockerChildLabel(args: readonly string[]): string {
+	const op = dockerOperation(args);
+	if (op.startsWith("exec git")) return "docker exec git";
+	if (op.startsWith("exec ")) return "docker exec";
+	return `docker ${args[0] || "command"}`;
+}
+
+async function execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+	if (!cpuDiagnosticsEnabled()) {
+		return await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+	}
+	const start = performance.now();
+	let success = 0;
+	let errorCode = "none";
+	try {
+		const result = await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+		success = 1;
+		return result;
+	} catch (err) {
+		errorCode = childErrorCode(err);
+		throw err;
+	} finally {
+		getCpuDiagnostics().recordChildProcess(dockerChildLabel(args), performance.now() - start, {
+			operation: dockerOperation(args),
+			success,
+			errorCode,
+			timeoutMs: typeof options?.timeout === "number" ? options.timeout : 0,
+		});
+	}
+}
 
 // ── Docker resource limits ─────────────────────────────────────────────────
 
@@ -46,8 +103,8 @@ export async function getDockerResourceLimits(): Promise<DockerResourceLimits | 
 	if (_cachedDockerLimits !== undefined) return _cachedDockerLimits;
 
 	try {
-		const { stdout } = await execFileAsync(
-			"docker", ["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
+		const { stdout } = await execDocker(
+			["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
 			{ timeout: 5_000, env: DOCKER_ENV },
 		);
 		const parts = stdout.trim().split(/\s+/);
@@ -95,10 +152,19 @@ export interface ProjectSandboxOptions {
 	projectId: string;
 	projectDir: string;        // host project root
 	repoUrl: string;           // git remote URL to clone inside container (single-repo)
+	/**
+	 * Resolved clone source for the single-repo clone. When `kind === "mounted"`
+	 * the host repo is bind-mounted read-only into the container and cloned via
+	 * `file://`, never a raw host path. Falls back to `repoUrl` when absent.
+	 * See `resolveSandboxCloneSource` and `docs/design/...`.
+	 */
+	cloneSource?: SandboxCloneSource;
 	image: string;             // Docker image name
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
+	sandboxAgentAuthAllowed?: boolean;
+	sandboxAgentAuthPrefs?: PreferencesStore | null;
 	githubToken?: string;      // for git push/PR inside container
 	/** Tool manager for resolving builtin tools directory in Docker mounts. */
 	toolManager?: ToolManager;
@@ -116,6 +182,13 @@ export interface ProjectSandboxOptions {
 	 * remote prefix and the host can resolve them via `git remote get-url`).
 	 */
 	repoUrlByName?: Record<string, string>;
+	/**
+	 * Multi-repo: optional per-repo resolved clone sources. When a repo has no
+	 * `origin`, the resolver yields a `mounted` source so the container clones
+	 * via `file://` instead of an unreachable host path. Each `mounted` source's
+	 * host path is bind-mounted read-only at its `mountPath`.
+	 */
+	cloneSourceByName?: Record<string, SandboxCloneSource>;
 	/**
 	 * Live resolver for the project's `base_ref` setting. Called fresh on every
 	 * `createWorktree` / `createWorktreeSet` so the container path adopts the
@@ -163,6 +236,13 @@ export class ProjectSandbox {
 			this._readyResolve = resolve;
 			this._readyReject = reject;
 		});
+		// Always "handle" the ready promise so a failed init with no concurrent
+		// awaiter (only `getContainerId()` awaits it) never surfaces as a global
+		// `unhandledRejection` — which under load can wedge the gateway for other
+		// sessions. The real rejection is still observed by `getContainerId()`
+		// (which awaits the same promise) and re-thrown on the awaited `init()`
+		// boundary below. See tests/sandbox-init-rejection.test.ts.
+		this._readyPromise.catch(() => {});
 
 		try {
 			await this._initContainer();
@@ -201,7 +281,7 @@ export class ProjectSandbox {
 			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
 		} catch {
 			// Permission denied — create as root and chown to node
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -249,17 +329,18 @@ export class ProjectSandbox {
 		// Install post-commit hook for push-to-remote durability
 		await this._installPostCommitHook(containerId, worktreePath);
 
-		// Set upstream tracking (non-fatal)
+		// Publish with an explicit destination refspec, then set upstream tracking
+		// only after that safe publish succeeds (non-fatal).
 		if (!shouldSkipRemotePush()) {
 			try {
-				await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: worktreePath });
-			} catch { /* push may fail if branch doesn't exist on remote yet */ }
+				await this._publishBranchToOrigin(containerId, worktreePath, branch, true);
+			} catch { /* push may fail with no remote, auth issues, or offline */ }
 		}
 
 		// When the project has a configured `base_ref`, override the per-branch
 		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
-		// integration target rather than `origin/<branch>` that `git push -u`
-		// just set. Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
+		// integration target rather than `origin/<branch>` created above.
+		// Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
 		// Non-fatal in the sandbox — host-side save-time validation already
 		// guarantees the ref resolves; this is defence-in-depth.
 		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
@@ -310,7 +391,7 @@ export class ProjectSandbox {
 		try {
 			await this._dockerExec(containerId, ["mkdir", "-p", container]);
 		} catch {
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				`mkdir -p ${container} && chown node:node ${container}`,
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -355,8 +436,8 @@ export class ProjectSandbox {
 
 			if (!shouldSkipRemotePush()) {
 				try {
-					await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: wtPath });
-				} catch { /* push may fail if branch doesn't exist on remote yet */ }
+					await this._publishBranchToOrigin(containerId, wtPath, branch, true);
+				} catch { /* push may fail with no remote, auth issues, or offline */ }
 			}
 
 			// Override per-branch upstream to the configured `base_ref` when set,
@@ -425,6 +506,9 @@ export class ProjectSandbox {
 	/** Start periodic health checks. Safe to call multiple times. */
 	startHealthMonitor(intervalMs = 20_000): void {
 		this.stopHealthMonitor();
+		if (cpuDiagnosticsEnabled()) {
+			getCpuDiagnostics().recordTimer("project-sandbox:healthMonitor", 0, { starts: 1, intervalMs });
+		}
 		this._healthInterval = setInterval(() => {
 			this._healthCheck().catch(err => {
 				console.warn(`[project-sandbox] Health check error for project ${this.options.projectId}:`, err?.message || err);
@@ -437,6 +521,9 @@ export class ProjectSandbox {
 		if (this._healthInterval) {
 			clearInterval(this._healthInterval);
 			this._healthInterval = null;
+			if (cpuDiagnosticsEnabled()) {
+				getCpuDiagnostics().recordTimer("project-sandbox:healthMonitor", 0, { stops: 1 });
+			}
 		}
 	}
 
@@ -456,33 +543,58 @@ export class ProjectSandbox {
 	}
 
 	private async _healthCheck(): Promise<void> {
-		if (this._recovering) return;
-		// Skip if never initialized (still in first-time startup)
-		if (this._status === "starting") return;
-		// If status is "ready", check container health; if "error", retry recovery
-		if (this._status === "ready") {
-			if (!this.containerId) return;
-			const isRunning = await this._isContainerRunning(this.containerId);
-			if (isRunning) return;
-		}
-
-		// Container is dead or previous recovery failed — begin recovery
-		this._recovering = true;
-		const oldContainerId = this.containerId ?? "unknown";
-		this._status = "error";
-
-		console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
-		this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
-
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		const counters = diagEnabled ? {
+			ticks: 1,
+			skippedRecovering: 0,
+			skippedStarting: 0,
+			skippedNoContainer: 0,
+			inspectCalls: 0,
+			running: 0,
+			dead: 0,
+			recoveryAttempts: 0,
+			recovered: 0,
+			recoveryErrors: 0,
+		} : undefined;
 		try {
-			await this.init();
-			console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
-			this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
-		} catch (err: any) {
-			console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
-			// Will retry on next poll cycle — _recovering resets so next cycle can try again
+			if (this._recovering) { if (counters) counters.skippedRecovering = 1; return; }
+			// Skip if never initialized (still in first-time startup)
+			if (this._status === "starting") { if (counters) counters.skippedStarting = 1; return; }
+			// If status is "ready", check container health; if "error", retry recovery
+			if (this._status === "ready") {
+				if (!this.containerId) { if (counters) counters.skippedNoContainer = 1; return; }
+				if (counters) counters.inspectCalls = 1;
+				const isRunning = await this._isContainerRunning(this.containerId);
+				if (isRunning) { if (counters) counters.running = 1; return; }
+				if (counters) counters.dead = 1;
+			}
+
+			// Container is dead or previous recovery failed — begin recovery
+			this._recovering = true;
+			const oldContainerId = this.containerId ?? "unknown";
+			this._status = "error";
+			if (counters) counters.recoveryAttempts = 1;
+
+			console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
+			this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+
+			try {
+				await this.init();
+				if (counters) counters.recovered = 1;
+				console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
+				this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+			} catch (err: any) {
+				if (counters) counters.recoveryErrors = 1;
+				console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
+				// Will retry on next poll cycle — _recovering resets so next cycle can try again
+			} finally {
+				this._recovering = false;
+			}
 		} finally {
-			this._recovering = false;
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("project-sandbox:healthCheck", performance.now() - diagStart, counters);
+			}
 		}
 	}
 
@@ -496,7 +608,7 @@ export class ProjectSandbox {
 				const wtList = await this._dockerExec(this.containerId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
 				console.log(`[project-sandbox] Pre-shutdown worktrees in ${this.containerId.substring(0, 12)}: ${wtList.trim()}`);
 			} catch { /* best-effort audit */ }
-			await execFileAsync("docker", ["stop", this.containerId], {
+			await execDocker(["stop", this.containerId], {
 				timeout: 30_000,
 				env: DOCKER_ENV,
 			});
@@ -512,14 +624,14 @@ export class ProjectSandbox {
 		const volumeName = this._volumeName();
 		if (this.containerId) {
 			try {
-				await execFileAsync("docker", ["rm", "-f", this.containerId], {
+				await execDocker(["rm", "-f", this.containerId], {
 					timeout: 15_000,
 					env: DOCKER_ENV,
 				});
 			} catch { /* already gone */ }
 		}
 		try {
-			await execFileAsync("docker", ["volume", "rm", "-f", volumeName], {
+			await execDocker(["volume", "rm", "-f", volumeName], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -579,7 +691,7 @@ export class ProjectSandbox {
 			} else {
 				// Stopped — try to start it
 				try {
-					await execFileAsync("docker", ["start", existingId], {
+					await execDocker(["start", existingId], {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
@@ -609,7 +721,7 @@ export class ProjectSandbox {
 	}
 
 	private async _createContainer(): Promise<void> {
-		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, githubToken } = this.options;
+		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
@@ -628,6 +740,21 @@ export class ProjectSandbox {
 			dockerLimits?.memBytes,
 		);
 
+		// Collect read-only bind mounts for any `mounted` clone sources (remote-less
+		// repos). The host repo is mounted at a fixed container path so the init
+		// sequence clones it via `file://<mountPath>` instead of an unreachable
+		// host path. De-dupe by mountPath so multi-repo sources can't collide.
+		const extraReadonlyMounts: Array<{ hostPath: string; mountPath: string }> = [];
+		const seenMountPaths = new Set<string>();
+		const addMount = (src?: SandboxCloneSource): void => {
+			if (src?.kind === "mounted" && !seenMountPaths.has(src.mountPath)) {
+				seenMountPaths.add(src.mountPath);
+				extraReadonlyMounts.push({ hostPath: src.hostPath, mountPath: src.mountPath });
+			}
+		};
+		addMount(this.options.cloneSource);
+		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
+
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused — named volume instead
@@ -640,8 +767,11 @@ export class ProjectSandbox {
 			pidsLimit: "0",  // unlimited — long-lived container runs many agents
 			sandboxMounts,
 			sandboxCredentials,
+			sandboxAgentAuthAllowed,
+			sandboxAgentAuthPrefs,
 			sandboxNetwork,
 			toolManager: this.options.toolManager,
+			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
 		});
 
 		// Inject GITHUB_TOKEN for git push/PR inside container
@@ -650,7 +780,7 @@ export class ProjectSandbox {
 			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
 		}
 
-		const { stdout } = await execFileAsync("docker", dockerArgs, {
+		const { stdout } = await execDocker(dockerArgs, {
 			timeout: 60_000,
 			env: DOCKER_ENV,
 		});
@@ -664,7 +794,7 @@ export class ProjectSandbox {
 
 		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
 		try {
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -674,7 +804,7 @@ export class ProjectSandbox {
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mount --bind /dev/null /proc/1/environ 2>/dev/null || chmod 0400 /proc/1/environ 2>/dev/null || true",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -713,9 +843,21 @@ export class ProjectSandbox {
 			// .git doesn't exist — need to clone
 		}
 
-		// Strip any embedded token from the URL (defense-in-depth).
-		// Auth is handled by the credential helper reading GITHUB_TOKEN from env.
-		const repoUrl = stripTokenFromGitUrl(this.options.repoUrl);
+		// Resolve the clone source. Prefer the pre-resolved `cloneSource`
+		// (which is guaranteed to never be a raw host path — remote-less repos
+		// become a `file://` bind-mount source). Fall back to the legacy
+		// `repoUrl` for backward compatibility, stripping any embedded token
+		// (defense-in-depth — auth is via the GITHUB_TOKEN credential helper).
+		const repoUrl = this.options.cloneSource?.cloneUrl ?? stripTokenFromGitUrl(this.options.repoUrl);
+
+		// Mark all paths as safe for git BEFORE cloning. When the clone source is a
+		// `file://` bind-mount (remote-less project — see resolveSandboxCloneSource),
+		// the mounted source repo is owned by the host UID, not the container `node`
+		// user, so git's dubious-ownership guard rejects the clone
+		// ("fatal: detected dubious ownership in repository at '/workspace-src/.git'")
+		// unless safe.directory is configured first. The multi-repo init path
+		// (`_runInitSequenceMultiRepo`) already orders this before its clones.
+		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
 
 		// Clone the repo
 		console.log(`[project-sandbox] Cloning ${repoUrl} into /workspace...`);
@@ -723,9 +865,6 @@ export class ProjectSandbox {
 			cwd: "/workspace",
 			timeout: 120_000,
 		});
-
-		// Mark /workspace-wt as safe for git
-		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
 
 		// npm ci if package-lock.json exists
 		try {
@@ -782,7 +921,8 @@ export class ProjectSandbox {
 	private async _runInitSequenceMultiRepo(repoNames: string[]): Promise<void> {
 		if (!this.containerId) return;
 		const urlMap = this.options.repoUrlByName ?? {};
-		const defaultUrl = stripTokenFromGitUrl(this.options.repoUrl);
+		const cloneSourceMap = this.options.cloneSourceByName ?? {};
+		const defaultUrl = this.options.cloneSource?.cloneUrl ?? stripTokenFromGitUrl(this.options.repoUrl);
 
 		// Mark all of /workspace as a safe directory for git
 		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
@@ -796,7 +936,9 @@ export class ProjectSandbox {
 				continue;
 			} catch { /* not cloned yet */ }
 
-			const url = stripTokenFromGitUrl(urlMap[repo] ?? defaultUrl);
+			// Prefer the pre-resolved per-repo clone source (never a raw host
+			// path); fall back to the legacy per-repo URL map, then the default.
+			const url = cloneSourceMap[repo]?.cloneUrl ?? stripTokenFromGitUrl(urlMap[repo] ?? defaultUrl);
 			try {
 				await this._dockerExec(this.containerId, ["sh", "-c", `mkdir -p ${dest}`]);
 			} catch { /* will be created by clone */ }
@@ -813,6 +955,22 @@ export class ProjectSandbox {
 
 	// ── Private: Post-commit hook ──────────────────────────────────────
 
+	private async _publishBranchToOrigin(containerId: string, worktreePath: string, branch: string, setUpstream: boolean): Promise<void> {
+		await this._dockerExec(containerId, ["git", "push", "origin", `${branch}:refs/heads/${branch}`], {
+			cwd: worktreePath,
+			timeout: 30_000,
+		});
+		if (!setUpstream) return;
+		await this._dockerExec(containerId, ["git", "fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], {
+			cwd: worktreePath,
+			timeout: 15_000,
+		});
+		await this._dockerExec(containerId, ["git", "branch", `--set-upstream-to=origin/${branch}`, branch], {
+			cwd: worktreePath,
+			timeout: 10_000,
+		});
+	}
+
 	private async _installPostCommitHook(containerId: string, worktreePath: string): Promise<void> {
 		if (shouldSkipRemotePush()) return; // No push hook in test mode
 
@@ -820,7 +978,7 @@ export class ProjectSandbox {
 		const hookScript = [
 			"#!/bin/sh",
 			'branch=$(git symbolic-ref --short HEAD 2>/dev/null)',
-			'[ -n "$branch" ] && git push origin "$branch" 2>/dev/null &',
+			'[ -n "$branch" ] && git push origin "HEAD:refs/heads/$branch" 2>/dev/null &',
 		].join("\n");
 
 		try {
@@ -840,7 +998,7 @@ export class ProjectSandbox {
 
 	private async _findContainerByLabel(label: string): Promise<string | null> {
 		try {
-			const { stdout } = await execFileAsync("docker", [
+			const { stdout } = await execDocker([
 				"ps", "-a",
 				"--filter", `label=${label}`,
 				"--format", "{{.ID}}",
@@ -867,8 +1025,8 @@ export class ProjectSandbox {
 	private async _isContainerImageStale(containerId: string, imageTag: string): Promise<boolean> {
 		try {
 			const [containerImg, currentImg] = await Promise.all([
-				execFileAsync("docker", ["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
-				execFileAsync("docker", ["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
+				execDocker(["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
+				execDocker(["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
 			]);
 			const a = containerImg.stdout.trim();
 			const b = currentImg.stdout.trim();
@@ -881,7 +1039,7 @@ export class ProjectSandbox {
 
 	private async _isContainerRunning(containerId: string): Promise<boolean> {
 		try {
-			const { stdout } = await execFileAsync("docker", [
+			const { stdout } = await execDocker([
 				"inspect", "--format", "{{.State.Running}}", containerId,
 			], {
 				timeout: 5_000,
@@ -895,7 +1053,7 @@ export class ProjectSandbox {
 
 	private async _removeContainer(containerId: string): Promise<void> {
 		try {
-			await execFileAsync("docker", ["rm", "-f", containerId], {
+			await execDocker(["rm", "-f", containerId], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -918,7 +1076,7 @@ export class ProjectSandbox {
 		}
 		execArgs.push(containerId, ...args);
 
-		const { stdout } = await execFileAsync("docker", execArgs, {
+		const { stdout } = await execDocker(execArgs, {
 			timeout: opts?.timeout ?? 60_000,
 			env: DOCKER_ENV,
 			maxBuffer: 10 * 1024 * 1024,

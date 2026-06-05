@@ -4,7 +4,13 @@ import path from "node:path";
 import { walkGoalSubtree } from "./goal-subtree.js";
 import type { PersistedGoal } from "./goal-store.js";
 
-export interface SessionCost {
+/**
+ * Raw per-session cost counters as stored on disk and accumulated in memory.
+ * `cacheHitRate` is intentionally NOT persisted — it is a derived field
+ * computed at read time from `cacheReadTokens` and `inputTokens`. See
+ * docs/design (Cache-Hit Metric).
+ */
+export interface RawSessionCost {
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
@@ -29,6 +35,16 @@ export interface SessionCost {
 	 * only reports a `firstSeenAt` when at least one unstamped entry has one.
 	 */
 	firstSeenAt?: number;
+}
+
+/**
+ * Public-facing session cost snapshot. Adds the derived `cacheHitRate`
+ * to {@link RawSessionCost}. `cacheHitRate` is `null` when the denominator
+ * (`cacheReadTokens + inputTokens`) is 0 — i.e. cold sessions, or providers
+ * that do not report cache counters. UI renders `null` as `—`.
+ */
+export interface SessionCost extends RawSessionCost {
+	cacheHitRate: number | null;
 }
 
 export interface UsageData {
@@ -85,7 +101,7 @@ export type SessionIdsForGoalFn = (goalId: string) => string[];
  */
 export const UNATTRIBUTABLE_LEGACY_GOAL_ID = "__unattributable__";
 
-function emptyCost(): SessionCost {
+function emptyRaw(): RawSessionCost {
 	return {
 		inputTokens: 0,
 		outputTokens: 0,
@@ -96,12 +112,33 @@ function emptyCost(): SessionCost {
 }
 
 /**
+ * Derive the cache-hit rate from a raw cost snapshot.
+ *
+ * Formula: `cacheReadTokens / (cacheReadTokens + inputTokens)`. `cacheWriteTokens`
+ * is intentionally excluded — writes are charged at full price and are not hits.
+ * Returns `null` when the denominator is 0 so cold sessions render as `—`
+ * rather than `0%`.
+ */
+export function deriveCacheHitRate(
+	cost: Pick<RawSessionCost, "inputTokens" | "cacheReadTokens">,
+): number | null {
+	const denom = (cost.cacheReadTokens ?? 0) + (cost.inputTokens ?? 0);
+	if (denom <= 0) return null;
+	return (cost.cacheReadTokens ?? 0) / denom;
+}
+
+/** Decorate a raw cost with the derived `cacheHitRate` field. */
+export function withDerivedFields(raw: RawSessionCost): SessionCost {
+	return { ...raw, cacheHitRate: deriveCacheHitRate(raw) };
+}
+
+/**
  * Tracks cumulative per-session cost/usage data.
  * Persists to .bobbit/state/session-costs.json.
  * Same load-on-construct, write-on-mutate pattern as GoalStore/SessionStore.
  */
 export class CostTracker {
-	private costs: Map<string, SessionCost> = new Map();
+	private costs: Map<string, RawSessionCost> = new Map();
 	private readonly storeDir: string;
 	private readonly storeFile: string;
 	/** Monotonically increasing tick — bumped on every cost mutation.
@@ -122,7 +159,7 @@ export class CostTracker {
 					for (const [id, cost] of Object.entries(data)) {
 						if (id && cost && typeof cost === "object") {
 							const c = cost as Record<string, unknown>;
-							const entry: SessionCost = {
+							const entry: RawSessionCost = {
 								inputTokens: typeof c.inputTokens === "number" ? c.inputTokens : 0,
 								outputTokens: typeof c.outputTokens === "number" ? c.outputTokens : 0,
 								cacheReadTokens: typeof c.cacheReadTokens === "number" ? c.cacheReadTokens : 0,
@@ -150,9 +187,21 @@ export class CostTracker {
 			if (!fs.existsSync(this.storeDir)) {
 				fs.mkdirSync(this.storeDir, { recursive: true });
 			}
-			const data: Record<string, SessionCost> = {};
+			// Persist the raw counters plus the stamped `goalId` / `firstSeenAt`
+			// (needed for tree-cost rollups + legacy backfill to survive reload).
+			// Derived fields (cacheHitRate) are NEVER written — recomputed on read.
+			const data: Record<string, RawSessionCost> = {};
 			for (const [id, cost] of this.costs) {
-				data[id] = cost;
+				const entry: RawSessionCost = {
+					inputTokens: cost.inputTokens,
+					outputTokens: cost.outputTokens,
+					cacheReadTokens: cost.cacheReadTokens,
+					cacheWriteTokens: cost.cacheWriteTokens,
+					totalCost: cost.totalCost,
+				};
+				if (cost.goalId) entry.goalId = cost.goalId;
+				if (typeof cost.firstSeenAt === "number") entry.firstSeenAt = cost.firstSeenAt;
+				data[id] = entry;
 			}
 			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
@@ -168,9 +217,11 @@ export class CostTracker {
 	 * survive session purge. Write-once semantics: only stamped if currently
 	 * unset; subsequent calls with the same or different goalId never
 	 * overwrite. Passing `undefined` for an already-stamped entry is a no-op.
+	 *
+	 * Returns a snapshot with the derived `cacheHitRate` populated.
 	 */
 	recordUsage(sessionId: string, usage: UsageData, goalId?: string): SessionCost {
-		const existing = this.costs.get(sessionId) ?? emptyCost();
+		const existing = this.costs.get(sessionId) ?? emptyRaw();
 		existing.inputTokens += usage.inputTokens ?? 0;
 		existing.outputTokens += usage.outputTokens ?? 0;
 		existing.cacheReadTokens += usage.cacheReadTokens ?? 0;
@@ -186,7 +237,7 @@ export class CostTracker {
 		this.costs.set(sessionId, existing);
 		this.generation++;
 		this.save();
-		return { ...existing };
+		return withDerivedFields(existing);
 	}
 
 	/** Current generation tick. Bumped on every cost mutation. */
@@ -196,7 +247,7 @@ export class CostTracker {
 
 	getSessionCost(sessionId: string): SessionCost | undefined {
 		const cost = this.costs.get(sessionId);
-		return cost ? { ...cost } : undefined;
+		return cost ? withDerivedFields(cost) : undefined;
 	}
 
 	/**
@@ -209,11 +260,14 @@ export class CostTracker {
 	 * Two-arg form: legacy explicit-scope path. Aggregates exactly the
 	 * given sessionIds. Kept for tests and callers that want to scope
 	 * by an explicit session set.
+	 *
+	 * Both forms return a combined SessionCost with the aggregate
+	 * `cacheHitRate` derived from the aggregate counters.
 	 */
 	getGoalCost(goalId: string): SessionCost;
 	getGoalCost(goalId: string, sessionIds: string[]): SessionCost;
 	getGoalCost(goalId: string, sessionIds?: string[]): SessionCost {
-		const total = emptyCost();
+		const total = emptyRaw();
 		if (sessionIds === undefined) {
 			for (const c of this.costs.values()) {
 				if (c.goalId === goalId) {
@@ -224,7 +278,7 @@ export class CostTracker {
 					total.totalCost += c.totalCost;
 				}
 			}
-			return total;
+			return withDerivedFields(total);
 		}
 		for (const sid of sessionIds) {
 			const c = this.costs.get(sid);
@@ -236,11 +290,15 @@ export class CostTracker {
 				total.totalCost += c.totalCost;
 			}
 		}
-		return total;
+		return withDerivedFields(total);
 	}
 
 	getAllCosts(): Map<string, SessionCost> {
-		return new Map(this.costs);
+		const out = new Map<string, SessionCost>();
+		for (const [id, cost] of this.costs) {
+			out.set(id, withDerivedFields(cost));
+		}
+		return out;
 	}
 
 	/**
@@ -254,7 +312,7 @@ export class CostTracker {
 	 * endpoint exposes this as an explicit `unattributableLegacy` bucket.
 	 */
 	getUnattributableLegacyCost(): SessionCost {
-		const total = emptyCost();
+		const total = emptyRaw();
 		for (const c of this.costs.values()) {
 			if (c.goalId) continue;
 			total.inputTokens += c.inputTokens;
@@ -264,7 +322,7 @@ export class CostTracker {
 			total.totalCost += c.totalCost;
 		}
 		total.totalCost = Math.round(total.totalCost * 1_000_000) / 1_000_000;
-		return total;
+		return withDerivedFields(total);
 	}
 
 	/**

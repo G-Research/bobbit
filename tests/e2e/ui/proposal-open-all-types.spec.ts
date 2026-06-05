@@ -71,6 +71,11 @@ const CASES: ProposalCase[] = [
 
 const STAFF_ACCEPT_NAME = "parity-staff";
 
+// Browser E2E keeps one generic non-goal/project proposal flow as a real
+// gateway + mock-agent smoke. The full per-type rendering/dismissal matrix is
+// covered by tests/ui-fixtures/proposal-review-fixture.spec.ts.
+const BROWSER_CASES = CASES.filter((c) => c.type === "role");
+
 async function waitForProposalSlot(page: Page, type: ProposalType): Promise<void> {
 	await page.waitForFunction(
 		(t) => {
@@ -143,11 +148,7 @@ async function otherProposalSlots(page: Page, type: ProposalType): Promise<Recor
 }
 
 function proposalTab(page: Page, proposal: ProposalCase): Locator {
-	return page.locator(`button.goal-tab-pill[title="${proposal.label}"]`).first();
-}
-
-function chatTab(page: Page): Locator {
-	return page.locator('button.goal-tab-pill[title="Chat"]').first();
+	return page.locator(`.goal-tab-pill[title="${proposal.label}"]`).first();
 }
 
 function proposalPane(page: Page, proposal: ProposalCase): Locator {
@@ -190,14 +191,10 @@ async function switchToMobileChatAndBack(page: Page, proposal: ProposalCase): Pr
 	await page.setViewportSize({ width: 390, height: 800 });
 	await expectProposalTabAndPane(page, proposal);
 
-	const firstTab = page.locator(".goal-tab-bar button.goal-tab-pill").first();
-	await expect(firstTab, "Chat tab should be first on the mobile unified panel").toHaveAttribute("title", "Chat", { timeout: 5_000 });
-	const chat = chatTab(page);
-	await expect(chat).toBeVisible({ timeout: 5_000 });
-	await chat.click();
-	await expect(chat).toHaveClass(/goal-tab-pill--active/);
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 5_000 });
-
+	// Mobile renders a pinned Chat pill as the first tab in the unified bar
+	// (a UI affordance for swiping to the chat pane). It is not persisted as
+	// a panel-tab row, so the slot list still excludes it.
+	await expect(page.locator('.goal-tab-pill[title="Chat"]')).toHaveCount(1, { timeout: 5_000 });
 	await proposalTab(page, proposal).click();
 	await expect(proposalTab(page, proposal)).toHaveClass(/goal-tab-pill--active/);
 	await expect(proposalPane(page, proposal)).toBeVisible({ timeout: 5_000 });
@@ -205,6 +202,7 @@ async function switchToMobileChatAndBack(page: Page, proposal: ProposalCase): Pr
 }
 
 async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, sessionId: string): Promise<void> {
+	await page.setViewportSize({ width: 1280, height: 800 });
 	await page.reload();
 	await page.waitForFunction(
 		(sid) => {
@@ -216,8 +214,7 @@ async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, session
 	);
 	await waitForProposalSlot(page, proposal.type);
 
-	await expect(chatTab(page)).toBeVisible({ timeout: 5_000 });
-	await chatTab(page).click();
+	await expect(page.locator('.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
 	const openButton = await expectProposalToolCard(page, proposal);
 	await openButton.scrollIntoViewIfNeeded();
 	await openButton.click();
@@ -259,7 +256,7 @@ async function deleteStaffByName(name: string): Promise<void> {
 test.describe("Proposal tabs open all proposal types in normal sessions", () => {
 	test.describe.configure({ timeout: 90_000 });
 
-	for (const proposal of CASES) {
+	for (const proposal of BROWSER_CASES) {
 		const title = proposal.type === "staff"
 			? "Staff proposal card opens a Staff tab, rehydrates, and dismisses from a normal session"
 			: `${proposal.label} proposal is openable, rehydrates, and dismisses from a normal session`;

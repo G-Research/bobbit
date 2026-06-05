@@ -18,9 +18,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalAgentDir } from "../bobbit-dir.js";
+import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
+
+export interface AigwModelCost {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
 
 export interface AigwModel {
 	id: string;
@@ -30,6 +38,7 @@ export interface AigwModel {
 	input: ("text" | "image")[];
 	contextWindow: number;
 	maxTokens: number;
+	cost?: AigwModelCost;
 	compat?: Record<string, unknown>;
 }
 
@@ -56,6 +65,40 @@ const DEFAULT_META: ModelMeta = {
 	reasoning: false,
 	input: ["text"],
 };
+
+function zeroAigwCost(): AigwModelCost {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
+
+function normalizeCostValue(value: number): number {
+	if (!Number.isFinite(value) || value < 0) return 0;
+	return Math.round(value * 1_000_000_000_000) / 1_000_000_000_000;
+}
+
+function normalizeAigwPricing(pricing: unknown): AigwModelCost {
+	if (!pricing || typeof pricing !== "object") return zeroAigwCost();
+
+	const record = pricing as Record<string, unknown>;
+	const prompt = record.prompt;
+	const completion = record.completion;
+	if (
+		typeof prompt !== "number" ||
+		typeof completion !== "number" ||
+		!Number.isFinite(prompt) ||
+		!Number.isFinite(completion) ||
+		prompt < 0 ||
+		completion < 0
+	) {
+		return zeroAigwCost();
+	}
+
+	return {
+		input: normalizeCostValue(prompt * 1_000_000),
+		output: normalizeCostValue(completion * 1_000_000),
+		cacheRead: normalizeCostValue(prompt * 0.1 * 1_000_000),
+		cacheWrite: normalizeCostValue(prompt * 1.25 * 1_000_000),
+	};
+}
 
 /**
  * Infer model metadata from the model ID.
@@ -96,14 +139,17 @@ const INFER_RULES: InferRule[] = [
 	{ test: /claude-haiku/, meta: { contextWindow: 200_000, maxTokens: 8_192, reasoning: false, input: ["text", "image"] } },
 	{ test: /claude/, meta: { contextWindow: 200_000, maxTokens: 16_384, reasoning: false, input: ["text", "image"] } },
 
-	// ── OpenAI GPT-5.x (pro first so it doesn't match the bare 5.5) ─
+	// ── OpenAI GPT-5.x (pro first so it doesn't match base variants) ─
 	{ test: /gpt-5\.5-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
-	{ test: /gpt-5\.5/, meta: { contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
+	{ test: /gpt-5\.5/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
+	{ test: /gpt-5\.4-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	// gpt-5.1-codex-max and gpt-5.2* / gpt-5.4* are reasoning models (and
 	// xhigh-capable per src/shared/thinking-levels.ts). They must be classified
 	// as reasoning so server-side clamping does not collapse xhigh to off for
-	// aigw-routed users.
-	{ test: /gpt-5\.4/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
+	// aigw-routed users. Base gpt-5.4/5.5 currently advertise a 272k active
+	// window in pi-ai; using the old speculative 1M here makes compaction look
+	// far too early and can defer threshold compaction until provider overflow.
+	{ test: /gpt-5\.4/, meta: { contextWindow: 272_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.2/, meta: { contextWindow: 400_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.1-codex-max/, meta: { contextWindow: 400_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5/, meta: { contextWindow: 400_000, maxTokens: 32_768, reasoning: false, input: ["text", "image"] } },
@@ -175,14 +221,18 @@ function readModelsJson(): Record<string, any> {
 
 function writeModelsJson(data: Record<string, any>): void {
 	const p = getModelsJsonPath();
+	let tmp = "";
 	try {
 		const dir = path.dirname(p);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-		const tmp = p + ".tmp";
+		tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
 		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
 		fs.renameSync(tmp, p);
 		console.log(`[aigw-manager] Wrote models.json to ${p}`);
 	} catch (err) {
+		if (tmp) {
+			try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+		}
 		console.error("[aigw-manager] Failed to write models.json:", err);
 	}
 }
@@ -335,9 +385,11 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		// The literal here JSON-encodes to:
 		//   "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
 		headers: {
+			"User-Agent": BOBBIT_AIGW_USER_AGENT,
 			"x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`,
 		},
 		models: models.map(m => {
+			const cost = m.cost ?? zeroAigwCost();
 			if (isClaudeModel(m.id)) {
 				return {
 					id: bedrockModelId(m.id),
@@ -346,6 +398,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 					maxTokens: m.maxTokens,
 					reasoning: m.reasoning,
 					input: m.input,
+					cost,
 					api: "bedrock-converse-stream",
 					// Per-model Bedrock endpoint override — provider baseUrl is the
 					// OpenAI-compatible /v1 root; Bedrock Converse lives under /aws.
@@ -360,6 +413,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 				maxTokens: m.maxTokens,
 				reasoning: m.reasoning,
 				input: m.input,
+				cost,
 				compat: { ...openaiCompat, ...(m.compat || {}) },
 			};
 		}),
@@ -543,7 +597,7 @@ function httpGet(url: string, timeoutMs = 10_000): Promise<any> {
 		const parsedUrl = new URL(url);
 		const transport = parsedUrl.protocol === "https:" ? https : http;
 
-		const req = transport.request(parsedUrl, { method: "GET", timeout: timeoutMs }, (res) => {
+		const req = transport.request(parsedUrl, { method: "GET", headers: aigwUserAgentHeaders(), timeout: timeoutMs }, (res) => {
 			const chunks: Buffer[] = [];
 			res.on("data", (c: Buffer) => chunks.push(c));
 			res.on("end", () => {
@@ -578,8 +632,10 @@ export function proxyRequest(
 	incomingReq.on("data", (c: Buffer) => chunks.push(c));
 	incomingReq.on("end", () => {
 		const body = Buffer.concat(chunks);
-		const headers: Record<string, string> = { "Content-Type": "application/json" };
-		if (body.length > 0) headers["Content-Length"] = String(body.length);
+		const headers = aigwUserAgentHeaders({
+			"Content-Type": "application/json",
+			...(body.length > 0 ? { "Content-Length": String(body.length) } : {}),
+		});
 
 		const RESPONSE_TIMEOUT_MS = 120_000;
 		let responseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -657,6 +713,7 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
 			input: meta.input,
 			contextWindow: Math.max(ctxFromGw || 0, meta.contextWindow),
 			maxTokens: Math.max(maxTokFromGw || 0, meta.maxTokens),
+			cost: normalizeAigwPricing(m.pricing),
 			...(meta.compat ? { compat: meta.compat } : {}),
 		};
 	});

@@ -2,16 +2,18 @@
 // fixture can seed sessions/goals/gateStatusCache and exercise the policy
 // without a running gateway.
 
-import { needsHumanAttention } from "../../src/app/notification-policy.js";
+import { needsHumanAttention, needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "../../src/app/notification-policy.js";
 import { state, type GatewaySession, type Goal } from "../../src/app/state.js";
 
 (window as any).__state = state;
 (window as any).__needsHumanAttention = needsHumanAttention;
+(window as any).__needsHumanAttentionOnIdleTransition = needsHumanAttentionOnIdleTransition;
+(window as any).__needsImmediateHumanAttention = needsImmediateHumanAttention;
 
 interface SeedOpts {
 	sessions: Array<Partial<GatewaySession> & Pick<GatewaySession, "id">>;
 	goals?: Array<Partial<Goal> & Pick<Goal, "id" | "state">>;
-	gateStatusCache?: Array<{ goalId: string; verifying: boolean }>;
+	gateStatusCache?: Array<{ goalId: string; verifying?: boolean; awaitingHumanSignoff?: boolean; awaitingSignoffCount?: number }>;
 }
 
 (window as any).__seed = (opts: SeedOpts): void => {
@@ -32,6 +34,8 @@ interface SeedOpts {
 			delegateOf: s.delegateOf,
 			teamGoalId: s.teamGoalId,
 			teamLeadSessionId: s.teamLeadSessionId,
+			lastTurnErrored: s.lastTurnErrored,
+			consecutiveErrorTurns: s.consecutiveErrorTurns,
 		};
 		state.gatewaySessions.push(sess);
 	}
@@ -50,22 +54,54 @@ interface SeedOpts {
 	}
 	state.gateStatusCache.clear();
 	for (const g of opts.gateStatusCache ?? []) {
+		const verifying = !!g.verifying;
+		const awaitingSignoffCount = g.awaitingSignoffCount ?? (g.awaitingHumanSignoff ? 1 : 0);
+		const awaitingHumanSignoff = awaitingSignoffCount > 0;
 		state.gateStatusCache.set(g.goalId, {
 			passed: 0,
 			total: 0,
-			verifying: g.verifying,
-			verifyingCount: g.verifying ? 1 : 0,
+			verifying,
+			verifyingCount: verifying ? 1 : 0,
+			awaitingSignoffCount,
+			awaitingHumanSignoff,
 		});
 	}
 };
 
-// Convenience: run the predicate against a seeded session by id.
+// Convenience: run the persistent attention policy against a seeded session by id.
+// Returns the OR of both persistent predicates. Use `__checkSplit` for
+// finer-grained assertions about which rule fired.
 (window as any).__check = (sessionId: string): boolean => {
 	const session = state.gatewaySessions.find(s => s.id === sessionId);
 	if (!session) throw new Error(`session ${sessionId} not seeded`);
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-	return needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache);
+	return needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)
+		|| needsImmediateHumanAttention(session, state.gateStatusCache);
+};
+
+// Mirrors one-shot streaming→idle beep call sites (api.ts / remote-agent.ts):
+// idle-stuck is intentionally excluded, while complete/signoff/errored still fire.
+(window as any).__checkIdleTransition = (sessionId: string): boolean => {
+	const session = state.gatewaySessions.find(s => s.id === sessionId);
+	if (!session) throw new Error(`session ${sessionId} not seeded`);
+	const goalId = session.teamGoalId || session.goalId;
+	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+	return needsHumanAttentionOnIdleTransition(session, goal, state.gatewaySessions, state.gateStatusCache)
+		|| needsImmediateHumanAttention(session, state.gateStatusCache);
+};
+
+// Returns { filterable, immediate } so tests can assert which predicate
+// caught the case — verifies the read-filter split.
+(window as any).__checkSplit = (sessionId: string): { filterable: boolean; immediate: boolean } => {
+	const session = state.gatewaySessions.find(s => s.id === sessionId);
+	if (!session) throw new Error(`session ${sessionId} not seeded`);
+	const goalId = session.teamGoalId || session.goalId;
+	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+	return {
+		filterable: needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache),
+		immediate: needsImmediateHumanAttention(session, state.gateStatusCache),
+	};
 };
 
 (window as any).__ready = true;

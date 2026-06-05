@@ -25,12 +25,24 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
 
+### Dev harness
+
+These endpoints expose restart support only for gateways launched through `npm run dev:harness`. The harness marks the child gateway with `BOBBIT_DEV_HARNESS=1`; ordinary `npm start` and `npm run dev` runs do not set it.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/harness-status` | Returns `{ restartAvailable: boolean }`. The Settings page uses this to decide whether to render the **Restart Server** button. |
+| `POST` | `/api/harness/restart` | Requests a harness rebuild/restart. Returns `202 { ok: true, restartRequested: true }` under the dev harness, and `403 { error: "Restart is only available under the dev harness" }` otherwise. |
+
+`POST /api/harness/restart` is gated on the server, not just hidden by the UI. On success it touches `.bobbit/state/gateway-restart`, the same sentinel used by `npm run restart-server`; the harness observes that file change, rebuilds the server, and relaunches the gateway.
+
 ### Sessions
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
@@ -41,11 +53,73 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
-| `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
+| `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
+| `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
+| `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
+| `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
+| `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
 
+### Fork session endpoint
+
+`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+
+Request body (optional):
+
+```json
+{ "newWorktree": true }
+```
+
+- `newWorktree: true` (default when omitted) — create a fresh worktree/branch off the project repo (a plain project-root session when the project isn't a git repo).
+- `newWorktree: false` — reuse the source session's existing worktree directly. The fork's `cwd` is set to the source's `worktreePath` and **no** new worktree is created; the two live sessions intentionally share the worktree/branch. The fork does not register worktree metadata, so terminating either session never tears down the shared tree. When the source has no worktree, the fork reuses the project-root cwd.
+
+Success returns `201`:
+
+```json
+{
+  "id": "new-session-id",
+  "cwd": "/repo-or-worktree",
+  "status": "idle",
+  "projectId": "project-id",
+  "goalId": "goal-id",
+  "title": "Fork: Source title"
+}
+```
+
+`goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
+
+The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
+
+Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
+
+See [Sidebar Actions Menu](sidebar-actions-menu.md#fork-session-endpoint) for the user-facing behavior.
+
+### Background processes
+
+Background process snapshots use epoch-millisecond timestamps so clients can render runtime without depending on page load time:
+
+```ts
+type BgProcessInfo = {
+  id: string;
+  name: string;
+  command: string;
+  pid: number;
+  status: "running" | "exited";
+  exitCode: number | null;
+  startTime: number;
+  endTime: number | null;
+};
+```
+
+`endTime` is `null` while `status === "running"`. On child exit the server sets `endTime` once, and list / wait snapshots preserve that final value so reloads and reconnects keep showing the fixed `endTime - startTime` runtime.
+
+- `POST /api/sessions/:id/bg-processes` returns `201 BgProcessInfo` for the created process.
+- `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for UI hydration.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info: BgProcessInfo, timedOut: boolean, aborted: boolean }`; `info.endTime` is numeric after exit and remains `null` for running timeout/abort snapshots.
+
+Older exited snapshots may omit `endTime` or set it to `null`. Clients must render those runtimes as unknown/non-growing instead of substituting `Date.now()` for an exit timestamp.
 
 ### Proposal drafts
 
@@ -56,15 +130,16 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
-| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. |
+| `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
+| `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing — unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}` (skipped when the session has no project, the project has zero workflows, or `workflow` is empty). See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. On failure: file unchanged, returns 4xx with structured error. |
-| `POST` | `/api/sessions/:id/proposal/:type/restore` | Restore a prior revision snapshot. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a non-negative integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. |
+| `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
 | `GET` | `/api/sessions/:id/proposals` | List every parsed proposal draft for the session in one call. Returns `200 { proposals: Array<{ proposalType, fields, rev }> }`; `proposals` is empty when the per-session directory is absent or empty. Mirrors the WS `proposal_update {source:"rehydrate"}` broadcast as a one-shot REST call — used by fast-path session switch-backs (no fresh WS auth, so the broadcast doesn't run) and by the archived-session footer to decide whether to surface a "Resubmit `<type>` proposal" button (see [docs/archived-proposal-reopen.md](archived-proposal-reopen.md)). `400` on invalid sessionId; `500` on unexpected enumeration failure. |
 
 #### Error response shape
 
-All 4xx responses for the edit / seed endpoints share the same JSON shape:
+Structured proposal validation failures share this JSON shape across seed, edit, snapshot, and restore where parsing/validation applies:
 
 ```json
 {
@@ -83,8 +158,9 @@ All 4xx responses for the edit / seed endpoints share the same JSON shape:
 
 | Code | Status | Endpoint(s) | When |
 |---|---|---|---|
-| `INVALID_BODY` | `400` | edit, seed | Body is not JSON, or required keys are wrong type. |
+| `INVALID_BODY` | `400` | edit, seed, snapshot, restore | Body/query is not JSON where required, or required keys/params are wrong type. |
 | `FILE_NOT_FOUND` | `404` | GET, edit | No prior `propose_<type>` in this session. The `message` names the matching `propose_*` tool. |
+| `SNAPSHOT_NOT_FOUND` | `404` | snapshot, restore | Requested `<type>.history/<rev>.<ext>` file is missing. |
 | `OLD_TEXT_NOT_FOUND` | `400` | edit | `old_text` does not occur in the file. |
 | `OLD_TEXT_NOT_UNIQUE` | `400` | edit | `old_text` matches multiple times — ambiguous. Caller must extend `old_text` with surrounding context. |
 | `FRONTMATTER_MALFORMED` | `400` | edit, seed | `goal.md` frontmatter fence is broken or unparseable. |
@@ -98,7 +174,7 @@ All 4xx responses for the edit / seed endpoints share the same JSON shape:
 
 **Restart survival.** On WS attach, `src/server/ws/handler.ts` enumerates the per-session directory and re-emits one `proposal_update {source:"rehydrate", rev}` per surviving file (where `rev` is computed from the highest integer in the `<type>.history/` dir, or `0` for legacy sessions predating the snapshot system), so reloading a browser or restarting the server mid-edit yields the same UI state without a separate persistence layer.
 
-**Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". The `restore` endpoint is the only way to navigate the history; chat-card "Open proposal" buttons drive it via the `__proposal_rev_v1__:<n>` marker embedded in tool-result text by the `propose_*` and `edit_proposal` tool extensions. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
+**Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". Chat-card "Open proposal" buttons parse the `__proposal_rev_v1__:<n>` marker and, for older revisions, call the non-mutating `GET /snapshot` endpoint to populate read-only historical tabs. The mutating `restore` endpoint remains available for explicit rollback flows but is not used for ordinary history browsing. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
 ### Review Annotations
 
@@ -126,10 +202,12 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `DELETE` | `/api/goals/:parentId/archive-child/:childId` | **Parent-scoped child archive.** Verifies that `childId` is a direct child of `parentId` (same project, `child.parentGoalId === parentId`) — rejects with `403 { code: "NOT_DIRECT_CHILD" }` otherwise. Used by the `goal_archive_child` tool to prevent lateral-movement: the old general `DELETE /api/goals/:id` route did not enforce the parent/child relationship, letting a team-lead archive arbitrary goals by supplying their id. Supports the same `?cascade` and `?mergedManually` semantics as the general archive route. |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
-| `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
+| `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
+| `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/goals/:id/tree-cost` | BFS tree-cost rollup across the goal and **all descendants (live + archived)** via `walkGoalSubtree`. The rollup is **rooted at the requested goal** — a root-goal sees the whole-project total; a subgoal sees only its own subtree; a leaf equals its own cost. Returns `{ rootGoalId, totalCostUsd, totalTokensIn, totalTokensOut, breakdown: [{goalId, depth, title, costUsd, tokensIn, tokensOut}, …], unattributableLegacy? }`. Archived descendants are included because their cost is permanent. The optional `unattributableLegacy` field (`{ goalId: "__unattributable__", title, costUsd, tokensIn, tokensOut, firstSeenAt? }`) is present only when legacy cost entries exist whose goalId could not be recovered by the boot-time backfill; `firstSeenAt` is the oldest known timestamp in that residual bucket when available. It is NOT included in `totalCostUsd`. Cached on `(goalId, costGeneration)` — invalidated when any cost entry mutates. **Gated** by `requireSubgoalsEnabled()` — returns `403 SUBGOALS_DISABLED` when the Subgoals toggle is off. See [docs/nested-goals.md — Cost rollup](nested-goals.md#cost-rollup), [docs/cost-backfill.md](cost-backfill.md), and [docs/design/hierarchical-cascade.md](design/hierarchical-cascade.md). |
 | `GET` | `/api/goals/:id/descendants` | BFS descendant walk via `parentGoalId` (depth cap 32). Returns `{ goals: PersistedGoal[] }` with full records for every descendant — live AND archived — of the goal, excluding the goal itself. Powers the dashboard's Plan-tab data source so archived siblings stay visible in the DAG regardless of the sidebar's "See Archived" toggle (see [docs/nested-goals.md — Plan tab](nested-goals.md#data-source-dashboardgoalpool-and-descendants)). NOT gated by `requireSubgoalsEnabled()` — Plan tab is core dashboard functionality. 404 if the goal or its project context is not found. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
+| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
 
 #### `POST /api/goals` — `parentGoalId` error codes
@@ -164,6 +242,28 @@ system-scope toggle (default OFF). When the toggle is off they return
 | `POST` | `/api/goals/:id/mutation/:requestId/decision` | Resolve a queued mutation request from `PATCH /plan`. Body: `{decision: "approve" \| "reject"}`. Approve replaces `execution.verify[]` with the proposed steps and increments `replanCount` (auto-pauses at >5). RequestId is implicitly scoped to goalId — the store key is `(goalId, requestId)` so cross-goal access naturally 404s. |
 | `PATCH` | `/api/goals/:id/policy` | Update `divergencePolicy` (`strict \| balanced \| autonomous`) and/or `maxConcurrentChildren` (1–8). Broadcasts `goal_state_changed` with the new policy values inline so clients don't refetch. `maxConcurrentChildren` is only consulted on root goals; children store the value but the harness reads the root's. |
 
+### Goal GitHub link endpoint
+
+`GET /api/goals/:id/github-link` resolves a PR URL or a sanitized GitHub branch URL for a goal. It remains available, but the sidebar **Open on GitHub** menu item no longer depends on it: that item now mirrors the goal-row PR badge (a PR with a `url` in `prStatusCache`, and a fully-passed gate summary for workflow goals) and opens the PR URL directly. The endpoint is still useful for callers that want a server-sanitized link, including the branch fallback the menu item no longer surfaces.
+
+Success or unavailability both return `200` with a discriminated response:
+
+```ts
+type GoalGithubLinkResponse =
+  | { available: true; url: string; kind: "pr" | "branch" }
+  | { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+```
+
+Resolution order:
+
+1. Return the goal's cached PR URL from `PrStatusStore` when present.
+2. Otherwise look up PR status for the goal branch using `gh` through `execFile` argument arrays, not shell command strings.
+3. If no PR URL exists, read `origin` with `git remote get-url origin` through `execFile`.
+4. Strip embedded credentials, accept only GitHub remotes, and build an encoded branch tree URL.
+5. Return `available: false` for missing goals, goals without branches, missing/non-GitHub remotes, or git lookup failures.
+
+Branch names are never interpolated into a shell command; PR lookup and remote resolution both go through `execFile` argument arrays. See [Sidebar Actions Menu](sidebar-actions-menu.md#github-link-resolution) for how the menu item mirrors the PR badge rather than calling this endpoint.
+
 ### Goal Tasks
 
 | Method | Path | Description |
@@ -179,7 +279,9 @@ system-scope toggle (default OFF). When the toggle is off they return
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`). Returns 409 `{code:"GOAL_PAUSED", goalId}` if the goal is paused (blocks both the signal accept and the verifier spawn it would trigger). |
+| `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to `pending`; preserves signal history. See [Gate reset endpoint](#gate-reset-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
+| `POST` | `/api/goals/:id/gates/:gateId/signoff` | Resolve a parked `human-signoff` step (`{ signalId, stepName, decision: "pass"\|"fail", feedback? }`); idempotent 409 on already-resolved steps. See [Sign-off endpoint](#sign-off-endpoint). |
 
 ### Goal Team
 
@@ -207,7 +309,27 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `DELETE` | `/api/tasks/:id` | Delete a task |
 | `POST` | `/api/tasks/:id/assign` | Assign a task to a session (`{ sessionId }`). Auto-populates `baseSha` and `branch` from the agent's `TeamAgent` record if available |
 | `POST` | `/api/tasks/:id/transition` | Transition task state (`{ state }`) |
-| `GET` | `/api/tasks/:id/cost` | Cost for the session assigned to a task |
+| `GET` | `/api/tasks/:id/cost` | Cost for the session assigned to a task (includes `cacheHitRate`) |
+
+#### Cost response shape
+
+All three cost endpoints (`/sessions/:id/cost`, `/goals/:id/cost`, `/tasks/:id/cost`) return the same `SessionCost` shape:
+
+```json
+{
+  "inputTokens": 12500,
+  "outputTokens": 340,
+  "cacheReadTokens": 87000,
+  "cacheWriteTokens": 3200,
+  "totalCost": 0.004712,
+  "cacheHitRate": 0.874
+}
+```
+
+- `cacheHitRate` — derived field: `cacheReadTokens / (cacheReadTokens + inputTokens)`. `null` when both counters are 0 (cold session or provider does not report cache tokens). Never stored on disk; recomputed on every read.
+- For goals, `cacheHitRate` is derived from the aggregate counters across all linked sessions — not an average of per-session rates.
+
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semantics.
 
 ### Tools
 
@@ -252,15 +374,17 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders in a dedicated collapsible **Staff** sub-section under the owning project in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)). The staff-creation **assistant session** (`assistantType: "staff"`) is a normal session and appears in that project's Sessions list while open — it is not a staff agent until `propose_staff` is accepted.
 
-For the user-facing model (lifecycle, immutable sandbox mode, legacy records) see [staff-agents.md](staff-agents.md). For the inbox queue that owns trigger fan-in and the agent-only state-transition endpoints below, see [staff-inbox.md](staff-inbox.md).
+For the user-facing model (lifecycle, immutable sandbox mode, legacy records) see [staff-agents.md](staff-agents.md). For the inbox queue that owns trigger fan-in and the agent-only state-transition endpoints below, see [staff-inbox.md](staff-inbox.md). For the trigger type reference (including the push-based goal lifecycle triggers and their required-prompt rule) see [staff-triggers.md](staff-triggers.md).
+
+Staff records include a persisted `accessory` string as part of the staff identity. Valid accessory IDs round-trip through `staff.json`; missing, blank, non-string, or unknown values normalise to `"none"` on load and write. Staff sessions mirror this value only for rendering: create/recreate paths copy `staff.accessory` into the permanent session, and `PUT /api/staff/:id` mirrors changes to the current session when one exists so sidebar/avatar rendering updates immediately. If no current session exists, the persisted staff value is still used for the next permanent session.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes the persisted `sandboxed` boolean (chosen at creation, immutable thereafter — see [staff-agents.md](staff-agents.md)). Returns `{ staff: PersistedStaff[] }`. |
-| `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }`. Consumed by the sidebar's orphan banner. |
-| `GET` | `/api/staff/:id` | Get a single staff agent definition (includes the persisted `sandboxed` boolean) |
-| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd?, worktree?, triggers?, roleId?, projectId?, sandboxed? }`). Subject to the [project resolution contract](#project-resolution-contract): `projectId` selects a registered project; otherwise `cwd` must be inside one. With `projectId` and missing/blank `cwd`, the server uses the project root. Explicit `cwd` with `projectId` must stay inside that selected project. `worktree` defaults to auto (`true`/omitted: use a project worktree when supported; `false`: run in the project directory; non-git projects fall back to no-worktree). `sandboxed` defaults to `false` and is immutable. |
-| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId, contextPolicy }`). Changed `cwd` values must be non-empty and inside the staff agent's own project. An unchanged `cwd` on a legacy/orphan record may still be re-sent so other fields remain editable. `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). `contextPolicy` accepts `"preserve"` or `"compact"` (see [staff-inbox.md](staff-inbox.md#contextpolicy)); other values are ignored. |
+| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes the normalised persisted `accessory` and the persisted `sandboxed` boolean (chosen at creation, immutable thereafter — see [staff-agents.md](staff-agents.md)). Returns `{ staff: PersistedStaff[] }`. |
+| `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }` with the same normalised staff shape. Consumed by the sidebar's orphan banner. |
+| `GET` | `/api/staff/:id` | Get a single staff agent definition, including the normalised persisted `accessory` and persisted `sandboxed` boolean. |
+| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd?, worktree?, triggers?, roleId?, projectId?, sandboxed?, accessory? }`). Returns `400` when any element of `triggers[]` has `type` `goal_created` / `goal_archived` and a missing or empty `prompt` (see [staff-triggers.md](staff-triggers.md)). Subject to the [project resolution contract](#project-resolution-contract): `projectId` selects a registered project; otherwise `cwd` must be inside one. With `projectId` and missing/blank `cwd`, the server uses the project root. Explicit `cwd` with `projectId` must stay inside that selected project. `worktree` defaults to auto (`true`/omitted: use a project worktree when supported; `false`: run in the project directory; non-git projects fall back to no-worktree). `sandboxed` defaults to `false` and is immutable. `accessory` defaults to `"none"`, is persisted on the staff record, and is copied onto the initial permanent session for rendering. `roleId` is optional: a non-empty string attaches a role (validated — unknown role returns **404**; a non-string, non-null value returns **400**); the role's prompt context is prepended to the staff system prompt and, when no explicit `accessory` is given, the role's accessory becomes the default. See [staff-agents.md — Role selection](staff-agents.md#role-selection). |
+| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId, contextPolicy, accessory }`). Same goal-trigger prompt validation as `POST /api/staff`: empty `prompt` on a `goal_created` / `goal_archived` row returns `400`. Changed `cwd` values must be non-empty and inside the staff agent's own project. An unchanged `cwd` on a legacy/orphan record may still be re-sent so other fields remain editable. `accessory`, when present, is normalised, persisted on the staff record, and mirrored to the current permanent session if one exists. `roleId` is optional and validated the same way as on `POST`: a non-empty string sets the role (unknown → **404**), `null` clears it, and a non-string non-null value → **400**; the change takes effect on the next session spawn. See [staff-agents.md — Role selection](staff-agents.md#role-selection). `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). `contextPolicy` accepts `"preserve"` or `"compact"` (see [staff-inbox.md](staff-inbox.md#contextpolicy)); other values are ignored. |
 | `PATCH` | `/api/staff/:id` | Re-home a staff record to a different project. Body: `{ projectId }`. Moves the persisted record between per-project stores, updates `staff.projectId`, re-indexes search, resets `cwd` to the target project root, and clears old runtime metadata (`currentSessionId`, `worktreePath`, `branch`, `repoPath`, `repoWorktrees`) so old-project paths cannot be retained. Used by the sidebar's orphan banner "Assign to project…" action. Returns the updated `PersistedStaff` on 200. **400** when `projectId` is missing, empty, hidden, or the system project; **404** when either the staff id or the target project is unknown. |
 | `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
 | `GET` | `/api/staff/:id/inbox` | List inbox entries for a staff agent. Query: `state` (`pending` \| `completed` \| `failed` \| `cancelled`, default returns all), `limit` (default unbounded). Returns `{ entries: InboxEntry[] }` in FIFO order. See [staff-inbox.md](staff-inbox.md#rest-surface). |
@@ -274,13 +398,67 @@ For the user-facing model (lifecycle, immutable sandbox mode, legacy records) se
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects` | List all registered projects. |
-| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
+| `GET` | `/api/projects` | List visible registered projects in persisted project order. Hidden projects, including the synthetic `system` project, are excluded. |
+| `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
+| `PUT` | `/api/projects/order` | Persist the full visible project ID order for sidebar project drag reorder. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
 | `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. |
 | `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). See [add-project-preflight.md](add-project-preflight.md). |
 | `GET` | `/api/projects/:id` | Get a single project. |
-| `PUT` | `/api/projects/:id` | Update name, color, palette, `rootPath`, or `parentProjectId`. Body fields are all optional; only present fields are applied. `parentProjectId: string \| null` sets/clears the link used by the [role field-level inheritance chain](internals.md#field-level-role-inheritance); the target must be an existing, non-hidden, non-provisional project that is not the project itself and does not already sit downstream in the chain. Self-reference, unknown id, hidden / provisional target, or any cycle → **400**. Pass `null` (or omit unchanged) to clear. |
-| `DELETE` | `/api/projects/:id` | Unregister (does not delete files). Returns **400** `{"error":"Cannot delete the last remaining project — add another project first"}` when deleting would leave zero projects. Under `BOBBIT_E2E=1`, `?force=1` bypasses the guard for tests that need to exercise the zero-project UX. |
+| `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
+| `PUT` | `/api/projects/:id` | Update name, color, palette, and `rootPath` (plus `colorLight` / `colorDark`). Body fields are all optional; only present fields are applied. |
+| `DELETE` | `/api/projects/:id` | Unregister (does not delete files on disk). Any project may be removed, including the last visible one — when zero non-hidden projects remain, the UI falls back to the existing zero-project first-run state. The hidden "system" project is unaffected by this flow. |
+
+#### Project order
+
+`GET /api/projects` returns only visible, non-system projects in the server-persisted order. Use the returned array order as the source of truth for sidebar grouping; visible project records may include a `position` field, but clients should not need to sort by it.
+
+`PUT /api/projects/order` is a reserved collection-level endpoint. It must be handled by the dedicated order route, never by the generic `PUT /api/projects/:id` update path. The server keeps the dedicated route before project-id handlers and excludes reserved collection subroutes from the generic matcher so `order` cannot be interpreted as a project ID.
+
+`PUT /api/projects/order` saves a new global order for visible projects:
+
+```http
+PUT /api/projects/order
+Content-Type: application/json
+
+{ "projectIds": ["project-c", "project-a", "project-b"] }
+```
+
+`projectIds` must be the complete current list of visible, non-system project IDs in the requested order. On success, the server stores contiguous positions, returns `200` with the visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
+
+Project objects include the normal project fields; this example is truncated to the fields relevant to ordering:
+
+```json
+{
+  "projects": [
+    { "id": "project-c", "name": "Gamma", "rootPath": "/repo/gamma", "position": 0 },
+    { "id": "project-a", "name": "Alpha", "rootPath": "/repo/alpha", "position": 1 },
+    { "id": "project-b", "name": "Beta", "rootPath": "/repo/beta", "position": 2 }
+  ]
+}
+```
+
+Invalid requests return `400` and do not mutate the registry:
+
+```json
+{ "error": "projectIds must be an array of strings", "code": "invalid_project_order" }
+```
+
+`invalid_project_order` covers malformed bodies, non-string IDs, duplicate IDs, unknown IDs, hidden project IDs, and the synthetic `system` project ID. Hidden/system projects do not participate in ordering and are never returned by `GET /api/projects`.
+
+Stale complete-order mismatches return `409` and do not mutate the registry:
+
+```json
+{
+  "error": "Project order is stale",
+  "code": "stale_project_order",
+  "expectedProjectIds": ["project-a", "project-b", "project-c"],
+  "receivedProjectIds": ["project-a", "project-b"]
+}
+```
+
+A stale error means the submitted IDs were otherwise valid visible projects, but the submitted set no longer exactly matched the server's visible project set. The usual client recovery is to re-fetch `GET /api/projects`, apply the returned order, and let the user retry.
+
+For the user-facing sidebar behavior, see [Sidebar project drag reorder](sidebar-project-reorder.md).
 
 ### Project resolution contract
 
@@ -401,6 +579,8 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
+`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`. For AI Gateway models, Bobbit derives this from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+
 `POST /api/models/test` responses:
 
 - `200 { ok: true, modelResolved, latencyMs }` — success.
@@ -420,6 +600,8 @@ Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debu
 | `POST` | `/api/aigw/test` | Test connection to a URL without saving (`{ url }`) |
 | `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
 | `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
+
+Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. Model discovery also consumes `/v1/models` pricing metadata and persists converted costs into generated agent `models.json` entries. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) and [AI Gateway model pricing](internals.md#ai-gateway-model-pricing).
 
 ### OAuth
 
@@ -527,14 +709,15 @@ Unauthenticated rows (`authenticated: false`) still appear so the Settings → M
 |---|---|---|---|
 | `prompt` | `string` | yes | Free-form prompt. Capped at 8192 chars. |
 | `n` | `integer` | no | Number of images. Must be an integer in `[1, 4]`. Defaults to `1`. |
-| `model` | `string` | no | Override id in `provider/modelId` form. Both sides are canonicalised before comparison. If unrecognised, the request silently falls back to the session's selected image model rather than rejecting. |
 | `size` | `string` | no | Provider-specific size token (e.g. `1024x1024`). |
 | `quality` | `string` | no | Provider-specific quality token (e.g. `auto`, `hd`). |
 | `background` | `string` | no | One of `transparent`, `opaque`, `auto` (OpenAI-only). |
 | `format` | `string` | no | One of `png`, `jpeg`, `webp`. |
 | `aspectRatio` | `string` | no | Gemini/Imagen aspect ratio (e.g. `16:9`). |
 | `imageSize` | `string` | no | Alternative size token validated against the registry entry's `sizes`. |
-| `sessionId` | `string` | no | Used to resolve the session's selected image model when `model` is omitted. |
+| `sessionId` | `string` | no | Resolves the session's selected image model (the single source of truth for the model). |
+
+There is no `model` field: the image model is controlled solely by the session image-model selector / `default.imageModel` settings default. A `body.model` is ignored if sent (regression-guarded), so neither an agent tool argument nor a human's prompt can change the model.
 
 Response on success (HTTP `200`):
 
@@ -553,7 +736,7 @@ Response on success (HTTP `200`):
 }
 ```
 
-The `model` object echoes the resolved provider/id/name/api so the caller can confirm which model actually served the request (the request `model` may have been canonicalised or fallen back to the session default). Each image carries `data` (base64-encoded bytes) and `mimeType`; some OpenAI calls also include a `revisedPrompt` when the provider rewrote the prompt. The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
+The `model` object echoes the resolved provider/id/name/api so the caller can confirm which model actually served the request (always the session selector / `default.imageModel` / `defaultImageModelPref()`, canonicalised). Each image carries `data` (base64-encoded bytes) and `mimeType`; some OpenAI calls also include a `revisedPrompt` when the provider rewrote the prompt. The tool extension fans this out to disk paths or inlines base64 in chat as appropriate.
 
 Error responses:
 
@@ -562,9 +745,9 @@ Error responses:
 - `400 { error: "n must be 1..4" }` — `n` is not an integer or is outside `[1, 4]`.
 - `500 { error: "<provider message>" }` — provider helper threw. The message comes straight from `err.message` (typically prefixed with the upstream HTTP status, never `[object Object]`). Provider-specific failure modes (Codex `n=1` clamp, `remote image exceeds 25 MB cap`, missing credentials) all surface here as `500`.
 
-The gateway does **not** return `502` or `503` from this endpoint, and there is no separate `400 { error: "unknown image model" }` path — unknown `model` values silently fall back to the session default (the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md)).
+The gateway does **not** return `502` or `503` from this endpoint. The model is never taken from the request body, so there is no "unknown image model" rejection here (the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md)).
 
-Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
+Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing canonical model-ID reference (gpt-image-2 / Google IDs) lives in `defaults/system-prompt.md`; the model itself is chosen only via the session image-model selector / settings default, not the tool call. The per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
 
 ### MCP Servers
 
@@ -600,9 +783,10 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount. Body is one of `{ html, entry? }` (inline) or `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy entry plus explicitly declared siblings). Returns `200 { url, path, relPath, entry, mtime }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `relPath` is the host-invariant `<sessionId>/<entry>` identifier (forward slashes on all OS) used by the agent tool to build the v3 snapshot marker — its size is bounded by content shape, not by where `bobbitStateDir()` lives on disk. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
-| `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns the same `{ url, path, relPath, entry, mtime }` shape as the `POST`, or `404 { error: "no preview mount" }` if the mount is missing or empty. |
-| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path}` after every successful `POST /api/preview/mount`. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
+| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount, OR restore an immutable artifact. Body is one of: `{ html, entry? }` (inline), `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy entry plus explicitly declared siblings), or `{ artifactId }` (restore a previously captured artifact — mutually exclusive with `html`/`file`/`assets`/`manifest`). Returns `200 { url, path, relPath, entry, mtime, contentHash, artifactId }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `contentHash` is a lowercase SHA-256 hex string for the populated mount tree; `artifactId` is the id of the immutable artifact written alongside the mount (see [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md) and the [Preview architecture](preview-architecture.md) doc for lifecycle). `relPath` is the host-invariant `<sessionId>/<entry>` identifier (forward slashes on all OS) used by the agent tool to build the v3 snapshot marker. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error / `artifactId` combined with another body field; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing / `artifactId` unknown or owned by a different session. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
+| `POST` | `/api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | Restore a previously captured immutable preview artifact into the session's live mount and broadcast `preview-changed`. The artifact must belong to `<sid>`; cross-session ids return `404`. Returns the same shape as the mount `POST` (`{ url, path, relPath, entry, mtime, contentHash, artifactId }`). Used by the preview-renderer Open button on historical `preview_open` tool cards. Equivalent to `POST /api/preview/mount` with `{ artifactId }` body; this dedicated route keeps the URL self-describing for the client restore path. |
+| `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns `{ url, path, relPath, entry, mtime, contentHash, artifactId? }` (artifactId present iff an artifact was persisted for the current mount), or `404 { error: "no preview mount" }` if the mount is missing or empty. |
+| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
 
 ### Search
 
@@ -655,39 +839,49 @@ Returns **400** if `projectId` is missing, **404** if the project is not registe
 
 ### Summary views (`?view=summary`)
 
-Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls. Without this parameter, the full response is returned (used by the UI dashboard).
+Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls and gate progress counters. Without this parameter, the full response is returned for detail views.
 
 **Why this exists:** Full gate and task responses include signal history, content bodies, verification output, and task specs — often hundreds of KB. Agent tools call these endpoints frequently, and every byte enters the LLM context window permanently. Summary views strip non-essential data, reducing typical `gate_list` responses from ~436KB to ~500B.
 
 **`GET /api/goals/:id/gates?view=summary`**
 
-Returns status, dependency, and signal count per gate — no signal arrays or content bodies.
+Returns the server-authoritative gate progress summary for counters and status chips. The response is built by `src/server/gate-status-summary.ts` from stored `GateStore` state plus active verification state, so clients do not infer running or human-sign-off state from slim signal rows.
 
 ```json
 {
+  "passed": 0,
+  "total": 1,
+  "verifying": true,
+  "verifyingCount": 1,
+  "awaitingSignoffCount": 0,
+  "awaitingHumanSignoff": false,
+  "runningGateIds": ["implementation"],
   "gates": [{
     "gateId": "implementation",
     "name": "Implementation",
-    "status": "failed",
+    "status": "passed",
+    "effectiveStatus": "running",
+    "running": true,
+    "awaitingSignoffCount": 0,
     "dependsOn": ["design-doc"],
     "signalCount": 22,
-    "updatedAt": 1775853741666,
-    "failedSteps": ["E2E tests"]
-  }]
+    "updatedAt": 1775853741666
+  }],
+  "summary": { "...": "same fields as the top-level summary" }
 }
 ```
 
-Fields: `gateId`, `name`, `status`, `dependsOn`, `signalCount`. Conditional: `updatedAt` (if signaled), `failedSteps` (if failed — names of non-passed, non-skipped verification steps).
+Goal-wide fields: `passed`, `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and `gates`. Per-gate fields: `gateId`, `name`, stored `status`, `effectiveStatus` (`running` while an active verification overlays stored state), `running`, `awaitingSignoffCount`, `dependsOn`, and `signalCount`. Conditional fields: `updatedAt` (if signaled) and `failedSteps` (if failed — names of non-passed, non-skipped verification steps). The top-level fields preserve existing consumers; `summary` is the canonical grouped shape used by newer clients.
 
 **`GET /api/goals/:id/gates/:gateId?view=summary`**
 
-Returns the latest signal only, with truncated output for failed verification steps (last 40 lines). Content body is replaced with `hasContent` + `contentLength`.
+Returns the latest signal only. Content body is replaced with `hasContent` + `contentLength`. When the latest signal is still running, `latestSignal.verification` is built from the same active snapshot used by `gate_inspect section=verification`, so `gate_status` and inspect agree on step status, durations, summary counts, active metadata, and bounded output.
 
 ```json
 {
   "gateId": "implementation",
   "name": "Implementation",
-  "status": "failed",
+  "status": "passed",
   "dependsOn": ["design-doc"],
   "signalCount": 22,
   "updatedAt": 1775853741666,
@@ -700,17 +894,22 @@ Returns the latest signal only, with truncated output for failed verification st
     "timestamp": 1775853741666,
     "commitSha": "bd8fc7b",
     "verification": {
-      "status": "failed",
+      "status": "running",
+      "summary": "1 passed, 1 running, 1 waiting",
+      "counts": { "passed": 1, "failed": 0, "skipped": 0, "running": 1, "waiting": 1, "blocked": 0 },
+      "active": true,
       "steps": [
-        { "name": "Type check passes", "passed": true },
-        { "name": "E2E tests", "passed": false, "output": "… last 40 lines …" }
-      ]
+        { "name": "Type check passes", "type": "command", "status": "passed", "passed": true, "duration_ms": 15320 },
+        { "name": "E2E tests", "type": "command", "status": "running", "duration_ms": 62150, "output": "… last 20 live lines …" },
+        { "name": "QA review", "type": "agent-qa", "status": "waiting" }
+      ],
+      "selection": { "mode": "tail", "truncated": false }
     }
   }
 }
 ```
 
-Passed verification steps include only `name` and `passed: true` — no output. Failed steps include a tail of their output (40 lines max).
+Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps. Completed signals keep their persisted final results.
 
 **`GET /api/goals/:id/tasks?view=summary`**
 
@@ -732,54 +931,216 @@ Strips `spec`, `resultSummary`, `baseSha`, timestamps (`createdAt`, `updatedAt`,
 }
 ```
 
+### Sign-off endpoint
+
+**`POST /api/goals/:id/gates/:gateId/signoff`** — resolves a `human-signoff` verification step that is parked waiting on a human decision (`awaitingHuman: true` on the active verification's step). See [goals-workflows-tasks.md — Human sign-off steps](goals-workflows-tasks.md#human-sign-off-steps) for the full lifecycle.
+
+Request body:
+
+```json
+{
+  "signalId": "sig-7",
+  "stepName": "design-approval",
+  "decision": "pass",
+  "feedback": "Approved — ship it."
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `signalId` | yes | Id of the gate signal whose verification owns the step. |
+| `stepName` | yes | `name` of the parked step as declared in the workflow YAML. |
+| `decision` | yes | `"pass"` or `"fail"`. Anything else → 400. |
+| `feedback` | no | Free-form markdown. Stored verbatim in the step `output` and a `text/markdown` artifact. The review pane composes this from the final comment and inline comments when the decision came from a review document. |
+
+Responses:
+
+- **200** `{ "resolved": true }` — the resolver was invoked. The step result is built (`passed = decision === "pass"`) and the gate continues through the standard phase machinery.
+- **400** — missing or malformed body.
+- **404** — goal / signal / step does not exist or no active verification owns the signal/gate pair.
+- **409** — idempotent surface. The step exists but is no longer awaiting human input. Body: `{ "error": "step is no longer awaiting human input", "stepName", "status": "passed" | "failed" | "skipped" }`. Distinguishes "another client just resolved it" from "never parked here".
+- **400** when the goal is shelved; **409** when archived.
+
+Authz (v1) trusts the gateway token — anyone with UI access can submit. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve a sign-off step that gates their own work.
+
+Review-pane behavior and validation are documented in [Review Pane Sign-Off](review-pane-signoff.md).
+
+### Gate reset endpoint
+
+**`POST /api/goals/:id/gates/:gateId/reset`** — invalidates a gate and every transitive downstream dependent from the goal's workflow DAG. The route has no required request body.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "gateId": "design-doc",
+  "affectedGateIds": ["design-doc", "implementation", "ready-to-merge"],
+  "changedGateIds": ["design-doc", "implementation"],
+  "unchangedGateIds": ["ready-to-merge"],
+  "previousStatuses": {
+    "design-doc": "passed",
+    "implementation": "failed",
+    "ready-to-merge": "pending"
+  },
+  "gates": [
+    { "gateId": "design-doc", "name": "Design Doc", "status": "pending" },
+    { "gateId": "implementation", "name": "Implementation", "status": "pending" },
+    { "gateId": "ready-to-merge", "name": "Ready to Merge", "status": "pending" }
+  ],
+  "teamLeadNotified": true
+}
+```
+
+Notes:
+
+- `affectedGateIds` includes the requested gate first, then downstream dependents reached through `dependsOn`.
+- Only gates that were not already `pending` appear in `changedGateIds`; already-pending gates appear in `unchangedGateIds`.
+- Every affected gate gets a `verificationCacheInvalidatedAt` marker. Signals at or before that timestamp cannot supply same-commit cached verification steps, so the next signal runs fresh verification even if the commit SHA is unchanged.
+- Signal history, content, metadata, and verification output are preserved for audit. The gate `status` is the approval source of truth after reset.
+- `human-signoff` approvals are never reused from verification cache; each re-signal requires a fresh human decision.
+- After a fresh post-reset pass, later non-reset re-signals at the same commit may reuse that new passed output normally.
+- Active verifications for affected gates are cancelled before status changes are persisted.
+- The server emits `gate_status_changed` plus `gate_reset` WebSocket events and notifies the team lead when one is active.
+- Sandboxed agent tokens are forbidden from this route.
+
+Errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate; 409 when the goal is archived.
+
 ### Gate inspect endpoint
 
 **`GET /api/goals/:id/gates/:gateId/inspect`**
 
-A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool.
+A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool. It applies bounded text selection to text-heavy gate fields so agents can inspect large content, verification output, and signal history without loading the full payload into context.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `section` | `"content"` \| `"verification"` \| `"signals"` | yes | — | What data to retrieve |
-| `signal_index` | integer | no | -1 (latest) | Which signal. 0-based, negative indexes from end. |
+| `signal_index` | integer | no | `-1` (latest) | Which signal. 0-based, negative indexes from end. Ignored for `section=signals`. |
+| `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns the last 20 lines per selected field/verification step, not full output. |
+| `pattern` | string | for `grep` | — | Regex used by `mode=grep`. Invalid regexes return 400. |
+| `context` | integer | no | `0` | Surrounding lines to include around each grep match. |
+| `max_results` | integer | no | server default | Maximum grep matches before truncating. |
+| `lines` | integer | no | server default | Number of lines for `mode=head` or `mode=tail`. |
+| `from` / `to` | integer | for `slice` | — | 1-indexed inclusive line range for `mode=slice`. |
 
-**`section=content`** — Returns the markdown content body from a specific signal.
+Retrieval controls mirror the background-shell inspection tools where they make sense:
+
+- `grep` returns line-numbered regex matches with optional merged context.
+- `slice` returns a line-numbered 1-indexed inclusive range.
+- `head` and `tail` return bounded ranges identified in metadata.
+- `full` requests the full rendered text, but normal line/byte/tool-result caps still apply.
+
+When `mode` is omitted, the endpoint defaults to the last 20 lines. If that implicit default omits earlier lines, the response includes an omission hint such as:
+
+```text
+[N lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=X to=Y, to inspect more]
+```
+
+Explicit `grep`, `head`, `tail`, `slice`, and `full` requests do not add this guidance hint beyond normal truncation metadata.
+
+Selection metadata is returned with filtered output:
+
+| Field | Meaning |
+|---|---|
+| `selection.mode` | Retrieval mode used |
+| `selection.totalLines` | Total rendered line count when available |
+| `selection.range` | Selected line range, when applicable |
+| `selection.matchCount` / `selection.shownMatches` | Total and returned grep matches, when applicable |
+| `selection.truncated` | Whether selection or response caps were applied |
+| `selection.truncationReason` | Why output was truncated, when applicable |
+| `selection.omittedHint` | Hint shown only for implicit default tails that omitted lines |
+
+**`section=content`** — Returns selected markdown content from a specific signal.
 ```json
 {
   "gateId": "design-doc",
   "section": "content",
   "signalIndex": 0,
   "signalId": "sig-1",
-  "text": "## Design Document\n\n..."
+  "text": "120: ## Detailed Plan\n121: ...",
+  "selection": {
+    "mode": "slice",
+    "totalLines": 240,
+    "range": { "from": 120, "to": 180 },
+    "truncated": false
+  }
 }
 ```
 
-**`section=verification`** — Returns full verification step output (all steps, not truncated).
+**`section=verification`** — Returns a verification snapshot with each step's `output` independently selected. For the latest running signal, this is the same active snapshot used by `gate_status`: persisted signal rows are overlaid with active harness state before output selection. A top-level `selection` may also appear when the combined response is capped.
 ```json
 {
   "gateId": "implementation",
   "section": "verification",
   "signalIndex": 21,
   "signalId": "sig-22",
+  "status": "running",
+  "summary": "1 passed, 1 running, 1 waiting",
+  "counts": { "passed": 1, "failed": 0, "skipped": 0, "running": 1, "waiting": 1, "blocked": 0 },
+  "active": true,
   "steps": [
-    { "name": "Type check", "type": "command", "passed": true, "duration_ms": 12400, "output": "Found 0 errors.\n" },
-    { "name": "E2E tests", "type": "command", "passed": false, "duration_ms": 95200, "output": "..." }
-  ]
+    {
+      "name": "Type check passes",
+      "type": "command",
+      "status": "passed",
+      "passed": true,
+      "duration_ms": 15320,
+      "selection": { "mode": "tail", "totalLines": 1, "truncated": false }
+    },
+    {
+      "name": "E2E tests",
+      "type": "command",
+      "status": "running",
+      "duration_ms": 95200,
+      "output": "… last 20 live stdout/stderr lines …",
+      "liveLogs": { "stdout": true, "stderr": true },
+      "selection": { "mode": "tail", "totalLines": 900, "range": { "from": 881, "to": 900 }, "truncated": false }
+    },
+    {
+      "name": "QA review",
+      "type": "agent-qa",
+      "status": "waiting"
+    }
+  ],
+  "selection": { "mode": "tail", "truncated": false }
 }
 ```
 
-**`section=signals`** — Returns a summary list of all signals (no content bodies or verification output).
+Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` means it will not run because an earlier phase failed. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
+
+Running command steps may include bounded live stdout/stderr reads via `liveLogs`. The server reads a capped portion of the live log file first, then applies the requested `tail`, `head`, `slice`, `grep`, or `full` selection and the aggregate output budget. Use those selection modes for deeper targeted logs instead of relying on the default 20-line tail.
+
+**`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected JSON-lines `text`.
 ```json
 {
   "gateId": "implementation",
   "section": "signals",
+  "signalsTotal": 22,
+  "signalsShown": 1,
+  "signalsTruncated": true,
   "signals": [
-    { "index": 0, "id": "sig-1", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
-  ]
+    { "index": 21, "id": "sig-22", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
+  ],
+  "text": "{\"index\":21,\"id\":\"sig-22\",\"timestamp\":1775812345000,\"sessionId\":\"efed71fb\",\"commitSha\":\"abc123\",\"verdict\":\"failed\",\"hasContent\":true,\"metadataKeys\":[\"new_regressions\"]}",
+  "selection": {
+    "mode": "tail",
+    "totalLines": 22,
+    "range": { "from": 22, "to": 22 },
+    "truncated": false
+  }
 }
 ```
 
-Returns 400 if `section` is missing or invalid. Returns 404 if the resolved signal index is out of range.
+Examples:
+
+```text
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=grep&pattern=error%7Cfailed&context=2
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=tail&lines=80
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=slice&from=120&to=180
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=full
+```
+
+Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, or a slice range is missing/non-integer/below 1/`from > to`. Returns 404 if the resolved signal index is out of range.
 
 ### Session error-state fields
 

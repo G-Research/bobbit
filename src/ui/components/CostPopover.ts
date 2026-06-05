@@ -22,6 +22,24 @@ interface CostAggregate {
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
 	totalCost: number;
+	/**
+	 * Derived ratio `cacheReadTokens / (cacheReadTokens + inputTokens)`. The server
+	 * derives this on every cost snapshot. Older servers may omit the field — in
+	 * that case (or when the denominator is zero / value is non-finite) the UI
+	 * renders an em dash, never `0%`, so cold sessions are not misread.
+	 */
+	cacheHitRate?: number | null;
+}
+
+/**
+ * Format a cache-hit ratio for display. Returns an em dash for missing/null/
+ * non-finite values so cold sessions and old-protocol servers don't show `0%`.
+ */
+function formatCacheHitRate(rate: number | null | undefined): string {
+	if (rate === null || rate === undefined || typeof rate !== "number" || !Number.isFinite(rate)) {
+		return "\u2014";
+	}
+	return `${Math.round(rate * 100)}%`;
 }
 
 @customElement("cost-popover")
@@ -102,6 +120,14 @@ export class CostPopover extends LitElement {
 			</div>`;
 	}
 
+	private _renderCacheHitRow(rate: number | null | undefined) {
+		return html`
+			<div data-testid="cost-cache-hit" style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;">
+				<span style="color:var(--muted-foreground)">Cache hit</span>
+				<span style="font-variant-numeric:tabular-nums;">${formatCacheHitRate(rate)}</span>
+			</div>`;
+	}
+
 	private _renderBreakdown(agg: CostAggregate) {
 		const rows = [
 			{ label: "Input tokens", tokens: agg.inputTokens },
@@ -109,7 +135,10 @@ export class CostPopover extends LitElement {
 		];
 		if (agg.cacheReadTokens) rows.push({ label: "Cache read", tokens: agg.cacheReadTokens });
 		if (agg.cacheWriteTokens) rows.push({ label: "Cache write", tokens: agg.cacheWriteTokens });
-		return rows.map(r => this._renderTokenRow(r.label, r.tokens));
+		return html`
+			${rows.map(r => this._renderTokenRow(r.label, r.tokens))}
+			${this._renderCacheHitRow(agg.cacheHitRate)}
+		`;
 	}
 
 	override render() {

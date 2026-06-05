@@ -17,6 +17,7 @@ import type { SessionInfo } from "./session-manager.js";
 import { emitSessionEvent, broadcastStatus } from "./session-manager.js";
 import type { RpcBridgeOptions } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
+import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import type { SessionStore } from "./session-store.js";
@@ -146,6 +147,14 @@ export interface SessionSetupPlan {
 	goalId?: string;
 	assistantType?: string;
 	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	readOnly?: boolean;
+	walkthroughJobId?: string;
+	walkthroughChangesetId?: string;
+	walkthroughTargetKey?: string;
+	/** Explicit session-scoped tool allowlist that must survive process restarts. */
+	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
 	repoPath?: string;
@@ -650,6 +659,13 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		nonInteractive: plan.nonInteractive,
 		sandboxed: plan.sandboxed,
 		delegateOf: plan.delegateOf,
+		parentSessionId: plan.parentSessionId,
+		childKind: plan.childKind,
+		readOnly: plan.readOnly,
+		walkthroughJobId: plan.walkthroughJobId,
+		walkthroughChangesetId: plan.walkthroughChangesetId,
+		walkthroughTargetKey: plan.walkthroughTargetKey,
+		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
 	});
@@ -766,7 +782,12 @@ export async function executeWorktreeAsync(
 	}
 
 	// Use pre-built worktree from pool, or create one from scratch
-	let worktreeCwd: string;
+	let worktreeCwd: string = plan.cwd;
+	// Defense-in-depth: set when no worktree-able repo remained (multi-repo
+	// declaration whose sub-repos aren't git repos). resolveWorktreeSupport
+	// normally prevents reaching here, but if it does we run the session in the
+	// original cwd with no worktree rather than pointing at a missing container.
+	let noWorktreeFallback = false;
 	if (preBuiltWorktreePath) {
 		worktreeCwd = preBuiltWorktreePath;
 		console.log(`[session-setup] Using pre-built worktree for session ${session.id}: ${worktreeCwd}`);
@@ -788,13 +809,19 @@ export async function executeWorktreeAsync(
 				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, { worktreeRoot, configuredBaseRef }),
 				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
 			);
-			worktreeCwd = result.container;
-			// Mirror the pool-claim path: record per-repo worktrees for archive cleanup.
-			session.repoWorktrees = result.worktrees.map(w => ({
-				repo: w.repo,
-				repoPath: w.repoPath,
-				worktreePath: w.worktreePath,
-			}));
+			if (result.worktrees.length === 0) {
+				// No worktree-able git sub-repo remained — fall back to no-worktree.
+				noWorktreeFallback = true;
+				console.warn(`[session-setup] No worktree-able repo for session ${session.id}; running without a worktree in ${plan.cwd}`);
+			} else {
+				worktreeCwd = result.container;
+				// Mirror the pool-claim path: record per-repo worktrees for archive cleanup.
+				session.repoWorktrees = result.worktrees.map(w => ({
+					repo: w.repo,
+					repoPath: w.repoPath,
+					worktreePath: w.worktreePath,
+				}));
+			}
 		} else {
 			worktreeCwd = await withRetry(
 				async () => {
@@ -806,8 +833,9 @@ export async function executeWorktreeAsync(
 		}
 
 		// Per-component setup — non-fatal on failure. Routes through the canonical
-		// resolver so component.relativePath is honored.
-		if (components.length > 0) {
+		// resolver so component.relativePath is honored. Skipped entirely in the
+		// no-worktree fallback (there is no branch container to set up).
+		if (!noWorktreeFallback && components.length > 0) {
 			try {
 				const { runComponentSetups } = await import("../skills/worktree-setup.js");
 				const { execShellCommand } = await import("./shell-util.js");
@@ -825,36 +853,44 @@ export async function executeWorktreeAsync(
 		}
 	}
 
-	// For sandboxed sessions, set sandboxBranch so applySandboxWiring() creates
-	// the worktree inside the container (via ProjectSandbox.createWorktree).
-	// The host worktree is still kept for server-side bookkeeping (worktreePath).
-	if (plan.sandboxed && !plan.sandboxBranch && plan.branch) {
-		plan.sandboxBranch = plan.branch;
-		// No baseBranch for regular sessions — they branch from HEAD
-	}
+	if (noWorktreeFallback) {
+		// No worktree was created — run the session in its original cwd exactly
+		// like a no-worktree session. Do NOT set worktreePath/repoWorktrees and
+		// skip the sandbox-branch wiring that assumes a real branch container.
+		// plan.cwd / session.cwd are left unchanged (the original project cwd).
+		console.log(`[session-setup] Session ${session.id} running without a worktree in ${plan.cwd}`);
+	} else {
+		// For sandboxed sessions, set sandboxBranch so applySandboxWiring() creates
+		// the worktree inside the container (via ProjectSandbox.createWorktree).
+		// The host worktree is still kept for server-side bookkeeping (worktreePath).
+		if (plan.sandboxed && !plan.sandboxBranch && plan.branch) {
+			plan.sandboxBranch = plan.branch;
+			// No baseBranch for regular sessions — they branch from HEAD
+		}
 
-	// Apply subdirectory offset: if the session's original CWD (project rootPath) is a
-	// subdirectory of the repo, offset the working directory within the worktree.
-	const originalCwd = plan.cwd;
-	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
-	const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
-	if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
-	const offsetCwd = relativeOffset && relativeOffset !== "."
-		? path.join(worktreeCwd, relativeOffset)
-		: worktreeCwd;
+		// Apply subdirectory offset: if the session's original CWD (project rootPath) is a
+		// subdirectory of the repo, offset the working directory within the worktree.
+		const originalCwd = plan.cwd;
+		const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
+		const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
+		if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
+		const offsetCwd = relativeOffset && relativeOffset !== "."
+			? path.join(worktreeCwd, relativeOffset)
+			: worktreeCwd;
 
-	// Update session and plan with worktree CWD (offset applied)
-	session.cwd = offsetCwd;
-	session.worktreePath = worktreeCwd;
-	plan.cwd = offsetCwd;
-	const persistFields: Record<string, unknown> = { cwd: offsetCwd, worktreePath: worktreeCwd };
-	if (session.repoWorktrees && session.repoWorktrees.length > 0) {
-		persistFields.repoWorktrees = Object.fromEntries(
-			session.repoWorktrees.map(w => [w.repo, w.worktreePath]),
-		);
+		// Update session and plan with worktree CWD (offset applied)
+		session.cwd = offsetCwd;
+		session.worktreePath = worktreeCwd;
+		plan.cwd = offsetCwd;
+		const persistFields: Record<string, unknown> = { cwd: offsetCwd, worktreePath: worktreeCwd };
+		if (session.repoWorktrees && session.repoWorktrees.length > 0) {
+			persistFields.repoWorktrees = Object.fromEntries(
+				session.repoWorktrees.map(w => [w.repo, w.worktreePath]),
+			);
+		}
+		ctx.store.update(session.id, persistFields);
+		console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 	}
-	ctx.store.update(session.id, persistFields);
-	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 
 	// LSP pre-warm is intentionally deferred until AFTER sandbox wiring runs
 	// below. Doing it here would race with `applySandboxWiring`: for sandboxed
@@ -1007,6 +1043,13 @@ export async function executeWorktreeAsync(
 			ctx.store.update(session.id, { agentSessionFile: correctPath });
 		}
 
+		// Un-poison any blank-text user messages in the cloned transcript before
+		// the agent rehydrates from it (best-effort, non-fatal).
+		await sanitizeAgentTranscriptFile(
+			{ sandboxed: !!plan.sandboxed, projectId: plan.projectId },
+			plan.preExistingAgentSessionFile,
+			ctx.sandboxManager,
+		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },
@@ -1073,6 +1116,12 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
 		delegateOf: plan.delegateOf,
+		parentSessionId: plan.parentSessionId,
+		childKind: plan.childKind,
+		readOnly: plan.readOnly,
+		walkthroughJobId: plan.walkthroughJobId,
+		walkthroughChangesetId: plan.walkthroughChangesetId,
+		walkthroughTargetKey: plan.walkthroughTargetKey,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
@@ -1117,6 +1166,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
+		await sanitizeAgentTranscriptFile(
+			{ sandboxed: !!plan.sandboxed, projectId: plan.projectId },
+			plan.preExistingAgentSessionFile,
+			ctx.sandboxManager,
+		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchResp = await rpcClient.sendCommand(
 			{ type: "switch_session", sessionPath: plan.preExistingAgentSessionFile },

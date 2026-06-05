@@ -1,0 +1,10 @@
+name: submit_pr_walkthrough_yaml
+description: "Submit the completed PR walkthrough YAML document for validation and panel publishing."
+summary: "Publish PR walkthrough YAML"
+params: [yaml]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: PR Walkthrough
+docs: |-
+  Call exactly once when the PR walkthrough YAML is complete. The gateway validates the YAML and populates the PR walkthrough panel only after this tool succeeds. On validation errors, fix the YAML and call the tool again.

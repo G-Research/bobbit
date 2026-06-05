@@ -1,10 +1,41 @@
-import { getModel } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
+
+/**
+ * Placeholder model used as the initial value of `_state.model` before the
+ * real model arrives via WS hydration (`set_model` event). Hard-coded to
+ * avoid statically importing `getModel` from `@earendil-works/pi-ai`, which
+ * would pull the 553 kB generated model catalog into the entry chunk.
+ *
+ * Mirrors `getModel("anthropic", "claude-opus-4-6")` with `contextWindow: 0`
+ * (the previous initial state). The hydrated model from the server replaces
+ * this within a few ms of WS connect — only `contextWindow` and `provider`
+ * are read from the placeholder, both defensively.
+ *
+ * See `docs/design/shrink-initial-bundle.md` (Task A) and `pi-ai-lazy.ts`.
+ */
+const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
+	id: "claude-opus-4-6",
+	name: "Claude Opus 4.6",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	thinkingLevelMap: { xhigh: "max" },
+	input: ["text", "image"],
+	cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+	contextWindow: 0,
+	maxTokens: 128000,
+};
+
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
-import { state, renderApp } from "./state.js";
+import { state, renderApp, setProjectsIfChanged } from "./state.js";
+import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
+import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
-import { needsHumanAttention } from "./notification-policy.js";
-import { refreshGateStatusForGoal, refreshSessions } from "./api.js";
+import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
+import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
+import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
@@ -118,6 +149,15 @@ function mergeToolPayloads(...payloads: Array<Record<string, unknown> | null | u
 	return merged;
 }
 
+function isReviewWorkspaceSelectionActive(title?: string): boolean {
+	const s = state as any;
+	const activeId = typeof s.activePanelTabId === "string" ? s.activePanelTabId
+		: typeof s.panelWorkspace?.activeTabId === "string" ? s.panelWorkspace.activeTabId
+		: "";
+	if (activeId) return activeId.startsWith("review:") || (!!title && activeId === `review:${encodeURIComponent(title)}`);
+	return s.previewPanelTab === "review" || s.previewPanelActiveTab === "review";
+}
+
 function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: string) => unknown): any {
 	if (!message || !Array.isArray(message.content)) return message;
 	let changed = false;
@@ -169,6 +209,10 @@ export interface QueuedMessage {
 	isSteered: boolean;
 	/** True if already dispatched mid-turn via steer RPC (kept in queue for UI) */
 	dispatched?: boolean;
+	/** True for a client-side outbox row not yet delivered to the server (S2):
+	 *  issued while the WS was reconnecting; flushed on auth_ok. Lets the pill
+	 *  strip render it distinctly ("waiting to send") and the client reconcile it. */
+	unsent?: boolean;
 	createdAt: number;
 }
 
@@ -182,6 +226,14 @@ export class RemoteAgent {
 	private _toolCallInputsById = new Map<string, unknown>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
+	// Client-side outbox for user-intent frames issued while the WS is not OPEN
+	// (S2 — VPN flap / reconnect): instead of silently dropping the frame (and
+	// clearing the composer as if it sent), queue it, surface it in the existing
+	// prompt-queue pill strip as a "pending/unsent" row, and flush FIFO on the
+	// next auth_ok. Bounded so a long offline period can't grow unbounded.
+	private _pendingOutbox: Array<{ frame: any; row?: QueuedMessage }> = [];
+	private static readonly OUTBOX_MAX = 50;
+	private static readonly OUTBOX_FRAME_TYPES = new Set(["prompt", "steer", "retry"]);
 	// Reducer-owned message state. The reducer is the single source of truth
 	// for transcript order; `_state.messages` is mirrored from `reducerState.messages`
 	// after every dispatch so existing UI bindings keep working.
@@ -455,7 +507,7 @@ export class RemoteAgent {
 	onGoalSetupEvent?: () => void;
 	/** Callback fired when compaction state changes (start/end). */
 	onCompactionChange?: (isCompacting: boolean) => void;
-	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; process?: any }) => void;
+	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; endTime?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
 	/** Callback fired when server detects PR creation and busts the cache. */
@@ -475,7 +527,7 @@ export class RemoteAgent {
 	constructor() {
 		this._state = {
 			systemPrompt: "",
-			model: { ...getModel("anthropic", "claude-opus-4-6"), contextWindow: 0 },
+			model: { ...PLACEHOLDER_DEFAULT_MODEL, contextWindow: 0 },
 			thinkingLevel: "medium",
 			imageGenerationModel: null as any,
 			tools: [],
@@ -483,7 +535,7 @@ export class RemoteAgent {
 			status: "idle" as ClientSessionStatus,
 			isCompacting: false,
 			archivedAt: null as number | null,
-			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } | null,
+			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate?: number | null } | null,
 			streamingMessage: null as any,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
@@ -658,6 +710,9 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
+						// S2: deliver any prompts/steers/retries the user issued while
+						// the socket was reconnecting, before resume/snapshot traffic.
+						this._flushOutbox();
 						// On reconnect, try a seq-based resume before falling back
 						// to a full snapshot. If the server still holds our last seen
 						// seq in its EventBuffer, it will replay only missed events
@@ -821,6 +876,17 @@ export class RemoteAgent {
 			}
 		}
 
+		const maybeWalkthroughCommand = !attachments?.length && !imageData?.length && /^\/walkthrough-pr(?:\s+.+)?$/i.test(text.trim());
+		if (maybeWalkthroughCommand) {
+			const { openPrWalkthroughPanel, parseWalkthroughPrCommand } = await import("./pr-walkthrough.js");
+			const walkthroughInput = parseWalkthroughPrCommand(text);
+			if (walkthroughInput) {
+				openPrWalkthroughPanel(state, this.gatewaySessionId || state.selectedSessionId || "", walkthroughInput);
+				renderApp();
+				return;
+			}
+		}
+
 		// Stash attachments so we can enrich the echoed user message
 		this._pendingAttachments = attachments || null;
 		// Skill expansions are server-resolved — only forward if the caller
@@ -832,11 +898,11 @@ export class RemoteAgent {
 				: null;
 
 		// Add the user message optimistically so it renders immediately —
-		// but only when the agent is idle. If streaming, the prompt is queued
-		// server-side and the server will echo it in the correct position
-		// (interleaved with responses). Rendering it now would stack multiple
-		// user messages together before any response.
-		if (!this._state.isStreaming) {
+		// but only when the agent is idle AND the socket is open. If streaming,
+		// the prompt is queued server-side and echoed in the correct position. If
+		// the socket is NOT open (S2), the frame goes to the outbox and surfaces as
+		// a pending pill — rendering a transcript bubble would falsely look "sent".
+		if (!this._state.isStreaming && this.ws?.readyState === WebSocket.OPEN) {
 			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 			const optimisticMsg: any = {
 				role: attachments?.length || this._pendingSkillExpansions?.length
@@ -864,17 +930,20 @@ export class RemoteAgent {
 
 	steer(message: any): void {
 		const text = typeof message === "string" ? message : extractText(message);
-		// Add optimistic user message so it renders immediately in chat,
-		// matching the pattern used in prompt() for idle sends.
-		const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-		const optimisticMsg: any = {
-			role: "user",
-			content: [{ type: "text", text }],
-			timestamp: Date.now(),
-			id: optimisticId,
-		};
-		this.apply({ type: "optimistic-steer", message: optimisticMsg });
-		this.emit({ type: "message_end", message: optimisticMsg });
+		// Add optimistic user message so it renders immediately in chat — but only
+		// when the socket is open. Offline (S2), the steer goes to the outbox and
+		// shows as a pending pill instead of a falsely-"sent" bubble.
+		if (this.ws?.readyState === WebSocket.OPEN) {
+			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const optimisticMsg: any = {
+				role: "user",
+				content: [{ type: "text", text }],
+				timestamp: Date.now(),
+				id: optimisticId,
+			};
+			this.apply({ type: "optimistic-steer", message: optimisticMsg });
+			this.emit({ type: "message_end", message: optimisticMsg });
+		}
 		this.send({ type: "steer", text });
 	}
 
@@ -1198,12 +1267,16 @@ export class RemoteAgent {
 	clearFollowUpQueue(): void {}
 	clearAllQueues(): void {}
 	hasQueuedMessages(): boolean {
-		return this._serverQueue.length > 0;
+		return this._serverQueue.length > 0 || this._pendingOutbox.some((e) => !!e.row);
 	}
 
-	/** Get the current server-authoritative prompt queue. */
+	/** Get the prompt queue for the pill strip: the server-authoritative queue
+	 *  plus any client-side pending-unsent rows (S2), which sort after the server
+	 *  rows since they have not been delivered yet. */
 	getQueue(): QueuedMessage[] {
-		return this._serverQueue;
+		if (this._pendingOutbox.length === 0) return this._serverQueue;
+		const pendingRows = this._pendingOutbox.map((e) => e.row).filter((r): r is QueuedMessage => !!r);
+		return pendingRows.length ? [...this._serverQueue, ...pendingRows] : this._serverQueue;
 	}
 
 	/** Ask the server to promote a queued message to a steer. */
@@ -1211,8 +1284,15 @@ export class RemoteAgent {
 		this.send({ type: "steer_queued", messageId });
 	}
 
-	/** Ask the server to remove a message from the queue. */
+	/** Ask the server to remove a message from the queue. A pending-unsent
+	 *  outbox row (S2) is dropped locally — the server never saw it. */
 	removeQueued(messageId: string): void {
+		const idx = this._pendingOutbox.findIndex((e) => e.row?.id === messageId);
+		if (idx !== -1) {
+			this._pendingOutbox.splice(idx, 1);
+			this.onQueueUpdate?.(this.getQueue());
+			return;
+		}
 		this.send({ type: "remove_queued", messageId });
 	}
 
@@ -1231,12 +1311,51 @@ export class RemoteAgent {
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
-		} else {
-			console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
+			return;
 		}
+		// S2: queue user-intent frames instead of dropping them. A prompt/steer
+		// also gets a pending pill row (built from the frame) so it appears in the
+		// existing queue strip; retry has no text → no pill, but still resends.
+		if (RemoteAgent.OUTBOX_FRAME_TYPES.has(msg?.type)) {
+			if (this._pendingOutbox.length >= RemoteAgent.OUTBOX_MAX) this._pendingOutbox.shift();
+			let row: QueuedMessage | undefined;
+			if (typeof msg.text === "string") {
+				row = {
+					id: `outbox_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+					text: msg.text,
+					isSteered: msg.type === "steer",
+					unsent: true,
+					createdAt: Date.now(),
+					...(Array.isArray(msg.images) && msg.images.length ? { images: msg.images } : {}),
+					...(Array.isArray(msg.attachments) && msg.attachments.length ? { attachments: msg.attachments } : {}),
+				};
+			}
+			this._pendingOutbox.push({ frame: msg, row });
+			if (row) this.onQueueUpdate?.(this.getQueue());
+			return;
+		}
+		console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
+	}
+
+	/** Flush queued user-intent frames after the socket reopens (auth_ok). FIFO;
+	 *  the server then echoes/enqueues them and the normal queue_update
+	 *  reconciliation replaces the pending pills. (S2) */
+	private _flushOutbox(): void {
+		if (this._pendingOutbox.length === 0) return;
+		const pending = this._pendingOutbox;
+		this._pendingOutbox = [];
+		for (const entry of pending) {
+			if (this.ws?.readyState === WebSocket.OPEN) {
+				try { this.ws.send(JSON.stringify(entry.frame)); } catch { /* re-drop on a racing close; rare */ }
+			}
+		}
+		this.onQueueUpdate?.(this.getQueue());
 	}
 
 	private async handleServerMessage(msg: any) {
+		if (shouldRefreshGateStatusForEvent(msg)) {
+			scheduleGateStatusRefreshForGoal((msg as any).goalId);
+		}
 		switch (msg.type) {
 			case "state":
 				// Canonical-status path (new server). When the server splices
@@ -1268,6 +1387,12 @@ export class RemoteAgent {
 				}
 				if (msg.data?.imageGenerationModel) {
 					this._state.imageGenerationModel = msg.data.imageGenerationModel;
+				}
+				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "serverCost")) {
+					this._state.serverCost = msg.data.serverCost ?? null;
+					if (this._state.serverCost) {
+						this.emit({ type: "cost_update" as any, cost: this._state.serverCost });
+					}
 				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;
@@ -1334,6 +1459,7 @@ export class RemoteAgent {
 							this._checkReviewToolResult(m);
 						}
 					}
+					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -1389,6 +1515,14 @@ export class RemoteAgent {
 						this._pendingEvents = [];
 						this._inResumeFallback = true;
 						this._highestSeq = 0;
+						// S9: also clear _seqInitialized so the NEXT live frame
+						// re-baselines _highestSeq (via the !_seqInitialized branch
+						// above). Without this, _highestSeq stays 0 while
+						// _seqInitialized remains true, so every subsequent large-seq
+						// frame re-buffers as a gap → the buffer refills to the cap →
+						// overflow fires forever and live streaming stalls until reload.
+						// Mirrors the resume_gap / _advanceTopLevelSeq recovery paths.
+						this._seqInitialized = false;
 						this.requestMessages();
 					}
 					this._drainOrderedEvents();
@@ -1468,7 +1602,9 @@ export class RemoteAgent {
 
 			case "queue_update":
 				this._serverQueue = Array.isArray(msg.queue) ? msg.queue : [];
-				this.onQueueUpdate?.(this._serverQueue);
+				// Merge any pending-unsent outbox rows so a server queue update
+				// doesn't visually drop them before they flush (S2).
+				this.onQueueUpdate?.(this.getQueue());
 				break;
 
 			case "goal_setup_complete":
@@ -1529,19 +1665,16 @@ export class RemoteAgent {
 			}
 
 			case "gate_signal_received":
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 
 			case "gate_status_changed": {
 				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 
 			case "gate_verification_started":
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			case "gate_verification_phase_started":
 			case "gate_verification_step_complete":
@@ -1550,11 +1683,14 @@ export class RemoteAgent {
 				dispatchVerificationEvent(msg);
 				break;
 
+			case "gate_verification_awaiting_human":
+				dispatchVerificationEvent(msg);
+				break;
+
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 
@@ -1594,6 +1730,12 @@ export class RemoteAgent {
 			case "preferences_changed":
 				this._applyPreferences(msg.preferences);
 				break;
+
+			case "projects_changed": {
+				const projects = Array.isArray((msg as any).projects) ? (msg as any).projects : null;
+				if (projects && setProjectsIfChanged(projects)) renderApp();
+				break;
+			}
 
 			case "preview_changed":
 				this.onPreviewChanged?.(msg.sessionId, msg.preview);
@@ -1915,35 +2057,41 @@ export class RemoteAgent {
 				// (the fire-and-forget PUT would race with concurrent server-side
 				// setSubmitted(true) and clobber it on reload). RP-09.
 				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
-				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (replace || !state.reviewDocuments.has(data.title)) {
-					state.reviewDocuments.set(data.title, { title: data.title, markdown: data.markdown });
-				}
-				state.reviewPanelOpen = true;
-				state.reviewActiveTab = data.title;
-				state.previewPanelActiveTab = "review";
-				state.previewPanelTab = "review";
-				// Un-collapse panel on desktop
-				if (this._sessionId) {
-					localStorage.removeItem(`bobbit-preview-collapsed-${this._sessionId}`);
-				}
-				renderApp();
+				openMarkdownReviewDocument({
+					title: data.title,
+					markdown: data.markdown,
+					replace,
+					sessionId: this._sessionId || "",
+				});
 			} else if (data.action === "review_close") {
 				const sid = this._sessionId || "";
+				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
 				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (data.title) {
-					state.reviewDocuments.delete(data.title);
-					clearAnnotations(sid, data.title);
-					if (state.reviewActiveTab === data.title) {
+				if (closingTitle) {
+					state.reviewDocuments.delete(closingTitle);
+					clearAnnotations(sid, closingTitle);
+					removePersistedReviewDocument(sid, closingTitle);
+					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
 					}
+					closeReviewWorkspaceTabs([closingTitle], { sessionId: sid, select: false });
 				} else {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					clearAllAnnotations(sid);
+					clearPersistedReviewDocuments(sid);
+					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
+				if (shouldReselect) {
+					if (state.reviewPanelOpen && state.reviewActiveTab) {
+						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId: sid, select: true });
+					} else {
+						selectSensiblePanelWorkspaceTab({ sessionId: sid, select: true });
+					}
+				}
 				renderApp();
 			}
 		}
@@ -2087,7 +2235,8 @@ export class RemoteAgent {
 					if (sess) {
 						const goalId = sess.teamGoalId || sess.goalId;
 						const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-						if (needsHumanAttention(sess, goal, state.gatewaySessions, state.gateStatusCache)) {
+						if (needsHumanAttentionOnIdleTransition(sess, goal, state.gatewaySessions, state.gateStatusCache)
+							|| needsImmediateHumanAttention(sess, state.gateStatusCache)) {
 							RemoteAgent.playNotificationBeep();
 							showFaviconBadge();
 						}
@@ -2224,12 +2373,22 @@ export class RemoteAgent {
 						this.streamingMessageId = undefined;
 
 						// Enrich echoed user messages with stashed attachments / skill expansions.
+						// The attachment slot is now a FALLBACK only (WP1 / RC2): when the
+						// echo already carries image content blocks, the reducer's
+						// enrichUserMessage derives the tiles from server-authoritative
+						// content — applying the slot too would double-attach. Use the slot
+						// only when the echo has no image block; clear it unconditionally
+						// (one-shot) so a later text-only prompt can't inherit stale images.
 						if (msg.role === "user" && this._pendingAttachments) {
-							msg = {
-								...msg,
-								role: "user-with-attachments",
-								attachments: this._pendingAttachments,
-							};
+							const echoHasImage = Array.isArray(msg.content)
+								&& msg.content.some((c: any) => c?.type === "image" && c?.data);
+							if (!echoHasImage) {
+								msg = {
+									...msg,
+									role: "user-with-attachments",
+									attachments: this._pendingAttachments,
+								};
+							}
 							this._pendingAttachments = null;
 						}
 						if (

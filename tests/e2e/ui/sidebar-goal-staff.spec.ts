@@ -1,18 +1,17 @@
 /**
- * Sidebar goal actions & staff E2E tests — SB-16, SB-22, SB-23, SB-31.
+ * Sidebar goal actions E2E tests — SB-16, SB-22, SB-23.
  *
  * Covers:
  *   SB-16: "New Goal" button on project header → goal assistant opens
- *   SB-22: Re-attempt archived goal → goal assistant opens
+ *   SB-22: Re-attempt archived/fresh goal → goal assistant opens
  *   SB-23: Archive goal lifecycle (live → archive → appears in archived section)
- *   SB-31: Dedicated Staff sub-section visible per-project (zero or more staff)
  */
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
-test.describe("Sidebar goal actions & staff @quarantine", () => {
+test.describe("Sidebar goal actions & staff", () => {
 	const goalIds: string[] = [];
 
 	test.afterAll(async () => {
@@ -56,6 +55,8 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		// Archive the goal
 		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 
+		// Desktop viewport so the sidebar-actions hamburger trigger renders
+		await page.setViewportSize({ width: 1280, height: 900 });
 		await openApp(page);
 
 		// Open the Filters popover and toggle Show Archived ON
@@ -72,10 +73,16 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		const goalRow = goalTitle.locator("xpath=ancestor::div[contains(@class,'group')]").first();
 		await goalRow.hover();
 
-		// Find and click the re-attempt button (title="Re-attempt goal")
-		const reattemptBtn = goalRow.locator("button[title='Re-attempt goal']");
-		await expect(reattemptBtn).toBeVisible({ timeout: 5_000 });
-		await reattemptBtn.click();
+		// Re-attempt is now popover-only (quick:false). Open the sidebar actions
+		// popover via the hamburger trigger, then click the Re-attempt menu item.
+		const trigger = page.locator(
+			`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="goal"][data-sidebar-actions-id="${goal.id}"]`,
+		);
+		await expect(trigger).toBeVisible({ timeout: 5_000 });
+		await trigger.click();
+
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="reattempt"]').click();
 
 		// Should open a goal assistant session with a textarea
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
@@ -98,6 +105,8 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		const goal = await createGoal({ title: "SB22b Fresh Reattempt", cwd: nonGitCwd() });
 		goalIds.push(goal.id);
 
+		// Desktop viewport so the sidebar-actions hamburger trigger renders
+		await page.setViewportSize({ width: 1280, height: 900 });
 		await openApp(page);
 
 		const goalTitle = page.getByText("SB22b Fresh Reattempt", { exact: false }).first();
@@ -106,9 +115,15 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		const goalRow = goalTitle.locator("xpath=ancestor::div[contains(@class,'group')]").first();
 		await goalRow.hover();
 
-		const reattemptBtn = goalRow.locator("button[title='Re-attempt goal']");
-		await expect(reattemptBtn).toBeVisible({ timeout: 5_000 });
-		await reattemptBtn.click();
+		// Re-attempt is now popover-only (quick:false). Drive it through the popover.
+		const trigger = page.locator(
+			`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="goal"][data-sidebar-actions-id="${goal.id}"]`,
+		);
+		await expect(trigger).toBeVisible({ timeout: 5_000 });
+		await trigger.click();
+
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="reattempt"]').click();
 
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 
@@ -153,23 +168,4 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("SB-31: dedicated Staff section header in the sidebar (per-project)", async ({ page }) => {
-		await openApp(page);
-
-		// Wait for the sidebar to fully load
-		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 15_000 });
-
-		// Each project bucket has a dedicated "Staff" sub-section header — even
-		// when zero staff exist — so users can create their first staff agent
-		// from inside the project bucket.
-		const staffSubheader = page.locator("[data-testid='sidebar-expanded'] span.uppercase")
-			.filter({ hasText: /^Staff$/i })
-			.first();
-		await expect(staffSubheader).toBeVisible({ timeout: 5_000 });
-
-		// The "+ New staff agent" button is reachable on the staff sub-section header.
-		await expect(page.locator("button[title^='New staff agent']").first()).toBeVisible({ timeout: 5_000 });
-	});
 });

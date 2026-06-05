@@ -6,8 +6,10 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
+import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
@@ -20,7 +22,8 @@ import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
-import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
+import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
@@ -33,12 +36,22 @@ import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
+import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
+import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
+import { buildGateStatusSummary } from "./gate-status-summary.js";
+import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
+import {
+	TextSelectionError,
+	selectText,
+	type TextSelectionMode,
+	type TextSelectionOptions,
+} from "./utils/text-selection.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -52,10 +65,11 @@ import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
+import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -67,6 +81,81 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
 }
+
+// Best-effort guard for add-time `base_ref` pinning: a detected `origin/<branch>`
+// must exist in EVERY configured component repo before it is persisted — mirroring
+// the save-time validator (which rejects a ref missing in any component). Without
+// this, a multi-repo project whose primary repo's remote HEAD differs from another
+// component's available refs would persist a value that breaks worktree creation
+// for that component. Returns true only if at least one repo was checked AND every
+// checked git repo has the ref. Never throws. See docs/design/base-ref.md.
+async function detectedRefExistsInAllComponents(
+	rootPath: string,
+	comps: Array<{ repo: string }>,
+	ref: string,
+): Promise<boolean> {
+	try {
+		const seen = new Set<string>();
+		let checked = 0;
+		for (const c of comps.length > 0 ? comps : [{ repo: "." }]) {
+			if (seen.has(c.repo)) continue;
+			seen.add(c.repo);
+			const repoPath = path.join(rootPath, c.repo);
+			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			checked++;
+			if (!(await refExistsInRepo(repoPath, ref))) return false;
+		}
+		return checked > 0;
+	} catch {
+		return false;
+	}
+}
+
+function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
+	const normalizedPath = pathname
+		.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}(?=\/|$)/gi, "/:id")
+		.replace(/\/\d+(?=\/|$)/g, "/:id")
+		.replace(/\/[A-Za-z0-9_-]{20,}(?=\/|$)/g, "/:id");
+	return `${method || "GET"} ${normalizedPath}`;
+}
+
+function wsEventType(event: unknown): string {
+	return event && typeof event === "object" && typeof (event as { type?: unknown }).type === "string"
+		? (event as { type: string }).type
+		: "unknown";
+}
+
+function responseChunkByteLength(chunk: unknown, encoding?: unknown): number {
+	if (chunk == null || typeof chunk === "function") return 0;
+	if (typeof chunk === "string") {
+		return Buffer.byteLength(chunk, typeof encoding === "string" ? encoding as BufferEncoding : undefined);
+	}
+	if (Buffer.isBuffer(chunk)) return chunk.length;
+	if (chunk instanceof Uint8Array) return chunk.byteLength;
+	return Buffer.byteLength(String(chunk));
+}
+
+function attachResponseByteCounter(res: http.ServerResponse): () => number {
+	let bytes = 0;
+	const originalWrite = res.write;
+	const originalEnd = res.end;
+	res.write = function patchedWrite(this: http.ServerResponse, chunk: any, encodingOrCb?: any, cb?: any): boolean {
+		bytes += responseChunkByteLength(chunk, encodingOrCb);
+		return originalWrite.call(this, chunk, encodingOrCb, cb);
+	} as typeof res.write;
+	res.end = function patchedEnd(this: http.ServerResponse, chunk?: any, encodingOrCb?: any, cb?: any): http.ServerResponse {
+		bytes += responseChunkByteLength(chunk, encodingOrCb);
+		return originalEnd.call(this, chunk, encodingOrCb, cb);
+	} as typeof res.end;
+	return () => bytes;
+}
+
+function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
+	if (!ws?.isViewer) return false;
+	const goalIds = ws.viewerGoalIds;
+	return goalIds instanceof Set && goalIds.has(goalId);
+}
+
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -82,7 +171,9 @@ import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-lev
 const askSubmittedToolUseIds = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
+import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
+import { GoalTriggerDispatcher } from "./agent/goal-trigger-dispatcher.js";
 import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
@@ -92,38 +183,50 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
+import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
+import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
+import { WalkthroughAgentManager } from "./pr-walkthrough/walkthrough-agent-manager.js";
+import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
+import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
+import { testModelPreference } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
-import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID } from "./agent/project-registry.js";
+import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
+import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
+import type { GateResetResult } from "./agent/gate-store.js";
+import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
-import { ConfigCascade } from "./agent/config-cascade.js";
+import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
 import { LspSupervisor } from "./lsp/supervisor.js";
 import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
 import { PyrightLspFactory } from "./lsp/clients/pyright.js";
 import { MultiProjectSandboxLspBridge } from "./lsp/sandbox-bridge.js";
 import { registerWorktreePreCleanupHook } from "./lsp/cleanup-hook.js";
+import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
+import { MarketplaceInstaller, MarketplaceError, type InstallScope, type PackOrderStore } from "./agent/marketplace-install.js";
+import { scopeMarketPackEntries } from "./agent/pack-list.js";
+import { buildConflictsFor, type ConflictWire, type PackScope } from "./agent/pack-types.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -134,12 +237,21 @@ import {
 	listProposalFiles,
 	parseProposalFile,
 	readProposalFile,
+	readSnapshot,
 	restoreSnapshot,
 	writeProposalFile,
+	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
+
+/** Max WebSocket frame the gateway will accept (S31). The ws default is 100 MiB;
+ *  a multi-image prompt frame carries ~3x base64 per image and could silently
+ *  trip a close-1009 teardown. Set an explicit, generous cap ABOVE the composer's
+ *  aggregate-send guard (src/ui/components/MessageEditor.ts) so the composer
+ *  rejects an oversized send with a clear error BEFORE it can tear down the socket. */
+export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
@@ -208,6 +320,31 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
+const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,reviewDecision";
+
+type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
+let _ghExecFileForTests: GhExecFileForTests | undefined;
+
+export function buildGhPrViewArgs(branch?: string): string[] {
+	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
+}
+
+async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
+	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
+	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
+	return String(stdout);
+}
+
+export function __setGhExecFileForPrStatusTests(fn: GhExecFileForTests | undefined): void {
+	_ghExecFileForTests = fn;
+	__resetPrStatusCachesForTests();
+}
+
+export function __resetPrStatusCachesForTests(): void {
+	_prCache.clear();
+	_prInFlight.clear();
+	_repoPermCache.clear();
+}
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
@@ -235,9 +372,7 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	const cached = _repoPermCache.get(cwd);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
 	try {
-		const { stdout } = await execAsync("gh repo view --json viewerPermission", {
-			cwd, encoding: "utf-8", timeout: 10000,
-		});
+		const stdout = await execGh(["repo", "view", "--json", "viewerPermission"], cwd);
 		const perm = JSON.parse(stdout).viewerPermission ?? "";
 		_repoPermCache.set(cwd, { perm, ts: Date.now() });
 		return perm === "ADMIN";
@@ -249,15 +384,13 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 
 async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	const ghFields = "--json state,url,number,title,mergeable,headRefName,reviewDecision";
-	const branchArg = branch ? ` ${branch}` : "";
-	const cmd = `gh pr view${branchArg} ${ghFields}`;
+	const args = buildGhPrViewArgs(branch);
 
 	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
-			const { stdout } = await execAsync(cmd, { cwd: dir, encoding: "utf-8", timeout: 10000 });
+			const stdout = await execGh(args, dir);
 			const pr = JSON.parse(stdout);
 			const viewerIsAdmin = await getViewerIsAdmin(dir);
 			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
@@ -270,6 +403,10 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 	}
 	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
 	return null;
+}
+
+export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return getCachedPrStatus(cwd, branch, fallbackCwd);
 }
 
 async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -299,6 +436,52 @@ async function execGit(cmd: string, cwd: string, timeout = 5000, containerId?: s
 }
 async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?: string): Promise<string> {
 	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
+}
+
+async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+	if (containerId) {
+		const { stdout } = await execFileAsync("docker", [
+			"exec", "-w", cwd, containerId, "git", ...args,
+		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+		return stdout.trim();
+	}
+	const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf-8", timeout });
+	return stdout.trim();
+}
+// Argument-vector variant of execGitSafe: never passes user input through a shell.
+async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string): Promise<string> {
+	try { return await execGitArgs(args, cwd, 5000, containerId); } catch { return fallback; }
+}
+
+function branchPublishGitArgs(branch: string): {
+	push: string[];
+	fetchRemoteTracking: string[];
+	setUpstream: string[];
+} {
+	if (!branch) throw new Error("Cannot push: no current branch");
+	return {
+		push: ["push", "origin", `HEAD:refs/heads/${branch}`],
+		fetchRemoteTracking: ["fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`],
+		setUpstream: ["branch", `--set-upstream-to=origin/${branch}`, branch],
+	};
+}
+
+async function publishCurrentBranchToOrigin(
+	cwd: string,
+	branch: string,
+	opts: { containerId?: string; setUpstream?: boolean } = {},
+): Promise<string> {
+	const args = branchPublishGitArgs(branch);
+	const output = await execGitArgs(args.push, cwd, 30_000, opts.containerId);
+	if (opts.setUpstream) {
+		try {
+			await execGitArgs(args.fetchRemoteTracking, cwd, 15_000, opts.containerId);
+			await execGitArgs(args.setUpstream, cwd, 10_000, opts.containerId);
+		} catch {
+			// Publishing succeeded; upstream repair is best-effort for compatibility.
+		}
+	}
+	return output;
 }
 
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
@@ -510,14 +693,15 @@ async function getGitDiff(cwd: string, file?: string, containerId?: string): Pro
 		}
 		if (containerId) {
 			// Run git diff inside container
+			// Argument-vector execution — `file` is never parsed by a shell.
 			if (hasHead) {
-				diff = await execGitSafe(`git diff HEAD -- ${file}`, cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "HEAD", "--", file], cwd, "", containerId);
 			} else {
-				diff = await execGitSafe(`git diff --cached -- ${file}`, cwd, "", containerId)
-					+ await execGitSafe(`git diff -- ${file}`, cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--cached", "--", file], cwd, "", containerId)
+					+ await execGitArgsSafe(["diff", "--", file], cwd, "", containerId);
 			}
 			if (!diff.trim()) {
-				diff = await execGitSafe(`git diff --no-index /dev/null -- ${file}`, cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--no-index", "/dev/null", "--", file], cwd, "", containerId);
 			}
 		} else if (hasHead) {
 			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
@@ -588,6 +772,7 @@ export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	fs.mkdirSync(stateDir, { recursive: true });
+	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
 
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
@@ -771,7 +956,70 @@ export function createGateway(config: GatewayConfig) {
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
+	// ── Pack-Based Marketplace (single resolver over installed packs) ──────
+	// Sources are global to the server; the cache + sources file live under
+	// the server scope. Install/resolve derive market-pack roots from a per-
+	// scope `base` via scopePaths() (design §1.3.1). Server base is the
+	// project root (getProjectRoot()), global-user is the home dir, project is
+	// each project's rootPath.
+	const marketplaceSourceStore = new MarketplaceSourceStore(configDir);
+	const marketplaceInstaller = new MarketplaceInstaller({
+		sourceStore: marketplaceSourceStore,
+		cacheRoot: path.join(bobbitStateDir(), "marketplace-cache"),
+		serverBase: getProjectRoot(),
+		globalUserBase: os.homedir(),
+	});
+	// Resolve the on-disk base + pack_order store for an install scope.
+	const marketScopeContext = (scope: InstallScope, projectId?: string): { base: string; store: PackOrderStore } | null => {
+		if (scope === "server") return { base: getProjectRoot(), store: projectConfigStore };
+		if (scope === "global-user") return { base: os.homedir(), store: projectConfigStore };
+		// project
+		if (!projectId) return null;
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) return null;
+		return { base: ctx.project.rootPath, store: ctx.projectConfigStore };
+	};
+	// Feed installed market packs into the roles/tools cascade (design §3.2).
+	const marketPackProvider: MarketPackProvider = {
+		marketEntries(scope, projectId) {
+			const sc = marketScopeContext(scope as InstallScope, projectId);
+			if (!sc) return [];
+			return scopeMarketPackEntries(scope as PackScope, sc.base, sc.store.getPackOrder(scope));
+		},
+	};
+	configCascade.setMarketPackProvider(marketPackProvider);
+
+	// Ordered installed market-pack `tools/` roots (low→high) for a project, so
+	// market-pack tools are listed, documented, provider-loaded, and usable at
+	// runtime — not just surfaced by the cascade listing (design §3.2 / finding
+	// #1). Mirrors the cascade scope order (server < global-user < project) and
+	// dedups self-managed-project path collisions, keeping the FIRST (lowest)
+	// scope, exactly as `ConfigCascade.resolveEntities` does.
+	const marketToolRoots = (projectId?: string): string[] => {
+		const roots: string[] = [];
+		const seen = new Set<string>();
+		for (const scope of ["server", "global-user", "project"] as const) {
+			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
+				const toolsDir = path.join(e.path, "tools");
+				const key = path.resolve(toolsDir);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				roots.push(toolsDir);
+			}
+		}
+		return roots;
+	};
+	// Server-level toolManager (used by GET /api/tools/:name without a project)
+	// sees server + global-user market packs (project scope needs a projectId).
+	toolManager.setMarketToolRootsProvider(() => marketToolRoots(undefined));
+	// Every per-project context's toolManager sees its full cross-scope market
+	// roots (server < global-user < project) — applied to existing + future ctxs.
+	projectContextManager.setContextConfigurator((ctx) => {
+		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+	});
+
 	const staffManager = new StaffManager(projectContextManager);
+	sessionManager.setStaffManager(staffManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
 	// `inboxNudger` ticks every 15s to deliver digests to idle staff.
@@ -820,6 +1068,13 @@ export function createGateway(config: GatewayConfig) {
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
 	triggerEngine.start();
 	inboxNudger.start();
+
+	// Push-based dispatcher for `goal_created` / `goal_archived` staff triggers.
+	// Distinct from `TriggerEngine` (which polls schedule/git) — fired
+	// synchronously from `GoalStore.put` / `GoalStore.archive` via callbacks
+	// wired on every ProjectContext (existing + lazily created).
+	const goalTriggerDispatcher = new GoalTriggerDispatcher(staffManager, inboxManager);
+	projectContextManager.setGoalTriggerDispatcher(goalTriggerDispatcher);
 	// Placeholder task store for TeamManager construction. Real goal/task operations
 	// route through the per-project context (see TeamManager.getTasksForSession). The
 	// first registered project's store is used when available, otherwise a server-
@@ -869,6 +1124,15 @@ export function createGateway(config: GatewayConfig) {
 
 		// API routes
 		if (url.pathname.startsWith("/api/")) {
+			const _cpuDiagEnabled = cpuDiagnosticsEnabled();
+			const _cpuDiagStart = _cpuDiagEnabled ? performance.now() : 0;
+			const _cpuDiagLabel = _cpuDiagEnabled ? normalizeApiRouteLabel(req.method, url.pathname) : "";
+			const _cpuDiagBytes = _cpuDiagEnabled ? attachResponseByteCounter(res) : undefined;
+			if (_cpuDiagEnabled) {
+				res.once("finish", () => {
+					getCpuDiagnostics().recordRest(_cpuDiagLabel, res.statusCode || 0, performance.now() - _cpuDiagStart, _cpuDiagBytes?.() ?? 0);
+				});
+			}
 
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
@@ -944,7 +1208,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1016,38 +1280,131 @@ export function createGateway(config: GatewayConfig) {
 	// cluster (RP-18, CT-01-d, S-02) where the WS would briefly disconnect
 	// during high-volume mock-agent event bursts. Loopback never benefits
 	// from compression in production either, so this is a strict win.
-	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
-	// Broadcast a message to WebSocket clients belonging to a specific goal
+	// Broadcast a message to WebSocket clients belonging to a specific goal.
+	// Recipients are the matching goal's session sockets plus explicit
+	// `/ws/viewer` dashboard sockets. Regular non-goal sessions are skipped so
+	// gate/team events do not wake unrelated tabs.
 	function broadcastToGoal(goalId: string, event: any): void {
-		const data = JSON.stringify(event);
-		for (const ws of wss.clients) {
-			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
-					if (session?.teamGoalId === goalId || session?.goalId === goalId) {
-						ws.send(data);
-						continue;
-					}
-					// Session is associated with a different goal — skip it
-					if (session?.teamGoalId || session?.goalId) continue;
+					if (session?.teamGoalId === goalId || session?.goalId === goalId) ws.send(data);
+					continue;
 				}
-				// Fallback: send to clients with no goal association
-				// (e.g. the user's browser session viewing the goal dashboard)
-				ws.send(data);
+				if (viewerSubscribedToGoal(ws as any, goalId)) ws.send(data);
 			}
+			return;
 		}
+
+		const stringifyStart = performance.now();
+		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let matchedGoal = 0;
+		let viewer = 0;
+		let fallback = 0;
+		let skipped = 0;
+		let skippedNonGoalSession = 0;
+		let skippedOtherGoal = 0;
+		let skippedUnknownSession = 0;
+		let skippedUnscoped = 0;
+		let skippedViewerUnsubscribed = 0;
+		for (const ws of wss.clients) {
+			scanned++;
+			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			const sid = (ws as any).sessionId as string | undefined;
+			if (sid) {
+				const session = sessionManager.getSession(sid);
+				if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+					ws.send(data);
+					recipients++;
+					matchedGoal++;
+					continue;
+				}
+				skipped++;
+				if (!session) skippedUnknownSession++;
+				else if (session.teamGoalId || session.goalId) skippedOtherGoal++;
+				else skippedNonGoalSession++;
+				continue;
+			}
+			if ((ws as any).isViewer) {
+				if (viewerSubscribedToGoal(ws as any, goalId)) {
+					ws.send(data);
+					recipients++;
+					viewer++;
+				} else {
+					skipped++;
+					skippedViewerUnsubscribed++;
+				}
+				continue;
+			}
+			skipped++;
+			skippedUnscoped++;
+		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToGoal", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			matchedGoal,
+			viewer,
+			fallback,
+			skipped,
+			skippedNonGoalSession,
+			skippedOtherGoal,
+			skippedUnknownSession,
+			skippedUnscoped,
+			skippedViewerUnsubscribed,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 
 	/** Broadcast to ALL authenticated WebSocket clients (regardless of session/goal). */
 	function broadcastToAll(event: any): void {
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+					ws.send(data);
+				}
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
 		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
 		for (const ws of wss.clients) {
+			scanned++;
 			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
 				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
 			}
 		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToAll", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 	/**
 	 * Broadcast to all authenticated WebSocket clients whose active session
@@ -1056,18 +1413,68 @@ export function createGateway(config: GatewayConfig) {
 	 * surface index status in project-agnostic chrome.
 	 */
 	function broadcastToProject(projectId: string, event: any): void {
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				const sid = (ws as any).sessionId as string | undefined;
+				if (sid) {
+					const session = sessionManager.getSession(sid);
+					if (!session) continue;
+					if (session.projectId && session.projectId !== projectId) continue;
+				}
+				ws.send(data);
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
 		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
 		for (const ws of wss.clients) {
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+			scanned++;
+			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
-				if (!session) continue;
-				if (session.projectId && session.projectId !== projectId) continue;
+				if (!session) { skipped++; continue; }
+				if (session.projectId && session.projectId !== projectId) { skipped++; continue; }
 			}
 			ws.send(data);
+			recipients++;
 		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToProject", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
+
+	const prWalkthroughAgentManager = new WalkthroughAgentManager({
+		defaultCwd: config.defaultCwd,
+		stateDir,
+		sessionManager,
+		preferencesStore,
+		broadcast: broadcastToAll,
+		preflightGithubLaunch: true,
+		resolveSessionCwd: (sessionId: string) => {
+			const live = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return live?.worktreePath || persisted?.worktreePath || live?.cwd || persisted?.cwd;
+		},
+		resolveSessionModel: (sessionId: string) => {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+		},
+	});
 
 	// Bridge search index progress bus → WS. Progress events are debounced
 	// to 500ms per-project (design §9). Complete + error events pass through.
@@ -1076,9 +1483,14 @@ export function createGateway(config: GatewayConfig) {
 		const flushProgress = (projectId: string) => {
 			const entry = progressDebounce.get(projectId);
 			if (!entry) return;
+			const diagEnabled = cpuDiagnosticsEnabled();
+			const diagStart = diagEnabled ? performance.now() : 0;
 			progressDebounce.delete(projectId);
 			clearTimeout(entry.timer);
 			broadcastToProject(projectId, entry.latest);
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("search:progressFlush", performance.now() - diagStart, { flushes: 1 });
+			}
 		};
 		searchProgressBus.on("index:progress", (ev) => {
 			const event = { type: "index:progress" as const, ...ev };
@@ -1111,6 +1523,11 @@ export function createGateway(config: GatewayConfig) {
 		} catch (err) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
 		}
+		if (info.reason === "purged") {
+			try { previewArtifacts.removeArtifacts(sessionId); } catch (err) {
+				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
+			}
+		}
 	});
 
 	sessionManager.setOnPrCreationDetected((session) => {
@@ -1127,10 +1544,39 @@ export function createGateway(config: GatewayConfig) {
 	function broadcastToSession(sessionId: string, event: any): void {
 		const session = sessionManager.getSession(sessionId);
 		if (!session) return;
-		const data = JSON.stringify(event);
-		for (const ws of session.clients) {
-			if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of session.clients) {
+				if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+			}
+			return;
 		}
+
+		const stringifyStart = performance.now();
+		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
+		for (const ws of session.clients) {
+			scanned++;
+			if ((ws as any).readyState === 1 /* OPEN */) {
+				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
+			}
+		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToSession", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
@@ -1249,16 +1695,28 @@ export function createGateway(config: GatewayConfig) {
 				}
 				const repoPath = await getRepoRoot(projectDir);
 
-				// Repo URL for cloning inside the container. Strip embedded tokens so
-				// they don't leak into .git/config; the container's credential helper
-				// reads GITHUB_TOKEN from env instead.
-				let repoUrl: string;
-				try {
-					const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoPath, timeout: 5000 });
-					repoUrl = stripTokenFromGitUrl(stdout.trim());
-				} catch {
-					repoUrl = repoPath;
-				}
+				// Resolve the clone source for the container. Resolving via
+				// `resolveSandboxCloneSource` guarantees we NEVER hand git a raw host
+				// path (e.g. a Windows drive-letter path, which git misparses as scp
+				// syntax → `cannot run ssh`) or an otherwise-unreachable host path.
+				// With an `origin` remote we clone the remote URL (tokens stripped so
+				// they don't leak into .git/config — the container's credential helper
+				// reads GITHUB_TOKEN from env instead). Without one, the canonical main
+				// repo root (resolved via `resolveSandboxMountRoot`, which handles linked
+				// worktrees) is bind-mounted read-only and cloned via `file://`. A LOCAL
+				// origin throws here — propagating through the awaited bootstrap so
+				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
+				const resolveOrigin = async (cwd: string): Promise<string | null> => {
+					try {
+						const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
+						return stdout.trim() || null;
+					} catch {
+						return null;
+					}
+				};
+				const mountSourcePath = await resolveSandboxMountRoot(repoPath);
+				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), mountSourcePath });
+				const repoUrl = cloneSource.cloneUrl;
 
 				let poolMounts: string[] = [];
 				try {
@@ -1283,34 +1741,48 @@ export function createGateway(config: GatewayConfig) {
 				// a remote configured (the bootstrap will then clone the same repo
 				// into multiple paths — only useful as a defensive default).
 				let repoUrlByName: Record<string, string> | undefined;
+				let cloneSourceByName: Record<string, SandboxCloneSource> | undefined;
 				if (components.some(c => c.repo !== ".")) {
 					repoUrlByName = {};
+					cloneSourceByName = {};
 					const seen = new Set<string>();
 					for (const c of components) {
 						if (c.repo === "." || seen.has(c.repo)) continue;
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
-						try {
-							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: rp, timeout: 5000 });
-							repoUrlByName[c.repo] = stripTokenFromGitUrl(stdout.trim());
-						} catch {
-							repoUrlByName[c.repo] = repoUrl;
-						}
+						// Same resolution as the single-repo path: never fall back to a
+						// raw host path. Remote-less repos bind-mount their canonical main
+						// repo root (resolved via `resolveSandboxMountRoot`, which handles
+						// linked worktrees) at a per-repo container mount path and clone
+						// via `file://`. A local origin throws (caller's awaited boundary).
+						const perRepoMountSource = await resolveSandboxMountRoot(rp);
+						const perRepoSrc = resolveSandboxCloneSource({
+							originUrl: await resolveOrigin(rp),
+							mountSourcePath: perRepoMountSource,
+							mountPath: `/workspace-src/${c.repo}`,
+						});
+						cloneSourceByName[c.repo] = perRepoSrc;
+						repoUrlByName[c.repo] = perRepoSrc.cloneUrl;
 					}
 				}
 
+				const sandboxTokenEntries = cfg.getSandboxTokens();
 				return {
 					projectId,
 					projectDir,
 					repoUrl,
+					cloneSource,
 					image: imageName,
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
+					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
 					components,
 					repoUrlByName,
+					cloneSourceByName,
 					// Resolver is invoked at worktree-creation time inside the container, so it always
 					// reads the current project-config-store value rather than a snapshot taken at
 					// sandbox bootstrap. Same shape as the worktree-pool baseRefResolver.
@@ -1327,6 +1799,7 @@ export function createGateway(config: GatewayConfig) {
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
+			prWalkthroughAgentManager.restore();
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
@@ -1705,6 +2178,7 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			inboxNudger.stop();
 			wss.close();
+			try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
@@ -1839,6 +2313,34 @@ function mergeSandboxSecrets(updates: Record<string, string>, configStore: impor
 	}
 }
 
+function parseGateInspectIntegerParam(params: URLSearchParams, name: string): number | undefined {
+	const raw = params.get(name);
+	if (raw === null || raw === "") return undefined;
+	if (!/^-?\d+$/.test(raw)) throw new TextSelectionError(`${name} must be an integer`);
+	return Number(raw);
+}
+
+function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectionOptions {
+	const rawMode = params.get("mode");
+	let mode: TextSelectionMode | undefined;
+	if (rawMode !== null) {
+		if (!["full", "grep", "head", "tail", "slice"].includes(rawMode)) {
+			throw new TextSelectionError(`mode must be one of: full, grep, head, tail, slice`);
+		}
+		mode = rawMode as TextSelectionMode;
+	}
+	return {
+		mode,
+		implicitDefault: rawMode === null,
+		pattern: params.get("pattern") ?? undefined,
+		context: parseGateInspectIntegerParam(params, "context"),
+		maxResults: parseGateInspectIntegerParam(params, "max_results"),
+		lines: parseGateInspectIntegerParam(params, "lines"),
+		from: parseGateInspectIntegerParam(params, "from"),
+		to: parseGateInspectIntegerParam(params, "to"),
+	};
+}
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -1868,10 +2370,29 @@ async function handleApiRoute(
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
+	prWalkthroughAgentManager?: WalkthroughAgentManager,
+	marketplaceSourceStore?: MarketplaceSourceStore,
+	marketplaceInstaller?: MarketplaceInstaller,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
+	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
+	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
+		...r.item,
+		origin: r.origin,
+		...(r.overrides ? { overrides: r.overrides } : {}),
+		// Always emit originPackId/originPackName (null for builtin/user entities)
+		// so roles/tools match the skills wire shape (finding #3).
+		originPackId: r.originPackId ?? null,
+		originPackName: r.originPackName ?? null,
+	});
+	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
+	// and the ToolManager mtime-keyed scan cache both need busting after a
+	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
+	// installed/updated/removed market-pack tool roots are re-scanned (Windows
+	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); };
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -1890,6 +2411,25 @@ async function handleApiRoute(
 		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
 		return false;
 	}
+
+	if (await handlePrWalkthroughApiRoute(url, req, res, {
+		defaultCwd: config.defaultCwd,
+		readBody,
+		sessionManager,
+		broadcast: broadcastToAll,
+		walkthroughAgentManager: prWalkthroughAgentManager,
+		resolveSessionCwd: (sessionId: string) => {
+			const live = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return live?.worktreePath || persisted?.worktreePath || live?.cwd || persisted?.cwd;
+		},
+		resolveSessionModel: (sessionId: string) => {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+		},
+		preferencesStore,
+		sandboxScope,
+	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
 
@@ -1931,6 +2471,38 @@ async function handleApiRoute(
 		return cwd;
 	}
 
+	/**
+	 * Explicit market-scope wiring for skill discovery (finding #3) — mirrors
+	 * the roles/tools `marketScopeContext` so server-scope market skill packs
+	 * resolve even when a project's root != the server cwd, and global-user
+	 * `pack_order` is read from the SERVER store (not the project store).
+	 */
+	function skillMarketContext(projectId: string | null | undefined): SkillMarketContext {
+		const ctx = projectId && projectContextManager ? projectContextManager.getOrCreate(projectId) : undefined;
+		return {
+			serverBase: getProjectRoot(),
+			globalUserBase: os.homedir(),
+			projectBase: ctx?.project.rootPath,
+			serverConfigStore: projectConfigStore,
+			projectConfigStore: ctx?.projectConfigStore,
+		};
+	}
+
+	/** Guard shared by the Fork endpoint: reject source sessions that cannot be
+	 * forked. The substrings (archived/terminated/delegate/child/read-only/team/
+	 * non-interactive) are load-bearing — the API E2E asserts on them. */
+	function isUnsupportedForkSource(session: any, ps: any): string | null {
+		if (!session || !ps) return "session not found";
+		if (ps.archived) return "archived sessions cannot be forked";
+		if (session.status === "terminated") return "terminated sessions cannot be forked";
+		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be forked";
+		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be forked";
+		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be forked";
+		if (session.nonInteractive || ps.nonInteractive) return "non-interactive sessions cannot be forked";
+		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be forked";
+		return null;
+	}
+
 	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
 	function getGoalManagerForGoal(goalId: string): GoalManager {
 		const ctx = projectContextManager.getContextForGoal(goalId);
@@ -1960,6 +2532,23 @@ async function handleApiRoute(
 			if (task) return getTaskManagerForGoal(task.goalId);
 		}
 		throw new Error(`Task "${taskId}" not found in any project`);
+	}
+
+	// GET /api/harness-status — report whether the dev restart harness is active
+	if (url.pathname === "/api/harness-status" && req.method === "GET") {
+		json({ restartAvailable: process.env.BOBBIT_DEV_HARNESS === "1" });
+		return;
+	}
+
+	// POST /api/harness/restart — request a dev harness rebuild/restart
+	if (url.pathname === "/api/harness/restart" && req.method === "POST") {
+		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
+			json({ error: "Restart is only available under the dev harness" }, 403);
+			return;
+		}
+		touchGatewayRestartSentinel();
+		json({ ok: true, restartRequested: true }, 202);
+		return;
 	}
 
 	// GET /api/health — unauthenticated so the client can probe localhost mode
@@ -2544,7 +3133,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/projects" && req.method === "GET") {
 		// Filter out hidden projects (e.g. the synthetic "system" project) so
 		// they never appear in the client's state.projects.
-		json(projectRegistry.list().filter(p => !p.hidden));
+		json(projectRegistry.list().filter(p => !p.hidden && p.id !== SYSTEM_PROJECT_ID));
 		return;
 	}
 
@@ -2670,6 +3259,35 @@ async function handleApiRoute(
 				// No default-workflow seeding. Workflows must be designed by the
 				// project assistant; a project may legitimately have zero workflows.
 			}
+			// Pin base_ref from the live remote so new projects never have a blank,
+			// silently-resolved base. Best-effort: failures leave it blank (today's
+			// behaviour). See docs/design/base-ref.md (add-time pinning).
+			//
+			// MUST run BEFORE worktree-pool init below: the pool's baseRefResolver
+			// reads `base_ref` on each _fill()/startFilling(), so pinning the
+			// concrete value first prevents early pool entries from being created
+			// off the old `origin/HEAD` fallback.
+			try {
+				const cfg = newCtx?.projectConfigStore;
+				if (cfg && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(body.rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Only pin when the detected ref is grammar-valid AND present in
+					// every component repo — otherwise a manual save would reject it
+					// and it could break worktree creation for the lacking component.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -2726,8 +3344,34 @@ async function handleApiRoute(
 		return;
 	}
 
+	// PUT /api/projects/order
+	if (url.pathname === "/api/projects/order" && req.method === "PUT") {
+		const body = await readBody(req);
+		try {
+			const projects = projectRegistry.setVisibleOrder(body?.projectIds);
+			broadcastToAll({ type: "projects_changed", projects });
+			json({ projects });
+		} catch (err: any) {
+			if (err instanceof ProjectOrderError || err?.code === "invalid_project_order" || err?.code === "stale_project_order") {
+				const code = err?.code === "stale_project_order" ? "stale_project_order" : "invalid_project_order";
+				const payload: Record<string, unknown> = {
+					error: err?.message || "Invalid project order",
+					code,
+				};
+				if (Array.isArray(err?.details?.expectedProjectIds)) payload.expectedProjectIds = err.details.expectedProjectIds;
+				if (Array.isArray(err?.details?.receivedProjectIds)) payload.receivedProjectIds = err.details.receivedProjectIds;
+				json(payload, code === "stale_project_order" ? 409 : 400);
+			} else {
+				jsonError(400, err);
+			}
+		}
+		return;
+	}
+
 	// GET /api/projects/:id
-	const projectGetMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+	// Collection-level project endpoints must never fall through to the generic
+	// project-id handlers (notably PUT /api/projects/order -> update("order")).
+	const projectGetMatch = url.pathname.match(/^\/api\/projects\/(?!(?:preflight|archive-bobbit|detect|scan|order)$)([^/]+)$/);
 	if (projectGetMatch && req.method === "GET") {
 		const project = projectRegistry.get(projectGetMatch[1]);
 		if (!project) { json({ error: "Project not found" }, 404); return; }
@@ -2791,7 +3435,75 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
 			const promoted = projectRegistry.promote(projectId, { name });
+			// Pin base_ref from the live remote (best-effort) now that the
+			// promoted project's rootPath is a real git repo. Mirrors the
+			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
+			try {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				const rootPath = projectRegistry.get(projectId)?.rootPath;
+				const cfg = ctx?.projectConfigStore;
+				if (cfg && rootPath && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Pin only if the detected ref exists in every component repo
+					// (mirrors save-time validation). See POST /api/projects above.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
+		} catch (err: any) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/base-ref/detect — read-only resolver helper.
+	// Returns { resolved, detected }:
+	//   resolved = what worktrees actually branch off right now
+	//              (resolveBaseRef(primaryRepoPath, storedValue).ref)
+	//   detected = live `git ls-remote --symref origin HEAD` result, but ONLY
+	//              when it is saveable (passes the same grammar + cross-component
+	//              existence checks add-time pinning applies); otherwise null
+	//              (offline / no remote / not saveable). Guarantees any non-null
+	//              `detected` the UI fills can be saved without rejection.
+	// Scoped to the project's pool/primary repo (same selection as add-time
+	// pinning). No mutation. See docs/design/base-ref.md.
+	const baseRefDetectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/base-ref\/detect$/);
+	if (baseRefDetectMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(baseRefDetectMatch[1]);
+		const rootPath = projectRegistry.get(baseRefDetectMatch[1])?.rootPath;
+		if (!ctx || !rootPath) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const cfg = ctx.projectConfigStore;
+			const comps = cfg.getComponents();
+			const isMultiRepo = comps.some(c => c.repo !== ".");
+			const primaryRepoPath = isMultiRepo
+				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+				: await getRepoRoot(rootPath);
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			// `detected` must be SAVEABLE — null it out unless it passes the same
+			// checks add-time pinning applies (grammar + cross-component existence).
+			// The Settings "Detect from remote" button fills this value, so a
+			// non-saveable value here would be rejected by the normal Save path.
+			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			if (
+				detected
+				&& (!isValidBaseRefBranchGrammar(detected)
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+			) {
+				detected = null;
+			}
+			json({ resolved, detected });
 		} catch (err: any) {
 			jsonError(400, err);
 		}
@@ -3218,7 +3930,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// BFS helper: walk delegateOf, teamLeadSessionId, teamGoalId, and goalId chains
+	// BFS helper: walk delegateOf, parentSessionId, teamLeadSessionId, teamGoalId, and goalId chains
 	// from seed IDs through an archived session pool.
 	function bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[] {
 		const result: any[] = [];
@@ -3229,6 +3941,7 @@ async function handleApiRoute(
 			for (const s of allArchived) {
 				if (!seen.has(s.id) && (
 					s.delegateOf === parentId ||
+					s.parentSessionId === parentId ||
 					s.teamLeadSessionId === parentId ||
 					s.teamGoalId === parentId ||
 					s.goalId === parentId
@@ -3373,7 +4086,7 @@ async function handleApiRoute(
 				if (session.sandboxed) skillCwd = ctx.project.rootPath;
 			}
 		}
-		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore);
+		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null));
 		if (!skill) {
 			json({ error: `Skill "${skillName}" not found` }, 404);
 			return;
@@ -3450,7 +4163,14 @@ async function handleApiRoute(
 					goalId: archived.goalId,
 					assistantType: archived.assistantType,
 					delegateOf: archived.delegateOf,
+					parentSessionId: archived.parentSessionId,
+					childKind: archived.childKind,
+					readOnly: archived.readOnly,
+					walkthroughJobId: archived.walkthroughJobId,
+					walkthroughChangesetId: archived.walkthroughChangesetId,
+					walkthroughTargetKey: archived.walkthroughTargetKey,
 					role: archived.role,
+					accessory: archived.accessory,
 					teamGoalId: archived.teamGoalId,
 					teamLeadSessionId: archived.teamLeadSessionId,
 					worktreePath: archived.worktreePath,
@@ -3486,7 +4206,14 @@ async function handleApiRoute(
 			roleAssistant: session.assistantType === "role",
 			toolAssistant: session.assistantType === "tool",
 			delegateOf: session.delegateOf,
+			parentSessionId: sessionPs?.parentSessionId ?? session.parentSessionId,
+			childKind: sessionPs?.childKind ?? session.childKind,
+			readOnly: sessionPs?.readOnly ?? session.readOnly,
+			walkthroughJobId: sessionPs?.walkthroughJobId ?? session.walkthroughJobId,
+			walkthroughChangesetId: sessionPs?.walkthroughChangesetId ?? session.walkthroughChangesetId,
+			walkthroughTargetKey: sessionPs?.walkthroughTargetKey ?? session.walkthroughTargetKey,
 			role: session.role,
+			accessory: session.accessory,
 			teamGoalId: session.teamGoalId,
 			teamLeadSessionId: session.teamLeadSessionId,
 			worktreePath: session.worktreePath,
@@ -3722,12 +4449,12 @@ async function handleApiRoute(
 			try {
 				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
 				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
-				const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
-				if (isMulti && proj?.rootPath) {
-					worktreeOpts = { repoPath: proj.rootPath };
-				} else if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
+				// Single source of truth shared with the staff path
+				// (staff-manager.ts) and goal path (goal-manager.ts).
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd);
+				if (support.supported && support.repoPath) {
+					worktreeOpts = { repoPath: support.repoPath };
 				}
 			} catch {
 				// Not a git repo or git not available — silently ignore
@@ -3744,7 +4471,20 @@ async function handleApiRoute(
 		}
 
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, {
+				...createOpts,
+				worktreeOpts,
+				reattemptGoalId,
+				sandboxed,
+				projectId: resolvedProjectId,
+				...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}),
+				parentSessionId: typeof body?.parentSessionId === "string" ? body.parentSessionId : undefined,
+				childKind: typeof body?.childKind === "string" ? body.childKind : undefined,
+				readOnly: typeof body?.readOnly === "boolean" ? body.readOnly : undefined,
+				walkthroughJobId: typeof body?.walkthroughJobId === "string" ? body.walkthroughJobId : undefined,
+				walkthroughChangesetId: typeof body?.walkthroughChangesetId === "string" ? body.walkthroughChangesetId : undefined,
+				walkthroughTargetKey: typeof body?.walkthroughTargetKey === "string" ? body.walkthroughTargetKey : undefined,
+			});
 
 			// Set assistant role metadata if no explicit role was provided
 			if (!createOpts?.role && assistantType) {
@@ -3777,6 +4517,12 @@ async function handleApiRoute(
 				toolAssistant: session.assistantType === "tool",
 				role: session.role,
 				accessory: session.accessory,
+				parentSessionId: session.parentSessionId,
+				childKind: session.childKind,
+				readOnly: session.readOnly,
+				walkthroughJobId: session.walkthroughJobId,
+				walkthroughChangesetId: session.walkthroughChangesetId,
+				walkthroughTargetKey: session.walkthroughTargetKey,
 				reattemptGoalId,
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
@@ -4431,7 +5177,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveTools(projectId);
-		const tools: Array<Record<string, unknown>> = resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) }));
+		const tools: Array<Record<string, unknown>> = resolved.map(r => withOrigin(r as any));
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
@@ -4451,9 +5197,25 @@ async function handleApiRoute(
 		const name = decodeURIComponent(toolMatch[1]);
 
 		if (req.method === "GET") {
-			const tool = toolManager.getToolByName(name);
+			// Resolve via the project's toolManager when a projectId is supplied so
+			// project-scope market-pack tools are visible (their `tools/` roots are
+			// wired into that context's manager — finding #1). Falls back to the
+			// server-level manager (server + global-user market packs + builtins).
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const tm = (projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager;
+			const tool = tm.getToolByName(name);
 			if (!tool) { json({ error: "Tool not found" }, 404); return; }
-			json(tool);
+			// Merge in cascade origin metadata so the detail payload carries the same
+			// origin/originPackId/originPackName the LIST endpoint emits (finding #1).
+			// Without this, the tools edit page replaces the cascade list item with the
+			// raw detail and a market-pack tool loses its origin badge + read-only state.
+			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
+			if (cascadeEntry) {
+				const withMeta = withOrigin(cascadeEntry as any);
+				json({ ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName });
+			} else {
+				json(tool);
+			}
 			return;
 		}
 
@@ -4678,7 +5440,13 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 		for (const [key, value] of Object.entries(body)) {
-			if (value === null || value === undefined) {
+			if (key === "githubTrustedHosts") {
+				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
+				// authoritative. An empty/invalid list removes the key entirely.
+				const normalized = normalizeTrustedHosts(value);
+				if (normalized.length === 0) preferencesStore.remove(key);
+				else preferencesStore.set(key, normalized);
+			} else if (value === null || value === undefined) {
 				preferencesStore.remove(key);
 			} else {
 				preferencesStore.set(key, value);
@@ -4733,6 +5501,220 @@ async function handleApiRoute(
 		const resolvedStore = resolveProjectConfigStore(projectId);
 		resetConfigDirectories(resolvedStore);
 		json({ ok: true });
+		return;
+	}
+
+	// ── Pack-Based Marketplace (design §9 / §9.1 / §9.2) ──────────────
+	if (url.pathname.startsWith("/api/marketplace/") || url.pathname === "/api/packs/conflicts") {
+		if (!marketplaceInstaller || !marketplaceSourceStore) { json({ error: "marketplace not available" }, 500); return; }
+		const installer = marketplaceInstaller;
+		const sourceStore = marketplaceSourceStore;
+
+		const MARKET_SCOPES = new Set(["global-user", "server", "project"]);
+		const parseScope = (raw: unknown): InstallScope | null =>
+			typeof raw === "string" && MARKET_SCOPES.has(raw) ? (raw as InstallScope) : null;
+
+		type ScopeTarget = { scope: InstallScope; projectBase?: string; store: PackOrderStore };
+		const resolveScopeTarget = (
+			scope: InstallScope,
+			projectId: string | undefined,
+		): { ok: true; target: ScopeTarget } | { ok: false; status: number; error: string } => {
+			if (scope === "project") {
+				if (!projectId) return { ok: false, status: 400, error: "projectId required for project scope" };
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!ctx) return { ok: false, status: 404, error: "Project not found" };
+				return { ok: true, target: { scope, projectBase: ctx.project.rootPath, store: ctx.projectConfigStore } };
+			}
+			return { ok: true, target: { scope, store: projectConfigStore } };
+		};
+
+		const errStatus = (code: string, notInstalled = 409): number => {
+			switch (code) {
+				case "unknown_source": return 404;
+				case "unknown_pack": return 404;
+				case "invalid_pack": return 422;
+				case "already_installed": return 409;
+				case "not_installed": return notInstalled;
+				case "unsafe_name": return 400;
+				case "git_failed": return 502;
+				default: return 400;
+			}
+		};
+		const handleMarketErr = (err: unknown, notInstalled = 409): void => {
+			if (err instanceof MarketplaceError) { json({ error: err.message }, errStatus(err.code, notInstalled)); return; }
+			jsonError(500, err);
+		};
+
+		// All scope contexts present for cross-scope listing. Each carries its
+		// scope's `pack_order` so `listInstalled` returns rows in precedence order
+		// (finding #2) — the UI relies on that order to build reorder payloads.
+		const allContexts = (projectId?: string): Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> => {
+			const ctxs: Array<{ scope: InstallScope; projectBase?: string; packOrder?: string[] }> = [
+				{ scope: "server", packOrder: projectConfigStore.getPackOrder("server") },
+				{ scope: "global-user", packOrder: projectConfigStore.getPackOrder("global-user") },
+			];
+			if (projectId) {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (ctx) ctxs.push({ scope: "project", projectBase: ctx.project.rootPath, packOrder: ctx.projectConfigStore.getPackOrder("project") });
+			}
+			return ctxs;
+		};
+
+		// ── Sources ───────────────────────────────────────────────
+		// GET /api/marketplace/sources
+		if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
+			json({ sources: sourceStore.list() });
+			return;
+		}
+		// POST /api/marketplace/sources { url, ref? }
+		if (url.pathname === "/api/marketplace/sources" && req.method === "POST") {
+			const body = await readBody(req);
+			const srcUrl = body && typeof (body as any).url === "string" ? (body as any).url.trim() : "";
+			if (!srcUrl) { json({ error: "url is required" }, 400); return; }
+			if (sourceStore.getByUrl(srcUrl)) { json({ error: `source already registered: ${srcUrl}` }, 409); return; }
+			let source;
+			try {
+				source = sourceStore.add({ url: srcUrl, ref: (body as any).ref });
+			} catch (err) { jsonError(400, err); return; }
+			try {
+				installer.syncSource(source.id);
+			} catch (err) {
+				// Roll back the registration if the initial sync fails.
+				sourceStore.remove(source.id);
+				handleMarketErr(err);
+				return;
+			}
+			json({ source: sourceStore.get(source.id) }, 201);
+			return;
+		}
+		// /api/marketplace/sources/:id[...]
+		const sourceMatch = url.pathname.match(/^\/api\/marketplace\/sources\/([^/]+)(\/sync|\/packs)?$/);
+		if (sourceMatch) {
+			const id = decodeURIComponent(sourceMatch[1]);
+			const sub = sourceMatch[2];
+			if (!isValidSourceId(id) || !sourceStore.get(id)) { json({ error: `unknown source: ${id}` }, 404); return; }
+
+			if (!sub && req.method === "DELETE") {
+				sourceStore.remove(id);
+				try { fs.rmSync(installer.cacheDirFor(id), { recursive: true, force: true }); } catch { /* ignore */ }
+				res.writeHead(204); res.end();
+				return;
+			}
+			if (sub === "/sync" && req.method === "POST") {
+				try { installer.syncSource(id); } catch (err) { handleMarketErr(err); return; }
+				json({ source: sourceStore.get(id) });
+				return;
+			}
+			if (sub === "/packs" && req.method === "GET") {
+				try { json({ packs: installer.browsePacks(id) }); } catch (err) { handleMarketErr(err); }
+				return;
+			}
+		}
+
+		// ── Install / update / uninstall ──────────────────────────
+		// POST /api/marketplace/install { sourceId, dirName, scope, projectId? }
+		// `dirName` is the physical source subdir to read; the installed identity
+		// is the pack's `manifest.name` (design §1.4). `packName` is accepted as a
+		// back-compat alias for `dirName`.
+		if (url.pathname === "/api/marketplace/install" && req.method === "POST") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			const dirName = typeof body?.dirName === "string" ? body.dirName : (typeof body?.packName === "string" ? body.packName : undefined);
+			if (typeof body?.sourceId !== "string" || typeof dirName !== "string") { json({ error: "sourceId and dirName are required" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			try {
+				const installed = installer.installPack({ sourceId: body.sourceId, dirName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				invalidateResolverCaches();
+				json({ installed }, 201);
+			} catch (err) { handleMarketErr(err); }
+			return;
+		}
+		// POST /api/marketplace/update { scope, packName, projectId? }
+		if (url.pathname === "/api/marketplace/update" && req.method === "POST") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			try {
+				const installed = installer.updatePack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				invalidateResolverCaches();
+				json({ installed });
+			} catch (err) { handleMarketErr(err, 409); }
+			return;
+		}
+		// DELETE /api/marketplace/installed { scope, packName, projectId? }
+		if (url.pathname === "/api/marketplace/installed" && req.method === "DELETE") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			try {
+				installer.uninstallPack({ packName: body.packName, scope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
+				invalidateResolverCaches();
+				res.writeHead(204); res.end();
+			} catch (err) { handleMarketErr(err, 404); }
+			return;
+		}
+		// GET /api/marketplace/installed?projectId=
+		if (url.pathname === "/api/marketplace/installed" && req.method === "GET") {
+			const projectId = url.searchParams.get("projectId") || undefined;
+			try { json({ installed: installer.listInstalled(allContexts(projectId)) }); } catch (err) { jsonError(500, err); }
+			return;
+		}
+
+		// ── pack-order (§9.2) ─────────────────────────────────────
+		if (url.pathname === "/api/marketplace/pack-order" && req.method === "GET") {
+			const scope = parseScope(url.searchParams.get("scope"));
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const st = resolveScopeTarget(scope, projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			json({ scope, order: st.target.store.getPackOrder(scope) });
+			return;
+		}
+		if (url.pathname === "/api/marketplace/pack-order" && req.method === "PUT") {
+			const body = (await readBody(req)) as any;
+			const scope = parseScope(body?.scope);
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			if (!Array.isArray(body?.order) || !body.order.every((x: unknown) => typeof x === "string")) { json({ error: "order must be a string array" }, 400); return; }
+			const st = resolveScopeTarget(scope, body?.projectId);
+			if (!st.ok) { json({ error: st.error }, st.status); return; }
+			// Normalize: drop names not installed at this scope; append on-disk-but-absent
+			// packs at lowest priority (front), preserving the requested order otherwise.
+			const installedNames = installer.listInstalled([{ scope, projectBase: st.target.projectBase }])
+				.filter((p) => p.scope === scope && p.status !== "corrupt")
+				.map((p) => p.packName);
+			const installedSet = new Set(installedNames);
+			const filtered = (body.order as string[]).filter((n) => installedSet.has(n));
+			const missing = installedNames.filter((n) => !filtered.includes(n));
+			const normalized = [...missing, ...filtered];
+			st.target.store.setPackOrder(scope, normalized);
+			invalidateResolverCaches();
+			json({ scope, order: normalized });
+			return;
+		}
+
+		// ── conflicts (§4 / §9) ───────────────────────────────────
+		if (url.pathname === "/api/packs/conflicts" && req.method === "GET") {
+			const projectId = url.searchParams.get("projectId") || undefined;
+			const conflicts: ConflictWire[] = [
+				...buildConflictsFor("roles", configCascade.resolveRolesEntries(projectId)),
+				...buildConflictsFor("tools", configCascade.resolveToolsEntries(projectId)),
+			];
+			const skillCwd = resolveSkillDiscoveryCwd(process.cwd(), projectId ?? null);
+			const skillStore = resolveProjectConfigStore(projectId ?? null);
+			conflicts.push(...buildConflictsFor("skills", discoverSlashSkillsResolved(skillCwd, skillStore, skillMarketContext(projectId ?? null))));
+			json({ conflicts });
+			return;
+		}
+
+		json({ error: "not found" }, 404);
 		return;
 	}
 
@@ -4865,20 +5847,10 @@ async function handleApiRoute(
 		}
 		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
 		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
-		// Canonicalise both sides so equality compares apples-to-apples (e.g. user
-		// pref "google/nano-banana" vs requested "google/gemini-2.5-flash-image").
 		const selectedModelRaw = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
-		const selectedModel = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
-		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
-		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
-		const model = requestedModel
-			&& (
-				!sessionId
-				|| requestedModel === selectedModel
-				|| imageModelMentionedInText(preferencesStore, requestedModel, lastUserPrompt)
-			)
-			? requestedModel
-			: selectedModel;
+		// Selector / settings default is the single source of truth. body.model is ignored
+		// on purpose — never reintroduce a tool- or prompt-driven model override.
+		const model = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
 		try {
 			const result = await generateImage(preferencesStore, {
 				prompt: body.prompt,
@@ -5123,11 +6095,8 @@ async function handleApiRoute(
 				return;
 			}
 			if (provider !== "aigw") {
-				json({
-					ok: false,
-					modelResolved: resolved.id,
-					error: "Test not supported for this provider yet — only AI Gateway models can be tested from here.",
-				}, 422);
+				const result = await testModelPreference(preferencesStore, pref);
+				json(result, result.status || (result.ok ? 200 : 502));
 				return;
 			}
 			const aigwUrl = getAigwUrl(preferencesStore);
@@ -5242,7 +6211,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/roles" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveRoles(projectId);
-		json({ roles: resolved.map(r => ({ ...r.item, origin: r.origin, ...(r.overrides ? { overrides: r.overrides } : {}) })) });
+		json({ roles: resolved.map(r => withOrigin(r as any)) });
 		return;
 	}
 
@@ -5354,7 +6323,7 @@ async function handleApiRoute(
 				const resolved = configCascade.resolveRoles(qProjectId);
 				const found = resolved.find(r => r.item.name === name);
 				if (!found) { json({ error: "Role not found" }, 404); return; }
-				json({ ...found.item, origin: found.origin, ...(found.overrides ? { overrides: found.overrides } : {}) });
+				json(withOrigin(found as any));
 			} else {
 				const role = roleManager.getRole(name);
 				if (!role) { json({ error: "Role not found" }, 404); return; }
@@ -5539,26 +6508,13 @@ async function handleApiRoute(
 			return { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
 		});
 		if (url.searchParams.get("view") === "summary") {
-			const slim = enriched.map(g => {
-				const base: Record<string, unknown> = {
-					gateId: g.gateId,
-					name: g.name,
-					status: g.status,
-					dependsOn: g.dependsOn || [],
-					signalCount: g.signalCount,
-				};
-				if (g.signals.length > 0) base.updatedAt = g.updatedAt;
-				if (g.status === "failed") {
-					const latest = g.signals[g.signals.length - 1];
-					if (latest?.verification?.steps) {
-						base.failedSteps = latest.verification.steps
-							.filter((s: any) => !s.passed && !s.skipped)
-							.map((s: any) => s.name);
-					}
-				}
-				return base;
+			const summary = buildGateStatusSummary({
+				workflow: goal.workflow,
+				gates,
+				activeVerifications: verificationHarness.getActiveVerifications(goalId),
 			});
-			json({ gates: slim });
+			const { gates: summaryGates, ...counts } = summary;
+			json({ gates: summaryGates, ...counts, summary });
 			return;
 		}
 		json({ gates: enriched });
@@ -5578,8 +6534,8 @@ async function handleApiRoute(
 		const def = goal?.workflow?.gates.find(wg => wg.id === gateId);
 		if (url.searchParams.get("view") === "summary") {
 			const latestSignal = gate.signals[gate.signals.length - 1];
-			const MAX_TAIL_LINES = 40;
 			const slim: Record<string, unknown> = {
+				goalId,
 				gateId: gate.gateId,
 				name: def?.name,
 				status: gate.status,
@@ -5591,23 +6547,26 @@ async function handleApiRoute(
 			};
 			if (gate.currentMetadata) slim.currentMetadata = gate.currentMetadata;
 			if (latestSignal) {
+				const verificationSnapshot = latestSignal.verification ? buildGateVerificationSnapshot({
+					goalId,
+					gateId,
+					signalId: latestSignal.id,
+					verification: latestSignal.verification,
+					activeVerification: verificationHarness.getActiveVerification(latestSignal.id),
+					selectionOptions: { implicitDefault: true },
+				}) : undefined;
 				slim.latestSignal = {
 					id: latestSignal.id,
 					sessionId: latestSignal.sessionId,
 					timestamp: latestSignal.timestamp,
 					commitSha: latestSignal.commitSha,
-					verification: latestSignal.verification ? {
-						status: latestSignal.verification.status,
-						steps: latestSignal.verification.steps.map(s => {
-							const base: Record<string, unknown> = { name: s.name, passed: s.passed };
-							if (!s.passed && !s.skipped && s.output) {
-								const lines = s.output.split("\n");
-								base.output = lines.length > MAX_TAIL_LINES
-									? lines.slice(-MAX_TAIL_LINES).join("\n")
-									: s.output;
-							}
-							return base;
-						}),
+					verification: verificationSnapshot ? {
+						status: verificationSnapshot.status,
+						summary: verificationSnapshot.summary,
+						counts: verificationSnapshot.counts,
+						active: verificationSnapshot.active,
+						steps: verificationSnapshot.steps,
+						selection: verificationSnapshot.selection,
 					} : undefined,
 				};
 			}
@@ -5633,6 +6592,15 @@ async function handleApiRoute(
 			return;
 		}
 
+		let selectionOptions: TextSelectionOptions;
+		try {
+			selectionOptions = parseGateInspectSelectionOptions(url.searchParams);
+			selectText("", selectionOptions);
+		} catch (err) {
+			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+			throw err;
+		}
+
 		const resolveSignal = () => {
 			const idxStr = url.searchParams.get("signal_index");
 			let idx = idxStr !== null ? parseInt(idxStr, 10) : -1;
@@ -5645,51 +6613,199 @@ async function handleApiRoute(
 		if (section === "content") {
 			const resolved = resolveSignal();
 			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
-			json({
-				gateId, section: "content",
-				signalIndex: resolved.index,
-				signalId: resolved.signal.id,
-				text: resolved.signal.content || null,
-			});
+			try {
+				const rawText = resolved.signal.content || "";
+				const selected = selectText(rawText, selectionOptions);
+				json({
+					gateId, section: "content",
+					signalIndex: resolved.index,
+					signalId: resolved.signal.id,
+					text: resolved.signal.content ? selected.text : null,
+					selection: selected.selection,
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
 			return;
 		}
 
 		if (section === "verification") {
 			const resolved = resolveSignal();
 			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
-			const v = resolved.signal.verification;
-			json({
-				gateId, section: "verification",
-				signalIndex: resolved.index,
-				signalId: resolved.signal.id,
-				steps: v ? v.steps.map(s => ({
-					name: s.name,
-					type: s.type,
-					passed: s.passed,
-					skipped: s.skipped || undefined,
-					duration_ms: s.duration_ms,
-					output: s.output,
-				})) : [],
-			});
+			try {
+				const snapshot = buildGateVerificationSnapshot({
+					goalId,
+					gateId,
+					signalId: resolved.signal.id,
+					verification: resolved.signal.verification,
+					activeVerification: verificationHarness.getActiveVerification(resolved.signal.id),
+					selectionOptions,
+				});
+				json({
+					gateId, section: "verification",
+					signalIndex: resolved.index,
+					signalId: resolved.signal.id,
+					status: snapshot.status,
+					summary: snapshot.summary,
+					counts: snapshot.counts,
+					active: snapshot.active,
+					steps: snapshot.steps,
+					selection: snapshot.selection,
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
 			return;
 		}
 
 		if (section === "signals") {
-			json({
-				gateId, section: "signals",
-				signals: gate.signals.map((s, i) => ({
-					index: i,
-					id: s.id,
-					timestamp: s.timestamp,
-					sessionId: s.sessionId,
-					commitSha: s.commitSha,
-					verdict: s.verification?.status || "running",
-					hasContent: !!s.content,
-					metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
-				})),
-			});
+			const summaries = gate.signals.map((s, i) => ({
+				index: i,
+				id: s.id,
+				timestamp: s.timestamp,
+				sessionId: s.sessionId,
+				commitSha: s.commitSha,
+				verdict: s.verification?.status || "running",
+				hasContent: !!s.content,
+				metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
+			}));
+			try {
+				const rendered = summaries.map(s => JSON.stringify(s)).join("\n");
+				const selected = selectText(rendered, selectionOptions);
+				const selectedLines = new Set(selected.selectedLineNumbers);
+				const signals = summaries.filter((_, i) => selectedLines.has(i + 1));
+				json({
+					gateId, section: "signals",
+					signals,
+					signalsTotal: summaries.length,
+					signalsShown: signals.length,
+					signalsTruncated: signals.length < summaries.length,
+					text: selected.text,
+					selection: selected.selection,
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
 			return;
 		}
+	}
+
+	// POST /api/goals/:goalId/gates/:gateId/reset — reset a gate and downstream dependents
+	const gateResetMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/reset$/);
+	if (gateResetMatch && req.method === "POST") {
+		if (sandboxScope) {
+			json({ error: "Forbidden: sandbox token cannot reset gates" }, 403);
+			return;
+		}
+
+		const [, goalId, gateId] = gateResetMatch;
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+
+		const gateResetCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateResetCtx.gateStore;
+		const requestedGateDef = goal.workflow.gates.find(g => g.id === gateId);
+		if (!requestedGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+
+		const affectedGateIds = getGateAndTransitiveDependents(goal.workflow, gateId);
+		try {
+			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds);
+		} catch (err) {
+			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
+		}
+
+		let resetResult: GateResetResult;
+		try {
+			resetResult = gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
+		} catch (err: any) {
+			json({ error: err?.message || `Unknown gate: ${gateId}` }, 404);
+			return;
+		}
+
+		const affectedGates = resetResult.affectedGateIds.map(affectedGateId => {
+			const def = goal.workflow!.gates.find(g => g.id === affectedGateId);
+			const state = gateStore.getGate(goalId, affectedGateId);
+			return {
+				gateId: affectedGateId,
+				name: def?.name || affectedGateId,
+				status: state?.status || "pending",
+			};
+		});
+
+		for (const gate of affectedGates) {
+			broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: gate.gateId, status: gate.status });
+		}
+		broadcastToGoal(goalId, {
+			type: "gate_reset",
+			goalId,
+			gateId,
+			affectedGateIds: resetResult.affectedGateIds,
+			changedGateIds: resetResult.changedGateIds,
+			unchangedGateIds: resetResult.unchangedGateIds,
+		});
+
+		const gateNameById = new Map(goal.workflow.gates.map(g => [g.id, g.name || g.id]));
+		const namesFor = (ids: string[]) => ids.map(id => `- ${gateNameById.get(id) || id}`);
+		const downstreamIds = resetResult.affectedGateIds.filter(id => id !== gateId);
+		const clearedPassedIds = resetResult.affectedGateIds.filter(id => resetResult.previousStatuses[id] === "passed");
+		const alreadyNotPassedIds = resetResult.affectedGateIds.filter(id => resetResult.previousStatuses[id] !== "passed");
+		const notificationLines = [
+			`Gate reset: ${requestedGateDef.name || gateId}`,
+			"",
+			"Reset by user action from the goal status widget.",
+			"",
+			"Selected gate:",
+			`- ${requestedGateDef.name || gateId}`,
+			"",
+			"Invalidated dependent gates:",
+			...(downstreamIds.length ? namesFor(downstreamIds) : ["- None"]),
+			"",
+			"Cleared passed state:",
+			...(clearedPassedIds.length ? namesFor(clearedPassedIds) : ["- None"]),
+			"",
+			"Already not passed but included in reset scope:",
+			...(alreadyNotPassedIds.length ? namesFor(alreadyNotPassedIds) : ["- None"]),
+			"",
+			"Why this matters:",
+			"Downstream work may have relied on outputs from the reset gate. Please revisit dependent implementation, review, or verification work before continuing.",
+		];
+		const notification = notificationLines.join("\n");
+
+		let teamLeadNotified = false;
+		const team = teamManager.getTeamState(goalId);
+		if (team?.teamLeadSessionId) {
+			const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
+			if (teamLeadSession && teamLeadSession.status !== "terminated") {
+				try {
+					if (teamLeadSession.status === "streaming") {
+						await sessionManager.deliverLiveSteer(team.teamLeadSessionId, notification, { source: "system" });
+					} else {
+						await sessionManager.enqueuePrompt(team.teamLeadSessionId, notification, { isSteered: true, source: "system" });
+					}
+					teamLeadNotified = true;
+				} catch (err) {
+					console.error(`[api] Failed to notify team lead for gate reset ${goalId}/${gateId}:`, err);
+				}
+			}
+		}
+
+		json({
+			ok: true,
+			gateId,
+			affectedGateIds: resetResult.affectedGateIds,
+			changedGateIds: resetResult.changedGateIds,
+			unchangedGateIds: resetResult.unchangedGateIds,
+			previousStatuses: resetResult.previousStatuses,
+			gates: affectedGates,
+			teamLeadNotified,
+		});
+		return;
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate
@@ -5778,12 +6894,19 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-pass if a prior signal for the same commit already fully passed
+		// Auto-pass if a prior signal for the same commit already fully passed.
+		// Manual reset preserves signal history for auditability, so this route-level
+		// fast path must honor the same reset cache boundary as VerificationHarness.
+		// Human sign-offs are never reusable consent; let the harness run them again.
 		if (commitSha !== "unknown") {
 			const existingGateForCache = gateStore.getGate(goalId, gateId);
 			if (existingGateForCache) {
+				const cacheInvalidatedAt = existingGateForCache.verificationCacheInvalidatedAt;
 				const priorPassed = existingGateForCache.signals.find(s =>
-					s.commitSha === commitSha && s.verification?.status === "passed"
+					s.commitSha === commitSha
+					&& s.verification?.status === "passed"
+					&& (cacheInvalidatedAt === undefined || s.timestamp > cacheInvalidatedAt)
+					&& !s.verification.steps.some(step => step.type === "human-signoff")
 				);
 				if (priorPassed?.verification) {
 					// Create a signal record with cached results
@@ -5963,6 +7086,80 @@ async function handleApiRoute(
 		const cancelCtx = projectContextManager.getContextForGoal(goalId);
 		if (cancelCtx) cancelCtx.gateStore.updateGateStatus(goalId, gateId, "failed");
 		json({ cancelled: true }, 200);
+		return;
+	}
+
+	// POST /api/goals/:goalId/gates/:gateId/signoff — resolve a parked human-signoff step.
+	// Body: { signalId, stepName, decision: "pass" | "fail", feedback? }.
+	// Idempotent — already-resolved steps respond 409 with the current step state.
+	const signoffMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signoff$/);
+	if (signoffMatch && req.method === "POST") {
+		const [, goalId, gateId] = signoffMatch;
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (goal.state === "shelved") { json({ error: "Goal is shelved" }, 400); return; }
+
+		const body = await readBody(req);
+		if (!body
+			|| typeof body.signalId !== "string" || !body.signalId
+			|| typeof body.stepName !== "string" || !body.stepName
+			|| (body.decision !== "pass" && body.decision !== "fail")) {
+			json({ error: "Invalid body: { signalId, stepName, decision: 'pass'|'fail', feedback? }" }, 400);
+			return;
+		}
+
+		const active = verificationHarness.getActiveVerification(body.signalId);
+		if (!active || active.goalId !== goalId || active.gateId !== gateId) {
+			// No in-flight verification — the signal may have already completed.
+			// Distinguish "signal genuinely unknown" (404) from "signal exists but
+			// the step is already resolved" (409, idempotent surface).
+			const histCtx = projectContextManager.getContextForGoal(goalId);
+			const histGate = histCtx?.gateStore.getGate(goalId, gateId);
+			const histSignal = histGate?.signals.find(s => s.id === body.signalId);
+			if (histSignal) {
+				const histStep = histSignal.verification.steps.find(s => s.name === body.stepName);
+				if (histStep && histStep.type === "human-signoff") {
+					json({
+						error: "step is no longer awaiting human input",
+						stepName: histStep.name,
+						status: histStep.passed ? "passed" : (histStep.skipped ? "skipped" : "failed"),
+					}, 409);
+					return;
+				}
+				if (histStep) {
+					json({ error: "The specified step is not a human-signoff step" }, 409);
+					return;
+				}
+			}
+			json({ error: "No active verification for that signal/goal/gate" }, 404);
+			return;
+		}
+		const step = active.steps.find(s => s.name === body.stepName);
+		if (!step) {
+			json({ error: `Step "${body.stepName}" not found in active verification` }, 404);
+			return;
+		}
+		if (!step.awaitingHuman) {
+			json({
+				error: "step is no longer awaiting human input",
+				stepName: step.name,
+				status: step.status,
+			}, 409);
+			return;
+		}
+
+		const feedback = typeof body.feedback === "string" ? body.feedback : undefined;
+		const resolved = verificationHarness.resolveSignoff(body.signalId, body.stepName, {
+			decision: body.decision,
+			feedback,
+		});
+		if (!resolved) {
+			// Raced with cancellation or a prior resolve — idempotent surface.
+			json({ error: "step is no longer awaiting human input" }, 409);
+			return;
+		}
+		json({ resolved: true }, 200);
 		return;
 	}
 
@@ -6366,6 +7563,46 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/goals/:id/github-link — PR URL or sanitized GitHub branch fallback
+	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
+	if (goalGithubLinkMatch && req.method === "GET") {
+		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
+
+		const cached = prStatusStore.get(goalId);
+		if (cached?.url) {
+			json({ available: true, kind: "pr", url: cached.url } satisfies GoalGithubLinkResponse);
+			return;
+		}
+
+		if (goal.branch && fs.existsSync(goal.cwd)) {
+			const fresh = await getCachedPrStatus(goal.cwd, goal.branch, process.cwd()).catch(() => null);
+			if (fresh?.url) {
+				prStatusStore.set(goalId, fresh);
+				json({ available: true, kind: "pr", url: fresh.url } satisfies GoalGithubLinkResponse);
+				return;
+			}
+		}
+
+		if (!goal.branch) { json({ available: false, reason: "no-branch" } satisfies GoalGithubLinkResponse); return; }
+
+		const remoteCwd = goal.repoPath || goal.cwd;
+		try {
+			const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+				cwd: remoteCwd,
+				encoding: "utf-8",
+				timeout: 5_000,
+			});
+			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(stdout.trim()), goal.branch);
+			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
+			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
+		} catch {
+			json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse);
+		}
+		return;
+	}
+
 	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for a goal
 	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
 	if (req.method === 'POST' && goalPrCacheBustMatch) {
@@ -6550,8 +7787,8 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
-			await sessionManager.enqueuePrompt(body.sessionId, message);
-			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
+			const result = await sessionManager.enqueuePrompt(body.sessionId, message);
+			json({ ok: true, status: result.status });
 		} catch (err) {
 			jsonError(500, err);
 		}
@@ -6718,6 +7955,168 @@ async function handleApiRoute(
 		}
 	}
 
+	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
+	// transcript (and tool-content / proposal drafts) into a fresh session and
+	// preserve its project/goal/task/model/role context. The caller chooses
+	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
+	if (forkMatch && req.method === "POST") {
+		const sourceId = forkMatch[1];
+		const forkBody = await readBody(req).catch(() => ({} as any));
+		// Default to a NEW worktree when the flag is omitted.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
+
+		const source = sessionManager.getSession(sourceId);
+		const ps = sessionManager.getPersistedSession(sourceId);
+		if (!ps) { json({ error: "session not found" }, 404); return; }
+		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
+
+		const unsupported = isUnsupportedForkSource(source, ps);
+		if (unsupported) { json({ error: unsupported }, 422); return; }
+
+		const projectId = ps.projectId || source.projectId;
+		if (!projectId || !projectRegistry.get(projectId)) {
+			json({ error: "source project no longer registered" }, 410);
+			return;
+		}
+
+		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
+		if (goal?.state === "todo") {
+			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		}
+
+		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+
+		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
+		// rows that never persisted `agentSessionFile`.
+		let sourceJsonl = ps.agentSessionFile;
+		if (!sourceJsonl) {
+			const recovered = sessionManager.recoverSessionFile(ps);
+			if (recovered) sourceJsonl = recovered;
+		}
+		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+		if (!ps.sandboxed) {
+			try {
+				const st = fs.statSync(sourceJsonl);
+				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
+			} catch {
+				json({ error: "source transcript missing or empty" }, 404);
+				return;
+			}
+		}
+
+		const projCwd = projectRegistry.get(projectId)!.rootPath;
+		// Worktree choice:
+		//  • newWorktree=true  → create a fresh worktree/branch off the project repo
+		//    (or a plain project-root session when the project isn't a git repo),
+		//    matching the Continue-Archived flow.
+		//  • newWorktree=false → reuse the source's existing worktree directly. Two
+		//    live sessions intentionally share the tree, so we deliberately do NOT
+		//    register worktree metadata on the fork — terminating either session
+		//    must never tear down the shared worktree/branch.
+		let sessionCwd: string;
+		let worktreeOpts: { repoPath: string } | undefined;
+		if (newWorktree) {
+			sessionCwd = projCwd;
+			try {
+				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+			} catch { /* not a git repo — plain project-root session */ }
+		} else {
+			// Prefer the source's own cwd when it has no worktree so a standalone
+			// non-worktree session keeps its working directory instead of landing
+			// in the project root.
+			sessionCwd = ps.worktreePath || ps.cwd || projCwd;
+			worktreeOpts = undefined;
+		}
+
+		const forkId = randomUUID();
+		// Use the project root for the cloned `.jsonl` slug (same as /continue);
+		// worktree-backed sessions rotate to the final cwd-derived file after the
+		// worktree is ready, adopting this clone via switch_session.
+		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+
+		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		try {
+			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+		} catch (err) {
+			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+			return;
+		}
+		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+		}
+		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+		}
+
+		const createOpts: any = {
+			sessionId: forkId,
+			projectId,
+			sandboxed: !!ps.sandboxed,
+			worktreeOpts,
+			preExistingAgentSessionFile: destJsonl,
+			taskId: ps.taskId,
+			reattemptGoalId: ps.reattemptGoalId,
+			staffId: ps.staffId,
+			allowedTools: ps.allowedTools,
+			skipAutoModel: !!(ps.modelProvider && ps.modelId),
+		};
+		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+			createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+		}
+
+		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+		if (staff) {
+			createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager);
+			createOpts.roleName = staff.roleId;
+			createOpts.accessory = staff.accessory;
+			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+		} else {
+			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			if (role) {
+				createOpts.rolePrompt = role.promptTemplate;
+				createOpts.roleName = role.name;
+				createOpts.role = role.name;
+				createOpts.accessory = role.accessory;
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+		}
+
+		try {
+			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
+			const baseTitle = (ps.title || source.title || "session").trim() || "session";
+			const title = `Fork: ${baseTitle}`;
+			sessionManager.setTitle(fork.id, title, { markGenerated: true });
+			if (ps.staffId) fork.staffId = ps.staffId;
+			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(fork.id, ps.modelProvider, ps.modelId);
+
+			json({
+				id: fork.id,
+				cwd: fork.cwd,
+				status: fork.status,
+				projectId,
+				goalId: ps.goalId,
+				title,
+			}, 201);
+		} catch (err) {
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/wait — block until session becomes idle
 	// Uses chunked transfer with periodic heartbeat newlines to prevent
 	// HTTP client body-timeout (undici defaults to 300s between chunks).
@@ -6736,7 +8135,14 @@ async function handleApiRoute(
 
 		// Send a heartbeat newline every 60s to prevent client body-timeout
 		const heartbeat = setInterval(() => {
-			try { res.write("\n"); } catch { /* connection gone */ }
+			const diagEnabled = cpuDiagnosticsEnabled();
+			const diagStart = diagEnabled ? performance.now() : 0;
+			try {
+				res.write("\n");
+				if (diagEnabled) getCpuDiagnostics().recordTimer("rest:waitHeartbeat", performance.now() - diagStart, { writes: 1 });
+			} catch {
+				if (diagEnabled) getCpuDiagnostics().recordTimer("rest:waitHeartbeat", performance.now() - diagStart, { errors: 1 });
+			}
 		}, 60_000);
 
 		try {
@@ -7036,6 +8442,7 @@ async function handleApiRoute(
 			}
 		}
 
+
 		if (typeof body.teamLeadSessionId === "string") {
 			// Update teamLeadSessionId — works for both live and archived sessions
 			const session = sessionManager.getSession(id);
@@ -7079,7 +8486,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -7106,6 +8513,32 @@ async function handleApiRoute(
 				const contentType = proposalType === "goal" ? "text/markdown; charset=utf-8" : "application/yaml; charset=utf-8";
 				res.writeHead(200, { "Content-Type": contentType });
 				res.end(content);
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// GET /api/sessions/:id/proposal/:type/snapshot?rev=N — read a historical snapshot without mutating the live draft.
+		if (suffix === "/snapshot" && req.method === "GET") {
+			const revParam = url.searchParams.get("rev") || "";
+			const rev = Number.parseInt(revParam, 10);
+			if (!Number.isInteger(rev) || rev < 1 || String(rev) !== revParam) {
+				json({ ok: false, code: "INVALID_BODY", message: "rev must be a positive integer" }, 400);
+				return;
+			}
+			try {
+				const content = await readSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				if (content === undefined) {
+					json({ ok: false, code: "SNAPSHOT_NOT_FOUND", message: `No snapshot rev ${rev} for ${proposalType} proposal` }, 404);
+					return;
+				}
+				const parsed = getProposalTypePlugin(proposalType).parse(content);
+				if (!parsed.ok) {
+					json(parsed, 400);
+					return;
+				}
+				json({ ok: true, rev, fields: parsed.value.fields });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
@@ -7186,6 +8619,23 @@ async function handleApiRoute(
 						enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
 					}
 				}
+			}
+			// Validate workflow + optional steps for goal proposals BEFORE persisting,
+			// so a stale/hallucinated workflow never produces a broken draft. Skipped
+			// when the session has no resolvable project or the project has zero
+			// workflows (empty-state behaviour preserved).
+			if (proposalType === "goal") {
+				const projectId = sessionManager.getSession(sessionId)?.projectId;
+				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
+				if (projectId) {
+					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
+					if (workflows.length === 0) {
+						const ctx = projectContextManager.getOrCreate(projectId);
+						if (ctx) workflows = ctx.workflowStore.getAll();
+					}
+				}
+				const wfErr = validateGoalProposalWorkflow(args as Record<string, unknown>, workflows);
+				if (wfErr) { json(wfErr, 400); return; }
 			}
 			try {
 				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
@@ -7481,25 +8931,109 @@ async function handleApiRoute(
 		// Windows) and errors are not cached, so the client retry loop in
 		// `git-status-refresh.ts` (4 attempts × 0/500/2000/5000 ms backoff) is
 		// the resilience layer for transient failures.
+		// `session.repoWorktrees` is an ARRAY `Array<{repo, repoPath, worktreePath}>`
+		// (session-manager.ts), unlike the goal's `Record<string,string>`.
+		const sessRepoWorktrees = session.repoWorktrees;
+		const isMultiRepo = !!(sessRepoWorktrees && sessRepoWorktrees.length > 1);
+
+		// Root container status. In a TRUE polyrepo (no `repo: "."` git-root
+		// component) the container `cwd` is NOT itself a git repo, so this is
+		// null/throws — that is non-fatal in multi-repo mode (the per-repo
+		// worktrees below are the source of truth). For single-repo it must
+		// keep the existing 400/500 behavior.
 		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
 		try {
 			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
 		} catch (err: any) {
-			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
-			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
+			if (!isMultiRepo) {
+				console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
+				jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
+				return;
+			}
+			// Multi-repo: container-cwd failure is expected/non-fatal.
+			result = undefined;
+		}
+
+		if (!isMultiRepo) {
+			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
+			// `repos: { ".": result }, aggregate: result`.
+			if (!result) { json({ error: "Not a git repository" }, 400); return; }
+			json({ ...result, aggregate: result, repos: { ".": result } });
+
+			// Auto-push: for feature branches with unpushed commits, publish the
+			// current branch to its matching remote ref regardless of inherited
+			// upstream config.
+			if (!shouldSkipRemotePush()) {
+				if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
+					publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
+				} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
+					// Session branches without upstream: publish safely, then set tracking.
+					publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid, setUpstream: true }).catch(() => {});
+				}
+			}
 			return;
 		}
-		if (!result) { json({ error: "Not a git repository" }, 400); return; }
 
-		json(result);
+		// Multi-repo aware envelope (parity with the goal git-status handler):
+		// emit a `repos` map keyed by repo name + an `aggregate`.
+		const repos: Record<string, GitStatusResult> = {};
+		for (const { repo, worktreePath } of sessRepoWorktrees!) {
+			try {
+				if (cid || fs.existsSync(worktreePath)) {
+					const r = await batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
+					if (r) repos[repo] = r;
+				}
+			} catch { /* per-repo failure non-fatal */ }
+		}
 
-		// Auto-push: for feature branches with unpushed commits, push in background
-		if (!shouldSkipRemotePush()) {
-			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
-				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+		const repoResults = Object.values(repos);
+		// Aggregate: prefer the root container status when it IS a git repo
+		// (e.g. a `repo: "."` component) for back-compat; otherwise synthesize
+		// one from the per-repo results. All sub-repos share the same session
+		// branch, so branch/primary fields come from the first repo while the
+		// numeric counters are summed and `clean` is the AND across repos.
+		let aggregate: GitStatusResult | undefined = result ?? undefined;
+		if (!aggregate) {
+			if (repoResults.length === 0) { json({ error: "Not a git repository" }, 400); return; }
+			const base = repoResults[0];
+			const sum = (pick: (r: GitStatusResult) => number) =>
+				repoResults.reduce((acc, r) => acc + (typeof pick(r) === "number" ? pick(r) : 0), 0);
+			const ahead = sum(r => r.ahead);
+			const behind = sum(r => r.behind);
+			const insertionsVsPrimary = sum(r => r.insertionsVsPrimary);
+			const deletionsVsPrimary = sum(r => r.deletionsVsPrimary);
+			aggregate = {
+				branch: base.branch,
+				primaryBranch: base.primaryBranch,
+				primaryRef: base.primaryRef,
+				isOnPrimary: base.isOnPrimary,
+				hasUpstream: base.hasUpstream,
+				mergedIntoPrimary: base.mergedIntoPrimary,
+				status: [], // multi-repo mode suppresses the flat list; per-repo sections are authoritative
+				ahead,
+				behind,
+				aheadOfPrimary: sum(r => r.aheadOfPrimary),
+				behindPrimary: sum(r => r.behindPrimary),
+				insertionsVsPrimary,
+				deletionsVsPrimary,
+				clean: repoResults.every(r => r.clean),
+				unpushed: repoResults.some(r => r.unpushed),
+				summary: `${repoResults.length} repos`,
+				untrackedIncluded: sessUntracked,
+			};
+		}
+
+		json({ ...aggregate, aggregate, repos });
+
+		// Auto-push only when the root container IS a git repo. Session branches
+		// are published at worktree-claim time, so skipping container auto-push
+		// for a true (non-git-container) polyrepo is fine.
+		if (result && !shouldSkipRemotePush()) {
+			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
+				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
 			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-				// Session branches without upstream: set up tracking and push
-				execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+				// Session branches without upstream: publish safely, then set tracking.
+				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid, setUpstream: true }).catch(() => {});
 			}
 		}
 		return;
@@ -7684,8 +9218,16 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		// Per-repo diff routing (multi-repo sessions). `session.repoWorktrees` is
+		// an array; resolve the requested repo's worktree path, else fall back to cwd.
+		const repoParam = url.searchParams.get("repo") || undefined;
+		let diffCwd = cwd;
+		if (repoParam && repoParam !== ".") {
+			const entry = session.repoWorktrees?.find(w => w.repo === repoParam);
+			if (entry) diffCwd = entry.worktreePath;
+		}
 		try {
-			const diff = await getGitDiff(cwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }
@@ -7827,7 +9369,9 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const output = await execGit('git push', cwd, 30000, cid);
+			const branch = await execGit('git symbolic-ref --short HEAD', cwd, 5000, cid);
+			const upstream = await execGitSafe('git rev-parse --abbrev-ref --symbolic-full-name @{u}', cwd, "", cid);
+			const output = await publishCurrentBranchToOrigin(cwd, branch, { containerId: cid, setUpstream: !upstream });
 			invalidateGitStatusCache(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
@@ -8038,8 +9582,37 @@ async function handleApiRoute(
 		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
 		// Skill files live on the host, so resolve the project rootPath for discovery.
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source })) });
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })) });
+		return;
+	}
+
+	// GET /api/file-mentions — bounded file enumeration for @-mention autocomplete.
+	// Includes gitignored/untracked files; excludes .git/node_modules/etc. (no .gitignore consulted).
+	if (url.pathname === "/api/file-mentions" && req.method === "GET") {
+		const rawCwd = url.searchParams.get("cwd") || process.cwd();
+		const sessionId = url.searchParams.get("sessionId");
+		const q = url.searchParams.get("q") || undefined;
+		const limitRaw = url.searchParams.get("limit");
+		const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
+		const limit = limitParsed !== undefined && Number.isFinite(limitParsed) ? limitParsed : undefined;
+		// Enumerate the session's HOST worktree, NOT the project root. The
+		// project-root redirect (resolveSkillDiscoveryCwd) is correct for SKILL
+		// discovery but wrong here: file mentions must see the goal/session
+		// worktree's branch-local, untracked and gitignored files. worktreePath
+		// is the host path; for sandboxed sessions cwd is a container path so
+		// worktreePath is required. Fall back to the raw `cwd` param (never the
+		// project root) when no session is bound.
+		let cwd = rawCwd;
+		if (sessionId) {
+			const session = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			const worktree = session?.worktreePath || persisted?.worktreePath;
+			const sessionCwd = session?.cwd || persisted?.cwd;
+			cwd = worktree || sessionCwd || rawCwd;
+		}
+		const files = await enumerateFiles(cwd, { query: q, limit });
+		json({ files: files.map((p) => ({ path: p })) });
 		return;
 	}
 
@@ -8049,9 +9622,9 @@ async function handleApiRoute(
 		const projectId = url.searchParams.get("projectId");
 		const resolvedStore = resolveProjectConfigStore(projectId);
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore);
+		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(projectId));
 		const directories = getSkillDirectories(cwd, resolvedStore);
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content })), directories });
+		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, source: s.source, filePath: s.filePath, content: s.content, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })), directories });
 		return;
 	}
 
@@ -8251,7 +9824,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (!goal.projectId) {
-			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 }, sessions: [] });
+			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null }, sessions: [] });
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
@@ -8300,7 +9873,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (!goal.projectId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
@@ -8319,17 +9892,17 @@ async function handleApiRoute(
 			return;
 		}
 		if (!task.assignedSessionId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
 		const taskSessionLive = sessionManager.getSession(task.assignedSessionId);
 		const taskSession = taskSessionLive ?? sessionManager.getPersistedSession(task.assignedSessionId);
 		if (!taskSession?.projectId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
 		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
-		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 		return;
 	}
 
@@ -8338,7 +9911,7 @@ async function handleApiRoute(
 
 	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
 	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
-	// {url, path, entry, mtime}. See docs/design/embedded-html-preview-rewrite.md §6.
+	// {url, path, entry, mtime, contentHash}. See docs/design/embedded-html-preview-rewrite.md §6.
 	if (url.pathname === "/api/preview/mount" && req.method === "POST") {
 		const sessionId = url.searchParams.get("sessionId") || "";
 		if (!VALID_SESSION_ID.test(sessionId)) {
@@ -8350,12 +9923,17 @@ async function handleApiRoute(
 			return;
 		}
 		const body = await readBody(req).catch(() => ({}));
+		const hasArtifact = typeof body?.artifactId === "string" && body.artifactId.length > 0;
 		const hasHtml = typeof body?.html === "string";
 		const hasFile = typeof body?.file === "string" && body.file.length > 0;
 		const hasAssets = Array.isArray(body?.assets);
 		const hasManifest = typeof body?.manifest === "string" && body.manifest.length > 0;
-		if (!hasHtml && !hasFile) {
-			json({ error: "Body must contain one of 'html' or 'file'" }, 400);
+		if (hasArtifact && (hasHtml || hasFile || hasAssets || hasManifest)) {
+			json({ error: "`artifactId` restore cannot be combined with `html`, `file`, `assets`, or `manifest`" }, 400);
+			return;
+		}
+		if (!hasArtifact && !hasHtml && !hasFile) {
+			json({ error: "Body must contain one of 'html', 'file', or 'artifactId'" }, 400);
 			return;
 		}
 		if (hasHtml && (hasAssets || hasManifest)) {
@@ -8363,7 +9941,20 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			let result: previewMount.MountResult | previewMount.MountFileResult;
+			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
+			if (hasArtifact) {
+				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
+				broadcastPreviewChanged(sessionId, {
+					entry: restored.entry,
+					mtime: restored.mtime,
+					url: restored.url,
+					path: restored.path,
+					contentHash: restored.contentHash,
+					artifactId: restored.artifactId,
+				});
+				json(restored);
+				return;
+			}
 			if (hasHtml) {
 				// `html` wins over `file` when both are provided.
 				let entry: string | undefined;
@@ -8453,20 +10044,69 @@ async function handleApiRoute(
 				}
 				result = previewMount.mountFile(sessionId, filePath, dedup);
 			}
+			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
+			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,
 				mtime: result.mtime,
 				url: result.url,
 				path: result.path,
+				contentHash: result.contentHash,
+				artifactId: artifact.artifactId,
 			});
-			json(result);
+			json(resultWithArtifact);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
 				jsonError(err.statusCode, err);
 				return;
 			}
+			if (err && err instanceof previewArtifacts.PreviewArtifactError) {
+				jsonError(err.statusCode, err);
+				return;
+			}
 			jsonError(500, err, { error: `preview mount failed: ${err?.message ?? String(err)}` });
+			return;
+		}
+	}
+
+	// POST /api/preview/artifacts/:artifactId/restore?sessionId=<sid> — restore
+	// an immutable preview artifact into the single live preview mount.
+	const previewArtifactRestoreMatch = url.pathname.match(/^\/api\/preview\/artifacts\/([^/]+)\/restore$/);
+	if (previewArtifactRestoreMatch && req.method === "POST") {
+		const sessionId = url.searchParams.get("sessionId") || "";
+		const artifactId = decodeURIComponent(previewArtifactRestoreMatch[1] || "");
+		if (!VALID_SESSION_ID.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
+			json({ error: "Forbidden: session out of scope" }, 403);
+			return;
+		}
+		const body = await readBody(req).catch(() => ({}));
+		if (typeof body?.artifactId === "string" && body.artifactId.length > 0 && body.artifactId !== artifactId) {
+			json({ error: "artifactId body does not match route" }, 400);
+			return;
+		}
+		try {
+			const restored = previewArtifacts.restorePreviewArtifact(sessionId, artifactId);
+			broadcastPreviewChanged(sessionId, {
+				entry: restored.entry,
+				mtime: restored.mtime,
+				url: restored.url,
+				path: restored.path,
+				contentHash: restored.contentHash,
+				artifactId: restored.artifactId,
+			});
+			json(restored);
+			return;
+		} catch (err: any) {
+			if (err && err instanceof previewArtifacts.PreviewArtifactError) {
+				jsonError(err.statusCode, err);
+				return;
+			}
+			jsonError(500, err, { error: `preview artifact restore failed: ${err?.message ?? String(err)}` });
 			return;
 		}
 	}
@@ -8498,12 +10138,16 @@ async function handleApiRoute(
 				json({ error: "no preview mount" }, 404);
 				return;
 			}
+			const contentHash = previewMount.contentHashForMount(sessionId);
+			const artifact = previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
 			json({
 				url: `/preview/${sessionId}/${entry}`,
 				path: entryPath,
 				relPath: path.posix.join(sessionId, entry),
 				entry,
 				mtime: Math.floor(stat.mtimeMs),
+				contentHash,
+				artifactId: artifact?.artifactId,
 			});
 			return;
 		} catch (err: any) {
@@ -8563,11 +10207,15 @@ async function handleApiRoute(
 				if (entry) {
 					const entryPath = path.join(dir, entry);
 					const stat = fs.statSync(entryPath);
+					const contentHash = previewMount.contentHashForMount(sid);
+					const artifact = previewArtifacts.findPreviewArtifactByHash(sid, contentHash);
 					res.write(`event: preview-changed\ndata: ${JSON.stringify({
 						entry,
 						mtime: Math.floor(stat.mtimeMs),
 						url: `/preview/${sid}/${entry}`,
 						path: entryPath,
+						contentHash,
+						artifactId: artifact?.artifactId,
 					})}\n\n`);
 				}
 			}
@@ -8621,7 +10269,7 @@ async function handleApiRoute(
 		const [, sessionId, processId] = bgLogsMatch;
 		const logs = bgProcessManager.getLogs(sessionId, processId);
 		if (!logs) { json({ error: "Process not found" }, 404); return; }
-		const tail = parseInt(url.searchParams.get("tail") || "200", 10);
+		const tail = parseInt(url.searchParams.get("tail") || "15", 10);
 		json({
 			log: logs.log.slice(-tail),
 			stdout: logs.stdout.slice(-tail),
@@ -8675,9 +10323,8 @@ async function handleApiRoute(
 		const controller = new AbortController();
 		bgProcessManager.registerWait(sessionId, controller);
 		try {
-			const result = await bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal);
-			if (!result) { json({ error: "Process not found" }, 404); return; }
-			json(result);
+			await streamBgWaitResponse(res, () =>
+				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal));
 		} finally {
 			bgProcessManager.unregisterWait(sessionId, controller);
 		}
@@ -8918,6 +10565,25 @@ async function handleApiRoute(
 			json({ error: "Missing systemPrompt" }, 400);
 			return;
 		}
+		// Defense-in-depth: roleId, when present, must be a string or null.
+		if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+			json({ error: "roleId must be a string or null" }, 400);
+			return;
+		}
+		// Validate the referenced role exists (when provided). roleId omitted or
+		// null/empty is allowed — staff with no role behave as before.
+		if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
+			json({ error: "Role not found" }, 404);
+			return;
+		}
+		// Validate goal-* triggers carry a non-empty prompt (push-based
+		// dispatcher has no fallback; the prompt is mandatory).
+		try {
+			staffManager.validateTriggers(body.triggers);
+		} catch (err: any) {
+			jsonError(400, err);
+			return;
+		}
 		const explicitCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
 			? body.cwd.trim()
 			: undefined;
@@ -8952,6 +10618,7 @@ async function handleApiRoute(
 				{
 					triggers: body.triggers,
 					roleId: body.roleId,
+					accessory: body.accessory,
 					projectId,
 					sandboxed: body.sandboxed === true,
 					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
@@ -9003,6 +10670,28 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			// Defense-in-depth: roleId, when present, must be a string or null.
+			if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+				json({ error: "roleId must be a string or null" }, 400);
+				return;
+			}
+			// Validate the referenced role exists (when provided). roleId: null
+			// (clear) and omitted are allowed.
+			if (typeof body.roleId === "string" && body.roleId.length > 0 && !roleManager.getRole(body.roleId)) {
+				json({ error: "Role not found" }, 404);
+				return;
+			}
+			// Validate goal-* triggers carry a non-empty prompt before any other
+			// work (mirrors POST /api/staff). Only applies when the caller is
+			// updating triggers — PUTs that omit the field are unchanged.
+			if (Object.prototype.hasOwnProperty.call(body, "triggers")) {
+				try {
+					staffManager.validateTriggers(body.triggers);
+				} catch (err: any) {
+					jsonError(400, err);
+					return;
+				}
+			}
 
 			let cwdUpdate: string | undefined;
 			if (Object.prototype.hasOwnProperty.call(body, "cwd")) {
@@ -9041,6 +10730,7 @@ async function handleApiRoute(
 				}
 			}
 
+			const hasAccessoryUpdate = Object.prototype.hasOwnProperty.call(body, "accessory");
 			const ok = staffManager.updateStaff(id, {
 				name: body.name,
 				description: body.description,
@@ -9050,13 +10740,18 @@ async function handleApiRoute(
 				triggers: body.triggers,
 				memory: body.memory,
 				roleId: body.roleId,
+				accessory: hasAccessoryUpdate ? body.accessory : undefined,
 				contextPolicy:
 					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
 						? body.contextPolicy
 						: undefined,
 			});
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
-			json(staffManager.getStaff(id));
+			const staff = staffManager.getStaff(id);
+			if (hasAccessoryUpdate && staff?.currentSessionId) {
+				sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
+			}
+			json(staff);
 			return;
 		}
 
@@ -9869,6 +11564,96 @@ async function handleApiRoute(
 	}
 
 	json({ error: "Not found" }, 404);
+}
+
+/**
+ * Validate a goal proposal's `workflow` / `options` args against the project's
+ * configured workflows. Returns a structured error object to send as 400, or
+ * null if valid. Pure — caller resolves the workflow list (see seed handler).
+ *
+ * Rules (see docs/design — Validate goal workflow):
+ * - Zero workflows ⇒ no validation (UI supplies a default; empty-state preserved).
+ * - Empty/omitted `workflow` is NOT an error (UI dropdown supplies the default).
+ * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
+ * - `options` (comma-separated optional-step names) validated against the chosen
+ *   workflow (named, else first) — matched ONLY by the canonical step.name of
+ *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
+ *   the UI both key on step.name, so accepting optionalLabel/label here would be a
+ *   false-success path that later fails to enable the step.
+ */
+function validateGoalProposalWorkflow(
+	args: Record<string, unknown>,
+	workflows: import("./agent/workflow-store.js").Workflow[],
+): { ok: false; code: string; message: string; availableWorkflows?: { id: string; name: string }[]; validOptionalSteps?: string[] } | null {
+	if (workflows.length === 0) return null;
+
+	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
+	const available = workflows.map(w => ({ id: w.id, name: w.name }));
+
+	// 1. Unknown explicit workflow id.
+	if (wfArg && !workflows.some(w => w.id === wfArg)) {
+		return {
+			ok: false,
+			code: "UNKNOWN_WORKFLOW",
+			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${available.map(w => w.id).join(", ")}. Re-call propose_goal with one of these IDs (or omit workflow to use the default).`,
+			availableWorkflows: available,
+		};
+	}
+
+	// 2. Validate optional-step names against the chosen workflow (or default = first).
+	const chosen = wfArg ? workflows.find(w => w.id === wfArg)! : workflows[0];
+	const optsArg = typeof args.options === "string" ? args.options : "";
+	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
+	if (requested.length > 0) {
+		const validNames = new Set<string>();
+		for (const g of chosen.gates) {
+			for (const s of (g.verify ?? [])) {
+				// Only the canonical step.name is a valid enable key (runtime + UI both
+				// match on name); accepting optionalLabel/label would be a false success.
+				if (s.optional === true) validNames.add(s.name);
+			}
+		}
+		const validList = [...validNames];
+		const unknown = requested.filter(n => !validNames.has(n));
+		if (unknown.length > 0) {
+			return {
+				ok: false,
+				code: "UNKNOWN_OPTIONAL_STEP",
+				message: `Unknown optional step(s) [${unknown.join(", ")}] for workflow "${chosen.id}". Valid optional steps: ${validList.length ? validList.join(", ") : "(none)"}.`,
+				validOptionalSteps: validList,
+			};
+		}
+	}
+	return null;
+}
+
+/** Return a gate plus every transitive dependent in workflow-DAG order. */
+function getGateAndTransitiveDependents(workflow: import("./agent/workflow-store.js").Workflow, gateId: string): string[] {
+	const gateIds = new Set(workflow.gates.map(g => g.id));
+	if (!gateIds.has(gateId)) throw new Error(`Unknown gate: ${gateId}`);
+
+	const adjacency = new Map<string, string[]>();
+	for (const gate of workflow.gates) {
+		for (const depId of gate.dependsOn) {
+			const list = adjacency.get(depId) ?? [];
+			list.push(gate.id);
+			adjacency.set(depId, list);
+		}
+	}
+
+	const affectedGateIds: string[] = [];
+	const visited = new Set<string>([gateId]);
+	const queue = [gateId];
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		affectedGateIds.push(current);
+		for (const dependentId of adjacency.get(current) ?? []) {
+			if (visited.has(dependentId)) continue;
+			visited.add(dependentId);
+			queue.push(dependentId);
+		}
+	}
+	return affectedGateIds;
 }
 
 /** Check if gateId transitively depends on targetId in the workflow DAG */

@@ -1,8 +1,8 @@
 # Notification policy — scope beeps and unread dots to human attention
 
-Status: implemented. Shipped under the goal *Scope notifications to human attention* (branch `goal/scope-noti-bad2ad9b`).
+Status: implemented. Shipped under the goal *Scope notifications to human attention* (branch `goal/scope-noti-bad2ad9b`); extended under *Human Sign-Off Gates* (branch `goal/human-sign-off-0333f6af`) with the four-rule team-lead disjunction in §2.1.
 
-The canonical predicate lives at [`src/app/notification-policy.ts`](../../src/app/notification-policy.ts). Pinning tests: [`tests/notification-policy.spec.ts`](../../tests/notification-policy.spec.ts) (unit, 9-row table) and [`tests/e2e/ui/notification-policy.spec.ts`](../../tests/e2e/ui/notification-policy.spec.ts) (browser E2E).
+The canonical predicate lives at [`src/app/notification-policy.ts`](../../src/app/notification-policy.ts). Pinning tests: [`tests/notification-policy.spec.ts`](../../tests/notification-policy.spec.ts) (unit) and [`tests/e2e/ui/notification-policy.spec.ts`](../../tests/e2e/ui/notification-policy.spec.ts) (browser E2E).
 
 Sections 1–8 cover the UI-side predicate (beep / favicon badge / sidebar dot). Section 9 covers a sibling concern on the server side: how often `TeamManager` nudges an idle team-lead session. Both are about *not* spamming whichever consumer (human or team-lead bot) is listening for a turn-finished signal.
 
@@ -14,35 +14,61 @@ The "agent finished" cue — beep + favicon badge + sidebar unread dot — used 
 - The team lead also beeped when it went idle mid-goal — but a mid-goal idle is usually transient (the lead has just queued the next turn), so the user was being pulled in for nothing.
 - The sidebar unread dot drifted in the opposite direction: `hasUnseenActivity` already partially suppressed team agents (only surfacing them when the goal was complete) but disagreed with the other two surfaces.
 
-The fix is **one predicate** that all three surfaces consult: *does this idle session actually need a human?*
+The fix is **one policy module** that all notification surfaces consult: *does this idle session actually need a human, and is this a persistent surface or a one-shot idle transition?*
 
 ## 2. The predicate
 
-`needsHumanAttention(session, goal, allSessions, gateStatusCache)` returns `true` iff a notification is warranted. Three branches, mutually exclusive:
+Exported predicates have different read-state and transition semantics:
+
+| Predicate | Read-filterable | Rules covered |
+|---|---|---|
+| `needsHumanAttention(session, goal, allSessions, gateStatusCache)` | yes | 1, 4 (persistent surfaces only) |
+| `needsHumanAttentionOnIdleTransition(session, goal, allSessions, gateStatusCache)` | yes | 1 only |
+| `needsImmediateHumanAttention(session, gateStatusCache)` | no (bypass) | 2, 3 (see §2.1) |
+
+Call sites OR the appropriate filterable predicate with `needsImmediateHumanAttention()`. The immediate predicate fires regardless of whether the user has "read" the session, because pending sign-off and errored-and-parked demand attention until the user explicitly acts. `needsHumanAttention()` is wrapped by `hasUnseenActivity()` so persistent rules clear once the user views the session. One-shot streaming→idle beeps use `needsHumanAttentionOnIdleTransition()` so Rule 4 does not beep merely because a team lead has just gone idle to wait for workers or verification.
+
+Three session-kind branches, mutually exclusive:
 
 | Session kind | Detection | Notify? |
 |---|---|---|
 | **Standalone** | No `delegateOf`, no `teamLeadSessionId`, role missing or not a team role | **Yes** — unchanged from before |
 | **Team member** | `delegateOf` set, OR `teamLeadSessionId` set, OR (`role` exists, is **not** `"team-lead"`, and the session is bound to a `goalId` / `teamGoalId`) | **Never** — they escalate to their team lead, not to the human |
-| **Team lead** (`role === "team-lead"`) | Has a `goalId` or `teamGoalId` | **Only when** (a) `goal.state === "complete"`, OR (b) the lead is **stuck**: no live downstream work and no in-flight verification for the goal |
+| **Team lead** (`role === "team-lead"`) | Has a `goalId` or `teamGoalId` | Per §2.1 four-rule disjunction |
 
-"Live downstream work" = any other (non-lead, non-delegate) session bound to the same goal whose `status` is in `streaming` / `busy` / `preparing` / `aborting` / `starting`, or whose `isCompacting` flag is set — plus an entry in `state.gateStatusCache` with `verifying: true` for the goal id.
+"Live downstream work" (used by rule 4) = any other (non-lead, non-delegate) session bound to the same goal whose `status` is in `streaming` / `busy` / `preparing` / `aborting` / `starting`, or whose `isCompacting` flag is set. In-flight gate verification (`state.gateStatusCache.<goalId>.verifying`) is a separate suppressor on rule 4.
 
-The full 9-row truth table is the source of truth for behaviour and is checked one-to-one by `tests/notification-policy.spec.ts`:
+### 2.1 Team-lead disjunction — four rules
 
-| # | Scenario | Notify? |
-|---|---|---|
-| 1 | Standalone idle session | yes |
-| 2 | Delegate session (`delegateOf` set) | no |
-| 3 | Team member: `role: "coder"`, `teamLeadSessionId` set | no |
-| 4 | Team member: `role: "reviewer"` in a team goal | no |
-| 5 | Team lead idle, sibling coder still streaming | no |
-| 6 | Team lead idle, all members idle, no verification | **yes (stuck)** |
-| 7 | Team lead idle, verification running for the goal | no |
-| 8 | Team lead idle, goal `complete` | yes |
-| 9 | Team lead idle, goal `complete`, sibling still streaming | yes (goal-complete wins) |
+A team-lead session surfaces persistent unread state when **any** of the following hold. One-shot polling / active-session beeps use the same policy but intentionally exclude Rule 4, so normal mid-workflow idle waits stay silent.
 
-Row 6 plus row 7 is how "team lead has asked the human a question via `ask_user_choices` and is now waiting" gets covered without needing server-side detection of the pending tool call: an `ask_user_choices` leaves the lead idle with nothing live downstream, which is *by definition* stuck. The predicate stays purely client-side.
+| # | Rule | Predicate | Bypass read filter? | Notes |
+|---|---|---|---|---|
+| 1 | Goal complete | `needsHumanAttention` | no | Team is done; surface so the user can review / merge. Clears once the user views the session. |
+| 2 | Goal has ≥ 1 `human-signoff` step in `awaitingHuman` state | `needsImmediateHumanAttention` | **yes** | Sign-off requests demand attention until resolved. See [design/human-signoff-gates.md](human-signoff-gates.md). |
+| 3 | `session.lastTurnErrored === true` AND `consecutiveErrorTurns ≥ MAX_CONSECUTIVE_ERROR_TURNS` (3) | `needsImmediateHumanAttention` | **yes** | Canonical "human action required" state — messages parked in `promptQueue` awaiting explicit Retry. See [docs/internals.md](../internals.md) for the server-side parking mechanic. |
+| 4 | Idle stuck (debounced) | `needsHumanAttention` | no | Lead is idle AND `Date.now() - session.lastActivity ≥ STUCK_IDLE_THRESHOLD_MS` (10s) AND none of: a live sibling, an in-flight verification, an awaiting sign-off. |
+
+Rule 4 explicitly suppresses on `cache.awaitingHumanSignoff` so it doesn't double-count with rule 2.
+
+#### Why rule 4 is debounced
+
+Pre-debounce, a delegate's status briefly clears between handoffs (one delegate ends; the next has not yet emitted `streaming`). For that sub-second window no sibling looks "live", and the predicate fired a transient dot every time the team progressed. The 10-second threshold eliminates this spawn-handoff race; genuine "team lead is stuck" cases (no handoff arrives at all) trip the dot a full beat later — acceptable trade.
+
+#### Why `ask_user_choices` doesn't need a special case
+
+When the agent posts an `ask_user_choices` widget, that's new transcript activity — the standard unread path fires the dot. Once the user reads the session, they've consciously seen the question and chosen to leave it pending; no further nag. Rule 4's read-state filter and the normal `lastActivity` mechanics handle this correctly without any special predicate.
+
+#### Why rule 2 needed extra plumbing
+
+The sign-off bit lives on `state.gateStatusCache.<goalId>.awaitingHumanSignoff`, denormalised from `awaitingSignoffCount > 0`. Two pieces had to line up:
+
+- **Server.** `GET /api/goals/:id/gates?view=summary` uses the shared gate-status summary builder to stamp `awaitingSignoffCount` per gate plus a goal-wide total from active verifications. The bare `/gates` endpoint does **not** include the count.
+- **Client.** `refreshGateStatusCache` in `src/app/api.ts` fetches the `?view=summary` shape. `src/app/gate-status-events.ts` centralizes the WS/custom event types that refresh the cache when a sign-off parks, resolves, or completes.
+
+Without both, rule 2 stays dormant. Pinned by the widget/sign-off E2E coverage.
+
+Full design and implementation details: [design/human-signoff-gates.md](human-signoff-gates.md).
 
 ## 3. Why one shared predicate
 
@@ -68,7 +94,8 @@ The session-list poll compares previous status against current status. When a no
 if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
   const goalId = s.teamGoalId || s.goalId;
   const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-  if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)) {
+  if (needsHumanAttentionOnIdleTransition(s, goal, newSessions, state.gateStatusCache)
+      || needsImmediateHumanAttention(s, state.gateStatusCache)) {
     RemoteAgent.playNotificationBeep();
     showFaviconBadge();
   }
@@ -77,7 +104,7 @@ if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
 
 ### 4.2 Active-session `agent_end` — `src/app/remote-agent.ts`
 
-The active session has its own beep path because `agent_end` fires immediately on the WS, with no poll lag. The other `agent_end` housekeeping (streamingMessage cleanup, `pendingToolCalls` reset, per-tag streaming flag clear) is unchanged.
+The active session has its own beep path because `agent_end` fires immediately on the WS, with no poll lag. It uses `needsHumanAttentionOnIdleTransition()` plus the immediate predicate, matching the polling beep and excluding Rule 4's idle-stuck branch. The other `agent_end` housekeeping (streamingMessage cleanup, `pendingToolCalls` reset, per-tag streaming flag clear) is unchanged.
 
 There is one defensive fallback: if the session is not yet in `state.gatewaySessions` (the brief window before the next list poll lands), the code falls back to beeping. This preserves the standalone "turn finished" cue and never *silently swallows* it — the failure mode is at worst "an extra beep" rather than "missed the only one".
 
@@ -106,7 +133,7 @@ The team-goal filter is then replaced by a call to `needsHumanAttention`. Behavi
 
 ## 7. Pinning tests
 
-- **Unit (`tests/notification-policy.spec.ts`)** — file:// fixture bundling `notification-policy.ts` against a small `__seed` helper. Ten rows: the nine-row design table plus a "team member compacting counts as live downstream work" bonus. Mirrors the structure of `tests/spurious-idle-unread.spec.ts`.
+- **Unit (`tests/notification-policy.spec.ts`)** — file:// fixture bundling `notification-policy.ts` against a small `__seed` helper. Covers the standalone / delegate / team-member branches plus the full team-lead disjunction matrix: rules 1–4 in isolation, rule 4's debounce (lead idle for less than `STUCK_IDLE_THRESHOLD_MS` stays silent), rule 4's suppressors (live sibling, `verifying`, `awaitingHumanSignoff` each individually — false), the rule 2 / 3 read-filter bypass, and the idle-transition split that suppresses Rule 4 beeps while preserving complete/sign-off notifications. Mirrors the structure of `tests/spurious-idle-unread.spec.ts`.
 - **Browser E2E (`tests/e2e/ui/notification-policy.spec.ts`)** — three scenarios driving the wiring at the sidebar:
   1. Standalone idle session shows the dot; patching the session to a team member silences it; reverting restores it.
   2. Team lead with a fabricated `complete` goal shows the dot via the `renderTeamLeadRow` path (which uses `data-nav-id="session:<id>"` rather than `data-session-id`); flipping to in-progress + adding a streaming sibling member hides it.

@@ -11,8 +11,21 @@ import {
 	connectWs,
 	statusPredicate,
 	queueLenPredicate,
+	toolStartPredicate,
+	type WsConnection,
 	type WsMsg,
 } from "./e2e-setup.js";
+
+// Longer than the test timeout: these turns should only end via abort, never
+// because the worker was paused long enough for the mock sleep to finish.
+const BUSY_TURN_MS = 60_000;
+
+async function startAbortableBusyTurn(conn: WsConnection, label: string): Promise<void> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "prompt", text: `STAY_BUSY:${BUSY_TURN_MS} ${label}` });
+	await conn.waitForFrom(cursor, statusPredicate("streaming"));
+	await conn.waitForFrom(cursor, toolStartPredicate("Bash"));
+}
 
 test.setTimeout(30_000);
 
@@ -33,22 +46,19 @@ test.describe("Abort status E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make the agent busy with a long-running turn so abort has time
-			// to trigger the aborting → idle transition
-			conn.send({ type: "prompt", text: "STAY_BUSY:1500 long running task" });
-			await conn.waitFor(statusPredicate("streaming"));
+			// Wait for the mock's abortable tool body, not just the early
+			// streaming status, so the abort window cannot close under load.
+			await startAbortableBusyTurn(conn, "long running task");
 
-			// Clear message buffer to track only abort-related status changes
-			conn.messages.length = 0;
-
-			// Send abort
+			const abortCursor = conn.messageCount();
 			conn.send({ type: "abort" });
 
-			// Wait for idle — the abort must complete
-			await conn.waitFor(statusPredicate("idle"), 10_000);
+			await conn.waitForFrom(abortCursor, statusPredicate("aborting"), 5_000);
+			await conn.waitForFrom(abortCursor, statusPredicate("idle"), 10_000);
 
-			// Collect all session_status messages in order
+			// Collect abort-related session_status messages in order.
 			const statuses = conn.messages
+				.slice(abortCursor)
 				.filter((m: WsMsg) => m.type === "session_status")
 				.map((m: WsMsg) => m.status);
 
@@ -70,9 +80,8 @@ test.describe("Abort status E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:1500 working on first task" });
-			await conn.waitFor(statusPredicate("streaming"));
+			// Make agent busy inside the abortable tool body.
+			await startAbortableBusyTurn(conn, "working on first task");
 
 			// Queue 3 messages while agent is busy
 			conn.send({ type: "prompt", text: "M1" });
@@ -99,18 +108,16 @@ test.describe("Abort status E2E", () => {
 				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === m2Id && q.isSteered),
 			);
 
-			// Clear messages BEFORE abort so we don't match the initial empty queue
-			conn.messages.length = 0;
-
-			// Abort the current turn
+			const abortCursor = conn.messageCount();
 			conn.send({ type: "abort" });
 
 			// After abort, the queue should drain — all messages processed.
-			// Wait for queue to reach 0 (only matches new messages since we cleared).
-			await conn.waitFor(queueLenPredicate(0), 15_000);
+			await conn.waitForFrom(abortCursor, queueLenPredicate(0), 15_000);
+
+			const postAbortMessages = conn.messages.slice(abortCursor);
 
 			// Verify the queue is truly empty
-			const finalQueue = conn.messages
+			const finalQueue = postAbortMessages
 				.filter((m: WsMsg) => m.type === "queue_update")
 				.pop();
 			expect(finalQueue).toBeDefined();
@@ -118,7 +125,7 @@ test.describe("Abort status E2E", () => {
 
 			// Verify agent processed the queued messages by checking for agent_end
 			// events (the mock agent emits these after completing each turn)
-			const agentEnds = conn.messages.filter(
+			const agentEnds = postAbortMessages.filter(
 				(m: WsMsg) => m.type === "event" && m.data?.type === "agent_end",
 			);
 			expect(agentEnds.length).toBeGreaterThanOrEqual(1);
@@ -148,8 +155,7 @@ test.describe("Abort status E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:2000 long running task" });
-			await conn.waitFor(statusPredicate("streaming"));
+			await startAbortableBusyTurn(conn, "long running task");
 
 			// Snapshot cursor so we look only at events AFTER steer+abort.
 			const cursor = conn.messageCount();
@@ -243,8 +249,7 @@ test.describe("Abort status E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:2000 long running task" });
-			await conn.waitFor(statusPredicate("streaming"));
+			await startAbortableBusyTurn(conn, "long running task");
 
 			const cursor = conn.messageCount();
 
@@ -332,9 +337,8 @@ test.describe("Abort status E2E", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			// Make agent busy
-			conn.send({ type: "prompt", text: "STAY_BUSY:1500 initial task" });
-			await conn.waitFor(statusPredicate("streaming"));
+			// Make agent busy inside the abortable tool body.
+			await startAbortableBusyTurn(conn, "initial task");
 
 			// Queue messages: S1 (will be steered), N1 (normal), S2 (will be steered)
 			conn.send({ type: "prompt", text: "S1" });
@@ -372,20 +376,17 @@ test.describe("Abort status E2E", () => {
 			expect(steeredTexts).toContain("S1");
 			expect(steeredTexts).toContain("S2");
 
-			// Clear messages before abort
-			conn.messages.length = 0;
-
-			// Abort — queue should drain: steered first, then N1
+			const abortCursor = conn.messageCount();
 			conn.send({ type: "abort" });
 
 			// Wait for queue to fully drain
-			await conn.waitFor(queueLenPredicate(0), 15_000);
+			await conn.waitForFrom(abortCursor, queueLenPredicate(0), 15_000);
 
 			// Queue fully drained — verify at least one agent_end happened
 			// (messages were not lost, they were processed)
-			const agentEnds = conn.messages.filter(
-				(m: WsMsg) => m.type === "event" && m.data?.type === "agent_end",
-			);
+			const agentEnds = conn.messages
+				.slice(abortCursor)
+				.filter((m: WsMsg) => m.type === "event" && m.data?.type === "agent_end");
 			expect(agentEnds.length).toBeGreaterThanOrEqual(1);
 		} finally {
 			conn.close();

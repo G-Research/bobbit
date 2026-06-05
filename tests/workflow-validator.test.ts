@@ -53,6 +53,36 @@ describe("workflow-validator — positive cases", () => {
 		assert.deepEqual(validateWorkflow(wf, components), []);
 	});
 
+	it("accepts human-signoff step shape with prompt + label", () => {
+		const wf: ValidatorWorkflow = {
+			id: "signoff",
+			name: "Signoff",
+			gates: [{
+				id: "design",
+				name: "Design",
+				verify: [
+					{ name: "Approve design", type: "human-signoff", label: "Approve design doc", prompt: "Review the design doc and approve or reject." },
+				],
+			}],
+		};
+		assert.deepEqual(validateWorkflow(wf, components), []);
+	});
+
+	it("accepts optional non-signoff steps using canonical optionalLabel", () => {
+		const wf: ValidatorWorkflow = {
+			id: "optional-label",
+			name: "Optional label",
+			gates: [{
+				id: "qa",
+				name: "QA",
+				verify: [
+					{ name: "QA", type: "agent-qa", optional: true, optionalLabel: "Enable QA Testing", prompt: "Run QA." },
+				],
+			}],
+		};
+		assert.deepEqual(validateWorkflow(wf, components), []);
+	});
+
 	it("accepts runtime context tokens in free-form run/prompt without complaint", () => {
 		const wf: ValidatorWorkflow = {
 			id: "merge",
@@ -201,7 +231,7 @@ describe("workflow-validator — negative cases", () => {
 			}],
 		};
 		const errs = validateWorkflow(wf, components);
-		assert.ok(errs.some(e => /optional: true but has no label/.test(e.message)));
+		assert.ok(errs.some(e => /optional: true but has no optionalLabel/.test(e.message)));
 	});
 
 	it("rejects unknown step type", () => {
@@ -212,5 +242,57 @@ describe("workflow-validator — negative cases", () => {
 		const errs = validateWorkflow(wf, components);
 		assert.equal(errs.length, 1);
 		assert.match(errs[0].message, /unknown step type "wat"/);
+		// human-signoff must appear in the accepted-set hint so authors know about it.
+		assert.match(errs[0].message, /human-signoff/);
+	});
+
+	it("rejects human-signoff step with missing prompt", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{
+				id: "g", name: "G",
+				verify: [{ name: "Approve", type: "human-signoff", label: "Approve it" } as any],
+			}],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(e => /human-signoff step requires a non-empty "prompt"/.test(e.message)),
+			`expected prompt error, got: ${errs.map(e => e.message).join("; ")}`);
+	});
+
+	it("rejects human-signoff step with empty prompt", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{
+				id: "g", name: "G",
+				verify: [{ name: "Approve", type: "human-signoff", label: "Approve it", prompt: "" } as any],
+			}],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(e => /human-signoff step requires a non-empty "prompt"/.test(e.message)));
+	});
+
+	it("rejects human-signoff step with missing label", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{
+				id: "g", name: "G",
+				verify: [{ name: "Approve", type: "human-signoff", prompt: "Look it over." } as any],
+			}],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(e => /human-signoff step requires a non-empty "label"/.test(e.message)),
+			`expected label error, got: ${errs.map(e => e.message).join("; ")}`);
+	});
+
+	it("rejects human-signoff step with empty label", () => {
+		const wf: ValidatorWorkflow = {
+			id: "x", name: "X",
+			gates: [{
+				id: "g", name: "G",
+				verify: [{ name: "Approve", type: "human-signoff", label: "", prompt: "Check." } as any],
+			}],
+		};
+		const errs = validateWorkflow(wf, components);
+		assert.ok(errs.some(e => /human-signoff step requires a non-empty "label"/.test(e.message)));
 	});
 });

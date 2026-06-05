@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { RegisteredProject } from "./project-registry.js";
 import { GoalStore } from "./goal-store.js";
+import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import { SessionStore } from "./session-store.js";
 import { GateStore } from "./gate-store.js";
 import { TaskStore } from "./task-store.js";
@@ -49,6 +50,14 @@ export class ProjectContext {
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
   readonly planMutationStore: PlanMutationStore;
+
+  /**
+   * Optional dispatcher for `goal_created` / `goal_archived` staff triggers.
+   * Wired post-construction by `ProjectContextManager.setGoalTriggerDispatcher`
+   * once `server.ts` has built the staff/inbox managers. Stays `null` in tests
+   * that don't need the trigger surface.
+   */
+  private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -105,7 +114,10 @@ export class ProjectContext {
       sessionStore: this.sessionStore,
       staffStore: this.staffStore,
     });
-    // Wire search index updates on goal/session mutations
+    // Wire search index updates on goal/session mutations.
+    // NOTE: `onIndexUpdate` is the single SEARCH index hook and must NOT be
+    // co-opted for goal lifecycle triggers — those use the separate
+    // `onGoalCreated` / `onGoalArchived` channels wired below.
     this.goalStore.onIndexUpdate = (goal) => {
       this.searchIndex.indexGoal(goal, this.project.id);
     };
@@ -113,6 +125,34 @@ export class ProjectContext {
       const goalTitle = session.goalId ? this.goalStore.get(session.goalId)?.title : undefined;
       this.searchIndex.indexSession(session, goalTitle, this.project.id);
     };
+    // Re-apply any dispatcher wiring in case `setGoalTriggerDispatcher`
+    // was called before `open()` (current call order is reverse, but the
+    // explicit re-bind keeps both orderings safe).
+    this.applyGoalTriggerDispatcher();
+  }
+
+  /**
+   * Attach the shared `GoalTriggerDispatcher` so this context's GoalStore
+   * mutations dispatch `goal_created` / `goal_archived` events to staff
+   * inboxes. Idempotent and order-independent with respect to `open()` —
+   * the manager wires every existing context (and every future
+   * `getOrCreate`) after the dispatcher is constructed in `server.ts`.
+   */
+  setGoalTriggerDispatcher(dispatcher: GoalTriggerDispatcher | null): void {
+    this.goalTriggerDispatcher = dispatcher;
+    this.applyGoalTriggerDispatcher();
+  }
+
+  private applyGoalTriggerDispatcher(): void {
+    const d = this.goalTriggerDispatcher;
+    if (!d) {
+      // Detach: leave onIndexUpdate untouched, only clear the trigger hooks.
+      this.goalStore.onGoalCreated = undefined;
+      this.goalStore.onGoalArchived = undefined;
+      return;
+    }
+    this.goalStore.onGoalCreated = (goal) => d.onGoalCreated(goal);
+    this.goalStore.onGoalArchived = (goal) => d.onGoalArchived(goal);
   }
 
   /** Close resources for clean shutdown. */

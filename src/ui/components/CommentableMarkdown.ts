@@ -14,7 +14,7 @@ import {
   proposalBackend,
   composeProposalFeedback,
 } from "./review/proposal-annotations.js";
-import "./review/ReviewDocument.js";
+import { ensureReviewComponents } from "../../app/lazy-review.js";
 
 @customElement("commentable-markdown")
 export class CommentableMarkdown extends LitElement {
@@ -26,6 +26,16 @@ export class CommentableMarkdown extends LitElement {
   // Light DOM — <review-document> needs DOM access for the annotator.
   createRenderRoot() {
     return this;
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    // Kick off the heavy review-document chunk on first mount. The
+    // <review-document> element rendered below stays as an
+    // HTMLUnknownElement until the chunk lands and customElements
+    // defines it — Lit's property bindings are preserved across the
+    // upgrade, so no manual re-render is needed.
+    void ensureReviewComponents();
   }
 
   render() {

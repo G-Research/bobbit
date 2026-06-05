@@ -33,6 +33,10 @@ import {
 } from "./subgoal-nesting-limit.js";
 import { adaptReadyToMergeVerify, adaptReadyToMergeForChild } from "./child-ready-to-merge.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
+import type { ToolManager } from "./tool-manager.js";
+import type { McpManager } from "../mcp/mcp-manager.js";
+import type { GrantPolicy } from "./role-store.js";
+import { computeEffectiveAllowedTools, computeToolActivationArgs, tagAllowedTool, writeMcpProxyExtensions, writeToolGuardExtension, type GroupPolicyProvider } from "./tool-activation.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell, GIT_BASH } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
@@ -81,6 +85,67 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	const modelId = modelStr.slice(slash + 1);
 	const meta = inferMeta(modelId);
 	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+}
+
+export interface VerificationToolActivationDeps {
+	toolManager?: ToolManager;
+	groupPolicyStore?: GroupPolicyProvider;
+	mcpManager?: McpManager | null;
+}
+
+export interface VerificationToolActivationResult {
+	args: string[];
+	env: Record<string, string>;
+	toolManager?: ToolManager;
+	allowedTools?: string[];
+}
+
+/**
+ * Build Pi CLI flags for legacy direct verification sub-sessions using the
+ * same post-Pi-0.70 contract as normal sessions: no unified `--tools`, file
+ * builtins re-registered via `_builtins/extension.ts`, Bobbit extensions kept
+ * active, and policy enforcement delegated to the guard extension.
+ */
+export function buildVerificationToolActivation(
+	subSessionId: string,
+	cwd: string,
+	role: { toolPolicies?: Record<string, string | GrantPolicy> } | undefined,
+	deps: VerificationToolActivationDeps = {},
+): VerificationToolActivationResult {
+	const roleForPolicies = role as { toolPolicies?: Record<string, GrantPolicy> } | undefined;
+	if (!deps.toolManager) {
+		// Without a ToolManager we cannot resolve Bobbit extension paths or emit
+		// the _builtins shim safely. Return no explicit activation flags so
+		// RpcBridge.start() applies its baseline fallback without reintroducing
+		// Pi's unified `--tools` allowlist.
+		return {
+			args: [],
+			env: {},
+			allowedTools: role?.toolPolicies
+				? Object.entries(role.toolPolicies).filter(([, policy]) => policy !== "never").map(([name]) => tagAllowedTool(name).name)
+				: undefined,
+		};
+	}
+
+	const effectiveAllowedTools = computeEffectiveAllowedTools(deps.toolManager, roleForPolicies, deps.groupPolicyStore, deps.mcpManager ?? undefined);
+	const allowedToolNames = effectiveAllowedTools.map(tool => tool.name);
+	const mcpExtensionPaths = deps.mcpManager
+		? writeMcpProxyExtensions(deps.mcpManager, allowedToolNames, roleForPolicies, deps.toolManager, deps.groupPolicyStore)
+		: undefined;
+	const activation = computeToolActivationArgs(effectiveAllowedTools, deps.toolManager, cwd, mcpExtensionPaths);
+	const args = [...activation.args];
+
+	const guardPath = deps.toolManager
+		? writeToolGuardExtension(subSessionId, deps.toolManager, deps.mcpManager ?? undefined, roleForPolicies, deps.groupPolicyStore)
+		: undefined;
+	if (guardPath) args.push("--extension", guardPath);
+
+	return {
+		args,
+		env: activation.env,
+		toolManager: deps.toolManager,
+		allowedTools: allowedToolNames,
+	};
 }
 
 /**
@@ -165,6 +230,276 @@ export function resolveStep(
 	return { cwd: branchContainer, runString: step.run };
 }
 
+export interface VerificationPushSafetyVars {
+	branch?: string;
+	baseBranch?: string;
+	master?: string;
+}
+
+export type VerificationPushSafetyResult = { ok: true } | { ok: false; reason: string };
+
+const SHELL_COMMAND_SEPARATORS = new Set(["&&", "||", ";", "|"]);
+
+function shellTokenize(command: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | null = null;
+
+	const flush = () => {
+		if (current.length > 0) {
+			tokens.push(current);
+			current = "";
+		}
+	};
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") quote = null;
+			else current += ch;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') quote = null;
+			else if (ch === "\\" && i + 1 < command.length && ['"', "\\", "$", "`", "\n"].includes(command[i + 1])) current += command[++i];
+			else current += ch;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			current += command[++i];
+			continue;
+		}
+		if (ch === "\n" || ch === ";") {
+			flush();
+			tokens.push(";");
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			flush();
+			continue;
+		}
+		const next = command[i + 1];
+		if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+			flush();
+			tokens.push(ch + next);
+			i++;
+			continue;
+		}
+		if (ch === "|") {
+			flush();
+			tokens.push("|");
+			continue;
+		}
+		current += ch;
+	}
+	flush();
+	return tokens;
+}
+
+function isShellSeparator(token: string): boolean {
+	return SHELL_COMMAND_SEPARATORS.has(token);
+}
+
+function commandEnd(tokens: string[], start: number): number {
+	let end = start;
+	while (end < tokens.length && !isShellSeparator(tokens[end])) end++;
+	return end;
+}
+
+function skipGitGlobalOption(tokens: string[], index: number, end: number): number {
+	const token = tokens[index];
+	if (token === "-C" || token === "-c" || token === "--git-dir" || token === "--work-tree" || token === "--namespace" || token === "--config-env") {
+		return Math.min(index + 2, end);
+	}
+	return index + 1;
+}
+
+function normalizeBranchRef(ref: string | undefined): string {
+	let value = (ref || "").trim();
+	while (value.startsWith("+")) value = value.slice(1);
+	if (value.startsWith("refs/remotes/origin/")) value = value.slice("refs/remotes/origin/".length);
+	if (value.startsWith("origin/")) value = value.slice("origin/".length);
+	if (value.startsWith("refs/heads/")) value = value.slice("refs/heads/".length);
+	return value;
+}
+
+function normalizePushedSource(src: string, currentBranch: string): string {
+	const normalized = normalizeBranchRef(src);
+	if (normalized === "HEAD" || normalized === "@") return currentBranch;
+	return normalized;
+}
+
+function protectedBranchSet(vars: VerificationPushSafetyVars): Set<string> {
+	const branches = [vars.baseBranch, vars.master, "master"]
+		.map(normalizeBranchRef)
+		.filter((b) => b.length > 0);
+	return new Set(branches);
+}
+
+function protectedBranchLabel(branches: Set<string>): string {
+	return [...branches].map((b) => `refs/heads/${b}`).join(" or ") || "the primary branch";
+}
+
+function executableBasename(token: string): string {
+	const normalized = token.replace(/\\/g, "/");
+	return normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+}
+
+function isGitExecutableToken(token: string): boolean {
+	const base = executableBasename(token);
+	return base === "git" || base === "git.exe" || base === "git.cmd" || base === "git.bat";
+}
+
+function findGitPushes(tokens: string[]): Array<{ gitIndex: number; pushIndex: number; end: number }> {
+	const pushes: Array<{ gitIndex: number; pushIndex: number; end: number }> = [];
+	for (let i = 0; i < tokens.length; i++) {
+		if (!isGitExecutableToken(tokens[i])) continue;
+		const end = commandEnd(tokens, i + 1);
+		let j = i + 1;
+		while (j < end) {
+			const token = tokens[j];
+			if (token === "push") {
+				pushes.push({ gitIndex: i, pushIndex: j, end });
+				break;
+			}
+			if (token.startsWith("-")) {
+				j = skipGitGlobalOption(tokens, j, end);
+				continue;
+			}
+			break;
+		}
+		i = end;
+	}
+	return pushes;
+}
+
+function pushOptionConsumesValue(token: string): boolean {
+	return token === "--repo" || token === "--receive-pack" || token === "--exec" || token === "--push-option" || token === "-o";
+}
+
+function parsePushArgs(tokens: string[], pushIndex: number, end: number): { remote?: string; refspecs: string[]; pushesAllBranches: boolean; tagsOnly: boolean } {
+	let remote: string | undefined;
+	const refspecs: string[] = [];
+	let pushesAllBranches = false;
+	let tagsOnly = false;
+
+	for (let i = pushIndex + 1; i < end; i++) {
+		const token = tokens[i];
+		if (token === "--repo") {
+			remote = tokens[i + 1] || remote;
+			i++;
+			continue;
+		}
+		if (token.startsWith("--repo=")) {
+			remote = token.slice("--repo=".length);
+			continue;
+		}
+		if (token === "--all" || token === "--mirror") {
+			pushesAllBranches = true;
+			continue;
+		}
+		if (token === "--tags") {
+			tagsOnly = true;
+			continue;
+		}
+		if (token.startsWith("-") && token !== "-") {
+			if (pushOptionConsumesValue(token)) i++;
+			continue;
+		}
+		if (!remote) {
+			remote = token;
+			continue;
+		}
+		refspecs.push(token);
+	}
+
+	return { remote, refspecs, pushesAllBranches, tagsOnly };
+}
+
+function unsafePushReason(pushCommand: string, detail: string, vars: VerificationPushSafetyVars, protectedBranches: Set<string>): VerificationPushSafetyResult {
+	const branch = normalizeBranchRef(vars.branch) || "HEAD";
+	return {
+		ok: false,
+		reason: `[verification] Refusing unsafe git push in verification command: ${pushCommand}\n${detail}\nCurrent branch: ${branch}; protected destination: ${protectedBranchLabel(protectedBranches)}. Use an explicit destination refspec such as \`git push origin ${branch}:refs/heads/${branch}\` for branch publication checks.`,
+	};
+}
+
+function inspectPushRefspec(pushCommand: string, refspec: string, currentBranch: string, vars: VerificationPushSafetyVars, protectedBranches: Set<string>): VerificationPushSafetyResult | null {
+	const clean = refspec.replace(/^\+/, "");
+	if (!clean || clean.startsWith("refs/tags/")) return null;
+
+	if (clean.includes(":")) {
+		const colon = clean.indexOf(":");
+		const src = clean.slice(0, colon);
+		const dst = clean.slice(colon + 1);
+		const dstBranch = normalizeBranchRef(dst);
+		if (dstBranch && protectedBranches.has(dstBranch)) {
+			const srcBranch = normalizePushedSource(src, currentBranch);
+			if (currentBranch !== dstBranch || srcBranch !== dstBranch) {
+				return unsafePushReason(
+					pushCommand,
+					`Refspec \`${refspec}\` targets \`refs/heads/${dstBranch}\` from \`${srcBranch || "(delete/empty source)"}\`. Verification must not update a protected base branch from a different branch.`,
+					vars,
+					protectedBranches,
+				);
+			}
+		}
+		return null;
+	}
+
+	const branch = normalizeBranchRef(clean);
+	if (!branch) return null;
+	if (protectedBranches.has(branch)) {
+		if (currentBranch === branch) return null;
+		return unsafePushReason(
+			pushCommand,
+			`Bare ref \`${refspec}\` can update protected branch \`refs/heads/${branch}\` while verification is running on \`${currentBranch || "HEAD"}\`.`,
+			vars,
+			protectedBranches,
+		);
+	}
+
+	return unsafePushReason(
+		pushCommand,
+		`Bare ref \`${refspec}\` has no destination ref. With inherited upstream configuration (for example \`push.default=upstream\`), Git can push it to a protected branch instead of \`refs/heads/${branch}\`.`,
+		vars,
+		protectedBranches,
+	);
+}
+
+export function validateVerificationPushSafety(command: string, vars: VerificationPushSafetyVars): VerificationPushSafetyResult {
+	const tokens = shellTokenize(command);
+	const protectedBranches = protectedBranchSet(vars);
+	const currentBranch = normalizeBranchRef(vars.branch);
+	const currentIsProtected = currentBranch.length > 0 && protectedBranches.has(currentBranch);
+
+	for (const push of findGitPushes(tokens)) {
+		const parsed = parsePushArgs(tokens, push.pushIndex, push.end);
+		const pushCommand = tokens.slice(push.gitIndex, push.end).join(" ");
+
+		if (parsed.pushesAllBranches && !currentIsProtected) {
+			return unsafePushReason(pushCommand, "Pushing all branches from a non-primary verification branch can update the protected base branch.", vars, protectedBranches);
+		}
+		if (parsed.refspecs.length === 0) {
+			if (!currentIsProtected && !parsed.tagsOnly) {
+				return unsafePushReason(pushCommand, "A push with no explicit refspec can use inherited upstream configuration and update the protected base branch.", vars, protectedBranches);
+			}
+			continue;
+		}
+
+		for (const refspec of parsed.refspecs) {
+			const result = inspectPushRefspec(pushCommand, refspec, currentBranch, vars, protectedBranches);
+			if (result) return result;
+		}
+	}
+
+	return { ok: true };
+}
+
 /** Create a deferred promise with exposed resolve/reject. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
 	let resolve!: (value: T) => void;
@@ -179,6 +514,16 @@ export interface VerificationResult {
 	summary: string;
 	reportHtml?: string;
 }
+
+/**
+ * Outcome of a `human-signoff` step. The verification harness parks an
+ * awaiter in `pendingSignoffs` until either the REST handler resolves it
+ * with a decision (pass/fail + optional feedback) or `cancelStaleVerifications`
+ * drains it with `{ cancelled: true }`.
+ */
+export type SignoffOutcome =
+	| { decision: "pass" | "fail"; feedback?: string }
+	| { cancelled: true };
 
 /** Reminder prompt sent when an agent goes idle without calling verification_result. */
 export const VERIFICATION_RESULT_REMINDER =
@@ -279,6 +624,12 @@ export interface ActiveVerification {
 		sessionId?: string;
 		/** Subgoal-step cache — Tier-1.5 lookup reads `childGoalId` to short-circuit tier resolution. */
 		subgoal?: { childGoalId?: string; planId?: string; };
+		/** True while a `human-signoff` step is parked waiting on the user. */
+		awaitingHuman?: boolean;
+		/** Already-substituted markdown prompt shown to the user (human-signoff). */
+		humanPrompt?: string;
+		/** Human-readable label rendered on the sign-off card (human-signoff). */
+		humanLabel?: string;
 		/** OS process id of the spawned command (Layer 1). */
 		pid?: number;
 		/** Date.now() at spawn — tie-breaker against pid reuse. */
@@ -526,6 +877,40 @@ export class VerificationHarness {
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
 
 	/**
+	 * Pending human-signoff resolvers keyed by `${signalId}::${stepName}`.
+	 * Populated when a `human-signoff` step parks and `await`s the user;
+	 * drained by `resolveSignoff()` (user decision) or `cancelStaleVerifications()`
+	 * (gate re-signaled / goal completed).
+	 */
+	public pendingSignoffs = new Map<string, (outcome: SignoffOutcome) => void>();
+
+	/**
+	 * Resolve a pending human-signoff. Returns `true` if the resolver was
+	 * found and invoked, `false` if the step is no longer parked (idempotent
+	 * for callers that race with cancellation or a prior resolve).
+	 *
+	 * The verification harness's own `verifyGateSignal` branch builds the
+	 * step result + artifact from the outcome — callers do not write to the
+	 * gate store directly.
+	 */
+	resolveSignoff(signalId: string, stepName: string, outcome: SignoffOutcome): boolean {
+		const key = `${signalId}::${stepName}`;
+		const resolver = this.pendingSignoffs.get(key);
+		if (!resolver) return false;
+		this.pendingSignoffs.delete(key);
+		const active = this.activeVerifications.get(signalId);
+		const step = active?.steps.find(s => s.name === stepName);
+		if (step?.awaitingHuman) {
+			step.awaitingHuman = false;
+			this._persistActive();
+		}
+		try { resolver(outcome); } catch (err) {
+			console.error(`[verification] resolveSignoff resolver threw for ${key}:`, err);
+		}
+		return true;
+	}
+
+	/**
 	 * @deprecated The verification_result tool is now registered via the standard
 	 * goal tools extension. No generated extension file needed.
 	 */
@@ -642,6 +1027,9 @@ export class VerificationHarness {
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
 			if (step.status !== "running") continue;
+			// human-signoff steps are alive while parked on user input — they have
+			// no session/pid but are legitimately running, not a zombie.
+			if (step.awaitingHuman) return true;
 			if (step.sessionId) {
 				// LLM/agent steps — check if session is still alive
 				const session = this.sessionManager?.getSession(step.sessionId);
@@ -850,6 +1238,50 @@ export class VerificationHarness {
 				continue;
 			}
 
+			// human-signoff resume — the verification was parked waiting on a
+			// human decision when the server restarted. Re-create the resolver,
+			// re-broadcast `gate_verification_awaiting_human` so any connected UI
+			// rehydrates the pending request, and await the user's decision
+			// inline. The persisted humanPrompt / humanLabel survive the restart.
+			if (step.type === "human-signoff" && step.awaitingHuman) {
+				const stepIndex = v.steps.indexOf(step);
+				const prompt = step.humanPrompt || "";
+				const label = step.humanLabel || step.name;
+				this.broadcastFn(v.goalId, {
+					type: "gate_verification_awaiting_human",
+					goalId: v.goalId, gateId: v.gateId, signalId: v.signalId,
+					stepIndex, stepName: step.name,
+					label, prompt,
+				});
+				const key = `${v.signalId}::${step.name}`;
+				const { promise, resolve: resolver } = deferred<SignoffOutcome>();
+				this.pendingSignoffs.set(key, resolver);
+				const outcome = await promise;
+				this.pendingSignoffs.delete(key);
+				let passed: boolean;
+				let output: string;
+				if ("decision" in outcome) {
+					const fb = outcome.feedback?.trim();
+					passed = outcome.decision === "pass";
+					output = passed
+						? (fb ? `Approved.\n\n${fb}` : "Approved.")
+						: (fb ? `Rejected.\n\n${fb}` : "Rejected.");
+				} else {
+					passed = false; output = "Sign-off cancelled.";
+				}
+				const av = this.activeVerifications.get(v.signalId);
+				if (av && av.steps[stepIndex]) {
+					av.steps[stepIndex].awaitingHuman = false;
+					this._persistActive();
+				}
+				resolvedSteps.push({
+					name: step.name, type: step.type,
+					passed, output,
+					duration_ms: Date.now() - step.startedAt,
+				});
+				continue;
+			}
+
 			// Step was running — for command-type steps, try the file-based
 			// (Layer 1) resume path; for session-backed steps, re-attach to the
 			// restored reviewer session as before.
@@ -911,7 +1343,7 @@ export class VerificationHarness {
 			status: persistedStatus,
 			steps: resolvedSteps.map(r => ({
 				name: r.name,
-				type: r.type as "command" | "llm-review" | "agent-qa",
+				type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
 				passed: r.passed,
 				output: r.output,
 				duration_ms: r.duration_ms,
@@ -1230,8 +1662,11 @@ export class VerificationHarness {
 		// instance — simpler than scoping per (goal,gate,signal) and equally
 		// effective since the dedupe key includes signalId.
 		this.broadcastFn = (goalId: string, event: any) => {
-			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_") && event.seq == null) {
-				event.seq = ++this._verifSeqCounter;
+			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_")) {
+				if (event.seq == null) event.seq = ++this._verifSeqCounter;
+				if (event.type !== "gate_verification_step_output") {
+					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration?.();
+				}
 			}
 			this._rawBroadcastFn(goalId, event);
 		};
@@ -1281,6 +1716,22 @@ export class VerificationHarness {
 			console.warn(`[verification] Goal "${goalId}" not found in any project context — falling back to server-level projectConfigStore. This likely means the gate will run with wrong commands.`);
 		}
 		return this.projectConfigStore;
+	}
+
+	private resolveToolActivationDeps(cwd: string): VerificationToolActivationDeps {
+		let toolManager: ToolManager | undefined;
+		let groupPolicyStore: GroupPolicyProvider | undefined;
+		const project = this.projectContextManager?.getRegistry().findByCwd(cwd);
+		const ctx = project ? this.projectContextManager?.getOrCreate(project.id) : undefined;
+		if (ctx) {
+			toolManager = ctx.toolManager;
+			groupPolicyStore = ctx.toolGroupPolicyStore;
+		}
+		return {
+			toolManager,
+			groupPolicyStore,
+			mcpManager: this.sessionManager?.getMcpManager() ?? undefined,
+		};
 	}
 
 	/**
@@ -1354,6 +1805,26 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Drain every pending human-signoff resolver whose key matches the given
+	 * signalId. Used by `cancelStaleVerifications` / `cancelAllVerifications`
+	 * so a re-signal or goal-complete unblocks any parked `await promise`
+	 * inside `verifyGateSignal`'s human-signoff branch — the awaited promise
+	 * resolves with `{ cancelled: true }` and the outer `active.cancelled`
+	 * short-circuit handles the rest of the cleanup.
+	 */
+	private _drainPendingSignoffsForSignal(signalId: string): void {
+		const prefix = `${signalId}::`;
+		for (const key of Array.from(this.pendingSignoffs.keys())) {
+			if (!key.startsWith(prefix)) continue;
+			const resolver = this.pendingSignoffs.get(key);
+			this.pendingSignoffs.delete(key);
+			try { resolver?.({ cancelled: true }); } catch (err) {
+				console.error(`[verification] Failed to drain pending signoff ${key}:`, err);
+			}
+		}
+	}
+
+	/**
 	 * Graceful shutdown — kill every in-flight tracked subprocess tree so
 	 * orphan chromium / playwright descendants don't survive the gateway exit.
 	 */
@@ -1372,6 +1843,7 @@ export class VerificationHarness {
 			active.overallStatus = "cancelled";
 
 			this._killTrackedForSignal(signalId);
+			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
 				if (step.sessionId && step.status === "running") {
@@ -1400,49 +1872,69 @@ export class VerificationHarness {
 	 * Terminates reviewer sessions and removes from activeVerifications.
 	 */
 	async cancelStaleVerifications(goalId: string, gateId: string): Promise<void> {
+		await this.cancelStaleVerificationsForGates(goalId, [gateId]);
+	}
+
+	/**
+	 * Cancel in-flight verifications for any matching gate in one synchronous
+	 * marking pass before awaiting reviewer-session cleanup. This lets callers
+	 * invalidate several gates without a later verification completing between
+	 * per-gate awaits and re-marking a reset gate.
+	 */
+	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
+		const gateIdSet = new Set(gateIds);
+		const cancellations: Array<{ signalId: string; gateId: string; runningSessionIds: string[] }> = [];
+
 		for (const [signalId, active] of this.activeVerifications) {
-			if (active.goalId === goalId && active.gateId === gateId) {
-				// Mark as cancelled
-				active.cancelled = true;
-				active.overallStatus = "cancelled";
+			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
 
-				this._killTrackedForSignal(signalId);
+			active.cancelled = true;
+			active.overallStatus = "cancelled";
 
-				// Terminate all running reviewer sessions
-				for (const step of active.steps) {
-					if (step.sessionId && step.status === "running") {
-						try {
-							await this.sessionManager?.terminateSession(step.sessionId);
-						} catch { /* ignore — may already be terminated */ }
-						if (this.teamManager) {
-							try {
-								await this.teamManager.unregisterReviewerSession(goalId, step.sessionId);
-							} catch { /* ignore */ }
-						}
-					}
+			this._killTrackedForSignal(signalId);
+			this._drainPendingSignoffsForSignal(signalId);
+			this.activeVerifications.delete(signalId);
+
+			cancellations.push({
+				signalId,
+				gateId: active.gateId,
+				runningSessionIds: active.steps
+					.filter(step => step.sessionId && step.status === "running")
+					.map(step => step.sessionId!),
+			});
+		}
+
+		if (cancellations.length > 0) this._persistActive();
+
+		for (const { signalId, gateId, runningSessionIds } of cancellations) {
+			// Terminate all running reviewer sessions after every affected active
+			// verification has already been marked cancelled and removed.
+			for (const sessionId of runningSessionIds) {
+				try {
+					await this.sessionManager?.terminateSession(sessionId);
+				} catch { /* ignore — may already be terminated */ }
+				if (this.teamManager) {
+					try {
+						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
+					} catch { /* ignore */ }
 				}
-
-				// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
-				this.resolveGateStore(goalId).updateSignalVerification(signalId, {
-					status: "failed",
-					steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled.", duration_ms: 0 }],
-				});
-				// Note: gate status is NOT updated here — the caller decides whether to set it
-				// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
-
-				// Remove from active verifications
-				this.activeVerifications.delete(signalId);
-				this._persistActive();
-
-				// Broadcast cancellation
-				this.broadcastFn(goalId, {
-					type: "gate_verification_complete",
-					goalId, gateId, signalId,
-					status: "cancelled",
-				});
-
-				console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
 			}
+
+			// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
+			this.resolveGateStore(goalId).updateSignalVerification(signalId, {
+				status: "failed",
+				steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled.", duration_ms: 0 }],
+			});
+			// Note: gate status is NOT updated here — the caller decides whether to set it
+			// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
+
+			this.broadcastFn(goalId, {
+				type: "gate_verification_complete",
+				goalId, gateId, signalId,
+				status: "cancelled",
+			});
+
+			console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
 		}
 	}
 
@@ -1590,7 +2082,12 @@ export class VerificationHarness {
 			// Build cache of previously-passed step results for the same commit SHA.
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
 			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
-			const cachedSteps = buildStepCache(gateState?.signals ?? [], signal.id, signal.commitSha);
+			const cachedSteps = buildStepCache(
+				gateState?.signals ?? [],
+				signal.id,
+				signal.commitSha,
+				gateState?.verificationCacheInvalidatedAt,
+			);
 			if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}
@@ -1838,77 +2335,82 @@ export class VerificationHarness {
 							if (skipReason) {
 								result = { passed: true, output: skipReason };
 							} else {
-							const expectFailure = step.expect === "failure";
+								const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
+								if (!pushSafety.ok) {
+									result = { passed: false, output: pushSafety.reason };
+								} else {
+									const expectFailure = step.expect === "failure";
 
-							// Look up error_pattern for expect: failure steps
-							let errorPattern: string | undefined;
-							if (expectFailure) {
-								errorPattern = agentVars["error_pattern"];
-								if (!errorPattern && allGateStates) {
-									for (const [, gs] of allGateStates) {
-										if (gs.metadata?.["error_pattern"]) {
-											errorPattern = gs.metadata["error_pattern"];
-											break;
-										}
-									}
-								}
-							}
-
-							const streamCtx = {
-								goalId: signal.goalId, gateId: signal.gateId,
-								signalId: signal.id, stepIndex: index,
-							};
-
-							// For sandboxed goals, resolve the project container ID
-							// so the command runs inside the container (where the code lives).
-							// Also resolve the container-internal worktree path so the command
-							// runs on the goal's branch, not /workspace (the main branch).
-							let commandContainerId: string | undefined;
-							let commandCwd = resolvedCwd;
-							const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-							const isSandboxedGoal = sandboxedGoal?.sandboxed;
-							if (isSandboxedGoal && this.sessionManager) {
-								const sandboxMgr = this.sessionManager.getSandboxManager();
-								const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
-								if (sandboxMgr && goalCtx) {
-									const projectSandbox = sandboxMgr.get(goalCtx.project.id);
-									if (projectSandbox) {
-										try {
-											commandContainerId = await projectSandbox.getContainerId();
-											// Resolve the container worktree path for this goal's branch.
-											// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
-											const goalBranchName = sandboxedGoal?.branch;
-											if (goalBranchName) {
-												commandCwd = `/workspace-wt/${goalBranchName}`;
-											} else {
-												commandCwd = "/workspace";
+									// Look up error_pattern for expect: failure steps
+									let errorPattern: string | undefined;
+									if (expectFailure) {
+										errorPattern = agentVars["error_pattern"];
+										if (!errorPattern && allGateStates) {
+											for (const [, gs] of allGateStates) {
+												if (gs.metadata?.["error_pattern"]) {
+													errorPattern = gs.metadata["error_pattern"];
+													break;
+												}
 											}
-										} catch {
-											// Container unavailable — fall through to warning
 										}
 									}
-								}
-								if (!commandContainerId) {
-									const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
-									console.warn(warning);
-									this.broadcastFn(streamCtx.goalId, {
-										type: "gate_verification_step_output",
-										goalId: streamCtx.goalId, gateId: streamCtx.gateId,
-										signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
-										stream: "stderr", text: warning + "\n", ts: Date.now(),
-									});
-								}
-							}
 
-							if (this.commandSemaphore.available === 0) {
-								console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-							}
-							await this.commandSemaphore.acquire();
-							try {
-								result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
-							} finally {
-								this.commandSemaphore.release();
-							}
+									const streamCtx = {
+										goalId: signal.goalId, gateId: signal.gateId,
+										signalId: signal.id, stepIndex: index,
+									};
+
+									// For sandboxed goals, resolve the project container ID
+									// so the command runs inside the container (where the code lives).
+									// Also resolve the container-internal worktree path so the command
+									// runs on the goal's branch, not /workspace (the main branch).
+									let commandContainerId: string | undefined;
+									let commandCwd = resolvedCwd;
+									const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+									const isSandboxedGoal = sandboxedGoal?.sandboxed;
+									if (isSandboxedGoal && this.sessionManager) {
+										const sandboxMgr = this.sessionManager.getSandboxManager();
+										const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
+										if (sandboxMgr && goalCtx) {
+											const projectSandbox = sandboxMgr.get(goalCtx.project.id);
+											if (projectSandbox) {
+												try {
+													commandContainerId = await projectSandbox.getContainerId();
+													// Resolve the container worktree path for this goal's branch.
+													// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
+													const goalBranchName = sandboxedGoal?.branch;
+													if (goalBranchName) {
+														commandCwd = `/workspace-wt/${goalBranchName}`;
+													} else {
+														commandCwd = "/workspace";
+													}
+												} catch {
+													// Container unavailable — fall through to warning
+												}
+											}
+										}
+										if (!commandContainerId) {
+											const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
+											console.warn(warning);
+											this.broadcastFn(streamCtx.goalId, {
+												type: "gate_verification_step_output",
+												goalId: streamCtx.goalId, gateId: streamCtx.gateId,
+												signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
+												stream: "stderr", text: warning + "\n", ts: Date.now(),
+											});
+										}
+									}
+
+									if (this.commandSemaphore.available === 0) {
+										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
+									}
+									await this.commandSemaphore.acquire();
+									try {
+										result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
+									} finally {
+										this.commandSemaphore.release();
+									}
+								}
 							}
 						} else if (step.type === "subgoal") {
 							active.steps[index].startedAt = Date.now();
@@ -1957,6 +2459,69 @@ export class VerificationHarness {
 									await this._sleepCancellable(delayMs, () => !!active.cancelled);
 								}
 							}
+						} else if (step.type === "human-signoff") {
+							// human-signoff — park on a deferred resolver until the user
+							// POSTs /signoff with a decision. No subprocess, no session.
+							//
+							// Bypass logic: ONLY `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a
+							// human-signoff step. There is intentionally NO fallback to
+							// BOBBIT_LLM_REVIEW_SKIP — a "human" gate must not share a
+							// bypass with `agent-qa` / `llm-review`, otherwise the global
+							// E2E harness (which sets BOBBIT_LLM_REVIEW_SKIP=1) would
+							// silently auto-approve every human gate. Removing the
+							// fallback was the Bug-1 defense-in-depth fix in the
+							// "Re-attempt: Sign-Off Gates" goal.
+							//
+							// Both `BOBBIT_HUMAN_SIGNOFF_SKIP` unset and `=0` park.
+							const skipHumanSignoff = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP === "1";
+							if (skipHumanSignoff) {
+								result = { passed: true, output: "Human sign-off skipped (BOBBIT_HUMAN_SIGNOFF_SKIP=1)." };
+							} else {
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const label = step.label || step.name;
+								const startedAt = Date.now();
+								active.steps[index].startedAt = startedAt;
+								const av = this.activeVerifications.get(signal.id);
+								if (av && av.steps[index]) {
+									av.steps[index].awaitingHuman = true;
+									av.steps[index].humanPrompt = prompt;
+									av.steps[index].humanLabel = label;
+									this._persistActive();
+								}
+								if (!active.cancelled) this.broadcastFn(signal.goalId, {
+									type: "gate_verification_step_started",
+									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+									stepIndex: index, stepName: step.name,
+									startedAt, phase,
+								});
+								if (!active.cancelled) this.broadcastFn(signal.goalId, {
+									type: "gate_verification_awaiting_human",
+									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+									stepIndex: index, stepName: step.name,
+									label, prompt,
+								});
+								const key = `${signal.id}::${step.name}`;
+								const { promise, resolve: resolver } = deferred<SignoffOutcome>();
+								this.pendingSignoffs.set(key, resolver);
+								const outcome = await promise;
+								this.pendingSignoffs.delete(key);
+								if ("decision" in outcome) {
+									const fb = outcome.feedback?.trim();
+									result = {
+										passed: outcome.decision === "pass",
+										output: outcome.decision === "pass"
+											? (fb ? `Approved.\n\n${fb}` : "Approved.")
+											: (fb ? `Rejected.\n\n${fb}` : "Rejected."),
+									};
+								} else {
+									result = { passed: false, output: "Sign-off cancelled." };
+								}
+								const av2 = this.activeVerifications.get(signal.id);
+								if (av2 && av2.steps[index]) {
+									av2.steps[index].awaitingHuman = false;
+									this._persistActive();
+								}
+							}
 						} else {
 							// llm-review — spawn a one-shot reviewer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -1993,8 +2558,10 @@ export class VerificationHarness {
 
 						const duration_ms = Date.now() - startTime;
 
-						// Build artifact for llm-review steps (agent-qa artifacts are set during execution)
-						if (!artifact && step.type === "llm-review" && result.output && result.output.length > 0) {
+						// Build artifact for llm-review and human-signoff steps (agent-qa artifacts are set during execution).
+						// Failed sign-offs surface their feedback to the team lead via the same
+						// markdown-artifact channel as failed reviews — no extra steer plumbing needed.
+						if (!artifact && (step.type === "llm-review" || step.type === "human-signoff") && result.output && result.output.length > 0) {
 							artifact = {
 								content: result.output.length > MAX_ARTIFACT_SIZE ? result.output.slice(0, MAX_ARTIFACT_SIZE) : result.output,
 								contentType: "text/markdown",
@@ -2785,15 +3352,17 @@ export class VerificationHarness {
 			goalState: "active",
 		});
 
-		// Derive allowed tools from toolPolicies (include all non-"never" entries)
-		const allowedTools = role.toolPolicies
-			? Object.entries(role.toolPolicies).filter(([, p]) => p !== "never").map(([name]) => name)
-			: [];
+		const toolActivation = buildVerificationToolActivation(
+			subSessionId,
+			cwd,
+			role,
+			this.resolveToolActivationDeps(cwd),
+		);
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
-			args: [
-				...(allowedTools.length > 0 ? ["--tools", allowedTools.join(",")] : []),
-			],
+			args: toolActivation.args,
+			env: toolActivation.env,
+			toolManager: toolActivation.toolManager,
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 

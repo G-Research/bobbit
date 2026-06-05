@@ -146,7 +146,9 @@ On successful retry (turn completes without error), `lastTurnErrored` is cleared
 
 ### Dispatch failure
 
-If `rpcClient.prompt()` fails during `drainQueue()`, the optimistic `"streaming"` status is reverted to `"idle"` and broadcast to clients.
+If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order, the optimistic `"streaming"` status is reverted to `"idle"`, and a follow-up drain is scheduled on the next tick.
+
+The exception is a child-exit path where the session is already `terminated` or `aborting`. Bobbit does not re-enqueue into a dead bridge; sandbox recovery, force-abort recovery, or explicit Retry owns the next process.
 
 ## Abort and force-kill recovery
 
@@ -201,3 +203,7 @@ Residual at-least-once risk: a hard process kill in the small window between `rp
 | `src/server/ws/handler.ts` | WS command routing (`prompt`, `steer`, `follow_up`, etc.) |
 | `src/server/ws/protocol.ts` | `QueuedMessage` type, client/server message unions |
 | `src/app/remote-agent.ts` | Client-side optimistic rendering, dedup, queue state |
+
+## Related
+
+- [image-attachment-only-prompts.md](image-attachment-only-prompts.md) — `enqueuePrompt` synthesizes a non-blank text body for attachment-only prompts before they reach the queue, so queued/drained rows never carry a blank `ContentBlock`.

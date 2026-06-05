@@ -32,6 +32,8 @@ export interface ApiModel {
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	headers?: Record<string, string>;
+	compat?: unknown;
 	authenticated: boolean;
 }
 
@@ -104,6 +106,20 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 
 // ── Model Assembly ─────────────────────────────────────────────────
 
+function shouldRaiseBuiltInMeta(modelId: string, explicitValue: number | undefined, inferredValue: number): boolean {
+	if (!explicitValue || inferredValue <= explicitValue) return false;
+	// Bobbit intentionally patches stale Claude Sonnet/Opus metadata upward (see
+	// writeContextWindowOverrides). Do not use generic inference to inflate newer
+	// OpenAI built-ins; pi-ai's provider-specific metadata is authoritative there.
+	return /claude-(?:opus|sonnet)/i.test(modelId);
+}
+
+function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: number): number {
+	const explicit = typeof explicitValue === "number" && explicitValue > 0 ? explicitValue : undefined;
+	if (shouldRaiseBuiltInMeta(modelId, explicit, inferredValue)) return inferredValue;
+	return explicit ?? inferredValue;
+}
+
 async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
 	const aigwUrl = getAigwUrl(prefs);
@@ -138,12 +154,14 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 						provider: providerId as string,
 						api: m.api as string,
 						baseUrl: m.baseUrl,
-						contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
-						maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
+						contextWindow: builtInNumber(m.id, m.contextWindow, meta.contextWindow),
+						maxTokens: builtInNumber(m.id, m.maxTokens, meta.maxTokens),
 						reasoning: meta.reasoning || m.reasoning || false,
 						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
 						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
 						cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						...((m as any).headers ? { headers: (m as any).headers } : {}),
+						...((m as any).compat ? { compat: (m as any).compat } : {}),
 						authenticated: isAuth,
 					});
 				}
@@ -179,7 +197,7 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
 					reasoning: meta.reasoning || m.reasoning || false,
 					input: meta.input || ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					authenticated: true, // aigw is always authenticated (no key needed)
 				});
 			}
@@ -466,6 +484,21 @@ function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<
 import { GPT_55_RECENCY_RANK } from "../../shared/model-ranks.js";
 export { GPT_55_RECENCY_RANK };
 
+function claudeOpus4Minor(id: string): number | undefined {
+	// Keep in lockstep with src/ui/dialogs/ModelSelector.ts. Limit the minor
+	// capture to version-looking values so date-only IDs like
+	// claude-opus-4-20250514 remain the generic Opus 4 tier.
+	const match = id.toLowerCase().match(/claude-opus-4(?:-|\.)(\d{1,3})\b/);
+	return match ? Number(match[1]) : undefined;
+}
+
+function claudeOpus4Rank(id: string): number | undefined {
+	const minor = claudeOpus4Minor(id);
+	if (minor === undefined) return undefined;
+	if (minor === 1) return 96;
+	return 88 + minor * 2;
+}
+
 /**
  * Rank a model ID by recency/quality tier. Higher = newer/better.
  * Used to auto-select the best model when no preference is set.
@@ -473,47 +506,85 @@ export { GPT_55_RECENCY_RANK };
  */
 export function modelRecencyRank(id: string): number {
 	const s = id.toLowerCase();
-	// Anthropic Claude
-	if (s.includes("claude-opus-4-7") || s.includes("claude-opus-4.7")) return 102;
-	if (s.includes("claude-opus-4-6") || s.includes("claude-opus-4.6")) return 100;
+
+	// ── Anthropic Claude ──
+	const opus4Rank = claudeOpus4Rank(s);
+	if (opus4Rank !== undefined) return opus4Rank;
 	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
-	if (s.includes("claude-opus-4-5") || s.includes("claude-opus-4.5")) return 98;
 	if (s.includes("claude-sonnet-4-5") || s.includes("claude-sonnet-4.5")) return 97;
+	if (s.includes("claude-opus-4")) return 95;
 	if (s.includes("claude-sonnet-4") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 94;
 	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
+	if (s.includes("claude-3-7-sonnet") || s.includes("claude-3.7-sonnet")) return 80;
+	if (s.includes("claude-3-5-sonnet") || s.includes("claude-3.5-sonnet")) return 70;
+	if (s.includes("claude-3-5-haiku") || s.includes("claude-3.5-haiku")) return 65;
+	if (s.includes("claude-3-opus")) return 60;
 	if (s.includes("claude")) return 50;
-	// OpenAI
+
+	// ── OpenAI ──
 	if (s.includes("gpt-5.5")) return GPT_55_RECENCY_RANK;
 	if (s.includes("gpt-5.4")) return 100;
 	if (s.includes("gpt-5.3")) return 98;
 	if (s.includes("gpt-5.2")) return 96;
+	if (s.includes("gpt-5.1")) return 94;
 	if (s.includes("gpt-5") && !s.includes("5.")) return 92;
 	if (s.includes("o4-mini")) return 91;
+	if (s.includes("o3-pro")) return 89;
 	if (s.includes("o3") && !s.includes("o3-mini")) return 88;
+	if (s.includes("o3-mini")) return 85;
+	if (s.includes("o1-pro")) return 80;
+	if (s.includes("o1") && !s.includes("o1-mini")) return 78;
 	if (s.includes("gpt-4o") && !s.includes("mini")) return 70;
+	if (s.includes("gpt-4.1")) return 68;
+	if (s.includes("gpt-4o-mini") || s.includes("gpt-4.1-mini")) return 65;
 	if (s.includes("gpt-4")) return 50;
-	// Gemini
-	if (s.includes("gemini-3.1-pro") || s.includes("gemini-3-pro")) return 98;
+
+	// ── Google Gemini ──
+	if (s.includes("gemini-3.1-pro")) return 100;
+	if (s.includes("gemini-3-pro")) return 98;
+	if (s.includes("gemini-3.1-flash") || s.includes("gemini-3-flash")) return 95;
 	if (s.includes("gemini-2.5-pro")) return 90;
+	if (s.includes("gemini-2.5-flash") && !s.includes("lite")) return 85;
+	if (s.includes("gemini-2.5-flash-lite")) return 80;
+	if (s.includes("gemini-2.0")) return 60;
+	if (s.includes("gemini-1.5")) return 40;
 	if (s.includes("gemini")) return 30;
-	// Grok
+
+	// ── xAI Grok ──
 	if (s.includes("grok-4")) return 100;
 	if (s.includes("grok-3") && !s.includes("mini")) return 90;
+	if (s.includes("grok-3-mini")) return 85;
+	if (s.includes("grok-2")) return 70;
 	if (s.includes("grok")) return 50;
-	// DeepSeek
+
+	// ── DeepSeek ──
+	if (s.includes("deepseek-v3.2")) return 95;
+	if (s.includes("deepseek-v3.1")) return 90;
 	if (s.includes("deepseek-r1")) return 88;
 	if (s.includes("deepseek-v3")) return 85;
 	if (s.includes("deepseek")) return 50;
-	// Qwen
+
+	// ── Qwen ──
+	if (s.includes("qwen3.5") || s.includes("qwen-3.5")) return 95;
 	if (s.includes("qwen3-coder") || s.includes("qwen-3-coder")) return 90;
+	if (s.includes("qwen3-next") || s.includes("qwen-3-next")) return 88;
 	if (s.includes("qwen3") || s.includes("qwen-3")) return 85;
 	if (s.includes("qwen")) return 50;
-	// Mistral
+
+	// ── Mistral ──
+	if (s.includes("devstral-medium")) return 90;
+	if (s.includes("magistral")) return 88;
 	if (s.includes("devstral")) return 85;
 	if (s.includes("codestral")) return 80;
+	if (s.includes("mistral-large")) return 75;
+	if (s.includes("mistral-medium")) return 70;
 	if (s.includes("mistral")) return 50;
-	// Llama
+
+	// ── Llama ──
 	if (s.includes("llama-4") || s.includes("llama4")) return 90;
+	if (s.includes("llama-3.3") || s.includes("llama3-3")) return 80;
+	if (s.includes("llama-3.2") || s.includes("llama3-2")) return 70;
 	if (s.includes("llama")) return 50;
+
 	return 0;
 }

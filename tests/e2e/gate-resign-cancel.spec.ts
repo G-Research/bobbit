@@ -85,8 +85,9 @@ test.describe("Gate Re-signal Cancellation", () => {
 		});
 		const goalId = goal.id;
 
-		// Open a WS connection to receive gate events
-		const sessionId = await createSession();
+		// Open a matching goal-session WS connection to receive gate events.
+		// Goal broadcasts intentionally skip unrelated regular sessions.
+		const sessionId = await createSession({ goalId });
 		let conn: WsConnection | undefined;
 
 		try {
@@ -175,8 +176,9 @@ test.describe("Gate Re-signal Cancellation", () => {
 		});
 		const goalId = goal.id;
 
-		// Open a WS connection to receive gate events
-		const sessionId = await createSession();
+		// Open a matching goal-session WS connection to receive gate events.
+		// Goal broadcasts intentionally skip unrelated regular sessions.
+		const sessionId = await createSession({ goalId });
 		let conn: WsConnection | undefined;
 
 		try {

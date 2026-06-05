@@ -16,18 +16,14 @@
 import { test as base, expect } from "@playwright/test";
 import http from "node:http";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Per-worker V8 compile cache (mirrors in-process-harness.ts).
-{
-	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT || join(tmpdir(), "bobbit-e2e-v8cache");
-	const workerCacheDir = join(cacheRoot, `w-${process.pid}`);
-	try { mkdirSync(workerCacheDir, { recursive: true }); } catch { /* best-effort */ }
-	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
-}
+// Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
+// workers cold-import dist/server once per process, so a per-worker cache gives
+// no useful same-run speedup; on Windows/Node 24 it intermittently returned
+// stale module metadata as false "does not provide an export" startup errors.
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
@@ -41,6 +37,8 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
+const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(PROJECT_ROOT, "package.json"), "utf-8")).version;
+const EXPECTED_USER_AGENT = `Bobbit/${PACKAGE_VERSION}`;
 
 interface SeedOpts {
 	aigwUrl?: string;
@@ -89,6 +87,7 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	process.env.BOBBIT_DIR = bobbitDir;
 	// Isolate the agent dir so each test has its own ~/.bobbit/agent equivalent.
 	process.env.BOBBIT_AGENT_DIR = agentDir;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
@@ -145,16 +144,47 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	};
 }
 
+interface RecordedRequest {
+	method?: string;
+	url?: string;
+	headers: http.IncomingHttpHeaders;
+	rawHeaders: string[];
+}
+
 interface MockGateway {
 	url: string;
 	hits: () => number;
+	requests: () => RecordedRequest[];
 	close: () => Promise<void>;
+}
+
+function userAgentValues(record: RecordedRequest): string[] {
+	const values: string[] = [];
+	for (let i = 0; i < record.rawHeaders.length; i += 2) {
+		if (record.rawHeaders[i]?.toLowerCase() === "user-agent") {
+			values.push(record.rawHeaders[i + 1] || "");
+		}
+	}
+	return values;
+}
+
+function expectSingleBobbitUserAgent(record: RecordedRequest | undefined): void {
+	expect(record, "mock gateway should have recorded startup discovery").toBeTruthy();
+	expect(record!.headers["user-agent"]).toBe(EXPECTED_USER_AGENT);
+	expect(userAgentValues(record!)).toEqual([EXPECTED_USER_AGENT]);
 }
 
 function startMockAigw(modelIds: string[]): Promise<MockGateway> {
 	let hits = 0;
+	const requests: RecordedRequest[] = [];
 	const server = http.createServer((req, res) => {
 		hits++;
+		requests.push({
+			method: req.method,
+			url: req.url,
+			headers: req.headers,
+			rawHeaders: [...req.rawHeaders],
+		});
 		if (req.url?.endsWith("/v1/models")) {
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({
@@ -171,6 +201,7 @@ function startMockAigw(modelIds: string[]): Promise<MockGateway> {
 			resolve({
 				url: `http://127.0.0.1:${port}`,
 				hits: () => hits,
+				requests: () => [...requests],
 				close: () => new Promise<void>((r) => server.close(() => r())),
 			});
 		});
@@ -196,11 +227,13 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 			const data = JSON.parse(readFileSync(gw.modelsJsonPath, "utf-8"));
 			expect(data?.providers?.aigw, "aigw provider must exist after startup refresh").toBeTruthy();
 			expect(data.providers.aigw.headers["x-opencode-session"]).toBe(EXPECTED_HEADER_VALUE);
+			expect(data.providers.aigw.headers["User-Agent"]).toBe(EXPECTED_USER_AGENT);
 
 			const ids = data.providers.aigw.models.map((m: any) => m.id);
 			expect(ids).toContain("openai/gpt-5.2");
 			expect(ids).toContain("us.anthropic.claude-sonnet-4-6"); // Claude prefix stripped
 			expect(mock.hits()).toBeGreaterThan(0);
+			expectSingleBobbitUserAgent(mock.requests().find((record) => record.url === "/v1/models"));
 		} finally {
 			await gw?.shutdown();
 			await mock.close();

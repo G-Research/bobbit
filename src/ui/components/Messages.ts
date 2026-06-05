@@ -22,6 +22,8 @@ import "./LiveTimer.js";
 import "./ToolGroup.js";
 import "./SkillChip.js";
 import type { SkillChipData } from "./SkillChip.js";
+import "./FileMentionChip.js";
+import type { FileMentionChipData, FileMentionKind } from "./FileMentionChip.js";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 
 /** Format a message timestamp for display (locale-appropriate time). */
@@ -52,12 +54,32 @@ export interface SkillExpansion {
 	expanded: string;
 }
 
+/**
+ * Persisted record of a user-typed `@path` file reference. Mirrors the
+ * server-side `FileMention` shape — `range` uses UTF-16 code-unit offsets
+ * into the original `text`, matching `String.prototype.slice`. The UI
+ * re-declares this structurally-identical interface (it does NOT import the
+ * server module) so the JSON crosses the wire unchanged.
+ */
+export interface FileMention {
+	path: string;
+	absPath?: string;
+	range: [number, number];
+	kind: FileMentionKind;
+	content?: string;
+	data?: string;
+	mimeType?: string;
+	bytes?: number;
+	reason?: string;
+}
+
 export type UserMessageWithAttachments = {
 	role: "user-with-attachments";
 	content: string | (TextContent | ImageContent)[];
 	timestamp: number;
 	attachments?: Attachment[];
 	skillExpansions?: SkillExpansion[];
+	fileMentions?: FileMention[];
 };
 
 // Artifact message type for session persistence
@@ -78,26 +100,38 @@ declare module "@earendil-works/pi-agent-core" {
 }
 
 /**
- * Render `text` with `<skill-chip>` elements spliced in at each expansion's
- * recorded UTF-16 character range. Plain-text gaps are rendered through
- * `<markdown-block>` so user formatting is preserved exactly as today; line
- * breaks become `<br>` via the trailing-spaces trick used in render().
- *
- * Robustness: any expansion whose range is invalid (out of bounds, inverted,
- * or overlapping) is dropped with a warning — the surrounding plain text
- * still renders. This guarantees we never crash a user bubble because of a
- * malformed sidecar entry.
+ * A single chip to splice into the user text at a recorded UTF-16 range.
+ * Generalised so both `<skill-chip>` (slash skills) and `<file-mention-chip>`
+ * (`@path` references) flow through one robust splice path.
  */
-function renderTextWithSkillChips(
+interface ChipItem {
+	range: [number, number];
+	render: () => TemplateResult;
+}
+
+/**
+ * Render `text` with chip elements spliced in at each item's recorded UTF-16
+ * character range. Plain-text gaps are rendered as inline HTML so user
+ * formatting is preserved exactly as today; line breaks become `<br>` via the
+ * trailing-spaces trick used in render().
+ *
+ * Robustness: any item whose range is invalid (out of bounds, inverted, or
+ * overlapping a previously-accepted item) is dropped with a warning — the
+ * surrounding plain text still renders. This guarantees we never crash a user
+ * bubble because of a malformed sidecar entry.
+ */
+function renderTextWithChips(
 	text: string,
-	expansions: SkillExpansion[],
+	items: ChipItem[],
 ): TemplateResult {
-	const valid: SkillExpansion[] = [];
+	const valid: ChipItem[] = [];
 	let lastEnd = 0;
 	// Sort by range start so we can splice left-to-right and detect overlap.
-	const sorted = [...expansions].sort((a, b) => a.range[0] - b.range[0]);
-	for (const e of sorted) {
-		const [start, end] = e.range;
+	// Skill and file-mention items cannot overlap by construction (`/` vs `@`
+	// triggers), but the guard below drops any that do regardless of source.
+	const sorted = [...items].sort((a, b) => a.range[0] - b.range[0]);
+	for (const item of sorted) {
+		const [start, end] = item.range;
 		if (
 			typeof start !== "number" ||
 			typeof end !== "number" ||
@@ -106,10 +140,10 @@ function renderTextWithSkillChips(
 			start >= end ||
 			start < lastEnd
 		) {
-			console.warn("[SkillChip] dropping invalid expansion", e);
+			console.warn("[Messages] dropping invalid chip range", item.range);
 			continue;
 		}
-		valid.push(e);
+		valid.push(item);
 		lastEnd = end;
 	}
 
@@ -130,9 +164,25 @@ function renderTextWithSkillChips(
 		const inlineHtml = marked.parseInline(withBreaks, { async: false }) as string;
 		return html`<span class="skill-chip-gap">${unsafeHTML(inlineHtml)}</span>`;
 	};
-	for (const e of valid) {
-		const [s, eIdx] = e.range;
+	for (const item of valid) {
+		const [s, eIdx] = item.range;
 		if (s > cursor) parts.push(renderGap(text.slice(cursor, s)));
+		parts.push(item.render());
+		cursor = eIdx;
+	}
+	if (cursor < text.length) parts.push(renderGap(text.slice(cursor)));
+	return html`<div class="skill-chip-flow flex flex-wrap items-baseline gap-x-1 gap-y-1 markdown-content">${parts}</div>`;
+}
+
+/** Build the merged chip list from a user message's skill expansions and file
+ *  mentions. Each entry carries its splice `range` plus a renderer for the chip
+ *  element. Kept pure so the splice path stays the single source of truth. */
+function buildChipItems(
+	expansions: SkillExpansion[] | undefined,
+	mentions: FileMention[] | undefined,
+): ChipItem[] {
+	const items: ChipItem[] = [];
+	for (const e of expansions ?? []) {
 		const data: SkillChipData = {
 			name: e.name,
 			args: e.args,
@@ -140,11 +190,21 @@ function renderTextWithSkillChips(
 			filePath: e.filePath,
 			expanded: e.expanded,
 		};
-		parts.push(html`<skill-chip .data=${data}></skill-chip>`);
-		cursor = eIdx;
+		items.push({ range: e.range, render: () => html`<skill-chip .data=${data}></skill-chip>` });
 	}
-	if (cursor < text.length) parts.push(renderGap(text.slice(cursor)));
-	return html`<div class="skill-chip-flow flex flex-wrap items-baseline gap-x-1 gap-y-1 markdown-content">${parts}</div>`;
+	for (const m of mentions ?? []) {
+		const data: FileMentionChipData = {
+			path: m.path,
+			kind: m.kind,
+			content: m.content,
+			data: m.data,
+			mimeType: m.mimeType,
+			bytes: m.bytes,
+			reason: m.reason,
+		};
+		items.push({ range: m.range, render: () => html`<file-mention-chip .data=${data}></file-mention-chip>` });
+	}
+	return items;
 }
 
 @customElement("user-message")
@@ -170,29 +230,39 @@ export class UserMessage extends LitElement {
 		// so markdown renders them as <br> instead of collapsing to a single space.
 		const content = rawContent.replace(/\n/g, "  \n");
 
-		const expansions = (this.message as UserMessageWithAttachments).skillExpansions;
+		const withAttachments = this.message as UserMessageWithAttachments;
+		const chipItems = buildChipItems(withAttachments.skillExpansions, withAttachments.fileMentions);
 		const body =
-			expansions && expansions.length
-				? renderTextWithSkillChips(rawContent, expansions)
+			chipItems.length
+				? renderTextWithChips(rawContent, chipItems)
 				: html`<markdown-block .content=${content}></markdown-block>`;
 
 		return html`
 			<div class="flex justify-start mx-2 sm:mx-4 my-1">
 				<div class="user-message-container py-2 px-3 sm:px-4">
 					${body}
-					${
-						this.message.role === "user-with-attachments" &&
-						this.message.attachments &&
-						this.message.attachments.length > 0
+					${(() => {
+						// Rich attachments (optimistic preview / restored) win; otherwise
+						// derive tiles from server-authoritative image content blocks so a
+						// bare role:"user" echo still renders its image live (WP1 / RC2 / S6).
+						const richAttachments =
+							this.message.role === "user-with-attachments" && this.message.attachments
+								? this.message.attachments
+								: [];
+						const tiles =
+							richAttachments.length > 0
+								? richAttachments
+								: imageAttachmentsFromContent(this.message.content);
+						return tiles.length > 0
 							? html`
 								<div class="mt-3 flex flex-wrap gap-2">
-									${this.message.attachments.map(
+									${tiles.map(
 										(attachment) => html` <attachment-tile .attachment=${attachment}></attachment-tile> `,
 									)}
 								</div>
 							`
-							: ""
-					}
+							: "";
+					})()}
 				</div>
 				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
@@ -691,6 +761,34 @@ export function convertAttachments(attachments: Attachment[]): (TextContent | Im
 		}
 	}
 	return content;
+}
+
+/**
+ * Build attachment tiles from a user message's image content blocks. Mirrors
+ * message-reducer.ts::enrichUserMessage field-for-field so a live `role:"user"`
+ * echo renders identically to a reloaded one (WP1 / RC2 — removes the render's
+ * dependency on the racy `_pendingAttachments` slot; closes S6).
+ */
+export function imageAttachmentsFromContent(content: unknown): Attachment[] {
+	if (!Array.isArray(content)) return [];
+	const out: Attachment[] = [];
+	let i = 0;
+	for (const c of content) {
+		const img = c as { type?: string; data?: string; mimeType?: string; media_type?: string };
+		if (img && img.type === "image" && img.data) {
+			out.push({
+				id: `restored_${i}`,
+				type: "image",
+				fileName: `image-${i + 1}.png`,
+				mimeType: img.mimeType || img.media_type || "image/png",
+				size: img.data.length || 0,
+				content: img.data,
+				preview: img.data,
+			});
+			i++;
+		}
+	}
+	return out;
 }
 
 /**

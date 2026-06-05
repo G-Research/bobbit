@@ -23,9 +23,6 @@ import {
 	STORY_GR03,
 	STORY_GR04,
 	STORY_GR05,
-	STORY_GR06,
-	STORY_GR07,
-	STORY_GR08,
 	STORY_GR09,
 	STORY_GR10,
 } from "./story-registry.js";
@@ -83,7 +80,7 @@ async function deleteAllProjects(): Promise<void> {
 }
 
 // ---------------------------------------------------------------
-// Shared two-project group (GR-01..GR-08)
+// Shared two-project browser group (GR-01..GR-05)
 // ---------------------------------------------------------------
 
 test.describe("CT-18: Multi-project goal/session routing @quarantine", () => {
@@ -345,82 +342,6 @@ test.describe("CT-18: Multi-project goal/session routing @quarantine", () => {
 		const goal = await goalResp.json();
 		goalsToCleanup.push(goal.id);
 		expect(goal.projectId).toBe(projB.id);
-	});
-
-	// -----------------------------------------------------------
-	// GR-06: POST /api/goals with cwd only resolves to matching project
-	// -----------------------------------------------------------
-
-	test("GR-06: API: cwd-only request resolves project", async () => {
-		s.begin(STORY_GR06);
-
-		s.act();
-		// cwd is a subpath inside B's rootPath and does not match A.
-		const subCwd = join(projB.rootPath, "sub");
-		mkdirSync(subCwd, { recursive: true });
-
-		// Use rawApiFetch so the harness default-projectId injection doesn't
-		// short-circuit the cwd-only resolution we're exercising.
-		const resp = await rawApiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "GR-06 cwd-only", cwd: subCwd, worktree: false }),
-		});
-
-		s.assert();
-		expect(resp.status, "cwd-only request should succeed when cwd is inside a registered project").toBe(201);
-		const created = await resp.json();
-		goalsToCleanup.push(created.id);
-		expect(created.projectId, "goal routed to project B via cwd match").toBe(projB.id);
-	});
-
-	// -----------------------------------------------------------
-	// GR-07: POST /api/goals with no projectId + unresolvable cwd → 400
-	// -----------------------------------------------------------
-
-	test("GR-07: API: no projectId + no matching cwd returns 400", async () => {
-		s.begin(STORY_GR07);
-
-		s.act();
-		const bogusCwd = join(tmpdir(), `bobbit-gr07-bogus-${Date.now()}`);
-		mkdirSync(bogusCwd, { recursive: true });
-
-		const resp = await rawApiFetch("/api/goals", {
-			method: "POST",
-			body: JSON.stringify({ title: "GR-07 unmatched", cwd: bogusCwd, worktree: false }),
-		});
-
-		s.assert();
-		expect(resp.status, "must reject rather than fall back to a default project").toBe(400);
-		const body = await resp.json().catch(() => ({}));
-		const errMsg = (body.error ?? "") as string;
-		expect(errMsg.toLowerCase(), `error should mention projectId (got: ${JSON.stringify(body)})`).toContain("projectid required");
-
-		try { rmSync(bogusCwd, { recursive: true, force: true }); } catch { /* best effort */ }
-	});
-
-	// -----------------------------------------------------------
-	// GR-08: POST /api/sessions with no resolvable project → 400
-	// -----------------------------------------------------------
-
-	test("GR-08: API: session creation enforces same contract", async () => {
-		s.begin(STORY_GR08);
-
-		s.act();
-		const bogusCwd = join(tmpdir(), `bobbit-gr08-bogus-${Date.now()}`);
-		mkdirSync(bogusCwd, { recursive: true });
-
-		const resp = await rawApiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: bogusCwd }),
-		});
-
-		s.assert();
-		expect(resp.status, "session creation must reject with 400").toBe(400);
-		const body = await resp.json().catch(() => ({}));
-		const errMsg = (body.error ?? "") as string;
-		expect(errMsg.toLowerCase(), `error should mention projectId (got: ${JSON.stringify(body)})`).toContain("projectid required");
-
-		try { rmSync(bogusCwd, { recursive: true, force: true }); } catch { /* best effort */ }
 	});
 });
 

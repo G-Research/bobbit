@@ -14,7 +14,7 @@ Use the run scripts when you have a Bobbit checkout and want to use it as a tool
 
 ## Prerequisites
 
-- **Node.js** (v18 or later) and **npm** — must be on your PATH
+- **Node.js** (v22.19 or later) and **npm** — must be on your PATH (the bundled `@earendil-works/pi-*` runtime pins `engines.node >=22.19.0`)
 - **git** — for cloning the Bobbit repo
 
 ## Usage
@@ -140,7 +140,7 @@ doskey bobbit=C:\tools\bobbit\run.cmd $*
 
 ### "Node.js is required but not found on PATH"
 
-Install Node.js from [nodejs.org](https://nodejs.org/) (v18 or later) and ensure `node` is on your PATH. Verify with:
+Install Node.js from [nodejs.org](https://nodejs.org/) (v22.19 or later) and ensure `node` is on your PATH. Verify with:
 
 ```bash
 node --version
@@ -150,7 +150,7 @@ node --version
 
 If `npm install` or `npm run build` fails on first run:
 
-1. Check your Node.js version — v18+ is required
+1. Check your Node.js version — v22.19+ is required
 2. Try running manually from the Bobbit checkout:
    ```bash
    cd /path/to/bobbit

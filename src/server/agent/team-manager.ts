@@ -1627,16 +1627,20 @@ export class TeamManager {
 			}
 		}
 
-		// Create a worktree for this role agent (only when the goal is in a git repo)
-		const shortId = randomUUID().slice(0, 8);
+		// Create a worktree for this role agent (only when the goal is in a git repo).
+		// Branch shape pinned by tests/team-branch-shape.test.ts:
+		//   goal/<goalId8>/<role>-<short4>
+		// `createWorktree` flattens slashes to hyphens for the worktree dirname,
+		// so the on-disk directory is `goal-<goalId8>-<role>-<short4>`.
+		const shortId = randomUUID().slice(0, 4);
 		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
 		let branchName: string | undefined;
 		let agentCwd: string;
 		const memberSandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 
 		if (useWorktree) {
-			const goalSlug = (goal.branch || goalId.slice(0, 8)).replace(/\//g, '-');
-			branchName = `goal-${goalSlug}-${role}-${shortId}`;
+			const goalId8 = goalId.slice(0, 8);
+			branchName = `goal/${goalId8}/${role}-${shortId}`;
 
 			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point
 			try {

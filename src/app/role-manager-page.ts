@@ -490,7 +490,7 @@ export function renderRoleListRow(opts: RoleRowOptions): TemplateResult {
 			${idleBlob(role.accessory ?? "none", 42, index, index)}
 			<div class="role-row-info">
 				<span class="role-row-label">${role.label}${customized ? html` <span class="role-row-customized-marker" title="Customized for this goal">●</span>` : nothing}</span>
-				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides)}</span>
+				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides, (role as any).originPackName)}</span>
 			</div>
 			<div class="role-row-actions">
 				${onEdit ? html`<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); onEdit(role); }} title="Edit">
@@ -856,7 +856,7 @@ export function renderRoleEditor(opts: RoleEditorOptions): TemplateResult {
 					<div class="flex items-center justify-between">
 						<h2 class="roles-section-title">Identity</h2>
 						<span class="inline-flex items-center gap-2">
-							${renderOriginBadge(origin, overrides)}
+							${renderOriginBadge(origin, overrides, (role as any).originPackName)}
 							${headerExtras ?? nothing}
 						</span>
 					</div>
@@ -1062,6 +1062,17 @@ function renderCustomizeRevertButtons(): TemplateResult | string {
 	if (!selectedRole) return "";
 	const origin = (selectedRole as any).origin as ConfigOrigin | undefined;
 	if (!origin) return "";
+
+	// Market-pack entities are read-only — managed via the Marketplace (install/
+	// uninstall), NOT the legacy customize/override endpoints (which can't remove
+	// an installed pack). Gate the actions off when the entity carries a pack tag.
+	// See docs/design/pack-based-marketplace.md §3.2 / finding #2.
+	const originPackName = (selectedRole as any).originPackName as string | null | undefined;
+	const originPackId = (selectedRole as any).originPackId as string | null | undefined;
+	if (originPackName || originPackId) {
+		return html`<span class="config-readonly-note" data-testid="market-readonly-note"
+			title="Installed from pack '${originPackName ?? originPackId}'. Manage it in the Marketplace.">Manage in Marketplace</span>`;
+	}
 
 	const scope = getConfigScope();
 	const projectId = getConfigProjectId();

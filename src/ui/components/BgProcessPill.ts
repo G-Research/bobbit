@@ -1,6 +1,8 @@
 import { html, LitElement, nothing, render as litRender } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
+import { icon } from "@mariozechner/mini-lit";
+import { Skull } from "lucide";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 import "./LiveTimer.js";
 
@@ -13,6 +15,8 @@ export interface BgProcessInfo {
 	status: "running" | "exited";
 	exitCode: number | null;
 	startTime: number;
+	/** Null while running; optional for legacy hydrated processes. */
+	endTime?: number | null;
 }
 
 /**
@@ -60,7 +64,9 @@ export class BgProcessPill extends LitElement {
 		this.style.display = 'inline-flex';
 		this.style.alignItems = 'center';
 		this.style.position = 'relative';
-		this.style.top = '1px';
+		this.style.height = 'var(--pill-h, auto)';
+		this.style.lineHeight = '1';
+		this.style.verticalAlign = 'middle';
 		document.addEventListener("click", this._onDocumentClick, true);
 		document.addEventListener("keydown", this._onEscapeKey, true);
 	}
@@ -148,9 +154,20 @@ export class BgProcessPill extends LitElement {
 		}
 	}
 
-	private _kill = (e: MouseEvent) => {
+	private _kill = async (e: MouseEvent) => {
 		e.stopPropagation();
-		if (this.onKill) this.onKill(this.process.id);
+		if (!this.onKill) return;
+		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		const confirmed = await confirmAction(
+			"Kill process",
+			`Kill "${this._displayName()}" (pid ${this.process.pid})? This stops the running background process.`,
+			"Kill",
+			true,
+			// Lift above the expanded popover portal (z-50) so the modal is never hidden.
+			60,
+		);
+		if (!confirmed) return;
+		this.onKill(this.process.id);
 	};
 
 	private _dismiss = (e: MouseEvent) => {
@@ -180,8 +197,22 @@ export class BgProcessPill extends LitElement {
 			: p.exitCode === 0
 				? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 dark:bg-green-400 shrink-0"></span>`
 				: p.exitCode !== null
-					? html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:10px;line-height:1;font-weight:700">!</span>`
+					? html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:11px;line-height:1;font-weight:700">!</span>`
 					: html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0"></span>`;
+	}
+
+	private _hasValidEndTime(p: BgProcessInfo): p is BgProcessInfo & { endTime: number } {
+		return typeof p.endTime === "number" && Number.isFinite(p.endTime) && p.endTime >= p.startTime;
+	}
+
+	private _runtimeTemplate(p: BgProcessInfo, isRunning: boolean) {
+		if (isRunning) {
+			return html`<live-timer .startTime=${p.startTime} .running=${true}></live-timer>`;
+		}
+		if (this._hasValidEndTime(p)) {
+			return html`<live-timer .startTime=${p.startTime} .endTime=${p.endTime} .running=${false}></live-timer>`;
+		}
+		return html`<span title="Runtime unavailable for legacy process">—</span>`;
 	}
 
 	private _dropdownTemplate() {
@@ -207,7 +238,7 @@ export class BgProcessPill extends LitElement {
 				}
 			</style>
 			<div
-				class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-xs ${this._closing ? 'closing' : ''}"
+				class="fixed z-50 bg-card border border-border rounded-lg shadow-lg p-2 text-[13px] ${this._closing ? 'closing' : ''}"
 				style="max-width:calc(100vw - 1rem); width: min(900px, calc(100vw - 1rem));"
 				id="bg-process-dropdown"
 			>
@@ -215,32 +246,32 @@ export class BgProcessPill extends LitElement {
 					<div class="flex items-center gap-1.5 text-foreground font-medium text-sm min-w-0">
 						${statusIndicator}
 						<span class="truncate font-mono">${this._displayName()}</span>
-						<span class="text-[10px] text-muted-foreground font-normal">${p.id} · pid ${p.pid}</span>
+						<span class="text-[11px] text-muted-foreground font-normal">${p.id} · pid ${p.pid}</span>
 					</div>
 					<div class="flex items-center gap-2">
 						${!isRunning && p.exitCode !== null
 							? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
 							: nothing}
-						<span class="font-mono text-[11px] text-muted-foreground" title="Elapsed since process started">
-							<live-timer .startTime=${p.startTime} .running=${isRunning}></live-timer>
+						<span class="font-mono text-[12px] text-muted-foreground" title=${isRunning || this._hasValidEndTime(p) ? "Elapsed since process started" : "Runtime unavailable for legacy process"}>
+							${this._runtimeTemplate(p, isRunning)}
 						</span>
 						${isRunning
 							? html`<button
-								class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 dark:text-red-400 hover:bg-red-500/30 transition-colors"
+								class="px-2 py-0.5 rounded text-[12px] bg-red-500/20 text-red-700 dark:text-red-400 hover:bg-red-500/30 transition-colors"
 								@click=${this._kill}
 							>Kill</button>`
 							: html`<button
-								class="px-2 py-0.5 rounded text-[11px] bg-muted text-muted-foreground hover:text-foreground transition-colors"
+								class="px-2 py-0.5 rounded text-[12px] bg-muted text-muted-foreground hover:text-foreground transition-colors"
 								@click=${this._dismiss}
 							>Remove</button>`}
 					</div>
 				</div>
 
-				<div class="text-muted-foreground mb-1.5 font-mono text-[11px] break-all leading-tight">${p.command}</div>
+				<div class="text-muted-foreground mb-1.5 font-mono text-[12px] break-all leading-tight">${p.command}</div>
 
 				${this.loadingLogs
 					? html`<div class="text-muted-foreground animate-pulse">Loading...</div>`
-					: html`<div class="h-[180px] overflow-y-auto bg-background text-foreground rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
+					: html`<div class="h-[180px] overflow-y-auto bg-background text-foreground rounded px-2 py-1.5 font-mono text-[12px] leading-snug break-all" id="bg-log-output">${this.logs.length > 0
 								? this.logs.map((entry) => html`<div class="whitespace-pre-wrap">${entry.ts
 									? html`<span class="text-muted-foreground select-none">${this._fmtTime(entry.ts)} </span>`
 									: nothing}${hasAnsi(entry.text) ? unsafeHTML(ansiToHtml(entry.text)) : entry.text}</div>`)
@@ -265,7 +296,7 @@ export class BgProcessPill extends LitElement {
 		const statusIndicator = this._statusIndicator();
 
 		return html`
-			<span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" style="max-width:200px; height:var(--pill-h, auto)">
+			<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight" style="box-sizing:border-box; max-width:200px; height:var(--pill-h, auto)">
 				<button
 					class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer rounded-l-full"
 					@click=${this._toggle}
@@ -276,10 +307,10 @@ export class BgProcessPill extends LitElement {
 				</button>
 				<button
 					class="inline-flex items-center justify-center px-1 text-muted-foreground/50 hover:text-foreground transition-colors cursor-pointer rounded-r-full border-l border-border"
-					style="font-size:10px; line-height:1; min-width:16px; align-self:stretch"
+					style="font-size:11px; line-height:1; min-width:16px; align-self:stretch"
 					@click=${isRunning ? this._kill : this._dismiss}
 					title=${isRunning ? "Kill process" : "Remove"}
-				>✕</button>
+				>${isRunning ? icon(Skull, "xs") : "✕"}</button>
 			</span>
 		`;
 	}

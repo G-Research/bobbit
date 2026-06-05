@@ -44,14 +44,25 @@ export interface VerifyStepSubgoal {
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa" | "subgoal";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
 	phase?: number;
 	optional?: boolean;
+	/**
+	 * Sign-off card title shown to the human reviewer on `human-signoff`
+	 * steps. Distinct from `optionalLabel` — see the split documented in
+	 * `docs/design/human-signoff-gates.md`.
+	 */
 	label?: string;
+	/**
+	 * Toggle label shown at goal creation for any step with `optional: true`.
+	 * Was previously overloaded into `label` for non-human-signoff steps;
+	 * `normalizeStep` migrates old YAML forward on load.
+	 */
+	optionalLabel?: string;
 	role?: string;
 	description?: string;
 	/** Structural reference: which component to run from. */
@@ -89,11 +100,25 @@ export interface Workflow {
 
 function normalizeStep(raw: unknown): VerifyStep {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
-	const rawType = r.type;
-	const type: VerifyStep["type"] =
-		rawType === "llm-review" || rawType === "agent-qa" || rawType === "subgoal"
-			? rawType
-			: "command";
+	// Loud failure on unknown step type. An absent `type:` continues to default
+	// to `"command"` (documented behaviour) — but a present-but-unknown value
+	// used to be silently downgraded to `"command"`, which is exactly how Bug 1
+	// of the re-attempt goal manifested (a `human-signoff` step authored as an
+	// unknown type would silently degrade to a `command` step with no `run`,
+	// then auto-pass via `isCommandStepSkippable`). Surface the malformed type
+	// at workflow-load time, not at gate-signal time.
+	let type: VerifyStep["type"] = "command";
+	if ("type" in r && r.type !== undefined) {
+		if (r.type === "command" || r.type === "llm-review" || r.type === "agent-qa" || r.type === "subgoal" || r.type === "human-signoff") {
+			type = r.type;
+		} else {
+			const stepName = typeof r.name === "string" ? r.name : "<unnamed>";
+			throw new Error(
+				`Workflow step "${stepName}" has unknown type: ${JSON.stringify(r.type)}. `
+				+ `Expected one of: command, llm-review, agent-qa, subgoal, human-signoff.`
+			);
+		}
+	}
 	const step: VerifyStep = {
 		name: typeof r.name === "string" ? r.name : "",
 		type,
@@ -104,7 +129,29 @@ function normalizeStep(raw: unknown): VerifyStep {
 	if (typeof r.timeout === "number") step.timeout = r.timeout;
 	if (typeof r.phase === "number") step.phase = r.phase;
 	if (r.optional === true) step.optional = true;
-	if (typeof r.label === "string") step.label = r.label;
+
+	// `label` / `optionalLabel` split. `label` is exclusively the sign-off card
+	// title on `human-signoff` steps; `optionalLabel` is the goal-creation
+	// opt-in toggle label for any `optional: true` step (regardless of type).
+	// Old YAML overloaded `label` for both — migrate forward on read so seed
+	// files in the wild keep working without manual edits. Written back in
+	// canonical shape on the next save (see `serializeStep`).
+	const rawOptionalLabel = typeof r.optionalLabel === "string" ? r.optionalLabel : "";
+	const rawLabel = typeof r.label === "string" ? r.label : undefined;
+	if (type !== "human-signoff") {
+		if (rawOptionalLabel) step.optionalLabel = rawOptionalLabel;
+		else if (step.optional === true && typeof rawLabel === "string") {
+			// Forward migration: overloaded `label` on a non-human-signoff optional
+			// step is the opt-in toggle label. Move it; drop the original `label`.
+			step.optionalLabel = rawLabel;
+		}
+		// Drop any non-human-signoff `label` on read. Saved workflows should always
+		// emit the canonical split: `label` is only the human-signoff card title.
+	} else {
+		if (rawOptionalLabel) step.optionalLabel = rawOptionalLabel;
+		if (typeof rawLabel === "string") step.label = rawLabel;
+	}
+
 	if (typeof r.role === "string") step.role = r.role;
 	if (typeof r.description === "string") step.description = r.description;
 	if (typeof r.component === "string") step.component = r.component;
@@ -320,7 +367,8 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.timeout !== undefined) out.timeout = s.timeout;
 	if (s.phase !== undefined) out.phase = s.phase;
 	if (s.optional) out.optional = true;
-	if (s.label !== undefined) out.label = s.label;
+	if (s.type === "human-signoff" && s.label !== undefined) out.label = s.label;
+	if (s.optionalLabel !== undefined) out.optionalLabel = s.optionalLabel;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
 	if (s.subgoal) {
@@ -419,7 +467,12 @@ export class InlineWorkflowStore {
 
 	put(workflow: Workflow): void {
 		const block = this.cfg.getWorkflows() ?? {};
-		block[workflow.id] = serializeWorkflow(workflow) as unknown as InlineWorkflowDef;
+		// API/proposal callers can still hand us legacy or YAML-shaped objects
+		// (`depends_on`, non-human `label`, etc.). Normalize before serializing so
+		// every write emits the canonical shape and legacy labels migrate instead of
+		// being dropped by `serializeStep`.
+		const canonical = normalizeWorkflow(workflow, workflow.id) ?? workflow;
+		block[canonical.id] = serializeWorkflow(canonical) as unknown as InlineWorkflowDef;
 		this.cfg.setWorkflows(block);
 	}
 

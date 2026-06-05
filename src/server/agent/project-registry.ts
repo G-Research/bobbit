@@ -18,6 +18,7 @@ export interface RegisteredProject {
   palette?: string;     // One of 10 palette IDs or undefined
   colorLight: string;   // Accent color for light mode (always present)
   colorDark: string;    // Accent color for dark mode (always present)
+  position?: number;    // Visible project ordering; hidden/system projects do not participate
   provisional?: boolean; // True while a project assistant is setting up this project
   /**
    * True for synthetic projects that should be filtered out of UI listings
@@ -38,6 +39,19 @@ export interface RegisteredProject {
 
 /** Stable id for the synthetic system project. */
 export const SYSTEM_PROJECT_ID = "system";
+
+export type ProjectOrderErrorCode = "invalid_project_order" | "stale_project_order";
+
+export class ProjectOrderError extends Error {
+  constructor(
+    public readonly code: ProjectOrderErrorCode,
+    message: string,
+    public readonly details: { expectedProjectIds?: string[]; receivedProjectIds?: string[] } = {},
+  ) {
+    super(message);
+    this.name = "ProjectOrderError";
+  }
+}
 
 /**
  * Detect whether `rootPath` resolves through a symlink to a different
@@ -99,8 +113,63 @@ export class ProjectRegistry {
     this.load();
   }
 
+  private participatesInVisibleOrder(project: RegisteredProject): boolean {
+    return !project.hidden && project.id !== SYSTEM_PROJECT_ID;
+  }
+
+  private positionSortValue(project: RegisteredProject): number {
+    return Number.isFinite(project.position) ? project.position! : Number.POSITIVE_INFINITY;
+  }
+
+  private compareVisibleOrderEntries(
+    a: { project: RegisteredProject; index: number },
+    b: { project: RegisteredProject; index: number },
+  ): number {
+    const posA = this.positionSortValue(a.project);
+    const posB = this.positionSortValue(b.project);
+    if (posA !== posB) return posA - posB;
+    if (a.project.createdAt !== b.project.createdAt) return a.project.createdAt - b.project.createdAt;
+    return a.index - b.index;
+  }
+
+  private normalizeVisiblePositions(): boolean {
+    const entries = [...this.projects.values()].map((project, index) => ({ project, index }));
+    let changed = false;
+
+    for (const { project } of entries) {
+      if (!this.participatesInVisibleOrder(project) && project.position !== undefined) {
+        delete project.position;
+        changed = true;
+      }
+    }
+
+    const visible = entries
+      .filter(entry => this.participatesInVisibleOrder(entry.project))
+      .sort((a, b) => this.compareVisibleOrderEntries(a, b));
+
+    for (let i = 0; i < visible.length; i++) {
+      const project = visible[i].project;
+      if (project.position !== i) {
+        project.position = i;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  private nextVisiblePosition(): number {
+    this.normalizeVisiblePositions();
+    const positions = [...this.projects.values()]
+      .filter(project => this.participatesInVisibleOrder(project))
+      .map(project => project.position)
+      .filter((position): position is number => Number.isFinite(position));
+    return positions.length > 0 ? Math.max(...positions) + 1 : 0;
+  }
+
   /** Read projects from disk. Missing file is treated as empty registry. */
   load(): void {
+    let changed = false;
     try {
       const raw = fs.readFileSync(this.storePath, "utf-8");
       const arr: any[] = JSON.parse(raw);
@@ -115,12 +184,19 @@ export class ProjectRegistry {
             p.colorLight = p.colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
             p.colorDark = p.colorDark || DEFAULT_PROJECT_COLOR_DARK;
           }
+          changed = true;
         }
         this.projects.set(p.id, p as RegisteredProject);
       }
     } catch {
       // File missing or corrupt — start empty
       this.projects.clear();
+      return;
+    }
+
+    if (this.normalizeVisiblePositions()) changed = true;
+    if (changed) {
+      try { this.save(); } catch (err) { console.warn(`[project-registry] failed to persist migrations: ${err}`); }
     }
   }
 
@@ -133,9 +209,60 @@ export class ProjectRegistry {
     fs.renameSync(tmp, this.storePath);
   }
 
-  /** Return all registered projects, ordered by createdAt ascending. */
+  /** Return all registered projects. Visible projects are ordered by position; hidden projects are appended by createdAt. */
   list(): RegisteredProject[] {
-    return [...this.projects.values()].sort((a, b) => a.createdAt - b.createdAt);
+    return [...this.projects.values()]
+      .map((project, index) => ({ project, index }))
+      .sort((a, b) => {
+        const visibleA = this.participatesInVisibleOrder(a.project);
+        const visibleB = this.participatesInVisibleOrder(b.project);
+        if (visibleA && visibleB) return this.compareVisibleOrderEntries(a, b);
+        if (visibleA !== visibleB) return visibleA ? -1 : 1;
+        if (a.project.createdAt !== b.project.createdAt) return a.project.createdAt - b.project.createdAt;
+        return a.index - b.index;
+      })
+      .map(entry => entry.project);
+  }
+
+  setVisibleOrder(projectIds: string[]): RegisteredProject[] {
+    if (!Array.isArray(projectIds) || projectIds.some(id => typeof id !== "string")) {
+      throw new ProjectOrderError("invalid_project_order", "projectIds must be an array of strings");
+    }
+
+    const seen = new Set<string>();
+    for (const id of projectIds) {
+      if (seen.has(id)) {
+        throw new ProjectOrderError("invalid_project_order", `Duplicate project id in order: ${id}`);
+      }
+      seen.add(id);
+    }
+
+    const expectedProjectIds = this.list()
+      .filter(project => this.participatesInVisibleOrder(project))
+      .map(project => project.id);
+    const receivedProjectIds = [...projectIds];
+
+    for (const id of receivedProjectIds) {
+      const project = this.projects.get(id);
+      if (!project || !this.participatesInVisibleOrder(project)) {
+        throw new ProjectOrderError("invalid_project_order", `Invalid project id in order: ${id}`);
+      }
+    }
+
+    const expectedSet = new Set(expectedProjectIds);
+    if (receivedProjectIds.length !== expectedProjectIds.length || receivedProjectIds.some(id => !expectedSet.has(id))) {
+      throw new ProjectOrderError("stale_project_order", "Project order is stale", {
+        expectedProjectIds,
+        receivedProjectIds,
+      });
+    }
+
+    receivedProjectIds.forEach((id, position) => {
+      const project = this.projects.get(id)!;
+      project.position = position;
+    });
+    this.save();
+    return this.list().filter(project => this.participatesInVisibleOrder(project));
   }
 
   /** Lookup by project ID. */
@@ -272,6 +399,7 @@ export class ProjectRegistry {
       name,
       rootPath,
       createdAt: Date.now(),
+      position: this.nextVisiblePosition(),
       color: colorLight, // backward compat
       colorLight,
       colorDark,
@@ -395,6 +523,7 @@ export class ProjectRegistry {
       throw new Error(`Project not found: ${id}`);
     }
     this.projects.delete(id);
+    this.normalizeVisiblePositions();
     this.save();
   }
 
@@ -408,7 +537,22 @@ export class ProjectRegistry {
    */
   registerSystemProject(rootPath: string): RegisteredProject {
     const existing = this.projects.get(SYSTEM_PROJECT_ID);
-    if (existing) return existing;
+    if (existing) {
+      let changed = false;
+      if (!existing.hidden) {
+        existing.hidden = true;
+        changed = true;
+      }
+      if (existing.position !== undefined) {
+        delete existing.position;
+        changed = true;
+      }
+      if (changed) {
+        this.normalizeVisiblePositions();
+        this.save();
+      }
+      return existing;
+    }
     if (!path.isAbsolute(rootPath)) {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
     }
@@ -481,6 +625,7 @@ export class ProjectRegistry {
       name,
       rootPath,
       createdAt: Date.now(),
+      position: this.nextVisiblePosition(),
       colorLight: DEFAULT_PROJECT_COLOR_LIGHT,
       colorDark: DEFAULT_PROJECT_COLOR_DARK,
       provisional: true,
@@ -524,6 +669,7 @@ export class ProjectRegistry {
     if (!project) throw new Error(`Project not found: ${id}`);
     if (!project.provisional) throw new Error(`Cannot remove non-provisional project ${id} via removeProvisional()`);
     this.projects.delete(id);
+    this.normalizeVisiblePositions();
     this.save();
   }
 

@@ -20,7 +20,7 @@
  *     n outside [1,4] → 400.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, apiFetch, connectWs, createSession } from "./e2e-setup.js";
 
 const headers = () => ({
 	Authorization: `Bearer ${readE2EToken()}`,
@@ -80,6 +80,28 @@ async function clearPref(key: string): Promise<void> {
 	}).catch(() => {});
 }
 
+/**
+ * Create a session and pin its image model via the WS `set_image_model` path.
+ * The model is now resolved exclusively from the session selector (the tool no
+ * longer sends `model`), so provider-branch coverage drives it through a
+ * per-session override. Per-session state keeps these tests isolated from the
+ * global `default.imageModel` pref (no cross-test contention).
+ */
+async function sessionWithImageModel(provider: string, modelId: string): Promise<string> {
+	const sessionId = await createSession();
+	const ws = await connectWs(sessionId);
+	try {
+		ws.send({ type: "set_image_model", provider, modelId });
+		await ws.waitFor(
+			(m: any) => m.type === "state" && m.data?.imageGenerationModel?.id === modelId,
+			5_000,
+		);
+	} finally {
+		ws.close();
+	}
+	return sessionId;
+}
+
 test.describe("image-generation provider branches", () => {
 	test.afterEach(async () => {
 		// Restore prefs that tests poked at.
@@ -97,10 +119,11 @@ test.describe("image-generation provider branches", () => {
 				}), { status: 200, headers: { "content-type": "application/json" } }),
 			},
 		]);
+		const sessionId = await sessionWithImageModel("openai", "dall-e-3");
 		try {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "a cat", model: "openai/dall-e-3" }),
+				body: JSON.stringify({ sessionId, prompt: "a cat" }),
 			});
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
@@ -110,6 +133,7 @@ test.describe("image-generation provider branches", () => {
 			expect(body.images[0].revisedPrompt).toBe("a cat");
 		} finally {
 			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
@@ -123,10 +147,11 @@ test.describe("image-generation provider branches", () => {
 				}), { status: 200, headers: { "content-type": "application/json" } }),
 			},
 		]);
+		const sessionId = await sessionWithImageModel("openai", "gpt-image-2");
 		try {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "a sunset", model: "openai/gpt-image-2", format: "png" }),
+				body: JSON.stringify({ sessionId, prompt: "a sunset", format: "png" }),
 			});
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
@@ -135,6 +160,7 @@ test.describe("image-generation provider branches", () => {
 			expect(body.images[0].mimeType).toBe("image/png");
 		} finally {
 			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
@@ -152,10 +178,11 @@ test.describe("image-generation provider branches", () => {
 				}), { status: 200, headers: { "content-type": "application/json" } }),
 			},
 		]);
+		const sessionId = await sessionWithImageModel("google", "gemini-2.5-flash-image");
 		try {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "a panda", model: "google/gemini-2.5-flash-image" }),
+				body: JSON.stringify({ sessionId, prompt: "a panda" }),
 			});
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
@@ -163,6 +190,7 @@ test.describe("image-generation provider branches", () => {
 			expect(body.images[0].data).toBe(FAKE_PNG_B64);
 		} finally {
 			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
@@ -176,10 +204,11 @@ test.describe("image-generation provider branches", () => {
 				}), { status: 200, headers: { "content-type": "application/json" } }),
 			},
 		]);
+		const sessionId = await sessionWithImageModel("google", "imagen-4.0-fast-generate-001");
 		try {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "a city", model: "google/imagen-4.0-fast-generate-001" }),
+				body: JSON.stringify({ sessionId, prompt: "a city" }),
 			});
 			expect(resp.status).toBe(200);
 			const body = await resp.json();
@@ -187,6 +216,7 @@ test.describe("image-generation provider branches", () => {
 			expect(body.images[0].data).toBe(FAKE_PNG_B64);
 		} finally {
 			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
@@ -203,10 +233,11 @@ test.describe("image-generation provider branches", () => {
 				),
 			},
 		]);
+		const sessionId = await sessionWithImageModel("openai", "dall-e-3");
 		try {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "x", model: "openai/dall-e-3" }),
+				body: JSON.stringify({ sessionId, prompt: "x" }),
 			});
 			expect(resp.status).toBe(500);
 			const body = await resp.json();
@@ -218,6 +249,7 @@ test.describe("image-generation provider branches", () => {
 			expect(body.error).toContain("policy_violation");
 		} finally {
 			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
@@ -232,10 +264,11 @@ test.describe("image-generation provider branches", () => {
 				),
 			},
 		]);
+		const sessionId = await sessionWithImageModel("openai", "dall-e-3");
 		try {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "x", model: "openai/dall-e-3" }),
+				body: JSON.stringify({ sessionId, prompt: "x" }),
 			});
 			expect(resp.status).toBe(500);
 			const body = await resp.json();
@@ -243,13 +276,14 @@ test.describe("image-generation provider branches", () => {
 			expect(body.error).toContain("rate limited");
 		} finally {
 			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
 	test("server validation: prompt > 8192 chars → 400 'prompt exceeds 8192 chars'", async () => {
 		const resp = await api("/api/image-generation/generate", {
 			method: "POST",
-			body: JSON.stringify({ prompt: "x".repeat(8193), model: "openai/gpt-image-2" }),
+			body: JSON.stringify({ prompt: "x".repeat(8193) }),
 		});
 		expect(resp.status).toBe(400);
 		const body = await resp.json();
@@ -260,7 +294,7 @@ test.describe("image-generation provider branches", () => {
 		for (const bad of [0, 5, -1, 1.5]) {
 			const resp = await api("/api/image-generation/generate", {
 				method: "POST",
-				body: JSON.stringify({ prompt: "x", n: bad, model: "openai/gpt-image-2" }),
+				body: JSON.stringify({ prompt: "x", n: bad }),
 			});
 			expect(resp.status, `n=${bad} should fail validation`).toBe(400);
 			const body = await resp.json();
@@ -271,8 +305,55 @@ test.describe("image-generation provider branches", () => {
 	test("server validation: missing prompt → 400", async () => {
 		const resp = await api("/api/image-generation/generate", {
 			method: "POST",
-			body: JSON.stringify({ model: "openai/gpt-image-2" }),
+			body: JSON.stringify({}),
 		});
 		expect(resp.status).toBe(400);
+	});
+
+	test("body.model is ignored — session image-model selector wins (regression guard)", async () => {
+		// Core regression guard for the "lock image model to selector" goal:
+		// the session's image-model selector is the single source of truth and a
+		// tool/body-supplied `model` must NOT override it.
+		await setPref("providerKey.openai", "test-openai-key");
+		await setPref("providerKey.google", "test-google-key");
+		const sessionId = await createSession();
+		const shim = shimFetch([
+			{
+				match: (u) => u.includes("api.openai.com") && u.includes("/images/generations"),
+				respond: () => new Response(JSON.stringify({
+					data: [{ b64_json: FAKE_PNG_B64 }],
+				}), { status: 200, headers: { "content-type": "application/json" } }),
+			},
+			{
+				match: (u) => u.includes("generativelanguage.googleapis.com"),
+				respond: () => new Response(JSON.stringify({
+					candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: FAKE_PNG_B64 } }] } }],
+				}), { status: 200, headers: { "content-type": "application/json" } }),
+			},
+		]);
+		try {
+			// Set the session image model to gpt-image-2 via WS.
+			const ws = await connectWs(sessionId);
+			try {
+				ws.send({ type: "set_image_model", provider: "openai", modelId: "gpt-image-2" });
+				await ws.waitFor(
+					(m: any) => m.type === "state" && m.data?.imageGenerationModel?.id === "gpt-image-2",
+					5_000,
+				);
+			} finally {
+				ws.close();
+			}
+			// POST with a DIFFERENT model in the body — it must be ignored.
+			const resp = await api("/api/image-generation/generate", {
+				method: "POST",
+				body: JSON.stringify({ sessionId, prompt: "a robot", model: "google/gemini-2.5-flash-image" }),
+			});
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.model.id).toBe("gpt-image-2");
+		} finally {
+			shim.restore();
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 });
