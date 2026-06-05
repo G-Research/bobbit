@@ -50,8 +50,13 @@ Both staff and regular-session paths funnel through these helpers, so prompt ord
 ### Setting a role
 
 - **Edit page** (`#/staff/<id>`): a role `<select>` with an explicit **"No role"** option, initialised from the staff's current `roleId`. Picking a role pre-fills the accessory picker as a default; clearing it sends `roleId: null`.
+- **Proposal panel** (the staff-creation assistant's preview): a role `<select>` mirroring the edit-page picker — an explicit **"No role"** option plus one option per role, populated lazily from the roles API. It is **seeded once** from the proposal's own `role` field so the user can see which role the assistant chose, override it, or add a role when none was proposed; the selected value is what gets persisted as `roleId` on create. Before this feature the panel silently forwarded the proposed `role` with no visible control, so a proposed role could be neither seen nor changed. The panel has no accessory picker, so the role→accessory default is applied server-side on create (see item 2 above), not in the panel.
 - **REST**: `POST /api/staff` and `PUT /api/staff/:id` accept `roleId` (a string to set, `null` to clear). Unknown role → `404`; a non-string, non-null value → `400`. See [rest-api.md — Staff Agents](rest-api.md#staff-agents).
 - **`propose_staff` tool**: accepts an optional `role` parameter. The staff-creation assistant can suggest a role; the accepted proposal maps `role` → `roleId` when the staff is created. The assistant should only propose roles that exist.
+
+### Create-in-flight guard
+
+"Create Staff" in the proposal panel guards against double-submission: the create round trip is slow, so the button is disabled and shows **"Creating…"** (and the Dismiss button is disabled too) while the request is in flight, and a re-entrancy check drops repeated clicks so at most one create request is issued. The in-flight flag is cleared in a `finally`, so on failure the button re-enables for a retry. Failure handling is otherwise unchanged: when `createStaffAgent` returns `null` the handler returns early **before** any teardown, so the proposal panel and the staff-assistant session stay open and editable. On success the behaviour is unchanged — proposal state clears, the assistant redirects, and the client connects to the new staff session.
 
 ## Project and cwd anchoring
 
