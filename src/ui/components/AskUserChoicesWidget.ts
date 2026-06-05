@@ -225,6 +225,32 @@ export class AskUserChoicesWidget extends LitElement {
 		this._draft = this._draft.map((d, i) => i === qIdx ? { ...d, other_text: text } : d);
 	}
 
+	/**
+	 * Handler for typing in the "Other" free-text input. Updates the draft text
+	 * and auto-selects "Other" if it isn't already selected — so the typed
+	 * answer counts without a separate click on the option.
+	 *
+	 * - Single-select: selecting Other replaces the previous selection.
+	 * - Multi-select: Other is ADDED (only call `_selectOption` when not already
+	 *   selected, since it toggles for multi — re-calling would deselect it).
+	 * - Never auto-deselects when text is cleared (deselection stays manual).
+	 * - No-op on selection changes when read-only (mirrors `_setOtherText`).
+	 */
+	private _onOtherInput(qIdx: number, text: string): void {
+		this._setOtherText(qIdx, text);
+		if (this._isReadOnly()) return;
+		const d = this._draft[qIdx];
+		if (!d) return;
+		const alreadySelected = Array.isArray(d.selected)
+			? d.selected.includes(OTHER_SENTINEL)
+			: d.selected === OTHER_SENTINEL;
+		if (!alreadySelected) {
+			// Reuse `_selectOption`, which handles single-vs-multi and never
+			// auto-advances/auto-submits for OTHER_SENTINEL.
+			this._selectOption(qIdx, OTHER_SENTINEL);
+		}
+	}
+
 	private _canSubmit(): boolean {
 		if (this._draft.length !== this.questions.length) return false;
 		return this._draft.every((_d, i) => this._isQuestionValid(i));
@@ -716,7 +742,7 @@ export class AskUserChoicesWidget extends LitElement {
 					placeholder="Type your answer…"
 					.value=${otherText}
 					?disabled=${readOnly}
-					@input=${(e: Event) => this._setOtherText(qIdx, (e.target as HTMLInputElement).value)}>
+					@input=${(e: Event) => this._onOtherInput(qIdx, (e.target as HTMLInputElement).value)}>
 			</div>`;
 	}
 }
