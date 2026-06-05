@@ -138,6 +138,14 @@ Keep the self-healing targeted. Do not add broad sleeps or weaken server validat
 - `SpecContext.event.disconnect()` — force-closes the WebSocket so RE-07 can observe reconnect behavior without killing the server.
 - `SpecContext.event.server_crash()` / `server_restart()` — bounce the in-process gateway via the worker-scoped `gateway` fixture. Pass `gateway` to the `SpecContext` constructor (`new SpecContext(page, gateway)`) to enable; calls without a fixture throw a clear error. See [Writing crash/restart E2E tests](#writing-crashrestart-e2e-tests).
 
+#### Flake-stabilization patterns
+
+Specs that pass in isolation but fail their retries only under full-suite load are almost always one of these. Each was a real root cause behind the suite's historical flake cluster (`goal-accept-failure-keeps-assistant`, `marketplace`, etc.) — root-cause fixes, not retry bumps. Prefer them in this order when triaging a new flake:
+
+- **Clean up any project a spec creates directly.** The gateway is worker-scoped, so a project a spec POSTs to `/api/projects` outlives the test and leaks into every later spec sharing that worker. A later single-project spec then sees 2+ projects and pops an unexpected "Select a project" dialog mid-flow — the root cause of the goal-accept flake. Specs that register their own projects (e.g. `at-mention.spec.ts`) must delete them in `afterEach` **and** `afterAll` (belt-and-braces: `afterEach` between tests, `afterAll` to guarantee the worker is back to exactly one project). This is separate from the helper self-healing above, which only restores the worker *default* — it does not remove extra projects a spec created.
+- **Re-render after reactive UI state changes.** Bobbit's app shell renders from module-closure state, not a reactive framework. A `@input` handler that mutates closure state (e.g. `newSourceUrl`) **must call `renderApp()`**, or bindings that depend on it (`?disabled=${!newSourceUrl.trim()}`) lag the keystroke. The marketplace add-source button looked disabled to the test even after `fill()` because the handler updated state without re-rendering — a real product bug surfaced by the flake, not a test-only artifact.
+- **Synchronize on real preconditions, never optimistic clicks or immediate count asserts.** Wait for the button to be *enabled* before clicking (`toBeEnabled()`), wait for the full expected step/element set to render before asserting on it, and poll exact counts with `expect.poll(...)` rather than reading a count once right after an async mutation. A single visibility check or an immediate `count()` races the async render/browse under load; the assertion isn't weakened, just synchronized on the condition the UI actually guarantees. See `registerSource()` in `tests/e2e/ui/marketplace.spec.ts` for the canonical pattern.
+
 ## Root Causes of Escaped Bugs
 
 ### 1. UI Code Is Largely Untested in Isolation
