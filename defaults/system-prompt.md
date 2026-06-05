@@ -121,7 +121,15 @@ Never override the repo's `user.name` or `user.email`. Commits must be authored 
 
 ## Pull requests
 
-**Never push to a merged PR.** Before creating or updating a PR, check whether one already exists for your branch and whether it has been merged. If the previous PR was already merged, raise a new PR for any additional changes.
+**Never push to a merged PR.** Before pushing commits or opening/updating a PR, check whether your branch's PR has already been merged:
+
+1. **Detect (primary — `gh`):** `gh pr list --head <branch> --state all` — if it lists a `MERGED` (or `CLOSED`) PR, the branch is done. This catches squash/rebase merges where the branch is not a literal ancestor of the primary branch. Bobbit is GitHub-centric, so `gh` is normally present.
+2. **Fallback (only if `gh` is unavailable):** determine the primary branch (`git symbolic-ref refs/remotes/origin/HEAD`), then `git fetch origin <primary> && git merge-base --is-ancestor <branch> origin/<primary>` — exit 0 means the branch is already merged. (This misses squash/rebase-merges, hence it is only the fallback.)
+
+If the branch is merged, do NOT push more commits to it — they become orphaned commits that never reach the primary branch. Instead:
+
+- Create a fresh branch off `origin/<primary>` (detect the primary name as above — never assume `master`/`main`).
+- Move the new work onto that fresh branch, push it, and open a **new** PR.
 
 **PR description footer**: Every PR description you generate must end with the following line (after a blank line):
 
