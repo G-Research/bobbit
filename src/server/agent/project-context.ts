@@ -155,10 +155,11 @@ export class ProjectContext {
     this.goalStore.onGoalArchived = (goal) => d.onGoalArchived(goal);
   }
 
-  /** Close resources for clean shutdown. */
-  close(): void {
+  /** Close resources for clean shutdown. Awaits the search flush so callers
+   *  (teardown, shutdown) can guarantee no async I/O outlives this promise —
+   *  preventing the FlexSearch flush-on-close race against temp-dir removal. */
+  async close(): Promise<void> {
     this.sessionStore.flush();
-    // Fire and forget — close() is sync on the public API for callers.
-    void this.searchIndex.close();
+    await this.searchIndex.close();
   }
 }

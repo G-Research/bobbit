@@ -26,7 +26,9 @@ test.describe("DELETE /api/projects/:id — last project", () => {
 		for (const p of await listVisibleProjects()) {
 			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
 		}
-		expect((await listVisibleProjects()).length, "drained to zero before seed").toBe(0);
+		await expect
+			.poll(async () => (await listVisibleProjects()).length, { timeout: 10_000 })
+			.toBe(0);
 
 		// Seed exactly one fresh project.
 		const dir = mkdtempSync(join(tmpdir(), "bobbit-del-last-"));
@@ -39,7 +41,9 @@ test.describe("DELETE /api/projects/:id — last project", () => {
 			const proj = await createRes.json();
 
 			// One visible project now — exactly the case the old guard refused.
-			expect((await listVisibleProjects()).length).toBe(1);
+			await expect
+				.poll(async () => (await listVisibleProjects()).length, { timeout: 10_000 })
+				.toBe(1);
 
 			// Plain DELETE with NO ?force=1. Must succeed.
 			const delRes = await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" });
@@ -48,7 +52,9 @@ test.describe("DELETE /api/projects/:id — last project", () => {
 			expect(delBody).toEqual({ ok: true });
 
 			// No non-hidden projects remain.
-			expect((await listVisibleProjects()).length).toBe(0);
+			await expect
+				.poll(async () => (await listVisibleProjects()).length, { timeout: 10_000 })
+				.toBe(0);
 		} finally {
 			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		}

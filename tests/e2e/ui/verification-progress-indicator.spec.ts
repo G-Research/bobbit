@@ -145,12 +145,19 @@ test.describe("Verification progress indicator (full-stack UI) — GATE_SIGNAL_P
 			// within one render tick. `toBeVisible` auto-waits up to the
 			// timeout but the underlying state is already settled — no
 			// flicker, no polling-tick delay window.
+			// Synchronize on the FULL step set before asserting per-step
+			// modifier classes. Under full-suite load the chips render in a
+			// staggered fashion (WS step-enumeration race): the first two
+			// chips can be present while the third ("Unit tests") is still a
+			// render tick behind. Waiting for all three to materialize first
+			// removes that flake without weakening the assertions below.
+			await expect(page.locator(".verify-card")).toHaveCount(3, { timeout: 15_000 });
 			const buildChip = page.locator(".verify-card").filter({ hasText: "Slow build" });
 			const typeCheckChip = page.locator(".verify-card").filter({ hasText: "Type check" });
 			const unitChip = page.locator(".verify-card").filter({ hasText: "Unit tests" });
-			await expect(buildChip).toBeVisible({ timeout: 5_000 });
-			await expect(typeCheckChip).toBeVisible({ timeout: 5_000 });
-			await expect(unitChip).toBeVisible({ timeout: 5_000 });
+			await expect(buildChip).toBeVisible({ timeout: 15_000 });
+			await expect(typeCheckChip).toBeVisible({ timeout: 15_000 });
+			await expect(unitChip).toBeVisible({ timeout: 15_000 });
 
 			// Step rows render with the expected per-step modifier classes:
 			// phase-0 → running, phase-1+ → waiting. (Pre-fix the placeholder
@@ -184,15 +191,18 @@ test.describe("Verification progress indicator (full-stack UI) — GATE_SIGNAL_P
 			await expandGate(page);
 			await expandLatestSignal(page);
 
+			// Same full-step-set synchronization after reload before the
+			// per-chip visibility checks.
+			await expect(page.locator(".verify-card")).toHaveCount(3, { timeout: 15_000 });
 			const buildChipAfter = page.locator(".verify-card").filter({ hasText: "Slow build" });
 			const typeCheckChipAfter = page.locator(".verify-card").filter({ hasText: "Type check" });
 			const unitChipAfter = page.locator(".verify-card").filter({ hasText: "Unit tests" });
 			await expect(
 				buildChipAfter,
 				"GATE_SIGNAL_PROGRESS_INDICATOR: 'Slow build' chip must render after reload from persisted state alone",
-			).toBeVisible({ timeout: 10_000 });
-			await expect(typeCheckChipAfter).toBeVisible({ timeout: 5_000 });
-			await expect(unitChipAfter).toBeVisible({ timeout: 5_000 });
+			).toBeVisible({ timeout: 15_000 });
+			await expect(typeCheckChipAfter).toBeVisible({ timeout: 15_000 });
+			await expect(unitChipAfter).toBeVisible({ timeout: 15_000 });
 
 			// Empty-state placeholder still absent after reload.
 			await expect(

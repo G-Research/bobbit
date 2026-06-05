@@ -1628,6 +1628,28 @@ The current engine is **[FlexSearch](https://github.com/nextapps-de/flexsearch)*
 - Persistence is export/import via FlexSearch's built-in serializer, written per-key with an atomic `.tmp` → rename and a trailing-edge debounce. Crash-mid-write leaves `.tmp` files that the loader skips on next open.
 - Meta mismatch on startup triggers a full rebuild from the source-of-truth stores. Fields checked: `engine`, `engineVersion`, `schemaVersion`, `contentPolicyVersion`.
 
+### Close & teardown ordering
+
+The search flush-on-close path is **fully awaitable** end to end. This matters because the flush is async disk I/O (`mkdir` → `writeFile(<tmp>)` → `rename`), and the E2E harness deletes each worker's temp `.bobbit` state dir immediately after shutdown. If the close were fire-and-forget, the directory removal would race a flush still in flight, surfacing as a `[search] flex flush error: ENOENT … __docs__.json.tmp` spew (POSIX) or `EPERM`/`EBUSY` (Windows). Beyond the log noise, the dangling I/O competed with the next worker for Windows filesystem/Defender handles and destabilized parallel runs. The fix threads the promise all the way up so teardown's `rm` cannot start until the final flush has settled:
+
+- **`ProjectContext.close()`** (`src/server/agent/project-context.ts`) is `async`: flushes the session store, then `await this.searchIndex.close()` (no longer `void`-fire-and-forget).
+- **`ProjectContextManager.closeAll()`** (`project-context-manager.ts`) is `async` and `await`s `Promise.allSettled(...)` over every context's `close()` before clearing the map. `remove(projectId)` stays fire-and-forget (`void ctx.close().catch(...)`) on purpose — it runs during normal operation, not teardown, so it must not block but must not throw.
+- **`server.ts` shutdown** `await`s `projectContextManager.closeAll()`.
+
+`SearchService.close()` (`search-service.ts`) coordinates with a possibly in-flight `open()`. Without this, `_doOpen()` could resume *after* `close()` returned and re-establish the store, indexer, and rebuild timer — leaking live search resources past shutdown. The two guards together close the race:
+
+1. `close()` first `await`s any in-flight `_openPromise`, then sets `_state = "closed"`, clears the startup `_rebuildTimer`, re-reads `_store` (in case `_doOpen` just assigned it), closes it, and nulls `_indexer`.
+2. `_doOpen()` re-checks `_state` after the `FlexSearchStore.open()` await *and* after the meta-read awaits. If state went `"closed"` mid-open it `await store.close()` and returns **without** assigning `_store`/`_indexer`, scheduling the rebuild timer, or flipping to `"ready"`.
+
+The startup rebuild timer is `unref()`'d (never keeps the process alive) and cancelled on close; its callback also re-checks `_state === "closed" || !_indexer` before rebuilding, because an already-scheduled timer can still fire during teardown.
+
+`FlexSearchStore` (`flex-store.ts`) is the belt-and-braces layer for any flush that still loses the race (a debounced timer or concurrent project-delete):
+
+- `_isBenignTeardownError()` swallows a write failure **only** when `_closed === true` *and* the code is `ENOENT`/`EPERM`/`EBUSY` (a vanishing dir). Genuine failures against an open store still throw — corruption is never hidden.
+- `close()` sets `_closed`, clears the debounce `_saveTimer`, awaits any in-flight flush, then does a final `_flushNow()`. The `_scheduleSave` timer callback re-checks `_closed` before flushing.
+- **Empty-tag exports** are skipped: FlexSearch serialises its tag context as `[field, valueMapOrNull]` pairs, and an empty index yields `null` values that crash `Document.import` (`null.length`) on reload. The exporter strips null-valued entries and skips the file entirely when nothing meaningful remains.
+- **Malformed tag files still trigger rebuild.** On load, `classifyTagImport()` returns `import` / `empty` / `invalid`. Only the known empty-tag shape is a clean no-op; an unparseable or malformed tag payload counts as an import failure so the rebuild-from-`__docs__.json` mirror recovery still fires (instead of silently degrading the in-memory index).
+
 ### Abstractions
 
 The surface in `src/server/search/types.ts` that downstream code sees is unchanged from the previous backend, so v2 work (e.g. file indexing) drops in without a refactor:
@@ -1785,6 +1807,11 @@ Skills follow the [Agent Skills spec](https://agentskills.io/specification)'s *p
 **Autonomous activation - system prompt section.** At session start, `system-prompt.ts` injects an "Available Skills" section listing `name`, `description`, and `argument-hint` for every discovered skill where: (a) `disable-model-invocation` is not set, and (b) the role has access to the `Skills` tool group. The section is capped by a configurable byte budget (default **16 KB**; user-tunable in `[1 KB, 128 KB]` via the `skillsCatalogBudget` preference / Settings → General — see `docs/features.md`). If exceeded, skills are sorted alphabetically by name and the tail is truncated with a footer (`_… (N more skills omitted, alphabetically truncated)_`) and a warn log reflecting the effective budget. The resolver `resolveSkillsCatalogBudget()` in `src/server/agent/system-prompt.ts` clamps overrides and falls back to the default for missing/invalid values. Existing 5-second cache TTL applies, so newly added skills appear within 5 s for autonomous use (immediately for slash use via cache miss).
 
 **Activation tool.** Built-in `activate_skill({ name, args? })` (`defaults/tools/skills/activate_skill.yaml` + `extension.ts`) looks up the skill via `getSlashSkill()`, runs `buildSlashSkillPrompt()` along the same snapshot path as user invocations, and returns the expanded body as the tool result. The chat UI renders the tool call as the same `<skill-chip>` UX (`src/ui/tools/renderers/ActivateSkillRenderer.ts`). Activation of a `disable-model-invocation` skill is rejected with a clear error.
+
+**Two invariants this path enforces (each pinned by a regression test after a confirmed bug):**
+
+- **Tool `execute()` params come from the SECOND argument.** pi's `ToolDefinition.execute` contract is `execute(toolCallId, params, signal, onUpdate, ctx)` — the tool-call id string is first, the validated params second. *Every* `defaults/tools/*` extension must use `async execute(_toolCallId, params, …)`. The skills extension once read `input.name` off the first argument, so the model-supplied `name`/`args` were silently `undefined`, `JSON.stringify` dropped the key, and the gateway rejected the call with 400 `name is required`. Pinned by `tests/activate-skill-extension.test.ts` (invokes the real registered tool with the `(toolCallId, params)` convention and asserts the request body carries `name`/`args`). The pre-existing `tests/e2e/activate-skill.spec.ts` missed it because it calls the REST endpoint directly, bypassing `execute()`.
+- **The renderer must not gate error display on `result.isError`.** pi's agent-loop hardcodes `isError: false` for any tool whose `execute()` *returns* (rather than throws) — so an extension that returns `{ isError: true }` never propagates that flag to the UI. `ActivateSkillRenderer` therefore surfaces the result's text content (`activate_skill failed: …`) as a visible error state whenever there is no `skillExpansion`, regardless of the flag; otherwise the failure rendered as a benign "Activating…" header and the error text was discarded. Pinned by `tests/activate-skill-renderer.spec.ts`. See [docs/debugging.md — `activate_skill` returns "name is required"](debugging.md#activate_skill-returns-name-is-required--failures-invisible-in-ui).
 
 **Tool-group policy.** `activate_skill` is in the `Skills` tool group. Roles can opt out by setting `Skills: never` in their `toolPolicies`, which both removes the "Available Skills" section from the system prompt *and* hard-blocks any `activate_skill` call - see [Tool access policies](#tool-access-policies).
 

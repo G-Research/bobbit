@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
+import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
 
 /**
  * Placeholder model used as the initial value of `_state.model` before the
@@ -693,6 +694,7 @@ export class RemoteAgent {
 			let settled = false;
 
 			this.ws.onopen = () => {
+				bootMark("ws-open");
 				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken }));
 			};
 
@@ -1400,10 +1402,21 @@ export class RemoteAgent {
 			case "messages": {
 				const msgs = Array.isArray(msg.data) ? msg.data : msg.data?.messages;
 				if (Array.isArray(msgs)) {
+					// Boot-timing: bracket the get_state snapshot replay — the cost
+					// that scales with transcript length. Opt-in; no-op when disarmed.
+					bootTimingMeta({ sessionId: this._sessionId, transcriptMessages: msgs.length });
+					bootMark(`snapshot-received(${msgs.length} msgs)`);
 					// Server snapshot is authoritative for any id it contains. The
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					bootMark("snapshot-applied");
+					// The reducer triggers a re-render via rAF; mark + flush after it
+					// paints so the table captures the full reload incl. MessageList.
+					requestAnimationFrame(() => requestAnimationFrame(() => {
+						bootMark("post-snapshot-paint");
+						bootTimingReport("post-snapshot-paint");
+					}));
 					// Post-compaction refreshAfterCompaction lands here. Amend the
 					// in-flight compaction card with authoritative tokensAfter if
 					// the new transcript carries usable usage.

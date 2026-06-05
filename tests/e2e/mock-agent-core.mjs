@@ -349,6 +349,13 @@ export class MockAgentCore {
 				output: "Staff proposal partial submitted.",
 			};
 		}
+		if (text.includes("STAFF_PROPOSAL_ROLE")) {
+			return {
+				tool: "propose_staff",
+				input: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "", role: "coder" },
+				output: "Staff proposal (with role) submitted.",
+			};
+		}
 		if (text.includes("STAFF_PROPOSAL_PARITY")) {
 			return {
 				tool: "propose_staff",

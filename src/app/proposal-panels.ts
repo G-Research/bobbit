@@ -34,6 +34,7 @@ import {
 	fetchTools,
 	type ToolInfo,
 	createStaffAgent,
+	fetchRoles,
 } from "./api.js";
 import {
 	renderWorkflowList,
@@ -143,6 +144,20 @@ let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
 let _staffSandboxed = false;
 let _assistantEnabledOptionalSteps: string[] = [];
+
+// ---- Staff proposal panel: role picker + create-in-flight state ----
+// Roles fetched lazily for the proposal panel's role <select>. Mirrors
+// staff-page.ts's `roles`/`ensureRolesLoaded()` but kept panel-local so the two
+// surfaces never share mutable state.
+let _staffProposalRoles: RoleData[] = [];
+/** Current role selection in the staff proposal panel (null ⇒ "No role"). */
+let _staffProposalRoleId: string | null = null;
+/** Guards one-time seeding from the proposal field so re-renders don't clobber a user choice. */
+let _staffProposalRoleSeeded = false;
+/** Guards the lazy roles fetch. */
+let _staffProposalRolesLoaded = false;
+/** In-flight flag for the "Create Staff" submit — disables the button + shows "Creating…". */
+let _creatingStaff = false;
 
 /** Set the selected workflow ID from outside the render module (e.g. from a goal proposal).
  *  Normalizes against the loaded workflow cache: a proposed id that isn't a configured
@@ -275,6 +290,20 @@ function ensureSandboxStatusLoaded(): void {
 	fetchSandboxStatus().then(s => { _sandboxStatusFetching = false; if (s) { state.sandboxStatus = s; renderApp(); } });
 }
 
+/** Lazily fetch roles for the staff proposal panel's role <select>.
+ *  Idempotent; mirrors staff-page.ts::ensureRolesLoaded(). Roles are optional, so
+ *  fetch errors are swallowed and leave the list empty. */
+async function ensureStaffProposalRolesLoaded(): Promise<void> {
+	if (_staffProposalRolesLoaded) return;
+	_staffProposalRolesLoaded = true;
+	try {
+		_staffProposalRoles = await fetchRoles();
+		renderApp();
+	} catch {
+		/* roles are optional; leave list empty */
+	}
+}
+
 // ============================================================================
 // PROPOSAL STREAMING UX (shared helpers)
 // ============================================================================
@@ -355,7 +384,14 @@ export function showProposalToast(text: string): void {
 export function resetProposalAnnCount(type: "goal" | "role" | "staff"): void {
 	if (type === "goal") _goalAnnCount = 0;
 	else if (type === "role") _roleAnnCount = 0;
-	else if (type === "staff") _staffAnnCount = 0;
+	else if (type === "staff") {
+		_staffAnnCount = 0;
+		// Re-seed the role selector from the next staff proposal's own field, and
+		// drop any in-flight create state, when a fresh proposal arrives.
+		_staffProposalRoleSeeded = false;
+		_staffProposalRoleId = null;
+		_creatingStaff = false;
+	}
 }
 
 function recomputeAssistantHasProposal(): void {
@@ -1758,6 +1794,17 @@ function seedStaffPreviewCwdFromProject(project = activeProjectForStaffPreview()
 function staffPreviewPanel() {
 	ensureMarkdownBlock();
 	ensureSandboxStatusLoaded();
+	void ensureStaffProposalRolesLoaded();
+	// Seed the role selector once from the proposal's own `role` field. Guarded so
+	// re-renders never clobber a user choice; reset on a fresh proposal (see
+	// resetProposalAnnCount).
+	if (!_staffProposalRoleSeeded) {
+		const seededRole = state.activeProposals.staff?.fields?.role;
+		_staffProposalRoleId = typeof seededRole === "string" && seededRole.trim()
+			? seededRole.trim()
+			: null;
+		_staffProposalRoleSeeded = true;
+	}
 	const staffProject = activeProjectForStaffPreview();
 	seedStaffPreviewCwdFromProject(staffProject);
 	const streaming = isProposalStreaming("staff_proposal");
@@ -1767,6 +1814,8 @@ function staffPreviewPanel() {
 		reconcileFollowTail(staffPromptTextareaRef.value);
 	});
 	const handleCreateStaff = async () => {
+		// Re-entrancy guard — belt-and-braces alongside the disabled button.
+		if (_creatingStaff) return;
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
 		// Block create if any goal-* trigger lacks a prompt. The submit button is
@@ -1786,56 +1835,65 @@ function staffPreviewPanel() {
 			? state.projects.find(p => p.id === submitProjectId)
 			: undefined;
 		const cwd = effectiveStaffPreviewCwd(submitProject);
-		// Optional role carried by the proposal seed. Unknown roles are rejected
-		// server-side (404) — no extra client validation needed.
-		const proposalRole = state.activeProposals.staff?.fields?.role;
-		const roleId = typeof proposalRole === "string" && proposalRole.trim()
-			? proposalRole.trim()
+		// Optional role from the panel's role <select> (null/empty ⇒ no role).
+		// Unknown roles are rejected server-side (404) — no extra client validation.
+		const roleId = _staffProposalRoleId && _staffProposalRoleId.trim()
+			? _staffProposalRoleId.trim()
 			: undefined;
-		const result = await createStaffAgent({
-			name: trimmedName,
-			description: state.staffPreviewDescription,
-			systemPrompt: state.staffPreviewPrompt,
-			cwd,
-			worktree: state.staffPreviewWorktree,
-			triggers,
-			projectId: submitProjectId,
-			sandboxed,
-			roleId,
-		});
-		if (!result) return;
 
-		_staffSandboxed = false;
-		state.staffPreviewWorktree = true;
-		clearProposalReviewState(proposalSessionId, "staff");
-		delete state.activeProposals.staff;
-		recomputeAssistantHasProposal();
-		clampUnifiedTabsAfterProposalRemoved("staff");
-		if (proposalSessionId) void deleteProposalFile(proposalSessionId, "staff");
-
-		if (isStaffAssistant) {
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.assistantType = null;
-			localStorage.removeItem("gateway.sessionId");
-			setHashRoute("landing");
-			state.appView = "authenticated";
-			if (proposalSessionId && !isSessionArchived(proposalSessionId)) {
-				await gatewayFetch(`/api/sessions/${proposalSessionId}`, { method: "DELETE" });
-				clearSessionModel(proposalSessionId);
-			}
-		}
-
-		reloadStaffList();
-		await refreshSessions();
-		if (result?.currentSessionId) {
-			const { connectToSession } = await import("./session-manager.js");
-			await connectToSession(result.currentSessionId, false);
-		}
+		// In-flight: disable the submit/dismiss buttons + show "Creating…". Cleared
+		// in `finally` so the button re-enables for retry on error (the early
+		// `if (!result) return` keeps the panel + assistant session open).
+		_creatingStaff = true;
 		renderApp();
+		try {
+			const result = await createStaffAgent({
+				name: trimmedName,
+				description: state.staffPreviewDescription,
+				systemPrompt: state.staffPreviewPrompt,
+				cwd,
+				worktree: state.staffPreviewWorktree,
+				triggers,
+				projectId: submitProjectId,
+				sandboxed,
+				roleId,
+			});
+			if (!result) return;
+
+			_staffSandboxed = false;
+			state.staffPreviewWorktree = true;
+			clearProposalReviewState(proposalSessionId, "staff");
+			delete state.activeProposals.staff;
+			recomputeAssistantHasProposal();
+			clampUnifiedTabsAfterProposalRemoved("staff");
+			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "staff");
+
+			if (isStaffAssistant) {
+				if (state.remoteAgent) {
+					state.remoteAgent.disconnect();
+					state.remoteAgent = null;
+					state.connectionStatus = "disconnected";
+				}
+				state.assistantType = null;
+				localStorage.removeItem("gateway.sessionId");
+				setHashRoute("landing");
+				state.appView = "authenticated";
+				if (proposalSessionId && !isSessionArchived(proposalSessionId)) {
+					await gatewayFetch(`/api/sessions/${proposalSessionId}`, { method: "DELETE" });
+					clearSessionModel(proposalSessionId);
+				}
+			}
+
+			reloadStaffList();
+			await refreshSessions();
+			if (result?.currentSessionId) {
+				const { connectToSession } = await import("./session-manager.js");
+				await connectToSession(result.currentSessionId, false);
+			}
+		} finally {
+			_creatingStaff = false;
+			renderApp();
+		}
 	};
 
 	return html`
@@ -1921,6 +1979,19 @@ function staffPreviewPanel() {
 							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 					</label>
 				</div>
+				<div data-testid="staff-proposal-role-picker">
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Role</label>
+					<p class="text-[10px] text-muted-foreground mb-1">Optional. Prepends the role's prompt context and pre-fills the accessory.</p>
+					<select
+						data-testid="staff-proposal-role-select"
+						class="w-full h-9 px-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+						.value=${_staffProposalRoleId ?? ""}
+						@change=${(e: Event) => { _staffProposalRoleId = (e.target as HTMLSelectElement).value || null; renderApp(); }}
+					>
+						<option value="" ?selected=${!_staffProposalRoleId}>No role</option>
+						${_staffProposalRoles.map((r) => html`<option value=${r.name} ?selected=${_staffProposalRoleId === r.name}>${r.label || r.name}</option>`)}
+					</select>
+				</div>
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>
@@ -1996,12 +2067,14 @@ function staffPreviewPanel() {
 					},
 					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_staffAnnCount})</span>`,
 				}) : ""}
-				${!state.assistantType ? Button({ variant: "ghost", onClick: () => dismissTypedProposal("staff"), children: "Dismiss" }) : ""}
+				${!state.assistantType ? Button({ variant: "ghost", onClick: () => dismissTypedProposal("staff"), disabled: _creatingStaff, children: "Dismiss" }) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
-					disabled: !state.staffPreviewName.trim() || streaming || hasInvalidGoalTriggersForPreview(),
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(UserCheck, "sm")} Create Staff</span>`,
+					disabled: _creatingStaff || !state.staffPreviewName.trim() || streaming || hasInvalidGoalTriggersForPreview(),
+					children: _creatingStaff
+						? html`<span class="inline-flex items-center gap-1.5" data-testid="staff-creating-label">Creating…</span>`
+						: html`<span class="inline-flex items-center gap-1.5">${icon(UserCheck, "sm")} Create Staff</span>`,
 				})}</span>
 			</div>
 		</div>
