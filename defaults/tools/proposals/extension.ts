@@ -114,16 +114,42 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "propose_goal",
 		label: "Propose Goal",
-		description: "Submit a goal proposal for user review.",
-		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields.",
+		description: "Submit a goal proposal. Prefer existing workflow/roles; inline only when needed.",
+		promptSnippet: "Propose a goal with title, spec, workflow, and optional fields. Reuse existing workflow/roles by default.",
 		parameters: Type.Object({
 			title: Type.String({ description: "Short 2-5 word title, under 29 characters." }),
 			spec: Type.String({ description: "Markdown spec: description, requirements, constraints, approach." }),
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
 			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
+			parentGoalId: Type.Optional(Type.String({ description: "Parent goal ID for creating a subgoal. When omitted inside a team-lead session, the server auto-fills from the current goal. Pass null or omit for top-level." })),
+			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
+				name: Type.String({ description: "Role id (kebab-case); must equal the map key." }),
+				label: Type.String({ description: "Display name." }),
+				promptTemplate: Type.String({ description: "System prompt; supports {{AGENT_ID}}, {{GOAL_BRANCH}}." }),
+				accessory: Type.Optional(Type.String()),
+				toolPolicies: Type.Optional(Type.Record(Type.String(), Type.String())),
+				model: Type.Optional(Type.String()),
+				thinkingLevel: Type.Optional(Type.String()),
+			}), { description: "Per-goal ephemeral roles. Use propose_role for permanent ones." })),
+			inlineWorkflow: Type.Optional(Type.Object({
+				id: Type.String(),
+				name: Type.String(),
+				description: Type.Optional(Type.String()),
+				gates: Type.Array(Type.Any()),
+			}, { description: "Inline workflow snapshot frozen on the goal; may reference inlineRoles." })),
 		}),
 		async execute(_id, args) {
+			// `workflow` (string id) and `inlineWorkflow` (full Workflow object)
+			// are SEPARATE fields with different semantics — workflow is looked
+			// up against the project's workflow store, inlineWorkflow is a
+			// frozen snapshot that bypasses the store. Pass both through
+			// untouched; the proposal serializer (proposal-types.ts goalPlugin)
+			// preserves both YAML keys, and goal-proposal acceptance reads
+			// inlineWorkflow → POST /api/goals body.workflow (the snapshot
+			// path), or workflow → POST /api/goals body.workflowId (the
+			// store-lookup path). Mixing one into the other corrupts the
+			// type contract.
 			const r = await seedProposal("goal", args);
 			if (r.errorMessage) {
 				return { content: [{ type: "text" as const, text: r.errorMessage }], isError: true } as any;
@@ -319,5 +345,56 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log("[proposal-tools] Registered 8 proposal tools");
+	// ── view_goal_spec ───────────────────────────────────
+	// Returns the live `goal.spec` content for the agent's current goal (or
+	// any goal id passed explicitly). Used by team-leads who receive a
+	// `goal_spec_changed` nudge: re-read the spec, decide whether the change
+	// affects the plan, then act.
+	pi.registerTool({
+		name: "view_goal_spec",
+		label: "View Goal Spec",
+		description: "Read the current goal.spec for a goal. Use after goal_spec_changed; system-prompt copy is stale.",
+		promptSnippet: "View the current goal.spec content (the spec injected at startup may be stale).",
+		parameters: Type.Object({
+			goal_id: Type.Optional(Type.String({ description: "Goal id. Defaults to the current session's goal (BOBBIT_GOAL_ID)." })),
+		}),
+		async execute(_id, args) {
+			const { goal_id } = args as { goal_id?: string };
+			const id = goal_id || process.env.BOBBIT_GOAL_ID;
+			if (!id) {
+				return {
+					content: [{ type: "text" as const, text: `view_goal_spec failed: no goal_id provided and BOBBIT_GOAL_ID is not set (this session is not bound to a goal).` }],
+					isError: true,
+				} as any;
+			}
+			try {
+				const { status, bodyText, bodyJson } = await callGateway(`/api/goals/${encodeURIComponent(id)}`, "GET");
+				if (status === 404) {
+					return {
+						content: [{ type: "text" as const, text: `view_goal_spec failed: goal ${id} not found.` }],
+						isError: true,
+					} as any;
+				}
+				if (status < 200 || status >= 300) {
+					return {
+						content: [{ type: "text" as const, text: `view_goal_spec failed (HTTP ${status}): ${bodyText.slice(0, 500)}` }],
+						isError: true,
+					} as any;
+				}
+				const goal = bodyJson as { id?: string; title?: string; spec?: string; updatedAt?: number } | undefined;
+				const spec = (goal && typeof goal.spec === "string") ? goal.spec : "";
+				const header = `# Goal: ${goal?.title ?? id}\n# id: ${goal?.id ?? id}\n# updatedAt: ${goal?.updatedAt ? new Date(goal.updatedAt).toISOString() : "unknown"}\n# spec length: ${spec.length} chars\n\n`;
+				return {
+					content: [{ type: "text" as const, text: header + spec }],
+				};
+			} catch (err) {
+				return {
+					content: [{ type: "text" as const, text: `view_goal_spec failed: ${(err as Error)?.message ?? err}` }],
+					isError: true,
+				} as any;
+			}
+		},
+	});
+
+	console.log("[proposal-tools] Registered 9 proposal tools");
 }

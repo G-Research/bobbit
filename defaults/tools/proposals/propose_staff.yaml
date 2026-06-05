@@ -7,7 +7,23 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: name (required), prompt (required), description, triggers, cwd,
-  role. The optional role attaches a role to the staff agent: it prepends the
-  role's prompt context to the staff agent's system prompt and pre-fills the
-  accessory. Only pass a role that exists.
+  Required parameters: name (kebab-case identifier — used in worktree path
+  staff-<name>-<id>), prompt (the staff agent's system prompt — runs each wake
+  cycle).
+
+  Optional parameters: description (free-form summary for the user), triggers
+  (string describing trigger conditions — wakes the staff agent on the named
+  events; see StaffTrigger in src/server/agent/staff-store.ts for the full
+  shape), cwd (project path the staff runs against — defaults to the
+  registered project).
+
+  Roles for staff: the optional `role` attaches a role to the staff agent — it
+  prepends the role's prompt context to the staff agent's system prompt and
+  pre-fills the accessory. Only pass a role that exists; define a custom role
+  first via propose_role if you need bespoke behaviour.
+
+  Cascade: staff are project-scoped only — there is no builtin/server layer.
+
+  Worktree refresh: staff worktrees are auto-rebased onto primary on each
+  wake, and per-component setup commands re-run. See AGENTS.md for the full
+  contract.

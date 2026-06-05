@@ -4,6 +4,15 @@ accessory: set-square
 toolPolicies:
   edit: never
   gate_signal: never
+  goal_spawn_child: never
+  goal_plan_propose: never
+  goal_plan_status: never
+  goal_merge_child: never
+  goal_pause: never
+  goal_resume: never
+  goal_archive_child: never
+  goal_decide_mutation: never
+  goal_set_policy: never
 createdAt: 1775322000000
 updatedAt: 1775322000000
 promptTemplate: |

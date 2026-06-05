@@ -27,6 +27,14 @@ export interface RegisteredProject {
    * projects must never appear in /api/projects responses.
    */
   hidden?: boolean;
+  /**
+   * Optional parent project id for hierarchical role/field inheritance.
+   * When set, ConfigCascade walks the ancestor chain when resolving
+   * role `model`/`thinkingLevel`/`promptTemplate` fields. Cycles and
+   * references to hidden/provisional/non-existent projects are rejected
+   * by `update()`.
+   */
+  parentProjectId?: string;
 }
 
 /** Stable id for the synthetic system project. */
@@ -406,10 +414,44 @@ export class ProjectRegistry {
   /** Update mutable fields of an existing project. */
   update(
     id: string,
-    updates: Partial<Pick<RegisteredProject, "name" | "color" | "rootPath" | "palette" | "colorLight" | "colorDark">>,
+    updates: Partial<Pick<RegisteredProject, "name" | "color" | "rootPath" | "palette" | "colorLight" | "colorDark">> & {
+      parentProjectId?: string | null;
+    },
   ): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
+
+    if (updates.parentProjectId !== undefined) {
+      const v = updates.parentProjectId;
+      if (v === null || v === "") {
+        delete project.parentProjectId;
+      } else if (typeof v === "string") {
+        if (v === id) {
+          throw new Error(`parentProjectId cannot reference self (${id})`);
+        }
+        const target = this.projects.get(v);
+        if (!target) throw new Error(`parentProjectId references unknown project: ${v}`);
+        if (target.hidden) throw new Error(`parentProjectId cannot reference a hidden project: ${v}`);
+        if (target.provisional) throw new Error(`parentProjectId cannot reference a provisional project: ${v}`);
+        // Cycle detection: walk target's ancestor chain and refuse if id reappears.
+        const seen = new Set<string>([id]);
+        let cursor: string | undefined = target.parentProjectId;
+        let hops = 0;
+        while (cursor && hops < 64) {
+          if (seen.has(cursor)) {
+            throw new Error(`parentProjectId would create a cycle through ${cursor}`);
+          }
+          seen.add(cursor);
+          const next: RegisteredProject | undefined = this.projects.get(cursor);
+          if (!next) break;
+          cursor = next.parentProjectId;
+          hops++;
+        }
+        project.parentProjectId = v;
+      } else {
+        throw new Error(`parentProjectId must be a string or null`);
+      }
+    }
 
     if (updates.name !== undefined) project.name = updates.name;
     if (updates.rootPath !== undefined) project.rootPath = path.resolve(updates.rootPath);
@@ -454,6 +496,28 @@ export class ProjectRegistry {
    * Does NOT delete files on disk — only unregisters.
    * Callers (e.g. server.ts) should guard against removing the last remaining project.
    */
+  /**
+   * Return ancestor projects in order (closest parent first). Stops at the
+   * root, on a missing reference, or on any cycle (defensive — bounded to
+   * 32 hops).
+   */
+  getAncestors(projectId: string): RegisteredProject[] {
+    const out: RegisteredProject[] = [];
+    const seen = new Set<string>([projectId]);
+    let cursor: string | undefined = this.projects.get(projectId)?.parentProjectId;
+    let hops = 0;
+    while (cursor && hops < 32) {
+      if (seen.has(cursor)) break;
+      seen.add(cursor);
+      const next = this.projects.get(cursor);
+      if (!next) break;
+      out.push(next);
+      cursor = next.parentProjectId;
+      hops++;
+    }
+    return out;
+  }
+
   remove(id: string): void {
     if (!this.projects.has(id)) {
       throw new Error(`Project not found: ${id}`);

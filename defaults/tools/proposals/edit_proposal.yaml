@@ -7,4 +7,9 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: type (required), old_text (required), new_text (required, may be empty). Failed edits do NOT modify the file on disk.
+  Parameters: type (required) — one of goal, project, role, tool, staff;
+  old_text (required); new_text (required, may be empty). Failed edits do
+  NOT modify the file on disk. Note: there is NO "workflow" proposal type —
+  to add, remove, or modify a workflow (including its gates, verify-steps,
+  and roles) on the current project, edit the in-flight `project` proposal
+  with type="project" — workflows live under the `workflows:` YAML key.

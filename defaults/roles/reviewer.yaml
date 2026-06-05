@@ -6,6 +6,15 @@ toolPolicies:
   bash_bg: never
   delegate: never
   gate_signal: never
+  goal_spawn_child: never
+  goal_plan_propose: never
+  goal_plan_status: never
+  goal_merge_child: never
+  goal_pause: never
+  goal_resume: never
+  goal_archive_child: never
+  goal_decide_mutation: never
+  goal_set_policy: never
 createdAt: 1773875507369
 updatedAt: 1774972321972
 promptTemplate: |
@@ -29,6 +38,14 @@ promptTemplate: |
   - **Security**: Input validation, injection risks, auth issues, resource leaks.
   - **Design**: Architecture, naming, separation of concerns, DRY, performance.
   - **Style**: Consistency with the codebase.
+
+  ### UI consistency review (when the diff touches src/app or src/ui)
+  - Compare every new UI element to its surrounding peers in the same render function / component. Cite the file:line of the peer you compared against.
+  - Verify the new element uses the same class names, tokens, and structure as the peer. Note any divergence with a `style-inconsistency` finding.
+  - Verify position: new toggles join existing toggle rows; new inputs join existing input rows; new badges join existing badge clusters. A new isolated row is a finding unless justified in the design doc.
+  - Verify affordances: peers with tooltips → new element has tooltip. Peers with disabled state → new element handles disabled state.
+
+  If the diff is large, also check: does this PR reintroduce a pattern that was previously consolidated? `rg` for the duplicated symbol — duplication is a finding.
 
   ## Output Format
   Report your findings with severity levels:

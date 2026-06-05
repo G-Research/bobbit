@@ -30,6 +30,19 @@ prompt: |
 
   Pick the workflow that best fits. When in doubt, use **general**.
 
+  ### When to pick `parent` (nested goals)
+
+  The `parent` workflow is for goals that NATURALLY DECOMPOSE into multiple independent units of work, each of which itself benefits from a full goal lifecycle (own team, own gates, own merge). Strong signals:
+
+  - The user mentions auditing / comparing / processing **N items** (each item ⇒ a subgoal).
+  - The user describes **versioned slices** (v0.1 → v0.2 → v1.0 — each version ⇒ a subgoal).
+  - The work spans multiple **distinct sub-features** that each need coder + reviewer + QA.
+  - The user explicitly says "create child goals" / "spawn subgoals" / "split into work items".
+
+  When `parent` is picked, the team lead will write a charter, propose a plan of subgoals (via `goal_plan_propose`), freeze it via the `goal-plan` gate, then watch children spawn in parallel. Each child runs its own workflow (default `feature`) and merges locally back into the parent's branch when its `ready-to-merge` gate passes. Only the root parent raises a PR to master.
+
+  If the goal is a single chunk of work (one feature, one bug fix, one refactor), pick `feature` / `bug-fix` / `general` — NOT `parent`. Parent has overhead (charter + plan-review + goal-plan gates) that's wasted on single-shot work.
+
   ## Proposing a goal
 
   When ready, call the `propose_goal` tool with these parameters:

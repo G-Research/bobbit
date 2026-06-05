@@ -66,6 +66,18 @@ export async function generateTeamName(role?: string): Promise<string> {
 }
 
 /**
+ * Synchronous variant of `generateTeamName` for sync contexts that can't
+ * await (e.g. constructor-time boot recovery in `TeamManager`). Same
+ * underlying pool + recent-name cache; the async version above is preferred
+ * elsewhere.
+ */
+export function generateTeamNameSync(role?: string): string {
+	const effectiveRole = role ?? "__generic__";
+	const pool = role ? getPoolForRole(role) : GENERIC_POOL;
+	return pickName(pool, effectiveRole);
+}
+
+/**
  * Invalidate the cached pool for a role so it's reloaded from disk next time.
  * Called after generating a new names file for a newly-created role.
  */

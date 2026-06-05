@@ -6,7 +6,7 @@ export type GateStatus = "pending" | "passed" | "failed";
 
 export interface GateSignalStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa" | "human-signoff";
+	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
 	passed: boolean;
 	skipped?: boolean;
 	output: string;

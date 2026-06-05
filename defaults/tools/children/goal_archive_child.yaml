@@ -1,0 +1,28 @@
+name: goal_archive_child
+description: "Archive a child goal (optionally cascading to its descendants)"
+summary: "Soft-delete a child goal; with cascade=true, also archive all of its descendants."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Required: `childGoalId`, `cascade` (boolean — explicit, no default). When `cascade=false` and the child has descendants, returns 409 `{ code: "HAS_DESCENDANTS", count }` so the UI can show a confirmation dialog. When `cascade=true`, descendants are walked deepest-first and each is archived (verifications cancelled, team torn down, remote branches push-deleted). Returns 200 `{ archived: <count> }`. Server returns 422 if `cascade` is omitted.
+detail_docs: >-
+  ## Purpose
+
+
+  Archive (soft-delete) a child goal. Mirrors `DELETE /api/goals/:id`
+  with explicit cascade semantics. Use this when a child is wedged or
+  superseded and you want to remove it from the active tree without
+  merging.
+
+
+  ## Cleanup side effects
+
+
+  - Cancels all in-flight gate verifications on archived goals.
+
+  - Tears down each goal's team (dismisses all role agents).
+
+  - Push-deletes the goal branch + each agent's branch from origin
+    (gated by `shouldSkipRemotePush()`).

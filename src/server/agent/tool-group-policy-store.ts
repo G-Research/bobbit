@@ -16,9 +16,24 @@ const VALID_POLICIES = new Set<string>(['allow', 'ask', 'never', 'always-ask', '
 export class ToolGroupPolicyStore {
 	private readonly policyFile: string;
 	private builtinPolicies: Record<string, GrantPolicy> = {};
+	private subgoalsEnabledGetter?: () => boolean;
 
 	constructor(configDir: string) {
 		this.policyFile = path.join(configDir, "tool-group-policies.yaml");
+	}
+
+	/**
+	 * Inject the system-scope Subgoals feature-gate accessor. When set and
+	 * returning false, every tool in the `Children` group resolves to `never`
+	 * via `resolveGrantPolicy`. See docs/design/subgoals-experimental-toggle.md.
+	 */
+	setSubgoalsEnabledGetter(getter: () => boolean): void {
+		this.subgoalsEnabledGetter = getter;
+	}
+
+	/** Surface the system-scope Subgoals flag through the GroupPolicyProvider interface. */
+	getSubgoalsEnabled(): boolean {
+		return this.subgoalsEnabledGetter ? !!this.subgoalsEnabledGetter() : false;
 	}
 
 	/*
