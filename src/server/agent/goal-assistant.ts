@@ -35,6 +35,7 @@ export function buildReattemptContext(goal: PersistedGoal, prStatusStore: PrStat
 	lines.push("   - **Revert & start fresh**: revert the merged commit(s) from master");
 	lines.push("   - **Fix up**: keep the merged work and build on top");
 	lines.push("   - **Revert & fix up**: revert from master but use old code as starting point");
+	lines.push("   (New work goes on the fresh branch the new goal creates off the primary branch — never push onto the old, already-merged branch.)");
 	lines.push("4. Compose a new goal spec that includes the original spec, what went wrong, the chosen approach, and pointers to the old branch/PR");
 	lines.push(`5. Call \`propose_goal\` with a title like "Re-attempt: ${goal.title}"`);
 	return lines.join("\n");
