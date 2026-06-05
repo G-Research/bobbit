@@ -12,14 +12,17 @@ import {
 	AlertTriangle,
 	ArrowLeft,
 	ChevronDown,
+	Database,
 	Download,
 	GripVertical,
 	Package,
 	Plus,
 	RotateCw,
+	ShoppingCart,
 	Store,
 	Trash2,
 } from "lucide";
+import type { IconNode } from "lucide";
 import { renderApp, state } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import {
@@ -44,6 +47,10 @@ import {
 // ============================================================================
 // MODULE STATE
 // ============================================================================
+
+/** Active sub-tab on the marketplace page. */
+export type MarketTab = "installed" | "browse" | "sources";
+let activeTab: MarketTab = "installed";
 
 let loading = true;
 let sourcesError = "";
@@ -88,6 +95,7 @@ let dragOverIndex: number | null = null;
 const SCOPE_ORDER: MarketScope[] = ["server", "global-user", "project"];
 
 export function clearMarketplaceState(): void {
+	activeTab = "installed";
 	loading = true;
 	sourcesError = "";
 	sources = [];
@@ -200,7 +208,10 @@ async function handleAddSource(): Promise<void> {
 		newSourceUrl = "";
 		newSourceRef = "";
 		await loadMarketplaceData(false);
-		if (res.data.source?.id) await loadBrowse(res.data.source.id);
+		if (res.data.source?.id) {
+			activeTab = "browse";
+			await loadBrowse(res.data.source.id);
+		}
 	} else {
 		sourcesError = res.error;
 		renderApp();
@@ -410,6 +421,38 @@ function renderNavBar(): TemplateResult {
 	`;
 }
 
+function renderTabBar(): TemplateResult {
+	const tab = (mode: MarketTab, label: string, tabIcon: IconNode, count?: number) => {
+		const isActive = activeTab === mode;
+		const cls = [
+			"flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-2 text-xs font-medium border-b-2 transition-colors select-none whitespace-nowrap cursor-pointer",
+			isActive ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
+		].join(" ");
+		const badgeCls = isActive
+			? "text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium"
+			: "text-[10px] px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground font-medium";
+		return html`
+			<button
+				type="button"
+				data-testid="market-tab-${mode}"
+				class=${cls}
+				@click=${() => { activeTab = mode; renderApp(); }}
+			>
+				${icon(tabIcon, "xs")}
+				<span>${label}</span>
+				${typeof count === "number" ? html`<span class=${badgeCls}>${count}</span>` : ""}
+			</button>
+		`;
+	};
+	return html`
+		<div class="flex border-b border-border shrink-0" role="tablist">
+			${tab("installed", "Installed", Package, installed.length)}
+			${tab("browse", "Browse", ShoppingCart)}
+			${tab("sources", "Sources", Database, sources.length)}
+		</div>
+	`;
+}
+
 function entityChips(pack: BrowsePackWire | InstalledPackWire): TemplateResult {
 	const contents = "contents" in pack ? pack.contents : (pack as InstalledPackWire).manifest.contents;
 	const groups: Array<[string, string[]]> = [
@@ -471,7 +514,7 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	const syncing = busy.has(`sync:${src.id}`);
 	return html`
 		<div class="market-source-row ${isSelected ? "market-source-row--selected" : ""}" data-testid="market-source-row">
-			<button class="flex-1 min-w-0 text-left" @click=${() => loadBrowse(src.id)} title="Browse packs">
+			<button class="flex-1 min-w-0 text-left" @click=${() => { activeTab = "browse"; loadBrowse(src.id); }} title="Browse packs">
 				<div class="text-sm font-medium truncate">${src.id}</div>
 				<div class="text-[11px] text-muted-foreground truncate">${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
 				${src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
@@ -695,14 +738,20 @@ export function renderMarketplacePage(): TemplateResult {
 		`;
 	}
 
+	const panel =
+		activeTab === "sources"
+			? renderSourcesPanel()
+			: activeTab === "browse"
+				? renderBrowsePanel()
+				: renderInstalledPanel();
+
 	return html`
 		<div class="flex-1 flex flex-col h-full">
 			${renderNavBar()}
+			${renderTabBar()}
 			<div class="flex-1 overflow-y-auto">
 				<div class="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-6">
-					${renderSourcesPanel()}
-					${renderBrowsePanel()}
-					${renderInstalledPanel()}
+					${panel}
 				</div>
 			</div>
 		</div>
