@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar spawned-children helpers — browser fixture</title>
+</head>
+<body>
+<script type="module">
+/**
+ * Mirror of src/app/sidebar-spawned-children.ts.
+ *
+ * Re-implementing in inline JS so the fixture can run without a bundler.
+ * The unit test in tests/sidebar-spawned-children.test.ts pins the same
+ * invariants against the TypeScript source — this fixture exists to give
+ * us a Playwright harness that exercises the same logic in the actual
+ * browser runtime (no mock JS engine, no node:test transpile path).
+ */
+
+window.selectSpawnedChildren = function(goals, parentId, leadId, showArchived) {
+	const seen = new Set();
+	return goals
+		.filter(g =>
+			g.parentGoalId === parentId
+			&& g.spawnedBySessionId === leadId
+			&& (showArchived || !g.archived))
+		.filter(g => {
+			if (seen.has(g.id)) return false;
+			seen.add(g.id);
+			return true;
+		})
+		.sort((a, b) => {
+			const at = a.createdAt ?? 0;
+			const bt = b.createdAt ?? 0;
+			if (at !== bt) return at - bt;
+			return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+		});
+};
+
+window.isAncestorCycle = function(childId, renderedAncestors) {
+	return renderedAncestors?.has(childId) === true;
+};
+
+window.extendAncestors = function(prev, goalId) {
+	const next = new Set(prev ?? []);
+	next.add(goalId);
+	return next;
+};
+
+window.computeTitleSuffixes = function(siblings) {
+	const titleCounts = new Map();
+	for (const s of siblings) {
+		const t = s.title ?? "";
+		titleCounts.set(t, (titleCounts.get(t) ?? 0) + 1);
+	}
+	const out = new Map();
+	for (const s of siblings) {
+		const t = s.title ?? "";
+		if ((titleCounts.get(t) ?? 0) > 1) {
+			out.set(s.id, s.id.slice(0, 6));
+		} else {
+			out.set(s.id, undefined);
+		}
+	}
+	return out;
+};
+
+/**
+ * Render-walk simulator — same shape as the real renderGoalGroup →
+ * renderSpawnedChildGoalRow chain in src/app/render-helpers.ts. Returns
+ * a flat list of `{kind, id}` rows so the test can assert what would
+ * actually appear in the DOM. `kind` is "row" for a regular spawned-child
+ * row or "loop" for a cycle-detected placeholder.
+ */
+window.simulateRender = function(goals, rootGoalId, leadId, opts) {
+	opts = opts || {};
+	const cap = opts.cap ?? 50;
+	const showArchived = opts.showArchived ?? false;
+	const out = [];
+	function walk(parentId, ancestors, depth) {
+		if (depth > cap) {
+			out.push({ kind: "cap-hit", id: parentId, depth });
+			return;
+		}
+		const children = window.selectSpawnedChildren(goals, parentId, leadId, showArchived);
+		for (const c of children) {
+			if (window.isAncestorCycle(c.id, ancestors)) {
+				out.push({ kind: "loop", id: c.id, depth });
+				continue;
+			}
+			out.push({ kind: "row", id: c.id, depth, title: c.title });
+			walk(c.id, window.extendAncestors(ancestors, c.id), depth + 1);
+		}
+	}
+	walk(rootGoalId, new Set([rootGoalId]), 0);
+	return out;
+};
+</script>
+</body>
+</html>
