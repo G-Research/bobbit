@@ -7,7 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
 import { live } from "lit/directives/live.js";
-import { ArrowLeft, Brain, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
+import { ArrowLeft, Brain, Check, FlaskConical, Gauge, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -39,6 +39,7 @@ import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { applyProjectPalette } from "./session-manager.js";
+import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -110,6 +111,10 @@ let harnessStatusLoaded = false;
 let harnessRestartAvailable = false;
 let harnessRestartState: "idle" | "requesting" | "requested" | "error" = "idle";
 let harnessRestartError = "";
+// Dev perf-instrumentation toggle (harness-only, next to Restart Server).
+// Mirrors the `devPerfInstrumentation` server preference; the localStorage
+// mirror (see boot-timing.ts) is what actually arms the next reload.
+let settingsPerfInstrumentation = false;
 // Skills-catalog byte budget override. `null` means "use server default" (no preference set).
 let settingsSkillsCatalogBudget: number | null = null;
 
@@ -920,10 +925,40 @@ export function toggleSettings(): void {
 function loadHarnessStatus(): void {
 	if (harnessStatusLoaded) return;
 	harnessStatusLoaded = true;
-	fetchHarnessStatus().then(status => {
+	fetchHarnessStatus().then(async status => {
 		harnessRestartAvailable = status.restartAvailable;
+		// Load the perf-instrumentation toggle state from the server preference
+		// and mirror it into localStorage so a fresh browser arms correctly on
+		// the next reload. Only meaningful under the harness.
+		if (status.restartAvailable) {
+			try {
+				const res = await gatewayFetch("/api/preferences");
+				if (res.ok) {
+					const prefs = await res.json();
+					settingsPerfInstrumentation = prefs.devPerfInstrumentation === true;
+					setPerfInstrumentationEnabled(settingsPerfInstrumentation);
+				}
+			} catch { /* fall back to localStorage mirror */ }
+			// If the server pref was unreadable, reflect the local mirror so the
+			// button still shows the truth that governs the next reload.
+			if (!settingsPerfInstrumentation) settingsPerfInstrumentation = isPerfInstrumentationEnabled();
+		}
 		renderApp();
 	});
+}
+
+async function togglePerfInstrumentation(): Promise<void> {
+	settingsPerfInstrumentation = !settingsPerfInstrumentation;
+	// Arm/disarm the NEXT reload immediately via the localStorage mirror; the
+	// current page is already past its boot marks.
+	setPerfInstrumentationEnabled(settingsPerfInstrumentation);
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ devPerfInstrumentation: settingsPerfInstrumentation }),
+		});
+	} catch { /* the localStorage mirror still governs the next reload */ }
 }
 
 async function requestSettingsRestart(): Promise<void> {
@@ -944,6 +979,25 @@ async function requestSettingsRestart(): Promise<void> {
 	renderApp();
 }
 
+function renderPerfInstrumentationToggle() {
+	const on = settingsPerfInstrumentation;
+	return html`
+		<button
+			class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border transition-colors ${on
+				? "border-primary bg-primary/10 text-primary"
+				: "border-border bg-background text-foreground hover:bg-secondary"}"
+			role="switch"
+			aria-checked=${on ? "true" : "false"}
+			data-testid="perf-instrumentation-toggle"
+			@click=${togglePerfInstrumentation}
+			title="Record reload performance stats to .bobbit/state/boot-timing.jsonl on each full reload. Applies on the next reload."
+		>
+			${icon(Gauge, "xs")}
+			<span>Perf ${on ? "On" : "Off"}</span>
+		</button>
+	`;
+}
+
 function renderHarnessRestartControl() {
 	if (!harnessRestartAvailable) return "";
 	const requesting = harnessRestartState === "requesting";
@@ -954,6 +1008,7 @@ function renderHarnessRestartControl() {
 			${harnessRestartState === "error" && harnessRestartError ? html`
 				<span class="text-xs text-destructive max-w-[40vw] sm:max-w-[18rem] truncate" title=${harnessRestartError}>${harnessRestartError}</span>
 			` : ""}
+			${renderPerfInstrumentationToggle()}
 			<button
 				class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-60 disabled:pointer-events-none"
 				?disabled=${requesting || requested}

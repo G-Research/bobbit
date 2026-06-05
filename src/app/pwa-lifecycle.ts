@@ -36,7 +36,7 @@
  * unit-testable `shouldReloadOnResume()` — no DOM, no globals.
  */
 
-import { bootMark, bootTimingFlush } from "./boot-timing.js";
+import { bootMark } from "./boot-timing.js";
 
 declare global {
 	interface Window {
@@ -326,9 +326,10 @@ function finalizeBoot(): void {
 	booted = true;
 	// First real paint: #app has child content. Records the structural-floor
 	// timing (navigation → module waterfall → first paint) before any session
-	// snapshot lands. Dev-only; no-op in production. See boot-timing.ts.
+	// snapshot lands. Opt-in; no-op when disarmed. The terminal report fires
+	// later (after the snapshot paints, or via the idle fallback for
+	// no-session views). See boot-timing.ts.
 	bootMark("first-paint");
-	bootTimingFlush("first-paint");
 	if (bootObserver) {
 		try {
 			bootObserver.disconnect();

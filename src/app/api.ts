@@ -2110,6 +2110,21 @@ export async function requestHarnessRestart(): Promise<{ ok: boolean; error?: st
 	}
 }
 
+/**
+ * POST one boot/reload-timing sample to the harness-gated sink
+ * (`/api/dev/boot-timing` → `<stateDir>/boot-timing.jsonl`). Fire-and-forget;
+ * swallows all errors so diagnostics can never disrupt the app. No-op-safe to
+ * call when the server is not under the harness (returns a 403 we ignore).
+ */
+export async function postBootTiming(sample: unknown): Promise<void> {
+	try {
+		await gatewayFetch("/api/dev/boot-timing", {
+			method: "POST",
+			body: JSON.stringify(sample),
+		});
+	} catch { /* ignore */ }
+}
+
 // ============================================================================
 // SANDBOX STATUS API
 // ============================================================================

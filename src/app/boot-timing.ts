@@ -1,29 +1,75 @@
 // src/app/boot-timing.ts
 //
-// Dev-only boot/reload timing instrumentation. Records `performance.now()`
+// Opt-in boot/reload performance instrumentation. Records `performance.now()`
 // (ms since navigation start / `performance.timeOrigin`) at named boot
-// milestones so we can see, with hard numbers, where a full page reload spends
-// its time: the Vite dev module waterfall, first paint, the WebSocket
-// reconnect, and the `get_state` snapshot replay + re-render.
+// milestones so a full page reload's cost can be measured with hard numbers:
+// the module waterfall, first paint, the WebSocket reconnect, and the
+// `get_state` snapshot replay + re-render.
 //
-// Zero cost in production: every entry point short-circuits unless
-// `globalThis.__BOBBIT_DEV__` is true (stamped by vite.config.ts `define`).
-// Marks are cheap (`performance.now()` + array push); the only console output
-// happens in dev via `bootTimingFlush()`.
+// Gated at runtime by a localStorage flag (`bobbit-perf-instrumentation`),
+// flipped from Settings → "Perf instrumentation" (shown only under the dev
+// harness, next to Restart Server). When armed, the terminal report is logged
+// to the console AND POSTed to `/api/dev/boot-timing`, which appends it to
+// `<stateDir>/boot-timing.jsonl` for agents/tooling to inspect.
 //
-// Read the latest numbers from devtools at any time:
-//   copy(window.__bobbitBootTimings)        // structured
+// When disarmed every entry point is a cheap boolean check + early return, so
+// shipping this in production carries negligible overhead.
+//
+// Inspect the latest sample from devtools at any time:
+//   copy(window.__bobbitBootTimings)
 //   console.table(window.__bobbitBootTimings.rows)
 
-const DEV = (globalThis as { __BOBBIT_DEV__?: boolean }).__BOBBIT_DEV__ === true;
+/** localStorage key mirroring the `devPerfInstrumentation` server preference. */
+export const PERF_INSTRUMENTATION_KEY = "bobbit-perf-instrumentation";
 
 interface Mark { name: string; t: number; }
 
+interface BootMeta {
+	sessionId?: string;
+	transcriptMessages?: number;
+}
+
 const marks: Mark[] = [];
-// Once the initial load/reload sequence is captured we stop recording, so
-// later mid-session reconnects / compaction snapshots don't append to (and
-// distort) the boot table. `window.__bobbitBootTimings` keeps the first run.
-let sealed = false;
+let meta: BootMeta = {};
+// Captured synchronously at module load so the very first reload milestones are
+// recorded when the user enabled the toggle on a prior page (the reload case).
+let armed = readArmed();
+// One terminal report per page load. Guards against the dual triggers
+// (post-snapshot terminal + idle-debounce fallback) double-posting.
+let reported = false;
+let reportTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Idle window after the last mark before we assume boot has settled and report
+// (covers no-session views, where no snapshot milestone ever fires).
+const IDLE_REPORT_MS = 3000;
+
+function readArmed(): boolean {
+	try { return localStorage.getItem(PERF_INSTRUMENTATION_KEY) === "1"; } catch { return false; }
+}
+
+/** True when boot instrumentation is currently armed (localStorage mirror). */
+export function isPerfInstrumentationEnabled(): boolean {
+	return readArmed();
+}
+
+/**
+ * Set the localStorage mirror that arms instrumentation on the NEXT reload.
+ * Called by the Settings toggle (alongside the `devPerfInstrumentation` PUT)
+ * and by preference hydration so a fresh browser reflects the server value.
+ */
+export function setPerfInstrumentationEnabled(on: boolean): void {
+	try {
+		if (on) localStorage.setItem(PERF_INSTRUMENTATION_KEY, "1");
+		else localStorage.removeItem(PERF_INSTRUMENTATION_KEY);
+	} catch { /* private mode — ignore */ }
+	armed = on;
+}
+
+/** Attach metadata to the eventual report (session id, transcript size, …). */
+export function bootTimingMeta(partial: BootMeta): void {
+	if (!armed) return;
+	meta = { ...meta, ...partial };
+}
 
 function buildRows(): Array<Record<string, unknown>> {
 	return marks.map((m, i) => ({
@@ -33,48 +79,66 @@ function buildRows(): Array<Record<string, unknown>> {
 	}));
 }
 
-function publish(reason: string): void {
-	const isReload = (() => {
-		try { return sessionStorage.getItem("bobbit-hot-reload") === "1"; } catch { return false; }
-	})();
-	(window as unknown as { __bobbitBootTimings?: unknown }).__bobbitBootTimings = {
+function buildSample(reason: string): Record<string, unknown> {
+	let isReload = false;
+	try { isReload = sessionStorage.getItem("bobbit-hot-reload") === "1"; } catch { /* ignore */ }
+	const total = marks.length ? Math.round(marks[marks.length - 1].t * 10) / 10 : 0;
+	return {
 		reason,
 		isReload,
-		total_ms: marks.length ? Math.round(marks[marks.length - 1].t * 10) / 10 : 0,
+		total_ms: total,
+		route: typeof location !== "undefined" ? location.hash || location.pathname : undefined,
+		sessionId: meta.sessionId,
+		transcriptMessages: meta.transcriptMessages,
+		buildId: (globalThis as { __BOBBIT_BUILD_ID__?: string }).__BOBBIT_BUILD_ID__,
+		userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+		viewport: typeof window !== "undefined" ? { w: window.innerWidth, h: window.innerHeight } : undefined,
+		clientTs: Date.now(),
 		marks: marks.map((m) => ({ ...m })),
 		rows: buildRows(),
 	};
 }
 
-/** Record a named boot milestone. No-op outside dev or after the run is sealed. */
+function publish(reason: string): Record<string, unknown> {
+	const sample = buildSample(reason);
+	(window as unknown as { __bobbitBootTimings?: unknown }).__bobbitBootTimings = sample;
+	return sample;
+}
+
+function scheduleIdleReport(): void {
+	if (reportTimer) clearTimeout(reportTimer);
+	reportTimer = setTimeout(() => bootTimingReport("idle"), IDLE_REPORT_MS);
+}
+
+/** Record a named boot milestone. No-op when disarmed or already reported. */
 export function bootMark(name: string): void {
-	if (!DEV || sealed || typeof performance === "undefined") return;
+	if (!armed || reported || typeof performance === "undefined") return;
 	marks.push({ name, t: performance.now() });
-	// Keep the window snapshot live so devtools always sees the latest, even
-	// before an explicit flush (the session snapshot lands after first paint).
-	try { publish("live"); } catch { /* window may be unavailable in some contexts */ }
+	publish("live");
+	scheduleIdleReport();
 }
 
 /**
- * Log the current timing table to the console. Safe to call multiple times
- * (e.g. once at first paint for the structural floor, once after the session
- * snapshot replay). No-op outside dev.
+ * Emit the terminal report exactly once: log the table and POST the sample to
+ * the server sink. Idempotent and no-op when disarmed. Called both immediately
+ * after the session snapshot paints (fast path) and via the idle-debounce
+ * fallback (no-session views).
  */
-export function bootTimingFlush(reason: string): void {
-	if (!DEV || typeof performance === "undefined" || marks.length === 0) return;
-	publish(reason);
-	const isReload = (window as unknown as { __bobbitBootTimings?: { isReload?: boolean } }).__bobbitBootTimings?.isReload;
-	const total = Math.round(marks[marks.length - 1].t * 10) / 10;
-	console.log(`[boot-timing] ${reason} — reload=${isReload} total=${total}ms (navigation→last mark)`);
+export function bootTimingReport(reason: string): void {
+	if (!armed || reported || marks.length === 0) return;
+	reported = true;
+	if (reportTimer) { clearTimeout(reportTimer); reportTimer = null; }
+
+	const sample = publish(reason);
+	const isReload = (sample as { isReload?: boolean }).isReload;
+	const total = (sample as { total_ms?: number }).total_ms;
+	console.log(`[boot-timing] ${reason} — reload=${isReload} total=${total}ms (navigation→last mark). Sample: window.__bobbitBootTimings`);
 	(console as { table?: (data: unknown) => void }).table?.(buildRows());
-}
 
-/**
- * Seal the run: stop recording further marks. Called once the initial
- * load/reload sequence is fully captured (after the first session snapshot
- * paints) so mid-session reconnects don't distort the table. No-op outside dev.
- */
-export function bootTimingSeal(): void {
-	if (!DEV) return;
-	sealed = true;
+	// Fire-and-forget POST to the harness-gated sink. Dynamic import avoids a
+	// static dependency cycle (api.ts → state.ts → …) and keeps boot-timing
+	// importable from very early modules.
+	import("./api.js")
+		.then((m) => m.postBootTiming(sample))
+		.catch(() => { /* diagnostics must never break the app */ });
 }
