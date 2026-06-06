@@ -31,6 +31,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 } from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
+import { SessionSecretStore } from "../auth/session-secret.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -648,6 +649,15 @@ export class SessionManager {
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
+	/**
+	 * S1 — per-session capability secret store. Injected into the owning
+	 * session's env as `BOBBIT_SESSION_SECRET` and used by the orchestration
+	 * Children authz to derive the AUTHENTIC caller (replaces the forgeable
+	 * public session-id header). In-memory only, never persisted — see
+	 * `src/server/auth/session-secret.ts`. Always present (constructed inline so
+	 * every spawn/restore/respawn path can inject without a null-check).
+	 */
+	readonly sessionSecretStore: SessionSecretStore = new SessionSecretStore();
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	/**
 	 * Optional inbox nudger. Wired late from `server.ts` boot via
@@ -1109,6 +1119,7 @@ export class SessionManager {
 			projectConfigStore: resolvedProjectConfigStore,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
+			sessionSecretStore: this.sessionSecretStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			costTracker: resolvedCostTracker,
@@ -3362,8 +3373,13 @@ export class SessionManager {
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
-		// Restore env vars needed by extensions
-		bridgeOptions.env = { BOBBIT_SESSION_ID: ps.id };
+		// Restore env vars needed by extensions. The per-session capability
+		// secret (S1) is regenerated here on restore and handed to the
+		// re-spawned agent process — see `session-secret.ts` (restart-safe).
+		bridgeOptions.env = {
+			BOBBIT_SESSION_ID: ps.id,
+			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(ps.id),
+		};
 		this.restoreWalkthroughSubmitEnv(ps, bridgeOptions.env);
 		if (ps.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = ps.goalId;
@@ -4927,7 +4943,10 @@ export class SessionManager {
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
-		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
+		bridgeOptions.env = {
+			BOBBIT_SESSION_ID: id,
+			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
+		};
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
@@ -5282,6 +5301,10 @@ export class SessionManager {
 		if (this.sandboxTokenStore && session.projectId) {
 			this.sandboxTokenStore.removeSession(session.projectId, id);
 		}
+
+		// S1: drop the per-session capability secret so a terminated session's
+		// secret can no longer resolve to an authentic caller.
+		this.sessionSecretStore.remove(id);
 
 		// Clean up sandbox worktree inside the container.
 		// Skip for delegate sessions — they share the parent's worktree and must
@@ -6087,7 +6110,10 @@ export class SessionManager {
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
-			bridgeOptions.env = { BOBBIT_SESSION_ID: id };
+			bridgeOptions.env = {
+				BOBBIT_SESSION_ID: id,
+				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
+			};
 
 			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
 			if (session.sandboxed) {

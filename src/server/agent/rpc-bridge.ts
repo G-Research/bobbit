@@ -534,6 +534,12 @@ export class RpcBridge {
 		if (this.options.env?.BOBBIT_SESSION_ID) {
 			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
 		}
+		// S1: the per-session capability secret reaches the sandboxed agent
+		// process via docker exec -e (NOT the pool container's PID 1 env — so it
+		// never appears in /proc/1/environ). See session-secret.ts.
+		if (this.options.env?.BOBBIT_SESSION_SECRET) {
+			execArgs.push("-e", `BOBBIT_SESSION_SECRET=${this.options.env.BOBBIT_SESSION_SECRET}`);
+		}
 		if (this.options.env?.BOBBIT_GOAL_ID) {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}

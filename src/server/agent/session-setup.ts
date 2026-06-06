@@ -223,6 +223,8 @@ export interface PipelineContext {
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
+	/** S1 — per-session capability secret store (see session-secret.ts). */
+	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	costTracker: CostTracker;
@@ -331,7 +333,14 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
-		env: { BOBBIT_SESSION_ID: plan.id, ...plan.env },
+		// S1: inject the per-session capability secret alongside the session id.
+		// Only this session's process receives its own secret — see
+		// `src/server/auth/session-secret.ts`.
+		env: {
+			BOBBIT_SESSION_ID: plan.id,
+			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),
+			...plan.env,
+		},
 	};
 	if (ctx.agentCliPath) {
 		plan.bridgeOptions.cliPath = ctx.agentCliPath;
@@ -1250,4 +1259,7 @@ export function handleSetupFailure(
 	if (ctx.sandboxTokenStore && plan.projectId) {
 		ctx.sandboxTokenStore.removeSession(plan.projectId, session.id);
 	}
+
+	// 6. S1: drop the per-session capability secret.
+	ctx.sessionSecretStore.remove(session.id);
 }

@@ -4858,7 +4858,11 @@ async function handleApiRoute(
 			const authz = authorizeChildrenMutation({
 				mutationClass: "operator",
 				isHumanOperator: cookieTryAuth(req, cookieStore!),
-				callerSessionId: readHeader("x-bobbit-spawning-session") ?? readHeader("x-bobbit-session-id"),
+				// S1: derive the AUTHENTIC caller from the per-session secret,
+				// never the forgeable public spawning-session header.
+				authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+					readHeader("x-bobbit-session-secret"),
+				),
 				teamLeadSessionId: teamManager.getTeamState(parentId)?.teamLeadSessionId,
 			});
 			if (!authz.ok) {
@@ -7457,6 +7461,12 @@ async function handleApiRoute(
 			json({ error: "No active team for this goal" }, 404);
 			return;
 		}
+		// S1: `teamLeadSessionId` is intentionally exposed here. It is NO LONGER
+		// an authorization credential — orchestration/operator Children authz
+		// binds to the unforgeable per-session `X-Bobbit-Session-Secret` (see
+		// children-mutation-authz.ts + session-secret.ts), so knowing the public
+		// team-lead session id grants nothing without the secret. Consumers rely
+		// on it (the UI, auto-start-team E2E, team-state polling), so we keep it.
 		json(state);
 		return;
 	}

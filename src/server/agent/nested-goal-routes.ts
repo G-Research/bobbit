@@ -199,23 +199,31 @@ export async function tryHandleNestedGoalRoute(
 		cookieStore,
 	} = deps;
 
+	function readReqHeader(name: string): string | undefined {
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const v = h[name.toLowerCase()];
+		const s = Array.isArray(v) ? v[0] : v;
+		return typeof s === "string" && s.trim() ? s.trim() : undefined;
+	}
+
 	/**
-	 * S1: read the caller session id from the spawning-session headers. The
-	 * `children` tool extension always sends `X-Bobbit-Spawning-Session`;
-	 * `X-Bobbit-Session-Id` is accepted as defence in depth. `undefined` means
-	 * no agent header. The human/UI signal is NO LONGER the absence of this
-	 * header (agents share the gateway token and could just omit it) — it is
-	 * the verified `bobbit_session` cookie, computed separately in
-	 * `authorizeTeamLeadOrReject`.
+	 * Read the PUBLIC caller session id from the spawning-session headers. This
+	 * is used ONLY for `spawnedBySessionId` bookkeeping — it is forgeable and is
+	 * NEVER trusted for authorization (see `readAuthenticCallerSessionId`).
 	 */
 	function readCallerSessionId(): string | undefined {
-		const h = req.headers as Record<string, string | string[] | undefined>;
-		const read = (n: string): string | undefined => {
-			const v = h[n.toLowerCase()];
-			const s = Array.isArray(v) ? v[0] : v;
-			return typeof s === "string" && s.trim() ? s.trim() : undefined;
-		};
-		return read("x-bobbit-spawning-session") ?? read("x-bobbit-session-id");
+		return readReqHeader("x-bobbit-spawning-session") ?? readReqHeader("x-bobbit-session-id");
+	}
+
+	/**
+	 * S1: derive the AUTHENTIC caller session id by resolving the per-session
+	 * capability secret (`X-Bobbit-Session-Secret`) server-side. Only the owning
+	 * session's process holds its own secret, so this cannot be forged by
+	 * replaying a public session id. Returns `undefined` for a missing/unknown
+	 * secret — which the authz helper treats as deny.
+	 */
+	function readAuthenticCallerSessionId(): string | undefined {
+		return sessionManager.sessionSecretStore.resolveSessionIdBySecret(readReqHeader("x-bobbit-session-secret"));
 	}
 
 	/**
@@ -226,15 +234,18 @@ export async function tryHandleNestedGoalRoute(
 	 *   - `orchestration` (spawn-child, plan PATCH, integrate-child, policy):
 	 *     team-lead-only. The `bobbit_session` cookie does NOT bypass — it is
 	 *     mintable by any holder of the shared admin Bearer token, so it is a
-	 *     weak human signal. We REQUIRE a spawning-session header matching the
-	 *     authoritative team-lead for `goalIdForTeam`.
+	 *     weak human signal. We REQUIRE the AUTHENTIC caller (resolved from the
+	 *     per-session secret) to match the authoritative team-lead for
+	 *     `goalIdForTeam`.
 	 *   - `operator` (pause, resume, mutation decision, archive-child): the
 	 *     human-in-the-loop verbs the web UI drives. A verified cookie is
-	 *     accepted; otherwise the same team-lead match applies.
+	 *     accepted; otherwise the same authentic team-lead match applies.
 	 *
-	 * The header is never trusted as a bare claim — only compared for equality
-	 * against the TeamManager's team-lead id. A teamless goal has no legitimate
-	 * agent caller (denied for orchestration; operator still allows the cookie).
+	 * The AUTHENTIC caller is derived from the unforgeable `X-Bobbit-Session-
+	 * Secret`, never the public `X-Bobbit-Spawning-Session` header — and is only
+	 * compared for equality against the TeamManager's team-lead id. A teamless
+	 * goal has no legitimate agent caller (denied for orchestration; operator
+	 * still allows the cookie).
 	 *
 	 * Returns `true` when the request may proceed; otherwise writes a 403 and
 	 * returns `false` so the caller should `return true` immediately.
@@ -243,7 +254,7 @@ export async function tryHandleNestedGoalRoute(
 		const result = authorizeChildrenMutation({
 			mutationClass,
 			isHumanOperator: cookieTryAuth(req, cookieStore),
-			callerSessionId: readCallerSessionId(),
+			authenticCallerSessionId: readAuthenticCallerSessionId(),
 			teamLeadSessionId: teamManager.getTeamState(goalIdForTeam)?.teamLeadSessionId,
 		});
 		if (!result.ok) {

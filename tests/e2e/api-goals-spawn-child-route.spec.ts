@@ -125,13 +125,18 @@ async function spawnChildRaw(opts: {
 	const explicit = opts.headers?.["X-Bobbit-Spawning-Session"]
 		?? opts.headers?.["X-Bobbit-Session-Id"];
 	const authzId = (explicit && explicit.trim()) ? explicit.trim() : `e2e-tl-${opts.parentId}`;
-	// Establish the parent's team-lead to match `authzId` (idempotent).
-	const tlHeader = seedTeamLeadHeader(gw.teamManager, opts.parentId, authzId);
+	// Establish the parent's team-lead to match `authzId` and register a
+	// capability secret that resolves to it (idempotent).
+	const tlHeader = seedTeamLeadHeader(gw, opts.parentId, authzId);
+	// S1: authz is keyed off the unforgeable X-Bobbit-Session-Secret, NOT the
+	// public spawning-session header. So we ALWAYS send the secret (it resolves
+	// to `authzId`, which equals the seeded team-lead), while letting the test's
+	// explicit public spawning/session header through verbatim so the
+	// spawnedBy-cascade tier under test is exercised faithfully.
 	const headers = authHeaders({
-		// Only inject the authz header when the test didn't supply its own
-		// spawning/session header — otherwise respect the test's header verbatim
-		// so the spawnedBy-cascade tier under test is exercised faithfully.
-		...(explicit ? {} : tlHeader),
+		// Always inject the public spawning header matching authzId (overridden
+		// below by the test's explicit header, if any) + the auth secret.
+		...tlHeader,
 		...opts.headers,
 	});
 	const resp = await rawApiFetch(`/api/goals/${opts.parentId}/spawn-child`, {
@@ -722,6 +727,94 @@ test.describe("POST /spawn-child spec validation (route-level)", () => {
 			expect(body.id).toBeTruthy();
 			await deleteGoal(body.id);
 		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+});
+
+test.describe("POST /api/goals/:id/spawn-child — S1 capability-secret forgery regression", () => {
+	// The HIGH finding: orchestration trusted the PUBLIC X-Bobbit-Spawning-
+	// Session header, which any token holder could read and replay. These tests
+	// pin that a forged public header is now USELESS without the per-session
+	// secret. The team-lead is seeded with a registered secret; the attacker
+	// replays only the (discoverable) public team-lead id.
+	test("correct public team-lead header but NO secret → 403 (forgery blocked)", async () => {
+		const parent = await createParentGoal();
+		try {
+			// Seed the team-lead + its capability secret, then DISCARD the secret:
+			// the attacker only knows the public team-lead session id.
+			const seeded = seedTeamLeadHeader(gw, parent.id);
+			const publicTeamLeadId = seeded["X-Bobbit-Spawning-Session"];
+			expect(publicTeamLeadId).toBeTruthy();
+
+			const resp = await rawApiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				headers: authHeaders({ "X-Bobbit-Spawning-Session": publicTeamLeadId }),
+				body: JSON.stringify({
+					planId: "forge-1",
+					title: "Forged spawn",
+					spec: "forgery regression: a replayed public team-lead header with no capability secret must be refused server-side.",
+				}),
+			});
+			expect(resp.status).toBe(403);
+			const body = await resp.json();
+			expect(body.code).toBe("NOT_TEAM_LEAD");
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("correct public team-lead header + FOREIGN secret → 403 (mismatch)", async () => {
+		const parent = await createParentGoal();
+		try {
+			const seeded = seedTeamLeadHeader(gw, parent.id);
+			const publicTeamLeadId = seeded["X-Bobbit-Spawning-Session"];
+			// A valid-but-foreign secret resolving to the attacker's OWN session.
+			const foreignSecret = gw.sessionManager.sessionSecretStore.getOrCreateSecret(
+				`attacker-${parent.id}`,
+			);
+
+			const resp = await rawApiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				headers: authHeaders({
+					"X-Bobbit-Spawning-Session": publicTeamLeadId,
+					"X-Bobbit-Session-Secret": foreignSecret,
+				}),
+				body: JSON.stringify({
+					planId: "forge-2",
+					title: "Forged spawn 2",
+					spec: "forgery regression: a foreign capability secret (not the team-lead's) must not authorize spawning despite the replayed public header.",
+				}),
+			});
+			expect(resp.status).toBe(403);
+			const body = await resp.json();
+			expect(body.code).toBe("NOT_TEAM_LEAD");
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("the team-lead's own secret → 201 (authentic caller authorized)", async () => {
+		const parent = await createParentGoal();
+		let childId: string | undefined;
+		try {
+			// Both headers from the seam (public id + matching secret) authorize.
+			const headers = seedTeamLeadHeader(gw, parent.id);
+			const resp = await rawApiFetch(`/api/goals/${parent.id}/spawn-child`, {
+				method: "POST",
+				headers: authHeaders(headers),
+				body: JSON.stringify({
+					planId: "authentic-1",
+					title: "Authentic spawn",
+					spec: "forgery regression positive case: the team-lead's own capability secret resolves to the authentic caller and authorizes spawn-child.",
+				}),
+			});
+			expect(resp.status).toBe(201);
+			const body = await resp.json();
+			expect(body.id).toBeTruthy();
+			childId = body.id;
+		} finally {
+			if (childId) await deleteGoal(childId);
 			await deleteGoal(parent.id);
 		}
 	});

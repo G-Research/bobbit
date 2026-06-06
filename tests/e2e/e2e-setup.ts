@@ -448,18 +448,22 @@ const CHILDREN_MUTATION_PATH =
  * Authorize an ORCHESTRATION-class Children mutation (`spawn-child`, plan
  * `PATCH`, `integrate-child`, `policy`) as the goal's team-lead.
  *
- * The cookie does NOT bypass orchestration authz, so a node test must present
- * an `X-Bobbit-Spawning-Session` header matching the goal's authoritative
- * team-lead. Production establishes the team-lead via `TeamManager.startTeam`
- * (which spawns a real session); in the mock E2E harness we register a minimal
- * team entry directly so tests don't pay that cost. Both E2E harnesses
- * (in-process + gateway) run the gateway in-process and expose
- * `gateway.teamManager`.
+ * S1: orchestration authz no longer trusts the public `X-Bobbit-Spawning-
+ * Session` header — it derives the AUTHENTIC caller by resolving the per-session
+ * `X-Bobbit-Session-Secret` server-side (see `session-secret.ts`). So this seam
+ * does two things: (1) registers a minimal team entry so `getTeamState` returns
+ * the team-lead id, and (2) registers a capability secret in the gateway's
+ * `SessionSecretStore` mapped to that same team-lead id. It returns BOTH headers
+ * — the public spawning-session header (for `spawnedBySessionId` stamping) and
+ * the secret (the actual auth credential). Production establishes the team-lead
+ * via `TeamManager.startTeam` (which spawns a real session and injects its
+ * secret); the mock E2E harness short-circuits both.
  *
- * Returns the header object to spread into the orchestration request, e.g.:
+ * Pass the harness GATEWAY object (which exposes `.teamManager` and
+ * `.sessionManager`), e.g.:
  *
  *   await apiFetch(`/api/goals/${id}/spawn-child`, {
- *     method: "POST", body, headers: seedTeamLeadHeader(gateway.teamManager, id),
+ *     method: "POST", body, headers: seedTeamLeadHeader(gateway, id),
  *   });
  *
  * Idempotent: reuses an already-established team-lead for the goal. Pass an
@@ -467,10 +471,15 @@ const CHILDREN_MUTATION_PATH =
  * team-lead identity.
  */
 export function seedTeamLeadHeader(
-	teamManager: any,
+	gateway: any,
 	goalId: string,
 	sessionId?: string,
 ): Record<string, string> {
+	// Back-compat: callers historically passed `gateway.teamManager`. Accept
+	// either the gateway (preferred — needed to reach the secret store) or a
+	// bare teamManager.
+	const teamManager = gateway?.teamManager ?? gateway;
+	const secretStore = gateway?.sessionManager?.sessionSecretStore ?? gateway?.sessionSecretStore;
 	const existing = teamManager?.getTeamState?.(goalId)?.teamLeadSessionId;
 	const tl = (typeof existing === "string" && existing.trim())
 		? existing.trim()
@@ -486,7 +495,12 @@ export function seedTeamLeadHeader(
 			maxConcurrent: 12,
 		});
 	}
-	return { "X-Bobbit-Spawning-Session": tl };
+	const headers: Record<string, string> = { "X-Bobbit-Spawning-Session": tl };
+	// S1: register + send the capability secret that resolves to the team-lead.
+	if (secretStore?.getOrCreateSecret) {
+		headers["X-Bobbit-Session-Secret"] = secretStore.getOrCreateSecret(tl);
+	}
+	return headers;
 }
 
 /**

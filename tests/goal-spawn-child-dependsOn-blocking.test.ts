@@ -127,6 +127,13 @@ async function makeHarness(): Promise<Harness> {
 		getSession: () => undefined,
 		deliverLiveSteer: async () => {},
 		enqueuePrompt: async () => {},
+		// S1: orchestration authz resolves the per-session secret here. This test
+		// is not exercising authz, so we use an identity-mapping stub (the secret
+		// IS the session id) and send `x-bobbit-session-secret: TEAM_LEAD` below.
+		sessionSecretStore: {
+			resolveSessionIdBySecret: (s: string | null | undefined) =>
+				typeof s === "string" && s.trim() ? s.trim() : undefined,
+		},
 	};
 
 	const verificationHarness: any = {
@@ -159,7 +166,7 @@ async function makeHarness(): Promise<Harness> {
 			json: (body, s) => { status = s ?? 200; payload = body; },
 			jsonError: (s, err, extra) => { status = s; payload = { error: String((err as any)?.message ?? err), ...(extra ?? {}) }; },
 		};
-		const req = { method, headers: { "x-bobbit-spawning-session": TEAM_LEAD }, _body: body } as any as http.IncomingMessage;
+		const req = { method, headers: { "x-bobbit-spawning-session": TEAM_LEAD, "x-bobbit-session-secret": TEAM_LEAD }, _body: body } as any as http.IncomingMessage;
 		const url = new URL(`http://x${pathname}`);
 		const handled = await tryHandleNestedGoalRoute(req, url, localDeps);
 		if (!handled) throw new Error(`route not handled: ${method} ${pathname}`);

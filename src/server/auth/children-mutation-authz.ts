@@ -21,18 +21,35 @@
  *     concurrency policy. They are NEVER issued by the human/UI gateway path
  *     (the web UI only ever calls the OPERATOR verbs — see `src/app/dialogs.ts`
  *     pause/resume and `children-mutation-approval`'s decision POST). We
- *     therefore require a team-lead-matching `X-Bobbit-Spawning-Session`
- *     header and IGNORE the cookie entirely: the cookie does NOT bypass an
- *     orchestration check. A forged cookie can no longer spawn children,
- *     mutate plans, integrate branches, or change policy. Orchestration is
- *     refused on an absent header, a teamless goal, or a header mismatch.
+ *     therefore require the AUTHENTIC caller session (see below) to match the
+ *     goal's team-lead, and IGNORE the cookie entirely: the cookie does NOT
+ *     bypass an orchestration check. A forged cookie can no longer spawn
+ *     children, mutate plans, integrate branches, or change policy.
+ *     Orchestration is refused on a missing/unknown secret, a teamless goal, or
+ *     a non-team-lead caller.
  *
  *   OPERATOR — `pause`, `resume`, mutation `decision`, `archive-child`.
  *     These are the human-in-the-loop verbs the web UI actually drives. A
  *     verified `bobbit_session` cookie is accepted (human/UI gateway call);
- *     otherwise we fall back to the same team-lead-match the orchestration
- *     class uses (so a team-lead agent can also pause/resume/decide/archive
- *     within its own goal).
+ *     otherwise we fall back to the same AUTHENTIC team-lead match the
+ *     orchestration class uses (so a team-lead agent can also
+ *     pause/resume/decide/archive within its own goal).
+ *
+ * The AUTHENTIC caller — per-session capability secret (S1, replaces the
+ * forgeable public header)
+ * ---------------------------------------------------------------------------
+ * The fatal flaw in the original design was trusting `X-Bobbit-Spawning-Session`
+ * — a PUBLIC session id any token holder could read and replay. This authz no
+ * longer trusts that header for AUTHORIZATION at all. Instead the caller's
+ * identity is derived SERVER-SIDE from a per-session secret: every session's
+ * process gets a crypto-random `BOBBIT_SESSION_SECRET` in its env (and ONLY that
+ * process gets its own — see `session-secret.ts` and `docker-args.ts`); the
+ * `children` extension sends it as `X-Bobbit-Session-Secret`; the route resolves
+ * it via `SessionSecretStore.resolveSessionIdBySecret()` to the AUTHENTIC
+ * session id and passes that here as `authenticCallerSessionId`. A caller that
+ * forges the public header but lacks the secret resolves to `undefined` → DENY.
+ * The public `X-Bobbit-Spawning-Session` header survives ONLY for non-auth
+ * bookkeeping (stamping `spawnedBySessionId`).
  *
  * RESIDUAL RISK (documented, accepted, future work)
  * --------------------------------------------------
@@ -46,35 +63,37 @@
  * login session or a per-operator token) that agents never possess. That is
  * out of scope here and tracked as future work — see
  * `docs/design/production-subgoals-port.md`. The orchestration/operator split
- * shrinks the blast radius (orchestration is now agent-team-lead-only and
- * cookie-proof) without claiming to fully isolate the operator surface.
+ * plus the per-session secret shrink the blast radius (orchestration is now
+ * bound to the AUTHENTIC team-lead and is both cookie-proof and header-forge-
+ * proof) without claiming to fully isolate the operator surface.
  *
- * Header handling
- * ---------------
- * The header is NEVER trusted as a bare authorization claim — it is only ever
- * compared for equality against the `TeamManager`'s authoritative team-lead
- * session id for the goal being mutated. A teamless goal has no legitimate
- * agent caller, so a non-cookie caller is denied (orchestration always; the
- * operator class still allows the human cookie).
+ * Authentic-caller handling
+ * --------------------------
+ * `authenticCallerSessionId` is NEVER trusted as a bare authorization claim — it
+ * is only ever compared for equality against the `TeamManager`'s authoritative
+ * team-lead session id for the goal being mutated, AND it is itself derived from
+ * an unforgeable secret. A teamless goal has no legitimate agent caller, so a
+ * non-cookie caller is denied (orchestration always; the operator class still
+ * allows the human cookie).
  *
  * Decision tables
  * ---------------
  *   ORCHESTRATION (cookie does NOT bypass):
- *   | caller header | team-lead known | result                        |
- *   |---------------|-----------------|-------------------------------|
- *   | absent        | —               | DENY  (403, no-caller-header) |
- *   | present       | none            | DENY  (403, no-team-lead)     |
- *   | present       | matches caller  | ALLOW (team-lead-match)       |
- *   | present       | mismatches      | DENY  (403, team-lead-mismatch) |
+ *   | authentic caller | team-lead known | result                          |
+ *   |------------------|-----------------|---------------------------------|
+ *   | none (no secret) | —               | DENY  (403, no-authentic-caller) |
+ *   | resolved         | none            | DENY  (403, no-team-lead)       |
+ *   | resolved         | matches caller  | ALLOW (team-lead-match)         |
+ *   | resolved         | mismatches      | DENY  (403, team-lead-mismatch) |
  *
- *   OPERATOR (human cookie OR team-lead match):
- *   | human cookie | caller header | team-lead known | result                  |
- *   |--------------|---------------|-----------------|-------------------------|
- *   | yes          | —             | —               | ALLOW (human-cookie)    |
- *   | no           | absent        | —               | DENY  (no-caller-header) |
- *   | no           | present       | none            | DENY  (no-team-lead)    |
- *   | no           | present       | matches caller  | ALLOW (team-lead-match) |
- *   | no           | present       | mismatches      | DENY  (team-lead-mismatch) |
+ *   OPERATOR (human cookie OR authentic team-lead match):
+ *   | human cookie | authentic caller | team-lead known | result                   |
+ *   |--------------|------------------|-----------------|--------------------------|
+ *   | yes          | —                | —               | ALLOW (human-cookie)     |
+ *   | no           | none (no secret) | —               | DENY  (no-authentic-caller) |
+ *   | no           | resolved         | none            | DENY  (no-team-lead)     |
+ *   | no           | resolved         | matches caller  | ALLOW (team-lead-match)  |
+ *   | no           | resolved         | mismatches      | DENY  (team-lead-mismatch) |
  */
 
 /**
@@ -102,11 +121,14 @@ export interface ChildrenMutationAuthzInput {
 	 */
 	isHumanOperator: boolean;
 	/**
-	 * Caller session id read from `X-Bobbit-Spawning-Session` (preferred) or
-	 * `X-Bobbit-Session-Id` (defence in depth). `undefined` when neither
-	 * header is present.
+	 * The AUTHENTIC caller session id, derived SERVER-SIDE by resolving the
+	 * per-session `X-Bobbit-Session-Secret` via
+	 * `SessionSecretStore.resolveSessionIdBySecret()`. This is NEVER the public
+	 * `X-Bobbit-Spawning-Session` header (which is forgeable and used only for
+	 * `spawnedBySessionId` bookkeeping). `undefined` when no secret was
+	 * presented or the secret is unknown — which MUST be treated as "deny".
 	 */
-	callerSessionId: string | undefined;
+	authenticCallerSessionId: string | undefined;
 	/**
 	 * Authoritative team-lead session id for the goal being mutated, resolved
 	 * from `TeamManager.getTeamState(goalId)?.teamLeadSessionId`. `null` /
@@ -117,14 +139,14 @@ export interface ChildrenMutationAuthzInput {
 
 export type ChildrenMutationAuthzReason =
 	| "human-cookie"
-	| "no-caller-header"
+	| "no-authentic-caller"
 	| "no-team-lead"
 	| "team-lead-match"
 	| "team-lead-mismatch";
 
 export type ChildrenMutationAuthzResult =
 	| { ok: true; reason: "human-cookie" | "team-lead-match" }
-	| { ok: false; reason: "no-caller-header" | "no-team-lead" | "team-lead-mismatch" };
+	| { ok: false; reason: "no-authentic-caller" | "no-team-lead" | "team-lead-mismatch" };
 
 export function authorizeChildrenMutation(
 	input: ChildrenMutationAuthzInput,
@@ -137,12 +159,12 @@ export function authorizeChildrenMutation(
 	if (input.mutationClass === "operator" && input.isHumanOperator) {
 		return { ok: true, reason: "human-cookie" };
 	}
-	// 2. Every other caller MUST present a spawning-session header. An agent
-	//    that simply omits the header can no longer impersonate the human/UI
-	//    path (the absent-header bypass), and an orchestration caller without a
-	//    header is always denied.
-	const caller = typeof input.callerSessionId === "string" ? input.callerSessionId.trim() : "";
-	if (!caller) return { ok: false, reason: "no-caller-header" };
+	// 2. Every other caller MUST resolve to an AUTHENTIC session via the
+	//    per-session secret. A forged public header without the secret resolves
+	//    to `undefined` here and is denied — it can no longer impersonate the
+	//    human/UI path nor a team-lead.
+	const caller = typeof input.authenticCallerSessionId === "string" ? input.authenticCallerSessionId.trim() : "";
+	if (!caller) return { ok: false, reason: "no-authentic-caller" };
 	// 3. No established team-lead → a teamless goal has no legitimate agent
 	//    caller. DENY every non-cookie caller so a forged header can't drive
 	//    Children mutations on an unrelated teamless goal.
