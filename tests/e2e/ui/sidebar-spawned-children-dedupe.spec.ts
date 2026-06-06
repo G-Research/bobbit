@@ -12,7 +12,7 @@
  * accidental duplicate id produced two visible rows.
  */
 import { test, expect, type Page } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 async function deleteGoalQuiet(id: string): Promise<void> {
@@ -48,14 +48,19 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 	let child1Id = "";
 	let child2Id = "";
 
-	test.beforeEach(async () => {
+	test.beforeEach(async ({ gateway }) => {
 		const projectId = await defaultProjectId();
 		const parent = await createGoal({ title: "Parent of duplicates", projectId, team: false });
 		parentId = parent.id as string;
+		// spawn-child is ORCHESTRATION (cookie does NOT bypass) — authorize as
+		// the parent's team-lead via a seeded matching header (idempotent across
+		// both spawns on the same parent).
+		const tlHeader = seedTeamLeadHeader(gateway.teamManager, parentId);
 		// Two children with IDENTICAL titles — distinct ids. The renderer must
 		// show both (not collapse them into one row).
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
+			headers: tlHeader,
 			body: JSON.stringify({
 				planId: "plan-dup-1",
 				title: "AUDIT: SAME TITLE",
@@ -67,6 +72,7 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 
 		const r2 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
+			headers: tlHeader,
 			body: JSON.stringify({
 				planId: "plan-dup-2",
 				title: "AUDIT: SAME TITLE",
