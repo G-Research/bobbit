@@ -4726,20 +4726,30 @@ async function handleApiRoute(
 			json(goal, 201);
 
 			// Fire-and-forget async worktree setup (and optionally start team)
-			if (goal.setupStatus === "preparing") {
-				if (goal.autoStartTeam && parentGoalId) {
-					// Finding 2 — a child goal auto-start must go through the
-					// unified per-root scheduler so the concurrency cap applies to
-					// the `POST /api/goals` child path too (previously it started
-					// the team with NO permit). At cap the child is parked
-					// `state='blocked'` (capacity-blocked) and started later when a
-					// permit frees; the scheduler handles setup + broadcasts.
+			if (goal.autoStartTeam && parentGoalId) {
+				// Finding 2 — a child goal auto-start must go through the
+				// unified per-root scheduler so the concurrency cap applies to
+				// the `POST /api/goals` child path too (previously it started
+				// the team with NO permit). At cap the child is parked
+				// `state='blocked'` (capacity-blocked) and started later when a
+				// permit frees; the scheduler handles setup + broadcasts.
+				//
+				// Guard is `state !== "blocked"` (NOT `setupStatus ===
+				// "preparing"`): a data-only / non-git child is created with
+				// `setupStatus === "ready"` (no worktree), so gating on
+				// "preparing" silently skipped the start and its team never ran.
+				// `requestChildStart` → `_startScheduledChildTeam` handles both
+				// "preparing" (setup + start) and "ready" (start-only). A blocked
+				// child (deps unmet) is not started here — it starts on unblock.
+				if (goal.state !== "blocked") {
 					const outcome = verificationHarness.requestChildStart(goal.id);
 					if (outcome === "capacity-blocked") {
 						targetGoalManager.updateGoal(goal.id, { state: "blocked" });
 						broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
 					}
-				} else if (goal.autoStartTeam) {
+				}
+			} else if (goal.setupStatus === "preparing") {
+				if (goal.autoStartTeam) {
 					targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
 						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
 					}).catch((err) => {
