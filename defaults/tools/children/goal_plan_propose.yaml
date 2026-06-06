@@ -10,7 +10,7 @@ docs: |-
 
   **Workflow-type behaviour:**
   - **Parent workflow (has `execution` gate):** steps are stored in `execution.verify[]` and go through the mutation classifier (`noop`, `fix-up`, `expansion`, `restructure`, `criteria-drop`). Changing `dependsOn` on an existing step is classified as `restructure`.
-  - **Non-parent workflow (no `execution` gate):** falls back to `spawn-children-direct` — each step is spawned via `goal_spawn_child` (idempotent on planId). `dependsOn` is enforced via **auto-pause**: children with unresolved deps are created paused and auto-resume when their last dep merges. Response includes `warning: "degraded-execution: ..."`, `blockedCount`, and `blockedPlanIds` when any step has `dependsOn`. Steps are spawned in topological order to prevent `UNKNOWN_PLAN_ID` errors on valid unordered DAGs. Pass `fallback: "spawn-children-direct"` to opt in to this path explicitly.
+  - **Non-parent workflow (no `execution` gate):** falls back to `spawn-children-direct` — each step is spawned via `goal_spawn_child` (idempotent on planId). `dependsOn` is enforced via **dependency-blocking**: children with unresolved deps are created in `state: "blocked"` (a scheduler-managed state, distinct from operator `paused`) and auto-start when their last dep merges into the parent. Response includes `warning: "degraded-execution: ..."`, `blockedCount`, and `blockedPlanIds` when any step has `dependsOn`. Steps are spawned in topological order to prevent `UNKNOWN_PLAN_ID` errors on valid unordered DAGs. Pass `fallback: "spawn-children-direct"` to opt in to this path explicitly.
 detail_docs: >-
   ## Purpose
 
@@ -46,12 +46,13 @@ detail_docs: >-
 
   When the goal has no `execution` gate, `goal_plan_propose` falls back
   to spawning each step directly. `dependsOn` is still enforced: children
-  with unresolved deps are created `paused: true` and automatically
-  unpaused when their last dependency merges into the parent. Steps are
-  sorted topologically before spawning. The response includes:
+  with unresolved deps are created in `state: "blocked"` (scheduler-managed,
+  distinct from operator `paused`) and auto-start when their last dependency
+  merges into the parent. Steps are sorted topologically before spawning.
+  The response includes:
   - `warning: "degraded-execution: ..."` — present when any step has `dependsOn`
-  - `blockedCount` — number of children created paused
-  - `blockedPlanIds` — planIds of the paused children
+  - `blockedCount` — number of children created blocked
+  - `blockedPlanIds` — planIds of the blocked children
   - `spawned[].blocked: true` / `pendingDeps` — per-step blocked status
 
 
