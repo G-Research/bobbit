@@ -85,6 +85,41 @@ test.describe("Plan tab — per-node gate status + merge/conflict", () => {
 			.toBeVisible({ timeout: 5_000 });
 	});
 
+	test("LIVE (non-archived) child node also surfaces gate-status from descendant enrichment", async ({ page }) => {
+		// Spawn a second, NON-archived child. Live children flow through
+		// state.goals, which never carries the enrichment fields — they must
+		// be carried across from the /descendants copy in dashboardGoalPool().
+		const r2 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
+			method: "POST",
+			body: JSON.stringify({ planId: "p2", title: "Live Child B", spec: "live child b spec: plan-tab gate-status UI test, padded to satisfy the spec validator minimum length requirement." }),
+		});
+		expect(r2.status).toBe(201);
+		const liveChildId = (await r2.json()).id as string;
+
+		// Inject onto the live child's /descendants copy only.
+		await page.route(/\/api\/goals\/[^/]+\/descendants(?:\?.*)?$/, async (route, req) => {
+			if (req.method() !== "GET") return route.fallback();
+			const resp = await route.fetch();
+			const body = await resp.json() as { goals?: Array<{ id: string; [k: string]: unknown }> };
+			for (const g of body.goals ?? []) {
+				if (g.id === liveChildId) Object.assign(g, { gateStatus: "passed", mergeConflict: false });
+			}
+			await route.fulfill({ response: resp, json: body });
+		});
+
+		await openApp(page);
+		await navigateToHash(page, `#/goal/${parentId}`);
+		await page.locator('[data-testid="tab-plan"]').first().click();
+		await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 5_000 });
+
+		const liveNode = page.locator(`[data-testid="plan-node"][data-child-goal-id="${liveChildId}"]`).first();
+		await expect(liveNode).toBeVisible({ timeout: 10_000 });
+		await expect(liveNode).toHaveAttribute("data-plan-gate-status", "passed");
+		await expect(liveNode).toHaveAttribute("data-archived", "false");
+		await expect(page.locator('[data-testid="plan-node-gate-dot"][data-gate-status="passed"]').first())
+			.toBeVisible({ timeout: 5_000 });
+	});
+
 	test("running gate shows dot but no conflict pill, persists across reload", async ({ page }) => {
 		await injectChildFields(page, { gateStatus: "running", mergeConflict: false });
 

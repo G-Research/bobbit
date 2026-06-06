@@ -125,6 +125,12 @@ export interface Goal {
 	spawnedBySessionId?: string;
 	paused?: boolean;
 	replanCount?: number;
+	/** Plan-tab enrichment (Phase 5c). Sourced ONLY from `GET /descendants`
+	 *  (`enrichDescendantsForPlan`), never from the live goal feed. Carried
+	 *  onto pooled goals by `dashboardGoalPool()` so both live and archived
+	 *  nodes can render gate status / conflict pills. */
+	gateStatus?: "pending" | "running" | "passed" | "failed";
+	mergeConflict?: boolean;
 	workflow?: {
 		id: string;
 		name: string;
