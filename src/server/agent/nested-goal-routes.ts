@@ -69,6 +69,89 @@ export interface NestedGoalRouteDeps {
 }
 
 /**
+ * Sec-2: request-size caps for the plan/spawn endpoints. These bound the
+ * memory/CPU a single PATCH /plan or spawn-child body can consume — a huge
+ * `proposedSteps[]`, an oversized spec, or a giant inline workflow/roles
+ * blob is rejected with a clear 400 BEFORE any classification or persistence
+ * work runs. Enforcement is authoritative server-side; the limits are
+ * deliberately generous so legitimate plans are never blocked.
+ */
+export const MAX_PROPOSED_STEPS = 100;
+/** Upper bound on a single spec string (sibling of SPEC_TOO_SHORT's MIN). */
+export const MAX_SPEC_LENGTH = 20_000;
+/** Upper bound on a serialized inline workflow or roles blob. */
+export const MAX_INLINE_JSON_BYTES = 256 * 1024;
+
+export type PlanSizeResult =
+	| { ok: true }
+	| { ok: false; code: string; error: string; limit: number; actual: number };
+
+/** Cap the PATCH /plan body: step count and per-step spec length. */
+export function checkPlanRequestSize(proposedSteps: unknown[]): PlanSizeResult {
+	if (proposedSteps.length > MAX_PROPOSED_STEPS) {
+		return {
+			ok: false,
+			code: "PLAN_TOO_LARGE",
+			error: `proposedSteps[] exceeds the maximum of ${MAX_PROPOSED_STEPS} steps (got ${proposedSteps.length})`,
+			limit: MAX_PROPOSED_STEPS,
+			actual: proposedSteps.length,
+		};
+	}
+	for (let i = 0; i < proposedSteps.length; i++) {
+		const s = proposedSteps[i] as { spec?: unknown; subgoal?: { spec?: unknown } } | null;
+		const topSpec = typeof s?.spec === "string" ? s.spec : "";
+		const subSpec = typeof s?.subgoal?.spec === "string" ? (s!.subgoal!.spec as string) : "";
+		const specLen = Math.max(topSpec.length, subSpec.length);
+		if (specLen > MAX_SPEC_LENGTH) {
+			return {
+				ok: false,
+				code: "SPEC_TOO_LONG",
+				error: `proposedSteps[${i}] spec exceeds the maximum length of ${MAX_SPEC_LENGTH} characters (got ${specLen})`,
+				limit: MAX_SPEC_LENGTH,
+				actual: specLen,
+			};
+		}
+	}
+	return { ok: true };
+}
+
+/** Cap a single spec string (spawn-child path). */
+export function checkSpecSize(spec: string): PlanSizeResult {
+	if (spec.length > MAX_SPEC_LENGTH) {
+		return {
+			ok: false,
+			code: "SPEC_TOO_LONG",
+			error: `spec exceeds the maximum length of ${MAX_SPEC_LENGTH} characters (got ${spec.length})`,
+			limit: MAX_SPEC_LENGTH,
+			actual: spec.length,
+		};
+	}
+	return { ok: true };
+}
+
+/** Cap a serialized inline workflow/roles blob (spawn-child path). */
+export function checkInlineJsonSize(value: unknown, kind: "workflow" | "roles"): PlanSizeResult {
+	if (value === undefined || value === null) return { ok: true };
+	const code = kind === "workflow" ? "WORKFLOW_TOO_LARGE" : "ROLES_TOO_LARGE";
+	let bytes: number;
+	try {
+		bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+	} catch {
+		return { ok: false, code, error: `inline ${kind} is not JSON-serializable`, limit: MAX_INLINE_JSON_BYTES, actual: -1 };
+	}
+	if (bytes > MAX_INLINE_JSON_BYTES) {
+		return {
+			ok: false,
+			code,
+			error: `inline ${kind} exceeds the maximum size of ${MAX_INLINE_JSON_BYTES} bytes (got ${bytes})`,
+			limit: MAX_INLINE_JSON_BYTES,
+			actual: bytes,
+		};
+	}
+	return { ok: true };
+}
+
+/**
  * BFS-walk descendants of a goal via `parentGoalId`. Used by both the
  * Phase-4 cascade routes and the legacy DELETE handler in server.ts —
  * exported so server.ts can call it directly without going through the
@@ -225,7 +308,32 @@ export async function tryHandleNestedGoalRoute(
 		return count;
 	}
 
-
+	/**
+	 * Gov-1: increment a goal's replanCount and trip the replan-overflow
+	 * safety circuit when it crosses the threshold. SINGLE source of truth
+	 * shared by BOTH the direct fix-up apply path (balanced/autonomous) and
+	 * the approval-applied path so they have identical semantics — previously
+	 * the direct path only bumped replanCount and skipped the auto-pause.
+	 *
+	 * Auto-pause routes through `executePauseForGoals` (the canonical pause
+	 * entry point) when `newReplanCount > 5 && !goal.paused`. The goal record
+	 * is re-read so the pause cascade sees current state. `callerSessionId`
+	 * excludes the triggering agent's own session from the cascade-abort loop.
+	 */
+	async function applyReplanAndMaybeAutopause(
+		goal: PersistedGoal,
+		goalManager: GoalManager,
+		callerSessionId: string | undefined,
+	): Promise<{ newReplanCount: number; autoPaused: boolean }> {
+		const newReplanCount = (goal.replanCount ?? 0) + 1;
+		await goalManager.updateGoal(goal.id, { replanCount: newReplanCount });
+		const autoPaused = newReplanCount > 5 && !goal.paused;
+		if (autoPaused) {
+			const goalRecord = getGoalAcrossProjects(goal.id);
+			if (goalRecord) await executePauseForGoals([goalRecord], callerSessionId);
+		}
+		return { newReplanCount, autoPaused };
+	}
 
 	/**
 	 * Apply a (validated) plan replacement to a parent-workflow goal.
@@ -341,6 +449,13 @@ export async function tryHandleNestedGoalRoute(
 			}, 400);
 			return true;
 		}
+		// Sec-2: reject oversized request bodies BEFORE any spawn work runs.
+		const specSize = checkSpecSize(spec);
+		if (!specSize.ok) { json({ error: specSize.error, code: specSize.code, limit: specSize.limit, actual: specSize.actual }, 400); return true; }
+		const wfSize = checkInlineJsonSize((body as { workflow?: unknown }).workflow, "workflow");
+		if (!wfSize.ok) { json({ error: wfSize.error, code: wfSize.code, limit: wfSize.limit, actual: wfSize.actual }, 400); return true; }
+		const rolesSize = checkInlineJsonSize((body as { inlineRoles?: unknown }).inlineRoles, "roles");
+		if (!rolesSize.ok) { json({ error: rolesSize.error, code: rolesSize.code, limit: rolesSize.limit, actual: rolesSize.actual }, 400); return true; }
 		// Optional explicit dependsOn (sibling planIds this child depends on).
 		let dependsOn: string[] | undefined;
 		if (Array.isArray((body as { dependsOn?: unknown }).dependsOn)) {
@@ -611,6 +726,13 @@ export async function tryHandleNestedGoalRoute(
 			json({ error: "proposedSteps[] is required" }, 400);
 			return true;
 		}
+		// Sec-2: cap request size (step count + per-step spec length) BEFORE the
+		// per-step shape validation, classification, or persistence runs.
+		const planSize = checkPlanRequestSize(body.proposedSteps);
+		if (!planSize.ok) {
+			json({ error: planSize.error, code: planSize.code, limit: planSize.limit, actual: planSize.actual }, 400);
+			return true;
+		}
 		// R-015: validate each proposed step's shape so a malformed item
 		// surfaces as a precise 400 rather than a confusing 409 RESTRUCTURE.
 		for (let i = 0; i < body.proposedSteps.length; i++) {
@@ -712,8 +834,14 @@ export async function tryHandleNestedGoalRoute(
 		if (verdict.kind === "fix-up" && (policy === "balanced" || policy === "autonomous")) {
 			try {
 				await applyPlanSteps(goal, proposedSteps, goalManager);
-				await goalManager.updateGoal(goal.id, { replanCount: (goal.replanCount ?? 0) + 1 });
-				json({ kind: verdict.kind, summary: verdict.summary, applied: true });
+				// Gov-1: bump replanCount AND trip the replan-overflow auto-pause
+				// via the SAME shared helper the approval path uses. Previously
+				// this direct path only incremented replanCount and silently
+				// skipped the `replanCount > 5` auto-pause.
+				const { newReplanCount, autoPaused } = await applyReplanAndMaybeAutopause(
+					goal, goalManager, readCallerSessionId(),
+				);
+				json({ kind: verdict.kind, summary: verdict.summary, applied: true, replanCount: newReplanCount, autoPaused });
 			} catch (err) {
 				jsonError(500, err);
 			}
@@ -1073,32 +1201,14 @@ export async function tryHandleNestedGoalRoute(
 		// approve: apply the proposed steps and bump replanCount.
 		try {
 			await applyPlanSteps(goal, pending.proposedSteps, goalManager);
-			const newReplanCount = (goal.replanCount ?? 0) + 1;
-			const updates: { replanCount: number } = { replanCount: newReplanCount };
-			await goalManager.updateGoal(goal.id, updates);
-			// Replan-overflow safety circuit: pause the goal after too many
-			// replans via the same mechanism as POST /pause — operator-style
-			// pause that is sticky and cleared only by goal_resume. This mirrors
-			// the loop body in the REST pause handler (paused: true +
-			// cancelAllVerifications + goal_state_changed broadcast) so that
-			// goal.paused has exactly TWO writers: this path and the REST handler.
-			const autoPaused = newReplanCount > 5 && !goal.paused;
-			if (autoPaused) {
-				// Route through executePauseForGoals — the canonical entry point
-				// for all pause operations, same as the REST POST /pause handler.
-				// Read the caller session from headers so the cascade-abort loop
-				// excludes the agent that triggered this mutation decision (same
-				// pattern as the REST pause handler's caller-exclusion, Issue 6).
-				const mutHdrs = req.headers as Record<string, string | string[] | undefined>;
-				const readMutHdr = (n: string): string | undefined => {
-					const v = mutHdrs[n.toLowerCase()];
-					const s = Array.isArray(v) ? v[0] : v;
-					return typeof s === "string" && s.trim() ? s.trim() : undefined;
-				};
-				const mutCallerSession = readMutHdr("x-bobbit-spawning-session") ?? readMutHdr("x-bobbit-session-id");
-				const goalRecord = getGoalAcrossProjects(goalId);
-				if (goalRecord) await executePauseForGoals([goalRecord], mutCallerSession);
-			}
+			// Gov-1: bump replanCount AND trip the replan-overflow auto-pause
+			// via the SAME shared helper the direct fix-up path uses, so both
+			// paths have identical semantics. The helper routes the pause
+			// through executePauseForGoals (canonical entry point) and excludes
+			// the triggering agent's own session from the cascade-abort loop.
+			const { newReplanCount, autoPaused } = await applyReplanAndMaybeAutopause(
+				goal, goalManager, readCallerSessionId(),
+			);
 			planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
 			// Cross-team propagation: when a child goal is auto-paused,

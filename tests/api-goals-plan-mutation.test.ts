@@ -27,6 +27,8 @@ import path from "node:path";
 
 import { classifyMutation, type ClassifierPlanStep, type MutationKind } from "../src/server/agent/plan-mutation.ts";
 import { PlanMutationStore, DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "../src/server/agent/plan-mutation-store.ts";
+import { tryHandleNestedGoalRoute } from "../src/server/agent/nested-goal-routes.ts";
+import { CookieStore } from "../src/server/auth/cookie.ts";
 import { randomUUID } from "node:crypto";
 
 let tmpRoot: string;
@@ -191,5 +193,127 @@ describe("plan-mutation decision matrix", () => {
 		// Mirror approve:
 		assert.equal(store.remove("g1", reqId), true);
 		assert.equal(store.get("g1", reqId), undefined);
+	});
+});
+
+/**
+ * Gov-1 regression — direct fix-up replans must trip the SAME replan-overflow
+ * auto-pause as the approval path. Previously the balanced/autonomous direct
+ * apply only bumped replanCount and skipped the `replanCount > 5` auto-pause.
+ *
+ * These drive the REAL `tryHandleNestedGoalRoute` PATCH /plan handler with
+ * mocked deps so the test catches a regression in the shared-helper wiring,
+ * not just the decision matrix.
+ *
+ * Auth: the goal has a team-lead (teamManager.getTeamState → teamLeadSessionId)
+ * and the request carries a matching `X-Bobbit-Spawning-Session` header, so the
+ * call authenticates legitimately as the goal's team-lead regardless of any
+ * concurrent authz tightening (no cookie / human path relied upon).
+ */
+describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
+	const TEAM_LEAD = "tl-session-abc";
+
+	function buildGoal(replanCount: number): any {
+		const goalId = "g-" + randomUUID().slice(0, 8);
+		return {
+			id: goalId,
+			rootGoalId: goalId,
+			workflowId: "parent",
+			spec: "",
+			acceptanceCriteria: [],
+			divergencePolicy: "balanced",
+			paused: false,
+			replanCount,
+			workflow: {
+				id: "parent",
+				gates: [
+					{
+						id: "execution",
+						verify: [
+							{ name: "s-a", type: "subgoal", phase: 1, subgoal: { planId: "a", title: "t-a", spec: "spec-a" } },
+						],
+					},
+				],
+			},
+		};
+	}
+
+	async function patchPlanFixup(
+		goal: any,
+		callerHeader: string | undefined,
+	): Promise<{ responses: { body: any; status: number }[] }> {
+		const goalManager: any = {
+			updateGoal: async (_id: string, partial: any) => { Object.assign(goal, partial); },
+			getGoalStore: () => ({ update: (_id: string, partial: any) => { Object.assign(goal, partial); } }),
+		};
+		const ctx: any = {
+			goalStore: { get: () => goal, getAll: () => [goal] },
+			planMutationStore: new PlanMutationStore(stateDir),
+			goalManager,
+			gateStore: { getGate: () => ({ status: "pending" }) },
+			workflowStore: {},
+		};
+		const responses: { body: any; status: number }[] = [];
+		const deps: any = {
+			projectContextManager: { getContextForGoal: () => ctx },
+			verificationHarness: {
+				getActiveVerifications: () => [],
+				cancelStaleVerifications: async () => {},
+				resolvePlanStepChild: () => ({}),
+			},
+			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
+			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {} },
+			cookieStore: new CookieStore(stateDir),
+			requireSubgoalsEnabled: () => true,
+			getGoalAcrossProjects: () => goal,
+			getGoalManagerForGoal: () => goalManager,
+			readBody: async () => ({ proposedSteps: [step("a", 1), step("b", 1)] }),
+			json: (body: any, status = 200) => { responses.push({ body, status }); },
+			jsonError: (status: number, err: unknown) => { responses.push({ body: { error: String(err) }, status }); },
+			broadcastToAll: () => {},
+			getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 3 }),
+		};
+		const req: any = {
+			method: "PATCH",
+			headers: callerHeader ? { "x-bobbit-spawning-session": callerHeader } : {},
+		};
+		const url = new URL(`http://x/api/goals/${goal.id}/plan`);
+		const handled = await tryHandleNestedGoalRoute(req, url, deps);
+		assert.equal(handled, true);
+		return { responses };
+	}
+
+	it("balanced fix-up at replanCount===5 → replanCount 6 AND goal paused", async () => {
+		const goal = buildGoal(5);
+		const { responses } = await patchPlanFixup(goal, TEAM_LEAD);
+		const last = responses.at(-1)!;
+		assert.equal(last.status, 200);
+		assert.equal(last.body.kind, "fix-up");
+		assert.equal(last.body.applied, true);
+		assert.equal(last.body.replanCount, 6);
+		assert.equal(last.body.autoPaused, true);
+		assert.equal(goal.replanCount, 6);
+		assert.equal(goal.paused, true);
+	});
+
+	it("balanced fix-up at replanCount===4 → replanCount 5, NOT paused", async () => {
+		const goal = buildGoal(4);
+		const { responses } = await patchPlanFixup(goal, TEAM_LEAD);
+		const last = responses.at(-1)!;
+		assert.equal(last.status, 200);
+		assert.equal(last.body.replanCount, 5);
+		assert.equal(last.body.autoPaused, false);
+		assert.equal(goal.replanCount, 5);
+		assert.equal(goal.paused, false);
+	});
+
+	it("non-team-lead caller (wrong header) is rejected 403 — no replan applied", async () => {
+		const goal = buildGoal(5);
+		const { responses } = await patchPlanFixup(goal, "not-the-team-lead");
+		const last = responses.at(-1)!;
+		assert.equal(last.status, 403);
+		assert.equal(last.body.code, "NOT_TEAM_LEAD");
+		assert.equal(goal.replanCount, 5);
+		assert.equal(goal.paused, false);
 	});
 });
