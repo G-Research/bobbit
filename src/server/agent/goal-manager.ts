@@ -825,6 +825,8 @@ export class GoalManager {
 		acceptanceCriteria?: string[];
 		suggestedRole?: string;
 		spawnedBySessionId?: string;
+		/** Durable merge-conflict flag for child goals (Plan-tab data contract). */
+		mergeConflict?: boolean;
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;

@@ -27,13 +27,15 @@
 export type DependsOnErrorCode =
 	| "SELF_DEPENDENCY"
 	| "UNKNOWN_PLAN_ID"
-	| "DEPENDS_ON_CYCLE";
+	| "DEPENDS_ON_CYCLE"
+	| "DUPLICATE_PLAN_ID";
 
 export type DependsOnValidationResult =
 	| { ok: true }
 	| { ok: false; code: "SELF_DEPENDENCY"; planId: string }
 	| { ok: false; code: "UNKNOWN_PLAN_ID"; missing: string[] }
-	| { ok: false; code: "DEPENDS_ON_CYCLE"; path: string[] };
+	| { ok: false; code: "DEPENDS_ON_CYCLE"; path: string[] }
+	| { ok: false; code: "DUPLICATE_PLAN_ID"; planId: string };
 
 export interface ValidateDependsOnInput {
 	/** planId of the step being spawned/added. */
@@ -75,17 +77,28 @@ export interface DependsOnStep {
 
 /**
  * Validate a full proposed plan — used at PATCH /plan time. Detects:
- *   1. self-deps (a step referencing its own planId in `dependsOn`),
- *   2. unknown planId references (deps pointing at non-existent steps),
- *   3. cycles, via Kahn's algorithm.
+ *   1. duplicate planIds (two steps sharing one planId corrupts the DAG and
+ *      child idempotency — must be rejected, not silently collapsed),
+ *   2. self-deps (a step referencing its own planId in `dependsOn`),
+ *   3. unknown planId references (deps pointing at non-existent steps),
+ *   4. cycles, via Kahn's algorithm.
  *
  * On the first error encountered, returns the error variant. Reports the
  * cycle path (a representative cycle) as the list of remaining planIds when
  * Kahn's terminates with non-empty in-degree map.
  */
 export function validatePlanDependsOn(steps: DependsOnStep[]): DependsOnValidationResult {
+	// 0. duplicate planIds — reject rather than collapse into a Set. Two steps
+	// with the same planId would overwrite each other in the adjacency/in-degree
+	// maps below, corrupting the DAG and breaking child idempotency keyed on
+	// `spawnedFromPlanId`.
 	const planIds = new Set<string>();
-	for (const s of steps) planIds.add(s.planId);
+	for (const s of steps) {
+		if (planIds.has(s.planId)) {
+			return { ok: false, code: "DUPLICATE_PLAN_ID", planId: s.planId };
+		}
+		planIds.add(s.planId);
+	}
 
 	// 1. self-deps + unknown refs
 	const missing: string[] = [];
