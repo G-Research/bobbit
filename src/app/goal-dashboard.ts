@@ -306,14 +306,33 @@ async function fetchDashboardDescendants(goalId: string): Promise<void> {
 
 /**
  * Merged goals pool used by Plan-tab compute paths. `state.goals` is
- * authoritative for live goals; `dashboardDescendants` brings in archived
- * descendants (and any live ones the hot poll may have missed). Dedupe
- * by id, prefer state.goals (freshest).
+ * authoritative for live goals' lifecycle; `dashboardDescendants` brings in
+ * archived descendants (and any live ones the hot poll may have missed).
+ * Dedupe by id, prefer state.goals (freshest lifecycle).
+ *
+ * The Plan-tab enrichment fields (`gateStatus` / `mergeConflict`) are
+ * produced ONLY by the `/descendants` endpoint (`enrichDescendantsForPlan`)
+ * — `state.goals` never carries them. So even when we keep the state.goals
+ * copy (live source of truth), we MUST carry the enrichment fields across
+ * from the matching `/descendants` copy, or per-node gate status / conflict
+ * pills silently drop for live AND archived children. (Pre-fix this only
+ * worked for archived children that had fallen out of state.goals.)
  */
 function dashboardGoalPool(): Goal[] {
+	const enrichedById = new Map<string, Goal>();
+	for (const g of dashboardDescendants) enrichedById.set(g.id, g);
+
 	const seen = new Set<string>();
 	const out: Goal[] = [];
-	for (const g of state.goals) { seen.add(g.id); out.push(g); }
+	for (const g of state.goals) {
+		seen.add(g.id);
+		const enriched = enrichedById.get(g.id);
+		if (enriched && (enriched.gateStatus !== undefined || enriched.mergeConflict !== undefined)) {
+			out.push({ ...g, gateStatus: enriched.gateStatus, mergeConflict: enriched.mergeConflict });
+		} else {
+			out.push(g);
+		}
+	}
 	for (const g of dashboardDescendants) {
 		if (!seen.has(g.id)) { seen.add(g.id); out.push(g); }
 	}
