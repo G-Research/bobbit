@@ -37,3 +37,32 @@ export function requireGoalNotPaused(
 	const g = lookup(goalId);
 	if (g?.paused) throw new GoalPausedError(goalId);
 }
+
+/**
+ * Walk `goalId` and its `parentGoalId` ancestor chain; throw
+ * `GoalPausedError(<first paused id>)` if any goal in the chain (the goal
+ * itself or any ancestor) is paused. A bounded, cycle-guarded walk (cap 64,
+ * mirroring `nestingDepth`) so a corrupt parent chain can never loop.
+ *
+ * Used by the child-creation spawn paths (`POST /api/goals` with
+ * `parentGoalId`) so the pause guarantee covers the whole ancestor chain — a
+ * paused grandparent must block a new descendant even when the direct parent
+ * is not itself flagged paused. A missing goal terminates the walk (the
+ * caller's own existence check runs first).
+ */
+export function requireAncestorsNotPaused(
+	goalId: string,
+	lookup: (id: string) => { paused?: boolean; parentGoalId?: string } | undefined,
+): void {
+	const seen = new Set<string>();
+	let curId: string | undefined = goalId;
+	let hops = 0;
+	while (curId && !seen.has(curId) && hops < 64) {
+		seen.add(curId);
+		const g = lookup(curId);
+		if (!g) break;
+		if (g.paused) throw new GoalPausedError(curId);
+		curId = g.parentGoalId;
+		hops++;
+	}
+}

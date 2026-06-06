@@ -181,6 +181,18 @@ Port all `tests/**` named in #497 except `*lsp*`/`tests/lsp/**`/
 - Children merge locally into parent branch (`git merge --no-ff`); only root
   raises a PR; conflicts `git merge --abort` + preserve child.
 - Per-root concurrency semaphore (default 3, floor 1, max 8) is the scheduler.
+  The shared `ChildTeamScheduler` (`child-team-scheduler.ts`, owned by the
+  harness, reached by the REST routes via `verificationHarness.requestChildStart`
+  / `notifyChildTerminal`) is the SINGLE authority for ALL child-team starts —
+  harness `runSubgoalStep`, REST `spawn-child`, `POST /api/goals` child
+  creation, and `integrate-child` dependency auto-unblock. At cap a child is
+  created/parked `state='blocked'` (capacity-blocked) and enqueued FIFO; a
+  terminal event (merge/archive/completion) releases the permit and starts the
+  next eligible child (no poll loop). `POST /api/goals` with `parentGoalId` is
+  refused with `409 GOAL_PAUSED` when the parent or any paused ancestor is
+  paused (`requireAncestorsNotPaused`). Harness Tier-3 existing-child handling
+  is state-aware: `blocked`→release/wait/reacquire, `todo`/awaiting→start under
+  the permit, `in-progress`→wait.
 - Plan mutation classifier (`noop`/`fix-up`/`expansion`/`restructure`/
   `criteria-drop`); criteria-drop always rejected; divergence policy matrix
   (`strict`/`balanced`/`autonomous`); `replanCount > 5` auto-pauses.

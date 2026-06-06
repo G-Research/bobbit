@@ -62,6 +62,7 @@ import {
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
+import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
@@ -861,10 +862,15 @@ export class VerificationHarness {
 	private commandSemaphore = new Semaphore(4);
 
 	/**
-	 * Per-rootGoalId concurrency caps for `runSubgoalStep` (one semaphore
-	 * per tree, lazy-created via `resolveRootMaxConcurrentChildren`).
+	 * Unified per-root child-team scheduler — THE single authority for the
+	 * per-tree concurrency cap across ALL child-team start paths (harness
+	 * `runSubgoalStep`, REST `spawn-child`, `POST /api/goals` child creation,
+	 * and `integrate-child` dependency auto-unblock). Owns the per-rootGoalId
+	 * semaphores (lazy-created via `resolveRootMaxConcurrentChildren`) plus the
+	 * capacity-blocked queue. See `child-team-scheduler.ts`. Initialised in the
+	 * constructor once `projectContextManager` is wired.
 	 */
-	private rootSubgoalSemaphores = new Map<string, Semaphore>();
+	private childScheduler!: ChildTeamScheduler;
 
 	/** Override hook for tests so they can stub the spawn/wait/merge sub-steps. */
 	_subgoalHooks?: {
@@ -1673,6 +1679,16 @@ export class VerificationHarness {
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.projectContextManager = projectContextManager ?? null;
+		// Unified child-team scheduler — closures read `this.*` lazily at call
+		// time so they pick up the projectContextManager/teamManager wired above.
+		this.childScheduler = new ChildTeamScheduler({
+			resolveCap: (rootGoalId) =>
+				this.projectContextManager?.getContextForGoal(rootGoalId)?.goalManager
+					.resolveRootMaxConcurrentChildren(rootGoalId) ?? 3,
+			getChild: (childGoalId) =>
+				this.projectContextManager?.getContextForGoal(childGoalId)?.goalStore.get(childGoalId),
+			startChildTeam: (childGoalId) => this._startScheduledChildTeam(childGoalId),
+		});
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
 		const persisted = this._loadActive();
@@ -4084,17 +4100,85 @@ export class VerificationHarness {
 
 	/**
 	 * Acquire/create the per-tree concurrency semaphore (default 3, max 8).
-	 * Keyed by rootGoalId. See `goalManager.resolveRootMaxConcurrentChildren`.
+	 * Keyed by rootGoalId. Delegates to the unified `ChildTeamScheduler` so the
+	 * harness shares ONE permit pool with the REST/POST start paths. `goalId`
+	 * is retained for signature stability (tests stub this method); the
+	 * scheduler resolves the cap from `rootGoalId` itself.
+	 * See `goalManager.resolveRootMaxConcurrentChildren`.
 	 */
-	private _acquireRootSubgoalSemaphore(rootGoalId: string, goalId: string): Semaphore {
-		let sem = this.rootSubgoalSemaphores.get(rootGoalId);
-		if (!sem) {
-			const ctx = this.projectContextManager?.getContextForGoal(goalId);
-			const cap = ctx?.goalManager.resolveRootMaxConcurrentChildren(rootGoalId) ?? 3;
-			sem = new Semaphore(cap);
-			this.rootSubgoalSemaphores.set(rootGoalId, sem);
+	private _acquireRootSubgoalSemaphore(rootGoalId: string, _goalId: string): Semaphore {
+		return this.childScheduler.getSemaphore(rootGoalId);
+	}
+
+	/**
+	 * Public access to the unified child-team scheduler so the REST start
+	 * paths (`spawn-child`, `integrate-child` auto-unblock) and `POST
+	 * /api/goals` child creation can route their team starts through the same
+	 * per-root concurrency cap. See `child-team-scheduler.ts`.
+	 */
+	get childTeamScheduler(): ChildTeamScheduler {
+		return this.childScheduler;
+	}
+
+	/**
+	 * Request a capacity-gated child-team start (REST/POST/auto-unblock paths).
+	 * Returns `"started"` when a permit was free (the team start is kicked off),
+	 * or `"capacity-blocked"` when the per-root cap is saturated (the caller
+	 * must stamp the child `state='blocked'`; the scheduler starts it later when
+	 * a permit frees). Thin delegator to `ChildTeamScheduler.requestStart`.
+	 */
+	requestChildStart(childGoalId: string): "started" | "capacity-blocked" {
+		return this.childScheduler.requestStart(childGoalId);
+	}
+
+	/**
+	 * Notify the scheduler of a terminal child event (merge / archive /
+	 * completion) so its permit is released and the next capacity-blocked child
+	 * starts. Best-effort + idempotent. Thin delegator to
+	 * `ChildTeamScheduler.notifyTerminal`.
+	 */
+	notifyChildTerminal(childGoalId: string): void {
+		this.childScheduler.notifyTerminal(childGoalId);
+	}
+
+	/**
+	 * Scheduler callback — start a capacity-gated child's team. Mirrors the
+	 * setup/start logic of the REST `spawn-child` / `integrate-child` handlers:
+	 * a previously capacity-blocked child has `state='blocked'`, so flip it back
+	 * to `todo`, then drive worktree setup + team start (or just team start when
+	 * the worktree is already `ready`, e.g. a resumed goal). Fire-and-forget;
+	 * broadcasts mirror the REST handlers so the UI updates identically.
+	 */
+	private _startScheduledChildTeam(childGoalId: string): void {
+		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
+		const goalManager = ctx?.goalManager;
+		const teamManager = this.teamManager;
+		if (!goalManager || !teamManager) return;
+		const g = goalManager.getGoal(childGoalId);
+		if (!g || g.archived) return;
+		if (g.state === "blocked") {
+			goalManager.updateGoal(childGoalId, { state: "todo" })
+				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId }))
+				.catch((err) => console.warn(`[scheduler] flip blocked→todo failed for ${childGoalId} (non-fatal):`, err));
 		}
-		return sem;
+		if (g.setupStatus === "preparing") {
+			goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId))
+				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId }))
+				.catch((err) => {
+					const cur = goalManager.getGoal(childGoalId);
+					if (cur?.setupStatus === "ready") {
+						this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
+						console.error(`[scheduler] auto-start team failed for ${childGoalId} (worktree ready):`, err);
+					} else {
+						console.error(`[scheduler] setup failed for ${childGoalId}:`, err);
+						this.broadcastFn?.(childGoalId, { type: "goal_setup_error", goalId: childGoalId, error: String(err) });
+					}
+				});
+		} else {
+			// Worktree already exists (resumed/ready goal): just start the team.
+			Promise.resolve(teamManager.startTeam(childGoalId)).catch((err) =>
+				console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err));
+		}
 	}
 
 	/**
@@ -4114,10 +4198,7 @@ export class VerificationHarness {
 	 * re-floored/clamped defensively by `Semaphore.resize`.
 	 */
 	resizeRootSubgoalSemaphore(rootGoalId: string, newMax: number): boolean {
-		const sem = this.rootSubgoalSemaphores.get(rootGoalId);
-		if (!sem) return false;
-		sem.resize(newMax);
-		return true;
+		return this.childScheduler.resize(rootGoalId, newMax);
 	}
 
 	/**
@@ -4393,6 +4474,46 @@ export class VerificationHarness {
 					active.steps[stepIndex].subgoal!.childGoalId = childGoalId;
 					this._persistActive();
 				}
+				// Finding 3 — state-aware handling of an EXISTING live child.
+				// Previously this branch ONLY stamped the pointer and fell
+				// through to `_waitForChildReadyToMerge` while holding the
+				// permit. That stranded a never-started `todo`/awaiting-setup
+				// child (no team is ever started → waits forever) and, for a
+				// `blocked` child, held the permit during the wait (re-creating
+				// the cap=1 deadlock the fresh-blocked path is careful to avoid).
+				// Re-read the live record (resolved.child may be a stale snapshot).
+				const existing = ctx.goalStore.get(childGoalId) ?? resolved.child;
+				if (existing.state === "blocked") {
+					// Dep-blocked existing child: release the permit while waiting
+					// for the auto-unblock scan (mirrors the fresh-blocked path —
+					// holding it would deadlock a cap=1 root). Hand the freed slot
+					// to any capacity-blocked sibling, then re-acquire + start.
+					sem.release();
+					permitHeld = false;
+					this.childScheduler.startNextEligible(rootGoalId);
+					const unblockOutcome = await this._waitForChildUnblock(parentGoalId, childGoalId, active);
+					if (unblockOutcome === "cancelled") return { passed: false, output: "Cancelled" };
+					if (unblockOutcome === "archived-complete") return { passed: true, output: `Subgoal already complete + archived (during dep-wait): ${childGoalId}` };
+					if (unblockOutcome === "archived-other") return { passed: false, output: `Subgoal ${childGoalId} archived externally while blocked (state != complete) — re-signal to re-resolve` };
+					if (unblockOutcome === "timeout") return { passed: false, output: `Subgoal ${childGoalId} blocked-dep wait timed out (>24h) — re-signal to retry` };
+					await sem.acquire();
+					permitHeld = true;
+					// pause/cancel can race during the (re)acquire await.
+					const _abortAfterUnblock = _shouldAbortSpawn();
+					if (_abortAfterUnblock) return _abortAfterUnblock;
+					await this._startChildTeam(childGoalId, goalManager, teamManager);
+				} else if (existing.state === "in-progress") {
+					// Team already running — just wait (holding the permit, which
+					// correctly occupies a concurrency slot for the live child).
+				} else {
+					// Runnable existing child (todo / awaiting-setup) whose team was
+					// never started (crash / restart / idempotent re-signal). Start
+					// it under the held permit before waiting for ready-to-merge —
+					// without this it would wait forever for a team that never runs.
+					const _abortBeforeStart = _shouldAbortSpawn();
+					if (_abortBeforeStart) return _abortBeforeStart;
+					await this._startChildTeam(childGoalId, goalManager, teamManager);
+				}
 			} else {
 				// Validate spec before spawning — reject placeholders so the child
 				// team-lead always receives a real task in its first user message.
@@ -4543,6 +4664,8 @@ export class VerificationHarness {
 					// ready-to-merge wait below.
 					sem.release();
 					permitHeld = false;
+					// Hand the freed slot to any capacity-blocked sibling.
+					this.childScheduler.startNextEligible(rootGoalId);
 					const unblockOutcome = await this._waitForChildUnblock(parentGoalId, childGoalId, active);
 					if (unblockOutcome === "cancelled") return { passed: false, output: "Cancelled" };
 					if (unblockOutcome === "archived-complete") return { passed: true, output: `Subgoal already complete + archived (during dep-wait): ${childGoalId}` };
@@ -4624,7 +4747,13 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: `Unexpected merge outcome (no merged/alreadyMerged/conflict flag): ${truncateForOutput(outcome.output)}` };
 		} finally {
-			if (permitHeld) sem.release();
+			if (permitHeld) {
+				sem.release();
+				// Terminal release for this harness-managed child — drive the next
+				// capacity-blocked REST/POST child into the freed slot so the
+				// per-root cap is unified across all start paths.
+				this.childScheduler.startNextEligible(rootGoalId);
+			}
 		}
 	}
 
