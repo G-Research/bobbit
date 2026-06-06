@@ -132,13 +132,22 @@ test.describe("Dashboard mutation-pending card", () => {
 		const card = page.locator('[data-testid="dashboard-mutation-pending-card"]').first();
 		await expect(card).toBeVisible({ timeout: 15_000 });
 
+		// The non-OK handler logs `[dashboard-mutation] decision failed: HTTP …`.
+		// Wait for that console error so we know the decision response has been
+		// fully processed by the client (any optimistic-clear would have fired by
+		// now) — event-driven, no hardcoded sleep.
+		const decisionFailedLog = page.waitForEvent("console", {
+			predicate: (msg) => msg.text().includes("[dashboard-mutation] decision failed"),
+			timeout: 10_000,
+		});
+
 		await page.locator('[data-testid="dashboard-mutation-pending-approve"]').first().click();
 
 		// The POST happened…
 		await expect.poll(() => decisionPosts, { timeout: 10_000 }).toBeGreaterThan(0);
-		// …but the card MUST remain because the response was non-OK. Give the
-		// optimistic-clear path a chance to (wrongly) fire, then assert presence.
-		await page.waitForTimeout(1_000);
+		// …and the client finished handling the non-OK response.
+		await decisionFailedLog;
+		// …but the card MUST remain because the response was non-OK.
 		await expect(card).toBeVisible();
 	});
 });
