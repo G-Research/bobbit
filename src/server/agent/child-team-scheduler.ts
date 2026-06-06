@@ -36,6 +36,15 @@ export interface SchedulerChildView {
 	state?: string;
 	rootGoalId?: string;
 	parentGoalId?: string;
+	/**
+	 * Pause flag (set by the pause cascade). A paused queued child is NOT
+	 * eligible to start — the scheduler skips it WITHOUT acquiring a permit and
+	 * leaves it queued so it can be started later on resume. The pause cascade
+	 * marks descendants paused but does NOT dequeue them, so the scheduler MUST
+	 * read this to honour the pause guarantee (and to avoid leaking the permit
+	 * via `teamManager.startTeam`, which rejects paused goals).
+	 */
+	paused?: boolean;
 }
 
 export interface ChildTeamSchedulerDeps {
@@ -111,16 +120,21 @@ export class ChildTeamScheduler {
 		const rootGoalId = this._rootOf(childGoalId);
 		if (!rootGoalId) {
 			// No resolvable root (should not happen for a child) — start without
-			// a cap rather than strand the child.
-			this.deps.startChildTeam(childGoalId);
+			// a cap rather than strand the child. No permit to leak here.
+			try {
+				this.deps.startChildTeam(childGoalId);
+			} catch (err) {
+				console.warn(`[scheduler] rootless startChildTeam failed for ${childGoalId} (non-fatal):`, err);
+			}
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
 		const sem = this.getSemaphore(rootGoalId);
 		if (sem.tryAcquire()) {
-			this._markHolding(rootGoalId, childGoalId);
-			this.deps.startChildTeam(childGoalId);
-			return "started";
+			// `_startHolding` releases the permit + re-enqueues if the start throws
+			// synchronously (e.g. the child turned out paused/archived), so the
+			// permit is never leaked. A failed start parks the child capacity-blocked.
+			return this._startHolding(rootGoalId, childGoalId, sem) ? "started" : "capacity-blocked";
 		}
 		this._enqueue(rootGoalId, childGoalId);
 		return "capacity-blocked";
@@ -173,6 +187,28 @@ export class ChildTeamScheduler {
 		set.add(childGoalId);
 	}
 
+	/**
+	 * Mark the child holding, then start its team. The permit MUST already be
+	 * acquired by the caller. If the start throws synchronously (e.g. the child
+	 * turned out paused/archived between the eligibility check and the start, or
+	 * `teamManager.startTeam` rejects), the permit is RELEASED (never leaked),
+	 * the child is dropped from `holding` and re-enqueued so it can start later
+	 * (on resume / next terminal). Returns whether the team actually started.
+	 */
+	private _startHolding(rootGoalId: string, childGoalId: string, sem: Semaphore): boolean {
+		this._markHolding(rootGoalId, childGoalId);
+		try {
+			this.deps.startChildTeam(childGoalId);
+			return true;
+		} catch (err) {
+			this.holding.get(rootGoalId)?.delete(childGoalId);
+			sem.release();
+			this._enqueue(rootGoalId, childGoalId);
+			console.warn(`[scheduler] startChildTeam failed for ${childGoalId}; permit released + re-enqueued (non-fatal):`, err);
+			return false;
+		}
+	}
+
 	private _enqueue(rootGoalId: string, childGoalId: string): void {
 		let q = this.pending.get(rootGoalId);
 		if (!q) { q = []; this.pending.set(rootGoalId, q); }
@@ -196,19 +232,34 @@ export class ChildTeamScheduler {
 		if (!sem) return;
 		const q = this.pending.get(rootGoalId);
 		if (!q || q.length === 0) return;
-		while (q.length > 0 && sem.available > 0) {
-			const next = q[0];
+		// `attempted` guards against re-processing a child re-enqueued (to the
+		// tail) by `_startHolding` after a synchronous start failure within this
+		// same drain pass — otherwise a transient throw could loop.
+		const attempted = new Set<string>();
+		let i = 0;
+		while (i < q.length && sem.available > 0) {
+			const next = q[i];
 			const c = this.deps.getChild(next);
 			if (!c || c.archived === true) {
 				// Stale pending entry — drop it, do not consume a permit.
-				q.shift();
+				q.splice(i, 1);
 				this.childRoot.delete(next);
 				continue;
 			}
+			if (c.paused === true) {
+				// Paused queued child is NOT eligible: skip it WITHOUT acquiring a
+				// permit and LEAVE it queued (so resume can start it). Scan onward
+				// for the next eligible (non-paused) sibling.
+				i++;
+				continue;
+			}
+			if (attempted.has(next)) { i++; continue; }
 			if (!sem.tryAcquire()) break;
-			q.shift();
-			this._markHolding(rootGoalId, next);
-			this.deps.startChildTeam(next);
+			q.splice(i, 1);
+			attempted.add(next);
+			// May release the permit + re-enqueue (to the tail) on a synchronous
+			// start failure; `attempted` then prevents re-processing it this pass.
+			this._startHolding(rootGoalId, next, sem);
 		}
 	}
 }
