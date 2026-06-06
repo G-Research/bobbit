@@ -12,12 +12,17 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+import { runFixtureGit } from "../../test-utils/git-fixture.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
 
 type BrowserPage = Parameters<typeof openApp>[0];
+
+/** Hermetic, non-interactive git (see ../../test-utils/git-fixture.ts). */
+function git(cwd: string, ...args: string[]): string {
+	return runFixtureGit(cwd, args);
+}
 
 /**
  * Create a working repo wired to a real bare `origin` remote whose HEAD points
@@ -28,24 +33,24 @@ type BrowserPage = Parameters<typeof openApp>[0];
 function gitInitWithRemote(dir: string): void {
 	const remoteDir = `${dir}-origin.git`;
 	mkdirSync(remoteDir, { recursive: true });
-	execFileSync("git", ["init", "--bare", "--quiet", remoteDir]);
+	git(remoteDir, "init", "--bare", "--quiet", remoteDir);
 	// Ensure the remote's HEAD symref resolves to master regardless of the
 	// host git's init.defaultBranch.
-	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/master"], { cwd: remoteDir });
+	git(remoteDir, "symbolic-ref", "HEAD", "refs/heads/master");
 
 	mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
-	execFileSync("git", ["checkout", "--quiet", "-b", "master"], { cwd: dir });
+	git(dir, "init", "--quiet");
+	git(dir, "config", "user.email", "test@bobbit.local");
+	git(dir, "config", "user.name", "test");
+	git(dir, "config", "commit.gpgsign", "false");
+	git(dir, "checkout", "--quiet", "-b", "master");
 	writeFileSync(join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
-	execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: dir });
-	execFileSync("git", ["push", "--quiet", "-u", "origin", "master"], { cwd: dir });
+	git(dir, "add", ".");
+	git(dir, "commit", "--quiet", "-m", "init");
+	git(dir, "remote", "add", "origin", remoteDir);
+	git(dir, "push", "--quiet", "-u", "origin", "master");
 	// Populate the local refs/remotes/origin/HEAD that resolveRemotePrimary reads.
-	execFileSync("git", ["remote", "set-head", "origin", "master"], { cwd: dir });
+	git(dir, "remote", "set-head", "origin", "master");
 }
 
 function uniqueProjectDir(prefix: string): string {

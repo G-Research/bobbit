@@ -455,6 +455,48 @@ The E2E suite provides two harnesses. Choose based on what your test needs:
 - **`in-process-harness.js`** — Default for API-only tests (no browser, no MCP, no process-level behavior). Faster startup (~2s vs ~5-8s per worker). Exposes `sessionManager` on `GatewayInfo` for sandbox token testing. Import `test, expect` from `./in-process-harness.js`.
 - **`gateway-harness.js`** — Required when the test uses a `page` fixture (browser), needs MCP servers enabled, or tests process-level behavior (port allocation, auth bypass). Import `test, expect` from `./gateway-harness.js`.
 
+### Git fixtures must be hermetic
+
+Any test that creates a throwaway git repo MUST go through the shared helper in
+`tests/test-utils/git-fixture.ts`: `createGitFixtureRepo(dir, opts)` to scaffold
+a repo (init → identity → one commit, plus optional tags / extra branches / fake
+`origin/<ref>` refs), and `runFixtureGit(cwd, args)` (or `gitFixtureEnv()`) for
+any ad-hoc git call. **Never** shell out with a bare
+`execFileSync("git", …, { cwd })` in test setup.
+
+**Why this is mandatory, not stylistic.** A raw fixture git call inherits the
+developer's *global* git config. On a host that sets `tag.gpgsign = true` and
+points `GIT_EDITOR` at an interactive editor (nvim, etc.), `git tag <name>` is
+promoted to a signed/annotated tag that needs a message, so git launches the
+editor on `.git/TAG_EDITMSG` and blocks forever. Inside a Playwright worker that
+`git`→editor child keeps the worker's Node event loop alive *after*
+`gw.shutdown()` has returned, so the worker never exits and the whole E2E run
+hangs at teardown until it is SIGKILLed — every test passes, yet the run is
+reported as a timeout. This was a real, host-dependent outage that clean CI did
+not reproduce, which made it hard to attribute. See
+[debugging.md — E2E suite completes but never exits](debugging.md#e2e-suite-completes-but-never-exits-worker-teardown-hang)
+for the diagnostic trail.
+
+**What the helper sets and why** (in `gitFixtureEnv()`, plus per-call `-c` flags):
+
+- `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null` — the host's
+  global and system config (gpgsign, editor, aliases, hooks) cannot leak in. git
+  treats an unreadable config path as empty, so this is safe on every platform
+  (on Windows a missing global config is the normal case).
+- `GIT_TERMINAL_PROMPT=0` — never block on a credential prompt.
+- `GIT_EDITOR=true` — if anything ever tries to launch an editor it returns
+  instantly (exit 0) instead of blocking the worker.
+- `GIT_AUTHOR_*` / `GIT_COMMITTER_*` — supply an identity, since neutralising the
+  global config also strips the host's `user.name` / `user.email`.
+- `-c commit.gpgsign=false -c tag.gpgsign=false` before every subcommand — belt
+  and braces so signing stays off regardless of any config git might still see.
+
+**Regression guard.** `tests/git-fixture-noninteractive.test.ts` is
+host-independent: it injects a hostile `tag.gpgsign=true` global config plus a
+fast-failing `GIT_EDITOR=false` (never a blocking editor) and asserts the fixture
+creates the tag promptly without invoking an editor. It is RED against a
+non-hermetic helper and GREEN after the fix, so the trap cannot silently return.
+
 ### UI E2E page-object helpers
 
 Reusable helpers in `tests/e2e/ui/ui-helpers.ts`. Import from `./ui-helpers.js`:

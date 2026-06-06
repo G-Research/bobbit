@@ -8,33 +8,12 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createGitFixtureRepo as gitInit } from "../../test-utils/git-fixture.js";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
 
 type BrowserPage = Parameters<typeof openApp>[0];
-
-function gitInit(dir: string, opts?: { tags?: string[]; remoteRefs?: string[] }): void {
-	mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
-	execFileSync("git", ["checkout", "--quiet", "-b", "master"], { cwd: dir });
-	writeFileSync(join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
-	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf-8" }).trim();
-	for (const t of opts?.tags ?? []) {
-		execFileSync("git", ["tag", t], { cwd: dir });
-	}
-	for (const r of opts?.remoteRefs ?? []) {
-		const refPath = join(dir, ".git", "refs", "remotes", "origin", r);
-		mkdirSync(join(refPath, ".."), { recursive: true });
-		writeFileSync(refPath, head + "\n");
-	}
-}
 
 function uniqueProjectDir(prefix: string): string {
 	return mkdtempSync(join(tmpdir(), `bobbit-baseref-ui-${prefix}-`));
