@@ -542,9 +542,17 @@ async function humanSessionCookie(): Promise<string> {
  * not bypass orchestration authz, so they authenticate as the team-lead via
  * `seedTeamLeadHeader()` at the call site instead.
  */
-async function withChildrenAuthzCookie(path: string, headers: Record<string, string>): Promise<Record<string, string>> {
+async function withChildrenAuthzCookie(path: string, method: string, headers: Record<string, string>): Promise<Record<string, string>> {
 	const bare = path.split("?")[0];
-	if (!CHILDREN_MUTATION_PATH.test(bare)) return headers;
+	// Child creation via `POST /api/goals` with a `parentGoalId` is now an
+	// OPERATOR-class Children mutation (the proposal UI drives it; see the S1
+	// authz block in server.ts). A node `apiFetch` carries no cookie, so child
+	// creation would 403 without one. We can't see the body here (only the
+	// path), so we cover ALL `POST /api/goals`; top-level goal creation ignores
+	// the cookie, so injecting it is harmless. Tests exercising the agent/deny
+	// path use `rawApiFetch` (which bypasses this) with explicit headers.
+	const isChildCreate = method.toUpperCase() === "POST" && bare === "/api/goals";
+	if (!CHILDREN_MUTATION_PATH.test(bare) && !isChildCreate) return headers;
 	const hasExplicitAuth = Object.keys(headers).some((k) => {
 		const lk = k.toLowerCase();
 		if ((lk === "x-bobbit-spawning-session" || lk === "x-bobbit-session-id") && headers[k]) return true;
@@ -562,7 +570,7 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
 	const finalPath = await maybeInjectProjectIdQuery(path, method);
-	const authedHeaders = await withChildrenAuthzCookie(finalPath, {
+	const authedHeaders = await withChildrenAuthzCookie(finalPath, method, {
 		"Content-Type": "application/json",
 		Authorization: `Bearer ${token()}`,
 		...(injected.headers as Record<string, string> || {}),

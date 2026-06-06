@@ -4532,6 +4532,48 @@ async function handleApiRoute(
 					}
 					return;
 				}
+				// S1 SECURITY: creating a child via `POST /api/goals` with a
+				// `parentGoalId` is a Children mutation — it spawns and can
+				// auto-start a child team under another goal. It MUST be
+				// authorized like the other Children verbs BEFORE anything is
+				// created/started; previously this path validated parent
+				// existence + nesting + pause then created the child with NO
+				// authz, letting any shared-bearer-token holder (incl. a
+				// non-team-lead agent) drive child creation under an arbitrary
+				// goal and bypass the Children tool policy + per-session secret
+				// binding. This is an OPERATOR-class verb: the proposal UI drives
+				// it (verified human cookie accepted), otherwise the AUTHENTIC
+				// caller (derived server-side from the unforgeable per-session
+				// secret, never the public spawning-session header) must match
+				// the team-lead of the parent's ROOT goal. See
+				// children-mutation-authz.ts.
+				{
+					const h = req.headers as Record<string, string | string[] | undefined>;
+					const readHeader = (n: string): string | undefined => {
+						const v = h[n.toLowerCase()];
+						const s = Array.isArray(v) ? v[0] : v;
+						return typeof s === "string" && s.trim() ? s.trim() : undefined;
+					};
+					const rootGoalId = resolvedParentGoal.rootGoalId ?? resolvedParentGoal.id;
+					const authz = authorizeChildrenMutation({
+						mutationClass: "operator",
+						isHumanOperator: cookieTryAuth(req, cookieStore!),
+						// Derive the AUTHENTIC caller from the per-session secret,
+						// never the forgeable public spawning-session header.
+						authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+							readHeader("x-bobbit-session-secret"),
+						),
+						teamLeadSessionId: teamManager.getTeamState(rootGoalId)?.teamLeadSessionId,
+					});
+					if (!authz.ok) {
+						json({
+							error: "Caller session is not the team-lead for this goal",
+							code: "NOT_TEAM_LEAD",
+							goalId: parentGoalId,
+						}, 403);
+						return;
+					}
+				}
 				// Pause-cascade (Finding 1): refuse to create/auto-start a child
 				// under a paused parent OR any paused ancestor. Mirrors the
 				// guarantee `/spawn-child` and the harness `runSubgoalStep` already
