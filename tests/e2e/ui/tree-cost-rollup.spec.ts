@@ -13,7 +13,7 @@
  * surfaces the structure even when totals are $0.00.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader, teardownTeam, waitForCondition } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 /**
@@ -29,6 +29,78 @@ function spawnChild(gateway: any, parentId: string, body: Record<string, unknown
 	});
 }
 
+/**
+ * A data-only (`setupStatus === "ready"`, non-git) child spawned via
+ * `/spawn-child` now AUTO-STARTS its team — this is intended product
+ * behaviour (see goal task `d6e48b46`). For the cost-rollup fixtures below we
+ * need the child goal to KEEP EXISTING (so the subtree rollup walks it) but we
+ * must NOT let a live team-lead session perturb the very things these tests
+ * assert on: per-goal cost, `unattributableLegacy.firstSeenAt`, the goal's
+ * `createdAt` backdate, and goal `state`.
+ *
+ * So after each spawn we (event-driven, NO fixed sleeps):
+ *   1. wait for the auto-started team-lead to come up (in-process team manager),
+ *   2. tear it down via `POST /api/goals/:id/team/teardown` (authenticated like
+ *      every other helper call),
+ *   3. wait until the team is gone before returning — so the subsequent
+ *      backdating / cost seeding / assertions can't race a live team-lead, and
+ *   4. wipe any cost the team-lead's mock-agent turn billed against the child's
+ *      goalId. The mock agent records ~$0.00075 on its first response, stamped
+ *      to the child goal; teardown terminates the session but the cost entry
+ *      survives (cost is addressed by goalId, by design). Removing those
+ *      entries restores the child's per-goal cost to exactly zero, which is the
+ *      premise of both the subtree-total and legacy-zero fixtures.
+ *
+ * Best-effort on step 1: if the team never comes up (e.g. capacity-blocked)
+ * there is nothing to tear down and we return without failing.
+ */
+async function quiesceAutoStartedChildTeam(gateway: any, childId: string, projectId: string | undefined): Promise<void> {
+	const tm = gateway?.teamManager;
+	if (!tm?.getTeamState) return;
+	try {
+		await waitForCondition(() => !!tm.getTeamState(childId), {
+			timeoutMs: 15_000,
+			intervalMs: 25,
+			message: `auto-started team for child ${childId}`,
+		});
+	} catch {
+		return; // team never came up — nothing to tear down
+	}
+	// Capture every session the auto-started team owns (team-lead + any members)
+	// so we can wipe their cost after teardown.
+	const teamSessionIds = (() => {
+		const st = tm.getTeamState(childId) as { teamLeadSessionId?: string; agents?: Array<{ sessionId?: string }> } | undefined;
+		const ids: string[] = [];
+		if (st?.teamLeadSessionId) ids.push(st.teamLeadSessionId);
+		for (const a of st?.agents ?? []) if (a?.sessionId) ids.push(a.sessionId);
+		return ids;
+	})();
+	await teardownTeam(childId);
+	await waitForCondition(() => !tm.getTeamState(childId), {
+		timeoutMs: 10_000,
+		intervalMs: 25,
+		message: `teardown of auto-started team for child ${childId}`,
+	});
+	// Wipe the cost the (now terminated) team sessions recorded against this
+	// child's goalId so its per-goal cost is exactly zero again. Use both the
+	// captured session ids (public removeSession) and a goalId sweep over the
+	// tracker's entries (belt-and-suspenders against a member spawned in the
+	// brief window before capture).
+	const ct = projectId ? gateway?.sessionManager?.getCostTracker?.(projectId) as {
+		removeSession?: (sid: string) => void;
+		costs?: Map<string, { goalId?: string }>;
+	} | undefined : undefined;
+	if (ct?.removeSession) {
+		for (const sid of teamSessionIds) ct.removeSession(sid);
+		const entries = ct.costs;
+		if (entries instanceof Map) {
+			for (const [sid, entry] of [...entries]) {
+				if (entry?.goalId === childId) ct.removeSession(sid);
+			}
+		}
+	}
+}
+
 test.describe("Phase 5b — tree cost rollup", () => {
 	test("parent dashboard renders Tree cost row + per-child breakdown", async ({ page, gateway }) => {
 		const projectId = await defaultProjectId();
@@ -37,6 +109,11 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const c1 = (await r1.json()).id as string;
 		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost UI test child 2: padded to meet spec validator minimum length." });
 		const c2 = (await r2.json()).id as string;
+
+		// Tear down the children's auto-started teams so no live team-lead
+		// session perturbs the rollup; the goals themselves remain.
+		await quiesceAutoStartedChildTeam(gateway, c1, projectId);
+		await quiesceAutoStartedChildTeam(gateway, c2, projectId);
 
 		// Sanity: REST endpoint returns the structured rollup.
 		const treeRes = await apiFetch(`/api/goals/${parent.id}/tree-cost`);
@@ -88,6 +165,11 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost archived-children UI test child 2: padded to meet validator length." });
 		const c2 = (await r2.json()).id as string;
 
+		// Tear down the children's auto-started teams before archiving so no live
+		// team-lead session perturbs the rollup.
+		await quiesceAutoStartedChildTeam(gateway, c1, projectId);
+		await quiesceAutoStartedChildTeam(gateway, c2, projectId);
+
 		// Archive both children (they're leaves, so cascade=false is fine).
 		const d1 = await apiFetch(`/api/goals/${c1}?cascade=false`, { method: "DELETE" });
 		expect(d1.status).toBeLessThan(400);
@@ -137,6 +219,11 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const rGrand = await spawnChild(gateway, childId, { planId: "sub-g", title: "Tree-cost subtree grandchild", spec: "tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length." });
 		expect(rGrand.status).toBe(201);
 		const grandId = (await rGrand.json()).id as string;
+
+		// Tear down the auto-started teams on the child + grandchild so their
+		// team-lead sessions can't perturb the per-goal cost we seed below.
+		await quiesceAutoStartedChildTeam(gateway, childId, projectId);
+		await quiesceAutoStartedChildTeam(gateway, grandId, projectId);
 
 		// Seed distinct, easy-to-read costs on each goal directly through the
 		// cost tracker. Picked so each subtree total has a unique two-decimal
@@ -245,6 +332,11 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const rChild = await spawnChild(gateway, parent.id, { planId: "legacy-c", title: "Tree-cost legacy child", spec: "tree-cost legacy-zero E2E child: padded to meet spec validator minimum length requirement." });
 		expect(rChild.status).toBe(201);
 		const childId = (await rChild.json()).id as string;
+
+		// Tear down the child's auto-started team BEFORE backdating its createdAt
+		// and seeding the legacy bucket — a live team-lead session would otherwise
+		// re-stamp goal state / cost and break the legacy-zero classification.
+		await quiesceAutoStartedChildTeam(gateway, childId, projectId);
 
 		// Backdate the child's createdAt well before any plausible sidecar
 		// `firstSeenAt`. Goal-store `update()` deliberately excludes
