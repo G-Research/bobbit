@@ -37,6 +37,16 @@ export type PlanNodeState =
 	| "failed"
 	| "paused";
 
+/**
+ * Per-node gate status (Phase 5c). An ADDITIONAL display dimension carried
+ * alongside the tier-based `state` — the two are orthogonal: `state` is the
+ * tier resolution of which child wins per planId, `gateStatus` is that
+ * child's workflow-gate progress. The backend stamps it on each descendant
+ * (data contract: `gateStatus: "pending"|"running"|"passed"|"failed"`).
+ * Optional everywhere so legacy payloads and tier resolution are unaffected.
+ */
+export type PlanNodeGateStatus = "pending" | "running" | "passed" | "failed";
+
 export interface PlanNodeChild {
 	id: string;
 	parentGoalId?: string;
@@ -45,6 +55,12 @@ export interface PlanNodeChild {
 	archived?: boolean;
 	paused?: boolean;
 	createdAt: number;
+	/** Backend data contract: true when the child's local merge into the
+	 *  parent branch hit a conflict and was preserved for manual recovery. */
+	mergeConflict?: boolean;
+	/** Backend data contract: the child's workflow-gate progress. Orthogonal
+	 *  to the tier-based `state` resolution. */
+	gateStatus?: PlanNodeGateStatus;
 }
 
 export interface PlanNodeResolution {
