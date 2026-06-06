@@ -709,7 +709,7 @@ export class RemoteAgent {
 				// whether the get_state cost is payload transfer vs. server-side
 				// assembly. Cheap: a type check + a (no-copy) string length read.
 				if (msg.type === "messages" && typeof evt.data === "string") {
-					bootTimingMeta({ snapshotChars: evt.data.length });
+					bootTimingMeta({ snapshotChars: evt.data.length, serverTiming: msg.serverTiming });
 				}
 
 				if (!settled) {
@@ -1068,6 +1068,7 @@ export class RemoteAgent {
 	}
 
 	requestMessages(): void {
+		bootMark("get-messages-sent");
 		this.send({ type: "get_messages" });
 	}
 

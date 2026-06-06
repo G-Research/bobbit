@@ -3,6 +3,7 @@ import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
+import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
 
 // ============================================================================
 // TYPES
@@ -223,8 +224,7 @@ export function clampSidebarWidth(w: number): number {
 }
 
 function loadSidebarWidth(): number {
-	if (typeof localStorage === "undefined") return SIDEBAR_WIDTH_DEFAULT;
-	const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+	const raw = safeGetItem(SIDEBAR_WIDTH_KEY);
 	if (!raw) return SIDEBAR_WIDTH_DEFAULT;
 	const n = Number.parseInt(raw, 10);
 	return clampSidebarWidth(n);
@@ -342,16 +342,16 @@ export const state = {
 	defaultCwd: "",
 
 	/** Whether the sidebar is collapsed */
-	sidebarCollapsed: localStorage.getItem("bobbit-sidebar-collapsed") === "true",
+	sidebarCollapsed: safeGetItem("bobbit-sidebar-collapsed") === "true",
 	/** User-resizable sidebar width in px (expanded state). Clamped 180–480. */
 	sidebarWidth: loadSidebarWidth(),
 
 	/** Whether to show archived sessions in the sidebar */
-	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
+	showArchived: safeGetItem("bobbit-show-archived") === "true",
 	/** Whether to show busy (streaming/aborting/preparing/starting/compacting) sessions. Default ON. */
-	showBusy: localStorage.getItem("bobbit-show-busy") !== "false",
+	showBusy: safeGetItem("bobbit-show-busy") !== "false",
 	/** Whether to show idle/done sessions without unread activity. Default ON. */
-	showRead: localStorage.getItem("bobbit-show-read") !== "false",
+	showRead: safeGetItem("bobbit-show-read") !== "false",
 	/** Whether the sidebar filters popover is open */
 	filtersPopoverOpen: false,
 	/** Whether the archived section is expanded */
@@ -529,7 +529,7 @@ try {
 const EXPANDED_GOALS_KEY = "bobbit-expanded-goals";
 
 export let expandedGoals: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(EXPANDED_GOALS_KEY) || "[]"),
+	safeGetJSON<string[]>(EXPANDED_GOALS_KEY, []),
 );
 
 // ── Per-project collapse state (Bug 4 fix) ─────────────────────────
@@ -538,10 +538,10 @@ const COLLAPSED_UNGROUPED_KEY = "bobbit-collapsed-ungrouped";
 const COLLAPSED_STAFF_KEY = "bobbit-collapsed-staff";
 
 export let collapsedUngroupedProjects: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(COLLAPSED_UNGROUPED_KEY) || "[]"),
+	safeGetJSON<string[]>(COLLAPSED_UNGROUPED_KEY, []),
 );
 export let collapsedStaffProjects: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(COLLAPSED_STAFF_KEY) || "[]"),
+	safeGetJSON<string[]>(COLLAPSED_STAFF_KEY, []),
 );
 
 export function isUngroupedExpanded(projectId: string): boolean {
@@ -551,7 +551,7 @@ export function isUngroupedExpanded(projectId: string): boolean {
 export function setUngroupedExpanded(projectId: string, value: boolean): void {
 	if (value) collapsedUngroupedProjects.delete(projectId);
 	else collapsedUngroupedProjects.add(projectId);
-	localStorage.setItem(COLLAPSED_UNGROUPED_KEY, JSON.stringify([...collapsedUngroupedProjects]));
+	safeSetItem(COLLAPSED_UNGROUPED_KEY, JSON.stringify([...collapsedUngroupedProjects]));
 }
 
 export function isStaffExpanded(projectId: string): boolean {
@@ -561,7 +561,7 @@ export function isStaffExpanded(projectId: string): boolean {
 export function setStaffSectionExpanded(projectId: string, value: boolean): void {
 	if (value) collapsedStaffProjects.delete(projectId);
 	else collapsedStaffProjects.add(projectId);
-	localStorage.setItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
+	safeSetItem(COLLAPSED_STAFF_KEY, JSON.stringify([...collapsedStaffProjects]));
 }
 
 // Per-project archived section expand state. Default = expanded (so toggling
@@ -570,7 +570,7 @@ export function setStaffSectionExpanded(projectId: string, value: boolean): void
 // collapsedUngroupedProjects / collapsedStaffProjects.
 const COLLAPSED_ARCHIVED_KEY = "bobbit-archived-collapsed-projects";
 export let collapsedArchivedProjects: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(COLLAPSED_ARCHIVED_KEY) || "[]"),
+	safeGetJSON<string[]>(COLLAPSED_ARCHIVED_KEY, []),
 );
 
 export function isArchivedSectionExpanded(projectId: string): boolean {
@@ -580,23 +580,23 @@ export function isArchivedSectionExpanded(projectId: string): boolean {
 export function setArchivedSectionExpanded(projectId: string, value: boolean): void {
 	if (value) collapsedArchivedProjects.delete(projectId);
 	else collapsedArchivedProjects.add(projectId);
-	localStorage.setItem(COLLAPSED_ARCHIVED_KEY, JSON.stringify([...collapsedArchivedProjects]));
+	safeSetItem(COLLAPSED_ARCHIVED_KEY, JSON.stringify([...collapsedArchivedProjects]));
 }
 
 const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";
 export let collapsedTeamLeadSessions: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(COLLAPSED_TEAM_LEADS_KEY) || "[]"),
+	safeGetJSON<string[]>(COLLAPSED_TEAM_LEADS_KEY, []),
 );
 
 export function saveExpandedGoals(): void {
-	localStorage.setItem(EXPANDED_GOALS_KEY, JSON.stringify([...expandedGoals]));
+	safeSetItem(EXPANDED_GOALS_KEY, JSON.stringify([...expandedGoals]));
 }
 
 
 export function setTeamLeadExpanded(sessionId: string, expanded: boolean): void {
 	if (expanded) collapsedTeamLeadSessions.delete(sessionId);
 	else collapsedTeamLeadSessions.add(sessionId);
-	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+	safeSetItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
 }
 
 export function toggleTeamLeadExpanded(sessionId: string): void {
@@ -609,13 +609,13 @@ export function isTeamLeadExpanded(sessionId: string): boolean {
 
 const COLLAPSED_FIRST_CLASS_PARENTS_KEY = "bobbit-collapsed-first-class-parents";
 export let collapsedFirstClassParents: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY) || "[]"),
+	safeGetJSON<string[]>(COLLAPSED_FIRST_CLASS_PARENTS_KEY, []),
 );
 
 export function setFirstClassParentExpanded(sessionId: string, expanded: boolean): void {
 	if (expanded) collapsedFirstClassParents.delete(sessionId);
 	else collapsedFirstClassParents.add(sessionId);
-	localStorage.setItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
+	safeSetItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
 }
 
 export function toggleFirstClassParentExpanded(sessionId: string): void {
@@ -628,13 +628,13 @@ export function isFirstClassParentExpanded(sessionId: string): boolean {
 
 const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
 const expandedDelegateParents: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(EXPANDED_DELEGATE_PARENTS_KEY) || "[]"),
+	safeGetJSON<string[]>(EXPANDED_DELEGATE_PARENTS_KEY, []),
 );
 
 export function setArchivedParentExpanded(sessionId: string, expanded: boolean): void {
 	if (expanded) expandedDelegateParents.add(sessionId);
 	else expandedDelegateParents.delete(sessionId);
-	localStorage.setItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
+	safeSetItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
 }
 
 export function toggleArchivedParentExpanded(sessionId: string): void {
@@ -654,16 +654,16 @@ export function resetArchivedExpandState(): void {
 	// Remove archived session IDs from expandedDelegateParents
 	const archivedSessionIds = new Set(state.archivedSessions.map(s => s.id));
 	for (const id of archivedSessionIds) expandedDelegateParents.delete(id);
-	localStorage.setItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
+	safeSetItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
 
 	// Reset archived team lead sessions from collapsedTeamLeadSessions
 	// (archived team leads that were explicitly collapsed — remove them so they return to default)
 	for (const id of archivedSessionIds) collapsedTeamLeadSessions.delete(id);
-	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+	safeSetItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
 
 	// Reset archived first-class parent sessions from collapsedFirstClassParents
 	for (const id of archivedSessionIds) collapsedFirstClassParents.delete(id);
-	localStorage.setItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
+	safeSetItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
 
 	// Free memory — archived sessions will be re-fetched on next toggle-on
 	state.archivedSessions = [];
@@ -754,7 +754,7 @@ export function setSidebarWidth(w: number, persist = true): void {
 	const clamped = clampSidebarWidth(w);
 	state.sidebarWidth = clamped;
 	applySidebarWidthVar(clamped);
-	if (persist) localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
+	if (persist) safeSetItem(SIDEBAR_WIDTH_KEY, String(clamped));
 }
 
 export const SIDEBAR_BREAKPOINT = 768;

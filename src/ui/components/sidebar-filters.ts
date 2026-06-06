@@ -21,6 +21,7 @@ import { shortcutHint } from "../../app/shortcut-registry.js";
 // ESM live-binding resolves at call time.
 import { clearArchivedBySearch } from "../../app/sidebar.js";
 import { fetchArchivedSessions, fetchArchivedGoalsPaginated, clearArchivedSessionsState } from "../../app/api.js";
+import { safeSetItem } from "../../app/safe-storage.js";
 
 // ---------------------------------------------------------------------------
 // Shared toggle handlers (used by both popover clicks and keyboard shortcuts)
@@ -29,7 +30,7 @@ import { fetchArchivedSessions, fetchArchivedGoalsPaginated, clearArchivedSessio
 /** Toggle Show Archived. Persists, lazy-loads/clears archived data, re-renders. */
 export function toggleShowArchived(): void {
 	state.showArchived = !state.showArchived;
-	localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+	safeSetItem("bobbit-show-archived", String(state.showArchived));
 	// Manual toggle takes precedence over search-driven auto-open.
 	clearArchivedBySearch();
 	if (state.showArchived) {
@@ -45,14 +46,14 @@ export function toggleShowArchived(): void {
 /** Toggle Show Busy. Persists, re-renders. */
 export function toggleShowBusy(): void {
 	state.showBusy = !state.showBusy;
-	localStorage.setItem("bobbit-show-busy", String(state.showBusy));
+	safeSetItem("bobbit-show-busy", String(state.showBusy));
 	renderApp();
 }
 
 /** Toggle Show Read. Persists, re-renders. */
 export function toggleShowRead(): void {
 	state.showRead = !state.showRead;
-	localStorage.setItem("bobbit-show-read", String(state.showRead));
+	safeSetItem("bobbit-show-read", String(state.showRead));
 	renderApp();
 }
 

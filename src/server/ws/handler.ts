@@ -810,12 +810,19 @@ export function handleWebSocketConnection(
 				}
 				case "get_messages": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					// Perf attribution (dev harness only): split the snapshot build
+					// into agent RPC assembly vs. server transform vs. serialize, and
+					// attach it to the frame so the client's boot-timing sample
+					// captures it. See SnapshotServerTiming. Zero cost when off.
+					const perf = process.env.BOBBIT_DEV_HARNESS === "1";
+					const tStart = perf ? performance.now() : 0;
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
 					const msgsResp = await session.rpcClient.getMessages();
 					if (diagEnabled) {
 						getCpuDiagnostics().recordTimer("ws-handler:getMessages", performance.now() - diagStart, { success: msgsResp.success ? 1 : 0 });
 					}
+					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
 						const raw = msgsResp.data as any;
 						// msgsResp.data may be an array or { messages: [...] }
@@ -838,7 +845,32 @@ export function handleWebSocketConnection(
 							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 							data = merged === raw.messages ? raw : { ...raw, messages: merged };
 						}
-						send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
+						const tPipeline = perf ? performance.now() : 0;
+						const stamped = stampSnapshotOrder(data);
+						const tStamp = perf ? performance.now() : 0;
+						if (perf) {
+							const arr = Array.isArray(stamped)
+								? stamped
+								: (stamped && Array.isArray((stamped as any).messages) ? (stamped as any).messages : []);
+							const sStart = performance.now();
+							const bytes = JSON.stringify(stamped).length;
+							const stringifyMs = performance.now() - sStart;
+							const r1 = (n: number) => Math.round(n * 10) / 10;
+							send(ws, {
+								type: "messages",
+								data: stamped as unknown[],
+								serverTiming: {
+									rpcMs: r1(tRpc - tStart),
+									pipelineMs: r1(tPipeline - tRpc),
+									stampMs: r1(tStamp - tPipeline),
+									stringifyMs: r1(stringifyMs),
+									bytes,
+									msgCount: arr.length,
+								},
+							});
+						} else {
+							send(ws, { type: "messages", data: stamped as unknown[] });
+						}
 					}
 					break;
 				}

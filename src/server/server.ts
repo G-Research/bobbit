@@ -41,7 +41,7 @@ import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
-import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
+import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -6470,6 +6470,12 @@ async function handleApiRoute(
 			return;
 		}
 
+		const stepName = url.searchParams.get("step") ?? undefined;
+		if (stepName !== undefined && section !== "verification") {
+			json({ error: "step is only valid with section='verification'" }, 400);
+			return;
+		}
+
 		let selectionOptions: TextSelectionOptions;
 		try {
 			selectionOptions = parseGateInspectSelectionOptions(url.searchParams);
@@ -6519,6 +6525,7 @@ async function handleApiRoute(
 					verification: resolved.signal.verification,
 					activeVerification: verificationHarness.getActiveVerification(resolved.signal.id),
 					selectionOptions,
+					stepName,
 				});
 				json({
 					gateId, section: "verification",
@@ -6533,6 +6540,7 @@ async function handleApiRoute(
 				});
 			} catch (err) {
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				if (err instanceof UnknownVerificationStepError) { json({ error: err.message }, 400); return; }
 				throw err;
 			}
 			return;

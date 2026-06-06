@@ -326,6 +326,16 @@ Verification log output is bounded by default: `gate_status` and `gate_inspect s
 
 Running command steps can include live stdout/stderr tails. The server reads those log files with bounded byte limits before applying the same selection and aggregate response budgets used for persisted output.
 
+##### Targeting a single verification step
+
+A gate often runs several verify steps (e.g. type-check + lint + unit + e2e, or multiple review steps). By default `gate_inspect section=verification` returns *every* step, so a team lead chasing one failing step still receives all the others' output and cannot scope a `grep`/`slice` to the step they care about. The optional `step` parameter fixes that: pass the step **name** and the snapshot is scoped to just that one step.
+
+- **Why by name:** step names are already surfaced to callers — `gate_status` returns the names of failed steps in `failedSteps`, and each step's `name` appears in an unfiltered verification snapshot. So the names needed to target a step are always in hand. Targeting is by name only; there is no index-based selector.
+- **What changes:** `steps[]` contains only the matching step (still a single-element array, so the response shape is unchanged), and the selection mode (`grep`/`tail`/`slice`/`head`/`full`) applies to that one step's output. Per-step `selection` metadata and the default bounded-tail behavior are preserved.
+- **Validation:** an unknown step name returns 400 listing the available step names for that signal. `step` is only meaningful for `section=verification`; combining it with `section=content` or `section=signals` returns 400 (`step is only valid with section='verification'`).
+
+Typical triage flow: `gate_status` reports a failure and names the culprit in `failedSteps`, then `gate_inspect(section="verification", step="<name>", mode="grep", pattern="error|failed", context=2)` focuses the search on that step's log alone. See the [`gate_inspect` tool docs](../defaults/tools/tasks/gate_inspect.yaml) for the full parameter table.
+
 The UI uses the same explicit-status model. Gate status cards, the `gate_inspect` renderer, and signaled gate live cards reconcile WebSocket events, active-verification fetches, and persisted signal rows without flickering back to placeholder failed or `0ms` states while verification is still running.
 
 #### Gate verification baselines

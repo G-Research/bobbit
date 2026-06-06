@@ -1174,6 +1174,23 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
+		// ── Fire the transcript snapshot request the INSTANT the WS is
+		// authenticated — before the refreshSessions()/setAgent() awaits below.
+		// Profiling (boot-timing) showed those awaits stall the snapshot request
+		// by ~700ms on a cold reload, even though the server builds the snapshot
+		// in ~200ms. The reducer applies the snapshot to remote.state
+		// independently of the ChatPanel binding, so the request can fly in
+		// parallel with all the connect setup; the panel renders the messages
+		// when setAgent() binds. Proposal checking is deferred here and released
+		// by runDeferredProposalCheck() after draft restores complete — so an
+		// early snapshot can't fill form state before drafts restore.
+		// (Previously this lived ~250 lines below, AFTER those awaits, which
+		// defeated the "fire early" intent.)
+		if (isExisting) {
+			remote.deferProposalCheck();
+			remote.requestMessages();
+		}
+
 		// Auto-prompt for new assistant sessions — fire IMMEDIATELY after connect
 		// before any draft-restore awaits that could yield and race
 		const AUTO_PROMPTS: Record<string, string> = {
@@ -1968,14 +1985,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			setHashRoute("session", sessionId, true);
 		}
 
-		// ── Fire requestMessages() early so the network roundtrip overlaps
-		// with draft restores and refreshSessions below. Proposal checking
-		// is deferred so incoming messages won't fill form state before
-		// draft restores have a chance to run.
-		if (isExisting) {
-			remote.deferProposalCheck();
-			remote.requestMessages();
-		}
+		// (Snapshot request + proposal-check deferral were hoisted to fire
+		// immediately after connect() resolves — see the block right after
+		// `await remote.connect(...)` above. Firing here, after the
+		// refreshSessions()/setAgent() awaits, added ~700ms to every reload.)
 
 		// Initial git status and bg process fetch (fire-and-forget)
 		refreshGitStatusForSession(sessionId);
