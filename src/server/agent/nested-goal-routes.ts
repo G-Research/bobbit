@@ -36,6 +36,8 @@ import {
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
+import { resolveChildWorkflow } from "./spawn-child-workflow.js";
+import { authorizeChildrenMutation } from "../auth/children-mutation-authz.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -105,6 +107,53 @@ export async function tryHandleNestedGoalRoute(
 		broadcastToAll,
 		getSubgoalNestingPrefs,
 	} = deps;
+
+	/**
+	 * S1: read the caller session id from the spawning-session headers. The
+	 * `children` tool extension always sends `X-Bobbit-Spawning-Session`;
+	 * `X-Bobbit-Session-Id` is accepted as defence in depth. `undefined` means
+	 * no agent header — a trusted human/UI gateway call (the web UI calls
+	 * /pause, /resume, /mutation decision directly via gatewayFetch).
+	 */
+	function readCallerSessionId(): string | undefined {
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const read = (n: string): string | undefined => {
+			const v = h[n.toLowerCase()];
+			const s = Array.isArray(v) ? v[0] : v;
+			return typeof s === "string" && s.trim() ? s.trim() : undefined;
+		};
+		return read("x-bobbit-spawning-session") ?? read("x-bobbit-session-id");
+	}
+
+	/**
+	 * S1: server-side authorization for the MUTATING Children endpoints. The
+	 * `Children` tool group is team-lead-only by tool policy, but the REST
+	 * routes are reachable by anything with gateway credentials. We authorize
+	 * by matching the caller's spawning-session header against the
+	 * authoritative team-lead session id for `goalIdForTeam` (resolved from
+	 * the TeamManager, never trusting the header as a bare claim). When the
+	 * header is absent (trusted human/UI gateway call) or the goal has no
+	 * established team-lead, the call is allowed. See
+	 * `src/server/auth/children-mutation-authz.ts` for the full threat model.
+	 *
+	 * Returns `true` when the request may proceed; otherwise writes a 403 and
+	 * returns `false` so the caller should `return true` immediately.
+	 */
+	function authorizeTeamLeadOrReject(goalIdForTeam: string): boolean {
+		const result = authorizeChildrenMutation({
+			callerSessionId: readCallerSessionId(),
+			teamLeadSessionId: teamManager.getTeamState(goalIdForTeam)?.teamLeadSessionId,
+		});
+		if (!result.ok) {
+			json({
+				error: "Caller session is not the team-lead for this goal",
+				code: "NOT_TEAM_LEAD",
+				goalId: goalIdForTeam,
+			}, 403);
+			return false;
+		}
+		return true;
+	}
 
 	/** Cancel any in-flight verifications for a goal (best-effort). */
 	async function cancelAllVerifications(goalId: string): Promise<void> {
@@ -185,6 +234,13 @@ export async function tryHandleNestedGoalRoute(
 			const depsTopLevel = s.dependsOn;
 			const depsSubgoal = s.subgoal?.dependsOn;
 			const stepDeps = depsTopLevel ?? depsSubgoal;
+			// G2/C1: `goal_plan_propose` sends workflowId/suggestedRole at the
+			// TOP level of each step; prefer those, falling back to the nested
+			// `subgoal.*` shape. Previously only the nested form was read, so a
+			// proposed child's workflow/role override never reached the stored
+			// execution plan.
+			const stepWorkflowId = s.workflowId ?? s.subgoal?.workflowId;
+			const stepRole = s.suggestedRole ?? s.subgoal?.suggestedRole;
 			return {
 				name: s.title ?? s.subgoal?.title ?? `step-${idx}`,
 				type: "subgoal" as const,
@@ -193,8 +249,8 @@ export async function tryHandleNestedGoalRoute(
 					planId: s.planId,
 					title: s.title ?? s.subgoal?.title ?? "",
 					spec: s.spec ?? s.subgoal?.spec ?? "",
-					...(s.subgoal?.workflowId !== undefined ? { workflowId: s.subgoal.workflowId } : {}),
-					...(s.subgoal?.suggestedRole !== undefined ? { suggestedRole: s.subgoal.suggestedRole } : {}),
+					...(stepWorkflowId !== undefined ? { workflowId: stepWorkflowId } : {}),
+					...(stepRole !== undefined ? { suggestedRole: stepRole } : {}),
 					...(stepDeps !== undefined ? { dependsOn: stepDeps } : {}),
 				},
 			};
@@ -249,6 +305,9 @@ export async function tryHandleNestedGoalRoute(
 			json({ error: `Parent goal ${parentId} is paused`, code: "GOAL_PAUSED", goalId: parentId }, 409);
 			return true;
 		}
+		// S1: only the parent's team-lead (or a trusted human/UI gateway call)
+		// may spawn children under it.
+		if (!authorizeTeamLeadOrReject(parentId)) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
 		const planId = typeof body.planId === "string" ? body.planId.trim() : "";
@@ -382,19 +441,38 @@ export async function tryHandleNestedGoalRoute(
 					: parent.repoPath;
 			}
 
-			// Inline workflow resolution. Precedence: body.workflow →
-			// parent.workflow (deep-cloned via stripSubgoalStepsForChildInheritance
-			// so a parent meta-workflow's plan is dropped) → body.workflowId
-			// (downstream lookup in goal-manager.createGoal).
-			const inlineWorkflowBody = (body as { workflow?: unknown }).workflow;
+			// G2/C1: workflow resolution via the shared `resolveChildWorkflow`
+			// cascade so an explicit `workflowId` OVERRIDES an inherited parent
+			// snapshot. The previous inline logic preferred `parent.workflow`
+			// over `body.workflowId`, silently dropping the caller's override.
+			// Cascade tiers (highest first): body.workflow → body.workflowId →
+			// parent.workflow (stripped of parent subgoal steps) → "feature" →
+			// first non-hidden. Tiers 1+3 return a snapshot (resolvedWorkflow);
+			// tiers 2/4/5 return an id only (materialised by createGoal). Keeps
+			// workflowId and workflow.id aligned (QA-1).
+			const inlineWorkflowBody = (body as { workflow?: Workflow }).workflow;
 			let resolvedWorkflowForChild: Workflow | undefined;
-			if (inlineWorkflowBody && typeof inlineWorkflowBody === "object") {
-				resolvedWorkflowForChild = inlineWorkflowBody as Workflow;
-			} else if (parent.workflow) {
-				resolvedWorkflowForChild = stripSubgoalStepsForChildInheritance(parent.workflow);
+			let workflowId: string;
+			try {
+				const wfResolution = resolveChildWorkflow(
+					parent,
+					undefined,
+					{
+						...(inlineWorkflowBody && typeof inlineWorkflowBody === "object" ? { workflow: inlineWorkflowBody } : {}),
+						...(bodyWorkflowId !== undefined ? { workflowId: bodyWorkflowId } : {}),
+					},
+					ctx.workflowStore,
+				);
+				resolvedWorkflowForChild = wfResolution.workflow;
+				workflowId = wfResolution.workflowId;
+			} catch {
+				// No workflow resolvable anywhere — fall back to the caller's id or
+				// "feature" and let createGoal materialise (or fail loudly).
+				resolvedWorkflowForChild = parent.workflow
+					? stripSubgoalStepsForChildInheritance(parent.workflow)
+					: undefined;
+				workflowId = resolvedWorkflowForChild?.id ?? bodyWorkflowId ?? "feature";
 			}
-			// QA-1: keep workflowId and workflow.id aligned.
-			const workflowId = resolvedWorkflowForChild?.id ?? bodyWorkflowId ?? "feature";
 
 			// Inline roles — merge parent's snapshot with the body's; child
 			// overrides parent for same name. Mirrors goal.workflow snapshot.
@@ -501,6 +579,9 @@ export async function tryHandleNestedGoalRoute(
 		const resolved = resolvePlanContext(id);
 		if (!resolved) return true;
 		const { goal } = resolved;
+		// S1: only the goal's team-lead (or a trusted human/UI gateway call)
+		// may mutate its plan.
+		if (!authorizeTeamLeadOrReject(id)) return true;
 		// Plan-propose requires a workflow with an `execution` gate.
 		const hasExecutionGate = !!goal.workflow?.gates.some(g => g.id === "execution");
 		if (!hasExecutionGate) {
@@ -714,6 +795,9 @@ export async function tryHandleNestedGoalRoute(
 			json({ error: `Child ${childId} parentGoalId="${child.parentGoalId}" does not match path parent ${parentId}`, code: "PARENT_MISMATCH" }, 400);
 			return true;
 		}
+		// S1: only the parent's team-lead (or a trusted human/UI gateway call)
+		// may integrate a child into the parent branch.
+		if (!authorizeTeamLeadOrReject(parentId)) return true;
 		const ctx = projectContextManager.getContextForGoal(parentId);
 		if (!ctx) { json({ error: "Project context not found" }, 404); return true; }
 		const goalManager = ctx.goalManager;
@@ -806,6 +890,9 @@ export async function tryHandleNestedGoalRoute(
 		const id = pauseMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
+		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
+		// pause it.
+		if (!authorizeTeamLeadOrReject(id)) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body || typeof body.cascade !== "boolean") {
 			json({ error: "cascade (boolean) is required", code: "CASCADE_REQUIRED" }, 422);
@@ -859,6 +946,9 @@ export async function tryHandleNestedGoalRoute(
 		const id = resumeMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
+		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
+		// resume it.
+		if (!authorizeTeamLeadOrReject(id)) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body || typeof body.cascade !== "boolean") {
 			json({ error: "cascade (boolean) is required", code: "CASCADE_REQUIRED" }, 422);
@@ -921,6 +1011,9 @@ export async function tryHandleNestedGoalRoute(
 		// (goalId, requestId) — a cross-goal requestId 404s naturally.
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
+		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
+		// decide a queued plan mutation.
+		if (!authorizeTeamLeadOrReject(goalId)) return true;
 		const body = await readBody(req).catch(() => null);
 		const decision = body?.decision;
 		if (decision !== "approve" && decision !== "reject") {
@@ -1008,6 +1101,9 @@ export async function tryHandleNestedGoalRoute(
 		const id = policyMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
+		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
+		// change its policy.
+		if (!authorizeTeamLeadOrReject(id)) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
 		const goalManager = getGoalManagerForGoal(id);
@@ -1020,14 +1116,27 @@ export async function tryHandleNestedGoalRoute(
 			updates.divergencePolicy = body.divergencePolicy;
 		}
 		if (body.maxConcurrentChildren !== undefined) {
-			const n = Number(body.maxConcurrentChildren);
+			// C4: integer clamp. A fractional value (e.g. 1.5) would otherwise be
+			// stored verbatim and let an extra child run. Floor to an integer and
+			// require the result to land in [1, 8].
+			const raw = Number(body.maxConcurrentChildren);
+			const n = Math.floor(raw);
 			if (!Number.isFinite(n) || n < 1 || n > 8) {
-				json({ error: "maxConcurrentChildren must be a number in [1, 8]" }, 400);
+				json({ error: "maxConcurrentChildren must be an integer in [1, 8]" }, 400);
 				return true;
 			}
 			updates.maxConcurrentChildren = n;
 		}
 		await goalManager.updateGoal(id, updates);
+		// C2: live concurrency enforcement. `maxConcurrentChildren` is
+		// root-resolved for the per-root subgoal semaphore, which is cached on
+		// first use. Resize the cached semaphore so a lowered cap takes effect
+		// on an already-running subtree instead of only after a restart.
+		if (updates.maxConcurrentChildren !== undefined) {
+			const rootGoalId = getGoalAcrossProjects(id)?.rootGoalId ?? id;
+			const resolvedMax = goalManager.resolveRootMaxConcurrentChildren(rootGoalId);
+			verificationHarness.resizeRootSubgoalSemaphore(rootGoalId, resolvedMax);
+		}
 		// R-017: include the new policy values in the broadcast so clients
 		// don't need to re-fetch the goal record on every policy change.
 		const updatedGoal = getGoalAcrossProjects(id);

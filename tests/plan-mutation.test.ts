@@ -274,6 +274,46 @@ describe("classifyMutation", () => {
 		assert.deepEqual(r.diff.modified, ["x"]);
 	});
 
+	// G2/C1 — goal_plan_propose sends workflowId/suggestedRole at the TOP level
+	// of each step; the classifier must hoist them (top-level wins over nested).
+	it("fix-up: TOP-LEVEL workflowId changed on existing step is detected", () => {
+		const current: ClassifierPlanStep[] = [{
+			planId: "x", phase: 1, title: "X", spec: "spec", workflowId: "feature",
+		}];
+		const proposed: ClassifierPlanStep[] = [{
+			planId: "x", phase: 1, title: "X", spec: "spec", workflowId: "parent",
+		}];
+		const r = classifyMutation({ current, proposed, rootAcceptanceCriteria: [], rootSpec: "" });
+		assert.equal(r.kind, "fix-up");
+		assert.deepEqual(r.diff.modified, ["x"]);
+	});
+
+	it("fix-up: TOP-LEVEL suggestedRole changed on existing step is detected", () => {
+		const current: ClassifierPlanStep[] = [{
+			planId: "x", phase: 1, title: "X", spec: "spec", suggestedRole: "coder",
+		}];
+		const proposed: ClassifierPlanStep[] = [{
+			planId: "x", phase: 1, title: "X", spec: "spec", suggestedRole: "test-engineer",
+		}];
+		const r = classifyMutation({ current, proposed, rootAcceptanceCriteria: [], rootSpec: "" });
+		assert.equal(r.kind, "fix-up");
+		assert.deepEqual(r.diff.modified, ["x"]);
+	});
+
+	it("noop: top-level workflowId/role on current matches nested workflowId/role on proposed", () => {
+		// Top-level (current) vs nested (proposed) for the SAME value must be a
+		// no-op — effectiveWorkflowId/effectiveRole normalise both shapes.
+		const current: ClassifierPlanStep[] = [{
+			planId: "x", phase: 1, title: "X", spec: "spec", workflowId: "feature", suggestedRole: "coder",
+		}];
+		const proposed: ClassifierPlanStep[] = [{
+			planId: "x", phase: 1, title: "X", spec: "spec",
+			subgoal: { planId: "x", title: "X", spec: "spec", workflowId: "feature", suggestedRole: "coder" },
+		}];
+		const r = classifyMutation({ current, proposed, rootAcceptanceCriteria: [], rootSpec: "" });
+		assert.equal(r.kind, "noop");
+	});
+
 	it("criterion split across two adjacent step specs does NOT pass coverage (R-013)", () => {
 		// Steps are normalised individually then `.join("\n")`'d, so a
 		// criterion that straddles the boundary between two step specs

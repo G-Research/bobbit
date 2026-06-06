@@ -788,12 +788,19 @@ export class GoalManager {
 
 	/**
 	 * Per-tree concurrency cap for `runSubgoalStep`. Reads root's
-	 * `maxConcurrentChildren`. Defaults: 3, clamped to [1, 8].
+	 * `maxConcurrentChildren`. Defaults: 3.
+	 *
+	 * C4: the result is ALWAYS an integer in [1, 8]. A fractional stored
+	 * value (e.g. `1.5`) is floored before clamping so it can never let an
+	 * extra child slip through the per-root semaphore (`Math.floor(1.5) === 1`).
+	 * `Math.floor` runs before the clamp so a value like `8.9` floors to `8`
+	 * (in-range) rather than being rejected. `NaN` falls back to the floor `1`.
 	 */
 	resolveRootMaxConcurrentChildren(rootGoalId: string): number {
 		const root = this.store.get(rootGoalId);
 		if (!root) return 3;
-		const raw = root.maxConcurrentChildren ?? 3;
+		const raw = Math.floor(Number(root.maxConcurrentChildren ?? 3));
+		if (!Number.isFinite(raw)) return 1;
 		return Math.max(1, Math.min(8, raw));
 	}
 
