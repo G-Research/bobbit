@@ -245,6 +245,92 @@ describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
 		assert.deepEqual(started, ["x"]);
 		assert.equal(scheduler.pendingCount(ROOT), 0);
 	});
+
+	it("releases the permit + re-enqueues + drains next when startChildTeam REJECTS asynchronously (no deadlock)", async () => {
+		// The real team start is async (worktree setup → teamManager.startTeam).
+		// If it rejects (goal paused/archived mid-start) the scheduler must release
+		// the held permit, re-enqueue the child, and drain the next eligible —
+		// otherwise the child stays in `holding` forever with no terminal event and
+		// the queue deadlocks (the HIGH async-start permit-leak).
+		const ROOT = "r";
+		const children = new Map<string, FakeChild>([
+			["x", { id: "x", state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+			["y", { id: "y", state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+		]);
+		const started: string[] = [];
+		let rejectX = true;
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1,
+			getChild: (id) => children.get(id),
+			startChildTeam: (id) => {
+				if (id === "x" && rejectX) { rejectX = false; return Promise.reject(new Error("paused mid-start")); }
+				started.push(id);
+				return Promise.resolve();
+			},
+		});
+
+		// cap=1: x acquires the only permit and its async start kicks off; y queues.
+		assert.equal(scheduler.requestStart("x"), "started");
+		assert.equal(scheduler.requestStart("y"), "capacity-blocked");
+		assert.equal(scheduler.pendingCount(ROOT), 2 - 1, "only y is queued so far");
+
+		// Let the rejected x-start promise settle (the `.catch` runs as a microtask).
+		await Promise.resolve();
+		await Promise.resolve();
+
+		// The permit x leaked-but-now-released drains the next eligible: y starts.
+		// If the permit had leaked, y could never acquire one and started stays [].
+		assert.deepEqual(started, ["y"], "freed permit drains the next eligible child");
+		assert.equal(scheduler.pendingCount(ROOT), 1, "x re-enqueued (its async start failed)");
+
+		// y reaches a terminal event → frees the permit → x retries and now succeeds.
+		children.get("y")!.archived = true;
+		scheduler.notifyTerminal("y");
+		await Promise.resolve();
+		assert.deepEqual(started, ["y", "x"], "x retried into the freed permit (no deadlock)");
+		assert.equal(scheduler.pendingCount(ROOT), 0);
+	});
+
+	it("does NOT double-release when a terminal event races an async start rejection", async () => {
+		// If a terminal event releases the permit BEFORE the async start rejection
+		// settles, the rejection handler must NOT release a second time (which would
+		// over-subscribe the semaphore / throw on over-release).
+		const ROOT = "r";
+		const children = new Map<string, FakeChild>([
+			["x", { id: "x", state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+			["y", { id: "y", state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+		]);
+		const started: string[] = [];
+		let rejectResolvers: (() => void)[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1,
+			getChild: (id) => children.get(id),
+			startChildTeam: (id) => {
+				if (id === "x") {
+					// A start whose rejection we control the timing of.
+					return new Promise<void>((_, reject) => rejectResolvers.push(() => reject(new Error("late fail"))));
+				}
+				started.push(id);
+				return Promise.resolve();
+			},
+		});
+
+		assert.equal(scheduler.requestStart("x"), "started");
+
+		// Terminal event for x fires FIRST (releases the permit, drops it from holding).
+		children.get("x")!.archived = true;
+		scheduler.notifyTerminal("x");
+
+		// Now the in-flight x start finally rejects — must be a no-op (already released).
+		rejectResolvers.forEach(r => r());
+		await Promise.resolve();
+		await Promise.resolve();
+
+		// y can still start (exactly one permit available — not double-released).
+		assert.equal(scheduler.requestStart("y"), "started");
+		assert.deepEqual(started, ["y"]);
+		assert.equal(scheduler.pendingCount(ROOT), 0, "x not re-enqueued by the late rejection");
+	});
 });
 
 describe("ChildTeamScheduler — live cap resize (PATCH /policy)", () => {
