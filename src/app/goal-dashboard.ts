@@ -381,14 +381,22 @@ async function decideDashboardMutation(goalId: string, requestId: string, decisi
 	dashboardMutationDecisionInFlight.add(requestId);
 	renderApp();
 	try {
-		await gatewayFetch(`/api/goals/${goalId}/mutation/${requestId}/decision`, {
+		const res = await gatewayFetch(`/api/goals/${goalId}/mutation/${requestId}/decision`, {
 			method: "POST",
 			body: JSON.stringify({ decision }),
 		});
+		// `gatewayFetch` resolves for 4xx/5xx — only clear the card on success.
+		// On a non-OK status leave the card visible so the operator can retry;
+		// the WS `mutation_decided` event would also clear it if the decision
+		// had actually been applied server-side.
+		if (!res.ok) {
+			console.error(`[dashboard-mutation] decision failed: HTTP ${res.status} ${res.statusText}`);
+			return;
+		}
 		removeDashboardPendingMutation(requestId);
 	} catch (err) {
-		// Leave the card visible so the operator can retry — the WS event would
-		// also clear it if the POST actually succeeded.
+		// Network/exception path — leave the card visible so the operator can
+		// retry; the WS event would also clear it if the POST actually succeeded.
 		console.error("[dashboard-mutation] decision failed:", err);
 	} finally {
 		dashboardMutationDecisionInFlight.delete(requestId);
