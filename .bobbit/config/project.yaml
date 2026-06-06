@@ -1769,13 +1769,6 @@ workflows:
             type: command
             run: sleep 60 && echo ok
             phase: 0
-config_directories:
-  - path: C:\tmp\.bobbit
-    types:
-      - skills
-  - path: C:\Users\jsubr\.claude\AGENTS.md
-    types:
-      - agents
 sandbox_tokens:
   - key: ANTHROPIC_OAUTH_TOKEN
     enabled: true
