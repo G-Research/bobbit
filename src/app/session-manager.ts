@@ -1609,7 +1609,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// ahead of the immutable snapshot counter and make the current tool card
 			// look stale. Legacy no-rev paths keep the existing rev (or 0 = unknown).
 			const nextRev = (typeof serverRev === "number" && serverRev > 0)
-				? Math.trunc(serverRev)
+				? Math.max(Math.trunc(serverRev), prev?.rev ?? 0)
 				: (prev?.rev ?? 0);
 		const slot: ProposalSlot = {
 				sessionId,
@@ -1644,6 +1644,23 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					isAssistant: isMatchingAssistant,
 					isMobile: !isDesktop(),
 				});
+			}
+			// Form-mirror gap closure: the goal-ASSISTANT panel (goalPreviewPanel)
+			// renders from the legacy form-mirror state (previewTitle/previewSpec/
+			// previewCwd), which the legacy onGoalProposal callback only writes on
+			// the propose_* tool-use scan. edit_proposal frames, off-screen/rehydrated
+			// proposals, and dedup-skipped replays reach the slot only through this
+			// unified path. Mirror the merged goal fields here so those paths update
+			// the panel too. Respects the *Edited flags exactly like the legacy
+			// callback so in-progress user edits are never clobbered. Runs on every
+			// non-dismissed goal proposal (first-emit, revision, edit, rehydrate).
+			if (type === "goal" && state.assistantType === "goal") {
+				const g = merged as { title?: string; spec?: string; cwd?: string; workflow?: string };
+				if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
+				if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
+				if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
+				if (g.workflow) setSelectedWorkflowId(g.workflow);
+				saveGoalDraft(sessionId);
 			}
 			renderApp();
 		};
@@ -2022,7 +2039,38 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
 				if (isStale()) return;
-				if (!restored) {
+				const goalSlot = state.activeProposals.goal;
+				const slotForThisSession = goalSlot != null && goalSlot.sessionId === sessionId;
+				if (slotForThisSession) {
+					// The unified onProposal slot is the source of truth for the
+					// proposal CONTENT (it is populated by the WS-auth
+					// `proposal_update {rehydrate}` broadcast on every fresh/boot
+					// connect). restoreGoalDraft may have just clobbered the
+					// form-mirror the goal-assistant panel reads from with a stale /
+					// empty persisted draft — e.g. an OFF-SCREEN proposal whose client
+					// draft was saved (empty) while the panel was inactive, so the
+					// restored `previewTitle`/`previewSpec` are blank even though the
+					// rehydrated slot holds the real proposal. Mirror the slot into the
+					// form-mirror, respecting the *Edited flags (themselves restored
+					// from the draft) so a genuine in-progress user edit always wins.
+					// Runs whether or not a draft was restored — the slot, not the
+					// draft, decides the proposal content. Persist so the next
+					// fast-path restore is correct.
+					const g = goalSlot!.fields as { title?: string; spec?: string; cwd?: string; workflow?: string };
+					if (!state.previewTitleEdited && typeof g.title === "string") state.previewTitle = g.title;
+					if (!state.previewSpecEdited && typeof g.spec === "string") state.previewSpec = g.spec;
+					if (!state.previewCwdEdited && g.cwd) state.previewCwd = g.cwd;
+					if (g.workflow) setSelectedWorkflowId(g.workflow);
+					state.assistantHasProposal = true;
+					// Surface the proposal panel exactly like the live propose_goal path
+					// (revealProposalPanel / legacy onGoalProposal): on mobile the panel
+					// is tab-gated, and the slow-path reset above forced assistantTab back
+					// to "chat" after an early buffered rehydrate replay already switched
+					// it to "preview". Re-assert it here so the rehydrated proposal is
+					// visible, not hidden behind the chat tab.
+					if (state.assistantTab === "chat" && !isDesktop()) state.assistantTab = "preview";
+					saveGoalDraft(sessionId);
+				} else if (!restored) {
 					state.assistantTab = "chat";
 					state.previewTitle = "";
 					state.previewCwd = "";
