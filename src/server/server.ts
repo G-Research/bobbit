@@ -187,6 +187,7 @@ import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sand
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
+import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { WalkthroughAgentManager } from "./pr-walkthrough/walkthrough-agent-manager.js";
@@ -4818,6 +4819,33 @@ async function handleApiRoute(
 	if (archiveChildMatch && req.method === "DELETE") {
 		const parentId = archiveChildMatch[1];
 		const childId = archiveChildMatch[2];
+		// Subgoals feature gate — archive-child is a Children mutation.
+		if (!requireSubgoalsEnabled()) return;
+		// S1: server-side Children authorization (same semantics as every
+		// other mutating Children endpoint — see children-mutation-authz.ts).
+		// Human cookie → allow; agent caller must present a spawning-session
+		// header matching the parent goal's authoritative team-lead.
+		{
+			const h = req.headers as Record<string, string | string[] | undefined>;
+			const readHeader = (n: string): string | undefined => {
+				const v = h[n.toLowerCase()];
+				const s = Array.isArray(v) ? v[0] : v;
+				return typeof s === "string" && s.trim() ? s.trim() : undefined;
+			};
+			const authz = authorizeChildrenMutation({
+				isHumanOperator: cookieTryAuth(req, cookieStore!),
+				callerSessionId: readHeader("x-bobbit-spawning-session") ?? readHeader("x-bobbit-session-id"),
+				teamLeadSessionId: teamManager.getTeamState(parentId)?.teamLeadSessionId,
+			});
+			if (!authz.ok) {
+				json({
+					error: "Caller session is not the team-lead for this goal",
+					code: "NOT_TEAM_LEAD",
+					goalId: parentId,
+				}, 403);
+				return;
+			}
+		}
 		const parent = getGoalAcrossProjects(parentId);
 		if (!parent) { json({ error: "Parent goal not found" }, 404); return; }
 		const child = getGoalAcrossProjects(childId);
