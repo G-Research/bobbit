@@ -15,8 +15,9 @@
  *   2. Authz — a verified human/UI operator (bobbit_session cookie) is
  *      allowed past the gate and the child is archived.
  *   3. Authz — an agent caller presenting a spawning-session header on a goal
- *      with no established team-lead takes the "no-team-lead → allow" branch
- *      and the child is archived.
+ *      with no established team-lead is rejected 403 NOT_TEAM_LEAD (a teamless
+ *      goal has no legitimate agent caller; only a human operator may mutate
+ *      it) and the child is NOT archived.
  *   4. Relationship — once authorized, a target that is NOT a direct child of
  *      the parent is rejected 403 NOT_DIRECT_CHILD (authenticating
  *      legitimately via the human cookie so the request reaches the
@@ -63,8 +64,8 @@ function humanHeaders(extra?: Record<string, string>): Record<string, string> {
 
 /**
  * Create a goal in a real git repo so it gets a worktree (`repoPath`).
- * `autoStartTeam: false` so no team-lead is established — leaving the
- * "no-team-lead → allow" authz branch in play for agent callers.
+ * `autoStartTeam: false` so no team-lead is established — a teamless goal is
+ * mutable ONLY by a verified human operator, so agent callers are denied.
  */
 async function createReadyGoal(label: string): Promise<{ id: string; repoPath?: string }> {
 	const resp = await apiFetch("/api/goals", {
@@ -179,10 +180,12 @@ test.describe("DELETE /api/goals/:parentId/archive-child/:childId — Children a
 		}
 	});
 
-	test("agent caller with spawning header on team-lead-less goal → allowed (no-team-lead branch)", async () => {
+	test("agent caller with spawning header on team-lead-less goal → 403 NOT_TEAM_LEAD (child preserved)", async () => {
 		const parent = await createReadyGoal("archive-child agent parent");
 		const childId = await spawnChild(parent.id, "plan-authz-agent");
 		try {
+			// A teamless goal has no legitimate agent caller, so a forged
+			// spawning-session header must NOT authorize the mutation.
 			const { status, body } = await archiveChildRaw({
 				parentId: parent.id,
 				childId,
@@ -191,9 +194,9 @@ test.describe("DELETE /api/goals/:parentId/archive-child/:childId — Children a
 					"X-Bobbit-Spawning-Session": `agent-sess-${Date.now()}`,
 				},
 			});
-			expect(status).toBe(200);
-			expect(body.ok).toBe(true);
-			expect(await isArchived(childId)).toBe(true);
+			expect(status).toBe(403);
+			expect(body.code).toBe("NOT_TEAM_LEAD");
+			expect(await isArchived(childId)).toBe(false);
 		} finally {
 			await deleteGoal(childId);
 			await deleteGoal(parent.id);
