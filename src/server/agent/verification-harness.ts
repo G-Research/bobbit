@@ -4375,6 +4375,13 @@ export class VerificationHarness {
 		// ── 6 + 7 + 8 + 9. Acquire semaphore → spawn or use existing → wait → merge ──
 		const sem = this._acquireRootSubgoalSemaphore(rootGoalId, parentGoalId);
 		await sem.acquire();
+		// `permitHeld` tracks whether we currently own the semaphore permit. A
+		// child created BLOCKED on unmet deps releases the permit while it waits
+		// for the auto-unblock scan (holding it would deadlock a cap=1 root —
+		// the dependency could never acquire a slot to run + merge) and
+		// re-acquires before the in-flight ready-to-merge wait. The `finally`
+		// only releases when we actually hold the permit.
+		let permitHeld = true;
 		try {
 			let childGoalId: string;
 			if (resolved.child) {
@@ -4472,6 +4479,20 @@ export class VerificationHarness {
 					teamManager,
 				}).value;
 				const _childOverrides = inheritedChildOverrides(parent, _nestingPrefs);
+				// dependsOn scheduling enforcement (mirrors POST /spawn-child):
+				// resolve each declared dep planId to a sibling and check whether it
+				// has merged (state=complete). Children with unresolved deps are
+				// stamped state='blocked' (scheduler-managed, NOT operator 'paused')
+				// and skip worktree/team start; they auto-resume when their last
+				// dependency merges (see _autoUnblockDependents, run from §8 after
+				// each child merge). Computed sync BEFORE createGoal so the
+				// stamp-immediately invariant (no awaits between createGoal and the
+				// spawnedFromPlanId updateGoal) is preserved.
+				const _siblings = ctx.goalStore.getAll().filter(
+					g => g.parentGoalId === parentGoalId,
+				);
+				const _unresolvedDeps = this._computeUnresolvedDeps(sg.dependsOn, _siblings);
+				const _blocked = _unresolvedDeps.length > 0;
 				const child = await goalManager.createGoal(sg.title, parent.cwd, {
 					spec: sg.spec,
 					workflowId: childWorkflowId,
@@ -4490,6 +4511,9 @@ export class VerificationHarness {
 					// payload so the Plan tab synthesis can compute topological depth
 					// + draw the right edges. Empty/missing → parallel sibling.
 					...(sg.dependsOn !== undefined ? { dependsOnPlanIds: sg.dependsOn } : {}),
+					// dependsOn scheduling: stamp state='blocked' atomically so the
+					// child never has a runnable window with unresolved deps.
+					...(_blocked ? { state: "blocked" as const } : {}),
 				});
 				// END stamp-immediately invariant critical sequence.
 
@@ -4507,21 +4531,29 @@ export class VerificationHarness {
 					this._persistActive();
 				}
 
-				// Trigger worktree setup + team start (asynchronously kicked off;
-				// `waitForReadyToMerge` polls the gate state regardless of when
-				// setup completes). Wired via the existing setupWorktreeAndStartTeam
-				// callback if available; otherwise the test hook can stub the
-				// whole thing.
-				if (this._subgoalHooks?.setupChildAndStartTeam) {
-					try { await this._subgoalHooks.setupChildAndStartTeam(childGoalId); } catch (err) {
-						console.warn(`[verification] setupChildAndStartTeam hook failed for ${childGoalId}:`, err);
-					}
-				} else if (teamManager) {
-					goalManager.setupWorktreeAndStartTeam(childGoalId, async () => {
-						return teamManager.startTeam(childGoalId);
-					}).catch((err) => {
-						console.warn(`[verification] setupWorktreeAndStartTeam failed for child ${childGoalId} (non-fatal):`, err);
-					});
+				if (_blocked) {
+					// Blocked child: do NOT start its team/worktree. Release the
+					// per-root concurrency permit while we wait for the auto-unblock
+					// scan (triggered by a dependency's merge in §8) to flip this
+					// child blocked→todo and start its team. Holding the permit here
+					// would deadlock a cap=1 root, where the dependency could never
+					// acquire a slot to run + merge. Re-acquire before the in-flight
+					// ready-to-merge wait below.
+					sem.release();
+					permitHeld = false;
+					const unblockOutcome = await this._waitForChildUnblock(parentGoalId, childGoalId, active);
+					if (unblockOutcome === "cancelled") return { passed: false, output: "Cancelled" };
+					if (unblockOutcome === "archived-complete") return { passed: true, output: `Subgoal already complete + archived (during dep-wait): ${childGoalId}` };
+					if (unblockOutcome === "archived-other") return { passed: false, output: `Subgoal ${childGoalId} archived externally while blocked (state != complete) — re-signal to re-resolve` };
+					if (unblockOutcome === "timeout") return { passed: false, output: `Subgoal ${childGoalId} blocked-dep wait timed out (>24h) — re-signal to retry` };
+					// Unblocked: the auto-unblock scan started this child's team.
+					await sem.acquire();
+					permitHeld = true;
+				} else {
+					// Trigger worktree setup + team start (asynchronously kicked off;
+					// `waitForReadyToMerge` polls the gate state regardless of when
+					// setup completes).
+					await this._startChildTeam(childGoalId, goalManager, teamManager);
 				}
 			}
 
@@ -4562,6 +4594,11 @@ export class VerificationHarness {
 				}
 				try { await teamManager?.teardownTeam(childGoalId); } catch { /* non-fatal */ }
 				await goalManager.archiveGoalAfterMerge(childGoalId);
+				// dependsOn scheduling — auto-unblock any sibling whose deps are now
+				// ALL complete after this merge. Harness equivalent of the
+				// integrate-child REST auto-unblock scan, which does NOT run on the
+				// harness merge path. Best-effort: never fails the step.
+				await this._autoUnblockDependents(parentGoalId, childGoalId, goalManager, teamManager);
 				return { passed: true, output: `Subgoal merged + archived (${outcome.merged ? "merged" : "already merged"}): ${childGoalId}` };
 			}
 			if (outcome.conflict) {
@@ -4579,7 +4616,140 @@ export class VerificationHarness {
 			}
 			return { passed: false, output: `Unexpected merge outcome (no merged/alreadyMerged/conflict flag): ${truncateForOutput(outcome.output)}` };
 		} finally {
-			sem.release();
+			if (permitHeld) sem.release();
+		}
+	}
+
+	/**
+	 * dependsOn scheduling — resolve each declared dependency planId to a
+	 * sibling and return those that have NOT merged (state != "complete").
+	 * Mirrors the REST `POST /spawn-child` dependency check so both spawn paths
+	 * agree on what "unmet" means. A missing sibling counts as unmet.
+	 */
+	private _computeUnresolvedDeps(
+		dependsOn: string[] | undefined,
+		siblings: Array<{ spawnedFromPlanId?: string; state: string }>,
+	): string[] {
+		const unresolved: string[] = [];
+		if (dependsOn && dependsOn.length > 0) {
+			for (const depPlanId of dependsOn) {
+				const sibling = siblings.find(g => g.spawnedFromPlanId === depPlanId);
+				if (!sibling || sibling.state !== "complete") unresolved.push(depPlanId);
+			}
+		}
+		return unresolved;
+	}
+
+	/**
+	 * Start a child's worktree + team. Prefers the test seam
+	 * (`_subgoalHooks.setupChildAndStartTeam`); otherwise kicks off the real
+	 * `setupWorktreeAndStartTeam` fire-and-forget (the ready-to-merge wait polls
+	 * regardless of when setup completes). Shared by the fresh-spawn path and
+	 * the auto-unblock scan so both start children identically.
+	 */
+	private async _startChildTeam(
+		childGoalId: string,
+		goalManager: import("./goal-manager.js").GoalManager,
+		teamManager: import("./team-manager.js").TeamManager | undefined,
+	): Promise<void> {
+		if (this._subgoalHooks?.setupChildAndStartTeam) {
+			try { await this._subgoalHooks.setupChildAndStartTeam(childGoalId); } catch (err) {
+				console.warn(`[verification] setupChildAndStartTeam hook failed for ${childGoalId}:`, err);
+			}
+			return;
+		}
+		if (teamManager) {
+			goalManager.setupWorktreeAndStartTeam(childGoalId, async () => {
+				return teamManager.startTeam(childGoalId);
+			}).catch((err) => {
+				console.warn(`[verification] setupWorktreeAndStartTeam failed for child ${childGoalId} (non-fatal):`, err);
+			});
+		}
+	}
+
+	/**
+	 * Harness equivalent of the integrate-child REST auto-unblock scan. After a
+	 * child merges (state=complete + archived), flip any sibling whose
+	 * `dependsOnPlanIds` are now ALL resolved from state='blocked' → 'todo' and
+	 * start its team. The REST scan only runs on the integrate-child HTTP path;
+	 * harness-driven merges (runSubgoalStep §8) need this so the parent-workflow
+	 * path enforces dependsOn scheduling end-to-end. A multi-dep child only
+	 * unblocks when its LAST dependency merges.
+	 *
+	 * Best-effort: never throws (logs + swallows) so a scan failure can't fail
+	 * the merge that already succeeded.
+	 */
+	private async _autoUnblockDependents(
+		parentGoalId: string,
+		mergedChildId: string,
+		goalManager: import("./goal-manager.js").GoalManager,
+		teamManager: import("./team-manager.js").TeamManager | undefined,
+	): Promise<void> {
+		try {
+			const ctx = this.projectContextManager?.getContextForGoal(parentGoalId);
+			if (!ctx) return;
+			const all = ctx.goalStore.getAll();
+			const mergedPlanId = ctx.goalStore.get(mergedChildId)?.spawnedFromPlanId;
+			if (!mergedPlanId) return;
+			const siblings = all.filter(g => g.parentGoalId === parentGoalId && !g.archived && g.id !== mergedChildId);
+			for (const sib of siblings) {
+				const deps = sib.dependsOnPlanIds;
+				if (!deps || deps.length === 0) continue;
+				if (!deps.includes(mergedPlanId)) continue;
+				if (sib.state !== "blocked") continue;
+				const allResolved = deps.every(depPid => {
+					const depSib = all.find(g =>
+						g.parentGoalId === parentGoalId && g.spawnedFromPlanId === depPid);
+					return !!depSib && depSib.state === "complete";
+				});
+				if (!allResolved) continue;
+				// Unblock: state='blocked' → 'todo', then start worktree + team.
+				await goalManager.updateGoal(sib.id, { state: "todo" });
+				this.broadcastFn?.(sib.id, { type: "goal_state_changed", goalId: sib.id });
+				await this._startChildTeam(sib.id, goalManager, teamManager);
+			}
+		} catch (err) {
+			console.error(`[verification] auto-unblock scan failed (non-fatal):`, err);
+		}
+	}
+
+	/**
+	 * Wait for a BLOCKED child to be auto-unblocked (state transitions away from
+	 * 'blocked'), or for a terminal exit condition. Polls the live goal record;
+	 * `_autoUnblockDependents` flips state blocked→todo when the child's last
+	 * dependency merges. Does NOT hold the per-root semaphore (the caller
+	 * releases it before calling this) so a cap=1 root can still run + merge the
+	 * dependency.
+	 *
+	 * Exit conditions mirror `_waitForChildReadyToMerge`:
+	 *   - active.cancelled → "cancelled"
+	 *   - child gone / cross-tree → "archived-other"
+	 *   - child.archived && state === "complete" → "archived-complete"
+	 *   - child.archived && state !== "complete" → "archived-other"
+	 *   - state !== "blocked" → "unblocked"
+	 *   - >24h → "timeout"
+	 */
+	private async _waitForChildUnblock(
+		parentGoalId: string,
+		childGoalId: string,
+		active: ActiveVerification,
+	): Promise<"unblocked" | "archived-complete" | "archived-other" | "cancelled" | "timeout"> {
+		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
+		if (!ctx) return "archived-other";
+		const POLL_MS = 100;
+		const MAX_WAIT_MS = 24 * 60 * 60 * 1000;
+		const startedAt = Date.now();
+		while (true) {
+			if (active.cancelled) return "cancelled";
+			const child = ctx.goalStore.get(childGoalId);
+			if (!child) return "archived-other";
+			if (child.parentGoalId !== parentGoalId) return "archived-other";
+			if (child.archived === true) {
+				return child.state === "complete" ? "archived-complete" : "archived-other";
+			}
+			if (child.state !== "blocked") return "unblocked";
+			if (Date.now() - startedAt >= MAX_WAIT_MS) return "timeout";
+			await new Promise(r => setTimeout(r, POLL_MS));
 		}
 	}
 
