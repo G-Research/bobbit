@@ -26,6 +26,15 @@ async function createInspectWorkflow(workflowId: string): Promise<void> {
 					name: "Verification Gate",
 					verify: [{ name: "Large command output", type: "command", run: VERIFY_LOG_CMD }],
 				},
+				{
+					id: "multi-verify-gate",
+					name: "Multi Verification Gate",
+					verify: [
+						{ name: "build", type: "command", run: `node -e "console.log('build ok line')"` },
+						{ name: "unit", type: "command", run: VERIFY_LOG_CMD },
+						{ name: "lint", type: "command", run: `node -e "console.log('lint ok line')"` },
+					],
+				},
 				{ id: "signals-gate", name: "Signals Gate", content: true },
 			],
 		}),
@@ -171,6 +180,52 @@ test.describe("gate inspect slicing", () => {
 			expect(sliceStep.output).not.toContain("noise line 127");
 			expect(sliceStep.selection).toMatchObject({ mode: "slice", totalLines: 160, range: { from: 120, to: 126 } });
 			expect(sliceStep.selection.omittedHint).toBeUndefined();
+		});
+	});
+
+	test("scopes verification to a single named step and rejects unknown/misplaced step params", async () => {
+		await withGoal(async (goalId) => {
+			await signalAndWait(goalId, "multi-verify-gate", {});
+
+			// step=<name> returns exactly one step.
+			const oneRes = await inspectGate(goalId, "multi-verify-gate", "verification", { step: "lint", mode: "full" });
+			expect(oneRes.status).toBe(200);
+			const oneBody = await oneRes.json();
+			expect(oneBody.steps).toHaveLength(1);
+			expect(oneBody.steps[0].name).toBe("lint");
+			expect(oneBody.steps[0].output).toContain("lint ok line");
+			expect(oneBody.summary).toBe("1 passed");
+			expect(oneBody.counts).toMatchObject({ passed: 1, failed: 0 });
+
+			// step + mode=grep scopes grep to that one step.
+			const grepRes = await inspectGate(goalId, "multi-verify-gate", "verification", {
+				step: "unit",
+				mode: "grep",
+				pattern: "ERROR|failed",
+				context: 1,
+			});
+			expect(grepRes.status).toBe(200);
+			const grepBody = await grepRes.json();
+			expect(grepBody.steps).toHaveLength(1);
+			expect(grepBody.steps[0].name).toBe("unit");
+			expect(grepBody.steps[0].output).toContain("ERROR failed sentinel line 125");
+			expect(grepBody.steps[0].output).not.toMatch(/\bnoise line 1\b/);
+			expect(grepBody.steps[0].selection).toMatchObject({ mode: "grep" });
+
+			// Unknown step name → 400 listing available names.
+			const unknownRes = await inspectGate(goalId, "multi-verify-gate", "verification", { step: "nope" });
+			expect(unknownRes.status).toBe(400);
+			const unknownBody = await unknownRes.json();
+			expect(unknownBody.error).toMatch(/Unknown verification step "nope"/);
+			expect(unknownBody.error).toContain("build");
+			expect(unknownBody.error).toContain("unit");
+			expect(unknownBody.error).toContain("lint");
+
+			// step + section=content → 400.
+			const wrongSectionRes = await inspectGate(goalId, "multi-verify-gate", "content", { step: "unit" });
+			expect(wrongSectionRes.status).toBe(400);
+			const wrongSectionBody = await wrongSectionRes.json();
+			expect(wrongSectionBody.error).toMatch(/step is only valid with section='verification'/);
 		});
 	});
 
