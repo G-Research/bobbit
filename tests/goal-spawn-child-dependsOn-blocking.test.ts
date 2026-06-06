@@ -3,10 +3,13 @@
  * `POST /api/goals/:id/integrate-child/:childId`.
  *
  * Children spawned with unresolved deps (`dependsOn` referencing siblings
- * not yet `state: "complete"`) are created paused and skip
+ * not yet `state: "complete"`) are created in `state: "blocked"` — a
+ * scheduler-managed state distinct from operator `paused` (see commit
+ * 165fd452 "pause semantics — blocked state") — and skip
  * `setupWorktreeAndStartTeam`. When the last dep merges, the integrate-child
- * handler auto-clears `paused` and triggers worktree setup + team start
- * on the formerly-blocked sibling.
+ * handler clears `state: "blocked"` → `"todo"` and triggers worktree setup +
+ * team start on the formerly-blocked sibling. Operator `paused` is never set
+ * by the scheduler.
  *
  * Drives `tryHandleNestedGoalRoute` directly with in-memory stubs. The
  * HTTP layer is not started — same pattern as the other API-primitives

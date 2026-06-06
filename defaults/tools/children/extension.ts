@@ -248,7 +248,7 @@ export default function (pi: ExtensionAPI) {
 						fallback: "spawn-children-direct",
 						note: "Goal's workflow has no execution gate, so the classifier/freeze flow was skipped. Each step was spawned via goal_spawn_child instead (idempotent on planId). To use the full plan/freeze/replan flow, recreate the goal with the 'parent' workflow.",
 						...(hasDependsOn ? {
-							warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow.",
+							warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via dependency-blocking on spawn — children with unmet deps are created in state='blocked' (scheduler-managed, distinct from operator paused) and auto-start when their last dep merges. Consider using the 'parent' workflow for full classifier/freeze flow.",
 							blockedCount: blockedEntries.length,
 							blockedPlanIds: blockedEntries.map(s => s.planId),
 						} : {}),

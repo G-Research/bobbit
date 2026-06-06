@@ -4098,6 +4098,29 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * C2: live concurrency-policy enforcement. `PATCH /api/goals/:id/policy`
+	 * persists a new `maxConcurrentChildren`, but the per-root subgoal
+	 * semaphore is cached on first use — without this, lowering 3→1 on a live
+	 * root had no effect until restart. The policy handler calls this AFTER
+	 * the goal record is updated so the cached semaphore is resized in place.
+	 *
+	 * Resizing respects in-flight permits (it never goes negative and never
+	 * interrupts running children — see `Semaphore.resize`). When no semaphore
+	 * has been created yet this is a no-op: lazy creation will read the fresh
+	 * `resolveRootMaxConcurrentChildren` value.
+	 *
+	 * `newMax` SHOULD be the already-resolved integer cap
+	 * (`goalManager.resolveRootMaxConcurrentChildren(rootGoalId)`); it is
+	 * re-floored/clamped defensively by `Semaphore.resize`.
+	 */
+	resizeRootSubgoalSemaphore(rootGoalId: string, newMax: number): boolean {
+		const sem = this.rootSubgoalSemaphores.get(rootGoalId);
+		if (!sem) return false;
+		sem.resize(newMax);
+		return true;
+	}
+
+	/**
 	 * Tier-based plan-step child resolution. See docs/nested-goals.md.
 	 *
 	 * Returns the most relevant child for `(parentGoalId, planId)` along with

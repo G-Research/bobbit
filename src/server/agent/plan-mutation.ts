@@ -33,6 +33,16 @@ export interface ClassifierPlanStep {
 	 * receive).
 	 */
 	dependsOn?: string[];
+	/**
+	 * G2/C1: `goal_plan_propose` (defaults/tools/children/extension.ts) sends
+	 * `workflowId` / `suggestedRole` at the TOP level of each step. The
+	 * classifier hoists them alongside `subgoal.workflowId` / `.suggestedRole`
+	 * and prefers the top-level field when both are present (mirrors
+	 * title/spec/dependsOn). Without this, a child's workflow/role override
+	 * was invisible to the diff and silently dropped on replan.
+	 */
+	workflowId?: string;
+	suggestedRole?: string;
 	subgoal?: {
 		planId: string;
 		title: string;
@@ -109,11 +119,11 @@ function effectiveSpec(s: ClassifierPlanStep): string | undefined {
 }
 
 function effectiveWorkflowId(s: ClassifierPlanStep): string | undefined {
-	return s.subgoal?.workflowId;
+	return s.workflowId ?? s.subgoal?.workflowId;
 }
 
 function effectiveRole(s: ClassifierPlanStep): string | undefined {
-	return s.subgoal?.suggestedRole;
+	return s.suggestedRole ?? s.subgoal?.suggestedRole;
 }
 
 function effectiveDependsOn(s: ClassifierPlanStep): string[] {

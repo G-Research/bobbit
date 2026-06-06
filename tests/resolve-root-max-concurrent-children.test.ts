@@ -96,4 +96,34 @@ describe("GoalManager.resolveRootMaxConcurrentChildren", () => {
 		store.update(root.id, { maxConcurrentChildren: 1 });
 		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 1);
 	});
+
+	// C4 — integer clamp. A fractional stored value must never let an extra
+	// child slip through the per-root semaphore.
+	it("floors a fractional value (1.5 → 1, not 2 children)", async () => {
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "general" });
+		store.update(root.id, { maxConcurrentChildren: 1.5 as number });
+		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 1);
+	});
+
+	it("floors 8.9 to 8 (in-range after floor, not rejected)", async () => {
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "general" });
+		store.update(root.id, { maxConcurrentChildren: 8.9 as number });
+		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 8);
+	});
+
+	it("floors 2.999 to 2", async () => {
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "general" });
+		store.update(root.id, { maxConcurrentChildren: 2.999 as number });
+		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 2);
+	});
+
+	it("a sub-1 fractional value (0.5) clamps to floor 1", async () => {
+		const { gm, store } = makeManager();
+		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "general" });
+		store.update(root.id, { maxConcurrentChildren: 0.5 as number });
+		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 1);
+	});
 });
