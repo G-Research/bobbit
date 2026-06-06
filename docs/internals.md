@@ -1934,7 +1934,7 @@ When an MCP server connects, `McpManager` auto-generates documentation for its t
 
 ## Docker sandbox
 
-Opt-in Docker isolation for agent sessions. Set `sandbox: "docker"` in `project.yaml`. Each project gets one long-lived Docker container - agents work inside it using standard git worktrees, the same isolation model as non-sandbox mode.
+Opt-in container isolation for agent sessions. Set `sandbox: "docker"` in `project.yaml`. Each project gets one long-lived container - agents work inside it using standard git worktrees, the same isolation model as non-sandbox mode. The container CLI is **Docker by default but can be switched to Podman** without enabling/disabling anything else - see [Container runtime (Docker or Podman)](#container-runtime-docker-or-podman). The rest of this section says "Docker" for the common case, but every `docker …` command shown is run with whichever runtime binary the project selected.
 
 ### Architecture
 
@@ -1959,7 +1959,8 @@ Bobbit server                           /workspace        (repo clone, native Li
 All settings in `project.yaml` (Settings → Project → Docker Sandbox):
 
 ```yaml
-sandbox: "docker"                      # "none" (default) or "docker"
+sandbox: "docker"                      # "none" (default) or "docker" — the ENABLE flag (on/off)
+sandbox_runtime: "docker"              # "docker" (default) or "podman" — which container CLI to spawn
 sandbox_image: "bobbit-agent"          # must be pre-built
 sandbox_tokens:
   - key: GITHUB_TOKEN
@@ -1970,6 +1971,38 @@ sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 ```
 
 `sandbox_credentials`, `sandbox_github_token`, and `sandbox_host_token_overrides` are legacy fallbacks. New configuration should use structured `sandbox_tokens`, whose secret `value` fields are stored in `SecretsStore` rather than persisted inline in `project.yaml`.
+
+### Container runtime (Docker or Podman)
+
+The sandbox can run on **Docker** (default) or **Podman**. Podman is a drop-in alternative for hosts or policies where the Docker daemon isn't available or wanted (e.g. rootless / daemonless setups). This is a basic-parity feature: same flows, same arguments, only the spawned binary differs.
+
+**Two distinct concepts that both happen to use the literal string `"docker"` - keep them separate:**
+
+| Concept | Config key | Values | Meaning |
+|---|---|---|---|
+| **Enable flag** (is sandboxing on?) | `sandbox` | `"none"` \| `"docker"` | `"docker"` = sandboxing is ON. Unchanged. |
+| **Runtime binary** (which CLI runs containers?) | `sandbox_runtime` | `"docker"` \| `"podman"` | Selects the binary to spawn. Default `"docker"`. |
+
+There is intentionally **no `sandbox: "podman"`**. To run the sandbox on Podman you keep `sandbox: "docker"` (sandboxing stays on) and set `sandbox_runtime: "podman"`. The `"docker"` *enable value* and the `"docker"` *binary name* are different things that only look alike; conflating them is the easiest way to misconfigure this feature.
+
+```yaml
+sandbox: "docker"        # sandboxing ON (enable flag - do NOT set to "podman")
+sandbox_runtime: "podman"  # ...but run containers via the podman binary
+```
+
+**Single source of truth for the binary.** Every container-CLI invocation resolves the binary through one place, so the runtime can never drift between call sites. `runtimeBin(store)` in `src/server/agent/runtime-bin.ts` returns `"docker" | "podman"` from the project's `ProjectConfigStore.getSandboxRuntime()`, falling back to `DEFAULT_RUNTIME_BIN` (`"docker"`) when the store is absent. `getSandboxRuntime()` itself lower-cases/trims the raw `sandbox_runtime` value and returns `"podman"` only on an exact match - **any unknown, empty, or misspelled value safely falls back to `"docker"` and never throws.** The reasoning: a typo in an optional config key must not hard-fail sandboxing for the whole project.
+
+**How the binary reaches each call site.** Where a `ProjectConfigStore` is already in scope, code calls `runtimeBin(store)` directly. Long-lived objects and injected spawn functions that don't hold a store instead receive a `runtimeBin: RuntimeBin` field, resolved once at bootstrap (where project config is read) and threaded down - e.g. `ProjectSandbox`, the `RpcBridge` that runs `docker exec` for each agent, the background-process and verification spawners, the native git-status container round-trip, and the `server.ts` availability/build calls. Net effect: no spawned-binary literal is hardcoded anywhere; `rg '"docker"' src/server` should turn up only enable-value comparisons, `dockerOperation` arg-parsing, label strings (`bobbit-project=…`), log prefixes, comments, and the `docker/Dockerfile` build-context path - never a binary being spawned.
+
+**Why parity works with unchanged arguments.** Podman's CLI is argument-compatible with Docker for every verb the sandbox uses - `build`, `info`, `inspect`, `image inspect`, `network create`/`rm`, `exec`, `run`, `cp`, `stop`, `rm`, `volume rm`, `start`. The existing argument arrays are reused verbatim; only the leading binary name varies. Consequences:
+
+- The `MSYS_NO_PATHCONV` / `MSYS2_ARG_CONV_EXCL` environment shim (which stops Git-Bash/MSYS on Windows from mangling container paths like `/workspace`) is applied to Podman too.
+- The image build still uses the project's `docker/Dockerfile` directory: `podman build -t <image> docker/` behaves identically to the Docker form. The directory name is a build-context path, not a runtime choice.
+- `dockerOperation()` arg-parsing and `goalBranchContainer()` are runtime-agnostic and are deliberately left untouched.
+
+**Availability check.** `checkDockerAvailability(imageName?, runtime)` in `src/server/agent/sandbox-status.ts` runs `<bin> info` against the *selected* runtime. When the chosen binary is missing or its service is unreachable, the returned error names the runtime (e.g. `"podman not available: …"`) and any suggested build command is rendered with that binary (`<runtime> build -t <image> docker/`) - so a Podman misconfiguration doesn't surface as a confusing "docker" error.
+
+**Out of scope (first cut).** Rootless-Podman-specific quirks are not yet handled: SELinux volume relabeling (`:z`/`:Z`), `--userns` mapping, and rootless networking/port differences. There is **no Settings UI** - `sandbox_runtime` is config-file-only for now (surfacing it under Settings → Project → Sandbox is a later goal). Podman-machine / Docker-Desktop-equivalent provisioning is also out of scope. File follow-ups if Podman surfaces issues under real use.
 
 ### Docker image
 
