@@ -9,10 +9,10 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, registerProject as registerProjectShared } from "./e2e-setup.js";
+import { runFixtureGit } from "../test-utils/git-fixture.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 let token: string;
 
@@ -21,8 +21,9 @@ const headers = () => ({
 	"Content-Type": "application/json",
 });
 
+/** Hermetic, non-interactive git (see ../test-utils/git-fixture.ts). */
 function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf-8", windowsHide: true }).trim();
+	return runFixtureGit(cwd, args);
 }
 
 /** Create a standalone git repo with a single commit on `branch` (default master). */

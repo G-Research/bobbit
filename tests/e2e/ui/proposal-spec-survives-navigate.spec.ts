@@ -102,7 +102,25 @@ test.describe("Goal proposal spec survives navigate-away/back", () => {
 		await waitForHealth();
 	});
 
-	test("@repro spec body persists after sidebar nav + return", async ({ page }) => {
+	// QUARANTINED (test.fixme): this @repro is RED again — the goal-proposal
+	// spec body is lost after navigate-away/back even though PR #602
+	// ("Fix goal-proposal spec rehydrate") is present. The regression was
+	// surfaced once the E2E suite stopped hanging at teardown (the hang
+	// previously prevented the suite from ever reaching this test). It is a
+	// client-side proposal-rehydrate bug, entirely unrelated to the E2E
+	// exit-hang fix that re-quarantined it. It is tracked in a dedicated
+	// follow-up goal (goal state is runtime, not committed to this repo), not
+	// in git; flip back to test(...) when the rehydrate fix lands.
+	//
+	// EXPLICIT USER PERMISSION TO QUARANTINE (satisfies the exit-hang goal's
+	// hard constraint "do NOT disable any test without explicit user
+	// permission"): on 2026-06-06 the human owner was presented with the
+	// options (fix-now / re-quarantine+separate-goal / leave-red / investigate)
+	// and explicitly chose: "Re-quarantine that one test (test.fixme) so the
+	// gate passes and the exit-hang fix ships now — and I file a SEPARATE goal
+	// to fix the rehydrate regression." This quarantine is that authorized
+	// action; the separate follow-up goal carries the actual fix.
+	test.fixme("@repro spec body persists after sidebar nav + return", async ({ page }) => {
 		await openGoalAssistantWithProposal(page);
 
 		// Capture the spec body the user is about to comment on. This is

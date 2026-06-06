@@ -8,10 +8,10 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, registerProject as registerProjectShared } from "./e2e-setup.js";
+import { createGitFixtureRepo, runFixtureGit } from "../test-utils/git-fixture.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 let token: string;
 
@@ -20,26 +20,16 @@ const headers = () => ({
 	"Content-Type": "application/json",
 });
 
+/** Thin alias around the shared hermetic fixture helper (see git-fixture.ts). */
 function gitInit(dir: string, opts?: { extraBranches?: string[] }): void {
-	fs.mkdirSync(dir, { recursive: true });
-	execFileSync("git", ["init", "--quiet"], { cwd: dir });
-	execFileSync("git", ["config", "user.email", "test@bobbit.local"], { cwd: dir });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
-	execFileSync("git", ["checkout", "--quiet", "-b", "master"], { cwd: dir });
-	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	execFileSync("git", ["add", "."], { cwd: dir });
-	execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
-	for (const b of opts?.extraBranches ?? []) {
-		execFileSync("git", ["branch", b], { cwd: dir });
-	}
+	createGitFixtureRepo(dir, { extraBranches: opts?.extraBranches });
 }
 
 /** Create a "fake" `origin/<branch>` remote tracking ref by writing a packed ref.
  *  Cheaper than scaffolding a real remote — `git rev-parse --verify origin/<branch>`
  *  resolves to whatever commit we point it at. */
 function fakeOriginRef(repo: string, branch: string, sha?: string): void {
-	const headSha = sha ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf-8" }).trim();
+	const headSha = sha ?? runFixtureGit(repo, ["rev-parse", "HEAD"]);
 	const refsDir = path.join(repo, ".git", "refs", "remotes", "origin");
 	const refPath = path.join(refsDir, branch);
 	fs.mkdirSync(path.dirname(refPath), { recursive: true });
@@ -109,7 +99,8 @@ test.describe("base_ref API validation", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-tag-"));
 		gitInit(root);
 		// Create a real tag in the repo so the server's tag-detection path fires.
-		execFileSync("git", ["tag", "v1.2.3"], { cwd: root });
+		// Hermetic helper → lightweight tag, never an editor (E2E exit-hang guard).
+		runFixtureGit(root, ["tag", "v1.2.3"]);
 		const id = await registerProject(`baseref-tag-${Date.now()}`, root);
 		const r = await put(id, { base_ref: "v1.2.3" });
 		expect(r.status).toBe(400);

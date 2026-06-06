@@ -129,21 +129,62 @@ test.describe("ask_user_choices widget", () => {
 		await expect(page.locator('input[type=radio][value="__OTHER__"]')).not.toBeChecked();
 	});
 
-	test("Typing in Other input before selecting Other does not auto-select", async ({ page }) => {
+	test("Typing in Other input auto-selects Other (single-select)", async ({ page }) => {
+		// Single-question single-select: Other is the only path that doesn't
+		// auto-submit/advance, so typing into it must auto-select it.
 		await page.evaluate(() => (window as any).mountWidget({
-			questions: [
-				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
-				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
-			],
+			questions: [{ question: "Q1", options: ["a", "b"] }],
 		}));
 		const input = page.locator('.ask-other-input').first();
-		await input.fill("speculative");
-		// Other radio still NOT checked.
 		await expect(page.locator('input[type=radio][value="__OTHER__"]').first()).not.toBeChecked();
-		// Now click Other — typed text is preserved.
-		await page.locator('input[type=radio][value="__OTHER__"]').first().click({ force: true });
+		await input.fill("speculative");
 		await expect(page.locator('input[type=radio][value="__OTHER__"]').first()).toBeChecked();
-		await expect(page.locator('.ask-other-input').first()).toHaveValue("speculative");
+		await expect(input).toHaveValue("speculative");
+		// Single-select draft is scalar, so selecting Other replaces any prior
+		// selection — no other radio remains checked.
+		await expect(page.locator('input[type=radio]:checked')).toHaveCount(1);
+	});
+
+	test("Typing in Other input adds Other to selection (multi-select) without removing others", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Pick", options: ["a", "b", "c"], multi: true }],
+		}));
+		// Check two real options first.
+		await page.locator('label:has(input[value="a"])').click();
+		await page.locator('label:has(input[value="c"])').click();
+		await expect(page.locator('input[type=checkbox][value="a"]')).toBeChecked();
+		await expect(page.locator('input[type=checkbox][value="c"]')).toBeChecked();
+		// Type into Other → Other is ADDED; existing selections remain.
+		await page.locator('.ask-other-input').fill("custom");
+		await expect(page.locator('input[type=checkbox][value="__OTHER__"]')).toBeChecked();
+		await expect(page.locator('input[type=checkbox][value="a"]')).toBeChecked();
+		await expect(page.locator('input[type=checkbox][value="c"]')).toBeChecked();
+		await expect(page.locator('input[type=checkbox][value="b"]')).not.toBeChecked();
+	});
+
+	test("Clearing Other text does NOT deselect Other (single-select)", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Q1", options: ["a", "b"] }],
+		}));
+		const input = page.locator('.ask-other-input').first();
+		await input.fill("x");
+		await expect(page.locator('input[type=radio][value="__OTHER__"]').first()).toBeChecked();
+		// Clear the text → Other stays selected (deselection is a manual action).
+		await input.fill("");
+		await expect(input).toHaveValue("");
+		await expect(page.locator('input[type=radio][value="__OTHER__"]').first()).toBeChecked();
+	});
+
+	test("Clearing Other text does NOT deselect Other (multi-select)", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [{ question: "Pick", options: ["a", "b"], multi: true }],
+		}));
+		const input = page.locator('.ask-other-input').first();
+		await input.fill("x");
+		await expect(page.locator('input[type=checkbox][value="__OTHER__"]')).toBeChecked();
+		await input.fill("");
+		await expect(input).toHaveValue("");
+		await expect(page.locator('input[type=checkbox][value="__OTHER__"]')).toBeChecked();
 	});
 
 	test("successful submit() → widget becomes read-only (no Submit button)", async ({ page }) => {

@@ -200,6 +200,18 @@ class AskWidget {
     this.render();
   }
 
+  // Mirrors AskUserChoicesWidget._onOtherInput: typing in Other auto-selects it.
+  onOtherInput(qIdx, text) {
+    this.setOtherText(qIdx, text);
+    if (this.isReadOnly()) return;
+    const d = this.draft[qIdx];
+    if (!d) return;
+    const alreadySelected = Array.isArray(d.selected)
+      ? d.selected.includes(OTHER_SENTINEL)
+      : d.selected === OTHER_SENTINEL;
+    if (!alreadySelected) this.selectOption(qIdx, OTHER_SENTINEL);
+  }
+
   async submit() {
     if (!this.canSubmit() || this.submitting) return;
     this.submitting = true;
@@ -462,7 +474,7 @@ class AskWidget {
       txt.className = "ask-other-input";
       txt.value = otherText;
       if (readOnly) txt.disabled = true;
-      txt.addEventListener("input", (e) => this.setOtherText(this.activeTab, e.target.value));
+      txt.addEventListener("input", (e) => this.onOtherInput(this.activeTab, e.target.value));
       row.appendChild(txt);
       return row;
     };
