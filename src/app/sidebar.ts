@@ -40,6 +40,7 @@ import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
+import { safeSetItem, safeGetJSON } from "./safe-storage.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 
 // ============================================================================
@@ -48,7 +49,7 @@ import { getActiveNavId } from "./sidebar-nav.js";
 
 const EXPANDED_PROJECTS_KEY = "bobbit-expanded-projects";
 const _expandedProjects: Set<string> = new Set(
-	JSON.parse(localStorage.getItem(EXPANDED_PROJECTS_KEY) || "[]"),
+	safeGetJSON<string[]>(EXPANDED_PROJECTS_KEY, []),
 );
 
 export function isProjectExpanded(projectId: string): boolean {
@@ -60,7 +61,7 @@ export function toggleProjectExpanded(projectId: string): void {
 	const key = `collapsed:${projectId}`;
 	if (_expandedProjects.has(key)) _expandedProjects.delete(key);
 	else _expandedProjects.add(key);
-	localStorage.setItem(EXPANDED_PROJECTS_KEY, JSON.stringify([..._expandedProjects]));
+	safeSetItem(EXPANDED_PROJECTS_KEY, JSON.stringify([..._expandedProjects]));
 }
 
 // ============================================================================
@@ -828,7 +829,7 @@ function onSidebarResizeDoubleClick(e: MouseEvent): void {
 
 export function toggleSidebar(): void {
 	state.sidebarCollapsed = !state.sidebarCollapsed;
-	localStorage.setItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
+	safeSetItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
 	renderApp();
 }
 

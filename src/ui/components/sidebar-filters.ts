@@ -16,6 +16,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Archive, Eye, Filter, Zap } from "lucide";
 import { renderApp, resetArchivedExpandState, state } from "../../app/state.js";
 import { shortcutHint } from "../../app/shortcut-registry.js";
+import { safeSetItem } from "../../app/safe-storage.js";
 
 // ---------------------------------------------------------------------------
 // Shared toggle handlers (used by both popover clicks and keyboard shortcuts)
@@ -24,7 +25,7 @@ import { shortcutHint } from "../../app/shortcut-registry.js";
 /** Toggle Show Archived. Persists, lazy-loads/clears archived data, re-renders. */
 export function toggleShowArchived(): void {
 	state.showArchived = !state.showArchived;
-	localStorage.setItem("bobbit-show-archived", String(state.showArchived));
+	safeSetItem("bobbit-show-archived", String(state.showArchived));
 	// Manual toggle takes precedence over search-driven auto-open.
 	import("../../app/sidebar.js").then(m => m.clearArchivedBySearch()).catch(() => {});
 	if (state.showArchived) {
@@ -42,14 +43,14 @@ export function toggleShowArchived(): void {
 /** Toggle Show Busy. Persists, re-renders. */
 export function toggleShowBusy(): void {
 	state.showBusy = !state.showBusy;
-	localStorage.setItem("bobbit-show-busy", String(state.showBusy));
+	safeSetItem("bobbit-show-busy", String(state.showBusy));
 	renderApp();
 }
 
 /** Toggle Show Read. Persists, re-renders. */
 export function toggleShowRead(): void {
 	state.showRead = !state.showRead;
-	localStorage.setItem("bobbit-show-read", String(state.showRead));
+	safeSetItem("bobbit-show-read", String(state.showRead));
 	renderApp();
 }
 

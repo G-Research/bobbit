@@ -47,16 +47,14 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		const input = widget.locator(".ask-other-input");
 		await expect(input).toBeVisible();
 
-		// Type into Other speculatively, select it, then Escape clears both the
-		// selection and text without removing the always-visible input.
+		// Typing into Other auto-selects it (no separate click needed); Escape
+		// then clears both the selection and text without removing the input.
 		await input.fill("abc");
 		await expect(input).toHaveValue("abc");
 		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
-			.not.toBeChecked();
-		await widget.locator('label:has(input[value="__OTHER__"])').first().click();
+			.toBeChecked();
 		await expect(widget.locator('[role="tab"][data-tab-index="0"]'))
 			.toHaveAttribute("aria-selected", "true");
-		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first()).toBeChecked();
 		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
 		await page.keyboard.press("Escape");
 		await expect(input).toHaveValue("");
@@ -273,6 +271,45 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		// only ONE shows interactive chrome — the failed one is collapsed.
 		await expect(page.locator("[role=\"tab\"]")).toHaveCount(2); // two tabs on the live widget
 		await expect(page.locator(".ask-submit")).toHaveCount(1); // exactly one Submit button
+	});
+
+	test("typing in Other auto-selects it and submit carries the typed other_text", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "please use ask_user_choices");
+
+		const widget = page.locator("ask-user-choices-widget").first();
+		await expect(widget).toBeVisible({ timeout: 20_000 });
+
+		// Wait for streaming to settle so auto-advance timers aren't dropped by
+		// mid-stream re-renders (see keyboard-only test for the full rationale).
+		await page.waitForFunction(
+			() => (window as any).__bobbitState?.remoteAgent?.state?.isStreaming === false,
+			{ timeout: 15_000 },
+		);
+
+		// Pick "red" on Q1 → auto-advance to Q2.
+		await widget.locator('label:has(input[value="red"])').click();
+		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+
+		// Type directly into the Other input on Q2 — Other auto-selects, no click.
+		const input = widget.locator(".ask-other-input");
+		await expect(input).toBeVisible();
+		await input.fill("eleven");
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]')).toBeChecked();
+
+		// Submit is enabled once Other is selected with non-empty text.
+		const submit = widget.locator(".ask-submit");
+		await expect(submit).toBeEnabled({ timeout: 5_000 });
+		await submit.click();
+
+		// Widget goes read-only and the agent echoes the answers, including the
+		// typed other_text, back into the chat.
+		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.locator("assistant-message").filter({ hasText: "eleven" }).first())
+			.toBeVisible({ timeout: 10_000 });
 	});
 
 	test("keyboard-only multi-question submission", async ({ page }) => {
