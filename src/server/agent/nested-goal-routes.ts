@@ -672,33 +672,35 @@ export async function tryHandleNestedGoalRoute(
 				console.warn(`[spawn-child] spawnedBySessionId could not be derived for goal=${child.id} parent=${parentId}`);
 			}
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
+
+			// Finding 2 — route the team start through the unified per-root
+			// scheduler so the concurrency cap is enforced on the direct
+			// `goal_spawn_child` path too (previously this started the team with
+			// NO permit, so cap=1 + several spawn-child calls started multiple
+			// teams at once). Blocked (deps-unmet) children skip this entirely —
+			// integrate-child auto-unblock requests their start when the final
+			// dep merges (also via the scheduler). A capacity-blocked child is
+			// parked `state='blocked'` and started later when a permit frees.
+			let capacityBlocked = false;
+			if (child.setupStatus === "preparing" && !blocked) {
+				const outcome = verificationHarness.requestChildStart(child.id);
+				if (outcome === "capacity-blocked") {
+					capacityBlocked = true;
+					try {
+						await goalManager.updateGoal(child.id, { state: "blocked" });
+						broadcastToAll({ type: "goal_state_changed", goalId: child.id });
+					} catch (err) {
+						console.warn(`[spawn-child] failed to stamp capacity-blocked state for ${child.id} (non-fatal):`, err);
+					}
+				}
+			}
 			json({
 				id: child.id,
 				suggestedRole,
 				spawnedBySessionId,
 				...(blocked ? { blocked: true, pendingDeps: unresolvedDeps } : {}),
+				...(capacityBlocked ? { capacityBlocked: true } : {}),
 			}, 201);
-
-			// Trigger worktree setup + team start exactly like POST /api/goals.
-			// Without this the child sits in setupStatus="preparing" forever.
-			// Blocked children skip this — integrate-child re-invokes setup when
-			// the final dep merges (see auto-unblock scan below).
-			if (child.setupStatus === "preparing" && !blocked) {
-				goalManager.setupWorktreeAndStartTeam(child.id, () => teamManager.startTeam(child.id))
-					.then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
-					})
-					.catch((err) => {
-						const g = goalManager.getGoal(child.id);
-						if (g?.setupStatus === "ready") {
-							broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
-							console.error(`[spawn-child] Auto-start team failed for ${child.id} (worktree ready):`, err);
-						} else {
-							console.error(`[spawn-child] Setup failed for ${child.id}:`, err);
-							broadcastToAll({ type: "goal_setup_error", goalId: child.id, error: String(err) });
-						}
-					});
-			}
 		} catch (err) {
 			// createGoal throws on cycle violations and missing parent.
 			jsonError(400, err);
@@ -1052,6 +1054,13 @@ export async function tryHandleNestedGoalRoute(
 					console.warn(`[api] integrate-child: teardownTeam error (non-fatal):`, err);
 				}
 				await goalManager.archiveGoalAfterMerge(childId);
+				// Finding 2 — terminal event: release the per-root permit this
+				// child held (if it was started under the scheduler) so the next
+				// capacity-blocked sibling can start. Best-effort + idempotent
+				// (a child that never held a permit is a no-op).
+				try { verificationHarness.notifyChildTerminal(childId); } catch (err) {
+					console.warn(`[integrate-child] notifyChildTerminal failed (non-fatal):`, err);
+				}
 				// dependsOn scheduling — auto-unblock any sibling whose deps are
 				// now ALL complete after this merge. Best-effort: any throw is
 				// caught and logged so the merge itself still returns success.
@@ -1073,21 +1082,14 @@ export async function tryHandleNestedGoalRoute(
 							});
 							if (!allResolved) continue;
 							if (sib.state !== "blocked") continue;
-							// Unblock: clear state='blocked' → 'todo', trigger worktree setup + team start.
-							await goalManager.updateGoal(sib.id, { state: "todo" });
-							broadcastToAll({ type: "goal_state_changed", goalId: sib.id });
-							if (sib.setupStatus === "preparing") {
-								goalManager.setupWorktreeAndStartTeam(sib.id, () => teamManager.startTeam(sib.id))
-									.then(() => broadcastToAll({ type: "goal_setup_complete", goalId: sib.id }))
-									.catch(err => {
-										console.error(`[integrate-child] auto-unblock setup failed for ${sib.id}:`, err);
-										broadcastToAll({ type: "goal_setup_error", goalId: sib.id, error: String(err) });
-									});
-							} else if (sib.setupStatus === "ready") {
-								// Worktree already exists (resumed paused goal): just start the team.
-								try { await teamManager.startTeam(sib.id); }
-								catch (err) { console.error(`[integrate-child] startTeam failed for ${sib.id}:`, err); }
-							}
+							// Finding 2 — deps now satisfied: request the sibling's
+							// team start through the unified scheduler instead of
+							// starting it directly. If a permit is free the scheduler
+							// flips state='blocked' → 'todo' and starts the team;
+							// otherwise the sibling stays parked capacity-blocked and
+							// starts when a permit frees (a single merge that unblocks
+							// several dependents no longer starts them all at once).
+							verificationHarness.requestChildStart(sib.id);
 						}
 					}
 				} catch (err) {

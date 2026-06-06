@@ -30,7 +30,7 @@ import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/g
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
-import { GoalPausedError } from "./agent/goal-paused-guard.js";
+import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -4532,6 +4532,24 @@ async function handleApiRoute(
 					}
 					return;
 				}
+				// Pause-cascade (Finding 1): refuse to create/auto-start a child
+				// under a paused parent OR any paused ancestor. Mirrors the
+				// guarantee `/spawn-child` and the harness `runSubgoalStep` already
+				// enforce — `POST /api/goals` with `parentGoalId` previously
+				// bypassed it entirely (validated parent existence + nesting, then
+				// created + auto-started the child). The walk is cycle-guarded.
+				try {
+					requireAncestorsNotPaused(
+						parentGoalId,
+						(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
+					);
+				} catch (err) {
+					if (err instanceof GoalPausedError) {
+						json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
+						return;
+					}
+					throw err;
+				}
 				const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
 				const nestResult = checkCanSpawnChild(
 					resolvedParentGoal,
@@ -4667,7 +4685,19 @@ async function handleApiRoute(
 
 			// Fire-and-forget async worktree setup (and optionally start team)
 			if (goal.setupStatus === "preparing") {
-				if (goal.autoStartTeam) {
+				if (goal.autoStartTeam && parentGoalId) {
+					// Finding 2 — a child goal auto-start must go through the
+					// unified per-root scheduler so the concurrency cap applies to
+					// the `POST /api/goals` child path too (previously it started
+					// the team with NO permit). At cap the child is parked
+					// `state='blocked'` (capacity-blocked) and started later when a
+					// permit frees; the scheduler handles setup + broadcasts.
+					const outcome = verificationHarness.requestChildStart(goal.id);
+					if (outcome === "capacity-blocked") {
+						targetGoalManager.updateGoal(goal.id, { state: "blocked" });
+						broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
+					}
+				} else if (goal.autoStartTeam) {
 					targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
 						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
 					}).catch((err) => {
@@ -4791,6 +4821,14 @@ async function handleApiRoute(
 			}
 			if (teamManager.getTeamState(g.id)) {
 				await teamManager.teardownTeam(g.id);
+			}
+			// Finding 2 — terminal event: release any per-root scheduler permit
+			// this child held (or drop it from the capacity queue) so the next
+			// capacity-blocked sibling can start. Best-effort + idempotent.
+			if (g.parentGoalId) {
+				try { verificationHarness.notifyChildTerminal(g.id); } catch (err) {
+					console.warn(`[api] archive: notifyChildTerminal failed for ${g.id} (non-fatal):`, err);
+				}
 			}
 			const gm = getGoalManagerForGoal(g.id);
 			await gm.archiveGoal(g.id);

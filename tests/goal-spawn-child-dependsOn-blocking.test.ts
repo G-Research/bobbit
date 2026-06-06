@@ -29,6 +29,7 @@ import { GateStore } from "../src/server/agent/gate-store.ts";
 import { ProjectConfigStore } from "../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../src/server/agent/nested-goal-routes.ts";
+import { ChildTeamScheduler } from "../src/server/agent/child-team-scheduler.ts";
 import { CookieStore } from "../src/server/auth/cookie.ts";
 
 interface Harness {
@@ -123,6 +124,25 @@ async function makeHarness(): Promise<Harness> {
 		getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }),
 	};
 
+	// Finding 2 — the integrate-child auto-unblock now routes the team start
+	// through the unified per-root scheduler. Wire a real one whose
+	// startChildTeam mirrors the production closure (flip blocked→todo, then
+	// setup/start) so this test exercises the same observable behaviour.
+	const scheduler = new ChildTeamScheduler({
+		resolveCap: (rootGoalId) => goalManager.resolveRootMaxConcurrentChildren(rootGoalId),
+		getChild: (cid) => goalStore.get(cid),
+		startChildTeam: (cid) => {
+			const g = goalStore.get(cid);
+			if (g?.state === "blocked") goalManager.updateGoal(cid, { state: "todo" } as any);
+			const cur = goalStore.get(cid);
+			if (cur?.setupStatus === "preparing") {
+				goalManager.setupWorktreeAndStartTeam(cid, () => teamManager.startTeam(cid));
+			} else {
+				teamManager.startTeam(cid);
+			}
+		},
+	});
+
 	const sessionManager: any = {
 		getSession: () => undefined,
 		deliverLiveSteer: async () => {},
@@ -140,6 +160,8 @@ async function makeHarness(): Promise<Harness> {
 		getActiveVerifications: () => [],
 		cancelStaleVerifications: async () => {},
 		resolvePlanStepChild: () => ({ source: "none", child: undefined }),
+		requestChildStart: (cid: string) => scheduler.requestStart(cid),
+		notifyChildTerminal: (cid: string) => scheduler.notifyTerminal(cid),
 	};
 
 	const deps: NestedGoalRouteDeps = {

@@ -76,6 +76,22 @@ export class Semaphore {
 		});
 	}
 
+	/**
+	 * Non-blocking acquire. Takes a permit and returns `true` iff one is
+	 * immediately available; otherwise returns `false` WITHOUT queueing a
+	 * waiter. Used by the unified child-team scheduler so a REST/POST spawn
+	 * path can decide synchronously whether to start a child now or park it
+	 * capacity-blocked. An over-subscribed semaphore (outstanding debt from a
+	 * live shrink, so `_value === 0`) correctly returns `false`.
+	 */
+	tryAcquire(): boolean {
+		if (this._value > 0) {
+			this._value--;
+			return true;
+		}
+		return false;
+	}
+
 	release(): void {
 		// Absorb over-subscription debt from a prior shrink BEFORE waking any
 		// waiter (C2). A live shrink (e.g. cap 3, 3 held, 1 waiting, resize→1)
