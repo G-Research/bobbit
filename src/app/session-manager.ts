@@ -49,6 +49,7 @@ import {
 	markProposalDismissed as markProposalDismissedTyped,
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
+import { shouldApplyProposalUpdate } from "./proposal-update-policy.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -1636,23 +1637,27 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const plugin = PROPOSAL_TYPE_REGISTRY[type];
 			const prev = state.activeProposals[type];
 			const hasServerRev = typeof serverRev === "number" && serverRev > 0;
+			const isFirstEmit = prev == null;
+			const prevRev = prev?.rev ?? 0;
 			// Finding 1 — server-stamped revisions are the source of truth for
-			// CONTENT, not just the rev number. A no-serverRev tool-use/transcript
-			// rescan (streaming === false) carries the ORIGINAL propose_* fields,
-			// which are stale once a later seed/edit has stamped a newer rev into the
-			// slot (prev.rev > 0). The pre-existing nextRev clamp stops the rev from
-			// regressing but NOT the fields, so a deferred rescan after a fresh-context
-			// reconnect (empty sessionStorage dedup) could still overwrite the slot
-			// content + form-mirror with the stale initial proposal. Suppress that:
-			// by message_end the server seed/edit has already applied identical-or-
-			// newer content, so skipping the non-streaming final/replay fire is
-			// harmless. Live streaming partials (streaming === true) and first-emit
-			// (prev == null) still flow through so revision previews update in place.
-			if (!hasServerRev && streaming !== true && prev && (prev.rev ?? 0) > 0) {
+			// CONTENT, not just the rev number. The decision is delegated to the
+			// pure `shouldApplyProposalUpdate` policy (pinned by
+			// tests/proposal-update-policy.test.ts) so the slot + form-mirror stay
+			// strictly monotonic w.r.t. the server rev. Two stale cases are dropped:
+			//   • A no-serverRev tool-use/transcript rescan (streaming === false)
+			//     carries the ORIGINAL propose_* fields, stale once a later seed/edit
+			//     has stamped a newer rev into the slot (prevRev > 0). By message_end
+			//     the server seed/edit has already applied identical-or-newer content,
+			//     so skipping the non-streaming final/replay fire is harmless.
+			//   • A server event whose serverRev < prevRev is an out-of-order older
+			//     rehydrate/seed racing in AFTER a newer stamped edit; applying it
+			//     would regress the content while the rev clamp keeps the rev high.
+			// Live streaming partials and first-emit / pre-server (prevRev === 0)
+			// still flow through so revision previews update in place.
+			if (!shouldApplyProposalUpdate({ hasServerRev, serverRev, prevRev, streaming: streaming === true, isFirstEmit })) {
 				return;
 			}
 			const merged = plugin.mergeFields(prev?.fields ?? {}, fields);
-			const isFirstEmit = prev == null;
 			// Inline-comments: a new proposal body invalidates any pending
 			// annotations because character offsets won't survive a rewrite.
 			// Only fires for goal/role/staff and only on a true content change
@@ -1679,9 +1684,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// ahead of the immutable snapshot counter and make the current tool card
 			// look stale. Legacy no-rev paths keep the existing rev (or 0 = unknown).
 			const nextRev = hasServerRev
-				? Math.max(Math.trunc(serverRev as number), prev?.rev ?? 0)
-				: (prev?.rev ?? 0);
-		const slot: ProposalSlot = {
+				? Math.max(Math.trunc(serverRev as number), prevRev)
+				: prevRev;
+			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
 				streaming: false,
