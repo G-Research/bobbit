@@ -4146,10 +4146,19 @@ export class VerificationHarness {
 	 * setup/start logic of the REST `spawn-child` / `integrate-child` handlers:
 	 * a previously capacity-blocked child has `state='blocked'`, so flip it back
 	 * to `todo`, then drive worktree setup + team start (or just team start when
-	 * the worktree is already `ready`, e.g. a resumed goal). Fire-and-forget;
-	 * broadcasts mirror the REST handlers so the UI updates identically.
+	 * the worktree is already `ready`, e.g. a resumed goal). Broadcasts mirror
+	 * the REST handlers so the UI updates identically.
+	 *
+	 * Returns the start PROMISE so the scheduler can release the held permit on
+	 * an ASYNCHRONOUS start failure (e.g. the goal is paused/archived mid-start
+	 * and `teamManager.startTeam` rejects). Returning here without propagating
+	 * the rejection (the old detached swallow-log `.catch`) would leave the child
+	 * holding a permit with no terminal event → permit leak → queue deadlock. A
+	 * rejected promise tells the scheduler the team did NOT start; it releases
+	 * the permit, re-enqueues the child, and drains the next eligible (the retry
+	 * hits the worktree-ready else-branch and just re-runs `startTeam`).
 	 */
-	private _startScheduledChildTeam(childGoalId: string): void {
+	private _startScheduledChildTeam(childGoalId: string): void | Promise<void> {
 		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
 		const goalManager = ctx?.goalManager;
 		const teamManager = this.teamManager;
@@ -4171,23 +4180,33 @@ export class VerificationHarness {
 				.catch((err) => console.warn(`[scheduler] flip blocked→todo failed for ${childGoalId} (non-fatal):`, err));
 		}
 		if (g.setupStatus === "preparing") {
-			goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId))
-				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId }))
+			// Propagate the rejection (don't swallow) so the scheduler releases the
+			// permit + re-enqueues when the team does not actually start.
+			return goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId))
+				.then(() => { this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId }); })
 				.catch((err) => {
 					const cur = goalManager.getGoal(childGoalId);
 					if (cur?.setupStatus === "ready") {
+						// Worktree finished but the team start raced (e.g. goal
+						// paused/archived mid-start). The worktree work is preserved, so
+						// surface setup-complete (no error UI) — but STILL rethrow so the
+						// scheduler frees the permit; the re-enqueued retry takes the
+						// worktree-ready else-branch and just re-runs startTeam.
 						this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
 						console.error(`[scheduler] auto-start team failed for ${childGoalId} (worktree ready):`, err);
 					} else {
 						console.error(`[scheduler] setup failed for ${childGoalId}:`, err);
 						this.broadcastFn?.(childGoalId, { type: "goal_setup_error", goalId: childGoalId, error: String(err) });
 					}
+					throw err;
 				});
-		} else {
-			// Worktree already exists (resumed/ready goal): just start the team.
-			Promise.resolve(teamManager.startTeam(childGoalId)).catch((err) =>
-				console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err));
 		}
+		// Worktree already exists (resumed/ready goal): just start the team.
+		// Propagate failure so the scheduler releases the permit + re-enqueues.
+		return Promise.resolve(teamManager.startTeam(childGoalId)).then(() => {}).catch((err) => {
+			console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err);
+			throw err;
+		});
 	}
 
 	/**

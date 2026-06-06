@@ -58,11 +58,19 @@ export interface ChildTeamSchedulerDeps {
 	getChild(childGoalId: string): SchedulerChildView | undefined;
 	/**
 	 * Start a child's team (worktree setup + team start + broadcasts). MUST be
-	 * fire-and-forget safe (the scheduler never awaits it) and idempotent
-	 * enough to tolerate a re-entry. Implementations should flip a
+	 * idempotent enough to tolerate a re-entry. Implementations should flip a
 	 * capacity-blocked child's `state` back to a runnable value.
+	 *
+	 * The real team start is ASYNCHRONOUS (worktree setup → `teamManager.startTeam`).
+	 * Implementations MUST return that promise (or throw synchronously) so the
+	 * scheduler can release the held permit if the start fails — a swallow-log
+	 * detached `.catch` would leak the permit forever (queue deadlock). A
+	 * rejected promise (or sync throw) means "the team did NOT start": the
+	 * scheduler releases the permit, re-enqueues the child, and drains the next
+	 * eligible. A resolved promise (or a sync return) means "started": the
+	 * permit is held until a terminal event releases it.
 	 */
-	startChildTeam(childGoalId: string): void;
+	startChildTeam(childGoalId: string): void | Promise<void>;
 }
 
 export type StartOutcome = "started" | "capacity-blocked";
@@ -131,9 +139,10 @@ export class ChildTeamScheduler {
 		this.childRoot.set(childGoalId, rootGoalId);
 		const sem = this.getSemaphore(rootGoalId);
 		if (sem.tryAcquire()) {
-			// `_startHolding` releases the permit + re-enqueues if the start throws
-			// synchronously (e.g. the child turned out paused/archived), so the
-			// permit is never leaked. A failed start parks the child capacity-blocked.
+			// `_startHolding` releases the permit + re-enqueues if the start fails
+			// EITHER synchronously (throw) OR asynchronously (rejected start promise,
+			// e.g. the child turned out paused/archived mid-start), so the permit is
+			// never leaked. A synchronous failure parks the child capacity-blocked here.
 			return this._startHolding(rootGoalId, childGoalId, sem) ? "started" : "capacity-blocked";
 		}
 		this._enqueue(rootGoalId, childGoalId);
@@ -189,24 +198,65 @@ export class ChildTeamScheduler {
 
 	/**
 	 * Mark the child holding, then start its team. The permit MUST already be
-	 * acquired by the caller. If the start throws synchronously (e.g. the child
-	 * turned out paused/archived between the eligibility check and the start, or
-	 * `teamManager.startTeam` rejects), the permit is RELEASED (never leaked),
-	 * the child is dropped from `holding` and re-enqueued so it can start later
-	 * (on resume / next terminal). Returns whether the team actually started.
+	 * acquired by the caller.
+	 *
+	 * The start can fail in TWO ways and neither may leak the permit:
+	 *   - SYNCHRONOUSLY (`startChildTeam` throws): release + re-enqueue inline and
+	 *     return `false` so the caller parks the child capacity-blocked.
+	 *   - ASYNCHRONOUSLY (`startChildTeam` returns a promise that rejects, e.g.
+	 *     the goal is paused/archived mid-start so `teamManager.startTeam`
+	 *     rejects): the synchronous path has already returned `true`, so we attach
+	 *     a `.catch` that releases the permit, re-enqueues the child, and drains
+	 *     the next eligible queued child. Without this the child would stay in
+	 *     `holding` with no terminal event → the permit is never released → queue
+	 *     deadlock (the HIGH async-start permit-leak).
+	 *
+	 * `_releaseHeldStart` guards against DOUBLE-release: it only releases when the
+	 * child is still in `holding` (a concurrent `notifyTerminal` may have already
+	 * released the permit). Returns whether the SYNCHRONOUS start succeeded.
 	 */
 	private _startHolding(rootGoalId: string, childGoalId: string, sem: Semaphore): boolean {
 		this._markHolding(rootGoalId, childGoalId);
+		let result: void | Promise<void>;
 		try {
-			this.deps.startChildTeam(childGoalId);
-			return true;
+			result = this.deps.startChildTeam(childGoalId);
 		} catch (err) {
-			this.holding.get(rootGoalId)?.delete(childGoalId);
-			sem.release();
-			this._enqueue(rootGoalId, childGoalId);
-			console.warn(`[scheduler] startChildTeam failed for ${childGoalId}; permit released + re-enqueued (non-fatal):`, err);
+			this._releaseHeldStart(rootGoalId, childGoalId, sem, err, "synchronous");
 			return false;
 		}
+		if (result && typeof (result as Promise<void>).then === "function") {
+			(result as Promise<void>).catch((err) => {
+				if (this._releaseHeldStart(rootGoalId, childGoalId, sem, err, "async")) {
+					// The freed permit must be re-driven — there is no terminal event
+					// coming for a start that never started.
+					this._startNextEligible(rootGoalId);
+				}
+			});
+		}
+		return true;
+	}
+
+	/**
+	 * Release a permit held by a failed start, exactly once. Returns `true` when
+	 * THIS call owned the release (the child was still in `holding`); `false`
+	 * when a concurrent terminal event already released it (so the caller must
+	 * NOT double-release or re-drive). On a true release the child is re-enqueued
+	 * so it can start later (on resume / next terminal / a re-drive by the
+	 * caller).
+	 */
+	private _releaseHeldStart(
+		rootGoalId: string,
+		childGoalId: string,
+		sem: Semaphore,
+		err: unknown,
+		phase: "synchronous" | "async",
+	): boolean {
+		const held = this.holding.get(rootGoalId);
+		if (!held?.delete(childGoalId)) return false; // terminal event already handled it
+		sem.release();
+		this._enqueue(rootGoalId, childGoalId);
+		console.warn(`[scheduler] ${phase} startChildTeam failed for ${childGoalId}; permit released + re-enqueued (non-fatal):`, err);
+		return true;
 	}
 
 	private _enqueue(rootGoalId: string, childGoalId: string): void {
