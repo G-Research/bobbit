@@ -31,17 +31,28 @@
  *      cookie, so for any non-human caller we REQUIRE a spawning-session
  *      header and match it against the AUTHORITATIVE team-lead session id for
  *      the goal being mutated, resolved from the `TeamManager` — never
- *      trusting the header as a bare claim beyond an equality check.
+ *      trusting the header as a bare claim beyond an equality check. A
+ *      non-human caller may ONLY mutate a goal that HAS an established
+ *      team-lead, and only when its header equals that team-lead.
+ *
+ * Teamless goals: a goal with no established team-lead has no legitimate
+ * agent caller — the only authorized mutator is a human operator (cookie).
+ * We therefore DENY every non-human caller on a teamless goal rather than
+ * allowing an arbitrary header to take a "nothing to match against" pass.
+ * Allowing it would let any session holding gateway credentials forge an
+ * `X-Bobbit-Spawning-Session` and drive every Children mutation on an
+ * unrelated teamless goal (spawn-child, plan, integrate-child, pause,
+ * resume, mutation decision, policy, archive-child).
  *
  * Decision table:
  *
  *   | human cookie | caller header | team-lead known | result                  |
  *   |--------------|---------------|-----------------|-------------------------|
  *   | yes          | —             | —               | ALLOW (human-cookie)    |
- *   | no           | absent        | —               | DENY  (403)             |
- *   | no           | present       | none            | ALLOW (no team-lead to match against — the goal has no team-lead agent that could abuse the tools; preserves the spawnedBy E2E) |
- *   | no           | present       | matches caller  | ALLOW                   |
- *   | no           | present       | mismatches      | DENY  (403)             |
+ *   | no           | absent        | —               | DENY  (403, no-caller-header) |
+ *   | no           | present       | none            | DENY  (403, no-team-lead — only a human operator may mutate a teamless goal) |
+ *   | no           | present       | matches caller  | ALLOW (team-lead-match) |
+ *   | no           | present       | mismatches      | DENY  (403, team-lead-mismatch) |
  *
  * The header is NEVER trusted as a bare authorization claim — it is only ever
  * compared for equality against the TeamManager's team-lead session id.
@@ -77,8 +88,8 @@ export type ChildrenMutationAuthzReason =
 	| "team-lead-mismatch";
 
 export type ChildrenMutationAuthzResult =
-	| { ok: true; reason: "human-cookie" | "no-team-lead" | "team-lead-match" }
-	| { ok: false; reason: "no-caller-header" | "team-lead-mismatch" };
+	| { ok: true; reason: "human-cookie" | "team-lead-match" }
+	| { ok: false; reason: "no-caller-header" | "no-team-lead" | "team-lead-mismatch" };
 
 export function authorizeChildrenMutation(
 	input: ChildrenMutationAuthzInput,
@@ -91,10 +102,12 @@ export function authorizeChildrenMutation(
 	//    path (the absent-header bypass).
 	const caller = typeof input.callerSessionId === "string" ? input.callerSessionId.trim() : "";
 	if (!caller) return { ok: false, reason: "no-caller-header" };
-	// 3. No established team-lead → nothing to match against; allow (preserves
-	//    the spawnedBy E2E where a goal has no team-lead agent yet).
+	// 3. No established team-lead → a teamless goal has no legitimate agent
+	//    caller. Only a human operator (cookie, handled above) may mutate it;
+	//    DENY every non-human caller so a forged header can't drive Children
+	//    mutations on an unrelated teamless goal.
 	const lead = typeof input.teamLeadSessionId === "string" ? input.teamLeadSessionId.trim() : "";
-	if (!lead) return { ok: true, reason: "no-team-lead" };
+	if (!lead) return { ok: false, reason: "no-team-lead" };
 	// 4. The header is only ever compared for equality, never trusted as a
 	//    bare claim.
 	if (lead === caller) return { ok: true, reason: "team-lead-match" };

@@ -331,13 +331,26 @@ describe("S1 — team-lead authorization on mutating endpoints", () => {
 		assert.equal(h.resizeCalls.length, 0, "no side effect on rejected policy change");
 	});
 
-	it("allows mutating endpoints when the goal has no established team-lead", async () => {
-		// No entry in teamLeadByGoal → getTeamState returns undefined.
+	it("rejects a non-human caller on a teamless goal with 403 NOT_TEAM_LEAD", async () => {
+		// No entry in teamLeadByGoal → getTeamState returns undefined. A teamless
+		// goal has no legitimate agent caller, so a forged header is denied.
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "no-team",
 			title: "No-team spawn",
-			spec: "When the goal has no team-lead session yet there is nothing to match against, so the call proceeds.",
+			spec: "A teamless goal has nothing to match against, so a non-human caller with a forged header must be denied.",
 		}, { "x-bobbit-spawning-session": "whoever" });
+		assert.equal(r.status, 403);
+		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
+	});
+
+	it("allows a human/UI caller (cookie) on a teamless goal", async () => {
+		// No entry in teamLeadByGoal → getTeamState returns undefined. The human
+		// operator is the only authorized mutator of a teamless goal.
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "no-team-human",
+			title: "No-team human spawn",
+			spec: "A human operator with a verified bobbit_session cookie may mutate a teamless goal even with no team-lead.",
+		}, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 201);
 	});
 });

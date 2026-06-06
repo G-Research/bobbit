@@ -425,25 +425,66 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 }
 
 /**
- * The seven MUTATING Children REST endpoints guarded by the S1 authz check
+ * The MUTATING Children REST endpoints guarded by the S1 authz check
  * (`src/server/auth/children-mutation-authz.ts`). A node `apiFetch` carries no
- * `bobbit_session` cookie, so without a caller header these would 403. Goals
- * created in E2E have no team-lead, so a generic `X-Bobbit-Session-Id` caller
- * header takes the "no-team-lead → allow" branch. (Browser-initiated requests
- * carry the cookie automatically and don't need this.)
+ * `bobbit_session` cookie, so without one these would 403. E2E goals have no
+ * team-lead, and a teamless goal is now mutable ONLY by a verified human/UI
+ * operator (the "no-team-lead → allow" agent branch was removed because a
+ * forged header could otherwise drive these routes on any teamless goal).
+ * We therefore authenticate these calls as the human operator via the
+ * gateway-minted `bobbit_session` cookie. (Browser-initiated requests carry
+ * the cookie automatically and don't need this.) Tests that deliberately
+ * exercise the agent/deny path use `rawApiFetch` with explicit headers.
  */
 const CHILDREN_MUTATION_PATH =
 	/^\/api\/goals\/[^/]+\/(spawn-child|integrate-child\/[^/]+|pause|resume|mutation\/[^/]+\/decision|policy|plan)$/;
 
-function withChildrenAuthzHeader(path: string, headers: Record<string, string>): Record<string, string> {
+/**
+ * Lazily capture the gateway-minted `bobbit_session` cookie for the human/UI
+ * operator authz path. In localhost mode the gateway issues the cookie on the
+ * first authenticated response that doesn't already carry one (see
+ * `issueCookieIfMissing` in src/server/server.ts). Cached per-port for worker
+ * isolation. Returns "" if (unexpectedly) no cookie was minted, in which case
+ * we fall back to no extra header and let the call fail loudly.
+ */
+const _humanCookieCache: Record<string, string> = {};
+async function humanSessionCookie(): Promise<string> {
+	const p = port();
+	if (_humanCookieCache[p]) return _humanCookieCache[p];
+	try {
+		const resp = await fetch(`${base()}/api/goals`, {
+			headers: { Authorization: `Bearer ${token()}` },
+		});
+		const setCookies = (resp.headers as any).getSetCookie?.() as string[] | undefined
+			?? (resp.headers.get("set-cookie") ? [resp.headers.get("set-cookie") as string] : []);
+		const cookie = setCookies
+			.map((c) => c.split(";")[0])
+			.find((c) => c.startsWith("bobbit_session=")) ?? "";
+		if (cookie) _humanCookieCache[p] = cookie;
+		return cookie;
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * For Children-mutation paths, authenticate as the human operator by adding
+ * the `bobbit_session` cookie — UNLESS the caller already supplied its own
+ * cookie or a spawning-session / session-id header (those tests are exercising
+ * a specific authz path and must be respected verbatim).
+ */
+async function withChildrenAuthzCookie(path: string, headers: Record<string, string>): Promise<Record<string, string>> {
 	const bare = path.split("?")[0];
 	if (!CHILDREN_MUTATION_PATH.test(bare)) return headers;
-	const hasCaller = Object.keys(headers).some((k) => {
+	const hasExplicitAuth = Object.keys(headers).some((k) => {
 		const lk = k.toLowerCase();
-		return (lk === "x-bobbit-spawning-session" || lk === "x-bobbit-session-id") && !!headers[k];
+		if ((lk === "x-bobbit-spawning-session" || lk === "x-bobbit-session-id") && headers[k]) return true;
+		if (lk === "cookie" && /bobbit_session=/.test(headers[k] || "")) return true;
+		return false;
 	});
-	if (hasCaller) return headers;
-	return { ...headers, "X-Bobbit-Session-Id": "e2e-children-authz-caller" };
+	if (hasExplicitAuth) return headers;
+	const cookie = await humanSessionCookie();
+	return cookie ? { ...headers, Cookie: cookie } : headers;
 }
 
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
@@ -452,15 +493,16 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
 	const finalPath = await maybeInjectProjectIdQuery(path, method);
+	const authedHeaders = await withChildrenAuthzCookie(finalPath, {
+		"Content-Type": "application/json",
+		Authorization: `Bearer ${token()}`,
+		...(injected.headers as Record<string, string> || {}),
+	});
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
 			const resp = await fetch(`${base()}${finalPath}`, {
 				...injected,
-				headers: withChildrenAuthzHeader(finalPath, {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${token()}`,
-					...(injected.headers as Record<string, string> || {}),
-				}),
+				headers: authedHeaders,
 			});
 			await maybeAutoSeedWorkflows(path, method, injected.body as unknown, resp);
 			return resp;

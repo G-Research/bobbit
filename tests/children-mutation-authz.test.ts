@@ -8,7 +8,7 @@
  * NOT the absence of the spawning-session header:
  *   - verified human cookie                       → ALLOW (human/UI gateway call)
  *   - no cookie, absent caller header             → DENY  (the closed bypass)
- *   - no cookie, caller header, no team-lead known → ALLOW (nothing to match against)
+ *   - no cookie, caller header, no team-lead known → DENY  (teamless goal: only a human operator may mutate)
  *   - no cookie, caller header == team-lead        → ALLOW
  *   - no cookie, caller header != team-lead        → DENY  (403 NOT_TEAM_LEAD)
  */
@@ -42,11 +42,19 @@ describe("authorizeChildrenMutation (S1)", () => {
 		}
 	});
 
-	it("allows when the goal has no established team-lead (nothing to match against)", () => {
+	it("DENIES a non-human caller when the goal has no established team-lead (teamless goals are human-only)", () => {
 		for (const lead of [undefined, null, ""]) {
 			const r = authorizeChildrenMutation({ isHumanOperator: false, callerSessionId: "agent-x", teamLeadSessionId: lead });
+			assert.equal(r.ok, false, `lead=${JSON.stringify(lead)}`);
+			assert.equal(!r.ok && r.reason, "no-team-lead");
+		}
+	});
+
+	it("allows a verified human cookie on a teamless goal (the only authorized mutator)", () => {
+		for (const lead of [undefined, null, ""]) {
+			const r = authorizeChildrenMutation({ isHumanOperator: true, callerSessionId: undefined, teamLeadSessionId: lead });
 			assert.equal(r.ok, true, `lead=${JSON.stringify(lead)}`);
-			assert.equal(r.ok && r.reason, "no-team-lead");
+			assert.equal(r.ok && r.reason, "human-cookie");
 		}
 	});
 
