@@ -64,6 +64,7 @@ import {
 	backToSessions,
 } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
+import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import { showConnectionError } from "./dialogs-lazy.js";
 import { errorDetails } from "./error-helpers.js";
@@ -2683,8 +2684,8 @@ function goalProposalPanel() {
 	ensureProposalRolesLoaded();
 	ensureProposalGroupPoliciesLoaded();
 	ensureToolsLoaded();
-	const subgoalsEnabled = document.documentElement.dataset.subgoalsEnabled === "true";
-	const maxNestingDepth = parseInt(document.documentElement.dataset.maxNestingDepth || "3", 10);
+	const subgoalsEnabled = isSubgoalsEnabled();
+	const maxNestingDepth = getSystemMaxNestingDepth();
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
