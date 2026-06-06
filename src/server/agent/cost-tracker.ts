@@ -422,15 +422,26 @@ interface TreeCostCacheEntry {
 }
 
 /** Fingerprint the relevant subset of `allGoals` for cache invalidation.
- *  Includes id + parentGoalId + rootGoalId + archived flag for every goal
- *  whose `rootGoalId` matches or whose `id` is the root — i.e. anything that
- *  could possibly be in the rooted subtree. We deliberately avoid hashing
- *  state/title/createdAt: those don't affect breakdown membership or
- *  ordering keys outside the walk. */
+ *  Walks the SAME `parentGoalId` subtree that `computeTreeCost` sums — via
+ *  `walkGoalSubtree` rooted at `rootGoalId` — and hashes id + parentGoalId +
+ *  rootGoalId + archived flag + createdAt for every member.
+ *
+ *  Must NOT filter by `rootGoalId === requestedGoalId`: subgoal descendants
+ *  keep the *top-level* root's id in their `rootGoalId` stamp, so a
+ *  rootGoalId-equality filter excludes the whole subtree when the requested
+ *  goal is itself a subgoal — the cache key would never change when a deep
+ *  descendant is added / removed / reparented / archived (finding C3). The
+ *  subtree walk includes those descendants, so the signature invalidates
+ *  correctly. We deliberately avoid hashing state/title: those don't affect
+ *  breakdown membership or ordering keys.
+ *  pinned by tests/tree-cost-rollup.test.ts::cache invalidates when a deep subgoal descendant changes */
 function computeTreeSignature(rootGoalId: string, allGoals: TreeCostGoal[]): string {
+	const members = walkGoalSubtree(rootGoalId, allGoals as unknown as PersistedGoal[], {
+		includeRoot: true,
+		includeArchived: true,
+	}) as unknown as TreeCostGoal[];
 	const parts: string[] = [];
-	for (const g of allGoals) {
-		if (g.id !== rootGoalId && g.rootGoalId !== rootGoalId) continue;
+	for (const g of members) {
 		parts.push(`${g.id}|${g.parentGoalId ?? ""}|${g.rootGoalId ?? ""}|${g.archived ? "a" : ""}|${g.createdAt ?? 0}`);
 	}
 	parts.sort();
