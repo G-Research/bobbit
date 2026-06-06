@@ -1095,6 +1095,21 @@ export function createGateway(config: GatewayConfig) {
 				return;
 			}
 
+			// Reject oversized request bodies up front — before auth, dispatch,
+			// or any handler buffers/parses the body (Sec-2). A declared
+			// Content-Length over the cap is refused with a definitive 413;
+			// chunked/streamed bodies without a length are bounded by the
+			// streaming cap inside readBody().
+			if (bodyLimitExceeded(req.headers["content-length"])) {
+				res.writeHead(413, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({
+					error: "Request body too large",
+					code: "BODY_TOO_LARGE",
+					limit: MAX_REQUEST_BODY_BYTES,
+				}));
+				return;
+			}
+
 			// Public endpoints — no auth required (CA cert is inherently public).
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
 
@@ -7619,6 +7634,26 @@ async function handleApiRoute(
 	const teamCompleteMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/complete$/);
 	if (teamCompleteMatch && req.method === "POST") {
 		const goalId = teamCompleteMatch[1];
+		// Guard: a goal cannot be marked complete while it still has unresolved
+		// live descendant goals. Nested child work must be rolled up (merged +
+		// completed) or archived before the parent completes — otherwise the
+		// parent's branch/PR would land without its children's work. This is
+		// independent of gate-requirement state (the gate checks in
+		// completeTeam() can be absent/skipped/stale, so we enforce here too).
+		// Archived and already-complete descendants don't block.
+		const completeCtx = projectContextManager.getContextForGoal(goalId);
+		const completeAllGoals = completeCtx?.goalStore.getAll() ?? [];
+		const unresolvedChildIds = walkGoalSubtree(goalId, completeAllGoals, { includeRoot: false, includeArchived: false })
+			.filter(g => g.state !== "complete")
+			.map(g => g.id);
+		if (unresolvedChildIds.length > 0) {
+			json({
+				error: `Cannot complete: ${unresolvedChildIds.length} unresolved child goal(s) must be completed or archived first`,
+				code: "UNRESOLVED_CHILDREN",
+				childIds: unresolvedChildIds,
+			}, 409);
+			return;
+		}
 		try {
 			await teamManager.completeTeam(goalId);
 			json({ ok: true });
@@ -11454,17 +11489,70 @@ function hasTransitiveDep(workflow: import("./agent/workflow-store.js").Workflow
 	return false;
 }
 
-function readBody(req: http.IncomingMessage): Promise<any> {
+/**
+ * Global cap on accepted request-body size (1 MiB). Legitimate API payloads
+ * (goal specs, inline workflows/roles, plan mutations) are bounded well below
+ * this — the per-endpoint plan/spawn caps in nested-goal-routes.ts are the
+ * fine-grained limits; this is the coarse backstop that prevents a single huge
+ * body from being buffered/parsed at all (Sec-2 defence-in-depth).
+ */
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
+/**
+ * True when a request's declared Content-Length exceeds `maxBytes`. Pure +
+ * header-only so the request handler can reject oversized bodies with a 413
+ * BEFORE any byte is buffered. Chunked/streamed bodies that omit Content-Length
+ * are bounded by the streaming cap inside `readBody()` instead.
+ */
+export function bodyLimitExceeded(
+	contentLength: string | string[] | undefined,
+	maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): boolean {
+	const raw = Array.isArray(contentLength) ? contentLength[0] : contentLength;
+	if (raw == null) return false;
+	const len = Number(raw);
+	return Number.isFinite(len) && len > maxBytes;
+}
+
+export function readBody(
+	req: http.IncomingMessage,
+	maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): Promise<any> {
 	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
-		req.on("data", (chunk: Buffer) => chunks.push(chunk));
+		let total = 0;
+		let settled = false;
+		const finish = (value: any): void => {
+			if (settled) return;
+			settled = true;
+			resolve(value);
+		};
+		req.on("data", (chunk: Buffer) => {
+			if (settled) return;
+			total += chunk.length;
+			if (total > maxBytes) {
+				// Oversized body: reject BEFORE Buffer.concat()/JSON.parse() so a
+				// huge payload is never fully materialised in memory. Drop buffered
+				// chunks, tear down the stream, and resolve null — handlers treat a
+				// null body as a malformed request (400); the request-handler's
+				// Content-Length precheck returns a definitive 413 for the common
+				// case where the length is declared up front.
+				chunks.length = 0;
+				try { req.destroy(); } catch { /* best-effort */ }
+				finish(null);
+				return;
+			}
+			chunks.push(chunk);
+		});
 		req.on("end", () => {
 			try {
-				resolve(JSON.parse(Buffer.concat(chunks).toString()));
+				finish(JSON.parse(Buffer.concat(chunks).toString()));
 			} catch {
-				resolve(null);
+				finish(null);
 			}
 		});
+		req.on("error", () => finish(null));
+		req.on("aborted", () => finish(null));
 	});
 }
 
