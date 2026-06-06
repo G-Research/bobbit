@@ -228,6 +228,28 @@ let dashboardDescendants: Goal[] = [];
 let dashboardDescendantsInFlight = false;
 let dashboardDescendantsLastFetchAt = 0;
 
+/**
+ * Pending plan-mutation approval requests for the current goal — the
+ * dashboard mutation-pending card. Populated by (a) the initial REST fetch on
+ * dashboard load / WS reconnect (restart-safe rehydration via
+ * `GET /api/goals/:id/mutations/pending`) and (b) the live `mutation_pending`
+ * broadcast; cleared by the `mutation_decided` broadcast (or optimistically on
+ * the operator's own approve/reject). Mirrors the in-chat
+ * <mutation-pending-card> surface (src/app/custom-messages.ts).
+ */
+interface DashboardPendingMutation {
+	requestId: string;
+	goalId: string;
+	kind: "fix-up" | "expansion" | "restructure" | "criteria-drop";
+	summary: string;
+	createdAt?: number;
+	expiresAt?: number;
+}
+let dashboardPendingMutations: DashboardPendingMutation[] = [];
+let dashboardMutationsInFlight = false;
+/** requestIds with an in-flight approve/reject POST (disables their buttons). */
+const dashboardMutationDecisionInFlight = new Set<string>();
+
 /** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned. */
 let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
 const PLAN_RERENDER_THROTTLE_MS = 250;
@@ -301,6 +323,76 @@ async function fetchDashboardDescendants(goalId: string): Promise<void> {
 		// best-effort
 	} finally {
 		dashboardDescendantsInFlight = false;
+	}
+}
+
+/**
+ * Restart-safe rehydration: fetch persisted pending plan-mutation requests so
+ * the dashboard card re-appears after a reload / WS reconnect even when the
+ * live `mutation_pending` broadcast fired while the UI was disconnected.
+ * Best-effort; the card short-circuits when the response hasn't landed.
+ */
+async function fetchPendingMutations(goalId: string): Promise<void> {
+	// §5.6: the card is gated on the experimental flag — skip the round-trip
+	// when it's off (the dashboard surface would never be rendered).
+	if (!isSubgoalsEnabled()) return;
+	if (dashboardMutationsInFlight) return;
+	dashboardMutationsInFlight = true;
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/mutations/pending`);
+		if (!res.ok) return;
+		const data = await res.json() as { pending?: DashboardPendingMutation[] };
+		if (currentGoalId === goalId) {
+			dashboardPendingMutations = Array.isArray(data?.pending) ? data.pending : [];
+			renderApp();
+		}
+	} catch {
+		// best-effort
+	} finally {
+		dashboardMutationsInFlight = false;
+	}
+}
+
+/** Live `mutation_pending` broadcast → upsert into the dashboard card list. */
+function upsertDashboardPendingMutation(m: DashboardPendingMutation): void {
+	const idx = dashboardPendingMutations.findIndex(x => x.requestId === m.requestId);
+	if (idx >= 0) dashboardPendingMutations[idx] = { ...dashboardPendingMutations[idx], ...m };
+	else dashboardPendingMutations = [...dashboardPendingMutations, m];
+	renderApp();
+}
+
+/** `mutation_decided` broadcast (or optimistic local clear) → drop the card. */
+function removeDashboardPendingMutation(requestId: string): void {
+	const next = dashboardPendingMutations.filter(m => m.requestId !== requestId);
+	if (next.length !== dashboardPendingMutations.length) {
+		dashboardPendingMutations = next;
+		renderApp();
+	}
+}
+
+/**
+ * Operator approve/reject from the dashboard card — posts to the SAME
+ * `POST /api/goals/:id/mutation/:requestId/decision` endpoint the in-chat card
+ * uses (src/app/custom-messages.ts). Optimistically clears the card; the WS
+ * `mutation_decided` broadcast is the authoritative source for the chat card.
+ */
+async function decideDashboardMutation(goalId: string, requestId: string, decision: "approve" | "reject"): Promise<void> {
+	if (dashboardMutationDecisionInFlight.has(requestId)) return;
+	dashboardMutationDecisionInFlight.add(requestId);
+	renderApp();
+	try {
+		await gatewayFetch(`/api/goals/${goalId}/mutation/${requestId}/decision`, {
+			method: "POST",
+			body: JSON.stringify({ decision }),
+		});
+		removeDashboardPendingMutation(requestId);
+	} catch (err) {
+		// Leave the card visible so the operator can retry — the WS event would
+		// also clear it if the POST actually succeeded.
+		console.error("[dashboard-mutation] decision failed:", err);
+	} finally {
+		dashboardMutationDecisionInFlight.delete(requestId);
+		renderApp();
 	}
 }
 
@@ -394,9 +486,27 @@ function connectDashboardWs(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "auth_ok") {
 				subscribeToCurrentGoal();
+				// Restart-safe rehydration: re-discover persisted pending plan
+				// mutations after a (re)connect so the dashboard card survives a
+				// dropped socket / server restart.
+				if (currentGoalId) void fetchPendingMutations(currentGoalId);
 				return;
 			}
 			if (typeof msg?.goalId === "string" && msg.goalId !== currentGoalId) return;
+			// Dashboard mutation-pending card: react to the live broadcasts. The
+			// in-chat card (remote-agent.ts) handles these independently on the
+			// session socket — this only drives the dashboard surface.
+			if (msg?.type === "mutation_pending" && msg.goalId === currentGoalId) {
+				upsertDashboardPendingMutation({
+					requestId: msg.requestId,
+					goalId: msg.goalId,
+					kind: msg.kind,
+					summary: msg.summary,
+				});
+			}
+			if (msg?.type === "mutation_decided" && msg.goalId === currentGoalId) {
+				removeDashboardPendingMutation(msg.requestId);
+			}
 			if (shouldRefreshGateStatusForEvent(msg)) {
 				scheduleGateStatusRefreshForGoal(msg.goalId);
 			}
@@ -587,8 +697,12 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		if (!sameGoal) {
 			dashboardDescendants = [];
 			dashboardDescendantsLastFetchAt = 0;
+			dashboardPendingMutations = [];
 		}
 		void fetchDashboardDescendants(goalId);
+
+		// Restart-safe rehydration of the mutation-pending approval card.
+		void fetchPendingMutations(goalId);
 
 		// Start setup status polling if worktree is still being prepared
 		if (currentGoal && currentGoal.setupStatus === "preparing") {
@@ -693,6 +807,9 @@ export function clearDashboardState(): void {
 	dashboardDescendants = [];
 	dashboardDescendantsInFlight = false;
 	dashboardDescendantsLastFetchAt = 0;
+	dashboardPendingMutations = [];
+	dashboardMutationsInFlight = false;
+	dashboardMutationDecisionInFlight.clear();
 	if (_planRerenderTimer != null) { clearTimeout(_planRerenderTimer); _planRerenderTimer = null; }
 	gitStatus = null;
 	gitRepoKnown = 'unknown';
@@ -2768,6 +2885,61 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 // RENDER: MAIN DASHBOARD
 // ============================================================================
 
+/**
+ * Dashboard mutation-pending card — the non-chat approval surface. Renders one
+ * row per pending plan-mutation request with Approve / Reject buttons hitting
+ * the shared decision endpoint. Hidden when the experimental flag is off or
+ * there are no (unexpired) pending requests.
+ */
+function renderDashboardMutationPending(): TemplateResult {
+	if (!isSubgoalsEnabled() || !currentGoalId) return html``;
+	const now = Date.now();
+	const pending = dashboardPendingMutations.filter(m => m.expiresAt === undefined || m.expiresAt > now);
+	if (pending.length === 0) return html``;
+	const goalId = currentGoalId;
+	const kindBadge: Record<string, string> = {
+		"fix-up": "Fix-up",
+		"expansion": "Expansion",
+		"restructure": "Restructure",
+		"criteria-drop": "Criteria-drop",
+	};
+	return html`
+		<div data-testid="dashboard-mutation-pending-card"
+			style="margin:0 16px 8px;display:flex;flex-direction:column;gap:8px;">
+			${pending.map(m => {
+				const busy = dashboardMutationDecisionInFlight.has(m.requestId);
+				const badge = kindBadge[m.kind] ?? m.kind;
+				return html`
+					<div data-testid="dashboard-mutation-pending-item"
+						data-request-id=${m.requestId}
+						style="padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card);">
+						<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+							<span class="notification-icon">⟳</span>
+							<span style="font-weight:600;font-size:13px;">Plan mutation pending — ${badge}</span>
+						</div>
+						<div data-testid="dashboard-mutation-pending-summary"
+							style="font-size:12px;color:var(--muted-foreground);margin-bottom:8px;">${m.summary}</div>
+						<div style="display:flex;gap:8px;">
+							<button data-testid="dashboard-mutation-pending-approve"
+								?disabled=${busy}
+								style="padding:4px 10px;border-radius:6px;border:1px solid var(--primary);background:var(--primary);color:var(--primary-foreground);cursor:pointer;font-size:12px;${busy ? "opacity:0.6;cursor:default;" : ""}"
+								@click=${() => decideDashboardMutation(goalId, m.requestId, "approve")}>
+								${busy ? "Working…" : "Approve"}
+							</button>
+							<button data-testid="dashboard-mutation-pending-reject"
+								?disabled=${busy}
+								style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:pointer;font-size:12px;${busy ? "opacity:0.6;cursor:default;" : ""}"
+								@click=${() => decideDashboardMutation(goalId, m.requestId, "reject")}>
+								${busy ? "Working…" : "Reject"}
+							</button>
+						</div>
+					</div>
+				`;
+			})}
+		</div>
+	`;
+}
+
 export function renderGoalDashboard(): TemplateResult {
 	if (loading) {
 		// Render a skeleton dashboard with an empty tab bar so tests and
@@ -2824,6 +2996,7 @@ export function renderGoalDashboard(): TemplateResult {
 			` : nothing}
 			${renderSetupBanner(currentGoal)}
 			${renderMetaRows(currentGoal)}
+			${renderDashboardMutationPending()}
 			${renderGatePipeline()}
 			${renderTabBar()}
 			<div class="tab-content">

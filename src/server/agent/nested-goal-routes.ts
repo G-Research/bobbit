@@ -952,6 +952,41 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
+	// GET /api/goals/:id/mutations/pending — persisted pending plan-mutation
+	// requests for the approval surfaces (in-chat card + dashboard
+	// mutation-pending card). Enables restart-safe REHYDRATION: a reload /
+	// reconnect re-discovers requests that the live `mutation_pending`
+	// broadcast already fired (and missed) while the UI was disconnected.
+	//
+	// READ-only: gated by the SAME `requireSubgoalsEnabled()` the sibling GET
+	// routes (e.g. GET /plan) use — deliberately NO `authorizeTeamLeadOrReject`
+	// / mutation-authz path (those guard the mutating verbs). Expired entries
+	// (past their 24h TTL) are filtered so a stale request never resurfaces.
+	const mutationsPendingMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/mutations\/pending$/);
+	if (mutationsPendingMatch && req.method === "GET") {
+		if (!requireSubgoalsEnabled()) return true;
+		const id = mutationsPendingMatch[1];
+		const resolved = resolvePlanContext(id);
+		if (!resolved) return true;
+		const now = Date.now();
+		const pending = resolved.ctx.planMutationStore
+			.listForGoal(id)
+			.filter(m => m.expiresAt > now)
+			.map(m => ({
+				requestId: m.requestId,
+				goalId: m.goalId,
+				kind: m.kind,
+				summary: m.summary,
+				diff: m.diff,
+				proposedSteps: m.proposedSteps,
+				...(m.uncoveredCriteria ? { uncoveredCriteria: m.uncoveredCriteria } : {}),
+				createdAt: m.createdAt,
+				expiresAt: m.expiresAt,
+			}));
+		json({ pending });
+		return true;
+	}
+
 	// POST /api/goals/:id/integrate-child/:childId — local merge + auto-archive.
 	const integrateChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/integrate-child\/([^/]+)$/);
 	if (integrateChildMatch && req.method === "POST") {
