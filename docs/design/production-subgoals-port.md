@@ -341,7 +341,7 @@ children.
 | Condition | Detection point | Response | Tests |
 |---|---|---|---|
 | Sibling dependency cycle / self-dep / unknown id | `depends-on-validation.ts` at spawn + plan PATCH | `400 DEPENDS_ON_CYCLE` / `SELF_DEPENDENCY {planId}` / `UNKNOWN_PLAN_ID {missing}` | goal-spawn-child-dependsOn, depends-on-validation |
-| Child with unmet deps | spawn / integrate-child | created paused, auto-resumes when last dep merges | goal-spawn-child-dependsOn-blocking, runSubgoalStep-dependsOn-stamping |
+| Child with unmet deps | spawn / integrate-child | created in the `blocked` scheduler state (deliberate #497-aligned state — distinct from operator `paused`; an operator resume must NOT clear dep-blocking), auto-resumes (`blocked`→`todo`) when its last dependency merges; spawn/plan responses surface `blocked: true` + `pendingDeps` | goal-spawn-child-dependsOn-blocking, runSubgoalStep-dependsOn-stamping |
 | Merge conflict | `runSubgoalStep` merge | `git merge --abort`, step fails with manual-recovery directive, child preserved (not archived) | runSubgoalStep-merge-then-archive |
 | Workflow-less `complete` child | `runSubgoalStep` recovery | degenerate-workflow recovery treats as ready-to-merge | runSubgoalStep-degenerate-workflow-less-recovery |
 | Stale archived/child pointer | `runSubgoalStep` | stale-pointer invalidation, re-resolves | runSubgoalStep-stale-archived-invalidates |
