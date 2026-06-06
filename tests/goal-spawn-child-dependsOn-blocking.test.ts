@@ -29,6 +29,7 @@ import { GateStore } from "../src/server/agent/gate-store.ts";
 import { ProjectConfigStore } from "../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../src/server/agent/nested-goal-routes.ts";
+import { CookieStore } from "../src/server/auth/cookie.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -54,6 +55,11 @@ async function makeHarness(): Promise<Harness> {
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
 
 	const goalStore = new GoalStore(stateDir);
+	const cookieStore = new CookieStore(stateDir);
+	// These tests exercise dependsOn scheduling, not authz — authenticate as a
+	// human/UI gateway call by carrying a verified bobbit_session cookie so the
+	// S1 Children-mutation guard allows the spawn-child / integrate-child calls.
+	const humanCookieHeader = `bobbit_session=${cookieStore.mint()}`;
 	const cfg = new ProjectConfigStore(configDir);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
@@ -132,6 +138,7 @@ async function makeHarness(): Promise<Harness> {
 		verificationHarness,
 		teamManager,
 		sessionManager,
+		cookieStore,
 		requireSubgoalsEnabled: () => true,
 		getGoalAcrossProjects: (gid) => goalStore.get(gid),
 		getGoalManagerForGoal: () => goalManager,
@@ -150,7 +157,7 @@ async function makeHarness(): Promise<Harness> {
 			json: (body, s) => { status = s ?? 200; payload = body; },
 			jsonError: (s, err, extra) => { status = s; payload = { error: String((err as any)?.message ?? err), ...(extra ?? {}) }; },
 		};
-		const req = { method, headers: {}, _body: body } as any as http.IncomingMessage;
+		const req = { method, headers: { cookie: humanCookieHeader }, _body: body } as any as http.IncomingMessage;
 		const url = new URL(`http://x${pathname}`);
 		const handled = await tryHandleNestedGoalRoute(req, url, localDeps);
 		if (!handled) throw new Error(`route not handled: ${method} ${pathname}`);

@@ -29,6 +29,7 @@ import { PlanMutationStore } from "../src/server/agent/plan-mutation-store.ts";
 import { ProjectConfigStore } from "../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../src/server/agent/nested-goal-routes.ts";
+import { CookieStore } from "../src/server/auth/cookie.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -37,6 +38,8 @@ interface Harness {
 	parent: PersistedGoal;
 	resizeCalls: Array<{ rootGoalId: string; newMax: number }>;
 	teamLeadByGoal: Record<string, string | null>;
+	/** A valid `bobbit_session` cookie header value for the human/UI path. */
+	humanCookieHeader: string;
 	cleanup(): void;
 	call(
 		method: string,
@@ -55,6 +58,8 @@ async function makeHarness(): Promise<Harness> {
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
 
 	const goalStore = new GoalStore(stateDir);
+	const cookieStore = new CookieStore(stateDir);
+	const humanCookieHeader = `bobbit_session=${cookieStore.mint()}`;
 	const cfg = new ProjectConfigStore(configDir);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
@@ -127,6 +132,7 @@ async function makeHarness(): Promise<Harness> {
 		verificationHarness,
 		teamManager,
 		sessionManager,
+		cookieStore,
 		requireSubgoalsEnabled: () => true,
 		getGoalAcrossProjects: (gid) => goalStore.get(gid),
 		getGoalManagerForGoal: () => goalManager,
@@ -159,6 +165,7 @@ async function makeHarness(): Promise<Harness> {
 
 	return {
 		tmpRoot, goalStore, goalManager, parent, resizeCalls, teamLeadByGoal,
+		humanCookieHeader,
 		cleanup() { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {} },
 		call,
 	};
@@ -174,7 +181,7 @@ describe("G2/C1 — spawn-child workflow override", () => {
 			title: "Child with explicit workflow",
 			spec: "Child spec: this child explicitly requests the 'feature' workflow, overriding the parent's 'parent' meta-workflow snapshot.",
 			workflowId: "feature",
-		});
+		}, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 201);
 		const child = h.goalStore.get(r.payload.id)!;
 		assert.equal(child.workflowId, "feature", "child must adopt the explicitly-requested workflow id");
@@ -189,7 +196,7 @@ describe("G2/C1 — spawn-child workflow override", () => {
 			planId: "p-inherit",
 			title: "Inheriting child",
 			spec: "Child spec: no explicit workflow, so it should inherit the parent's snapshot with parent-only subgoal steps stripped.",
-		});
+		}, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 201);
 		const child = h.goalStore.get(r.payload.id)!;
 		assert.equal(child.workflowId, "parent", "child inherits the parent workflow id by default");
@@ -209,7 +216,7 @@ describe("G2/C1 — PATCH /plan preserves top-level workflowId + suggestedRole",
 					phase: 0,
 				},
 			],
-		});
+		}, { cookie: h.humanCookieHeader });
 		// Empty current plan + one added step at phase 0 → fix-up, applied under balanced.
 		assert.equal(r.status, 200, JSON.stringify(r.payload));
 		assert.equal(r.payload.applied, true);
@@ -223,7 +230,7 @@ describe("G2/C1 — PATCH /plan preserves top-level workflowId + suggestedRole",
 
 describe("C2/C4 — PATCH /policy integer clamp + live semaphore resize", () => {
 	it("floors a fractional maxConcurrentChildren and resizes the cached semaphore", async () => {
-		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 1.5 });
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 1.5 }, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 200);
 		assert.equal(h.goalStore.get(h.parent.id)!.maxConcurrentChildren, 1, "1.5 must be floored to 1");
 		assert.equal(h.resizeCalls.length, 1, "the cached root semaphore must be resized");
@@ -231,27 +238,38 @@ describe("C2/C4 — PATCH /policy integer clamp + live semaphore resize", () => 
 	});
 
 	it("rejects a value that floors below 1", async () => {
-		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 0.5 });
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 0.5 }, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 400);
 		assert.equal(h.resizeCalls.length, 0);
 	});
 
 	it("does not resize when only divergencePolicy changes", async () => {
-		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { divergencePolicy: "strict" });
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { divergencePolicy: "strict" }, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 200);
 		assert.equal(h.resizeCalls.length, 0);
 	});
 });
 
 describe("S1 — team-lead authorization on mutating endpoints", () => {
-	it("allows a header-less (human/UI gateway) spawn-child", async () => {
+	it("allows a human/UI gateway spawn-child via the verified bobbit_session cookie (no spawning-session header)", async () => {
 		h.teamLeadByGoal[h.parent.id] = "tl-session";
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "ui-spawn",
 			title: "UI spawned",
-			spec: "Spawned by a human operator via the web UI — no spawning-session header, gateway auth only.",
-		}); // no headers
+			spec: "Spawned by a human operator via the web UI — verified bobbit_session cookie, no spawning-session header.",
+		}, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 201);
+	});
+
+	it("rejects a header-less, cookie-less caller with 403 NOT_TEAM_LEAD (closes the absent-header bypass)", async () => {
+		h.teamLeadByGoal[h.parent.id] = "tl-session";
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "bypass-spawn",
+			title: "Bypass attempt",
+			spec: "An agent that simply omits the spawning-session header must NOT be treated as a trusted human anymore.",
+		}); // no headers, no cookie
+		assert.equal(r.status, 403);
+		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
 	});
 
 	it("allows the team-lead (matching X-Bobbit-Spawning-Session)", async () => {

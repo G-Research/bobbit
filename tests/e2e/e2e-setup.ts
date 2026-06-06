@@ -424,6 +424,28 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 	} catch { /* best-effort */ }
 }
 
+/**
+ * The seven MUTATING Children REST endpoints guarded by the S1 authz check
+ * (`src/server/auth/children-mutation-authz.ts`). A node `apiFetch` carries no
+ * `bobbit_session` cookie, so without a caller header these would 403. Goals
+ * created in E2E have no team-lead, so a generic `X-Bobbit-Session-Id` caller
+ * header takes the "no-team-lead → allow" branch. (Browser-initiated requests
+ * carry the cookie automatically and don't need this.)
+ */
+const CHILDREN_MUTATION_PATH =
+	/^\/api\/goals\/[^/]+\/(spawn-child|integrate-child\/[^/]+|pause|resume|mutation\/[^/]+\/decision|policy|plan)$/;
+
+function withChildrenAuthzHeader(path: string, headers: Record<string, string>): Record<string, string> {
+	const bare = path.split("?")[0];
+	if (!CHILDREN_MUTATION_PATH.test(bare)) return headers;
+	const hasCaller = Object.keys(headers).some((k) => {
+		const lk = k.toLowerCase();
+		return (lk === "x-bobbit-spawning-session" || lk === "x-bobbit-session-id") && !!headers[k];
+	});
+	if (hasCaller) return headers;
+	return { ...headers, "X-Bobbit-Session-Id": "e2e-children-authz-caller" };
+}
+
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	const injected = maybeInjectAcceptCanonical(path, await maybeInjectProjectId(path, opts));
@@ -434,11 +456,11 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 		try {
 			const resp = await fetch(`${base()}${finalPath}`, {
 				...injected,
-				headers: {
+				headers: withChildrenAuthzHeader(finalPath, {
 					"Content-Type": "application/json",
 					Authorization: `Bearer ${token()}`,
 					...(injected.headers as Record<string, string> || {}),
-				},
+				}),
 			});
 			await maybeAutoSeedWorkflows(path, method, injected.body as unknown, resp);
 			return resp;
