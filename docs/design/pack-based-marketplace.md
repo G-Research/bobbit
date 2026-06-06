@@ -111,10 +111,11 @@ version: 1.2.0                   # REQUIRED. Semver string. Informational + show
 author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
 # Declared contents — what the pack ships. REQUIRED. Drives the browse UI
-# (declared-entity chips) and the "installs executable code" warning
-# (tools[] non-empty). All three keys MUST be present; each is an array that
-# MAY be empty. The resolver loads whatever is physically present, but
+# (declared-entity chips). All three keys MUST be present; each is an array
+# that MAY be empty. The resolver loads whatever is physically present, but
 # `contents` is the authoritative advertised manifest the UI renders.
+# (No per-pack "executable code" gate keys off tools[]: trust is handled
+#  once at the source-add boundary — see §10.2.)
 contents:
   roles:  [researcher]
   tools:  [research]             # tool GROUP names (dir names under tools/)
@@ -599,7 +600,7 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 | `POST /api/marketplace/sources` | Add a source `{ url, ref? }` → syncs + returns the created source. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source (and its cache dir). |
 | `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch); returns updated `lastCommit`. |
-| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: Array<PackManifest & { dirName, hasTools }> }`. `hasTools` drives the executable-code warning. |
+| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: Array<PackManifest & { dirName, hasTools }> }`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. |
 | `POST /api/marketplace/install` | Body `{ sourceId, packName, scope, projectId? }` → installs; returns `.pack-meta.yaml`. |
 | `POST /api/marketplace/update` | Body `{ scope, packName, projectId? }` → updates; returns new meta. |
 | `DELETE /api/marketplace/installed` | Body `{ scope, packName, projectId? }` → uninstall. |
@@ -650,7 +651,7 @@ interface ConflictWire {
 | `GET /api/marketplace/installed?projectId=` | — | `200 { installed: InstalledPackWire[] }` (all scopes; `corrupt` entries included) | `400` project scope requested without projectId |
 | `GET /api/packs/conflicts?projectId=` | — | `200 { conflicts: ConflictWire[] }` | `400` as above |
 
-- **Tool-bearing confirmation** is a UI-side gate (§10): the client only POSTs `install` after the user accepts the executable-code warning, which it derives from `hasTools`/`contents.tools` in the browse payload. The server does not require a confirmation flag, but install of a tool-bearing pack is otherwise unrestricted.
+- **No per-pack install gate.** Trust is handled once at the source-add boundary via a blanket warning + "Why?" disclosure (§10.2); the client POSTs `install` directly with no executable-code confirmation. The server never required a confirmation flag, and install of any pack is unrestricted. `hasTools` in the browse payload is now informational only.
 - **Reload/cache behavior:** install/update/uninstall invalidate the affected scope's resolver cache (and the `slash-skills.ts` TTL cache) synchronously before returning, so a subsequent `GET /api/roles|tools|skills` reflects the change immediately (no client reload required). `pack_order` mutations do the same.
 - **Idempotency / concurrency:** install is rejected (`409`) if `dest` exists; the atomic-rename (§8.1) makes concurrent installs of the same `(scope, packName)` safe — the loser sees `EEXIST`/`409`.
 
@@ -697,9 +698,8 @@ import { ShoppingBag /* or Store */ } from "lucide";
 
 Reuse config-page conventions (`config-scope.ts`: `renderConfigScopeRow`, `renderOriginBadge`, scope state):
 
-- **Sources panel:** list registered sources; "Add source" (URL + optional ref); per-source "Re-sync" and "Remove".
+- **Sources panel:** list registered sources; "Add source" (URL + optional ref); per-source "Re-sync" and "Remove". The Add-source controls carry a persistent **blanket trust warning** (only add sources you trust — installing any pack can run code or instruct agents on your machine) plus an expandable, keyboard-accessible **"Why?"** disclosure (collapsed by default) explaining the per-entity-type risk spectrum: **Tools** ship `extension.ts` / `_shared/` code that runs directly in the Bobbit server process on the host with no LLM/sandbox in the loop (highest risk); **Skills** are free-form instructions an agent follows literally (agent has shell access); **Roles** steer persona/behavior (more diffuse, but still drive an LLM with tool access). Trust is decided here, once, at the source boundary.
 - **Browse panel:** select a source → list its packs (name, version, description, declared entities as chips). Each pack has an **Install** button with a **scope picker** (System/server, Global-user, or a project — reuse `renderConfigScopeRow` semantics).
-- **Executable-code warning:** if a pack ships tools (`hasTools` / `contents.tools` non-empty), show an explicit confirm dialog **"This pack installs executable code that runs on your machine"** before install.
 - **Installed panel:** list installed packs grouped by scope with provenance (source URL, version, commit short SHA, install/updated dates from `.pack-meta.yaml`); per-pack **Update** and **Uninstall**.
 - **Conflict warnings:** packs participating in a same-name conflict show a warning icon (from `GET /api/packs/conflicts`); expand to see entity/type/winner/shadowed; the only resolution affordance is **reorder** (adjust `pack_order` via drag) — no per-conflict pin in MVP.
 - After install/uninstall/update, refresh the Roles/Tools/Skills page data so installed entities appear with the pack as `origin` and the existing badge styling.
@@ -780,7 +780,7 @@ Point at fixture pack trees under a tmp dir.
 5. **Persists across reload.**
 6. **Provenance** shown (source + version/commit + date).
 7. **Update** (re-sync after upstream change reflected) and **Uninstall** (entities disappear; exactly what install added is removed).
-8. **Executable-code warning** shown for a tool-bearing pack before install.
+8. **Source-level trust warning** is shown in the Add-source panel, with a "Why?" disclosure (collapsed by default) that expands to the per-entity-type threat model; no per-pack confirmation appears before install.
 9. **Conflict warning icon** appears when two installed packs define the same entity name; **drag-reorder** (which calls `PUT /api/marketplace/pack-order`) flips the winner and the warning/`origin` updates after re-resolve. Persists across reload.
 
 ### 12.4 Acceptance-criterion → test map
@@ -795,7 +795,7 @@ Point at fixture pack trees under a tmp dir.
 | Same-name conflicts → warning + configured precedence (`pack_order` reorder) | E2E #9 + unit #2,#4 (pack_order reordering) |
 | Entities tagged with the specific pack as origin | E2E #4 (originPackName) |
 | `disabled_config_directories` now enforced for skills | unit #6 |
-| Tool-bearing packs show executable-code warning | E2E #8 |
+| Source-level trust warning + "Why?" disclosure in Add-source panel | E2E #8 |
 | Re-sync + re-install reflects upstream | E2E #7 + unit #8 |
 
 ---

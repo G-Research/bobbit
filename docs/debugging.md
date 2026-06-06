@@ -33,6 +33,17 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Where to look**: custom workflow command steps in `project.yaml::workflows.*.gates.*.verify[].run`; runtime guard in `verification-harness.ts::validateVerificationPushSafety`; authoring guidance in [goals-workflows-tasks.md](goals-workflows-tasks.md#gate-verification-baselines).
 - **Pinning tests**: `tests/verification-push-guard.test.ts` and `tests/goal-push-safety-regression.test.ts`.
 
+## Agent pushed commits to a branch whose PR was already merged
+
+- **Symptom**: an agent (regular session or team-lead) keeps pushing new commits to a branch whose PR is already closed/merged. The commits never appear on the primary branch — they are **orphaned**, because a merged PR is closed and re-pushing its head ref does nothing useful.
+- **Why it bites**: squash- and rebase-merges are the common case here, and a plain ancestor check (`git merge-base --is-ancestor`) does **not** catch them — the squashed commit on the primary branch has a different SHA, so the original branch is never a literal ancestor. You must ask GitHub about the PR's state, not just inspect local history.
+- **Detection (run before pushing or opening/updating a PR)**:
+  - **Primary — `gh`**: `gh pr list --head <branch> --state all` — a `MERGED` (or `CLOSED`) entry means the branch is done. Catches squash/rebase merges. Bobbit is GitHub-centric, so `gh` is normally present.
+  - **Fallback (only if `gh` is unavailable)**: detect the primary branch (`git symbolic-ref refs/remotes/origin/HEAD` — never assume `master`/`main`), then `git fetch origin <primary> && git merge-base --is-ancestor <branch> origin/<primary>` (exit 0 ⇒ already merged). Misses squash/rebase-merges, hence fallback only.
+- **Recovery**: do NOT push more commits to the merged branch. Create a fresh branch off `origin/<primary>`, move the new work onto it, push that, and open a **new** PR.
+- **Where the guidance lives** (keep these consistent if you touch one): the `## Pull requests` procedure in `defaults/system-prompt.md` (every session); the Ready-to-Merge step in `defaults/roles/team-lead.yaml` (goal-branch push); the re-attempt context in `src/server/agent/goal-assistant.ts` (new work goes on the fresh branch the re-attempt goal creates, never the old merged branch).
+- **Pinning test**: `tests/system-prompt-merged-branch.test.ts` asserts the system-prompt `## Pull requests` section keeps the concrete detection commands and fresh-branch recovery wording, so it can't rot back into a vague one-liner.
+
 ## Streaming performance (UI sluggishness)
 
 - **Architecture**: `StreamingMessageContainer` owns rendering during streaming via `setMessage()` with `requestAnimationFrame` batching. `AgentInterface` must NOT call `this.requestUpdate()` in the `message_update` event handler — only the streaming container updates on each token.

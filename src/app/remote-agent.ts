@@ -677,9 +677,19 @@ export class RemoteAgent {
 					return;
 				}
 
+				// Boot-timing: record the raw snapshot frame size so we can tell
+				// whether the get_state cost is payload transfer vs. server-side
+				// assembly. Cheap: a type check + a (no-copy) string length read.
+				if (msg.type === "messages" && typeof evt.data === "string") {
+					bootTimingMeta({ snapshotChars: evt.data.length, serverTiming: msg.serverTiming });
+				}
+
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
+						// Splits the ws-open→snapshot window into handshake vs. the
+						// server-side snapshot wait that follows.
+						bootMark("auth-ok");
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
@@ -1030,6 +1040,7 @@ export class RemoteAgent {
 	}
 
 	requestMessages(): void {
+		bootMark("get-messages-sent");
 		this.send({ type: "get_messages" });
 	}
 

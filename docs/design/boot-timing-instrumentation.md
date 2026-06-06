@@ -34,8 +34,16 @@ across a reload and writes them somewhere agents can inspect.
   `modules-evaluated` (main.ts, after the eager graph evaluates),
   `initApp-start`, `first-render-call` (main.ts), `first-paint`
   (`pwa-lifecycle.ts::finalizeBoot`, when `#app` actually paints), `ws-open`,
-  `snapshot-received(N msgs)`, `snapshot-applied`, `post-snapshot-paint`
-  (`remote-agent.ts`).
+  `auth-ok` (WS auth handshake done — splits the ws-open→snapshot window into
+  handshake vs. server-side snapshot wait), `snapshot-received(N msgs)`,
+  `snapshot-applied`, `post-snapshot-paint` (`remote-agent.ts`). The raw
+  snapshot frame size is captured as `snapshotChars` to distinguish payload
+  transfer cost from server-side assembly.
+- **Server-side snapshot breakdown** (dev harness only): the `get_messages`
+  handler attaches a `SnapshotServerTiming` (`rpcMs` agent assembly /
+  `pipelineMs` server transform / `stampMs` / `stringifyMs` / `bytes` /
+  `msgCount`) to the `messages` frame, captured into the sample's `serverTiming`
+  field — so the ws-open→snapshot gap is fully attributed end to end.
 - One terminal report per load (idempotent): logs a `console.table` and POSTs
   the sample to the sink. Triggered immediately after the session snapshot
   paints, with a 3s idle-debounce fallback for no-session views.

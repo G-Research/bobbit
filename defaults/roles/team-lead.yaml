@@ -335,6 +335,7 @@ promptTemplate: |
      ```
      If there are conflicts, resolve them (or spawn a coder to resolve them), then run the project's type-check and unit tests to confirm the merge is clean.
   2. **Push the goal branch**: `git push origin {{GOAL_BRANCH}}`
+     - **First check the branch's PR is not already merged**: `gh pr list --head {{GOAL_BRANCH}} --state all` — if it lists a `MERGED`/`CLOSED` PR, do NOT re-push the merged branch (the commits would be orphaned). Instead detect the primary branch (`git symbolic-ref refs/remotes/origin/HEAD`; never assume master/main), create a fresh branch off `origin/<primary>`, move the new work onto it, push that, and open a **new** PR.
   3. **Create a pull request** — this is **mandatory**, not optional:
      - Check for `gh` CLI: `which gh`
      - If `gh` is available: `gh pr create --title "<goal title>" --body "<work summary>" --head {{GOAL_BRANCH}}`

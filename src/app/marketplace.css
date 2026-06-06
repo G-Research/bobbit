@@ -175,7 +175,6 @@
 	color: var(--chart-3);
 }
 
-.market-exec-warning,
 .market-corrupt,
 .market-conflict-icon {
 	display: inline-flex;
@@ -186,11 +185,6 @@
 	font-weight: 500;
 	border-radius: 4px;
 	white-space: nowrap;
-}
-
-.market-exec-warning {
-	background: color-mix(in oklch, var(--warning, var(--chart-4)) 16%, transparent);
-	color: var(--warning, var(--chart-4));
 }
 
 .market-corrupt,
@@ -215,6 +209,83 @@
 
 .market-conflict-winner {
 	font-weight: 600;
+	color: var(--foreground);
+}
+
+/* Source-level trust warning (Add-source block) + collapsible "Why?" disclosure. */
+.market-trust-warning {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.5rem;
+	font-size: 0.75rem;
+	line-height: 1.45;
+	padding: 0.5rem 0.625rem;
+	border-radius: 0.375rem;
+	border: 1px solid color-mix(in oklch, var(--warning, var(--chart-4)) 35%, transparent);
+	background: color-mix(in oklch, var(--warning, var(--chart-4)) 10%, transparent);
+	color: var(--foreground);
+}
+
+.market-trust-warning > :first-child {
+	color: var(--warning, var(--chart-4));
+	flex-shrink: 0;
+	margin-top: 0.0625rem;
+}
+
+.market-trust-why {
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
+.market-trust-why > summary {
+	cursor: pointer;
+	font-weight: 500;
+	color: var(--muted-foreground);
+	user-select: none;
+	width: fit-content;
+}
+
+.market-trust-why > summary:hover,
+.market-trust-why > summary:focus-visible {
+	color: var(--foreground);
+}
+
+.market-trust-why-body {
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+	margin-top: 0.375rem;
+}
+
+.market-trust-why-body p {
+	margin: 0;
+	padding-left: 0.5rem;
+	border-left: 2px solid var(--border);
+	color: var(--muted-foreground);
+}
+
+.market-trust-why-body p[data-kind="tool"] {
+	border-left-color: color-mix(in oklch, var(--chart-2) 60%, transparent);
+}
+
+.market-trust-why-body p[data-kind="skill"] {
+	border-left-color: color-mix(in oklch, var(--chart-3) 60%, transparent);
+}
+
+.market-trust-why-body p[data-kind="role"] {
+	border-left-color: color-mix(in oklch, var(--chart-1) 60%, transparent);
+}
+
+.market-trust-why-body strong {
+	color: var(--foreground);
+	font-weight: 600;
+}
+
+.market-trust-why-body code {
+	font-size: 0.625rem;
+	padding: 0 0.1875rem;
+	border-radius: 0.1875rem;
+	background: var(--muted);
 	color: var(--foreground);
 }
 
