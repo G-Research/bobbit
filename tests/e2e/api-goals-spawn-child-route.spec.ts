@@ -37,16 +37,35 @@ import {
 import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
+let humanCookie = "";
 
-test.beforeAll(() => {
+test.beforeAll(async () => {
 	token = readE2EToken();
+	// S1 authz: the mutating Children endpoints reject a caller that is neither
+	// a verified human (bobbit_session cookie) nor an agent presenting a
+	// team-lead-matching spawning-session header. These route-wiring tests act
+	// as the human/UI operator and assert on the spawnedBy cascade (body /
+	// header tiers), so they must authorize via the COOKIE — not a spawning
+	// header, which would pollute spawnedBy derivation. The gateway mints the
+	// bobbit_session cookie on the first authenticated request; capture it.
+	const probe = await rawApiFetch("/api/goals", { headers: { Authorization: `Bearer ${token}` } });
+	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
+		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
+	humanCookie = setCookies.map((c) => c.split(";")[0]).find((c) => c.startsWith("bobbit_session=")) ?? "";
+	expect(humanCookie, "harness must mint a bobbit_session cookie for the human/UI authz path").not.toBe("");
 });
 
-/** Build a header set including the auth token. */
+/**
+ * Build a header set including the auth token plus the human bobbit_session
+ * cookie (see beforeAll) so the S1 Children-mutation authz treats these calls
+ * as a trusted human/UI gateway operator. Authorization is independent of the
+ * spawning-session header, so the spawnedBy-cascade assertions are unaffected.
+ */
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
 	return {
 		"Content-Type": "application/json",
 		Authorization: `Bearer ${token}`,
+		...(humanCookie ? { Cookie: humanCookie } : {}),
 		...(extra ?? {}),
 	};
 }

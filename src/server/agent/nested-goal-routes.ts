@@ -38,12 +38,19 @@ import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation } from "../auth/children-mutation-authz.js";
+import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
 	verificationHarness: VerificationHarness;
 	teamManager: TeamManager;
 	sessionManager: SessionManager;
+	/**
+	 * Cookie store used to compute the human-operator signal for S1 authz on
+	 * the mutating Children endpoints. A request carrying a verified
+	 * `bobbit_session` cookie is treated as a trusted human/UI gateway call.
+	 */
+	cookieStore: CookieStore;
 	requireSubgoalsEnabled(): boolean;
 	getGoalAcrossProjects(goalId: string): PersistedGoal | undefined;
 	getGoalManagerForGoal(goalId: string): GoalManager;
@@ -106,14 +113,17 @@ export async function tryHandleNestedGoalRoute(
 		jsonError,
 		broadcastToAll,
 		getSubgoalNestingPrefs,
+		cookieStore,
 	} = deps;
 
 	/**
 	 * S1: read the caller session id from the spawning-session headers. The
 	 * `children` tool extension always sends `X-Bobbit-Spawning-Session`;
 	 * `X-Bobbit-Session-Id` is accepted as defence in depth. `undefined` means
-	 * no agent header — a trusted human/UI gateway call (the web UI calls
-	 * /pause, /resume, /mutation decision directly via gatewayFetch).
+	 * no agent header. The human/UI signal is NO LONGER the absence of this
+	 * header (agents share the gateway token and could just omit it) — it is
+	 * the verified `bobbit_session` cookie, computed separately in
+	 * `authorizeTeamLeadOrReject`.
 	 */
 	function readCallerSessionId(): string | undefined {
 		const h = req.headers as Record<string, string | string[] | undefined>;
@@ -128,19 +138,23 @@ export async function tryHandleNestedGoalRoute(
 	/**
 	 * S1: server-side authorization for the MUTATING Children endpoints. The
 	 * `Children` tool group is team-lead-only by tool policy, but the REST
-	 * routes are reachable by anything with gateway credentials. We authorize
-	 * by matching the caller's spawning-session header against the
-	 * authoritative team-lead session id for `goalIdForTeam` (resolved from
-	 * the TeamManager, never trusting the header as a bare claim). When the
-	 * header is absent (trusted human/UI gateway call) or the goal has no
-	 * established team-lead, the call is allowed. See
-	 * `src/server/auth/children-mutation-authz.ts` for the full threat model.
+	 * routes are reachable by anything with gateway credentials. A request
+	 * carrying a verified `bobbit_session` cookie is a trusted human/UI
+	 * gateway call and is allowed. Otherwise (an agent — agents never carry
+	 * the cookie) we REQUIRE a spawning-session header and match it against
+	 * the authoritative team-lead session id for `goalIdForTeam` (resolved
+	 * from the TeamManager, never trusting the header as a bare claim). A
+	 * missing header can no longer impersonate the human path. When the goal
+	 * has no established team-lead the call is allowed (nothing to match
+	 * against). See `src/server/auth/children-mutation-authz.ts` for the full
+	 * threat model.
 	 *
 	 * Returns `true` when the request may proceed; otherwise writes a 403 and
 	 * returns `false` so the caller should `return true` immediately.
 	 */
 	function authorizeTeamLeadOrReject(goalIdForTeam: string): boolean {
 		const result = authorizeChildrenMutation({
+			isHumanOperator: cookieTryAuth(req, cookieStore),
 			callerSessionId: readCallerSessionId(),
 			teamLeadSessionId: teamManager.getTeamState(goalIdForTeam)?.teamLeadSessionId,
 		});
