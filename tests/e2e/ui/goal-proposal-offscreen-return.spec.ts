@@ -179,6 +179,89 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await expectGoalPanelPopulated(page);
 	});
 
+	// ── Finding 2 (Gap Analysis, HIGH) — fast-path switch-back stale-draft race.
+	//
+	// On fast-path switch-back, rehydrate (populates the unified slot + form-mirror)
+	// and restoreGoalDraft (restores the client draft) fire with no ordering. For an
+	// OFF-SCREEN proposal the client draft was never saved, so the on-disk draft has
+	// NO activeGoalProposal: restoreGoalDraft's restore() then (a) DELETES the slot
+	// rehydrate just populated and (b) blanks previewTitle/previewSpec from the empty
+	// draft. Whichever of {rehydrate, restore} writes LAST wins — a genuine race.
+	//
+	// We make it DETERMINISTIC by force-ordering restore AFTER rehydrate: delay the
+	// goal-draft GET so it resolves last. On the first-impl HEAD that means restore
+	// is the final writer → slot deleted + form blank (FAILS). After the fix, the
+	// fast path waits for BOTH then re-reconciles the slot into the form (and
+	// restore() never deletes a current-session slot), so the proposal survives.
+	test("(d) fast-path switch-back with a stale/empty client draft must not drop the proposal", async ({ page }) => {
+		const { sidA } = await setupOffscreen(page);
+
+		// Deterministically place an EMPTY goal draft (no activeGoalProposal) on
+		// disk for S1 — the exact state an off-screen proposal leaves behind.
+		const putResp = await apiFetch(`/api/sessions/${sidA}/draft`, {
+			method: "PUT",
+			body: JSON.stringify({
+				type: "goal",
+				data: {
+					sessionId: sidA,
+					activeGoalProposal: undefined,
+					previewTitle: "",
+					previewSpec: "",
+					previewCwd: "",
+					previewProjectId: "",
+					previewTitleEdited: false,
+					previewSpecEdited: false,
+					previewCwdEdited: false,
+					hasReceivedProposal: false,
+					goalAssistantTab: "chat",
+				},
+			}),
+		});
+		expect(putResp.ok, "empty goal draft must be persisted for S1").toBe(true);
+
+		// Force the goal-draft GET to be the LAST writer deterministically (no
+		// inline sleep): hold the draft GET until the proposals GET (rehydrate)
+		// has been fulfilled to the page. Single-threaded JS then guarantees the
+		// rehydrate onProposal dispatch (slot + form-mirror) runs BEFORE
+		// restoreGoalDraft processes the draft response. On the first-impl HEAD
+		// restore's else-branch then deletes the slot + blanks the form (FAILS);
+		// after the fix the slot survives and is re-reconciled.
+		let resolveProposalsDelivered!: () => void;
+		const proposalsDelivered = new Promise<void>((res) => { resolveProposalsDelivered = res; });
+		await page.route(`**/api/sessions/${sidA}/proposals`, async (route) => {
+			const resp = await route.fetch();
+			await route.fulfill({ response: resp });
+			resolveProposalsDelivered();
+		});
+		await page.route(`**/api/sessions/${sidA}/draft?type=goal`, async (route) => {
+			if (route.request().method() === "GET") {
+				await proposalsDelivered;
+			}
+			await route.continue();
+		});
+
+		// Fast path: S1 is cached → navigate back reuses the chat panel.
+		await navigateToHash(page, `#/session/${sidA}`);
+		await page.waitForFunction(
+			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
+			sidA,
+			{ timeout: 15_000 },
+		);
+
+		// The slot must survive the stale-draft restore, and the form-mirror must
+		// be populated from it. CURRENTLY FAILS on HEAD: restore deletes the slot
+		// and blanks the form.
+		await expect(async () => {
+			const slotTitle = await page.evaluate(
+				() => ((window as any).bobbitState?.activeProposals?.goal?.fields?.title as string | undefined) ?? null,
+			);
+			expect(slotTitle, "the rehydrated slot must NOT be deleted by the stale-draft restore").toBe(GOAL_TITLE);
+		}).toPass({ timeout: 15_000, intervals: [500, 1000, 2000] });
+		await expectGoalPanelPopulated(page);
+		await page.unroute(`**/api/sessions/${sidA}/draft?type=goal`);
+		await page.unroute(`**/api/sessions/${sidA}/proposals`);
+	});
+
 	test("regression: a dismissed off-screen proposal stays hidden on return", async ({ page }) => {
 		const { sidA } = await setupOffscreen(page);
 		const fields = await waitForServerGoalProposal(sidA);

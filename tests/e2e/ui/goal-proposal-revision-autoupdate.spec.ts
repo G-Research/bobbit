@@ -190,4 +190,77 @@ test.describe("Goal proposal revision auto-update @repro", () => {
 		}).toPass({ timeout: 15_000, intervals: [500, 1000, 2000] });
 		await expect(titleInput).toHaveValue("E2E Test Goal");
 	});
+
+	// ── Finding 1 (Code Quality, HIGH) — stale historical transcript rescan
+	//    overwrites newer server-stamped CONTENT.
+	//
+	// Repro per the follow-up review: after an edit_proposal stamps a newer
+	// rev into the server proposal, a FRESH context whose sessionStorage lacks
+	// `processed-proposals-<sid>` re-runs the deferred transcript rescan with an
+	// EMPTY dedup set. The original propose_goal tool block (no serverRev) then
+	// re-fires the unified onProposal AND the legacy onGoalProposal with the
+	// STALE initial fields, clobbering the form-mirror back to the pre-edit
+	// spec while keeping the newer rev. The pre-existing nextRev clamp stops the
+	// rev going backwards but NOT the fields — exactly the gap this test pins.
+	//
+	// FAILS on the first-impl HEAD (no content guard); PASSES once a no-serverRev
+	// non-streaming rescan can no longer regress content past a server-stamped
+	// rev (the unified + legacy guards).
+	test("fresh-context reload (cleared sessionStorage) must not let a stale rescan revert the edited spec", async ({ page }) => {
+		const sid = await openGoalAssistant(page);
+
+		// Edit the initial proposal spec → server proposal now holds the edited
+		// body at rev > 0.
+		await sendMessage(page, "Apply GOAL_EDITABLE_EDIT to the spec");
+		await page.waitForFunction(
+			(needle: string) =>
+				((window as any).bobbitState?.activeProposals?.goal?.fields?.spec as string | undefined)?.includes(needle) ?? false,
+			EDITED_SPEC_BODY,
+			{ timeout: 20_000 },
+		);
+
+		// Simulate a fresh context: wipe ALL sessionStorage so the deferred
+		// transcript rescan after reconnect runs with an empty
+		// `processed-proposals-<sid>` dedup set and re-fires the original
+		// propose_goal block.
+		await page.evaluate(() => sessionStorage.clear());
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
+		await page.waitForFunction(
+			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
+			sid,
+			{ timeout: 20_000 },
+		);
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 15_000 });
+
+		// The rehydrate (serverRev set) must win permanently: the panel and the
+		// unified slot must both show the EDITED body, and the stale rescan must
+		// not re-introduce the replaced sentence. Negative-condition poll (mirrors
+		// goal-proposal-dismiss-reload.spec.ts): give the deferred transcript
+		// rescan a chance to (wrongly) revert the content. On the first-impl HEAD
+		// it reverts within ~1–2s; after the fix it never does, so this times out
+		// and falls through to the assertions below.
+		await page
+			.waitForFunction(
+				(tail: string) =>
+					(((window as any).bobbitState?.previewSpec as string) ?? "").includes(tail)
+					|| (((window as any).bobbitState?.activeProposals?.goal?.fields?.spec as string) ?? "").includes(tail),
+				INITIAL_SPEC_TAIL,
+				{ timeout: 6_000 },
+			)
+			.catch(() => { /* expected NOT to revert after the fix */ });
+		await expect(async () => {
+			const spec = await previewSpec(page);
+			const slot = await slotSpec(page);
+			expect(slot, "slot spec must stay edited after the rescan").toContain(EDITED_SPEC_BODY);
+			expect(spec, "previewSpec must stay edited after the rescan").toContain(EDITED_SPEC_BODY);
+			expect(spec, "the replaced sentence must NOT be reintroduced by the stale rescan").not.toContain(INITIAL_SPEC_TAIL);
+			expect(slot, "the replaced sentence must NOT be reintroduced into the slot").not.toContain(INITIAL_SPEC_TAIL);
+		}).toPass({ timeout: 12_000, intervals: [250, 500, 1000] });
+		await expect(titleInput).toHaveValue("E2E Test Goal");
+	});
 });
