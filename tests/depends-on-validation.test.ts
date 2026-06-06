@@ -156,4 +156,38 @@ describe("validatePlanDependsOn (multi-step plan)", () => {
 			assert.deepEqual(r.missing.sort(), ["x", "y"]);
 		}
 	});
+
+	it("rejects duplicate planIds (not silently collapsed)", () => {
+		const r = validatePlanDependsOn([
+			{ planId: "a" },
+			{ planId: "a", dependsOn: [] },
+			{ planId: "b" },
+		]);
+		assert.equal(r.ok, false);
+		if (!r.ok) {
+			assert.equal(r.code, "DUPLICATE_PLAN_ID");
+			assert.equal(r.planId, "a");
+		}
+	});
+
+	it("duplicate planId detected before self-dep / unknown-ref / cycle", () => {
+		// Even though the second 'a' has a self-dep, the duplicate is reported first.
+		const r = validatePlanDependsOn([
+			{ planId: "a" },
+			{ planId: "a", dependsOn: ["a"] },
+		]);
+		assert.equal(r.ok, false);
+		if (!r.ok) assert.equal(r.code, "DUPLICATE_PLAN_ID");
+	});
+
+	it("a valid plan with all-unique planIds still passes", () => {
+		assert.deepEqual(
+			validatePlanDependsOn([
+				{ planId: "a" },
+				{ planId: "b", dependsOn: ["a"] },
+				{ planId: "c", dependsOn: ["a", "b"] },
+			]),
+			{ ok: true },
+		);
+	});
 });

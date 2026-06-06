@@ -228,6 +228,35 @@ describe("G2/C1 — PATCH /plan preserves top-level workflowId + suggestedRole",
 	});
 });
 
+describe("PATCH /plan — rejects duplicate planIds (400 DUPLICATE_PLAN_ID)", () => {
+	it("returns 400 DUPLICATE_PLAN_ID when two proposed steps share a planId", async () => {
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/plan`, {
+			proposedSteps: [
+				{
+					planId: "dup",
+					title: "Step A",
+					spec: "Step A spec describing the work for the first child in the plan in enough detail to pass validation.",
+					phase: 0,
+				},
+				{
+					planId: "dup",
+					title: "Step B",
+					spec: "Step B spec describing the work for the second child — same planId must be rejected, not collapsed.",
+					phase: 0,
+				},
+			],
+		}, { cookie: h.humanCookieHeader });
+		assert.equal(r.status, 400, JSON.stringify(r.payload));
+		assert.equal(r.payload.code, "DUPLICATE_PLAN_ID");
+		assert.equal(r.payload.planId, "dup");
+		// The duplicate must NOT have been persisted into the plan.
+		const stored = h.goalStore.get(h.parent.id)!;
+		const execGate = stored.workflow!.gates.find(g => g.id === "execution");
+		const verifyLen = execGate?.verify?.length ?? 0;
+		assert.equal(verifyLen, 0, "no plan step should be persisted when validation fails");
+	});
+});
+
 describe("C2/C4 — PATCH /policy integer clamp + live semaphore resize", () => {
 	it("floors a fractional maxConcurrentChildren and resizes the cached semaphore", async () => {
 		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 1.5 }, { cookie: h.humanCookieHeader });

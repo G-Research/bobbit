@@ -31,7 +31,7 @@ import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError } from "./agent/goal-paused-guard.js";
-import { collectDescendants } from "./agent/goal-descendants.js";
+import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -4315,7 +4315,14 @@ async function handleApiRoute(
 		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
 		// getAll() returns both live and archived.
 		const allGoals = ctx.goalStore.getAll();
-		json({ goals: collectDescendants(goalId, allGoals) });
+		// Enrich each descendant with the Plan-tab data contract: `mergeConflict`
+		// (durable, from the goal record) and `gateStatus` (aggregated from the
+		// child's workflow gates). The frontend consumes these exact names.
+		const enriched = enrichDescendantsForPlan(collectDescendants(goalId, allGoals), {
+			getGatesForGoal: (gid) => ctx.gateStore.getGatesForGoal(gid),
+			hasActiveVerification: (gid) => verificationHarness.getActiveVerifications(gid).length > 0,
+		});
+		json({ goals: enriched });
 		return;
 	}
 

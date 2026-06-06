@@ -86,6 +86,17 @@ export interface PersistedGoal {
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
 	replanCount?: number;
 	/**
+	 * Durable merge-conflict flag for child goals. Set `true` when this child's
+	 * branch fails to merge into its parent's branch (conflict) on either the
+	 * integrate-child REST path or the runSubgoalStep harness path. Cleared to
+	 * `false` on a subsequent successful merge and on resume/retry of the child.
+	 *
+	 * This is a DATA CONTRACT consumed by the dashboard Plan-tab frontend
+	 * (`GET /descendants` exposes it per-descendant) — do not rename. Only
+	 * meaningful on non-root (child) goals.
+	 */
+	mergeConflict?: boolean;
+	/**
 	 * Optional role hint set by `goal_spawn_child` when the parent specifies
 	 * which role should pick up the child first. Read by the child team-lead's
 	 * system prompt to bias the first delegation; not enforced — the team-lead

@@ -649,6 +649,10 @@ export async function tryHandleNestedGoalRoute(
 			if (code === "SELF_DEPENDENCY") payload.planId = depsValidation.planId;
 			if (code === "UNKNOWN_PLAN_ID") payload.missing = depsValidation.missing;
 			if (code === "DEPENDS_ON_CYCLE") payload.path = depsValidation.path;
+			if (code === "DUPLICATE_PLAN_ID") {
+				payload.planId = depsValidation.planId;
+				payload.error = `duplicate planId: ${depsValidation.planId}`;
+			}
 			json(payload, 400);
 			return true;
 		}
@@ -834,6 +838,16 @@ export async function tryHandleNestedGoalRoute(
 		try {
 			const outcome = await goalManager.mergeChild(parentId, childId);
 			if (outcome.merged || outcome.alreadyMerged) {
+				// Durable merge-conflict flag: a successful merge clears any
+				// prior conflict on this child (data contract for /descendants).
+				if (child.mergeConflict) {
+					try {
+						await goalManager.updateGoal(childId, { mergeConflict: false });
+						broadcastToAll({ type: "goal_state_changed", goalId: childId });
+					} catch (err) {
+						console.warn(`[integrate-child] failed to clear mergeConflict (non-fatal):`, err);
+					}
+				}
 				try { await teamManager.teardownTeam(childId); } catch (err) {
 					console.warn(`[api] integrate-child: teardownTeam error (non-fatal):`, err);
 				}
@@ -885,6 +899,14 @@ export async function tryHandleNestedGoalRoute(
 				return true;
 			}
 			if (outcome.conflict) {
+				// Durable merge-conflict flag: persist + broadcast so the Plan
+				// tab can render this child's conflict state across reloads.
+				try {
+					await goalManager.updateGoal(childId, { mergeConflict: true });
+					broadcastToAll({ type: "goal_state_changed", goalId: childId });
+				} catch (err) {
+					console.warn(`[integrate-child] failed to set mergeConflict (non-fatal):`, err);
+				}
 				json({ conflict: true, output: outcome.output ?? "" }, 409);
 				return true;
 			}
@@ -999,7 +1021,9 @@ export async function tryHandleNestedGoalRoute(
 				apply: async (g) => {
 					if (!g.paused) return 0;
 					const gm = getGoalManagerForGoal(g.id);
-					await gm.updateGoal(g.id, { paused: false });
+					// Resume clears any durable merge-conflict flag so the child
+					// is retried clean (data contract for /descendants).
+					await gm.updateGoal(g.id, { paused: false, ...(g.mergeConflict ? { mergeConflict: false } : {}) });
 					broadcastToAll({ type: "goal_state_changed", goalId: g.id });
 					return 1;
 				},

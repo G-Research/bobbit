@@ -4352,6 +4352,26 @@ export class VerificationHarness {
 			}
 		}
 
+		// Pause/cancel guard — do NOT spawn a child if this verification was
+		// cancelled or the parent goal is paused. The REST `POST /spawn-child`
+		// path already rejects paused parents; this mirrors it on the harness
+		// path. Re-reads the parent from the store each call so a pause that
+		// landed during an earlier await is seen. Checked BEFORE acquiring the
+		// semaphore (cheap reject) AND again after acquisition immediately
+		// before createGoal (pause/cancel can race during the acquire await).
+		const _shouldAbortSpawn = (): { passed: boolean; output: string } | null => {
+			if (active.cancelled) {
+				return { passed: false, output: `runSubgoalStep: verification cancelled — not spawning child for plan "${planId}".` };
+			}
+			const fresh = ctx.goalStore.get(parentGoalId);
+			if (fresh?.paused) {
+				return { passed: false, output: `runSubgoalStep: parent goal ${parentGoalId} is paused — not spawning child for plan "${planId}".` };
+			}
+			return null;
+		};
+		const _preAcquireAbort = _shouldAbortSpawn();
+		if (_preAcquireAbort) return _preAcquireAbort;
+
 		// ── 6 + 7 + 8 + 9. Acquire semaphore → spawn or use existing → wait → merge ──
 		const sem = this._acquireRootSubgoalSemaphore(rootGoalId, parentGoalId);
 		await sem.acquire();
@@ -4389,6 +4409,12 @@ export class VerificationHarness {
 						output: `Subgoal spawn blocked: nesting depth limit reached (${_check.currentDepth}/${_check.maxDepth}).`,
 					};
 				}
+				// Re-check pause/cancel after the semaphore await — pause or
+				// cancel can race during acquisition. Returning here releases
+				// the semaphore via the outer `finally`.
+				const _postAcquireAbort = _shouldAbortSpawn();
+				if (_postAcquireAbort) return _postAcquireAbort;
+
 				// Spawn a fresh child. stamp-immediately invariant: stamp spawnedFromPlanId
 				// IMMEDIATELY after createGoal — no other awaits or calls in
 				// between. The very next line MUST be the updateGoal call.
@@ -4525,11 +4551,27 @@ export class VerificationHarness {
 			// ── 8. Merge + archive ────────────────────────────────────
 			const outcome = await goalManager.mergeChild(parentGoalId, childGoalId);
 			if (outcome.merged || outcome.alreadyMerged) {
+				// Durable merge-conflict flag: a successful merge clears any
+				// prior conflict (data contract for /descendants).
+				const _mc = ctx.goalStore.get(childGoalId);
+				if (_mc?.mergeConflict) {
+					try {
+						await goalManager.updateGoal(childGoalId, { mergeConflict: false });
+						this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+					} catch (err) { console.warn(`[verification] failed to clear mergeConflict for ${childGoalId} (non-fatal):`, err); }
+				}
 				try { await teamManager?.teardownTeam(childGoalId); } catch { /* non-fatal */ }
 				await goalManager.archiveGoalAfterMerge(childGoalId);
 				return { passed: true, output: `Subgoal merged + archived (${outcome.merged ? "merged" : "already merged"}): ${childGoalId}` };
 			}
 			if (outcome.conflict) {
+				// Durable merge-conflict flag: persist + broadcast so the Plan
+				// tab can render this child's conflict across reloads. The child
+				// is preserved (not auto-archived) for manual recovery.
+				try {
+					await goalManager.updateGoal(childGoalId, { mergeConflict: true });
+					this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+				} catch (err) { console.warn(`[verification] failed to set mergeConflict for ${childGoalId} (non-fatal):`, err); }
 				return {
 					passed: false,
 					output: `Merge conflict between child ${childGoalId} and parent ${parentGoalId} — manual resolution required. See docs/nested-goals.md §conflicts. Conflict diagnostic: ${truncateForOutput(outcome.output)}`,
