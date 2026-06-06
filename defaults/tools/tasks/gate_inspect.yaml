@@ -1,7 +1,7 @@
 name: gate_inspect
 description: "Fetch one bounded gate section: content, verification, or signals"
 summary: "Read bounded gate content, verification, or signals"
-params: ["gate_id", "section", "signal_index?", "mode?", "pattern?", "context?", "max_results?", "lines?", "from?", "to?"]
+params: ["gate_id", "section", "signal_index?", "step?", "mode?", "pattern?", "context?", "max_results?", "lines?", "from?", "to?"]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -22,6 +22,7 @@ detail_docs: |-
   | `gate_id` | string | **Yes** | — | Gate ID (e.g. `"design-doc"`, `"implementation"`) |
   | `section` | `"content"` / `"verification"` / `"signals"` | **Yes** | — | What to read |
   | `signal_index` | number | No | `-1` (latest) | Which signal. 0-based, negative from end. Ignored for `section="signals"`. |
+  | `step` | string | No | — | `section="verification"` only: scope to one step by name. Other sections → 400. |
   | `mode` | `"full"` / `"grep"` / `"head"` / `"tail"` / `"slice"` | No | `"tail"` | Retrieval mode. Default output is a bounded tail, not full content. |
   | `pattern` | string | For `grep` | — | Regex to match. Invalid regexes return a validation error. |
   | `context` | number | No | `0` | Surrounding lines to include around each grep match. |
@@ -68,7 +69,7 @@ detail_docs: |-
 
   ### section="verification" — Read verification output
 
-  Returns verification steps with each step's `output` independently selected.
+  Returns verification steps with each step's `output` independently selected. When `step="<name>"` is given, only that one step is returned (single-element `steps[]`) and the selection mode applies to that step's output; an unknown name returns a 400 listing the available step names.
 
   - `gateId` — gate identifier
   - `section` — `"verification"`
@@ -109,6 +110,7 @@ detail_docs: |-
 
   - **Start with status** — call `gate_status(gate_id="...")` first; its verdict and output tail are usually enough.
   - **Target failure lines** — use `mode="grep"` with `pattern="error|failed"` and `context=2` for large verification logs.
+  - **Focus one step** — pass `step="<name>"` to scope `section="verification"` to a single step (names come from `gate_status.failedSteps`).
   - **Inspect nearby output** — use `mode="tail"` or `mode="slice"` when grep shows where to look.
   - **Read upstream content** — use `section="content"` when you need the gate's actual content.
   - **Browse attempts** — use `section="signals"` to compare signal history.
@@ -128,6 +130,9 @@ detail_docs: |-
 
   # Grep large implementation verification output for failure lines
   gate_inspect(gate_id="implementation", section="verification", mode="grep", pattern="error|failed", context=2)
+
+  # Scope to a single verification step by name, then grep it for failures
+  gate_inspect(gate_id="implementation", section="verification", step="unit", mode="grep", pattern="error|failed", context=2)
 
   # Inspect the latest tail with an explicit line count
   gate_inspect(gate_id="implementation", section="verification", mode="tail", lines=80)

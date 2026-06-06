@@ -205,6 +205,7 @@ export default function (pi: ExtensionAPI) {
 				Type.Literal("signals"),
 			]),
 			signal_index: Type.Optional(Type.Number({ description: "0-based, negative from end. Default -1 (latest)." })),
+			step: Type.Optional(Type.String({ description: "Verification step name to scope to (section=verification only)." })),
 			mode: Type.Optional(Type.Union([
 				Type.Literal("full"),
 				Type.Literal("grep"),
@@ -223,6 +224,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const qs = new URLSearchParams({ section: params.section });
 				if (params.signal_index !== undefined) qs.set("signal_index", String(params.signal_index));
+				if (params.step !== undefined) qs.set("step", String(params.step));
 				if (params.mode !== undefined) qs.set("mode", String(params.mode));
 				if (params.pattern !== undefined) qs.set("pattern", String(params.pattern));
 				if (params.context !== undefined) qs.set("context", String(params.context));
