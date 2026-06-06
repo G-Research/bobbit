@@ -49,7 +49,8 @@ interface Harness {
 	call(method: string, pathname: string, body?: unknown, headers?: Record<string, string | string[] | undefined>): Promise<{ status: number; payload: any }>;
 }
 
-async function makeHarness(cap: number): Promise<Harness> {
+async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } = {}): Promise<Harness> {
+	const stampChildPreparing = opts.stampChildPreparing ?? true;
 	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nested-conc-"));
 	const stateDir = path.join(tmpRoot, "state");
 	const configDir = path.join(tmpRoot, "config");
@@ -78,13 +79,15 @@ async function makeHarness(cap: number): Promise<Harness> {
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
 	goalStore.update(parent.id, { maxConcurrentChildren: cap } as any);
 
-	// createGoal stamps setupStatus='preparing' for children so the route's
-	// "would start a team" branch fires (the non-git tmp cwd would otherwise
-	// resolve to 'ready' and skip the start path entirely).
+	// By default createGoal stamps setupStatus='preparing' for children so the
+	// route's "would start a team" branch fires under the OLD guard. Tests for
+	// the data-only / non-git fix pass `stampChildPreparing:false` so the child
+	// keeps the natural `setupStatus='ready'` (non-git tmp cwd → no worktree) —
+	// the NEW guard must still route those through the scheduler.
 	const realCreate = goalManager.createGoal.bind(goalManager);
 	(goalManager as any).createGoal = async (title: string, cwd: string, opts?: any) => {
 		const g = await realCreate(title, cwd, opts);
-		if (opts?.parentGoalId) {
+		if (opts?.parentGoalId && stampChildPreparing) {
 			goalStore.update(g.id, { setupStatus: "preparing" } as any);
 			return goalStore.get(g.id)!;
 		}
@@ -269,5 +272,48 @@ describe("Finding 2 — integrate-child auto-unblock of several dependents respe
 		assert.equal(h.started.length, 3, "the final dependent starts once a permit frees");
 		assert.equal(h.peak(), 1);
 		void c2; void c3;
+	});
+});
+
+describe("spawn-child starts data-only / non-git children (setupStatus='ready'), gated only by !blocked", () => {
+	// Regression: the start guard was `setupStatus === "preparing" && !blocked`.
+	// A data-only / non-git child is created `setupStatus === "ready"` (no
+	// worktree to prepare), so it slipped past the guard and its team NEVER
+	// started. The fix gates on `!blocked` alone; the scheduler's
+	// `_startScheduledChildTeam` handles ready (start-only) vs preparing
+	// (setup + start). Here children keep their natural 'ready' status.
+	beforeEach(async () => { h = await makeHarness(3, { stampChildPreparing: false }); h.teamLeadByGoal[h.parent.id] = TL; });
+
+	async function spawn(planId: string, extra: Record<string, unknown> = {}) {
+		return h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId, title: `Child ${planId}`,
+			spec: `Child ${planId}: implement and verify the slice of work described in the parent goal spec for this plan.`,
+			...extra,
+		}, h.authAs(TL));
+	}
+
+	it("a ready (non-git, data-only) child still has its team started", async () => {
+		const r = await spawn("p1");
+		assert.equal(r.status, 201);
+		// Sanity: the child really is 'ready' (the bug precondition).
+		assert.equal(h.goalStore.get(r.payload.id)!.setupStatus, "ready");
+		assert.deepEqual(h.started, [r.payload.id], "ready child must be started via the scheduler");
+		assert.equal(r.payload.capacityBlocked, undefined);
+	});
+
+	it("a blocked (deps-unmet) ready child is NOT started — it starts on unblock", async () => {
+		// First child has no deps → starts.
+		const c1 = await spawn("p1");
+		assert.equal(h.started.length, 1);
+		// Second depends on an UNMET sibling → created state='blocked', not started.
+		const c2 = await spawn("p2", { dependsOn: ["p1"] });
+		assert.equal(c2.payload.blocked, true);
+		assert.equal(h.goalStore.get(c2.payload.id)!.state, "blocked");
+		assert.equal(h.started.length, 1, "deps-blocked child must NOT start here");
+		assert.ok(!h.started.includes(c2.payload.id));
+
+		// Merging the dependency unblocks it and starts it (within the cap).
+		await h.call("POST", `/api/goals/${h.parent.id}/integrate-child/${c1.payload.id}`, { force: true }, h.authAs(TL));
+		assert.ok(h.started.includes(c2.payload.id), "blocked child starts once its dependency merges");
 	});
 });

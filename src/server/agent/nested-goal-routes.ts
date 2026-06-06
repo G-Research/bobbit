@@ -681,8 +681,15 @@ export async function tryHandleNestedGoalRoute(
 			// integrate-child auto-unblock requests their start when the final
 			// dep merges (also via the scheduler). A capacity-blocked child is
 			// parked `state='blocked'` and started later when a permit frees.
+			//
+			// Guard is `!blocked` (NOT `setupStatus === "preparing"`): a
+			// data-only / non-git child is created with `setupStatus === "ready"`
+			// (no worktree to prepare), so gating on "preparing" silently skipped
+			// the start and its team never ran. The scheduler's
+			// `_startScheduledChildTeam` already handles both cases — worktree
+			// setup + start for "preparing", start-only for "ready".
 			let capacityBlocked = false;
-			if (child.setupStatus === "preparing" && !blocked) {
+			if (!blocked) {
 				const outcome = verificationHarness.requestChildStart(child.id);
 				if (outcome === "capacity-blocked") {
 					capacityBlocked = true;
