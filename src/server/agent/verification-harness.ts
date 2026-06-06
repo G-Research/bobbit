@@ -4535,7 +4535,9 @@ export class VerificationHarness {
 					// Blocked child: do NOT start its team/worktree. Release the
 					// per-root concurrency permit while we wait for the auto-unblock
 					// scan (triggered by a dependency's merge in §8) to flip this
-					// child blocked→todo and start its team. Holding the permit here
+					// child blocked→todo. The scan only flips the state; THIS loop
+					// re-acquires the permit and starts the team (see below) so the
+					// start stays within the per-root cap. Holding the permit here
 					// would deadlock a cap=1 root, where the dependency could never
 					// acquire a slot to run + merge. Re-acquire before the in-flight
 					// ready-to-merge wait below.
@@ -4546,9 +4548,15 @@ export class VerificationHarness {
 					if (unblockOutcome === "archived-complete") return { passed: true, output: `Subgoal already complete + archived (during dep-wait): ${childGoalId}` };
 					if (unblockOutcome === "archived-other") return { passed: false, output: `Subgoal ${childGoalId} archived externally while blocked (state != complete) — re-signal to re-resolve` };
 					if (unblockOutcome === "timeout") return { passed: false, output: `Subgoal ${childGoalId} blocked-dep wait timed out (>24h) — re-signal to retry` };
-					// Unblocked: the auto-unblock scan started this child's team.
+					// Unblocked: the auto-unblock scan ONLY flipped this child
+					// blocked→todo (waking the wait above); it deliberately did NOT
+					// start the team, because the just-merged dependency may still
+					// hold its per-root permit (cap=1) and starting there would run
+					// this dependent outside the concurrency cap. Re-acquire the
+					// permit and start the team HERE so it runs within the bound.
 					await sem.acquire();
 					permitHeld = true;
+					await this._startChildTeam(childGoalId, goalManager, teamManager);
 				} else {
 					// Trigger worktree setup + team start (asynchronously kicked off;
 					// `waitForReadyToMerge` polls the gate state regardless of when
@@ -4598,7 +4606,7 @@ export class VerificationHarness {
 				// ALL complete after this merge. Harness equivalent of the
 				// integrate-child REST auto-unblock scan, which does NOT run on the
 				// harness merge path. Best-effort: never fails the step.
-				await this._autoUnblockDependents(parentGoalId, childGoalId, goalManager, teamManager);
+				await this._autoUnblockDependents(parentGoalId, childGoalId, goalManager);
 				return { passed: true, output: `Subgoal merged + archived (${outcome.merged ? "merged" : "already merged"}): ${childGoalId}` };
 			}
 			if (outcome.conflict) {
@@ -4644,8 +4652,10 @@ export class VerificationHarness {
 	 * Start a child's worktree + team. Prefers the test seam
 	 * (`_subgoalHooks.setupChildAndStartTeam`); otherwise kicks off the real
 	 * `setupWorktreeAndStartTeam` fire-and-forget (the ready-to-merge wait polls
-	 * regardless of when setup completes). Shared by the fresh-spawn path and
-	 * the auto-unblock scan so both start children identically.
+	 * regardless of when setup completes). Used by the fresh-spawn path and by
+	 * a previously-blocked child's own runSubgoalStep once it re-acquires the
+	 * per-root permit (after `_autoUnblockDependents` flips it blocked→todo) so
+	 * every team start stays within the concurrency cap.
 	 */
 	private async _startChildTeam(
 		childGoalId: string,
@@ -4670,11 +4680,18 @@ export class VerificationHarness {
 	/**
 	 * Harness equivalent of the integrate-child REST auto-unblock scan. After a
 	 * child merges (state=complete + archived), flip any sibling whose
-	 * `dependsOnPlanIds` are now ALL resolved from state='blocked' → 'todo' and
-	 * start its team. The REST scan only runs on the integrate-child HTTP path;
-	 * harness-driven merges (runSubgoalStep §8) need this so the parent-workflow
-	 * path enforces dependsOn scheduling end-to-end. A multi-dep child only
-	 * unblocks when its LAST dependency merges.
+	 * `dependsOnPlanIds` are now ALL resolved from state='blocked' → 'todo'.
+	 * This scan flips state ONLY — it does NOT start the unblocked child's
+	 * team. Each harness-spawned blocked child is parked in its own
+	 * `runSubgoalStep`/`_waitForChildUnblock` loop (having released its per-root
+	 * permit); the state flip wakes that loop, which re-acquires the semaphore
+	 * and starts the team within the concurrency cap. Starting the team here
+	 * would bypass the semaphore (the just-merged dependency may still hold its
+	 * permit under cap=1) and double-start once the waiting loop resumes. The
+	 * REST scan only runs on the integrate-child HTTP path; harness-driven
+	 * merges (runSubgoalStep §8) need this so the parent-workflow path enforces
+	 * dependsOn scheduling end-to-end. A multi-dep child only unblocks when its
+	 * LAST dependency merges.
 	 *
 	 * Best-effort: never throws (logs + swallows) so a scan failure can't fail
 	 * the merge that already succeeded.
@@ -4683,7 +4700,6 @@ export class VerificationHarness {
 		parentGoalId: string,
 		mergedChildId: string,
 		goalManager: import("./goal-manager.js").GoalManager,
-		teamManager: import("./team-manager.js").TeamManager | undefined,
 	): Promise<void> {
 		try {
 			const ctx = this.projectContextManager?.getContextForGoal(parentGoalId);
@@ -4703,10 +4719,18 @@ export class VerificationHarness {
 					return !!depSib && depSib.state === "complete";
 				});
 				if (!allResolved) continue;
-				// Unblock: state='blocked' → 'todo', then start worktree + team.
+				// Unblock: flip state='blocked' → 'todo' ONLY. Do NOT start the
+				// team here. Each harness-spawned blocked child is parked in its
+				// own runSubgoalStep `_waitForChildUnblock` poll (it released its
+				// permit before waiting); flipping the state wakes that loop, which
+				// RE-ACQUIRES the per-root semaphore and starts the team within the
+				// concurrency cap. Starting the team here would (a) bypass the
+				// semaphore — the just-merged dependency may still hold its permit
+				// under cap=1, so the dependent would run outside the cap — and
+				// (b) double-start once the waiting loop resumes. The semaphore
+				// remains the authoritative concurrency bound.
 				await goalManager.updateGoal(sib.id, { state: "todo" });
 				this.broadcastFn?.(sib.id, { type: "goal_state_changed", goalId: sib.id });
-				await this._startChildTeam(sib.id, goalManager, teamManager);
 			}
 		} catch (err) {
 			console.error(`[verification] auto-unblock scan failed (non-fatal):`, err);
@@ -4716,10 +4740,11 @@ export class VerificationHarness {
 	/**
 	 * Wait for a BLOCKED child to be auto-unblocked (state transitions away from
 	 * 'blocked'), or for a terminal exit condition. Polls the live goal record;
-	 * `_autoUnblockDependents` flips state blocked→todo when the child's last
-	 * dependency merges. Does NOT hold the per-root semaphore (the caller
-	 * releases it before calling this) so a cap=1 root can still run + merge the
-	 * dependency.
+	 * `_autoUnblockDependents` flips state blocked→todo (state only — it does
+	 * NOT start the team) when the child's last dependency merges. Does NOT hold
+	 * the per-root semaphore (the caller releases it before calling this) so a
+	 * cap=1 root can still run + merge the dependency. On return the caller
+	 * re-acquires the permit and starts the team within the cap.
 	 *
 	 * Exit conditions mirror `_waitForChildReadyToMerge`:
 	 *   - active.cancelled → "cancelled"
