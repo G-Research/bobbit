@@ -229,6 +229,9 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 				gates: [
 					{
 						id: "execution",
+						// Post-freeze: these Gov-1 tests exercise the classifier +
+						// replan flow, which only runs once the plan is frozen.
+						metadata: { frozen: "true" },
 						verify: [
 							{ name: "s-a", type: "subgoal", phase: 1, subgoal: { planId: "a", title: "t-a", spec: "spec-a" } },
 						],
@@ -315,5 +318,122 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 		assert.equal(last.body.code, "NOT_TEAM_LEAD");
 		assert.equal(goal.replanCount, 5);
 		assert.equal(goal.paused, false);
+	});
+});
+
+/**
+ * Pre-freeze authoring — PATCH /plan must NOT classify / approval-gate /
+ * replan-count plan edits until `goal-plan` is signalled and the execution
+ * gate is frozen (`execution.metadata.frozen === "true"`). Before freeze the
+ * agent is still drafting the plan, so even a higher-phase step (which would
+ * classify as `expansion` post-freeze) is applied DIRECTLY with no approval
+ * and no replanCount churn. After freeze the same edit is classified.
+ *
+ * Auth: authenticate as the goal's team-lead via a matching
+ * `X-Bobbit-Spawning-Session` header (robust to concurrent authz work).
+ */
+describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", () => {
+	const TEAM_LEAD = "tl-session-freeze";
+
+	function buildGoal(frozen: boolean, replanCount = 0): any {
+		const goalId = "g-" + randomUUID().slice(0, 8);
+		return {
+			id: goalId,
+			rootGoalId: goalId,
+			workflowId: "parent",
+			spec: "",
+			acceptanceCriteria: [],
+			divergencePolicy: "balanced",
+			paused: false,
+			replanCount,
+			workflow: {
+				id: "parent",
+				gates: [
+					{
+						id: "execution",
+						...(frozen ? { metadata: { frozen: "true" } } : {}),
+						verify: [
+							{ name: "s-a", type: "subgoal", phase: 1, subgoal: { planId: "a", title: "t-a", spec: "spec-a" } },
+						],
+					},
+				],
+			},
+		};
+	}
+
+	// Proposed plan adds a higher-phase step → would classify as `expansion`.
+	const proposed = [step("a", 1), step("b", 2)];
+
+	async function patchPlan(goal: any): Promise<{ body: any; status: number }> {
+		const goalManager: any = {
+			updateGoal: async (_id: string, partial: any) => { Object.assign(goal, partial); },
+			getGoalStore: () => ({ update: (_id: string, partial: any) => { Object.assign(goal, partial); } }),
+		};
+		const ctx: any = {
+			goalStore: { get: () => goal, getAll: () => [goal] },
+			planMutationStore: new PlanMutationStore(stateDir),
+			goalManager,
+			gateStore: { getGate: () => ({ status: "pending" }) },
+			workflowStore: {},
+		};
+		const responses: { body: any; status: number }[] = [];
+		const deps: any = {
+			projectContextManager: { getContextForGoal: () => ctx },
+			verificationHarness: {
+				getActiveVerifications: () => [],
+				cancelStaleVerifications: async () => {},
+				resolvePlanStepChild: () => ({}),
+			},
+			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
+			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {} },
+			cookieStore: new CookieStore(stateDir),
+			requireSubgoalsEnabled: () => true,
+			getGoalAcrossProjects: () => goal,
+			getGoalManagerForGoal: () => goalManager,
+			readBody: async () => ({ proposedSteps: proposed }),
+			json: (body: any, status = 200) => { responses.push({ body, status }); },
+			jsonError: (status: number, err: unknown) => { responses.push({ body: { error: String(err) }, status }); },
+			broadcastToAll: () => {},
+			getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 3 }),
+		};
+		const req: any = { method: "PATCH", headers: { "x-bobbit-spawning-session": TEAM_LEAD } };
+		const url = new URL(`http://x/api/goals/${goal.id}/plan`);
+		const handled = await tryHandleNestedGoalRoute(req, url, deps);
+		assert.equal(handled, true);
+		return responses.at(-1)!;
+	}
+
+	it("pre-freeze: higher-phase step applies directly — no approval, no replan", async () => {
+		const goal = buildGoal(false, 0);
+		const res = await patchPlan(goal);
+		assert.equal(res.status, 200);
+		assert.equal(res.body.applied, true);
+		assert.equal(res.body.frozen, false);
+		// Not classified → no expansion verdict, no approval gate.
+		assert.notEqual(res.body.kind, "expansion");
+		assert.equal(res.body.requiresApproval, undefined);
+		assert.equal(res.body.requestId, undefined);
+		// replanCount untouched by draft authoring.
+		assert.equal(goal.replanCount, 0);
+		assert.equal(goal.paused, false);
+		// The proposed steps were actually applied to the execution gate.
+		const verify = goal.workflow.gates.find((g: any) => g.id === "execution").verify;
+		assert.deepEqual(verify.map((v: any) => v.subgoal.planId), ["a", "b"]);
+	});
+
+	it("post-freeze: same higher-phase step is classified → expansion requires approval", async () => {
+		const goal = buildGoal(true, 0);
+		const res = await patchPlan(goal);
+		assert.equal(res.status, 200);
+		assert.equal(res.body.kind, "expansion");
+		assert.equal(res.body.requiresApproval, true);
+		assert.ok(typeof res.body.requestId === "string");
+		// expansion is approval-gated, so it is NOT applied yet and replanCount
+		// stays put until the approval path runs.
+		assert.equal(res.body.applied, undefined);
+		assert.equal(goal.replanCount, 0);
+		// Execution gate unchanged (still only step "a") pending approval.
+		const verify = goal.workflow.gates.find((g: any) => g.id === "execution").verify;
+		assert.deepEqual(verify.map((v: any) => v.subgoal.planId), ["a"]);
 	});
 });
