@@ -20,7 +20,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Document as FlexDocument } from "flexsearch";
+// flexsearch's ESM bundle exposes only a default export (a namespace of
+// { Index, Document, ... }); named imports like `{ Document }` fail under
+// node's native ESM resolver (tsx/node:test). Use the default import and
+// destructure so both esbuild/vite and node:test resolve `Document`.
+import FlexSearch from "flexsearch";
+const { Document: FlexDocument } = FlexSearch;
 import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
 import {
