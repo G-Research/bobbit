@@ -27,7 +27,7 @@
  * O(n + e) and pure.
  */
 
-import { resolvePlanNodeChild } from "./plan-node-state.js";
+import { resolvePlanNodeChild, type PlanNodeGateStatus } from "./plan-node-state.js";
 
 export interface SynthesisGoal {
 	id: string;
@@ -41,6 +41,9 @@ export interface SynthesisGoal {
 	workflowId?: string;
 	/** Explicit sibling planIds this child depends on (Phase 5). */
 	dependsOnPlanIds?: string[];
+	/** Backend data contract (Phase 5c) — see PlanNodeChild. */
+	mergeConflict?: boolean;
+	gateStatus?: PlanNodeGateStatus;
 }
 
 export interface PlanStep {
@@ -52,6 +55,12 @@ export interface PlanStep {
 	/** Sibling planIds this step depends on. Always present (possibly empty). */
 	dependsOn: string[];
 	childGoalId?: string;
+	/** Resolved child's merge-conflict flag (Phase 5c). Undefined when no
+	 *  child resolves the step. */
+	mergeConflict?: boolean;
+	/** Resolved child's workflow-gate status (Phase 5c). Undefined when no
+	 *  child resolves the step. */
+	gateStatus?: PlanNodeGateStatus;
 }
 
 export interface FormalPlanStep {
@@ -168,14 +177,19 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 		];
 		const depth = computeDepth(universe);
 
-		const out: PlanStep[] = formal.map(s => ({
-			planId: s.planId,
-			title: s.title,
-			spec: s.spec,
-			phase: depth.get(s.planId) ?? 0,
-			dependsOn: (s.dependsOn ?? []).slice(),
-			childGoalId: pickResolvedChild(s.planId, childGoals)?.id,
-		}));
+		const out: PlanStep[] = formal.map(s => {
+			const resolved = pickResolvedChild(s.planId, childGoals);
+			return {
+				planId: s.planId,
+				title: s.title,
+				spec: s.spec,
+				phase: depth.get(s.planId) ?? 0,
+				dependsOn: (s.dependsOn ?? []).slice(),
+				childGoalId: resolved?.id,
+				mergeConflict: resolved?.mergeConflict,
+				gateStatus: resolved?.gateStatus,
+			};
+		});
 		for (let i = 0; i < orphans.length; i++) {
 			const c = orphans[i];
 			const planId = orphanPlanIds[i];
@@ -186,6 +200,8 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 				phase: depth.get(planId) ?? 0,
 				dependsOn: (c.dependsOnPlanIds ?? []).slice(),
 				childGoalId: c.id,
+				mergeConflict: c.mergeConflict,
+				gateStatus: c.gateStatus,
 			});
 		}
 		return out;
@@ -241,5 +257,7 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 		phase: depth.get(w.planId) ?? 0,
 		dependsOn: (w.child.dependsOnPlanIds ?? []).slice(),
 		childGoalId: w.child.id,
+		mergeConflict: w.child.mergeConflict,
+		gateStatus: w.child.gateStatus,
 	}));
 }

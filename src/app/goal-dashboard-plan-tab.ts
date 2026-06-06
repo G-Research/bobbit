@@ -21,7 +21,7 @@ function _isLiveChild(g: { state?: string | null; archived?: boolean | null }): 
 	return !PLAN_TERMINAL_STATES.has((g.state ?? "todo") as GoalState);
 }
 import { buildPlanSteps, type PlanStep, type SynthesisGoal, type FormalPlanStep } from "./plan-synthesis.js";
-import { resolvePlanNodeChild, type PlanNodeChild, type PlanNodeState } from "./plan-node-state.js";
+import { resolvePlanNodeChild, type PlanNodeChild, type PlanNodeState, type PlanNodeGateStatus } from "./plan-node-state.js";
 import { computeEdgePaths, type PlanEdgeNode, type PlanEdge } from "./plan-edge-paths.js";
 
 const svgPlan = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>`;
@@ -66,6 +66,10 @@ interface PlanLayoutNode extends PlanEdgeNode {
 	step: PlanStep;
 	state: PlanNodeState;
 	childGoal?: Goal;
+	/** Resolved child's gate status (Phase 5c) — orthogonal to `state`. */
+	gateStatus?: PlanNodeGateStatus;
+	/** Resolved child hit a merge conflict preserved for manual recovery. */
+	mergeConflict?: boolean;
 }
 
 const PLAN_NODE_W = 200;
@@ -104,6 +108,8 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 			archived: !!g.archived,
 			paused: !!g.paused,
 			createdAt: g.createdAt,
+			mergeConflict: !!(g as any).mergeConflict,
+			gateStatus: (g as any).gateStatus as PlanNodeGateStatus | undefined,
 		}));
 	const nodes: PlanLayoutNode[] = [];
 	let maxColH = 0;
@@ -122,6 +128,8 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 				step: s,
 				state: resolution.state,
 				childGoal,
+				gateStatus: resolution.child?.gateStatus,
+				mergeConflict: !!resolution.child?.mergeConflict,
 				x,
 				y,
 				width: PLAN_NODE_W,
@@ -169,6 +177,20 @@ function planNodeBorderColor(s: PlanNodeState): string {
 	}
 }
 
+/**
+ * Gate-status dot colour — design-system semantic tokens only (no
+ * hardcoded hex). Orthogonal to the tier-based node fill/border above:
+ * the dot reflects the resolved child's workflow-gate progress.
+ */
+function planGateStatusColor(s: PlanNodeGateStatus): string {
+	switch (s) {
+		case "passed": return "var(--positive)";
+		case "failed": return "var(--negative)";
+		case "running": return "var(--info)";
+		default: return "var(--muted-foreground)"; // pending
+	}
+}
+
 function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, ownerGoalId: string, liveOnly: boolean): TemplateResult | typeof nothing {
 	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
 	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0, ownerGoalId, liveOnly);
@@ -184,7 +206,9 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 						? computePlanStepsForGoal(n.childGoal as any, allGoals, { isNested: true, liveOnly }).length > 0
 						: false;
 					const isArchived = !!n.childGoal?.archived;
-					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}" data-archived="${isArchived ? 'true' : 'false'}" style="${isArchived ? 'opacity:0.55;' : ''}">
+					const gateStatus = n.gateStatus;
+					const hasConflict = !!n.mergeConflict;
+					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-gate-status="${gateStatus ?? ""}" data-plan-conflict="${hasConflict ? 'true' : 'false'}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}" data-archived="${isArchived ? 'true' : 'false'}" style="${isArchived ? 'opacity:0.55;' : ''}">
 					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
 						fill=${planNodeFillColor(n.state)}
 						stroke=${planNodeBorderColor(n.state)}
@@ -194,6 +218,9 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 					<foreignObject x=${n.x + 6} y=${n.y + 4} width=${n.width - 12} height=${n.height - 8}>
 						<div xmlns="http://www.w3.org/1999/xhtml" style="font-family:inherit;font-size:11px;color:var(--foreground);overflow:hidden;height:100%;display:flex;flex-direction:column;justify-content:space-between;">
 							<div style="display:flex;align-items:center;gap:4px;">
+								${gateStatus ? html`<span data-testid="plan-node-gate-dot" data-gate-status="${gateStatus}"
+									style="flex-shrink:0;width:8px;height:8px;border-radius:50%;background:${planGateStatusColor(gateStatus)};${gateStatus === 'running' ? 'box-shadow:0 0 0 2px color-mix(in oklch, var(--info) 25%, transparent);' : ''}"
+									title="Gate: ${gateStatus}"></span>` : nothing}
 								${childHasSubPlan && n.childGoal ? html`<span data-testid="plan-node-chevron" class="plan-chevron"
 									style="cursor:pointer;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:transparent;"
 									@click=${(e: Event) => { e.stopPropagation(); _togglePlanExpanded(n.childGoal!.id); }}
@@ -201,6 +228,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 									${_isPlanExpanded(n.childGoal.id) ? "▾" : "▸"}
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
+								${hasConflict ? html`<span data-testid="plan-node-conflict-pill" title="Merge conflict — child preserved for manual recovery" style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;background:color-mix(in oklch, var(--negative) 16%, transparent);color:var(--negative);text-transform:uppercase;letter-spacing:0.04em;">conflict</span>` : nothing}
 								${isArchived ? html`<span data-testid="plan-node-archived-pill" style="flex-shrink:0;font-size:9px;font-weight:500;padding:1px 5px;border-radius:8px;background:var(--muted);color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.04em;">archived</span>` : nothing}
 							</div>
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
