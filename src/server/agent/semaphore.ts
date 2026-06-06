@@ -77,15 +77,18 @@ export class Semaphore {
 	}
 
 	release(): void {
+		// Absorb over-subscription debt from a prior shrink BEFORE waking any
+		// waiter (C2). A live shrink (e.g. cap 3, 3 held, 1 waiting, resize→1)
+		// records debt; the released permit must pay that debt down first, or
+		// handing it to a queued waiter would keep the root over-subscribed
+		// above the new cap. Only once `_debt === 0` may a waiter be woken.
+		if (this._debt > 0) {
+			this._debt--;
+			return;
+		}
 		const next = this._waiters.shift();
 		if (next) {
 			next();
-			return;
-		}
-		// Absorb over-subscription debt from a prior shrink before crediting
-		// an available slot (C2).
-		if (this._debt > 0) {
-			this._debt--;
 			return;
 		}
 		if (this._value >= this._capacity) {

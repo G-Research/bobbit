@@ -142,6 +142,46 @@ describe("Semaphore.resize (C2)", () => {
 		assert.throws(() => sem.release(), { message: /over-release/ });
 	});
 
+	it("pays down debt before waking waiters on a live shrink (cap 3, 3 held, 1 waiting → 1)", async () => {
+		const sem = new Semaphore(3);
+		await sem.acquire();
+		await sem.acquire();
+		await sem.acquire(); // 3 held, 0 available
+
+		// A fourth acquire queues up as a waiter while still at cap 3.
+		let woken = false;
+		const p = sem.acquire().then(() => { woken = true; });
+		assert.equal(sem.waiting, 1);
+
+		// Live shrink to 1: 3 held + 1 waiter against cap=1.
+		// Held=3 exceeds cap by 2 → debt=2. The slot that the waiter wanted is
+		// also over the cap, so debt must be paid before the waiter is woken.
+		sem.resize(1);
+		assert.equal(sem.capacity, 1);
+		assert.equal(sem.available, 0);
+
+		// First release pays debt (2→1); waiter must NOT wake — still over-subscribed.
+		sem.release();
+		assert.equal(woken, false);
+		assert.equal(sem.waiting, 1);
+		assert.equal(sem.available, 0);
+
+		// Second release pays the last debt (1→0); waiter still must NOT wake yet
+		// because the released permit was consumed by debt, not handed onward.
+		sem.release();
+		assert.equal(woken, false);
+		assert.equal(sem.waiting, 1);
+		assert.equal(sem.available, 0);
+
+		// Third release: debt is clear, so the queued waiter finally wakes,
+		// staying saturated at the new cap of 1.
+		sem.release();
+		await p;
+		assert.equal(woken, true);
+		assert.equal(sem.waiting, 0);
+		assert.equal(sem.available, 0);
+	});
+
 	it("growing wakes blocked waiters before crediting available slots", async () => {
 		const sem = new Semaphore(1);
 		await sem.acquire(); // 1 held, 0 available
