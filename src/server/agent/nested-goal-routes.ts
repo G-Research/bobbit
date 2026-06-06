@@ -783,6 +783,27 @@ export async function tryHandleNestedGoalRoute(
 		const planMutationStore = ctx.planMutationStore;
 		const goalManager = ctx.goalManager;
 
+		// Pre-freeze (initial authoring): until `goal-plan` is signalled and the
+		// execution gate is frozen (`execution.metadata.frozen === "true"`, the
+		// same flag GET /plan reports), plan edits are the author drafting the
+		// plan — NOT a divergence from a committed plan. So they are applied
+		// DIRECTLY, with NO mutation classification, approval gating, or
+		// replanCount/auto-pause. Otherwise a normal draft edit (e.g. adding a
+		// higher-phase step → `expansion`) would wrongly demand approval and
+		// could trip the replan-overflow auto-pause on draft churn. Once frozen,
+		// the full classifier + divergence-policy + replanCount flow below runs.
+		const executionGate = goal.workflow?.gates.find(g => g.id === "execution");
+		const frozen = executionGate?.metadata?.frozen === "true";
+		if (!frozen) {
+			try {
+				await applyPlanSteps(goal, proposedSteps, goalManager);
+				json({ applied: true, frozen: false, replanCount: goal.replanCount ?? 0 });
+			} catch (err) {
+				jsonError(500, err);
+			}
+			return true;
+		}
+
 		// Locate root for criteria source.
 		const rootGoalId = goal.rootGoalId ?? goal.id;
 		const root = ctx.goalStore.get(rootGoalId) ?? goal;
