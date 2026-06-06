@@ -1119,9 +1119,9 @@ export class MessageEditor extends LitElement {
 					<textarea
 						class="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none resize-none overflow-y-auto py-1 px-1"
 						placeholder=${i18n("Type a message...")}
-						rows="1"
+						rows="2"
 						autocomplete="off"
-						style="max-height: 200px; field-sizing: content; min-height: 1lh; height: auto;"
+						style="max-height: 20vh; field-sizing: content; min-height: 2lh; height: auto;"
 						.value=${live(this.value)}
 						@input=${this.handleTextareaInput}
 						@keydown=${this.handleKeyDown}
