@@ -7,16 +7,18 @@
  * `settings-page.ts`. Callers consult this helper from UI gate sites without
  * having to await preferences.
  *
- * Default OFF — undefined or anything other than the string `"true"` reads
- * as disabled. See docs/design/subgoals-experimental-toggle.md.
+ * Default ON — only an explicit stored `false` (mirrored as the string
+ * `"false"`) reads as disabled. A missing/undefined dataset value reads as
+ * enabled, matching the server's unset → enabled default.
+ * See docs/design/subgoals-experimental-toggle.md.
  */
 
 let testOverride: boolean | undefined;
 
 export function isSubgoalsEnabled(): boolean {
 	if (testOverride !== undefined) return testOverride;
-	if (typeof document === "undefined") return false;
-	return document.documentElement.dataset.subgoalsEnabled === "true";
+	if (typeof document === "undefined") return true;
+	return document.documentElement.dataset.subgoalsEnabled !== "false";
 }
 
 /**

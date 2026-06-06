@@ -107,7 +107,7 @@ let _listening = false;
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
-let settingsSubgoalsEnabled = false;
+let settingsSubgoalsEnabled = true;
 let settingsMaxNestingDepth: number | null = null;
 const MAX_NESTING_DEPTH_DEFAULT = 3;
 const MAX_NESTING_DEPTH_MIN = 1;
@@ -2170,8 +2170,8 @@ function loadGeneralSettings() {
 					settingsShowTimestamps = !!prefs.showTimestamps;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
-					// Subgoals (Experimental) — default OFF. See docs/nested-goals.md.
-					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
+					// Subgoals (Experimental) — default ON; only explicit false opts out. See docs/nested-goals.md.
+					settingsSubgoalsEnabled = prefs.subgoalsEnabled !== false;
 					const rawDepth = prefs.maxNestingDepth;
 					settingsMaxNestingDepth = (typeof rawDepth === "number" && Number.isFinite(rawDepth)) ? rawDepth : null;
 					const raw = prefs.skillsCatalogBudget;
