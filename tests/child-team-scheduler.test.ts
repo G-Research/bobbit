@@ -54,7 +54,12 @@ function build(cap: number) {
 		scheduler.notifyTerminal(id);
 	};
 
-	return { ROOT, scheduler, children, started, running, addChild, terminate, peak: () => peak };
+	// Simulate the pause cascade marking a child paused (it is NOT dequeued).
+	const pause = (id: string) => { const c = children.get(id); if (c) c.paused = true; };
+	// Simulate resume clearing the paused flag.
+	const resume = (id: string) => { const c = children.get(id); if (c) c.paused = false; };
+
+	return { ROOT, scheduler, children, started, running, addChild, terminate, pause, resume, peak: () => peak };
 }
 
 describe("ChildTeamScheduler — per-root concurrency cap", () => {
@@ -155,6 +160,90 @@ describe("ChildTeamScheduler — per-root concurrency cap", () => {
 		fx.scheduler.notifyTerminal("c1");
 		fx.scheduler.notifyTerminal("never-seen");
 		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 0);
+	});
+});
+
+describe("ChildTeamScheduler — pause awareness (no paused start; no permit leak)", () => {
+	it("cap=1: A holds permit, B queued; pause + A terminal → B NOT started, permit not leaked, B stays queued; resume → B starts", () => {
+		const fx = build(1);
+		fx.addChild("A"); fx.addChild("B");
+		assert.equal(fx.scheduler.requestStart("A"), "started");
+		assert.equal(fx.scheduler.requestStart("B"), "capacity-blocked");
+		assert.deepEqual(fx.started, ["A"]);
+		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 1);
+
+		// Pause the root subtree: the cascade marks B paused but leaves it queued.
+		fx.pause("B");
+
+		// A reaches a terminal event (merge/archive/completion), releasing its permit.
+		fx.terminate("A");
+
+		// B must NOT start (it is paused) and must remain queued for resume.
+		assert.deepEqual(fx.started, ["A"], "paused B must not be started by the freed permit");
+		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 1, "B stays queued while paused");
+
+		// Resume B and re-drive the scheduler (mirrors the resume handler's pass).
+		// If A's permit had leaked, B could never acquire one here — the start proves
+		// the permit was released and is still available.
+		fx.resume("B");
+		fx.scheduler.startNextEligible(fx.ROOT);
+		assert.deepEqual(fx.started, ["A", "B"], "resumed B starts into the still-free permit");
+		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 0);
+		assert.equal(fx.peak(), 1, "peak never exceeds cap=1");
+	});
+
+	it("permit is not leaked while a queued child is paused: a non-paused sibling can acquire the freed slot", () => {
+		const fx = build(1);
+		fx.addChild("A"); fx.addChild("B"); fx.addChild("C");
+		fx.scheduler.requestStart("A");           // started, holds the only permit
+		fx.scheduler.requestStart("B");           // queued
+		fx.pause("B");
+		fx.terminate("A");                          // frees the permit; paused B skipped
+		assert.deepEqual(fx.started, ["A"]);
+		// C requests a start: the permit freed by A is available (not leaked on B).
+		assert.equal(fx.scheduler.requestStart("C"), "started");
+		assert.deepEqual(fx.started, ["A", "C"]);
+		// B is still queued (paused), waiting for resume.
+		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 1);
+	});
+
+	it("scans past a paused queued child to start the next eligible (non-paused) sibling", () => {
+		const fx = build(1);
+		fx.addChild("A"); fx.addChild("B"); fx.addChild("C");
+		fx.scheduler.requestStart("A");           // started
+		fx.scheduler.requestStart("B");           // queued (will be paused)
+		fx.scheduler.requestStart("C");           // queued
+		fx.pause("B");
+		fx.terminate("A");                          // freed permit skips paused B, starts C
+		assert.deepEqual(fx.started, ["A", "C"], "paused B skipped; next eligible C starts");
+		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 1, "paused B remains queued");
+	});
+});
+
+describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
+	it("releases the permit + re-enqueues the child when startChildTeam throws synchronously", () => {
+		const ROOT = "r";
+		const children = new Map<string, FakeChild>([
+			["x", { id: "x", state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+		]);
+		let throwOnce = true;
+		const started: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1,
+			getChild: (id) => children.get(id),
+			startChildTeam: (id) => {
+				if (id === "x" && throwOnce) { throwOnce = false; throw new Error("boom"); }
+				started.push(id);
+			},
+		});
+		// First start throws → permit released + child re-enqueued (parked).
+		assert.equal(scheduler.requestStart("x"), "capacity-blocked");
+		assert.equal(scheduler.pendingCount(ROOT), 1);
+		assert.deepEqual(started, []);
+		// The freed permit is reusable: re-drive starts x (now succeeds).
+		scheduler.startNextEligible(ROOT);
+		assert.deepEqual(started, ["x"]);
+		assert.equal(scheduler.pendingCount(ROOT), 0);
 	});
 });
 

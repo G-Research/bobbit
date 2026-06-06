@@ -4155,7 +4155,16 @@ export class VerificationHarness {
 		const teamManager = this.teamManager;
 		if (!goalManager || !teamManager) return;
 		const g = goalManager.getGoal(childGoalId);
-		if (!g || g.archived) return;
+		// Throw (rather than silently return) for not-found / archived / paused so
+		// the scheduler RELEASES the permit it acquired before calling us — never
+		// leak it. A paused child is re-enqueued by the scheduler and stays queued
+		// until resume; archived/missing children are dropped on the next drain.
+		// (Primary guarantee is the scheduler's pre-acquire paused/archived skip;
+		// this covers the race where the child is paused/archived in the window
+		// between the eligibility check and this start.)
+		if (!g) throw new Error(`[scheduler] child ${childGoalId} not found — not starting`);
+		if (g.archived) throw new Error(`[scheduler] child ${childGoalId} is archived — not starting`);
+		if (g.paused) throw new Error(`[scheduler] child ${childGoalId} is paused — not starting`);
 		if (g.state === "blocked") {
 			goalManager.updateGoal(childGoalId, { state: "todo" })
 				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId }))
