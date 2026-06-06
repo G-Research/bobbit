@@ -79,7 +79,7 @@ async function createParentGoal(): Promise<{ id: string; repoPath?: string }> {
 async function spawnChild(parentId: string, planId: string): Promise<string> {
 	// spawn-child is an ORCHESTRATION verb (cookie does NOT bypass) — authorize
 	// as the parent's team-lead via a seeded matching header.
-	const tlHeader = seedTeamLeadHeader(gw.teamManager, parentId);
+	const tlHeader = seedTeamLeadHeader(gw, parentId);
 	const resp = await rawApiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
 		headers: authHeaders(tlHeader),

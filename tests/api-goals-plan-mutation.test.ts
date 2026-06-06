@@ -31,6 +31,17 @@ import { tryHandleNestedGoalRoute } from "../src/server/agent/nested-goal-routes
 import { CookieStore } from "../src/server/auth/cookie.ts";
 import { randomUUID } from "node:crypto";
 
+/**
+ * S1: orchestration authz resolves the AUTHENTIC caller from the per-session
+ * `X-Bobbit-Session-Secret`. These tests are not exercising the authz mechanism
+ * itself, so an identity-mapping stub (the secret IS the session id) lets a test
+ * authenticate as `<id>` by sending `x-bobbit-session-secret: <id>`.
+ */
+const identitySecretStore = {
+	resolveSessionIdBySecret: (s: string | null | undefined) =>
+		typeof s === "string" && s.trim() ? s.trim() : undefined,
+};
+
 let tmpRoot: string;
 let stateDir: string;
 
@@ -265,7 +276,7 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 				resolvePlanStepChild: () => ({}),
 			},
 			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
-			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {} },
+			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {}, sessionSecretStore: identitySecretStore },
 			cookieStore: new CookieStore(stateDir),
 			requireSubgoalsEnabled: () => true,
 			getGoalAcrossProjects: () => goal,
@@ -276,9 +287,14 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 			broadcastToAll: () => {},
 			getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 3 }),
 		};
+		// S1: PATCH /plan is orchestration — authz derives the AUTHENTIC caller
+		// from the per-session secret. The identity stub maps secret→same id, so
+		// sending `x-bobbit-session-secret: callerHeader` authenticates as that id.
 		const req: any = {
 			method: "PATCH",
-			headers: callerHeader ? { "x-bobbit-spawning-session": callerHeader } : {},
+			headers: callerHeader
+				? { "x-bobbit-spawning-session": callerHeader, "x-bobbit-session-secret": callerHeader }
+				: {},
 		};
 		const url = new URL(`http://x/api/goals/${goal.id}/plan`);
 		const handled = await tryHandleNestedGoalRoute(req, url, deps);
@@ -385,7 +401,7 @@ describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", 
 				resolvePlanStepChild: () => ({}),
 			},
 			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
-			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {} },
+			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {}, sessionSecretStore: identitySecretStore },
 			cookieStore: new CookieStore(stateDir),
 			requireSubgoalsEnabled: () => true,
 			getGoalAcrossProjects: () => goal,
@@ -396,7 +412,7 @@ describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", 
 			broadcastToAll: () => {},
 			getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 3 }),
 		};
-		const req: any = { method: "PATCH", headers: { "x-bobbit-spawning-session": TEAM_LEAD } };
+		const req: any = { method: "PATCH", headers: { "x-bobbit-spawning-session": TEAM_LEAD, "x-bobbit-session-secret": TEAM_LEAD } };
 		const url = new URL(`http://x/api/goals/${goal.id}/plan`);
 		const handled = await tryHandleNestedGoalRoute(req, url, deps);
 		assert.equal(handled, true);

@@ -30,6 +30,7 @@ import { ProjectConfigStore } from "../src/server/agent/project-config-store.ts"
 import { InlineWorkflowStore } from "../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../src/server/agent/nested-goal-routes.ts";
 import { CookieStore } from "../src/server/auth/cookie.ts";
+import { SessionSecretStore } from "../src/server/auth/session-secret.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -40,6 +41,12 @@ interface Harness {
 	teamLeadByGoal: Record<string, string | null>;
 	/** A valid `bobbit_session` cookie header value for the human/UI path. */
 	humanCookieHeader: string;
+	/**
+	 * S1: build the AUTHENTIC-caller auth headers for a given session id — the
+	 * unforgeable `X-Bobbit-Session-Secret` (resolved server-side) plus the
+	 * public spawning-session header the production extension also sends.
+	 */
+	authAs(sessionId: string): Record<string, string>;
 	cleanup(): void;
 	call(
 		method: string,
@@ -110,12 +117,15 @@ async function makeHarness(): Promise<Harness> {
 		getTeamState: (gid: string) =>
 			gid in teamLeadByGoal ? { teamLeadSessionId: teamLeadByGoal[gid] } : undefined,
 	};
+	const sessionSecretStore = new SessionSecretStore();
 	const sessionManager: any = {
 		getSession: () => undefined,
 		deliverLiveSteer: async () => {},
 		enqueuePrompt: async () => {},
 		getAllSessionsRaw: () => [],
 		abortSessionTurn: async () => {},
+		// S1: orchestration/operator authz resolves the caller's secret here.
+		sessionSecretStore,
 	};
 	const verificationHarness: any = {
 		getActiveVerifications: () => [],
@@ -166,6 +176,12 @@ async function makeHarness(): Promise<Harness> {
 	return {
 		tmpRoot, goalStore, goalManager, parent, resizeCalls, teamLeadByGoal,
 		humanCookieHeader,
+		authAs(sessionId: string) {
+			return {
+				"x-bobbit-spawning-session": sessionId,
+				"x-bobbit-session-secret": sessionSecretStore.getOrCreateSecret(sessionId),
+			};
+		},
 		cleanup() { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {} },
 		call,
 	};
@@ -176,10 +192,11 @@ beforeEach(async () => { h = await makeHarness(); });
 
 // spawn-child / plan PATCH / policy are ORCHESTRATION-class endpoints: the
 // cookie does NOT bypass, so these tests authorize as the goal's team-lead via
-// a matching X-Bobbit-Spawning-Session header. (Operator-class endpoints —
+// the AUTHENTIC caller derived from the per-session `X-Bobbit-Session-Secret`
+// (NOT the forgeable public header). `h.authAs(TL)` registers + sends the
+// secret that resolves to the team-lead. (Operator-class endpoints —
 // pause/resume/decision/archive — keep the cookie; covered separately below.)
 const TL = "tl-session";
-const tlHeaders = { "x-bobbit-spawning-session": TL };
 
 describe("G2/C1 — spawn-child workflow override", () => {
 	it("an explicit workflowId overrides the inherited parent workflow snapshot", async () => {
@@ -189,7 +206,7 @@ describe("G2/C1 — spawn-child workflow override", () => {
 			title: "Child with explicit workflow",
 			spec: "Child spec: this child explicitly requests the 'feature' workflow, overriding the parent's 'parent' meta-workflow snapshot.",
 			workflowId: "feature",
-		}, tlHeaders);
+		}, h.authAs(TL));
 		assert.equal(r.status, 201);
 		const child = h.goalStore.get(r.payload.id)!;
 		assert.equal(child.workflowId, "feature", "child must adopt the explicitly-requested workflow id");
@@ -205,7 +222,7 @@ describe("G2/C1 — spawn-child workflow override", () => {
 			planId: "p-inherit",
 			title: "Inheriting child",
 			spec: "Child spec: no explicit workflow, so it should inherit the parent's snapshot with parent-only subgoal steps stripped.",
-		}, tlHeaders);
+		}, h.authAs(TL));
 		assert.equal(r.status, 201);
 		const child = h.goalStore.get(r.payload.id)!;
 		assert.equal(child.workflowId, "parent", "child inherits the parent workflow id by default");
@@ -226,7 +243,7 @@ describe("G2/C1 — PATCH /plan preserves top-level workflowId + suggestedRole",
 					phase: 0,
 				},
 			],
-		}, tlHeaders);
+		}, h.authAs(TL));
 		// Empty current plan + one added step at phase 0 → fix-up, applied under balanced.
 		assert.equal(r.status, 200, JSON.stringify(r.payload));
 		assert.equal(r.payload.applied, true);
@@ -256,7 +273,7 @@ describe("PATCH /plan — rejects duplicate planIds (400 DUPLICATE_PLAN_ID)", ()
 					phase: 0,
 				},
 			],
-		}, tlHeaders);
+		}, h.authAs(TL));
 		assert.equal(r.status, 400, JSON.stringify(r.payload));
 		assert.equal(r.payload.code, "DUPLICATE_PLAN_ID");
 		assert.equal(r.payload.planId, "dup");
@@ -271,7 +288,7 @@ describe("PATCH /plan — rejects duplicate planIds (400 DUPLICATE_PLAN_ID)", ()
 describe("C2/C4 — PATCH /policy integer clamp + live semaphore resize", () => {
 	it("floors a fractional maxConcurrentChildren and resizes the cached semaphore", async () => {
 		h.teamLeadByGoal[h.parent.id] = TL;
-		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 1.5 }, tlHeaders);
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 1.5 }, h.authAs(TL));
 		assert.equal(r.status, 200);
 		assert.equal(h.goalStore.get(h.parent.id)!.maxConcurrentChildren, 1, "1.5 must be floored to 1");
 		assert.equal(h.resizeCalls.length, 1, "the cached root semaphore must be resized");
@@ -280,14 +297,14 @@ describe("C2/C4 — PATCH /policy integer clamp + live semaphore resize", () => 
 
 	it("rejects a value that floors below 1", async () => {
 		h.teamLeadByGoal[h.parent.id] = TL;
-		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 0.5 }, tlHeaders);
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { maxConcurrentChildren: 0.5 }, h.authAs(TL));
 		assert.equal(r.status, 400);
 		assert.equal(h.resizeCalls.length, 0);
 	});
 
 	it("does not resize when only divergencePolicy changes", async () => {
 		h.teamLeadByGoal[h.parent.id] = TL;
-		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { divergencePolicy: "strict" }, tlHeaders);
+		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`, { divergencePolicy: "strict" }, h.authAs(TL));
 		assert.equal(r.status, 200);
 		assert.equal(h.resizeCalls.length, 0);
 	});
@@ -319,23 +336,36 @@ describe("S1 — ORCHESTRATION authorization on spawn-child / policy (cookie doe
 		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
 	});
 
-	it("allows the team-lead (matching X-Bobbit-Spawning-Session)", async () => {
+	it("allows the team-lead (authentic caller resolved from the secret)", async () => {
 		h.teamLeadByGoal[h.parent.id] = "tl-session";
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "tl-spawn",
 			title: "TL spawned",
-			spec: "Spawned by the parent goal's team-lead agent via the children tool extension with a matching header.",
-		}, { "x-bobbit-spawning-session": "tl-session" });
+			spec: "Spawned by the parent goal's team-lead agent via the children tool extension with a matching capability secret.",
+		}, h.authAs("tl-session"));
 		assert.equal(r.status, 201);
 	});
 
-	it("rejects a non-team-lead caller with 403 NOT_TEAM_LEAD", async () => {
+	it("rejects a non-team-lead caller (foreign secret) with 403 NOT_TEAM_LEAD", async () => {
 		h.teamLeadByGoal[h.parent.id] = "tl-session";
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "rogue-spawn",
 			title: "Rogue spawned",
 			spec: "An unrelated agent with gateway credentials should NOT be able to spawn children under this goal.",
-		}, { "x-bobbit-spawning-session": "some-other-agent" });
+		}, h.authAs("some-other-agent"));
+		assert.equal(r.status, 403);
+		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
+	});
+
+	it("rejects a forged PUBLIC team-lead header with NO secret → 403 NOT_TEAM_LEAD", async () => {
+		// The forgery the finding is about: replaying the (discoverable) public
+		// team-lead session id without the unforgeable secret must be denied.
+		h.teamLeadByGoal[h.parent.id] = "tl-session";
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "forged-spawn",
+			title: "Forged spawn",
+			spec: "Replaying the public team-lead session id without the per-session secret must NOT authorize an orchestration mutation.",
+		}, { "x-bobbit-spawning-session": "tl-session" }); // public header only, no secret
 		assert.equal(r.status, 403);
 		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
 	});
@@ -344,19 +374,19 @@ describe("S1 — ORCHESTRATION authorization on spawn-child / policy (cookie doe
 		h.teamLeadByGoal[h.parent.id] = "tl-session";
 		const r = await h.call("PATCH", `/api/goals/${h.parent.id}/policy`,
 			{ maxConcurrentChildren: 2 },
-			{ "x-bobbit-spawning-session": "intruder" });
+			h.authAs("intruder"));
 		assert.equal(r.status, 403);
 		assert.equal(h.resizeCalls.length, 0, "no side effect on rejected policy change");
 	});
 
 	it("rejects a non-human caller on a teamless goal with 403 NOT_TEAM_LEAD", async () => {
 		// No entry in teamLeadByGoal → getTeamState returns undefined. A teamless
-		// goal has no legitimate agent caller, so a forged header is denied.
+		// goal has no legitimate agent caller, so even a valid secret is denied.
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "no-team",
 			title: "No-team spawn",
-			spec: "A teamless goal has nothing to match against, so a non-human caller with a forged header must be denied.",
-		}, { "x-bobbit-spawning-session": "whoever" });
+			spec: "A teamless goal has nothing to match against, so a non-human caller must be denied.",
+		}, h.authAs("whoever"));
 		assert.equal(r.status, 403);
 		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
 	});
@@ -383,9 +413,9 @@ describe("S1 — OPERATOR authorization on pause (cookie IS accepted)", () => {
 		assert.equal(h.goalStore.get(h.parent.id)!.paused, true, "the goal must be paused");
 	});
 
-	it("rejects a non-team-lead agent caller pausing (no cookie, mismatched header) → 403", async () => {
+	it("rejects a non-team-lead agent caller pausing (no cookie, foreign secret) → 403", async () => {
 		h.teamLeadByGoal[h.parent.id] = "tl-session";
-		const r = await h.call("POST", `/api/goals/${h.parent.id}/pause`, { cascade: false }, { "x-bobbit-spawning-session": "intruder" });
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/pause`, { cascade: false }, h.authAs("intruder"));
 		assert.equal(r.status, 403);
 		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
 		assert.notEqual(h.goalStore.get(h.parent.id)!.paused, true, "a rejected pause must not change state");

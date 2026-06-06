@@ -172,7 +172,7 @@ describe("restoreSession source guard", () => {
 		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
 		assert.ok(idx > 0, "restoreSession declaration not found");
 		const window = src.slice(idx, idx + 10_000);
-		const envInitIdx = window.indexOf("bridgeOptions.env = { BOBBIT_SESSION_ID: ps.id }");
+		const envInitIdx = window.indexOf("BOBBIT_SESSION_ID: ps.id,");
 		const restoreEnvIdx = window.indexOf("this.restoreWalkthroughSubmitEnv(ps, bridgeOptions.env)");
 		const toolActivationIdx = window.indexOf("this.buildToolActivationArgs");
 		assert.ok(envInitIdx >= 0, "restoreSession must initialize session env");

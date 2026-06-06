@@ -103,7 +103,7 @@ async function createReadyGoal(label: string): Promise<{ id: string; repoPath?: 
  * seeded matching X-Bobbit-Spawning-Session header.
  */
 async function spawnChild(parentId: string, planId: string): Promise<string> {
-	const tlHeader = seedTeamLeadHeader(gw.teamManager, parentId);
+	const tlHeader = seedTeamLeadHeader(gw, parentId);
 	const resp = await rawApiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...tlHeader },

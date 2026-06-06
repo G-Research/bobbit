@@ -33,7 +33,7 @@ test.describe("Plan tab — archived children", () => {
 		// the parent's team-lead via a seeded matching header.
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			headers: seedTeamLeadHeader(gateway.teamManager, parentId),
+			headers: seedTeamLeadHeader(gateway, parentId),
 			body: JSON.stringify({ planId: "p1", title: "Child A", spec: "child a spec: plan-tab archived-children UI test, padded to meet spec validator minimum length." }),
 		});
 		expect(r1.status).toBe(201);

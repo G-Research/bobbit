@@ -24,7 +24,7 @@ import { openApp, navigateToHash } from "./ui-helpers.js";
 function spawnChild(gateway: any, parentId: string, body: Record<string, unknown>): Promise<Response> {
 	return apiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
-		headers: seedTeamLeadHeader(gateway.teamManager, parentId),
+		headers: seedTeamLeadHeader(gateway, parentId),
 		body: JSON.stringify(body),
 	});
 }

@@ -55,7 +55,7 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 		// spawn-child is ORCHESTRATION (cookie does NOT bypass) — authorize as
 		// the parent's team-lead via a seeded matching header (idempotent across
 		// both spawns on the same parent).
-		const tlHeader = seedTeamLeadHeader(gateway.teamManager, parentId);
+		const tlHeader = seedTeamLeadHeader(gateway, parentId);
 		// Two children with IDENTICAL titles — distinct ids. The renderer must
 		// show both (not collapse them into one row).
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {

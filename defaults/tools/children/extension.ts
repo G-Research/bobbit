@@ -32,14 +32,20 @@ export default function (pi: ExtensionAPI) {
 	}
 	const creds = credsResult;
 
+	// S1: the per-session capability secret. The server resolves this back to
+	// the AUTHENTIC caller session id for orchestration/operator authz — the
+	// public `X-Bobbit-Spawning-Session` header below is NOT trusted for authz
+	// (it survives only for `spawnedBySessionId` bookkeeping). Only this
+	// session's own process holds its secret; see session-secret.ts.
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
+
 	// ── HTTP helper ───────────────────────────────────────────────────
-	// All children calls carry `X-Bobbit-Spawning-Session` so the server can
-	// stamp `spawnedBySessionId` on POST /spawn-child (sidebar nesting
-	// behaviour). Other endpoints ignore the header.
+	// All children calls carry `X-Bobbit-Spawning-Session` (for spawnedBy
+	// stamping) and `X-Bobbit-Session-Secret` (the unforgeable auth capability).
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
-		return apiCall(creds, method, urlPath, body, {
-			extraHeaders: { "X-Bobbit-Spawning-Session": sessionId },
-		});
+		const extraHeaders: Record<string, string> = { "X-Bobbit-Spawning-Session": sessionId };
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		return apiCall(creds, method, urlPath, body, { extraHeaders });
 	}
 
 	function ok(data: unknown) {
