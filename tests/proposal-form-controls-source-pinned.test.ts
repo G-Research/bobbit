@@ -55,6 +55,36 @@ describe("Goal proposal modal — subgoal controls source-pin", () => {
 		);
 	});
 
+	it("gates the controls via the default-on isSubgoalsEnabled() helper, not a default-off dataset read", () => {
+		const text = fs.readFileSync(RENDER_TS, "utf-8");
+		// The controls render only when `subgoalsEnabled` is truthy. That value
+		// MUST come from the shared `isSubgoalsEnabled()` helper (default-ON when
+		// the dataset is unset) — matching the rest of the UI and the server's
+		// unset → enabled default. A literal `dataset.subgoalsEnabled === "true"`
+		// read here is default-OFF and silently hides the controls on a fresh
+		// install, contradicting the G1 fix. Do not reintroduce it.
+		assert.ok(
+			text.includes("isSubgoalsEnabled()"),
+			"proposal-panels.ts must compute `subgoalsEnabled` via the shared\n" +
+			"isSubgoalsEnabled() helper from ./subgoals-flag.js (default-on),\n" +
+			"so the Allow-subgoals toggle + Max-depth control render when the\n" +
+			"system Subgoals preference is unset.",
+		);
+		assert.ok(
+			!text.includes('dataset.subgoalsEnabled === "true"'),
+			"proposal-panels.ts must NOT gate the subgoal controls on a literal\n" +
+			"`document.documentElement.dataset.subgoalsEnabled === \"true\"` read —\n" +
+			"that is default-OFF and hides the controls on a fresh install.\n" +
+			"Use the shared default-on isSubgoalsEnabled() helper instead.",
+		);
+		assert.ok(
+			text.includes("getSystemMaxNestingDepth()"),
+			"proposal-panels.ts must read the system max-nesting-depth default via\n" +
+			"the shared getSystemMaxNestingDepth() helper, not an ad-hoc parseInt of\n" +
+			"document.documentElement.dataset.maxNestingDepth.",
+		);
+	});
+
 	it("Allow-subgoals checkbox uses the shared toggle-switch pill style", () => {
 		const text = fs.readFileSync(RENDER_TS, "utf-8");
 		// Find the line introducing the subgoals checkbox and assert its class.
