@@ -1,11 +1,17 @@
 /**
- * Phase 4 — per-role policy invariant for the new `Children` tool group.
+ * Per-role policy invariant for the `Children` tool group.
  *
- * Mirrors `role-gate-signal-policy.test.ts`: only the team-lead may call
- * the nine `goal_*` tools that drive the parent ↔ child lifecycle. Every
- * shipped contributor role must declare `never` for each tool. The
- * tool-guard extension hard-blocks the call at runtime; the role YAML is
- * the source of truth that drives the extension.
+ * Only the team-lead may call the nine `goal_*` tools that drive the
+ * parent ↔ child lifecycle. EVERY other shipped role must resolve to
+ * `never` for each tool, so the tools are stripped from their allowedTools.
+ *
+ * This test asserts the *resolved* policy (not just YAML declarations),
+ * mirroring runtime `resolveGrantPolicy`. The group default in
+ * `defaults/tool-group-policies.yaml` is `Children: never`, which every
+ * non-team-lead role inherits; team-lead.yaml's per-tool `always-allow`
+ * overrides it (resolveGrantPolicy step 1 beats step 4). Enumerating ALL
+ * roles from `defaults/roles/*.yaml` guarantees a newly-added role can
+ * never silently inherit `ask`/`allow` for these tools.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +19,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const ROLES_DIR = path.resolve(import.meta.dirname, "..", "defaults", "roles");
+const { resolveGrantPolicy } = await import("../src/server/agent/tool-activation.ts");
+import type { GrantPolicy, GroupPolicyProvider } from "../src/server/agent/tool-activation.ts";
+
+const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "defaults");
+const ROLES_DIR = path.join(DEFAULTS_DIR, "roles");
+const GROUP_POLICIES_FILE = path.join(DEFAULTS_DIR, "tool-group-policies.yaml");
 
 const CHILDREN_TOOLS = [
 	"goal_spawn_child",
@@ -27,44 +38,68 @@ const CHILDREN_TOOLS = [
 	"goal_set_policy",
 ];
 
-const CONTRIBUTOR_ROLES = [
-	"coder",
-	"test-engineer",
-	"reviewer",
-	"code-reviewer",
-	"security-reviewer",
-	"architect",
-	"spec-auditor",
-	"qa-tester",
-	"docs-writer",
-];
-
-function loadRole(name: string): { toolPolicies?: Record<string, string> } {
-	const file = path.join(ROLES_DIR, `${name}.yaml`);
-	const text = fs.readFileSync(file, "utf-8");
-	return YAML.parse(text) as { toolPolicies?: Record<string, string> };
+/** Every shipped role name discovered from defaults/roles/*.yaml. */
+function discoverRoleNames(): string[] {
+	return fs
+		.readdirSync(ROLES_DIR, { withFileTypes: true })
+		.filter((e) => e.isFile() && e.name.endsWith(".yaml"))
+		.map((e) => e.name.replace(/\.yaml$/, ""))
+		.sort();
 }
 
-describe("role children-tools policy invariant", () => {
+function loadRole(name: string): { toolPolicies?: Record<string, GrantPolicy> } {
+	const text = fs.readFileSync(path.join(ROLES_DIR, `${name}.yaml`), "utf-8");
+	return YAML.parse(text) as { toolPolicies?: Record<string, GrantPolicy> };
+}
+
+/** Group-policy provider backed by defaults/tool-group-policies.yaml, with the
+ *  Subgoals feature gate ON (so team-lead's grant is not forced to `never`). */
+function defaultGroupPolicyProvider(): GroupPolicyProvider {
+	const raw = YAML.parse(fs.readFileSync(GROUP_POLICIES_FILE, "utf-8")) as Record<string, GrantPolicy>;
+	return {
+		getGroupPolicy: (group: string) => raw[group] ?? null,
+		getAll: () => raw,
+		getSubgoalsEnabled: () => true,
+	};
+}
+
+describe("role children-tools policy invariant (resolved)", () => {
+	const groupPolicyStore = defaultGroupPolicyProvider();
+	const roleNames = discoverRoleNames();
+
+	it("the group default for Children is `never`", () => {
+		assert.equal(
+			groupPolicyStore.getGroupPolicy("Children"),
+			"never",
+			"defaults/tool-group-policies.yaml must declare `Children: never`",
+		);
+	});
+
+	it("discovered at least the known roles (incl. team-lead)", () => {
+		assert.ok(roleNames.includes("team-lead"), "team-lead.yaml must exist");
+		assert.ok(roleNames.length >= 10, `expected many roles, found ${roleNames.length}`);
+	});
+
 	for (const tool of CHILDREN_TOOLS) {
-		it(`team-lead has ${tool}: always-allow`, () => {
+		it(`team-lead resolves ${tool} to allow`, () => {
 			const role = loadRole("team-lead");
 			assert.equal(
-				role.toolPolicies?.[tool],
-				"always-allow",
-				`team-lead.yaml must declare toolPolicies.${tool}: always-allow`,
+				resolveGrantPolicy(tool, "Children", role, undefined, groupPolicyStore),
+				"allow",
+				`team-lead must resolve ${tool} to allow (always-allow → allow)`,
 			);
 		});
 	}
 
-	for (const roleName of CONTRIBUTOR_ROLES) {
+	for (const roleName of roleNames) {
+		if (roleName === "team-lead") continue;
 		for (const tool of CHILDREN_TOOLS) {
-			it(`${roleName} has ${tool}: never`, () => {
+			it(`${roleName} resolves ${tool} to never`, () => {
 				const role = loadRole(roleName);
 				assert.equal(
-					role.toolPolicies?.[tool],
+					resolveGrantPolicy(tool, "Children", role, undefined, groupPolicyStore),
 					"never",
-					`${roleName}.yaml must declare toolPolicies.${tool}: never (only team-lead may use Children tools)`,
+					`${roleName} must resolve ${tool} to never (only team-lead may use Children tools)`,
 				);
 			});
 		}
