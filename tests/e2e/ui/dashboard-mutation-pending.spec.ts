@@ -110,4 +110,35 @@ test.describe("Dashboard mutation-pending card", () => {
 		await page.locator('[data-testid="dashboard-mutation-pending-reject"]').first().click();
 		await expect(page.locator('[data-testid="dashboard-mutation-pending-card"]')).toHaveCount(0, { timeout: 10_000 });
 	});
+
+	test("card is NOT cleared when the decision POST returns a non-OK status", async ({ page }) => {
+		const requestId = "req-nonok-1";
+		// Pending stays active for the whole test — the server never removes it
+		// because the decision is rejected with a 409.
+		await stubPending(page, requestId, () => true);
+
+		let decisionPosts = 0;
+		// `gatewayFetch` resolves (does not throw) for 4xx/5xx, so the client must
+		// inspect `res.ok` and keep the card when the decision is refused.
+		await page.route(/\/api\/goals\/[^/]+\/mutation\/[^/]+\/decision$/, async (route, req) => {
+			if (req.method() !== "POST") return route.fallback();
+			decisionPosts++;
+			await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "RESTRUCTURE_REQUIRES_PAUSE" }) });
+		});
+
+		await openApp(page);
+		await navigateToHash(page, `#/goal/${goalId}`);
+
+		const card = page.locator('[data-testid="dashboard-mutation-pending-card"]').first();
+		await expect(card).toBeVisible({ timeout: 15_000 });
+
+		await page.locator('[data-testid="dashboard-mutation-pending-approve"]').first().click();
+
+		// The POST happened…
+		await expect.poll(() => decisionPosts, { timeout: 10_000 }).toBeGreaterThan(0);
+		// …but the card MUST remain because the response was non-OK. Give the
+		// optimistic-clear path a chance to (wrongly) fire, then assert presence.
+		await page.waitForTimeout(1_000);
+		await expect(card).toBeVisible();
+	});
 });
