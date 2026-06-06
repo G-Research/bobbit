@@ -210,6 +210,7 @@ import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
+import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
@@ -6620,6 +6621,23 @@ async function handleApiRoute(
 				json({ error: `Missing required metadata fields: ${required.join(", ")}` }, 400);
 				return;
 			}
+		}
+
+		// Gov-2: an ACCEPTED signal of the `goal-plan` gate on a parent-workflow
+		// goal FREEZES the execution gate's verify[] (sets
+		// execution.metadata.frozen = "true" durably on the goal's workflow
+		// snapshot). Applied here — after dependency/metadata validation has
+		// passed (so a rejected signal never freezes) but before the
+		// cache/dup early-return branches (so the freeze is durable even when
+		// the signal short-circuits to a cached pass). Idempotent: re-signal is
+		// a harmless no-op write. After this, GET /api/goals/:id/plan reports
+		// frozen:true. See src/server/agent/parent-workflow-freeze.ts.
+		const freezeResult = computePlanFreezeUpdate(goal, gateId);
+		if (freezeResult.freeze && freezeResult.workflow) {
+			// Persist via the goal store's `update` (same path applyPlanSteps
+			// uses) — `updateGoal`'s partial type does not expose `workflow`.
+			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeResult.workflow });
+			goal.workflow = freezeResult.workflow;
 		}
 
 		// Get commit SHA
