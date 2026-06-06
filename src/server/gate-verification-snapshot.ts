@@ -16,6 +16,16 @@ const LIVE_LOG_TAIL_CHUNK_BYTES = 16 * 1024;
 
 export type GateVerificationSnapshotStatus = "passed" | "failed" | "skipped" | "running" | "waiting" | "blocked";
 
+/** Thrown when a `stepName` filter does not match any verification step. Maps to a 400. */
+export class UnknownVerificationStepError extends Error {
+	availableSteps: string[];
+	constructor(stepName: string, availableSteps: string[]) {
+		super(`Unknown verification step "${stepName}". Available steps: ${availableSteps.join(", ")}`);
+		this.name = "UnknownVerificationStepError";
+		this.availableSteps = availableSteps;
+	}
+}
+
 export interface GateVerificationSnapshotStep {
 	name: string;
 	type: string;
@@ -242,6 +252,7 @@ export function buildGateVerificationSnapshot(input: {
 	verification?: GateSignal["verification"];
 	activeVerification?: ActiveVerification;
 	selectionOptions?: TextSelectionOptions;
+	stepName?: string;
 	now?: number;
 }): GateVerificationSnapshot {
 	const now = input.now ?? Date.now();
@@ -321,7 +332,19 @@ export function buildGateVerificationSnapshot(input: {
 		return out;
 	});
 
-	const aggregate = enforceGateVerificationAggregateOutputBudget(steps);
+	// Narrow to a single named step when requested. Blocked/prior-failure state is
+	// already computed during the full map above; we only filter what is returned and
+	// re-run the aggregate budget over the single step so per-step selection is preserved.
+	let finalSteps = steps;
+	let totalLines = aggregateTotalLines;
+	if (input.stepName !== undefined) {
+		const matched = steps.find(step => step.name === input.stepName);
+		if (!matched) throw new UnknownVerificationStepError(input.stepName, steps.map(step => step.name));
+		finalSteps = [matched];
+		totalLines = matched.selection?.totalLines ?? 0;
+	}
+
+	const aggregate = enforceGateVerificationAggregateOutputBudget(finalSteps);
 	const counts: Record<GateVerificationSnapshotStatus, number> = {
 		passed: 0,
 		failed: 0,
@@ -330,16 +353,16 @@ export function buildGateVerificationSnapshot(input: {
 		waiting: 0,
 		blocked: 0,
 	};
-	for (const step of steps) counts[step.status]++;
+	for (const step of finalSteps) counts[step.status]++;
 
 	return {
 		status: active?.overallStatus ?? input.verification?.status,
-		steps,
+		steps: finalSteps,
 		counts,
 		summary: buildSummary(counts),
 		selection: {
 			mode: selectionOptions.mode ?? "tail",
-			totalLines: aggregateTotalLines,
+			totalLines,
 			truncated: aggregate.truncated,
 			truncationReason: aggregate.truncationReason,
 		},

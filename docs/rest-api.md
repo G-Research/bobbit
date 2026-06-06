@@ -981,6 +981,7 @@ A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspe
 |-----------|------|----------|---------|-------------|
 | `section` | `"content"` \| `"verification"` \| `"signals"` | yes | — | What data to retrieve |
 | `signal_index` | integer | no | `-1` (latest) | Which signal. 0-based, negative indexes from end. Ignored for `section=signals`. |
+| `step` | string | no | — | `section=verification` only: scope the response to a single verification step by name. Other sections return 400. |
 | `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns the last 20 lines per selected field/verification step, not full output. |
 | `pattern` | string | for `grep` | — | Regex used by `mode=grep`. Invalid regexes return 400. |
 | `context` | integer | no | `0` | Surrounding lines to include around each grep match. |
@@ -1033,6 +1034,8 @@ Selection metadata is returned with filtered output:
 ```
 
 **`section=verification`** — Returns a verification snapshot with each step's `output` independently selected. For the latest running signal, this is the same active snapshot used by `gate_status`: persisted signal rows are overlaid with active harness state before output selection. A top-level `selection` may also appear when the combined response is capped.
+
+Pass `step=<name>` to scope the snapshot to a single verification step. When set, `steps[]` contains only the matching step (still a single-element array, so the same response shape applies) and the selection mode applies to that one step's output. Step names come from `gate_status.failedSteps` and from each step's `name` in an unfiltered snapshot. An unknown step name returns 400 with the list of available step names for that signal; using `step` with `section=content` or `section=signals` returns 400 (`step is only valid with section='verification'`).
 ```json
 {
   "gateId": "implementation",
@@ -1102,10 +1105,11 @@ Examples:
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=grep&pattern=error%7Cfailed&context=2
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=tail&lines=80
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=slice&from=120&to=180
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&step=unit&mode=grep&pattern=error%7Cfailed&context=2
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=full
 ```
 
-Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, or a slice range is missing/non-integer/below 1/`from > to`. Returns 404 if the resolved signal index is out of range.
+Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, a slice range is missing/non-integer/below 1/`from > to`, `step` names an unknown step (the error lists the available step names), or `step` is combined with `section=content`/`section=signals`. Returns 404 if the resolved signal index is out of range.
 
 ### Session error-state fields
 
