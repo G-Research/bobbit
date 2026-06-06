@@ -248,6 +248,42 @@ helpers so REST and the verification harness share one code path:
   goal across its subtree (live + archived), surviving purge via `goalId`
   stamping on cost records.
 
+### Children-mutation authorization (S1 — two classes)
+
+The mutating Children REST endpoints are reachable by anything holding gateway
+credentials, so they are guarded server-side by `authorizeChildrenMutation`
+(`src/server/auth/children-mutation-authz.ts`). Because agents read the
+**shared admin Bearer token** off disk and any holder of it can mint the
+server-issued `bobbit_session` cookie, the cookie is only a **weak human
+signal**. To shrink the blast radius the mutations are split into two classes:
+
+- **`orchestration`** — `spawn-child`, plan `PATCH`, `integrate-child`,
+  `policy`. The autonomous team-lead verbs (spawn child teams, rewrite the
+  plan, merge child branches, resize concurrency). The web UI never issues
+  these. They are **team-lead-only**: require an `X-Bobbit-Spawning-Session`
+  header matching the goal's authoritative team-lead, and the cookie does
+  **NOT** bypass. Refused on absent header / teamless goal / mismatch
+  (`403 NOT_TEAM_LEAD`).
+- **`operator`** — `pause`, `resume`, mutation `decision`, `archive-child`.
+  The human-in-the-loop verbs the web UI actually drives. A verified
+  `bobbit_session` cookie is accepted (human/UI), else the same team-lead
+  match applies.
+
+The header is never trusted as a bare claim — only compared for equality
+against `TeamManager.getTeamState(goalId)?.teamLeadSessionId`.
+
+**Residual risk (accepted; future work).** The `operator` endpoints still
+trust the shared admin Bearer token: any token holder can mint the
+`bobbit_session` cookie and drive the operator verbs. This is an **inherent
+property of Bobbit's single shared-credential model** — agents and the human
+share one gateway token, so the cookie path cannot cryptographically
+distinguish a human operator from a token-holding agent. **Full separation
+requires a dedicated operator credential** (a distinct human-only secret that
+agents never possess), which is out of scope for this port and tracked as
+future work. The orchestration/operator split removes the cookie bypass from
+the high-impact orchestration surface without claiming to fully isolate the
+operator surface.
+
 ### Persisted `PersistedGoal` fields (owned by `goal-store.ts`)
 `parentGoalId?`, `subgoalsAllowed?`, `maxNestingDepth?`,
 `divergencePolicy?`, `maxConcurrentChildren?`, `spawnedFromPlanId?`

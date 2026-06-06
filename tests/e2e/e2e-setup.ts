@@ -425,19 +425,69 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 }
 
 /**
- * The MUTATING Children REST endpoints guarded by the S1 authz check
- * (`src/server/auth/children-mutation-authz.ts`). A node `apiFetch` carries no
- * `bobbit_session` cookie, so without one these would 403. E2E goals have no
- * team-lead, and a teamless goal is now mutable ONLY by a verified human/UI
- * operator (the "no-team-lead → allow" agent branch was removed because a
- * forged header could otherwise drive these routes on any teamless goal).
- * We therefore authenticate these calls as the human operator via the
- * gateway-minted `bobbit_session` cookie. (Browser-initiated requests carry
- * the cookie automatically and don't need this.) Tests that deliberately
- * exercise the agent/deny path use `rawApiFetch` with explicit headers.
+ * The OPERATOR-class Children REST endpoints guarded by the S1 authz check
+ * (`src/server/auth/children-mutation-authz.ts`): `pause`, `resume`, and
+ * mutation `decision`. These are the human-in-the-loop verbs the web UI
+ * drives, so a verified `bobbit_session` cookie authorizes them. A node
+ * `apiFetch` carries no cookie, so without one these would 403; we therefore
+ * auto-inject the gateway-minted cookie. (Browser-initiated requests carry the
+ * cookie automatically and don't need this.) Tests that deliberately exercise
+ * the agent/deny path use `rawApiFetch` with explicit headers.
+ *
+ * NOTE: the ORCHESTRATION-class verbs (`spawn-child`, plan `PATCH`,
+ * `integrate-child`, `policy`) are NOT in this set. The cookie does NOT bypass
+ * an orchestration check (it is mintable by any holder of the shared admin
+ * token), so auto-injecting it would not authorize them. Tests that drive
+ * orchestration must authenticate as the goal's team-lead — see
+ * `seedTeamLeadHeader()` below.
  */
 const CHILDREN_MUTATION_PATH =
-	/^\/api\/goals\/[^/]+\/(spawn-child|integrate-child\/[^/]+|pause|resume|mutation\/[^/]+\/decision|policy|plan)$/;
+	/^\/api\/goals\/[^/]+\/(pause|resume|mutation\/[^/]+\/decision)$/;
+
+/**
+ * Authorize an ORCHESTRATION-class Children mutation (`spawn-child`, plan
+ * `PATCH`, `integrate-child`, `policy`) as the goal's team-lead.
+ *
+ * The cookie does NOT bypass orchestration authz, so a node test must present
+ * an `X-Bobbit-Spawning-Session` header matching the goal's authoritative
+ * team-lead. Production establishes the team-lead via `TeamManager.startTeam`
+ * (which spawns a real session); in the mock E2E harness we register a minimal
+ * team entry directly so tests don't pay that cost. Both E2E harnesses
+ * (in-process + gateway) run the gateway in-process and expose
+ * `gateway.teamManager`.
+ *
+ * Returns the header object to spread into the orchestration request, e.g.:
+ *
+ *   await apiFetch(`/api/goals/${id}/spawn-child`, {
+ *     method: "POST", body, headers: seedTeamLeadHeader(gateway.teamManager, id),
+ *   });
+ *
+ * Idempotent: reuses an already-established team-lead for the goal. Pass an
+ * explicit `sessionId` when the spawnedBy-cascade assertions need a specific
+ * team-lead identity.
+ */
+export function seedTeamLeadHeader(
+	teamManager: any,
+	goalId: string,
+	sessionId?: string,
+): Record<string, string> {
+	const existing = teamManager?.getTeamState?.(goalId)?.teamLeadSessionId;
+	const tl = (typeof existing === "string" && existing.trim())
+		? existing.trim()
+		: (sessionId && sessionId.trim() ? sessionId.trim() : `e2e-teamlead-${goalId}`);
+	if (!existing) {
+		// Reach into the in-memory team map (mirrors gate-verification-resume's
+		// teamStore.put pattern). A minimal entry is enough for getTeamState to
+		// return the team-lead id the authz check compares against.
+		teamManager?.teams?.set?.(goalId, {
+			goalId,
+			teamLeadSessionId: tl,
+			agents: [],
+			maxConcurrent: 12,
+		});
+	}
+	return { "X-Bobbit-Spawning-Session": tl };
+}
 
 /**
  * Lazily capture the gateway-minted `bobbit_session` cookie for the human/UI
@@ -468,10 +518,15 @@ async function humanSessionCookie(): Promise<string> {
 }
 
 /**
- * For Children-mutation paths, authenticate as the human operator by adding
- * the `bobbit_session` cookie — UNLESS the caller already supplied its own
- * cookie or a spawning-session / session-id header (those tests are exercising
- * a specific authz path and must be respected verbatim).
+ * For OPERATOR-class Children-mutation paths (pause / resume / mutation
+ * decision — see CHILDREN_MUTATION_PATH), authenticate as the human operator
+ * by adding the `bobbit_session` cookie — UNLESS the caller already supplied
+ * its own cookie or a spawning-session / session-id header (those tests are
+ * exercising a specific authz path and must be respected verbatim).
+ *
+ * Orchestration-class verbs are deliberately NOT covered here: the cookie does
+ * not bypass orchestration authz, so they authenticate as the team-lead via
+ * `seedTeamLeadHeader()` at the call site instead.
  */
 async function withChildrenAuthzCookie(path: string, headers: Record<string, string>): Promise<Record<string, string>> {
 	const bare = path.split("?")[0];

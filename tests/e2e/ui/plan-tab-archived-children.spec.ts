@@ -18,19 +18,22 @@
  *   5. Asserts the plan-node renders with `data-archived="true"`.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Plan tab — archived children", () => {
 	let parentId = "";
 	let childId = "";
 
-	test.beforeEach(async () => {
+	test.beforeEach(async ({ gateway }) => {
 		const projectId = await defaultProjectId();
 		const parent = await createGoal({ title: "Parent w/ archived child", projectId, team: false });
 		parentId = parent.id as string;
+		// spawn-child is ORCHESTRATION (cookie does NOT bypass) — authorize as
+		// the parent's team-lead via a seeded matching header.
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
+			headers: seedTeamLeadHeader(gateway.teamManager, parentId),
 			body: JSON.stringify({ planId: "p1", title: "Child A", spec: "child a spec: plan-tab archived-children UI test, padded to meet spec validator minimum length." }),
 		});
 		expect(r1.status).toBe(201);

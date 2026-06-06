@@ -19,19 +19,22 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Plan tab — per-node gate status + merge/conflict", () => {
 	let parentId = "";
 	let childId = "";
 
-	test.beforeEach(async () => {
+	test.beforeEach(async ({ gateway }) => {
 		const projectId = await defaultProjectId();
 		const parent = await createGoal({ title: "Parent w/ gated child", projectId, team: false });
 		parentId = parent.id as string;
+		// spawn-child is ORCHESTRATION (cookie does NOT bypass) — authorize as
+		// the parent's team-lead via a seeded matching header.
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
+			headers: seedTeamLeadHeader(gateway.teamManager, parentId),
 			body: JSON.stringify({ planId: "p1", title: "Child A", spec: "child a spec: plan-tab gate-status UI test, padded to satisfy the spec validator minimum length requirement here." }),
 		});
 		expect(r1.status).toBe(201);
@@ -85,12 +88,13 @@ test.describe("Plan tab — per-node gate status + merge/conflict", () => {
 			.toBeVisible({ timeout: 5_000 });
 	});
 
-	test("LIVE (non-archived) child node also surfaces gate-status from descendant enrichment", async ({ page }) => {
+	test("LIVE (non-archived) child node also surfaces gate-status from descendant enrichment", async ({ page, gateway }) => {
 		// Spawn a second, NON-archived child. Live children flow through
 		// state.goals, which never carries the enrichment fields — they must
 		// be carried across from the /descendants copy in dashboardGoalPool().
 		const r2 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
+			headers: seedTeamLeadHeader(gateway.teamManager, parentId),
 			body: JSON.stringify({ planId: "p2", title: "Live Child B", spec: "live child b spec: plan-tab gate-status UI test, padded to satisfy the spec validator minimum length requirement." }),
 		});
 		expect(r2.status).toBe(201);

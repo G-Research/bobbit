@@ -13,22 +13,29 @@
  * surfaces the structure even when totals are $0.00.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
+/**
+ * Spawn a child via the ORCHESTRATION-class endpoint. spawn-child requires a
+ * team-lead-matching X-Bobbit-Spawning-Session header (the cookie does NOT
+ * bypass), so seed a team-lead on the parent and send the matching header.
+ */
+function spawnChild(gateway: any, parentId: string, body: Record<string, unknown>): Promise<Response> {
+	return apiFetch(`/api/goals/${parentId}/spawn-child`, {
+		method: "POST",
+		headers: seedTeamLeadHeader(gateway.teamManager, parentId),
+		body: JSON.stringify(body),
+	});
+}
+
 test.describe("Phase 5b — tree cost rollup", () => {
-	test("parent dashboard renders Tree cost row + per-child breakdown", async ({ page }) => {
+	test("parent dashboard renders Tree cost row + per-child breakdown", async ({ page, gateway }) => {
 		const projectId = await defaultProjectId();
 		const parent = await createGoal({ title: "Tree-cost parent", projectId, team: false });
-		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "tree-cost UI test child 1: padded to meet spec validator minimum length." }),
-		});
+		const r1 = await spawnChild(gateway, parent.id, { planId: "p1", title: "Tree-cost child 1", spec: "tree-cost UI test child 1: padded to meet spec validator minimum length." });
 		const c1 = (await r1.json()).id as string;
-		const r2 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "tree-cost UI test child 2: padded to meet spec validator minimum length." }),
-		});
+		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost UI test child 2: padded to meet spec validator minimum length." });
 		const c2 = (await r2.json()).id as string;
 
 		// Sanity: REST endpoint returns the structured rollup.
@@ -73,18 +80,12 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		void c1; void c2;
 	});
 
-	test("Tree cost row stays visible when all children are archived", async ({ page }) => {
+	test("Tree cost row stays visible when all children are archived", async ({ page, gateway }) => {
 		const projectId = await defaultProjectId();
 		const parent = await createGoal({ title: "Tree-cost archived-children parent", projectId, team: false });
-		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "tree-cost archived-children UI test child 1: padded to meet validator length." }),
-		});
+		const r1 = await spawnChild(gateway, parent.id, { planId: "p1", title: "Tree-cost child 1", spec: "tree-cost archived-children UI test child 1: padded to meet validator length." });
 		const c1 = (await r1.json()).id as string;
-		const r2 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "tree-cost archived-children UI test child 2: padded to meet validator length." }),
-		});
+		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost archived-children UI test child 2: padded to meet validator length." });
 		const c2 = (await r2.json()).id as string;
 
 		// Archive both children (they're leaves, so cascade=false is fine).
@@ -130,16 +131,10 @@ test.describe("Phase 5b — tree cost rollup", () => {
 
 		// Build a 3-deep chain: parent → child → grandchild.
 		const parent = await createGoal({ title: "Tree-cost subtree parent", projectId, team: false });
-		const rChild = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "sub-c", title: "Tree-cost subtree child", spec: "tree-cost subtree-rooted E2E child: padded to meet spec validator minimum length." }),
-		});
+		const rChild = await spawnChild(gateway, parent.id, { planId: "sub-c", title: "Tree-cost subtree child", spec: "tree-cost subtree-rooted E2E child: padded to meet spec validator minimum length." });
 		expect(rChild.status).toBe(201);
 		const childId = (await rChild.json()).id as string;
-		const rGrand = await apiFetch(`/api/goals/${childId}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "sub-g", title: "Tree-cost subtree grandchild", spec: "tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length." }),
-		});
+		const rGrand = await spawnChild(gateway, childId, { planId: "sub-g", title: "Tree-cost subtree grandchild", spec: "tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length." });
 		expect(rGrand.status).toBe(201);
 		const grandId = (await rGrand.json()).id as string;
 
@@ -247,10 +242,7 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		// Parent + one child. The child will be backdated to predate the
 		// sidecar-era threshold and intentionally left with zero spend.
 		const parent = await createGoal({ title: "Tree-cost legacy-zero parent", projectId, team: false });
-		const rChild = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
-			method: "POST",
-			body: JSON.stringify({ planId: "legacy-c", title: "Tree-cost legacy child", spec: "tree-cost legacy-zero E2E child: padded to meet spec validator minimum length requirement." }),
-		});
+		const rChild = await spawnChild(gateway, parent.id, { planId: "legacy-c", title: "Tree-cost legacy child", spec: "tree-cost legacy-zero E2E child: padded to meet spec validator minimum length requirement." });
 		expect(rChild.status).toBe(201);
 		const childId = (await rChild.json()).id as string;
 

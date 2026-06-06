@@ -20,16 +20,22 @@ import {
 	gitCwd,
 	rawApiFetch,
 	readE2EToken,
+	seedTeamLeadHeader,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
 let humanCookie = "";
+// In-process gateway (worker-scoped) — used to establish a team-lead for the
+// ORCHESTRATION-class spawn-child setup calls.
+let gw: any;
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
-	// The Children-mutation endpoints (spawn-child) require a verified-human
-	// cookie. The gateway mints bobbit_session on the first authed request.
+	gw = gateway;
+	// archive-child (used below) is an OPERATOR Children verb authorized by the
+	// verified-human cookie. The gateway mints bobbit_session on the first
+	// authed request; capture it.
 	const probe = await rawApiFetch("/api/goals", { headers: { Authorization: `Bearer ${token}` } });
 	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
 		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
@@ -71,9 +77,12 @@ async function createParentGoal(): Promise<{ id: string; repoPath?: string }> {
 }
 
 async function spawnChild(parentId: string, planId: string): Promise<string> {
+	// spawn-child is an ORCHESTRATION verb (cookie does NOT bypass) — authorize
+	// as the parent's team-lead via a seeded matching header.
+	const tlHeader = seedTeamLeadHeader(gw.teamManager, parentId);
 	const resp = await rawApiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
-		headers: authHeaders(),
+		headers: authHeaders(tlHeader),
 		body: JSON.stringify({
 			planId,
 			title: `child ${planId}`,

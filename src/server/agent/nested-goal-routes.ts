@@ -37,7 +37,7 @@ import {
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
-import { authorizeChildrenMutation } from "../auth/children-mutation-authz.js";
+import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 
 export interface NestedGoalRouteDeps {
@@ -219,24 +219,29 @@ export async function tryHandleNestedGoalRoute(
 	}
 
 	/**
-	 * S1: server-side authorization for the MUTATING Children endpoints. The
-	 * `Children` tool group is team-lead-only by tool policy, but the REST
-	 * routes are reachable by anything with gateway credentials. A request
-	 * carrying a verified `bobbit_session` cookie is a trusted human/UI
-	 * gateway call and is allowed. Otherwise (an agent — agents never carry
-	 * the cookie) we REQUIRE a spawning-session header and match it against
-	 * the authoritative team-lead session id for `goalIdForTeam` (resolved
-	 * from the TeamManager, never trusting the header as a bare claim). A
-	 * missing header can no longer impersonate the human path. When the goal
-	 * has no established team-lead the call is allowed (nothing to match
-	 * against). See `src/server/auth/children-mutation-authz.ts` for the full
-	 * threat model.
+	 * S1: server-side authorization for the MUTATING Children endpoints, split
+	 * into two classes (blast-radius reduction — see
+	 * `src/server/auth/children-mutation-authz.ts`):
+	 *
+	 *   - `orchestration` (spawn-child, plan PATCH, integrate-child, policy):
+	 *     team-lead-only. The `bobbit_session` cookie does NOT bypass — it is
+	 *     mintable by any holder of the shared admin Bearer token, so it is a
+	 *     weak human signal. We REQUIRE a spawning-session header matching the
+	 *     authoritative team-lead for `goalIdForTeam`.
+	 *   - `operator` (pause, resume, mutation decision, archive-child): the
+	 *     human-in-the-loop verbs the web UI drives. A verified cookie is
+	 *     accepted; otherwise the same team-lead match applies.
+	 *
+	 * The header is never trusted as a bare claim — only compared for equality
+	 * against the TeamManager's team-lead id. A teamless goal has no legitimate
+	 * agent caller (denied for orchestration; operator still allows the cookie).
 	 *
 	 * Returns `true` when the request may proceed; otherwise writes a 403 and
 	 * returns `false` so the caller should `return true` immediately.
 	 */
-	function authorizeTeamLeadOrReject(goalIdForTeam: string): boolean {
+	function authorizeTeamLeadOrReject(goalIdForTeam: string, mutationClass: ChildrenMutationClass): boolean {
 		const result = authorizeChildrenMutation({
+			mutationClass,
 			isHumanOperator: cookieTryAuth(req, cookieStore),
 			callerSessionId: readCallerSessionId(),
 			teamLeadSessionId: teamManager.getTeamState(goalIdForTeam)?.teamLeadSessionId,
@@ -427,9 +432,9 @@ export async function tryHandleNestedGoalRoute(
 			json({ error: `Parent goal ${parentId} is paused`, code: "GOAL_PAUSED", goalId: parentId }, 409);
 			return true;
 		}
-		// S1: only the parent's team-lead (or a trusted human/UI gateway call)
-		// may spawn children under it.
-		if (!authorizeTeamLeadOrReject(parentId)) return true;
+		// S1: spawn-child is an ORCHESTRATION verb — team-lead-only, the cookie
+		// does NOT bypass.
+		if (!authorizeTeamLeadOrReject(parentId, "orchestration")) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
 		const planId = typeof body.planId === "string" ? body.planId.trim() : "";
@@ -708,9 +713,9 @@ export async function tryHandleNestedGoalRoute(
 		const resolved = resolvePlanContext(id);
 		if (!resolved) return true;
 		const { goal } = resolved;
-		// S1: only the goal's team-lead (or a trusted human/UI gateway call)
-		// may mutate its plan.
-		if (!authorizeTeamLeadOrReject(id)) return true;
+		// S1: plan PATCH is an ORCHESTRATION verb — team-lead-only, the cookie
+		// does NOT bypass.
+		if (!authorizeTeamLeadOrReject(id, "orchestration")) return true;
 		// Plan-propose requires a workflow with an `execution` gate.
 		const hasExecutionGate = !!goal.workflow?.gates.some(g => g.id === "execution");
 		if (!hasExecutionGate) {
@@ -962,9 +967,9 @@ export async function tryHandleNestedGoalRoute(
 			json({ error: `Child ${childId} parentGoalId="${child.parentGoalId}" does not match path parent ${parentId}`, code: "PARENT_MISMATCH" }, 400);
 			return true;
 		}
-		// S1: only the parent's team-lead (or a trusted human/UI gateway call)
-		// may integrate a child into the parent branch.
-		if (!authorizeTeamLeadOrReject(parentId)) return true;
+		// S1: integrate-child is an ORCHESTRATION verb — team-lead-only, the
+		// cookie does NOT bypass.
+		if (!authorizeTeamLeadOrReject(parentId, "orchestration")) return true;
 		const ctx = projectContextManager.getContextForGoal(parentId);
 		if (!ctx) { json({ error: "Project context not found" }, 404); return true; }
 		const goalManager = ctx.goalManager;
@@ -1075,9 +1080,9 @@ export async function tryHandleNestedGoalRoute(
 		const id = pauseMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
-		// pause it.
-		if (!authorizeTeamLeadOrReject(id)) return true;
+		// S1: pause is an OPERATOR verb — the web UI drives it, so a verified
+		// human cookie is accepted (else team-lead match).
+		if (!authorizeTeamLeadOrReject(id, "operator")) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body || typeof body.cascade !== "boolean") {
 			json({ error: "cascade (boolean) is required", code: "CASCADE_REQUIRED" }, 422);
@@ -1131,9 +1136,9 @@ export async function tryHandleNestedGoalRoute(
 		const id = resumeMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
-		// resume it.
-		if (!authorizeTeamLeadOrReject(id)) return true;
+		// S1: resume is an OPERATOR verb — the web UI drives it, so a verified
+		// human cookie is accepted (else team-lead match).
+		if (!authorizeTeamLeadOrReject(id, "operator")) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body || typeof body.cascade !== "boolean") {
 			json({ error: "cascade (boolean) is required", code: "CASCADE_REQUIRED" }, 422);
@@ -1198,9 +1203,10 @@ export async function tryHandleNestedGoalRoute(
 		// (goalId, requestId) — a cross-goal requestId 404s naturally.
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
-		// decide a queued plan mutation.
-		if (!authorizeTeamLeadOrReject(goalId)) return true;
+		// S1: a mutation decision is an OPERATOR verb — the web UI's approval
+		// card drives it, so a verified human cookie is accepted (else
+		// team-lead match).
+		if (!authorizeTeamLeadOrReject(goalId, "operator")) return true;
 		const body = await readBody(req).catch(() => null);
 		const decision = body?.decision;
 		if (decision !== "approve" && decision !== "reject") {
@@ -1270,9 +1276,9 @@ export async function tryHandleNestedGoalRoute(
 		const id = policyMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		// S1: only the goal's team-lead (or a trusted human/UI gateway call) may
-		// change its policy.
-		if (!authorizeTeamLeadOrReject(id)) return true;
+		// S1: policy is an ORCHESTRATION verb — team-lead-only, the cookie does
+		// NOT bypass.
+		if (!authorizeTeamLeadOrReject(id, "orchestration")) return true;
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
 		const goalManager = getGoalManagerForGoal(id);

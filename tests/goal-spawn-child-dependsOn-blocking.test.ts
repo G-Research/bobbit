@@ -56,10 +56,12 @@ async function makeHarness(): Promise<Harness> {
 
 	const goalStore = new GoalStore(stateDir);
 	const cookieStore = new CookieStore(stateDir);
-	// These tests exercise dependsOn scheduling, not authz — authenticate as a
-	// human/UI gateway call by carrying a verified bobbit_session cookie so the
-	// S1 Children-mutation guard allows the spawn-child / integrate-child calls.
-	const humanCookieHeader = `bobbit_session=${cookieStore.mint()}`;
+	// These tests exercise dependsOn scheduling, not authz. spawn-child /
+	// integrate-child are ORCHESTRATION-class verbs (the cookie does NOT
+	// bypass), so authenticate as the goal's team-lead via a matching
+	// X-Bobbit-Spawning-Session header (the teamManager stub below returns
+	// TEAM_LEAD for every goal).
+	const TEAM_LEAD = "tl-deps-blocking";
 	const cfg = new ProjectConfigStore(configDir);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
@@ -118,7 +120,7 @@ async function makeHarness(): Promise<Harness> {
 	const teamManager: any = {
 		startTeam: async (gid: string) => { startTeamCalls.push(gid); return {} as any; },
 		teardownTeam: async () => {},
-		getTeamState: () => undefined,
+		getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }),
 	};
 
 	const sessionManager: any = {
@@ -157,7 +159,7 @@ async function makeHarness(): Promise<Harness> {
 			json: (body, s) => { status = s ?? 200; payload = body; },
 			jsonError: (s, err, extra) => { status = s; payload = { error: String((err as any)?.message ?? err), ...(extra ?? {}) }; },
 		};
-		const req = { method, headers: { cookie: humanCookieHeader }, _body: body } as any as http.IncomingMessage;
+		const req = { method, headers: { "x-bobbit-spawning-session": TEAM_LEAD }, _body: body } as any as http.IncomingMessage;
 		const url = new URL(`http://x${pathname}`);
 		const handled = await tryHandleNestedGoalRoute(req, url, localDeps);
 		if (!handled) throw new Error(`route not handled: ${method} ${pathname}`);

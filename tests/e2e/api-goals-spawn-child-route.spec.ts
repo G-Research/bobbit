@@ -33,39 +33,33 @@ import {
 	gitCwd,
 	rawApiFetch,
 	readE2EToken,
+	seedTeamLeadHeader,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
-let humanCookie = "";
+// The in-process gateway (worker-scoped) — captured in beforeAll so the
+// helpers below can reach `gateway.teamManager` to establish a team-lead.
+let gw: any;
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
-	// S1 authz: the mutating Children endpoints reject a caller that is neither
-	// a verified human (bobbit_session cookie) nor an agent presenting a
-	// team-lead-matching spawning-session header. These route-wiring tests act
-	// as the human/UI operator and assert on the spawnedBy cascade (body /
-	// header tiers), so they must authorize via the COOKIE — not a spawning
-	// header, which would pollute spawnedBy derivation. The gateway mints the
-	// bobbit_session cookie on the first authenticated request; capture it.
-	const probe = await rawApiFetch("/api/goals", { headers: { Authorization: `Bearer ${token}` } });
-	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
-		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
-	humanCookie = setCookies.map((c) => c.split(";")[0]).find((c) => c.startsWith("bobbit_session=")) ?? "";
-	expect(humanCookie, "harness must mint a bobbit_session cookie for the human/UI authz path").not.toBe("");
+	gw = gateway;
 });
 
 /**
- * Build a header set including the auth token plus the human bobbit_session
- * cookie (see beforeAll) so the S1 Children-mutation authz treats these calls
- * as a trusted human/UI gateway operator. Authorization is independent of the
- * spawning-session header, so the spawnedBy-cascade assertions are unaffected.
+ * Build a header set including the auth token. `spawn-child` is an
+ * ORCHESTRATION-class Children verb (the cookie does NOT bypass), so these
+ * route-wiring tests authorize as the parent goal's team-lead — the
+ * spawnedBy-cascade assertions still hold because the cascade reads the same
+ * `X-Bobbit-Spawning-Session` / body fields independently of authz (`body`
+ * tier 1 still beats the team-lead-matching header tier 2). See
+ * `spawnChildRaw` below for the team-lead seeding.
  */
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
 	return {
 		"Content-Type": "application/json",
 		Authorization: `Bearer ${token}`,
-		...(humanCookie ? { Cookie: humanCookie } : {}),
 		...(extra ?? {}),
 	};
 }
@@ -111,21 +105,44 @@ async function readGoal(goalId: string): Promise<any> {
 /**
  * POST to /api/goals/:id/spawn-child via rawApiFetch so we can pass
  * arbitrary headers (and not have the harness mutate the body).
+ *
+ * spawn-child is an ORCHESTRATION verb: it requires an
+ * `X-Bobbit-Spawning-Session` (or `X-Bobbit-Session-Id`) header matching the
+ * parent's authoritative team-lead. We seed the team-lead to match the authz
+ * identity this call will use:
+ *   - if the test supplies an explicit spawning/session header, the team-lead
+ *     is seeded to THAT value (so the cascade assertion is unchanged), and
+ *   - otherwise we inject a deterministic `e2e-tl-<parentId>` header and seed
+ *     the team-lead to match.
+ * Returns the established team-lead id so no-header/no-body cascade tests can
+ * assert spawnedBySessionId resolves to it.
  */
 async function spawnChildRaw(opts: {
 	parentId: string;
 	body: Record<string, unknown>;
 	headers?: Record<string, string>;
-}): Promise<{ status: number; body: any }> {
+}): Promise<{ status: number; body: any; teamLeadId: string }> {
+	const explicit = opts.headers?.["X-Bobbit-Spawning-Session"]
+		?? opts.headers?.["X-Bobbit-Session-Id"];
+	const authzId = (explicit && explicit.trim()) ? explicit.trim() : `e2e-tl-${opts.parentId}`;
+	// Establish the parent's team-lead to match `authzId` (idempotent).
+	const tlHeader = seedTeamLeadHeader(gw.teamManager, opts.parentId, authzId);
+	const headers = authHeaders({
+		// Only inject the authz header when the test didn't supply its own
+		// spawning/session header — otherwise respect the test's header verbatim
+		// so the spawnedBy-cascade tier under test is exercised faithfully.
+		...(explicit ? {} : tlHeader),
+		...opts.headers,
+	});
 	const resp = await rawApiFetch(`/api/goals/${opts.parentId}/spawn-child`, {
 		method: "POST",
-		headers: authHeaders(opts.headers),
+		headers,
 		body: JSON.stringify(opts.body),
 	});
 	const text = await resp.text();
 	let body: any;
 	try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-	return { status: resp.status, body };
+	return { status: resp.status, body, teamLeadId: authzId };
 }
 
 test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
@@ -163,11 +180,13 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 		try {
 			const { status, body } = await spawnChildRaw({
 				parentId: parent.id,
-				// No X-Bobbit-Spawning-Session header.
+				// The test supplies no spawning header; spawnChildRaw injects a
+				// team-lead-matching one for authz, but body.spawnedBySessionId
+				// (tier 1) still wins over that header (tier 2).
 				body: {
 					planId: "plan-body-1",
 					title: "Child via body",
-					spec: "body-fallback child spec: verify body spawnedBySessionId is used when no header is provided.",
+					spec: "body-fallback child spec: verify body spawnedBySessionId (tier 1) wins over the authz header (tier 2).",
 					spawnedBySessionId: sessionId,
 				},
 			});
@@ -394,24 +413,28 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 		}
 	});
 
-	test("absent header AND absent body → child has no spawnedBySessionId", async () => {
+	test("team-lead spawn with no body override → spawnedBySessionId = team-lead (tier 2/4)", async () => {
+		// Under the orchestration authz model a spawn-child is ALWAYS authorized
+		// by a team-lead-matching X-Bobbit-Spawning-Session header, so the
+		// spawnedBy cascade resolves to the team-lead (tier 2 header == team-lead)
+		// when no body field overrides it. (The legacy "null spawnedBy" REST
+		// branch is unreachable now that orchestration requires a header; the
+		// tier-5 fallback is covered by the spawn-child-spawnedby unit test.)
 		const parent = await createParentGoal();
 		try {
-			const { status, body } = await spawnChildRaw({
+			const { status, body, teamLeadId } = await spawnChildRaw({
 				parentId: parent.id,
 				body: {
 					planId: "plan-absent-1",
-					title: "No session-id child",
-					spec: "no session linkage: when neither header nor body provides spawnedBySessionId, leave it unset.",
+					title: "Team-lead-stamped child",
+					spec: "no body override: the authorizing team-lead session id is stamped as spawnedBySessionId via the header tier.",
 				},
 			});
 			expect(status).toBe(201);
-			// Response carries an undefined spawnedBySessionId (legacy callers
-			// without session context fall through to parent-level rendering).
-			expect(body.spawnedBySessionId == null).toBe(true);
+			expect(body.spawnedBySessionId).toBe(teamLeadId);
 
 			const child = await readGoal(body.id);
-			expect(child.spawnedBySessionId == null).toBe(true);
+			expect(child.spawnedBySessionId).toBe(teamLeadId);
 
 			await deleteGoal(body.id);
 		} finally {

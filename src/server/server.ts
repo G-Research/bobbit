@@ -4844,10 +4844,10 @@ async function handleApiRoute(
 		const childId = archiveChildMatch[2];
 		// Subgoals feature gate — archive-child is a Children mutation.
 		if (!requireSubgoalsEnabled()) return;
-		// S1: server-side Children authorization (same semantics as every
-		// other mutating Children endpoint — see children-mutation-authz.ts).
-		// Human cookie → allow; agent caller must present a spawning-session
-		// header matching the parent goal's authoritative team-lead.
+		// S1: archive-child is an OPERATOR Children verb (the web UI drives it),
+		// so a verified human cookie is accepted; otherwise an agent caller must
+		// present a spawning-session header matching the parent goal's
+		// authoritative team-lead. See children-mutation-authz.ts.
 		{
 			const h = req.headers as Record<string, string | string[] | undefined>;
 			const readHeader = (n: string): string | undefined => {
@@ -4856,6 +4856,7 @@ async function handleApiRoute(
 				return typeof s === "string" && s.trim() ? s.trim() : undefined;
 			};
 			const authz = authorizeChildrenMutation({
+				mutationClass: "operator",
 				isHumanOperator: cookieTryAuth(req, cookieStore!),
 				callerSessionId: readHeader("x-bobbit-spawning-session") ?? readHeader("x-bobbit-session-id"),
 				teamLeadSessionId: teamManager.getTeamState(parentId)?.teamLeadSessionId,

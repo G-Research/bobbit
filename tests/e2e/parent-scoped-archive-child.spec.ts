@@ -2,11 +2,12 @@
  * `DELETE /api/goals/:parentId/archive-child/:childId` — parent-scoped
  * archive route.
  *
- * This endpoint is a MUTATING Children operation and is guarded by the same
- * S1 server-side authorization as every other Children mutation
- * (`spawn-child`, `integrate-child`, `pause`, `resume`, mutation `decision`,
- * `policy`, plan `PATCH`). See `src/server/auth/children-mutation-authz.ts`
- * for the full threat model and decision table.
+ * This endpoint is an OPERATOR-class Children mutation (the web UI drives it),
+ * so the verified `bobbit_session` cookie authorizes it; otherwise the same
+ * team-lead match as every other Children mutation applies. See
+ * `src/server/auth/children-mutation-authz.ts` for the full threat model and
+ * decision tables. (The spawn-child setup calls used to create the child are
+ * ORCHESTRATION verbs and are authorized as the parent's team-lead.)
  *
  * Coverage:
  *   1. Authz — agent caller with neither a verified `bobbit_session` cookie
@@ -14,10 +15,9 @@
  *      absent-header bypass is closed), and the child is NOT archived.
  *   2. Authz — a verified human/UI operator (bobbit_session cookie) is
  *      allowed past the gate and the child is archived.
- *   3. Authz — an agent caller presenting a spawning-session header on a goal
- *      with no established team-lead is rejected 403 NOT_TEAM_LEAD (a teamless
- *      goal has no legitimate agent caller; only a human operator may mutate
- *      it) and the child is NOT archived.
+ *   3. Authz — an agent caller presenting a spawning-session header that does
+ *      NOT match the parent's authoritative team-lead is rejected 403
+ *      NOT_TEAM_LEAD and the child is NOT archived.
  *   4. Relationship — once authorized, a target that is NOT a direct child of
  *      the parent is rejected 403 NOT_DIRECT_CHILD (authenticating
  *      legitimately via the human cookie so the request reaches the
@@ -33,18 +33,24 @@ import {
 	gitCwd,
 	rawApiFetch,
 	readE2EToken,
+	seedTeamLeadHeader,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 let token: string;
 let humanCookie = "";
+// In-process gateway (worker-scoped) — used to establish a team-lead for the
+// ORCHESTRATION-class spawn-child setup calls (archive-child itself is an
+// OPERATOR verb that the human cookie still authorizes).
+let gw: any;
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
-	// The S1 Children-mutation authz treats a request carrying the verified
-	// `bobbit_session` cookie as a trusted human/UI operator. The gateway
-	// mints the cookie on the first authenticated request; capture it so the
-	// "human → allow" assertions can authorize via the cookie.
+	gw = gateway;
+	// archive-child is an OPERATOR Children verb: the S1 authz treats a request
+	// carrying the verified `bobbit_session` cookie as a trusted human/UI
+	// operator. The gateway mints the cookie on the first authenticated
+	// request; capture it so the "human → allow" assertions can authorize.
 	const probe = await rawApiFetch("/api/goals", { headers: { Authorization: `Bearer ${token}` } });
 	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
 		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
@@ -91,11 +97,16 @@ async function createReadyGoal(label: string): Promise<{ id: string; repoPath?: 
 	return settled;
 }
 
-/** Spawn a DIRECT child of `parentId` via the cookie-authorized human path. */
+/**
+ * Spawn a DIRECT child of `parentId`. spawn-child is an ORCHESTRATION verb
+ * (cookie does NOT bypass), so authorize as the parent's team-lead via a
+ * seeded matching X-Bobbit-Spawning-Session header.
+ */
 async function spawnChild(parentId: string, planId: string): Promise<string> {
+	const tlHeader = seedTeamLeadHeader(gw.teamManager, parentId);
 	const resp = await rawApiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
-		headers: humanHeaders(),
+		headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...tlHeader },
 		body: JSON.stringify({
 			planId,
 			title: `archive-child target ${planId}`,
@@ -180,12 +191,12 @@ test.describe("DELETE /api/goals/:parentId/archive-child/:childId — Children a
 		}
 	});
 
-	test("agent caller with spawning header on team-lead-less goal → 403 NOT_TEAM_LEAD (child preserved)", async () => {
+	test("agent caller with a non-matching spawning header → 403 NOT_TEAM_LEAD (child preserved)", async () => {
 		const parent = await createReadyGoal("archive-child agent parent");
 		const childId = await spawnChild(parent.id, "plan-authz-agent");
 		try {
-			// A teamless goal has no legitimate agent caller, so a forged
-			// spawning-session header must NOT authorize the mutation.
+			// A forged spawning-session header that does not equal the parent's
+			// authoritative team-lead must NOT authorize the operator mutation.
 			const { status, body } = await archiveChildRaw({
 				parentId: parent.id,
 				childId,
