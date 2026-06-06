@@ -177,6 +177,56 @@ describe("computeTreeCost", () => {
 		assert.ok(!result.breakdown.find(e => e.goalId === "STRAY"), "stray must be excluded");
 	});
 
+	it("cache invalidates when a deep subgoal descendant changes (C3: signature walks parentGoalId subtree, not rootGoalId filter)", () => {
+		const tracker = freshTracker();
+		_resetTreeCostCacheForTesting(tracker);
+		// parent → child → grandchild. Descendants keep the TOP-LEVEL root id
+		// ("P") in `rootGoalId`, NOT the child's id — exactly the production
+		// shape for a subgoal subtree. We request tree-cost for the CHILD.
+		// Stamp goalId at record time so the no-resolver path (the one that
+		// actually caches) is exercised; record everything up-front so the
+		// generation tick stays constant across all three calls and cache
+		// invalidation depends SOLELY on the tree signature.
+		tracker.recordUsage("s-c", { cost: 0.02, inputTokens: 200 }, "C");
+		tracker.recordUsage("s-gc", { cost: 0.04, inputTokens: 400 }, "GC");
+		tracker.recordUsage("s-ggc", { cost: 0.08, inputTokens: 800 }, "GGC");
+
+		const goals: G[] = [
+			{ id: "P", title: "Parent", createdAt: 1 },
+			{ id: "C", title: "Child", createdAt: 2, parentGoalId: "P", rootGoalId: "P" },
+			{ id: "GC", title: "Grandchild", createdAt: 3, parentGoalId: "C", rootGoalId: "P" },
+		];
+
+		const r1 = computeTreeCost("C", goals, tracker);
+		const r2 = computeTreeCost("C", goals, tracker);
+		// Same shape + generation + no resolver → cached object returned.
+		assert.equal(r1, r2, "second call within same generation returns the cached object");
+		assert.equal(r1.totalCostUsd, 0.06, "child subtree sums child + grandchild");
+		assert.equal(r1.breakdown.length, 2);
+
+		// Add a NEW great-grandchild under GC. It keeps rootGoalId "P" — the
+		// case the old rootGoalId-equality signature missed entirely (it only
+		// fingerprinted goals whose id/rootGoalId equalled "C", i.e. just C).
+		// No recordUsage between calls ⇒ generation is unchanged, so a stale
+		// cache could ONLY be avoided by the signature noticing the new node.
+		const goals2: G[] = [
+			...goals,
+			{ id: "GGC", title: "Great-grandchild", createdAt: 4, parentGoalId: "GC", rootGoalId: "P" },
+		];
+		const r3 = computeTreeCost("C", goals2, tracker);
+		assert.notEqual(r3, r1, "tree-shape change in a deep descendant must invalidate the cache");
+		assert.equal(r3.breakdown.length, 3, "new great-grandchild now appears in the breakdown");
+		assert.equal(r3.totalCostUsd, 0.14, "new great-grandchild cost is rolled up");
+		assert.ok(r3.breakdown.find(e => e.goalId === "GGC"), "GGC present in breakdown");
+
+		// Archiving an existing descendant must ALSO invalidate (archived flag
+		// is part of the fingerprint and feeds the plan-tab archived pill).
+		const goals3: G[] = goals2.map(g => g.id === "GC" ? { ...g, archived: true } : g);
+		const r4 = computeTreeCost("C", goals3, tracker);
+		assert.notEqual(r4, r3, "archiving a descendant must invalidate the cache");
+		assert.equal(r4.totalCostUsd, 0.14, "archived descendant cost still counted");
+	});
+
 	it("unknown root goal → returns empty breakdown without throwing", () => {
 		const tracker = freshTracker();
 		_resetTreeCostCacheForTesting(tracker);
