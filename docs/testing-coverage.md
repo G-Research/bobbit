@@ -2,6 +2,10 @@
 
 Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md). For opt-in video capture on top of browser E2E, see [testing-tier-2-5.md](testing-tier-2-5.md).
 
+## Phase invariant
+
+Every test file under `tests/` except `tests/manual-integration/**` runs in exactly one phase — `unit` (node logic via `tsx --test` + `file://` browser fixtures via `tests/playwright.config.ts`) or `e2e` (`playwright-e2e.config.ts`). The only gate-exempt path is `tests/manual-integration/**` (real LLM / Docker). [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) pins this: a test claimed by zero phases (orphan) or two (double-claim), or one that breaks the `*.test.ts`⇒node / `*.spec.ts`⇒Playwright runner convention, fails the guard. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
+
 ## Prompt interactions
 
 User stories PI-01 through PI-25 (+ sub-stories) are defined in `userstories/prompt-interactions.md`.

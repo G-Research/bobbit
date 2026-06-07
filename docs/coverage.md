@@ -33,9 +33,7 @@ After running `test:coverage`:
 
 ### E2E Coverage
 
-The `playwright-e2e-coverage.config.ts` config sets the `NODE_V8_COVERAGE` environment variable on the gateway server process. V8 natively writes coverage data to JSON files in `coverage/tmp/` when the process exits.
-
-A graceful shutdown teardown (`tests/e2e/e2e-coverage-teardown.ts`) sends `POST /api/shutdown` to the gateway before Playwright kills it, ensuring V8 flushes all coverage data.
+`test:coverage` runs the canonical `playwright-e2e.config.ts` `api` project with `NODE_V8_COVERAGE=coverage/tmp` set in the environment. The `api` project runs the gateway **in-process** (same Node process as the Playwright worker), so V8 natively writes that process's coverage to `coverage/tmp/` on exit — no separate coverage-only config or spawned-server teardown is needed. (The previous standalone `playwright-e2e-coverage.config.ts` was retired when the Playwright configs were collapsed; see [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).)
 
 ### Unit Test Coverage
 
@@ -47,7 +45,7 @@ The `test:coverage` script:
 
 1. Builds the server (`npm run build:server`)
 2. Cleans `coverage/` directory
-3. Runs E2E tests via Playwright — V8 writes coverage to `coverage/tmp/`
+3. Runs the e2e `api` project via `npm run test:e2e:run -- --project api` with `NODE_V8_COVERAGE` set — V8 writes coverage to `coverage/tmp/`
 4. Runs unit tests via c8 — writes additional coverage to `coverage/tmp/`
 5. Runs `c8 report` — merges all data in `coverage/tmp/` into HTML + lcov + text reports
 

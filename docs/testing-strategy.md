@@ -1,16 +1,38 @@
 # Testing Strategy — Assessment & Path Forward
 
+## The phase invariant (read this first)
+
+Bobbit runs its tests through **workflow gates**, not `npm test`. The implementation gate runs four command steps against the goal branch — `build`, `check`, `unit`, `e2e` — whose commands live in `.bobbit/config/project.yaml`. Whatever the `unit:` / `e2e:` commands execute IS the test suite; anything they don't run is invisible and lets failures slip onto `master`.
+
+To make that a no-brainer, exactly one rule is enforced: **every test file under `tests/` except those under `tests/manual-integration/**` runs in exactly one phase — `unit` or `e2e`.** Three buckets, two runners in the unit phase:
+
+| Bucket | What | Runner / source of truth | Gate command |
+|--------|------|---------------------------|--------------|
+| **unit · node** | fast logic tests, no real LLM | `tsx --test` over `NODE_UNIT_GLOBS` in [`scripts/test-phase-config.mjs`](../scripts/test-phase-config.mjs) (`tests/*.test.ts` + `tests/contract/*.test.ts`) | `unit:` → `npm run test:unit` |
+| **unit · browser** | `file://` component fixtures, no server | `tests/playwright.config.ts` (`tests/*.spec.ts`, minus `e2e/`, `manual-integration/`) | `unit:` → `npm run test:unit` |
+| **e2e** | all remaining non-LLM integration | `playwright-e2e.config.ts` (union across its `api` / `api-realpush` / `browser` projects) | `e2e:` → `npx playwright test --config playwright-e2e.config.ts` |
+| **manual-integration** *(gate-exempt)* | real LLM / Docker | `playwright-manual.config.ts` | `npm run test:manual` only |
+
+`npm run test:unit` runs the two unit runners **concurrently** via [`scripts/run-unit.mjs`](../scripts/run-unit.mjs), splitting the cores between them (node `--test-concurrency=N/2`, browser `--workers=N/2`) so they run genuinely in parallel without oversubscribing the box — full concurrency starves slow browser fixtures past their 15s timeout.
+
+**Convention purity**: `*.test.ts` ⇒ node:test runner; `*.spec.ts` ⇒ Playwright. A `*.test.ts` must never import `@playwright/test`; a `*.spec.ts` must never import `node:test`. This is what keeps the two unit runners cleanly separable.
+
+**The guard**: [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) enumerates every `tests/**/*.{test,spec}.ts`, derives the bucket globs from the same configs/constant the runners use, and fails if any file is claimed by zero phases (orphan) or more than one (double-claim), or violates the runner convention. There is **no fourth bucket**: a spec that some other config (e.g. the manual `docker` project) happens to collect but that does not physically live under `tests/manual-integration/` is treated as an orphan — which is why the real-Docker and real-LLM specs physically live under `tests/manual-integration/` rather than under `tests/e2e/` with an ignore.
+
+**Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~3.4k tests, and at a half-core split (`--test-concurrency=12`) it is the long pole at ~90s while the browser fixtures finish at ~76s. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`.
+
 ## Current State
 
 ### Test Inventory
 
 | Layer | Files | Tests | Runtime | Parallelism |
 |-------|-------|-------|---------|-------------|
-| Unit (file:// fixtures + Node) | ~105 | ~625 | <30s | Full (Playwright workers) |
-| API E2E (in-process gateway) | 69 | ~438 | ~60s | 4 workers |
-| Browser E2E (spawned gateway) | ~32 | ~140 | ~90s | 3 workers, spec-serial |
-| Manual integration (real agent + Docker) | 1 | 8 serial steps | ~5 min | **None** |
-| **Total** | **~207** | **~1,211** | **~3 min + 5 min manual** | |
+| Unit · node (node:test logic) | ~340 | ~3.4k | long pole of the ~90s unit wall | `--test-concurrency=N/2` |
+| Unit · browser (file:// fixtures) | ~120 | ~1.3k | finishes ~76s within the unit wall | `--workers=N/2` |
+| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5 min (incl. retries) | api 4 / browser 3 workers |
+| Manual integration (real agent/LLM + Docker) | ~11 | serial | ~5 min | **None** |
+
+(Counts are order-of-magnitude; the authoritative membership is the phase-invariant guard, not this table.)
 
 ### What Each Layer Actually Tests
 
@@ -520,15 +542,9 @@ npm run test:manual                 # Headless, API assertions only (~5 min)
 SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 ```
 
-### Real-LLM e2e lane (`npm run test:e2e:real`)
+### Real-LLM tests live under `tests/manual-integration/`
 
-A separate Playwright config — `tests/playwright-e2e.config.ts` — spawns an isolated gateway on port 3097 with `BOBBIT_DIR=.e2e-real-bobbit` for tests that need a real LLM. Currently exercised by `tests/compaction.spec.ts`; the manual-integration counterpart for the same feature is `tests/manual-integration/compaction-pressure.spec.ts`. See [compaction.md](compaction.md) for the feature-level walkthrough.
-
-```bash
-npm run test:e2e:real
-```
-
-This lane is opt-in (needs an API key) and is **not** part of `npm run test:e2e`.
+Any test that needs a real LLM call lives under `tests/manual-integration/` and runs only via `npm run test:manual` (real agent / Docker). There is **no** separate real-LLM e2e config or `test:e2e:real` script — those were retired so the only gate-exempt path is `tests/manual-integration/**` (see the phase invariant at the top of this doc). Compaction is covered there by `tests/manual-integration/compaction.spec.ts` (explicit `/compact`) and `tests/manual-integration/compaction-pressure.spec.ts` (auto-compaction). Both self-bootstrap an isolated gateway in-spec. See [compaction.md](compaction.md) for the feature-level walkthrough.
 
 **Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
 
