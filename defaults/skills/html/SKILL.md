@@ -22,8 +22,15 @@ full surface-selection rule and complete token reference.
 <link rel="stylesheet" href="/src/ui/app.css">
 <style>
   /* Defensive fallbacks for the bridge / HMR race — overridden by the
-     bridge whenever the parent has these tokens. Always include the
-     chart and semantic ones if you reference them. */
+     bridge whenever the parent has these tokens. Include the chart and
+     semantic ones if you reference them.
+     NEVER add surface tokens (--background, --foreground, --muted-foreground,
+     --card, --border) here, NEVER alias them with a single-mode fallback like
+     `--muted: var(--muted-foreground, #9aa0ad)`, and NEVER name a custom prop
+     after a real token (`--muted` is a real surface-bg token — the live bridge
+     mirrors it inline and overwrites your alias, making text light-on-light in
+     the preview pane). Reference surface tokens directly, or alias only with a
+     non-colliding name (--bg, --fg, --c1). */
   :root {
     --chart-1: oklch(0.52 0.18 250);
     --chart-2: oklch(0.55 0.16 60);
@@ -177,7 +184,12 @@ Full Tailwind is available. Use utility classes directly:
 2. **Always include `<link rel="stylesheet" href="/src/ui/app.css">`** for the
    design system.
 3. **Use CSS variables for all colours.** Never hardcode hex/rgb. Never
-   define your own `:root` palette beyond the defensive fallback block above.
+   define your own `:root` palette beyond the chart/semantic fallback block
+   above. **Never alias a surface token with a single-mode fallback** (e.g.
+   `--muted: var(--muted-foreground, #9aa0ad)`) — reference
+   `var(--muted-foreground)` directly, or muted text goes invisible when the
+   theme bridge can't run. Keep muted text on `--background`/`--card`, never on
+   a tinted/coloured surface.
 4. **Make it interactive.** Add event handlers, state, filtering, sorting.
    The user should *explore*, not just look.
 5. **Iterate atomically.** Re-call `preview_open` with the full new HTML;

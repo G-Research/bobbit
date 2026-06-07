@@ -11,7 +11,7 @@ preview_open(html="<link rel='stylesheet' href='/src/ui/app.css'><!-- your HTML 
 ```
 
 - **Reference real app CSS** — the preview iframe is same-origin with the Vite dev server, so `<link rel="stylesheet" href="/src/ui/app.css">` gives pixel-accurate mockups.
-- **Use Bobbit theme tokens** — use `var(--background)`, `var(--foreground)`, `var(--card)`, `var(--border)`, `var(--primary)`, `--chart-*`, and semantic status tokens instead of hardcoded colours unless you are matching source CSS exactly.
+- **Use Bobbit theme tokens** — use `var(--background)`, `var(--foreground)`, `var(--card)`, `var(--border)`, `var(--primary)`, `--chart-*`, and semantic status tokens instead of hardcoded colours unless you are matching source CSS exactly. **Reference them directly** — never alias a surface token with a single-mode fallback (`--muted: var(--muted-foreground, #9aa0ad)`) and never put surface tokens in your own `:root{}`; both make muted text invisible in standalone tabs / the bridge race.
 - **Expect content-hash dedupe** — repeated identical preview bytes may select/update the existing live preview tab instead of creating another historical tab. Change the content when you need a distinct restorable mockup.
 - **Add interactive controls** (dropdowns, sliders, toggles) so the user can explore variants without asking you to regenerate.
 - **Do not render preview HTML inline in the chat.** The user sees it in the side panel. Just describe what changed.

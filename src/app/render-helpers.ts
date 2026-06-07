@@ -1023,7 +1023,7 @@ export function renderSessionRow(session: GatewaySession) {
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session))}
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
-				<div class="${mobile ? "flex items-center gap-1 min-w-0" : ""} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${preparing ? html`<span class="shrink-0 text-muted-foreground/60 italic ml-1" style="font-size: 0.8333em;">preparing…</span>` : ""}${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+				<div class="${mobile ? "flex items-center gap-1 min-w-0" : "truncate min-w-0"} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${preparing ? html`<span class="shrink-0 text-muted-foreground/60 italic ml-1" style="font-size: 0.8333em;">preparing…</span>` : ""}${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
 			</div>
 			${mobile
 				? buttons

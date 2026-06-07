@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bobbit — Codebase Size Report</title>
+<style>
+  /* Reference the real theme tokens directly. The preview route injects a
+     contrast-safe :root/.dark snapshot and the live bridge mirrors the app's
+     tokens, so NEVER redeclare surface tokens (--background, --foreground,
+     --card, --muted-foreground, --border) here — that overrides the snapshot
+     and forces flat, off-theme colours. Only chart fallbacks (single-mode
+     mid-tones, legible in both modes) belong here. */
+  :root {
+    --bg: var(--background);
+    --fg: var(--foreground);
+    --c1: var(--chart-1, #6ea8fe);
+    --c2: var(--chart-2, #5ed4a8);
+    --c3: var(--chart-3, #f0b450);
+    --c4: var(--chart-4, #d98cf0);
+    --c5: var(--chart-5, #f08a8a);
+    --c6: var(--chart-6, #7ad0d8);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 28px;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  .sub { color: var(--muted-foreground); margin: 0 0 24px; font-size: 13px; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 26px; }
+  .kpi {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .kpi .v { font-size: 24px; font-weight: 650; letter-spacing: -0.5px; }
+  .kpi .l { color: var(--muted-foreground); font-size: 12px; margin-top: 2px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 22px; margin-bottom: 22px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 16px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 9px 0; }
+  .row .name { width: 200px; flex: none; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  .track { flex: 1; height: 22px; background: color-mix(in oklch, var(--fg) 7%, transparent); border-radius: 5px; overflow: hidden; }
+  .fill { height: 100%; border-radius: 5px; }
+  .val { width: 150px; flex: none; text-align: right; font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted-foreground); }
+  .val b { color: var(--fg); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted-foreground); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .tot td { font-weight: 650; border-top: 2px solid var(--border); border-bottom: none; }
+  .barcell { display: flex; align-items: center; gap: 8px; }
+  .pct { color: var(--muted-foreground); font-size: 12px; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 760px) { .kpis { grid-template-columns: repeat(2,1fr); } .split { grid-template-columns: 1fr; } .row .name { width: 130px; } .val { width: 110px; } }
+  .donut-wrap { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+  .legend { display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
+  .legend .li { display: flex; align-items: center; gap: 8px; }
+  .legend .li .lv { color: var(--muted-foreground); margin-left: auto; padding-left: 18px; font-variant-numeric: tabular-nums; }
+  footer { color: var(--muted-foreground); font-size: 12px; margin-top: 8px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Bobbit — Codebase Size Report</h1>
+  <p class="sub">By category, measured in lines across git-tracked text files (binaries &amp; node_modules excluded). Generated 2026-06-07.</p>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v">478,255</div><div class="l">Total lines</div></div>
+    <div class="kpi"><div class="v">1,936</div><div class="l">Text files</div></div>
+    <div class="kpi"><div class="v">185,148</div><div class="l">Production code</div></div>
+    <div class="kpi"><div class="v">191,476</div><div class="l">Test code</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Lines by top-level category</h2>
+    <div id="bars"></div>
+  </div>
+
+  <div class="split">
+    <div class="card">
+      <h2>Production vs. Test vs. Everything else</h2>
+      <div class="donut-wrap">
+        <svg id="donut" width="180" height="180" viewBox="0 0 180 180"></svg>
+        <div class="legend" id="donut-legend"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Test : Production ratio</h2>
+      <div class="donut-wrap">
+        <svg id="donut2" width="180" height="180" viewBox="0 0 180 180"></svg>
+        <div class="legend" id="donut2-legend"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Full breakdown</h2>
+    <table id="tbl">
+      <thead><tr><th>Category</th><th>Files</th><th>Lines</th><th>Share</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <footer>Lines counted by newline boundaries; files with NUL bytes treated as binary and skipped.</footer>
+</div>
+
+<script>
+const data = [
+  { name: "Test: unit/other",        files: 495, lines: 91481, color: "var(--c5)", group: "Tests" },
+  { name: "Prod: Web UI",            files: 259, lines: 98773, color: "var(--c1)", group: "Production" },
+  { name: "Prod: Server",            files: 216, lines: 85258, color: "var(--c2)", group: "Production" },
+  { name: "Test: E2E",               files: 357, lines: 74836, color: "var(--c4)", group: "Tests" },
+  { name: "Docs",                    files: 194, lines: 60430, color: "var(--c3)", group: "Other" },
+  { name: "Config / Data",           files: 134, lines: 25998, color: "var(--c6)", group: "Other" },
+  { name: "Test: fixtures/reports",  files: 194, lines: 25159, color: "var(--c5)", group: "Tests" },
+  { name: "Assets / Scripts",        files: 43,  lines: 10460, color: "var(--c6)", group: "Other" },
+  { name: "Other (root, misc)",      files: 31,  lines: 4743,  color: "var(--muted-foreground)", group: "Other" },
+  { name: "Prod: Other src",         files: 13,  lines: 1117,  color: "var(--c1)", group: "Production" },
+];
+const TOTAL = data.reduce((s,d)=>s+d.lines,0);
+const fmt = n => n.toLocaleString("en-US");
+const sorted = [...data].sort((a,b)=>b.lines-a.lines);
+const max = sorted[0].lines;
+
+// horizontal bars
+document.getElementById("bars").innerHTML = sorted.map(d => `
+  <div class="row">
+    <div class="name"><span class="dot" style="background:${d.color}"></span>${d.name}</div>
+    <div class="track"><div class="fill" style="width:${(d.lines/max*100).toFixed(1)}%;background:${d.color}"></div></div>
+    <div class="val"><b>${fmt(d.lines)}</b> &nbsp;${(d.lines/TOTAL*100).toFixed(1)}%</div>
+  </div>`).join("");
+
+// table
+document.querySelector("#tbl tbody").innerHTML = sorted.map(d => `
+  <tr>
+    <td><span class="barcell"><span class="dot" style="background:${d.color}"></span>${d.name}</span></td>
+    <td>${fmt(d.files)}</td>
+    <td>${fmt(d.lines)}</td>
+    <td class="pct">${(d.lines/TOTAL*100).toFixed(1)}%</td>
+  </tr>`).join("") + `
+  <tr class="tot"><td>Total</td><td>${fmt(data.reduce((s,d)=>s+d.files,0))}</td><td>${fmt(TOTAL)}</td><td>100%</td></tr>`;
+
+function drawDonut(svgId, legendId, slices) {
+  const total = slices.reduce((s,x)=>s+x.v,0);
+  const cx=90, cy=90, r=64, sw=26;
+  let a0 = -Math.PI/2;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById(svgId);
+  slices.forEach(s => {
+    const frac = s.v/total;
+    const a1 = a0 + frac*Math.PI*2;
+    const large = frac > 0.5 ? 1 : 0;
+    const x0 = cx + r*Math.cos(a0), y0 = cy + r*Math.sin(a0);
+    const x1 = cx + r*Math.cos(a1), y1 = cy + r*Math.sin(a1);
+    const p = document.createElementNS(ns,"path");
+    p.setAttribute("d", `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`);
+    p.setAttribute("fill","none");
+    p.setAttribute("stroke", s.color);
+    p.setAttribute("stroke-width", sw);
+    svg.appendChild(p);
+    a0 = a1;
+  });
+  const t = document.createElementNS(ns,"text");
+  t.setAttribute("x",cx); t.setAttribute("y",cy-4);
+  t.setAttribute("text-anchor","middle"); t.setAttribute("fill","var(--fg)");
+  t.setAttribute("font-size","20"); t.setAttribute("font-weight","650");
+  t.textContent = fmt(total);
+  svg.appendChild(t);
+  const t2 = document.createElementNS(ns,"text");
+  t2.setAttribute("x",cx); t2.setAttribute("y",cy+14);
+  t2.setAttribute("text-anchor","middle"); t2.setAttribute("fill","var(--muted-foreground)");
+  t2.setAttribute("font-size","11");
+  t2.textContent = "lines";
+  svg.appendChild(t2);
+  document.getElementById(legendId).innerHTML = slices.map(s => `
+    <div class="li"><span class="dot" style="background:${s.color}"></span>${s.label}
+      <span class="lv">${fmt(s.v)} · ${(s.v/total*100).toFixed(0)}%</span></div>`).join("");
+}
+
+const byGroup = g => data.filter(d=>d.group===g).reduce((s,d)=>s+d.lines,0);
+drawDonut("donut","donut-legend",[
+  { label:"Production", v: byGroup("Production"), color:"var(--c1)" },
+  { label:"Tests",      v: byGroup("Tests"),      color:"var(--c5)" },
+  { label:"Docs & other", v: byGroup("Other"),    color:"var(--c3)" },
+]);
+drawDonut("donut2","donut2-legend",[
+  { label:"Production code", v: byGroup("Production"), color:"var(--c2)" },
+  { label:"Test code",       v: byGroup("Tests"),      color:"var(--c4)" },
+]);
+</script>
+</body>
+</html>

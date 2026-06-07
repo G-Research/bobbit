@@ -4693,6 +4693,19 @@ async function handleApiRoute(
 			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
 				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
 				: undefined;
+			// Root-only orchestration policy. Only honoured for top-level goals
+			// (no parentGoalId); children inherit the root's values. Mirrors the
+			// validation in PATCH /api/goals/:id/policy.
+			const isRootGoalCreate = parentGoalId === undefined;
+			let effDivergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
+			if (isRootGoalCreate && (body?.divergencePolicy === "strict" || body?.divergencePolicy === "balanced" || body?.divergencePolicy === "autonomous")) {
+				effDivergencePolicy = body.divergencePolicy;
+			}
+			let effMaxConcurrentChildren: number | undefined;
+			if (isRootGoalCreate && typeof body?.maxConcurrentChildren === "number" && Number.isFinite(body.maxConcurrentChildren)) {
+				const n = Math.floor(body.maxConcurrentChildren);
+				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
+			}
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -4705,6 +4718,8 @@ async function handleApiRoute(
 				inlineRoles: bodyInlineRoles,
 				subgoalsAllowed: effSubgoalsAllowed,
 				maxNestingDepth: effMaxNestingDepth,
+				divergencePolicy: effDivergencePolicy,
+				maxConcurrentChildren: effMaxConcurrentChildren,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {

@@ -229,6 +229,20 @@ test.describe("Subgoals (Experimental) toggle", () => {
 		await expect(
 			page.locator("[data-testid='goal-form-max-depth']"),
 		).toBeVisible({ timeout: 10_000 });
+
+		// For a top-level (root) goal that allows subgoals, the root-only
+		// orchestration controls also appear: concurrency cap + divergence policy.
+		await expect(
+			page.locator("[data-testid='goal-form-max-concurrent-children']"),
+		).toBeVisible({ timeout: 10_000 });
+		await expect(
+			page.locator("[data-testid='goal-form-divergence-policy']"),
+		).toBeVisible({ timeout: 10_000 });
+		// Picking 'strict' marks it pressed.
+		await page.locator("[data-testid='goal-form-divergence-strict']").click();
+		await expect(
+			page.locator("[data-testid='goal-form-divergence-strict']"),
+		).toHaveAttribute("aria-pressed", "true", { timeout: 5_000 });
 	});
 
 	test("proposal panel hides the per-goal subgoal controls when subgoals are OFF/unset", async ({ page }) => {

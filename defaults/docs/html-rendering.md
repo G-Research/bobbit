@@ -209,6 +209,107 @@ semantic tokens you reference — never for surface tokens (`--background`,
 `--foreground`, `--card`, etc.) which the bridge ships universally and which
 need to track theme switches exactly.
 
+## The #1 contrast bug: invisible muted text
+
+By far the most common rendered-output defect is **muted text that disappears**
+(`--muted-foreground`, captions, `.sub`, table headers). The real theme values
+are WCAG-safe in both modes — so when text vanishes, *your CSS caused it*, not
+the theme. Three root causes, one rule each:
+
+### ❌ Never reuse a real theme-token name for your own alias
+
+The single most insidious version of this bug. `--muted` is a **real Bobbit
+token** — a muted *surface background* (a light ~0.9-lightness colour in light
+mode), **not** a text colour. If you alias it to a foreground:
+
+```css
+/* WRONG — --muted is already a real token (a surface bg). */
+:root { --muted: var(--muted-foreground); }
+.sub  { color: var(--muted); }   /* you THINK this is grey text… */
+```
+
+the live bridge mirrors the real `--muted` (the light surface) as an **inline**
+style on the iframe root, and inline styles **beat your `:root` alias**. So
+`color: var(--muted)` resolves to the light surface colour → light-on-light →
+invisible. This only manifests with the live bridge (the **preview pane**);
+standalone / inline render has no bridge to clobber the alias, so it looks fine
+— *the exact "fine inline, broken in preview" signature.*
+
+**Rule: never name a custom property after a real token** (`--muted`,
+`--card`, `--border`, `--accent`, `--ring`, `--primary`, `--secondary`,
+`--popover`, …). Either reference the real token directly
+(`color: var(--muted-foreground)`) or, for a genuine alias, pick a name that
+cannot collide (`--c1`, `--bg`, `--fg`, `--mut-fg`). The bridge mirrors *every*
+real `--*`, so any collision is silently overwritten.
+
+### ❌ Never alias a surface token with a single-mode fallback
+
+This is the trap that produces invisible text:
+
+```css
+/* WRONG — freezes one mode. The fallback hexes are picked for DARK mode,
+   but nothing guarantees the page renders in dark mode. */
+:root {
+  --bg:    var(--background, #14151a);   /* dark fallback */
+  --muted: var(--muted-foreground, #9aa0ad); /* dark-grey fallback */
+}
+body { background: var(--bg); }
+.sub  { color: var(--muted); }
+```
+
+When the live bridge can't run — **"open in new tab" standalone previews**
+(the bridge early-returns because `parent === window`) or the **HMR/sandbox
+race** — those fallbacks are used verbatim. A dark-grey fallback on a light
+surface (or vice-versa) is invisible, because the bg fallback and the fg
+fallback were chosen for *different* modes.
+
+**Rule: reference surface tokens directly. Do not create aliases like
+`--muted: var(--muted-foreground, #hex)`.** Write `color: var(--muted-foreground)`
+and let the bridge + the server-injected `:root`/`.dark` snapshot supply a
+mode-correct, contrast-safe value:
+
+```css
+/* RIGHT — no alias, no single-mode hex. */
+body { background: var(--background); color: var(--foreground); }
+.sub  { color: var(--muted-foreground); }
+```
+
+**Do not add a surface-token fallback at all for anything rendered inside
+Bobbit** (`preview_open`, inline `.html` render). Both surfaces inject a
+complete, contrast-correct, *palette-matched* `:root`/`.dark` snapshot, and the
+live bridge mirrors the app's tokens on top. A standalone fallback can only
+make things worse here — see the next rule. The single exception is an HTML
+file that will *only ever* be opened directly from disk **outside** Bobbit
+(never via `preview_open` or inline render); only then supply a **matched
+`:root` + `.dark` pair** so light and dark stay internally consistent (never a
+lone single-mode hex). If there is any chance the file is previewed in Bobbit,
+omit it.
+
+### ❌ Never override the snapshot from your own `:root{}`
+
+The server injects a complete, contrast-correct, palette-matched `:root`/`.dark`
+theme snapshot *before* your `<style>`. A surface token you redeclare in your
+own `:root{}`/`.dark{}` block comes **later in source order at equal
+specificity, so it silently wins** — replacing the real palette (e.g.
+`--background: oklch(0.935 0.012 148)` for the forest theme) with your flat
+hardcode (`#ffffff`). The inline-render surface masks this (its live bridge
+sets values *inline*, which beat your `:root`), but the preview pane relies on
+the snapshot, so the **same document renders correctly inline yet off-theme /
+broken in the preview pane.** Keep your `:root{}` block limited to **chart and
+semantic tokens only** (see previous section); never put `--background`,
+`--foreground`, `--card`, `--muted-foreground`, or `--border` in `:root`/`.dark`.
+Reference them directly with `var(--…)` and let the snapshot + bridge supply
+the values.
+
+### Self-check before you ship
+
+You cannot see the rendered pixels. Before each `preview_open`, mentally
+verify: every text colour resolves to a `*-foreground` token whose background
+is the *matching* surface token (`--muted-foreground` on `--background`/`--card`,
+`--card-foreground` on `--card`, `--chart-N-foreground` on a `--chart-N` fill).
+Never put a muted/low-contrast colour on a tinted or coloured background, and
+never stack `opacity` or `color-mix(... transparent)` on already-muted text.
+
 ## Iteration loop — collaborate, don't soliloquise
 
 Visual work is iterative by nature. Optimise the loop:
@@ -298,6 +399,15 @@ write `class="bg-card"` than `style="background: var(--card)"`.
 - ❌ Rely on undeclared sibling assets; declare them with `assets` or `manifest`.
 - ❌ Use a relative `preview_open(file=...)` path for a reusable file-backed preview.
 - ❌ Define `:root { --background: ... }` to "lock the palette".
+- ❌ Alias a surface token with a single-mode fallback:
+  `--muted: var(--muted-foreground, #9aa0ad)` — invisible text when the bridge
+  can't run. Reference the token directly instead.
+- ❌ Name a custom property after a real token (`--muted: var(--muted-foreground)`).
+  `--muted` is a real surface-bg token; the live bridge mirrors it inline and
+  overwrites your alias, so the text becomes light-on-light in the preview pane
+  (yet looks fine inline). Use a non-colliding name or reference directly.
+- ❌ Put `--background`/`--foreground`/`--muted-foreground`/`--card`/`--border`
+  in your own `:root{}` block — it overrides the server's contrast-safe snapshot.
 - ❌ Use `@media (prefers-color-scheme: dark)` — read the OS, not Bobbit.
 - ❌ Hardcode `#ffffff`, `rgba(0,0,0,0.5)`, `oklch(0.21 0.008 145)`.
 - ❌ Wrap a theme variable: `oklch(var(--primary))` — the variable already is one.

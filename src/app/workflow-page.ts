@@ -1404,7 +1404,10 @@ export function renderWorkflowInspector(opts: {
 	const scope: EditorScope = opts.scope ?? "goal-draft";
 	const workflowKey = `__inspector__:${wf.id}`;
 	const inst = getOrCreateEmbedInstance(workflowKey);
-	seedEmbedInstance(inst, wf, { scope, workflowKey, onChange: () => {}, readOnly: true }, true);
+	// Default to collapsed gates (expandAll=false) — the inspector is shown in
+	// the goal-proposal Workflow tab where a compact overview is preferred; the
+	// user expands individual gates on demand.
+	seedEmbedInstance(inst, wf, { scope, workflowKey, onChange: () => {}, readOnly: true }, false);
 	return renderEditView(inst);
 }
 

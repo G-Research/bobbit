@@ -1037,7 +1037,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
 					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : ""} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
+					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
 							const time = terseRelativeTime(session.lastActivity);

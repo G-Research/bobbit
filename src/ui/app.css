@@ -14,6 +14,18 @@
 	font-size: calc(0.75rem * var(--sidebar-font-scale, 1));
 }
 
+/* Never show a horizontal scrollbar in the sidebar — long labels/paths must
+   truncate or wrap, not push out a horizontal scroll axis. This must apply to
+   the actual scroll container(s): per CSS, when overflow-y is auto/scroll and
+   overflow-x is `visible`, the `visible` is forced to compute as `auto`, so a
+   nested vertical scroller (the project-reorder list) would otherwise still
+   expose a horizontal scrollbar. Pin overflow-x on the root and every sidebar
+   scroller explicitly. */
+.sidebar-root,
+.sidebar-root [data-project-reorder-list] {
+	overflow-x: hidden;
+}
+
 /* ── iOS PWA safe-area + dvh app shell ──
    Used on the top-level app container(s) in src/app/render.ts.
    - `100dvh` avoids iOS Safari/PWA 100vh paint-gap bugs (falls back to 100vh).

@@ -37,7 +37,6 @@ import {
 	fetchRoles,
 } from "./api.js";
 import {
-	renderWorkflowList,
 	renderWorkflowInspector,
 	renderWorkflowEditor,
 	clearWorkflowEditorController,
@@ -523,6 +522,19 @@ interface GoalFormConfig {
 	 *  user cleared the field (inherit system pref). */
 	onMaxNestingDepthChange?: (value: number | null) => void;
 
+	// ---- Root-only orchestration policy (tree-wide; owned by the root) ----
+	/** Current per-goal divergence (plan-mutation) policy. `null` = inherit
+	 *  default ("balanced"). Only meaningful for a top-level/root goal. */
+	divergencePolicyValue?: "strict" | "balanced" | "autonomous" | null;
+	/** Invoked when the user picks a divergence policy. Presence (with
+	 *  `onMaxConcurrentChildrenChange`) gates rendering of the orchestration row. */
+	onDivergencePolicyChange?: (value: "strict" | "balanced" | "autonomous") => void;
+	/** Current per-goal max-concurrent-children cap. `null` = inherit default (3).
+	 *  Only meaningful for a top-level/root goal; clamped to [1, 8]. */
+	maxConcurrentChildrenValue?: number | null;
+	/** Invoked when the user changes the concurrency cap. */
+	onMaxConcurrentChildrenChange?: (value: number) => void;
+
 	// ---- Proposal-modal tabs (Goal / Workflow / Roles) ----
 	/** When true, wrap the form body in a tabbed surface with Workflow + Roles
 	 *  tabs alongside Goal. The footer stays outside the panels so submit/dismiss
@@ -707,6 +719,94 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 /** Whether the dedicated Sub-goals tab should be shown for this proposal. */
 function showSubgoalsTab(config: GoalFormConfig): boolean {
 	return !!(config.subgoalsEnabled || config.parentGoalId);
+}
+
+/** Walk parentGoalId links up to the top-level (root) goal of the tree. */
+function findRootGoal(parentGoalId: string): { title: string; divergencePolicy?: string; maxConcurrentChildren?: number } | undefined {
+	const seen = new Set<string>();
+	let cur = state.goals.find(g => g.id === parentGoalId) as (typeof state.goals)[number] | undefined;
+	while (cur && (cur as { parentGoalId?: string }).parentGoalId && !seen.has(cur.id)) {
+		seen.add(cur.id);
+		cur = state.goals.find(g => g.id === (cur as { parentGoalId?: string }).parentGoalId);
+	}
+	return cur as unknown as { title: string; divergencePolicy?: string; maxConcurrentChildren?: number } | undefined;
+}
+
+const DIVERGENCE_OPTS: { id: "strict" | "balanced" | "autonomous"; label: string; desc: string }[] = [
+	{ id: "strict", label: "Strict", desc: "Approve every plan change, including minor fix-ups." },
+	{ id: "balanced", label: "Balanced", desc: "Auto-apply minor fix-ups; expansions still need your approval." },
+	{ id: "autonomous", label: "Autonomous", desc: "Most self-directed. Dropping acceptance criteria or unpaused restructures are still blocked." },
+];
+
+/**
+ * Root-only tree orchestration: max concurrent children + plan-change autonomy
+ * (divergence policy). These are owned by the top-level goal and resolved at
+ * the root for the whole tree, so for a child goal we render an inherited,
+ * read-only summary instead of editable controls.
+ */
+function renderSubgoalOrchestration(config: GoalFormConfig): TemplateResult | string {
+	if (!(config.onDivergencePolicyChange && config.onMaxConcurrentChildrenChange)) return "";
+	// Only relevant when this goal can actually spawn children.
+	const allowed = config.subgoalsAllowedValue ?? false;
+	if (!allowed) return "";
+
+	// Child goal: concurrency + autonomy are inherited from the root.
+	if (config.parentGoalId) {
+		const root = findRootGoal(config.parentGoalId);
+		const pol = (root?.divergencePolicy as string) || "balanced";
+		const cc = root?.maxConcurrentChildren ?? 3;
+		return html`
+			<div class="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] leading-snug text-muted-foreground" data-testid="goal-form-orchestration-inherited">
+				Concurrency and plan-change autonomy are owned by the top-level goal${root ? html` <span class="text-foreground/70 font-medium">${root.title}</span>` : ""} and inherited across the tree: <span class="text-foreground/80 font-medium">${cc} parallel</span> · <span class="text-foreground/80 font-medium">${pol}</span>.
+			</div>
+		`;
+	}
+
+	// Root goal: editable controls. Default to the max (8) — favour throughput;
+	// the human dials it down when cost/compute is the constraint.
+	const concurrency = Math.max(1, Math.min(8, config.maxConcurrentChildrenValue ?? 8));
+	const policy = config.divergencePolicyValue ?? "balanced";
+	const activeDesc = DIVERGENCE_OPTS.find(o => o.id === policy)?.desc ?? "";
+	return html`
+		<div class="flex flex-col gap-3 pt-1" data-testid="goal-form-orchestration">
+			<div class="flex items-center gap-1.5 text-xs text-muted-foreground">
+				<span>Max concurrent children</span>
+				<span class="inline-flex items-center rounded-md border border-border bg-background overflow-hidden">
+					<button type="button"
+						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
+						title="Decrease" ?disabled=${concurrency <= 1}
+						@click=${() => config.onMaxConcurrentChildrenChange?.(Math.max(1, concurrency - 1))}
+					>${icon(Minus, "xs")}</button>
+					<input type="number" min="1" max="8" step="1" .value=${String(concurrency)}
+						data-testid="goal-form-max-concurrent-children"
+						class="w-8 text-xs text-center px-0 py-0.5 border-0 border-x border-border bg-background text-foreground focus:outline-none focus:ring-0 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+						@change=${(e: Event) => {
+							const raw = parseInt((e.target as HTMLInputElement).value, 10);
+							if (Number.isFinite(raw)) config.onMaxConcurrentChildrenChange?.(Math.max(1, Math.min(8, raw)));
+						}} />
+					<button type="button"
+						class="flex items-center justify-center w-6 h-6 text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors"
+						title="Increase" ?disabled=${concurrency >= 8}
+						@click=${() => config.onMaxConcurrentChildrenChange?.(Math.min(8, concurrency + 1))}
+					>${icon(Plus, "xs")}</button>
+				</span>
+				<span title="How many child teams may run in parallel across the whole tree (1–8). Higher = faster but more token/compute load."
+					class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+			</div>
+			<div class="flex flex-col gap-1">
+				<span class="text-xs text-muted-foreground">Plan-change autonomy</span>
+				<div class="inline-flex rounded-md border border-border overflow-hidden self-start" role="group" data-testid="goal-form-divergence-policy">
+					${DIVERGENCE_OPTS.map((o, i) => html`<button type="button"
+						data-testid="goal-form-divergence-${o.id}"
+						aria-pressed=${policy === o.id ? "true" : "false"}
+						class="text-xs px-3 py-1 transition-colors ${i > 0 ? "border-l border-border" : ""} ${policy === o.id ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground hover:bg-secondary"}"
+						@click=${() => config.onDivergencePolicyChange?.(o.id)}
+					>${o.label}</button>`)}
+				</div>
+				<span class="text-[11px] text-muted-foreground leading-snug">${activeDesc}</span>
+			</div>
+		</div>
+	`;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -1056,11 +1156,13 @@ function renderGoalForm(config: GoalFormConfig) {
 // ============================================================================
 // PROPOSAL MODAL — WORKFLOW TAB
 //
-// Reuses renderWorkflowList / renderWorkflowInspector / renderWorkflowEditor
-// exported from src/app/workflow-page.ts so the DOM matches the main Workflows
-// page exactly. The editor runs in `goal-draft` scope: every mutation flows
-// back through `config.onInlineWorkflowChange` and NEVER mutates the project
-// workflow store.
+// A workflow <select> (synced to the Goal tab's picker via the shared
+// config.workflowId / config.onWorkflowChange) with a Customise/Revert toggle
+// to its right; the chosen workflow renders beneath in read-only inspector
+// form, or as the editor while customising. Reuses renderWorkflowInspector /
+// renderWorkflowEditor from src/app/workflow-page.ts. The editor runs in
+// `goal-draft` scope: every mutation flows back through
+// `config.onInlineWorkflowChange` and NEVER mutates the project workflow store.
 // ============================================================================
 function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const selectedId = config.workflowId;
@@ -1069,55 +1171,52 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const customizing = !!config.customizingWorkflow && !!inline;
 	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
 	const displayWf = inline ?? selectedLibrary;
-	const dirtyIds = new Set<string>();
-	if (inline) dirtyIds.add(inline.id);
 	return html`
-		<div class="flex-1 overflow-hidden flex min-h-0"
+		<div class="flex-1 overflow-hidden flex flex-col min-h-0 min-w-0"
 			role="tabpanel"
 			id="goal-proposal-panel-workflow"
 			aria-labelledby="goal-proposal-tab-workflow"
 			data-testid="goal-proposal-panel-workflow">
-			<div class="w-64 shrink-0 border-r border-border overflow-y-auto p-3">
-				${workflows.length === 0
-					? html`<p class="text-xs text-muted-foreground">No workflows available for this project.</p>`
-					: renderWorkflowList({
-						workflows,
-						selectedId,
-						dirtyIds,
-						onSelect: (wf) => {
-							const ev = new Event("change");
-							Object.defineProperty(ev, "target", { value: { value: wf.id } });
-							config.onWorkflowChange(ev);
-							config.onResetWorkflow?.();
-						},
-						scope: "goal-draft",
-					})}
-			</div>
-			<div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 min-w-0">
-				<div class="flex items-center justify-end gap-2">
-					${customizing
-						? Button({
-								variant: "ghost",
-								size: "sm",
-								onClick: () => config.onResetWorkflow?.(),
-								children: html`<span data-testid="goal-proposal-workflow-reset">Reset to selected</span>`,
-						  })
-						: Button({
-								variant: "secondary",
-								size: "sm",
-								onClick: () => config.onCustomizeWorkflow?.(),
-								disabled: !selectedLibrary,
-								children: html`<span data-testid="goal-proposal-workflow-customize">Customize for this goal</span>`,
-						  })}
-				</div>
-				${customizing && inline
-					? renderWorkflowEditor({
-						workflow: inline,
-						onChange: (wf) => config.onInlineWorkflowChange?.(wf),
-						scope: "goal-draft",
-					})
-					: renderWorkflowInspector({ workflow: displayWf, scope: "goal-draft" })}
-			</div>
+			${workflows.length === 0
+				? html`<p class="text-xs text-muted-foreground px-5 pt-3">No workflows available for this project.</p>`
+				: html`
+					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
+						<label class="text-xs text-muted-foreground font-medium shrink-0">Workflow</label>
+						<select
+							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							data-testid="goal-proposal-workflow-select"
+							.value=${selectedId}
+							@change=${config.onWorkflowChange}>
+							${workflows.map((w) => html`
+								<option value=${w.id} ?selected=${selectedId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							`)}
+						</select>
+						${customizing
+							? Button({
+									variant: "ghost",
+									size: "sm",
+									onClick: () => config.onResetWorkflow?.(),
+									children: html`<span data-testid="goal-proposal-workflow-reset">Revert to project definition</span>`,
+							  })
+							: Button({
+									variant: "secondary",
+									size: "sm",
+									onClick: () => config.onCustomizeWorkflow?.(),
+									disabled: !selectedLibrary,
+									children: html`<span data-testid="goal-proposal-workflow-customize">Customise for this goal</span>`,
+							  })}
+					</div>
+					<hr class="shrink-0 border-t border-border" />
+					<div class="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-3">
+						${customizing && inline
+							? renderWorkflowEditor({
+								workflow: inline,
+								onChange: (wf) => config.onInlineWorkflowChange?.(wf),
+								scope: "goal-draft",
+							})
+							: renderWorkflowInspector({ workflow: displayWf, scope: "goal-draft" })}
+					</div>
+				`}
 		</div>
 	`;
 }
@@ -1234,6 +1333,7 @@ function renderProposalSubgoalsTab(config: GoalFormConfig): TemplateResult {
 						${renderSubgoalsToggle(config)}
 					</div>
 				` : ""}
+				${renderSubgoalOrchestration(config)}
 			</div>
 		</div>
 	`;
@@ -2516,6 +2616,9 @@ let _proposalInitializedFrom: string | null = null;
 let _proposalParentGoalId: string = "";
 let _proposalSubgoalsAllowed: boolean | null = null;
 let _proposalMaxNestingDepth: number | null = null;
+// Root-only tree orchestration. null = inherit default (balanced / 3).
+let _proposalDivergencePolicy: "strict" | "balanced" | "autonomous" | null = null;
+let _proposalMaxConcurrentChildren: number | null = null;
 
 // ----------------------------------------------------------------------------
 // Proposal-modal tabs state (Goal / Workflow / Roles).
@@ -2748,6 +2851,8 @@ function syncProposalFormState(): void {
 	_proposalSaving = false;
 	_proposalSubgoalsAllowed = null;
 	_proposalMaxNestingDepth = null;
+	_proposalDivergencePolicy = null;
+	_proposalMaxConcurrentChildren = null;
 }
 
 function goalProposalPanel() {
@@ -2822,6 +2927,19 @@ function goalProposalPanel() {
 				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
 					? _proposalMaxNestingDepth
 					: undefined;
+				// Root-only orchestration. Only forwarded for a top-level goal
+				// (no parent) that allows subgoals, and only when the user
+				// actually picked a value (null = inherit server default).
+				const isRootProposal = !_proposalParentGoalId;
+				const allowsChildren = subgoalsEnabled && (_proposalSubgoalsAllowed ?? false);
+				const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
+					? _proposalDivergencePolicy
+					: undefined;
+				// Default to the max (8) so the created goal matches the value
+				// shown on the tab even when the user never touches the stepper.
+				const maxConcurrentChildrenField = isRootProposal && allowsChildren
+					? (_proposalMaxConcurrentChildren ?? 8)
+					: undefined;
 				// Customised inline workflow takes precedence over the library
 				// workflowId. inlineRoles is only forwarded when non-empty.
 				const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
@@ -2840,6 +2958,8 @@ function goalProposalPanel() {
 					parentGoalId: _proposalParentGoalId || undefined,
 					subgoalsAllowed: subgoalsAllowedField,
 					maxNestingDepth: maxNestingDepthField,
+					divergencePolicy: divergencePolicyField,
+					maxConcurrentChildren: maxConcurrentChildrenField,
 				});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
@@ -2857,6 +2977,8 @@ function goalProposalPanel() {
 			_proposalParentGoalId = "";
 			_proposalSubgoalsAllowed = null;
 			_proposalMaxNestingDepth = null;
+			_proposalDivergencePolicy = null;
+			_proposalMaxConcurrentChildren = null;
 			resetProposalTabsState();
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
@@ -2884,6 +3006,8 @@ function goalProposalPanel() {
 		_proposalParentGoalId = "";
 		_proposalSubgoalsAllowed = null;
 		_proposalMaxNestingDepth = null;
+		_proposalDivergencePolicy = null;
+		_proposalMaxConcurrentChildren = null;
 		resetProposalTabsState();
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
@@ -2959,6 +3083,10 @@ function goalProposalPanel() {
 		maxNestingDepthValue: _proposalMaxNestingDepth,
 		onSubgoalsAllowedChange: (value: boolean) => { _proposalSubgoalsAllowed = value; renderApp(); },
 		onMaxNestingDepthChange: (value: number | null) => { _proposalMaxNestingDepth = value; renderApp(); },
+		divergencePolicyValue: _proposalDivergencePolicy,
+		maxConcurrentChildrenValue: _proposalMaxConcurrentChildren,
+		onDivergencePolicyChange: (value) => { _proposalDivergencePolicy = value; renderApp(); },
+		onMaxConcurrentChildrenChange: (value) => { _proposalMaxConcurrentChildren = value; renderApp(); },
 
 		// ---- Proposal-modal tabs wiring ----
 		tabbed: true,
