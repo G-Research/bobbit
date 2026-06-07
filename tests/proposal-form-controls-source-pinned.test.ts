@@ -55,6 +55,24 @@ describe("Goal proposal modal — subgoal controls source-pin", () => {
 		);
 	});
 
+	it("proposal-panels.ts contains the root-only orchestration controls (concurrency + divergence)", () => {
+		const text = fs.readFileSync(RENDER_TS, "utf-8");
+		assert.ok(
+			text.includes("goal-form-max-concurrent-children"),
+			"src/app/proposal-panels.ts must render the 'Max concurrent children' stepper\n" +
+			"with data-testid=\"goal-form-max-concurrent-children\" on the Sub-goals tab\n" +
+			"for a top-level goal that allows subgoals. It maps to the root's\n" +
+			"maxConcurrentChildren tree-wide cap (clamped [1,8]).",
+		);
+		assert.ok(
+			text.includes("goal-form-divergence-policy"),
+			"src/app/proposal-panels.ts must render the divergence (plan-change autonomy)\n" +
+			"segmented control with data-testid=\"goal-form-divergence-policy\" on the\n" +
+			"Sub-goals tab for a top-level goal that allows subgoals. It maps to the\n" +
+			"root's divergencePolicy (strict|balanced|autonomous).",
+		);
+	});
+
 	it("gates the controls via the default-on isSubgoalsEnabled() helper, not a default-off dataset read", () => {
 		const text = fs.readFileSync(RENDER_TS, "utf-8");
 		// The controls render only when `subgoalsEnabled` is truthy. That value

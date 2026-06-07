@@ -204,8 +204,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren } = opts ?? {};
 		const team = true;
 		const worktree = true;
 		const now = Date.now();
@@ -281,6 +281,19 @@ export class GoalManager {
 		if (subgoalsAllowed !== undefined) goal.subgoalsAllowed = subgoalsAllowed;
 		if (maxNestingDepth !== undefined && Number.isFinite(maxNestingDepth)) {
 			goal.maxNestingDepth = maxNestingDepth;
+		}
+
+		// Root-only orchestration policy. divergencePolicy and
+		// maxConcurrentChildren are tree-wide concepts owned by the root
+		// (resolved at the root for the per-root scheduler/semaphore), so they
+		// are only stamped when this goal IS the root (no parent). Children
+		// inherit the root's values at resolve-time and must not carry their own.
+		const isRoot = nesting.parentGoalId === undefined;
+		if (isRoot && divergencePolicy !== undefined) {
+			goal.divergencePolicy = divergencePolicy;
+		}
+		if (isRoot && maxConcurrentChildren !== undefined && Number.isFinite(maxConcurrentChildren)) {
+			goal.maxConcurrentChildren = Math.max(1, Math.min(8, Math.floor(maxConcurrentChildren)));
 		}
 
 		// Stamp nested-goal lineage. Root: rootGoalId===id, mergeTarget==="master".
