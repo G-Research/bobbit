@@ -56,6 +56,8 @@
  *  STAFF_PROPOSAL_PARITY[_EDIT]        → UX-parity matrix triggers
  *  EDITABLE_PROPOSAL_INITIAL / EDITABLE_PROPOSAL_EDIT
  *                                      → editable-proposals seed/edit
+ *  GOAL_PROPOSAL_REV2                  → 2nd propose_goal (different title/spec)
+ *  GOAL_EDITABLE_EDIT                  → edit_proposal type:"goal" (Mode A repro)
  *  (See _decideToolAction / respondToPrompt for the full matcher table.)
  *
  * UI primitives
@@ -357,6 +359,43 @@ export class MockAgentCore {
 				tool: "propose_staff",
 				input: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "" },
 				output: "Staff proposal submitted.",
+			};
+		}
+
+		// Goal revision (2nd propose_goal with a different title/spec) — used by
+		// goal-proposal-revision-autoupdate.spec.ts (Failure Mode A). Must precede
+		// the generic `goal_proposal` matcher below because the trigger string
+		// contains the "GOAL_PROPOSAL" substring. The spec deliberately retains the
+		// "It validates the goal creation UI." sentence so the GOAL_EDITABLE_EDIT
+		// edit trigger (below) can apply cleanly after a revision as well as after
+		// the initial proposal.
+		if (text.includes("GOAL_PROPOSAL_REV2")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Revised Goal Title",
+					workflow: "general",
+					spec: "Revised body for revision two.\nIt validates the goal creation UI.",
+				},
+				output: "Revised goal proposal submitted.",
+			};
+		}
+		// Goal edit_proposal trigger — sibling to EDITABLE_PROPOSAL_EDIT (project)
+		// but targeting type:"goal". Drives the deterministic Failure Mode A repro:
+		// `edit_proposal` is not a `propose_*` tool, so the legacy onGoalProposal
+		// callback never fires and only the unified proposal_update {source:"edit"}
+		// path runs. `old_text` is a substring present in both the initial
+		// GOAL_PROPOSAL spec and the GOAL_PROPOSAL_REV2 spec so the edit applies
+		// cleanly regardless of whether a revision preceded it.
+		if (text.includes("GOAL_EDITABLE_EDIT")) {
+			return {
+				tool: "edit_proposal",
+				input: {
+					type: "goal",
+					old_text: "It validates the goal creation UI.",
+					new_text: "EDITED SPEC BODY for Mode A repro.",
+				},
+				output: "Goal proposal edited.",
 			};
 		}
 

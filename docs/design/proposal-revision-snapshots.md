@@ -2,7 +2,17 @@
 
 Status: implemented. Dynamic Chat Tabs changed historical reopen from mutating restore to read-only tab-local snapshots.
 Owner: single-coder task.
-Related: [docs/design/editable-proposals.md](./editable-proposals.md), [docs/internals.md — Editable proposals](../internals.md#editable-proposals).
+Related: [docs/design/editable-proposals.md](./editable-proposals.md), [docs/internals.md — Editable proposals](../internals.md#editable-proposals), [docs/design/goal-proposal-panel-fix-analysis.md](./goal-proposal-panel-fix-analysis.md).
+
+> **Server-rev as source of truth.** The historical-vs-live "Open proposal"
+> decision compares a card's `__proposal_rev_v1__:<n>` marker against the slot's
+> `rev`. That comparison only stays correct if the slot rev never goes backwards
+> and never lags the server. The goal-proposal panel fix hardens both: the
+> server-stamped `rev` is the source of truth for proposal **content** (not just
+> the number), with the apply-vs-drop rule in the pure
+> `src/app/proposal-update-policy.ts::shouldApplyProposalUpdate` and a
+> non-decreasing `nextRev` clamp. See
+> [goal-proposal-panel-fix-analysis.md](./goal-proposal-panel-fix-analysis.md).
 
 ## Problem
 

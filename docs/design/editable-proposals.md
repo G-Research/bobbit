@@ -881,5 +881,21 @@ Full spec: [docs/archived-proposal-reopen.md](../archived-proposal-reopen.md).
   (Post §11.6: cleanup is deferred from archive to the 7-day purge, so the
   race window now only opens on the explicit `purgeOneSession` tick rather
   than at terminate time.)
+- **Form-mirror gap on the goal-assistant panel (fixed).** The Part 3
+  UX-unification kept the legacy `previewTitle` / `previewSpec` / `previewCwd`
+  form-mirror that the goal-**assistant** panel (`goalPreviewPanel`) renders
+  from, while every other path now writes the unified
+  `state.activeProposals.goal.fields` slot. Paths that only touched the slot
+  (`edit_proposal` frames, off-screen rehydrate, dedup-skipped replays) left the
+  assistant panel stale or empty. The fix makes the unified `onProposal` the
+  single writer of the goal form-mirror and establishes that the
+  **server-stamped `rev` is the source of truth for proposal CONTENT, not just
+  the displayed rev number** — the apply-vs-drop decision lives in the pure
+  `src/app/proposal-update-policy.ts::shouldApplyProposalUpdate`. Full
+  root-cause analysis and invariants:
+  [goal-proposal-panel-fix-analysis.md](./goal-proposal-panel-fix-analysis.md).
+  The role/tool/staff/project assistant panels have the **same latent pattern**
+  (own form-mirror, written only by their legacy `onXProposal` callbacks) — an
+  out-of-scope follow-up.
 
 — end —
