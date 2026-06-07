@@ -135,6 +135,8 @@ async function makeHarness(): Promise<Harness> {
 			resizeCalls.push({ rootGoalId, newMax });
 			return true;
 		},
+		requestChildStart: () => "started",
+		notifyChildTerminal: () => {},
 	};
 
 	const deps: NestedGoalRouteDeps = {
