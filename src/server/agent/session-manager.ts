@@ -19,6 +19,8 @@ import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, type SessionFsContext } from "./session-fs.js";
+import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
+import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
@@ -29,6 +31,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 } from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
+import { SessionSecretStore } from "../auth/session-secret.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
@@ -646,6 +649,15 @@ export class SessionManager {
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
+	/**
+	 * S1 — per-session capability secret store. Injected into the owning
+	 * session's env as `BOBBIT_SESSION_SECRET` and used by the orchestration
+	 * Children authz to derive the AUTHENTIC caller (replaces the forgeable
+	 * public session-id header). In-memory only, never persisted — see
+	 * `src/server/auth/session-secret.ts`. Always present (constructed inline so
+	 * every spawn/restore/respawn path can inject without a null-check).
+	 */
+	readonly sessionSecretStore: SessionSecretStore = new SessionSecretStore();
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	/**
 	 * Optional inbox nudger. Wired late from `server.ts` boot via
@@ -656,7 +668,7 @@ export class SessionManager {
 	private _inboxNudger: import("./inbox-nudger.js").InboxNudger | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
-	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
+	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
 	 * persisted `agentSessionFile` (and are newer than the most recent
@@ -689,7 +701,7 @@ export class SessionManager {
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
-	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void): void {
+	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void): void {
 		this._terminationListeners.push(fn);
 	}
 
@@ -1107,6 +1119,7 @@ export class SessionManager {
 			projectConfigStore: resolvedProjectConfigStore,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
+			sessionSecretStore: this.sessionSecretStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			costTracker: resolvedCostTracker,
@@ -1666,10 +1679,10 @@ export class SessionManager {
 		let parts: PromptParts;
 
 		if (assistantDef) {
-			const assistantRole = this.roleManager?.getRole("assistant");
+			const assistantTemplate = this.resolveRolePromptTemplate("assistant", session.projectId);
 			let assistantGoalSpec = "";
-			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
+			if (assistantTemplate) {
+				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(session.goalId || session.id).slice(0, 8)}`);
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
@@ -1685,7 +1698,9 @@ export class SessionManager {
 				}
 			}
 			parts = {
-				baseSystemPromptPath: undefined,
+				// Assistant prompt reconstruction must include the base system prompt
+				// so it survives respawn / rebuild paths (not just initial session-setup).
+				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
@@ -1696,8 +1711,12 @@ export class SessionManager {
 		} else {
 			const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
 
-			const role = session.role && this.roleManager ? this.roleManager.getRole(session.role) : undefined;
-			const rolePrompt = resolveRolePrompt(role, {
+			// Source the template via the field-level cascade (PR feature), then run
+			// master's centralized placeholder substitution so create/restore can't drift.
+			const tmpl = session.role && this.roleManager
+				? this.resolveRolePromptTemplate(session.role, session.projectId)
+				: undefined;
+			const rolePrompt = resolveRolePrompt(tmpl ? { promptTemplate: tmpl } : undefined, {
 				branch: goal?.branch,
 				agentId: `${session.role}-${(session.goalId || session.id).slice(0, 8)}`,
 				roleManager: this.roleManager,
@@ -1739,6 +1758,24 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, { messageQueue: session.promptQueue.toArray() });
 	}
 
+	/**
+	 * dead-bridge auto-revive — Auto-revive a dead RPC bridge before dispatching a brand-new
+	 * prompt. Used ONLY at the two new-prompt sites in `enqueuePrompt` (the
+	 * error-recovery branch and the idle+empty branch) — NOT in steady-state
+	 * retry/drain paths, which should fail loudly so a real bridge death
+	 * surfaces in logs.
+	 *
+	 * Symptom this protects against: post-restart, a session's persisted record
+	 * is restored but its in-process RPC bridge is dead. The WS layer ack's the
+	 * prompt but the agent never sees it because `rpcClient.prompt()` throws
+	 * "Agent process not running" — and the user gets a phantom-stuck session
+	 * with no recovery affordance.
+	 *
+	 * Invariant: callers MUST refetch the session entry from `this.sessions`
+	 * after this returns, because `restartAgent` deletes and re-creates it.
+	 * That's why this helper returns the (possibly fresh) `SessionInfo` rather
+	 * than letting the caller hold onto a stale reference.
+	 */
 	/**
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
@@ -2989,6 +3026,27 @@ export class SessionManager {
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
 
+		// Zombie-archive guard: a record with neither an agent session file nor a role
+		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
+		// instead of throwing opaquely on every Restart click.
+		if (!ps.agentSessionFile && !ps.role) {
+			console.warn(
+				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
+				`(no agentSessionFile, no role) — archiving instead of restarting.`,
+			);
+			try {
+				this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: Date.now() });
+			} catch (err) {
+				console.error(`[session-manager] Failed to archive zombie session ${sessionId}:`, err);
+			}
+			const zombieErr: Error & { code?: string } = new Error(
+				`Session ${sessionId} could not be restarted — neither an agent session file nor ` +
+				`a role was persisted. The session has been archived; create a fresh session to continue.`,
+			);
+			zombieErr.code = "SESSION_UNRECOVERABLE_ARCHIVED";
+			throw zombieErr;
+		}
+
 		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
 
@@ -3024,13 +3082,14 @@ export class SessionManager {
 		if (costValue === undefined) return;
 
 		const sessionCostTracker = this.resolveCostTracker(session);
+		const stampGoalId = session.goalId ?? session.teamGoalId;
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
 			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
 			cost: costValue,
-		});
+		}, stampGoalId);
 
 		// Look up taskId from assigned tasks for this session
 		let taskId: string | undefined;
@@ -3314,8 +3373,13 @@ export class SessionManager {
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
-		// Restore env vars needed by extensions
-		bridgeOptions.env = { BOBBIT_SESSION_ID: ps.id };
+		// Restore env vars needed by extensions. The per-session capability
+		// secret (S1) is regenerated here on restore and handed to the
+		// re-spawned agent process — see `session-secret.ts` (restart-safe).
+		bridgeOptions.env = {
+			BOBBIT_SESSION_ID: ps.id,
+			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(ps.id),
+		};
 		this.restoreWalkthroughSubmitEnv(ps, bridgeOptions.env);
 		if (ps.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = ps.goalId;
@@ -3434,10 +3498,10 @@ export class SessionManager {
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
 		if (assistantDef) {
 			// Combine assistant role's shared prompt with per-type specialized prompt
-			const assistantRole = this.roleManager?.getRole("assistant");
+			const assistantTemplate = this.resolveRolePromptTemplate("assistant", ps.projectId);
 			let assistantGoalSpec = "";
-			if (assistantRole?.promptTemplate) {
-				assistantGoalSpec = assistantRole.promptTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
+			if (assistantTemplate) {
+				assistantGoalSpec = assistantTemplate.replace(/\{\{AGENT_ID\}\}/g, `assistant-${(ps.goalId || ps.id).slice(0, 8)}`);
 				assistantGoalSpec += "\n\n---\n\n";
 			}
 			assistantGoalSpec += assistantDef.prompt;
@@ -3453,7 +3517,9 @@ export class SessionManager {
 			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
-				baseSystemPromptPath: undefined,
+				// Restore/respawn path: keep the global base prompt so it reaches
+				// restored assistant sessions.
+				baseSystemPromptPath: this.systemPromptPath,
 				cwd: ps.cwd,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
@@ -3474,6 +3540,7 @@ export class SessionManager {
 				goalBranch: goal?.branch,
 				roleManager: this.roleManager,
 				getStaff: this.staffRecordSource ? (id) => this.staffRecordSource!.getStaff(id) : undefined,
+				resolveTemplate: (rn, pid) => this.resolveRolePromptTemplate(rn, pid),
 			});
 
 			const promptPath = this.assemblePrompt(ps.id, {
@@ -4105,19 +4172,34 @@ export class SessionManager {
 	private resolveRoleModel(session: SessionInfo): string | undefined {
 		if (!session.role || !this.configCascade) return undefined;
 		try {
-			const resolved = this.configCascade.resolveRoles(session.projectId);
-			return resolved.find(r => r.item.name === session.role)?.item.model;
+			return this.configCascade.resolveRoleModel(session.role, session.projectId);
 		} catch {
 			return undefined;
 		}
+	}
+
+	/**
+	 * Resolve the role's `promptTemplate` for assembly. Prefer the
+	 * field-level project→ancestor→server→builtin cascade when a projectId
+	 * is in scope so a project-only override of `model` doesn't erase the
+	 * inherited promptTemplate (and vice versa). Falls back to the role
+	 * manager view for system-scope sessions (no projectId).
+	 */
+	private resolveRolePromptTemplate(roleName: string, projectId: string | undefined): string | undefined {
+		if (projectId && this.configCascade) {
+			try {
+				const t = this.configCascade.resolveRolePromptTemplate(roleName, projectId);
+				if (t) return t;
+			} catch { /* fall through */ }
+		}
+		return this.roleManager?.getRole(roleName)?.promptTemplate;
 	}
 
 	/** Resolve a role-level thinkingLevel override for the session, if any. */
 	private resolveRoleThinkingLevel(session: SessionInfo): string | undefined {
 		if (!session.role || !this.configCascade) return undefined;
 		try {
-			const resolved = this.configCascade.resolveRoles(session.projectId);
-			return resolved.find(r => r.item.name === session.role)?.item.thinkingLevel;
+			return this.configCascade.resolveRoleThinkingLevel(session.role, session.projectId);
 		} catch {
 			return undefined;
 		}
@@ -4136,8 +4218,7 @@ export class SessionManager {
 		// Role override
 		if (role && this.configCascade) {
 			try {
-				const resolved = this.configCascade.resolveRoles(projectId);
-				const m = resolved.find(r => r.item.name === role)?.item.model;
+				const m = this.configCascade.resolveRoleModel(role, projectId);
 				if (m && /^[^/]+\/.+$/.test(m)) return m;
 			} catch { /* fall through */ }
 		}
@@ -4157,8 +4238,7 @@ export class SessionManager {
 		let candidate: string | undefined;
 		if (role && this.configCascade) {
 			try {
-				const resolved = this.configCascade.resolveRoles(projectId);
-				const t = resolved.find(r => r.item.name === role)?.item.thinkingLevel;
+				const t = this.configCascade.resolveRoleThinkingLevel(role, projectId);
 				const known = isKnownThinkingLevel(t);
 				if (known) candidate = known;
 			} catch { /* fall through */ }
@@ -4193,8 +4273,7 @@ export class SessionManager {
 	resolveInitialReviewModel(role: string | undefined, projectId: string | undefined): string | undefined {
 		if (role && this.configCascade) {
 			try {
-				const resolved = this.configCascade.resolveRoles(projectId);
-				const m = resolved.find(r => r.item.name === role)?.item.model;
+				const m = this.configCascade.resolveRoleModel(role, projectId);
 				if (m && /^[^/]+\/.+$/.test(m)) return m;
 			} catch { /* fall through */ }
 		}
@@ -4404,6 +4483,30 @@ export class SessionManager {
 				// first assistant message has no transcript to restore anyway).
 				// Pinned by tests/session-manager-no-precreate.test.ts.
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
+
+				// Write the bobbit sidecar alongside the .jsonl so a future
+				// recovery (when sessions.json loses this entry) can restore the
+				// ORIGINAL bobbit session id, title, role, team links, and model
+				// prefs instead of inventing fresh ones. Fire-and-forget;
+				// atomic write makes repeat invocations safe.
+				try {
+					const ps = this.resolveStoreForSession(session.id).get(session.id);
+					if (ps) {
+						// pi-coding-agent names .jsonl files after the agent session id
+						// (path/<agent-id>.jsonl). Use the basename as a stable id when
+						// the rpc response doesn't expose it directly.
+						const agentSessionId = (stateResp.data?.sessionId as string | undefined)
+							|| path.basename(agentSessionFile).replace(/\.jsonl$/, "");
+						const sidecar = buildSessionSidecar(
+							ps,
+							agentSessionId,
+							undefined,
+						);
+						writeSessionSidecar(agentSessionFile, sidecar);
+					}
+				} catch (err) {
+					console.warn(`[session-manager] Failed to write session sidecar for ${session.id}: ${err}`);
+				}
 				return; // success
 			} catch (err) {
 				if (attempt < maxRetries) {
@@ -4538,6 +4641,17 @@ export class SessionManager {
 			cleanupSessionPrompt(id);
 			console.log(`[session-manager] Unregistered external session ${id}`);
 		};
+	}
+
+	/**
+	 * @internal — full in-memory `SessionInfo[]` for callers inside
+	 * `src/server/agent/` that need to drive `forceAbort`/lifecycle ops
+	 * over every session (e.g. the pause-cascade sweep in
+	 * `nested-goal-routes.ts`). Do NOT expose over REST or WS — leaks
+	 * `rpcClient`, `eventBuffer`, etc.
+	 */
+	getAllSessionsRaw(): SessionInfo[] {
+		return Array.from(this.sessions.values());
 	}
 
 	listSessions(): Array<{
@@ -4829,7 +4943,10 @@ export class SessionManager {
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
-		bridgeOptions.env = { BOBBIT_SESSION_ID: id };
+		bridgeOptions.env = {
+			BOBBIT_SESSION_ID: id,
+			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
+		};
 		if (session.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
@@ -5185,6 +5302,10 @@ export class SessionManager {
 			this.sandboxTokenStore.removeSession(session.projectId, id);
 		}
 
+		// S1: drop the per-session capability secret so a terminated session's
+		// secret can no longer resolve to an authentic caller.
+		this.sessionSecretStore.remove(id);
+
 		// Clean up sandbox worktree inside the container.
 		// Skip for delegate sessions — they share the parent's worktree and must
 		// never remove it.  Only the owning (non-delegate) session should clean up.
@@ -5259,9 +5380,15 @@ export class SessionManager {
 		});
 
 	// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
+		// Pass cwd/worktreePath/repoWorktrees in the info so listeners
+		// can't be defeated by the `sessions.delete(id)` above —
+		// `getSession(id)` would return undefined here and refcounts would leak.
 		const projectIdForListeners = session.projectId;
+		const sessionCwd = session.cwd;
+		const sessionWorktreePath = session.worktreePath;
+		const sessionRepoWorktrees = session.repoWorktrees;
 		for (const listener of this._terminationListeners) {
-			try { listener(id, { projectId: projectIdForListeners, reason: "archived" }); } catch (err) {
+			try { listener(id, { projectId: projectIdForListeners, reason: "archived", cwd: sessionCwd, worktreePath: sessionWorktreePath, repoWorktrees: sessionRepoWorktrees }); } catch (err) {
 				console.error(`[session ${id}] termination listener failed:`, err);
 			}
 		}
@@ -5424,6 +5551,46 @@ export class SessionManager {
 
 	/** Internal: purge a single archived session — delete files, worktree, store entry. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
+		// SAFETY: refuse to destroy a team-lead session that the team-store
+		// still references for a non-archived goal. Symptom this prevents:
+		// the user's "Audit subgoals branch" team-lead vanished because some
+		// caller (most likely the immediate-purge branch of `DELETE /api/
+		// sessions/:id` at server.ts:5816, or the 7-day archive sweep) hit
+		// `purgeOneSession` on a session that the team-store still treated
+		// as the active team-lead. After purge the team-store referenced a
+		// dead session id, the goal got stuck at "Start Team" with a
+		// non-functional button, and the .jsonl was permanently destroyed.
+		//
+		// The right cleanup order is: teardownTeam(goalId) → that removes
+		// the team-store entry and terminates the team-lead session →
+		// purgeOneSession is then safe. Anything that wants to skip the
+		// teardown step is destroying user data.
+		//
+		// Allow the purge when the owning goal is archived: at that point
+		// teardownTeam should already have run (goal-manager.archiveGoal
+		// invokes it), and even if it didn't the team is no longer being
+		// used by the user, so cleaning up is acceptable.
+		if (ps.role === "team-lead" && ps.teamGoalId && ps.projectId && this.projectContextManager) {
+			try {
+				const ctx = this.projectContextManager.getOrCreate(ps.projectId);
+				if (ctx) {
+					const verdict = canPurgeTeamLeadSession(
+						{ role: ps.role, id: ps.id, teamGoalId: ps.teamGoalId },
+						(goalId) => ctx.teamStore.get(goalId)?.teamLeadSessionId ?? undefined,
+						(goalId) => !!ctx.goalStore.get(goalId)?.archived,
+					);
+					if (!verdict.allow) {
+						console.warn(`[session-manager] Refusing to purge session ${ps.id}: ${verdict.reason}`);
+						return;
+					}
+				}
+			} catch (err) {
+				console.error(`[session-manager] Pre-purge safety check failed for ${ps.id}:`, err);
+				// Fall through to purge rather than block indefinitely on a
+				// check error — best-effort, the rest of the cleanup logs.
+			}
+		}
+
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
@@ -5433,6 +5600,17 @@ export class SessionManager {
 			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
 				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
 			});
+			// Delete the bobbit sidecar alongside the .jsonl. Best-effort —
+			// host-side path lookup (sidecars are bobbit-owned, never written
+			// by sandboxed agents). Missing file is fine.
+			try {
+				const sidecarPath = sidecarPathFor(ps.agentSessionFile);
+				if (fs.existsSync(sidecarPath)) {
+					fs.unlinkSync(sidecarPath);
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
+			}
 		}
 
 		// Delete per-session proposal-drafts directory. Deferred from archive
@@ -5487,6 +5665,28 @@ export class SessionManager {
 
 		// Remove from store
 		this.resolveStoreForId(ps.id)?.purge(ps.id);
+
+		// Source-fix for the dangling-team-lead bug: if the purged session was
+		// the team-lead of a team-mode goal, also drop the corresponding
+		// team-store entry. Without this, the team-store keeps a pointer at
+		// the now-deleted session id; on the next boot `TeamManager.restoreTeams`
+		// surfaces the dangling entry into `this.teams`, and `startTeam(goalId)`
+		// then throws "Team already active" forever — the goal becomes stuck
+		// at "No agents — Start Team" with a non-functional button. A boot-time
+		// sweep in `team-manager.ts::restoreTeams` recovers already-damaged
+		// state; this clears the leak at source so the sweep stays a defensive
+		// belt rather than the only line of defence.
+		if (ps.role === "team-lead" && ps.teamGoalId && ps.projectId && this.projectContextManager) {
+			try {
+				const ctx = this.projectContextManager.getOrCreate(ps.projectId);
+				if (ctx && ctx.teamStore.get(ps.teamGoalId)) {
+					ctx.teamStore.remove(ps.teamGoalId);
+					console.log(`[session-manager] Dropped team-store entry for goal ${ps.teamGoalId} on team-lead purge (session ${ps.id}).`);
+				}
+			} catch (err) {
+				console.error(`[session-manager] Failed to clean team-store entry on team-lead purge for ${ps.id}:`, err);
+			}
+		}
 
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
 		// drop the entry without waiting for a polling tick.
@@ -5808,6 +6008,18 @@ export class SessionManager {
 	 * Abort the agent. If the graceful abort doesn't resolve within a timeout,
 	 * force-kill the agent process and restart it so the session remains usable.
 	 */
+	/**
+	 * Soft-abort: interrupt the current streaming turn without killing the
+	 * agent process. Used by pause-cascade — the session stays registered so
+	 * `goal_resume` can resume it later. No kill/restart fallback.
+	 */
+	async abortSessionTurn(id: string): Promise<void> {
+		const session = this.sessions.get(id);
+		if (!session || session.status !== "streaming") return;
+		broadcastStatus(session, "aborting");
+		try { await session.rpcClient.abort(); } catch { /* best-effort */ }
+	}
+
 	async forceAbort(id: string, gracePeriodMs = 3000): Promise<void> {
 		const session = this.sessions.get(id);
 		if (!session) return;
@@ -5898,7 +6110,10 @@ export class SessionManager {
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
-			bridgeOptions.env = { BOBBIT_SESSION_ID: id };
+			bridgeOptions.env = {
+				BOBBIT_SESSION_ID: id,
+				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
+			};
 
 			// Apply sandbox wiring for sandboxed sessions (container spawn, token, etc.)
 			if (session.sandboxed) {

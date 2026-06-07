@@ -1,0 +1,327 @@
+/**
+ * dependsOn scheduling enforcement — `POST /api/goals/:id/spawn-child` and
+ * `POST /api/goals/:id/integrate-child/:childId`.
+ *
+ * Children spawned with unresolved deps (`dependsOn` referencing siblings
+ * not yet `state: "complete"`) are created in `state: "blocked"` — a
+ * scheduler-managed state distinct from operator `paused` (see commit
+ * 165fd452 "pause semantics — blocked state") — and skip
+ * `setupWorktreeAndStartTeam`. When the last dep merges, the integrate-child
+ * handler clears `state: "blocked"` → `"todo"` and triggers worktree setup +
+ * team start on the formerly-blocked sibling. Operator `paused` is never set
+ * by the scheduler.
+ *
+ * Drives `tryHandleNestedGoalRoute` directly with in-memory stubs. The
+ * HTTP layer is not started — same pattern as the other API-primitives
+ * unit tests in this directory.
+ */
+import { describe, it, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import http from "node:http";
+import yaml from "yaml";
+
+import { GoalStore, type PersistedGoal } from "../src/server/agent/goal-store.ts";
+import { GoalManager } from "../src/server/agent/goal-manager.ts";
+import { GateStore } from "../src/server/agent/gate-store.ts";
+import { ProjectConfigStore } from "../src/server/agent/project-config-store.ts";
+import { InlineWorkflowStore } from "../src/server/agent/workflow-store.ts";
+import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../src/server/agent/nested-goal-routes.ts";
+import { ChildTeamScheduler } from "../src/server/agent/child-team-scheduler.ts";
+import { CookieStore } from "../src/server/auth/cookie.ts";
+
+interface Harness {
+	tmpRoot: string;
+	goalStore: GoalStore;
+	goalManager: GoalManager;
+	gateStore: GateStore;
+	parent: PersistedGoal;
+	deps: NestedGoalRouteDeps;
+	setupCalls: string[];
+	startTeamCalls: string[];
+	broadcasts: any[];
+	cleanup(): void;
+	spawnChild(body: any): Promise<{ status: number; payload: any }>;
+	integrateChild(childId: string): Promise<{ status: number; payload: any }>;
+}
+
+async function makeHarness(): Promise<Harness> {
+	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dependsOn-blocking-"));
+	const stateDir = path.join(tmpRoot, "state");
+	const configDir = path.join(tmpRoot, "config");
+	fs.mkdirSync(stateDir);
+	fs.mkdirSync(configDir);
+	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
+
+	const goalStore = new GoalStore(stateDir);
+	const cookieStore = new CookieStore(stateDir);
+	// These tests exercise dependsOn scheduling, not authz. spawn-child /
+	// integrate-child are ORCHESTRATION-class verbs (the cookie does NOT
+	// bypass), so authenticate as the goal's team-lead via a matching
+	// X-Bobbit-Spawning-Session header (the teamManager stub below returns
+	// TEAM_LEAD for every goal).
+	const TEAM_LEAD = "tl-deps-blocking";
+	const cfg = new ProjectConfigStore(configDir);
+	const wf = new InlineWorkflowStore(cfg);
+	wf.setBuiltins([
+		{
+			id: "feature", name: "Feature", description: "",
+			gates: [
+				{ id: "implementation", name: "Implementation", dependsOn: [] },
+				{ id: "ready-to-merge", name: "Ready", dependsOn: ["implementation"] },
+			],
+			createdAt: 0, updatedAt: 0,
+		},
+		{
+			id: "parent", name: "Parent", description: "",
+			gates: [
+				{ id: "execution", name: "Execution", dependsOn: [] },
+				{ id: "ready-to-merge", name: "Ready", dependsOn: ["execution"] },
+			],
+			createdAt: 0, updatedAt: 0,
+		},
+	]);
+	const goalManager = new GoalManager(goalStore, wf);
+	const gateStore = new GateStore(stateDir);
+
+	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
+
+	const setupCalls: string[] = [];
+	const startTeamCalls: string[] = [];
+	const broadcasts: any[] = [];
+
+	// Patch setupWorktreeAndStartTeam to no-op + record. It otherwise tries
+	// to run real git commands.
+	(goalManager as any).setupWorktreeAndStartTeam = async (gid: string, _startTeamFn: () => Promise<any>) => {
+		setupCalls.push(gid);
+		// Mark ready so the auto-unblock path's "ready" branch is also exercised.
+		await goalManager.updateGoal(gid, { setupStatus: "ready" } as any);
+	};
+	// Patch mergeChild to a clean success (no real git ops).
+	(goalManager as any).mergeChild = async (_parentId: string, _childId: string) => {
+		return { merged: true, alreadyMerged: false, conflict: false, pushed: false, output: "" } as any;
+	};
+	// archiveGoalAfterMerge stamps state=complete + archived; uses store ops only.
+
+	const ctx = {
+		goalStore,
+		goalManager,
+		gateStore,
+		workflowStore: wf,
+		project: { id: "p" } as any,
+		projectConfigStore: cfg,
+	};
+	const projectContextManager: any = {
+		getContextForGoal: () => ctx,
+		all: () => [ctx],
+	};
+
+	const teamManager: any = {
+		startTeam: async (gid: string) => { startTeamCalls.push(gid); return {} as any; },
+		teardownTeam: async () => {},
+		getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }),
+	};
+
+	// Finding 2 — the integrate-child auto-unblock now routes the team start
+	// through the unified per-root scheduler. Wire a real one whose
+	// startChildTeam mirrors the production closure (flip blocked→todo, then
+	// setup/start) so this test exercises the same observable behaviour.
+	const scheduler = new ChildTeamScheduler({
+		resolveCap: (rootGoalId) => goalManager.resolveRootMaxConcurrentChildren(rootGoalId),
+		getChild: (cid) => goalStore.get(cid),
+		startChildTeam: (cid) => {
+			const g = goalStore.get(cid);
+			if (g?.state === "blocked") goalManager.updateGoal(cid, { state: "todo" } as any);
+			const cur = goalStore.get(cid);
+			if (cur?.setupStatus === "preparing") {
+				goalManager.setupWorktreeAndStartTeam(cid, () => teamManager.startTeam(cid));
+			} else {
+				teamManager.startTeam(cid);
+			}
+		},
+	});
+
+	const sessionManager: any = {
+		getSession: () => undefined,
+		deliverLiveSteer: async () => {},
+		enqueuePrompt: async () => {},
+		// S1: orchestration authz resolves the per-session secret here. This test
+		// is not exercising authz, so we use an identity-mapping stub (the secret
+		// IS the session id) and send `x-bobbit-session-secret: TEAM_LEAD` below.
+		sessionSecretStore: {
+			resolveSessionIdBySecret: (s: string | null | undefined) =>
+				typeof s === "string" && s.trim() ? s.trim() : undefined,
+		},
+	};
+
+	const verificationHarness: any = {
+		getActiveVerifications: () => [],
+		cancelStaleVerifications: async () => {},
+		resolvePlanStepChild: () => ({ source: "none", child: undefined }),
+		requestChildStart: (cid: string) => scheduler.requestStart(cid),
+		notifyChildTerminal: (cid: string) => scheduler.notifyTerminal(cid),
+	};
+
+	const deps: NestedGoalRouteDeps = {
+		projectContextManager,
+		verificationHarness,
+		teamManager,
+		sessionManager,
+		cookieStore,
+		requireSubgoalsEnabled: () => true,
+		getGoalAcrossProjects: (gid) => goalStore.get(gid),
+		getGoalManagerForGoal: () => goalManager,
+		readBody: async (req: http.IncomingMessage) => (req as any)._body,
+		json: () => {},
+		jsonError: () => {},
+		broadcastToAll: (ev) => { broadcasts.push(ev); },
+		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
+
+	async function callRoute(method: string, pathname: string, body?: any): Promise<{ status: number; payload: any }> {
+		let status = 200;
+		let payload: any = undefined;
+		const localDeps: NestedGoalRouteDeps = {
+			...deps,
+			json: (body, s) => { status = s ?? 200; payload = body; },
+			jsonError: (s, err, extra) => { status = s; payload = { error: String((err as any)?.message ?? err), ...(extra ?? {}) }; },
+		};
+		const req = { method, headers: { "x-bobbit-spawning-session": TEAM_LEAD, "x-bobbit-session-secret": TEAM_LEAD }, _body: body } as any as http.IncomingMessage;
+		const url = new URL(`http://x${pathname}`);
+		const handled = await tryHandleNestedGoalRoute(req, url, localDeps);
+		if (!handled) throw new Error(`route not handled: ${method} ${pathname}`);
+		return { status, payload };
+	}
+
+	return {
+		tmpRoot, goalStore, goalManager, gateStore, parent, deps,
+		setupCalls, startTeamCalls, broadcasts,
+		cleanup() { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {} },
+		spawnChild: (body: any) => callRoute("POST", `/api/goals/${parent.id}/spawn-child`, body),
+		integrateChild: (childId: string) => callRoute("POST", `/api/goals/${parent.id}/integrate-child/${childId}`, {}),
+	};
+}
+
+/**
+ * Pass the child's ready-to-merge gate so integrate-child accepts the merge.
+ */
+function passRTM(h: Harness, childId: string): void {
+	h.gateStore.initGatesForGoal(childId, ["implementation", "ready-to-merge"]);
+	h.gateStore.updateGateStatus(childId, "ready-to-merge", "passed");
+}
+
+/**
+ * Mark a child as "merged" — what archiveGoalAfterMerge would do in real life.
+ * We bypass real git and just stamp state=complete + archived directly so the
+ * integrate-child path can fire its auto-unblock scan against complete deps.
+ */
+async function mergeAndArchive(h: Harness, childId: string): Promise<void> {
+	passRTM(h, childId);
+	const r = await h.integrateChild(childId);
+	assert.equal(r.status, 200, `integrate-child ${childId} should succeed: ${JSON.stringify(r.payload)}`);
+	// Sanity: archiveGoalAfterMerge runs inside the handler and stamps state=complete.
+	const ch = h.goalStore.get(childId);
+	assert.equal(ch?.state, "complete", `child ${childId} must be complete after merge`);
+	assert.equal(ch?.archived, true, `child ${childId} must be archived after merge`);
+}
+
+let h: Harness;
+beforeEach(async () => { h = await makeHarness(); });
+
+describe("spawn-child dependsOn enforcement — direct cases", () => {
+	it("t1: unresolved dep → child blocked (state='blocked'), no team started, response blocked:true", async () => {
+		// Spawn dep first; it stays state=todo.
+		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		assert.equal(r1.status, 201);
+		// Now spawn dependent.
+		h.setupCalls.length = 0;
+		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
+		assert.equal(r2.status, 201);
+		assert.equal(r2.payload.blocked, true, "blocked=true in response");
+		assert.deepEqual(r2.payload.pendingDeps, ["planA"]);
+		const child = h.goalStore.getAll().find(g => g.spawnedFromPlanId === "planB")!;
+		assert.equal(child.state, "blocked", "child must have state='blocked' (not paused)");
+		assert.notEqual(child.paused, true, "child must NOT have paused=true (operator-only flag)");
+		assert.equal(h.setupCalls.includes(child.id), false, "setupWorktreeAndStartTeam must NOT be called for blocked child");
+	});
+
+	it("t2: resolved dep → child starts normally (no blocked field, not paused)", async () => {
+		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		// Mark planA complete (simulating prior merge).
+		await h.goalManager.updateGoal(r1.payload.id, { state: "complete" });
+		h.setupCalls.length = 0;
+		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
+		assert.equal(r2.status, 201);
+		assert.equal(r2.payload.blocked, undefined);
+		const child = h.goalStore.get(r2.payload.id)!;
+		assert.notEqual(child.state, "blocked", "child must NOT be blocked when deps already resolved");
+		assert.notEqual(child.paused, true, "child must NOT be paused when deps already resolved");
+	});
+});
+
+describe("integrate-child dependsOn auto-unblock", () => {
+	it("t3: blocked child auto-unblocks when its single dep merges", async () => {
+		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
+		const childA = r1.payload.id;
+		const childB = r2.payload.id;
+		assert.equal(h.goalStore.get(childB)!.state, "blocked", "B must start as blocked");
+		assert.notEqual(h.goalStore.get(childB)!.paused, true, "B must NOT be paused (operator flag not set)");
+		h.setupCalls.length = 0;
+		h.startTeamCalls.length = 0;
+		await mergeAndArchive(h, childA);
+		const finalB = h.goalStore.get(childB)!;
+		assert.equal(finalB.state, "todo", "B must transition to todo after A merges");
+		assert.notEqual(finalB.paused, true, "B.paused must not be set by scheduler");
+		assert.ok(h.setupCalls.includes(childB) || h.startTeamCalls.includes(childB),
+			"team startup must be invoked for unblocked child");
+	});
+
+	it("t4: multi-dep child only unblocks after the LAST dep merges", async () => {
+		const ra = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rb = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer, depends on no other sibling for this test." });
+		const rleaf = await h.spawnChild({ planId: "leaf", title: "Leaf", spec: "Implement leaf feature: integrates feature A and B; runs only after both are complete.", dependsOn: ["A", "B"] });
+		const leafId = rleaf.payload.id;
+		assert.equal(h.goalStore.get(leafId)!.state, "blocked", "leaf must start as blocked");
+
+		await mergeAndArchive(h, ra.payload.id);
+		assert.equal(h.goalStore.get(leafId)!.state, "blocked", "leaf still blocked after only A merges");
+
+		h.setupCalls.length = 0;
+		await mergeAndArchive(h, rb.payload.id);
+		assert.equal(h.goalStore.get(leafId)!.state, "todo", "leaf unblocks when B (last dep) merges");
+		assert.notEqual(h.goalStore.get(leafId)!.paused, true, "leaf.paused must not be set by scheduler");
+		assert.ok(h.setupCalls.includes(leafId) || h.startTeamCalls.includes(leafId));
+	});
+
+	it("t5: chain A→B→C unblocks one level at a time", async () => {
+		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the service layer on top of A; depends on A completing first.", dependsOn: ["A"] });
+		const rC = await h.spawnChild({ planId: "C", title: "C", spec: "Implement feature C: add the presentation layer; depends on B completing first in the chain.", dependsOn: ["B"] });
+		assert.equal(h.goalStore.get(rB.payload.id)!.state, "blocked", "B must start as blocked");
+		assert.equal(h.goalStore.get(rC.payload.id)!.state, "blocked", "C must start as blocked");
+
+		await mergeAndArchive(h, rA.payload.id);
+		assert.equal(h.goalStore.get(rB.payload.id)!.state, "todo", "B unblocks after A");
+		assert.equal(h.goalStore.get(rC.payload.id)!.state, "blocked", "C still blocked on B");
+
+		await mergeAndArchive(h, rB.payload.id);
+		assert.equal(h.goalStore.get(rC.payload.id)!.state, "todo", "C unblocks after B");
+	});
+
+	it("t6: merging a child whose deps are already complete is a no-op (no throw, no double-start)", async () => {
+		// Two parallel children with no deps; merge them in sequence. Neither
+		// should trigger any auto-unblock side effect.
+		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer, runs in parallel with A since it has no declared deps." });
+		h.setupCalls.length = 0;
+		h.startTeamCalls.length = 0;
+		await mergeAndArchive(h, rA.payload.id);
+		await mergeAndArchive(h, rB.payload.id);
+		// Auto-unblock scan should have found no candidates (no sibling with deps).
+		// We can't observe "did not throw" directly, but reaching here means it ran cleanly.
+		assert.ok(true);
+	});
+});

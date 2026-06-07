@@ -1,0 +1,33 @@
+name: goal_merge_child
+description: "Merge a child goal's branch locally into the parent"
+summary: "Local-merge a child's branch into the parent and auto-archive the child on success."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Required: `childGoalId`. Performs `git merge --no-ff` of the child's branch into the parent's branch, runs `git push origin <parent-branch>` (best-effort, gated by BOBBIT_TEST_NO_PUSH), and on success archives the child + tears down its team. Returns 409 with `{ conflict: true, output }` on merge conflict — child stays live, manual resolution required.
+detail_docs: >-
+  ## Purpose
+
+
+  Manually trigger a local merge of a child goal's branch into the
+  parent. Normally the verification harness's `runSubgoalStep` does this
+  automatically when the child's `ready-to-merge` passes; this tool is
+  the agent-facing escape hatch for the rare case where automation
+  doesn't fire (workflow-less child recovery, manual force, etc.).
+
+
+  ## Security
+
+
+  Validates `child.parentGoalId === <current goal id>` — cross-tree
+  merges are rejected with 400.
+
+
+  ## Returns
+
+
+  - `{ merged: true }` — clean merge; child archived + team torn down.
+
+  - 409 `{ conflict: true, output }` — merge conflict; child stays live.

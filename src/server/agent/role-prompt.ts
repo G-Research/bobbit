@@ -85,11 +85,17 @@ export function buildStaffSystemPrompt(
  * - **Plain sessions** (no role, no staff): both `undefined`.
  */
 export function buildRestoreRolePrompt(
-	ps: { staffId?: string; role?: string; goalId?: string; id: string },
+	ps: { staffId?: string; role?: string; goalId?: string; id: string; projectId?: string },
 	ctx: {
 		goalBranch?: string;
 		roleManager?: RoleManager;
 		getStaff?: (id: string) => PersistedStaff | undefined;
+		/**
+		 * Optional field-level template resolver (project→ancestor→server→builtin
+		 * cascade). When supplied it takes precedence over the plain role-manager
+		 * view so project-scoped `promptTemplate` overrides survive a restart.
+		 */
+		resolveTemplate?: (roleName: string, projectId?: string) => string | undefined;
 	},
 ): { rolePrompt?: string; roleName?: string } {
 	if (ps.staffId && ctx.getStaff) {
@@ -98,8 +104,11 @@ export function buildRestoreRolePrompt(
 			return { rolePrompt: buildStaffSystemPrompt(staff, ctx.roleManager), roleName: staff.roleId };
 		}
 	}
-	const role = ps.role && ctx.roleManager ? ctx.roleManager.getRole(ps.role) : undefined;
-	const rolePrompt = resolveRolePrompt(role, {
+	const template = ps.role
+		? (ctx.resolveTemplate?.(ps.role, ps.projectId)
+			?? (ctx.roleManager ? ctx.roleManager.getRole(ps.role)?.promptTemplate : undefined))
+		: undefined;
+	const rolePrompt = resolveRolePrompt(template ? { promptTemplate: template } : undefined, {
 		branch: ctx.goalBranch,
 		agentId: `${ps.role}-${(ps.goalId || ps.id).slice(0, 8)}`,
 		roleManager: ctx.roleManager,

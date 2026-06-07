@@ -1,0 +1,144 @@
+/**
+ * `GET /api/goals/:id/mutations/pending` — restart-safe rehydration endpoint.
+ *
+ * The dashboard mutation-pending card and the in-chat approval card both need
+ * to re-discover persisted pending plan-mutation requests after a reload /
+ * reconnect (the live `mutation_pending` broadcast is fire-and-forget). This
+ * READ endpoint returns the goal's persisted requests via
+ * `PlanMutationStore.listForGoal()`, filtering entries past their 24h TTL.
+ *
+ * These drive the REAL `tryHandleNestedGoalRoute` GET handler with mocked deps
+ * (same in-process style as api-goals-plan-mutation.test.ts) so the test
+ * pins the route wiring, not just the store.
+ */
+import { describe, it, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { PlanMutationStore, DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "../src/server/agent/plan-mutation-store.ts";
+import { tryHandleNestedGoalRoute } from "../src/server/agent/nested-goal-routes.ts";
+import { CookieStore } from "../src/server/auth/cookie.ts";
+import type { ClassifierPlanStep } from "../src/server/agent/plan-mutation.ts";
+
+let tmpRoot: string;
+let stateDir: string;
+
+beforeEach(() => {
+	tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mutations-pending-"));
+	stateDir = path.join(tmpRoot, "state");
+	fs.mkdirSync(stateDir);
+});
+
+function step(planId: string, phase = 1): ClassifierPlanStep {
+	const spec = `spec-${planId}`;
+	const title = `t-${planId}`;
+	return { planId, phase, spec, title, subgoal: { planId, title, spec } };
+}
+
+function pending(goalId: string, requestId: string, expiresAt: number): PendingMutation {
+	return {
+		goalId,
+		requestId,
+		kind: "expansion",
+		proposedSteps: [step("a"), step("b", 2)],
+		summary: `summary-${requestId}`,
+		diff: { added: [], removed: [], changed: [] } as any,
+		createdAt: Date.now(),
+		expiresAt,
+	};
+}
+
+interface CallResult {
+	handled: boolean;
+	responses: { body: any; status: number }[];
+}
+
+async function getPending(goalId: string, store: PlanMutationStore, opts?: { subgoalsEnabled?: boolean; goalExists?: boolean }): Promise<CallResult> {
+	const goal: any = { id: goalId, rootGoalId: goalId };
+	const ctx: any = {
+		goalStore: { get: () => goal, getAll: () => [goal] },
+		planMutationStore: store,
+	};
+	const responses: { body: any; status: number }[] = [];
+	const goalExists = opts?.goalExists ?? true;
+	const deps: any = {
+		projectContextManager: { getContextForGoal: () => (goalExists ? ctx : undefined) },
+		verificationHarness: {},
+		teamManager: { getTeamState: () => undefined },
+		sessionManager: {},
+		cookieStore: new CookieStore(stateDir),
+		requireSubgoalsEnabled: () => opts?.subgoalsEnabled ?? true,
+		getGoalAcrossProjects: () => (goalExists ? goal : undefined),
+		getGoalManagerForGoal: () => ({}),
+		readBody: async () => ({}),
+		json: (body: any, status = 200) => { responses.push({ body, status }); },
+		jsonError: (status: number, err: unknown) => { responses.push({ body: { error: String(err) }, status }); },
+		broadcastToAll: () => {},
+		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 3 }),
+	};
+	const req: any = { method: "GET", headers: {} };
+	const url = new URL(`http://x/api/goals/${goalId}/mutations/pending`);
+	const handled = await tryHandleNestedGoalRoute(req, url, deps);
+	return { handled, responses };
+}
+
+describe("GET /api/goals/:id/mutations/pending", () => {
+	it("returns persisted pending requests with mapped fields", async () => {
+		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const now = Date.now();
+		store.put(pending("g1", "r1", now + DEFAULT_MUTATION_TTL_MS));
+		store.put(pending("g1", "r2", now + DEFAULT_MUTATION_TTL_MS));
+
+		const { handled, responses } = await getPending("g1", store);
+		assert.equal(handled, true);
+		assert.equal(responses.length, 1);
+		assert.equal(responses[0].status, 200);
+		const list = responses[0].body.pending as any[];
+		assert.equal(list.length, 2);
+		const ids = list.map(p => p.requestId).sort();
+		assert.deepEqual(ids, ["r1", "r2"]);
+		// Mapped shape carries the fields the cards need.
+		const r1 = list.find(p => p.requestId === "r1");
+		assert.equal(r1.goalId, "g1");
+		assert.equal(r1.kind, "expansion");
+		assert.equal(r1.summary, "summary-r1");
+		assert.ok(Array.isArray(r1.proposedSteps));
+		assert.equal(typeof r1.expiresAt, "number");
+	});
+
+	it("filters out entries past their TTL", async () => {
+		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const now = Date.now();
+		store.put(pending("g1", "fresh", now + DEFAULT_MUTATION_TTL_MS));
+		store.put(pending("g1", "stale", now - 1)); // already expired
+
+		const { responses } = await getPending("g1", store);
+		const list = responses[0].body.pending as any[];
+		assert.equal(list.length, 1);
+		assert.equal(list[0].requestId, "fresh");
+	});
+
+	it("returns empty list when the goal has no pending requests", async () => {
+		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const { responses } = await getPending("g-empty", store);
+		assert.equal(responses[0].status, 200);
+		assert.deepEqual(responses[0].body.pending, []);
+	});
+
+	it("404s for an unknown goal", async () => {
+		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		const { handled, responses } = await getPending("g-missing", store, { goalExists: false });
+		assert.equal(handled, true);
+		assert.equal(responses.at(-1)!.status, 404);
+	});
+
+	it("no-ops (handled, no body) when subgoals are disabled", async () => {
+		const store = new PlanMutationStore(stateDir, { startSweep: false });
+		store.put(pending("g1", "r1", Date.now() + DEFAULT_MUTATION_TTL_MS));
+		const { handled, responses } = await getPending("g1", store, { subgoalsEnabled: false });
+		assert.equal(handled, true);
+		assert.equal(responses.length, 0);
+	});
+});

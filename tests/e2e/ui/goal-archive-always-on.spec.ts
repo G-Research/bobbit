@@ -165,7 +165,7 @@ test.describe("Goal archive button (always-on)", () => {
 		// useful instead of just "got 400".
 		const probeResp = await apiFetch("/api/goals", {
 			method: "POST",
-			body: JSON.stringify({ title, worktree: false, team: true, autoStartTeam: false }),
+			body: JSON.stringify({ title, worktree: false, team: true, autoStartTeam: false, spec: "E2E test goal — spec for SPEC_REQUIRED guard." }),
 		});
 		if (probeResp.status !== 201) {
 			const text = await probeResp.text();

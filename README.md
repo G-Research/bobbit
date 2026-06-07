@@ -133,6 +133,7 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
+| [Nested Sub-Goals](docs/nested-goals.md) | Goals that spawn child goals — teams, depth caps, roll-up, governance |
 | [Marketplace](docs/marketplace.md) | Pack-based install of roles, tools, and skills |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 

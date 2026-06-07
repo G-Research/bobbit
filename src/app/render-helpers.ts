@@ -1,6 +1,9 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
 import { Archive, ExternalLink, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { buildNestedGoalForest } from "./sidebar-nesting.js";
+import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
+import { bucketTeamChildren } from "./team-archived-bucket.js";
 import {
 	state,
 	renderApp,
@@ -35,6 +38,48 @@ import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "..
 // ============================================================================
 // FORMATTING
 // ============================================================================
+
+/**
+ * Shared muted divider used to mark the boundary between active and archived
+ * items inside a sidebar group. Render only when both classes are present in
+ * the same group — callers gate on `activeCount > 0 && archivedCount > 0`,
+ * typically via `bucketActiveArchived().needsDivider`.
+ *
+ * When `owner` is provided, the label renders as "ARCHIVED · <owner>" with
+ * the owner name in normal case (the uppercase CSS class only applies to the
+ * leading "Archived ·" span). The owner is also exposed as `data-owner` for
+ * test selectors. Callers in `renderTeamGroup` pass the team-lead's title so
+ * stacked archive sections in a multi-team-lead subtree have unambiguous
+ * ownership; project-level and nested-goal callers omit the owner to keep
+ * the plain "Archived" label (back-compat with existing tests).
+ * See docs/design `Active-before-archived sidebar ordering`.
+ */
+export const archivedDivider = (owner?: string) => html`
+	<div class="flex items-center gap-2 my-1 mx-2" data-testid="sidebar-archived-divider" data-owner="${owner ?? ""}">
+		<div class="flex-1 border-t border-border/30"></div>
+		<span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Archived${owner ? " ·" : ""}</span>
+		${owner ? html`<span class="text-muted-foreground tracking-wider opacity-60 normal-case truncate" style="font-size: 0.75em;">${owner}</span>` : ""}
+		<div class="flex-1 border-t border-border/30"></div>
+	</div>
+`;
+
+/**
+ * Pure helper: split `rows` into active vs archived buckets using `isArchived`.
+ * `needsDivider` is true iff both buckets are non-empty — the canonical signal
+ * for callers deciding whether to emit `archivedDivider()` between them.
+ * Single source of truth for every active-before-archived render path.
+ */
+export function bucketActiveArchived<T>(
+	rows: T[],
+	isArchived: (r: T) => boolean,
+): { active: T[]; archived: T[]; needsDivider: boolean } {
+	const active: T[] = [];
+	const archived: T[] = [];
+	for (const r of rows) {
+		if (isArchived(r)) archived.push(r); else active.push(r);
+	}
+	return { active, archived, needsDivider: active.length > 0 && archived.length > 0 };
+}
 
 /** Guard set to prevent repeated on-demand child fetches per goal. */
 const _goalChildrenFetched = new Set<string>();
@@ -784,6 +829,93 @@ export function bucketArchivedByProject(
  * `variant: "desktop"` matches the original tight desktop styling.
  * `variant: "mobile"` uses larger touch targets and typography.
  */
+/**
+ * Render a sub-goal under its spawning team-lead session. Recursive — the
+ * sub-goal may itself be a parent of further sub-goals (a team-lead it
+ * spawned could spawn its own sub-goals). Reuses `renderGoalGroup` so the
+ * row, chevron, descendant badge, and team rendering match the rest of the
+ * sidebar. Indent is one INDENT step relative to the parent's
+ * tlExpanded container.
+ *
+ * `renderedAncestors` is the set of goal ids that have already rendered as
+ * an ancestor of this row. If `child.id` is already in the set we render a
+ * compact "(loop)" placeholder instead of recursing — defensive guard
+ * against any data anomaly that could let a descendant point back at an
+ * ancestor (createGoal rejects true id-cycles, but the render path
+ * shouldn't trust the data layer to be perfect).
+ */
+function renderSpawnedChildGoalRow(
+	child: Goal,
+	renderedAncestors?: Set<string>,
+	displayTitleSuffix?: string,
+): TemplateResult {
+	if (isAncestorCycle(child.id, renderedAncestors)) {
+		return html`
+			<div class="text-[10px] text-muted-foreground/70 italic px-1 py-0.5"
+				data-testid="sidebar-spawned-child-row-loop"
+				data-goal-id="${child.id}"
+				title="${child.title} appears earlier in this tree — loop detected.">
+				↺ ${child.title} (already shown above)
+			</div>
+		`;
+	}
+	const descendantCount = state.goals.filter(g => !g.archived && g.parentGoalId === child.id).length;
+	return html`
+		<div data-testid="sidebar-spawned-child-row" data-goal-id="${child.id}" data-spawned-by="${child.spawnedBySessionId ?? ""}">
+			${renderGoalGroup(child, { descendantCount, renderedAncestors, displayTitleSuffix })}
+		</div>
+	`;
+}
+
+/**
+ * Render the bottom Archived-section's goal list with hierarchy preserved.
+ * Pure intra-archived nesting: goals whose parent is also archived nest
+ * under that parent; truly orphaned (parent missing or non-archived) goals
+ * surface at the top via the helper's orphan-promotion. Indentation uses
+ * the same 16px-per-level scheme as the live forest.
+ */
+function renderArchivedGoalsForest(archivedGoals: Goal[], isMobile: boolean): TemplateResult {
+	// Symmetric to the live forest filter in sidebar.ts: exclude archived
+	// goals whose `spawnedBySessionId` points at an archived team-lead
+	// session in this same tree. Without this filter the same goal renders
+	// TWICE — once as a child node in the archived forest, and again under
+	// its team-lead's expanded block via renderLeadWithMembers's
+	// `spawnedSubGoalsOf`. The user's image #43 was that exact symptom: 19
+	// real children of REAL-TASKS appeared once via the forest's nested
+	// rendering AND a second time under Team Lead Al Truist's spawned-
+	// children block, producing visually-identical "duplicates".
+	const archivedTeamLeadIds = new Set(
+		state.archivedSessions
+			.filter(s => s.role === "team-lead")
+			.map(s => s.id),
+	);
+	const filteredArchivedGoals = archivedGoals.filter(g =>
+		!g.spawnedBySessionId || !archivedTeamLeadIds.has(g.spawnedBySessionId),
+	);
+	const forest = buildNestedGoalForest(filteredArchivedGoals as any, { maxDepth: 5, includeArchived: true });
+	// Same collapse-hides-children behaviour as the live forest in
+	// sidebar.ts::renderNestedNode. Archived parents must hide their
+	// archived children when their chevron is collapsed — symmetric with
+	// how live parents hide live children. The user reported sub-goal
+	// rows still showing under a collapsed archived parent.
+	const renderArcNode = (node: { goal: any; depth: number; descendantCount: number; children: any[]; displayTitleSuffix?: string }): TemplateResult => {
+		const indentPx = node.depth * 16;
+		const goal = node.goal as Goal;
+		const isExpanded = expandedGoals.has(goal.id);
+		return html`
+			<div data-testid="sidebar-archived-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
+				${isMobile
+					? html`<div class="opacity-60">${renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}</div>`
+					: renderGoalGroup(goal, { descendantCount: node.descendantCount, displayTitleSuffix: node.displayTitleSuffix })}
+			</div>
+			${isExpanded ? node.children.map((c: any) => renderArcNode(c)) : nothing}
+		`;
+	};
+	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
+		${forest.map(node => renderArcNode(node))}
+	</div>`;
+}
+
 export function renderProjectArchivedSection(
 	project: Project,
 	archivedGoals: Goal[],
@@ -816,9 +948,7 @@ export function renderProjectArchivedSection(
 			</button>
 			${expanded ? html`
 				${archivedGoals.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Goals</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
-				${archivedGoals.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT / 2}px;">
-					${archivedGoals.map(goal => isMobile ? html`<div class="opacity-60">${renderGoalGroup(goal)}</div>` : renderGoalGroup(goal))}
-				</div>` : ""}
+				${archivedGoals.length > 0 ? renderArchivedGoalsForest(archivedGoals, isMobile) : ""}
 				${archivedGoals.length > 0 && standaloneArchivedSessions.length > 0 ? html`<div class="flex items-center gap-2 my-1 mx-2"><div class="flex-1 border-t border-border/30"></div><span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Sessions</span><div class="flex-1 border-t border-border/30"></div></div>` : ""}
 				${standaloneArchivedSessions.length > 0 ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${standaloneArchivedSessions.map(s => html`
@@ -856,14 +986,27 @@ export function renderSessionRow(session: GatewaySession) {
 	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: () => { _forkNewWorktree = true; } })}`;
 
 	const navId = `session:${session.id}`;
+	// Keyboard nav can have moved the active row away from this session even
+	// while `state.selectedSessionId` (and thus `activeSessionId()`) still
+	// reports it as active — the route mutations that clear it run async via
+	// `handleHashChange`. The `sidebar-session-active` class and `data-nav-active`
+	// attribute are the single source of truth for "which row is currently the
+	// keyboard cursor / E2E active row", so they MUST respect a non-matching
+	// keyboard-nav override. Without this, two rows can carry the active class
+	// for a few ms after Ctrl+↓ off a session row, and any DOM-order based
+	// active-row query (incl. the sidebar-keyboard-nav E2E) reads the stale
+	// session row instead of the new target. Pinned by
+	// tests/e2e/ui/sidebar-keyboard-nav.spec.ts.
+	const kbOverride = getActiveNavId();
+	const navActive = kbOverride ? kbOverride === navId : active;
 	return html`
 		<div
 			data-session-id="${session.id}"
 			data-sidebar-actions-row-root
 			data-nav-id=${navId}
-			data-nav-active=${active ? "true" : "false"}
+			data-nav-active=${navActive ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
-				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+				${navActive ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
@@ -1179,7 +1322,7 @@ function renderGoalBadge(goal: Goal) {
  * Desktop: dashboard button hidden until hover. Double-click opens team-lead.
  * Mobile:  dashboard button always visible. No double-click (no hover hint).
  */
-export function renderGoalGroup(goal: Goal) {
+export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string }) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
 	// `goalSessions` is the full, unfiltered roster of sessions belonging to this
@@ -1292,22 +1435,94 @@ export function renderGoalGroup(goal: Goal) {
 	const renderTeamGroup = () => {
 		if (!teamLead) return displaySessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
-		// Archived members belonging to the live lead
+		// Archived members belonging to the live lead. Includes:
+		//  (a) explicit link: `teamLeadSessionId === teamLead.id`
+		//  (b) legacy fallback: `teamLeadSessionId` undefined — the live lead
+		//      is the safest receiver because it's the agent the user is
+		//      most likely watching. Without this, legacy reviewer/QA
+		//      sessions (which never stamped the field) vanish entirely
+		//      under a live team-lead. The boot-time backfill in
+		//      SessionStore stamps most of these via heuristic; this
+		//      render-side fallback covers ambiguous remainders.
 		const archivedForLiveLead = state.showArchived
-			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !isChildSession(s) && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
+			? state.archivedSessions.filter(s =>
+				s.teamGoalId === goal.id
+				&& !isChildSession(s)
+				&& s.role !== "team-lead"
+				&& (s.teamLeadSessionId === teamLead.id || !s.teamLeadSessionId)
+			)
 			: [];
+		// Delegate sessions of this lead are rendered separately (renderLiveDelegates /
+		// renderArchivedDelegates); keep their counts for the team-lead row badge.
 		const liveLeadChildren = visibleLiveChildrenForParent(teamLead.id);
 		const archivedLeadChildren = state.showArchived ? archivedChildrenForParent(teamLead.id) : [];
+		// Sub-goals this team-lead spawned (via goal_spawn_child).
+		// They render INSIDE this team-lead's expanded block so collapsing
+		// the team-lead also hides them — matches the user's mental model
+		// that the team-lead "owns" the sub-goals it created. The badge on
+		// the team-lead row counts agents+archived but NOT spawned sub-goals
+		// (sub-goals already advertise themselves via the parent goal's
+		// descendant-count badge).
+		//
+		// Defensive shaping (filter, dedupe by id, deterministic sort) lives
+		// in the pure helper so it's unit-testable. See sidebar-spawned-children.ts.
+		// `parentLeadId === teamLead.id` here: by construction this branch is
+		// rendering THIS goal's own live team-lead, so unstamped children of
+		// `goal` should attribute to it. The strict-parent fallback in
+		// selectSpawnedChildren prevents an unstamped orphan from being
+		// pulled under a sibling team-lead.
+		const spawnedChildren = selectSpawnedChildren(
+			state.goals,
+			goal.id,
+			teamLead.id,
+			state.showArchived,
+			teamLead.id,
+		);
+		// Cycle guard: build the visited-ancestors set we'll thread through
+		// each child's renderGoalGroup call. Includes this goal's id so any
+		// descendant that — via a data anomaly — points back at this goal as
+		// a child won't recurse infinitely.
+		const ancestors = extendAncestors(opts?.renderedAncestors, goal.id);
+		// Disambiguator suffixes for same-titled spawned siblings — same
+		// pattern as buildNestedGoalForest's sibling-title pass so the live
+		// and archived paths render identical "(<suffix>)" tags.
+		const liveSuffixes = computeTitleSuffixes(spawnedChildren);
+
+		// Active-before-archived ordering: emit live team children + active
+		// spawned-child goals first, then a single muted "Archived · <lead>"
+		// divider, then archived team workers + archived spawned-child goals.
+		// Owner label disambiguates dividers when multiple team-leads stack in
+		// the same expanded subtree (Bugs Bunny → Otis → Zoidberg repro).
+		const { active: activeSpawned, archived: archivedSpawned } = bucketActiveArchived(
+			spawnedChildren,
+			g => !!g.archived,
+		);
+		// Split teamChildren by status: live members render above the
+		// "Archived" divider, terminated/archived ones merge into the
+		// archived bucket below (deduped against archivedForLiveLead — a
+		// session can appear in both gatewaySessions with
+		// status="terminated" AND in archivedSessions after the purge).
+		// See team-archived-bucket.ts for the pure helper + tests.
+		const { liveTeamChildren, archivedBelow } = bucketTeamChildren(
+			teamChildren,
+			archivedForLiveLead,
+			state.showArchived,
+		);
+		const hasArchivedBelow = archivedBelow.length > 0 || archivedSpawned.length > 0;
+		const hasActiveAbove = liveTeamChildren.length > 0 || activeSpawned.length > 0;
 		return html`
-			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
+			${renderTeamLeadRow(teamLead, liveTeamChildren.length + archivedBelow.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
 			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${teamChildren.map(renderSessionRow)}
-					${archivedForLiveLead.map(s => html`
+					${liveTeamChildren.map(renderSessionRow)}
+					${activeSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
+					${hasActiveAbove && hasArchivedBelow ? archivedDivider(teamLead.title) : ""}
+					${archivedBelow.map(s => html`
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}
 					`)}
+					${archivedSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
 				</div>
 			` : ""}
 			${nonTeamSessions.map(renderSessionRow)}
@@ -1328,7 +1543,16 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;" title="${isExpanded ? "Collapse goal" : "Expand goal"}">${isExpanded ? "▾" : "▸"}</span>
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
-				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}</span>
+				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${opts?.displayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${opts.displayTitleSuffix})</span>` : ""}</span>
+				${(opts?.descendantCount ?? 0) > 0 ? html`
+					<span
+						class="shrink-0 font-semibold text-muted-foreground"
+						data-testid="sidebar-descendant-badge"
+						style="background:var(--secondary);padding:0 0.3333em;border-radius:0.5em;line-height:1.1667em;font-size:0.75em;"
+						title="${opts!.descendantCount} descendant goal${opts!.descendantCount === 1 ? "" : "s"}">
+						${opts!.descendantCount}
+					</span>
+				` : nothing}
 				${renderGoalBadge(goal)}
 				${mobile
 					? goalButtons
@@ -1364,19 +1588,44 @@ export function renderGoalGroup(goal: Goal) {
 						const mappedIds = new Set(archivedMembers.filter(m => m.teamLeadSessionId && allLeads.includes(m.teamLeadSessionId)).map(m => m.id));
 						const unmapped = archivedMembers.filter(m => !mappedIds.has(m.id));
 
-						// Render archived leads, each with their own members
+						// Sub-goals spawned by an archived team-lead — surfaced
+						// inside the archived lead's expanded block. The chevron
+						// only renders when there's something to expand, so we
+						// roll spawned sub-goals into the hasChildren signal.
+						// Same defensive shaping as live spawnedChildren via the
+						// shared pure helper. Note we pass `true` for showArchived
+						// here since the archived-leads branch is itself gated on
+						// `state.showArchived` upstream — we want to include
+						// archived sub-goals when this branch runs.
+						// Strict-parent attribution: pass leadId itself as parentLeadId
+						// because this branch iterates leads that belong to `goal`
+						// (live + archived team-leads of THIS goal). An unstamped
+						// child of `goal` therefore only attaches to its own parent's
+						// lead, never a sibling's.
+						const spawnedSubGoalsOf = (leadId: string) =>
+							selectSpawnedChildren(state.goals, goal.id, leadId, true, leadId);
+						// Cycle guard for the archived-lead branch — same shape as
+						// the live branch above.
+						const archivedAncestors = extendAncestors(opts?.renderedAncestors, goal.id);
+
+						// Render archived leads, each with their own members + spawned sub-goals
 						const renderLeadWithMembers = (lead: GatewaySession, isLast: boolean) => {
 							const myMembers = [...membersOf(lead.id), ...(isLast ? unmapped : [])];
+							const mySubGoals = spawnedSubGoalsOf(lead.id);
+							const hasContent = myMembers.length > 0 || mySubGoals.length > 0;
 							const expanded = isArchivedParentExpanded(lead.id);
+							// Same disambiguator pass as the live branch.
+							const archivedSuffixes = computeTitleSuffixes(mySubGoals);
 							return html`
-								${renderArchivedSessionRow(lead, myMembers.length > 0)}
+								${renderArchivedSessionRow(lead, hasContent)}
 								${renderArchivedDelegates(lead.id)}
-								${expanded && myMembers.length > 0 ? html`
+								${expanded && hasContent ? html`
 									<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 										${myMembers.map(m => html`
 											${renderArchivedSessionRow(m)}
 											${renderArchivedDelegates(m.id)}
 										`)}
+										${mySubGoals.map(child => renderSpawnedChildGoalRow(child, archivedAncestors, archivedSuffixes.get(child.id)))}
 									</div>
 								` : ""}
 							`;

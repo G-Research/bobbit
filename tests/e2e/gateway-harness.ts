@@ -55,6 +55,7 @@ export interface GatewayInfo {
 	wsBase: string;
 	bobbitDir: string;
 	sessionManager?: any;
+	teamManager?: any;
 	/** Server-side log ring buffer (last 200 lines), populated by the harness's
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
 	 * tail of this buffer into the test artifact directory. */
@@ -187,10 +188,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
 		// Canonicalize bobbitDir so downstream consumers (process.env.BOBBIT_DIR,
-		// project rootPaths derived from it, preview-mount baseDir) see the real
-		// path. On macOS /var/folders → /private/var/folders; mixing the symlink
-		// path with the canonical form breaks the path-guard containment check
-		// (missing files report 400→03 instead of 404).
+		// bobbitDir() helper, project rootPaths derived from it, preview-mount
+		// baseDir) see the real path. On macOS /var/folders → /private/var/folders;
+		// mixing the symlink path with the canonical form causes
+		// POST /api/projects to 400 with code:"symlink_root" and breaks the
+		// path-guard containment check (missing files report 400 instead of 404).
+		// Canonicalizing once at the boundary eliminates the entire class.
 		try {
 			const { realpathSync } = await import("node:fs");
 			bobbitDir = realpathSync(bobbitDir);
@@ -205,6 +208,13 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		// Mark setup as complete so the setup wizard doesn't appear in tests
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+		// Default the system-scope Subgoals (Experimental) flag ON for browser
+		// E2E tests. The OFF path is exercised explicitly by
+		// tests/e2e/ui/subgoals-experimental-toggle.spec.ts.
+		writeFileSync(
+			join(bobbitDir, "state", "preferences.json"),
+			JSON.stringify({ subgoalsEnabled: true }, null, 2),
+		);
 
 		// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
 		// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;
@@ -358,6 +368,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			wsBase: `ws://127.0.0.1:${port}`,
 			bobbitDir,
 			sessionManager: gw.sessionManager,
+			teamManager: gw.teamManager,
 			logs: _serverLogs,
 			async crash() {
 				await gw.shutdown();
@@ -401,6 +412,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 					`http://127.0.0.1:${port}`,
 				);
 				info.sessionManager = gw.sessionManager;
+				info.teamManager = gw.teamManager;
 			},
 		};
 

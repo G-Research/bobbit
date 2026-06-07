@@ -7,4 +7,49 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: title (required), spec (required), cwd, workflow, options.
+  Required parameters: title (short human-readable goal name — used in branch
+  names and the sidebar), spec (the full specification including acceptance
+  criteria — agents will use this to drive workflow gates and verification).
+
+  Optional parameters: cwd (project path the goal runs against — defaults to
+  the registered project for this session), workflow (workflow id to use; see
+  GET /api/workflows?projectId=... for available workflows; if omitted, the
+  user picks one in the proposal panel), options (comma-separated optional
+  step names), parentGoalId (parent goal ID for creating a subgoal — must be
+  in the same project; when called from inside a team-lead session the server
+  auto-fills from the current goal so this param is usually omitted; pass the
+  id explicitly to override or omit to create a top-level goal).
+
+  EPHEMERAL ROLES (`inlineRoles`): when an existing role doesn't fit and the
+  custom role would only matter for THIS goal (e.g. a one-off
+  "synthesis-reviewer" for a real-tasks audit), pass a Record<roleName,
+  roleDefinition> here instead of polluting the project's permanent role
+  library via propose_role. The map is snapshotted onto the goal record at
+  creation time and resolved BEFORE the project/server/builtin role cascade.
+  Children spawned from this goal inherit the parent's inline roles (and may
+  override them with their own). For roles that other goals will also need →
+  use propose_role (permanent) instead.
+
+  EPHEMERAL WORKFLOWS (`inlineWorkflow`): same pattern as inlineRoles but for
+  the workflow itself. When the project's existing workflows don't fit and
+  this goal needs a bespoke gate sequence, pass the full Workflow object
+  here. The workflow is snapshotted onto the goal record (via goal.workflow
+  in goal-store.ts), so subsequent edits to the project's workflow store
+  don't affect this goal. The workflow's verify[] steps may reference roles
+  defined in `inlineRoles`. For workflows that other goals will also need →
+  use propose_project with the new entry under `workflows:` instead.
+
+  INHERITANCE TO SUBGOALS: any subgoals spawned from this goal via
+  `goal_spawn_child` automatically inherit BOTH this goal's `inlineRoles`
+  AND its workflow snapshot (whether it came from `inlineWorkflow`,
+  `workflow` id, or auto-seeded defaults). Children may override either
+  on a per-spawn basis by passing their own `inlineRoles` (merged on top —
+  child entries with the same name win) or `inlineWorkflow` / `workflowId`
+  (replaces the inherited workflow entirely for that child).
+
+  DECISION GUIDE for the agent: ask "will any goal OTHER than this one need
+  this role/workflow?". If yes → permanent (propose_role / propose_project).
+  If no → ephemeral (inlineRoles / inlineWorkflow on this goal). When in
+  doubt, prefer ephemeral — the user can always promote it later by editing
+  the project config; it's harder to undo a permanent role that was only
+  ever used once.

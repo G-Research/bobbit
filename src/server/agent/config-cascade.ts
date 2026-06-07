@@ -76,6 +76,15 @@ export interface ServerStores {
 	getToolGroupPolicies(): Record<string, GrantPolicy>;
 }
 
+/**
+ * Minimal structural interface for the project registry, sufficient to walk
+ * ancestor chains during field-level role resolution. Kept structural so
+ * unit tests can inject a fake without spinning up the real registry.
+ */
+export interface ProjectAncestorRegistry {
+	getAncestors(projectId: string): { id: string }[];
+}
+
 export class ConfigCascade {
 	/**
 	 * Base dir for the global-user scope's user pack (`<base>/.bobbit/config`,
@@ -89,6 +98,7 @@ export class ConfigCascade {
 		private builtins: BuiltinConfigProvider,
 		private serverStores: ServerStores,
 		private projectContextManager: ProjectContextManager,
+		private projectRegistry?: ProjectAncestorRegistry,
 		private marketPackProvider?: MarketPackProvider,
 		globalUserBase?: string,
 	) {
@@ -103,6 +113,77 @@ export class ConfigCascade {
 	/** Override the global-user scope base (tests; defaults to `os.homedir()`). */
 	setGlobalUserBase(base: string): void {
 		this.globalUserBase = base;
+	}
+
+	// ── Field-level role resolution (model / thinkingLevel / promptTemplate) ──
+	//
+	// Unlike `resolveRoles()` which replaces whole role items at each layer,
+	// the field-level resolvers walk: current project → ancestor chain →
+	// server → builtin and return the first non-empty value. This lets a
+	// project override `model` without discarding the server/builtin
+	// `thinkingLevel` for the same role.
+
+	private readRoleField(
+		roles: Role[] | undefined,
+		roleName: string,
+		field: "model" | "thinkingLevel" | "promptTemplate",
+	): string | undefined {
+		if (!roles) return undefined;
+		const r = roles.find(x => x.name === roleName);
+		if (!r) return undefined;
+		const v = (r as any)[field];
+		if (typeof v !== "string") return undefined;
+		const trimmed = v.trim();
+		return trimmed.length > 0 ? v : undefined;
+	}
+
+	private localRoleField(
+		projectId: string,
+		roleName: string,
+		field: "model" | "thinkingLevel" | "promptTemplate",
+	): string | undefined {
+		const ctx = this.projectContextManager.getOrCreate(projectId);
+		if (!ctx) return undefined;
+		const role = ctx.roleStore.getLocal(roleName);
+		if (!role) return undefined;
+		const v = (role as any)[field];
+		if (typeof v !== "string") return undefined;
+		const trimmed = v.trim();
+		return trimmed.length > 0 ? v : undefined;
+	}
+
+	private resolveRoleField(
+		roleName: string,
+		field: "model" | "thinkingLevel" | "promptTemplate",
+		projectId?: string,
+	): string | undefined {
+		if (projectId) {
+			const v = this.localRoleField(projectId, roleName, field);
+			if (v !== undefined) return v;
+			if (this.projectRegistry) {
+				for (const anc of this.projectRegistry.getAncestors(projectId)) {
+					const av = this.localRoleField(anc.id, roleName, field);
+					if (av !== undefined) return av;
+				}
+			}
+		}
+		const sv = this.readRoleField(this.serverStores.getRoles(), roleName, field);
+		if (sv !== undefined) return sv;
+		const bv = this.readRoleField(this.builtins.getRoles(), roleName, field);
+		if (bv !== undefined) return bv;
+		return undefined;
+	}
+
+	resolveRoleModel(roleName: string, projectId?: string): string | undefined {
+		return this.resolveRoleField(roleName, "model", projectId);
+	}
+
+	resolveRoleThinkingLevel(roleName: string, projectId?: string): string | undefined {
+		return this.resolveRoleField(roleName, "thinkingLevel", projectId);
+	}
+
+	resolveRolePromptTemplate(roleName: string, projectId?: string): string | undefined {
+		return this.resolveRoleField(roleName, "promptTemplate", projectId);
 	}
 
 	// ── Roles ────────────────────────────────────────────────────

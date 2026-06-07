@@ -145,7 +145,7 @@ test.describe("multi-repo flow API/data paths", () => {
 				}
 
 				// Archive → cleanup. Allow up to 15s for async teardown.
-				await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+				await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 				goalId = undefined;
 				const allGone = await pollUntil(
 					async () => Object.values(goalRecord.repoWorktrees as Record<string, string>)
@@ -156,11 +156,11 @@ test.describe("multi-repo flow API/data paths", () => {
 			} else {
 				// Pre-Phase-4a single-repo fallback: just verify a worktree was set up.
 				expect(goalRecord.worktreePath || goalRecord.cwd).toBeTruthy();
-				await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+				await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 				goalId = undefined;
 			}
 		} finally {
-			if (goalId) await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+			if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 		}

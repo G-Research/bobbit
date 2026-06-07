@@ -16,7 +16,7 @@ import {
 	type Goal,
 	type GoalState,
 } from "./state.js";
-import { gatewayFetch, updateGoal, SymlinkRootError, type DetectedRepo, type MonorepoScanResult } from "./api.js";
+import { gatewayFetch, updateGoal, SymlinkRootError, fetchRoles, patchSession, type DetectedRepo, type MonorepoScanResult } from "./api.js";
 import "../ui/components/DirectoryPicker.js";
 import type {
 	DirectoryPicker as DirectoryPickerEl,
@@ -31,6 +31,10 @@ import { errorDetails } from "./error-helpers.js";
 import "../ui/components/ErrorDetails.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
+// Static import of session-manager creates a cycle (session-manager imports
+// dialogs.ts statically), but neither module references the other at
+// module-init time — ESM live bindings resolve at call time.
+import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
@@ -688,7 +692,6 @@ export function openGatewayDialog(): void {
 		const token = tokenValue.trim();
 
 		try {
-			const { authenticateGateway } = await import("./session-manager.js");
 			await authenticateGateway(url, token);
 			cleanup();
 		} catch (err) {
@@ -709,8 +712,7 @@ export function openGatewayDialog(): void {
 			while (Date.now() - start < MAX_WAIT) {
 				await new Promise(r => setTimeout(r, POLL_INTERVAL));
 				try {
-					const { authenticateGateway: auth } = await import("./session-manager.js");
-					await auth(url, token);
+					await authenticateGateway(url, token);
 					cleanup();
 					return;
 				} catch (retryErr: any) {
@@ -977,9 +979,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 	let pendingColorIndex: number | null = null;
 
 	// Load roles for the picker
-	import("./api.js").then(({ fetchRoles }) => {
-		if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
-	});
+	if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
 
 	const cleanup = () => {
 		titleChangeUnsub?.();
@@ -996,9 +996,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 			if (state.remoteAgent && activeSessionId() === sessionId) {
 				state.remoteAgent.setTitle(trimmed);
 			} else {
-				import("./api.js").then(({ patchSession }) => {
-					patchSession(sessionId, { title: trimmed });
-				});
+				patchSession(sessionId, { title: trimmed });
 				refreshSessions();
 			}
 		}
@@ -1342,7 +1340,6 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 			state.previewProjectId = projectId;
 			if (project && !state.previewCwdEdited) state.previewCwd = project.rootPath;
 		}
-		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
@@ -2414,3 +2411,469 @@ export function showProjectDialog(): void {
 		onEffectivePathChange(pathValue, true);
 	}
 }
+
+// ============================================================================
+// CASCADE CONFIRMATION DIALOGS
+//
+// Per-cascade confirm dialogs (Archive / Pause / Resume). Server endpoints
+// require explicit `cascade=true|false` (422 otherwise) — UI is the policy
+// authority. See AGENTS.md "Cascade confirmation dialogs".
+// ============================================================================
+
+export interface CascadeArchiveResult { archived: number; hasErrors?: boolean }
+
+/**
+ * Archive a goal with cascade UX. Returns count of goals archived (0=cancelled).
+ * See docs/nested-goals.md and AGENTS.md "Cascade confirmation dialogs".
+ */
+export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveResult> {
+	// R-027: this dialog is only invoked from `deleteGoal()` (api.ts) after
+	// the descendant-count is known to be > 0. The no-descendant case is
+	// handled there via the `confirmAction("Archive Goal", ...)` flow per
+	// AGENTS.md "Archive a goal (UI)" recipe — do NOT add direct callers
+	// here that skip that confirm.
+	// Pre-flight: try cascade=false. If the server reports descendants we'll
+	// open the dialog; otherwise treat as a normal archive and we're done.
+	let preflightStatus = 0;
+	let preflightBody: { code?: string; count?: number; archived?: number; ok?: boolean } | null = null;
+	try {
+		const res = await gatewayFetch(`/api/goals/${goal.id}?cascade=false`, { method: "DELETE" });
+		preflightStatus = res.status;
+		preflightBody = await res.json().catch(() => null);
+	} catch {
+		// fall through — let the dialog explain the failure if any
+	}
+
+	if (preflightStatus === 200) {
+		return { archived: typeof preflightBody?.archived === "number" ? preflightBody.archived : 1 };
+	}
+
+	if (preflightStatus !== 409 || preflightBody?.code !== "HAS_DESCENDANTS") {
+		// Not a descendants conflict — surface the error and bail.
+		const msg = preflightStatus
+			? `Archive failed (HTTP ${preflightStatus}).`
+			: "Archive failed (network error).";
+		showConnectionError("Failed to archive goal", msg);
+		return { archived: 0 };
+	}
+
+	const descendantCount = preflightBody?.count ?? 0;
+
+	return new Promise<CascadeArchiveResult>((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		let confirming = false;
+
+		const cleanup = (result: CascadeArchiveResult) => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const doConfirm = async () => {
+			if (confirming) return;
+			confirming = true;
+			renderDialog();
+			try {
+				const res = await gatewayFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
+				const body = await res.json().catch(() => null);
+				if (!res.ok) {
+					confirming = false;
+					renderDialog();
+					showConnectionError("Failed to archive goal", `HTTP ${res.status}`);
+					cleanup({ archived: 0 });
+					return;
+				}
+				// Surface partial failures: server returns errors[] when some
+				// goals couldn't be archived (e.g. teardown failed).
+				const hasErrors = Array.isArray(body?.errors) && body.errors.length > 0;
+				if (hasErrors) {
+					const failCount = (body.errors as { goalId: string; error: string }[]).length;
+					showConnectionError(
+						"Partial archive",
+						`${failCount} goal${failCount === 1 ? "" : "s"} could not be archived (team teardown failed). Refresh to check status.`,
+					);
+				}
+				cleanup({ archived: typeof body?.archived === "number" ? body.archived : descendantCount + 1, hasErrors });
+			} catch (err) {
+				confirming = false;
+				renderDialog();
+				const msg = err instanceof Error ? err.message : String(err);
+				showConnectionError("Failed to archive goal", msg);
+				cleanup({ archived: 0 });
+			}
+		};
+
+		const renderDialog = () => {
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => cleanup({ archived: 0 }),
+					width: "min(480px, 92vw)",
+					height: "auto",
+					backdropClassName: "bg-black/50 backdrop-blur-sm",
+					children: html`
+						${DialogContent({
+							children: html`
+								${DialogHeader({ title: "Archive goal & descendants" })}
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-archive-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantCount}</span>
+									descendant goal${descendantCount === 1 ? "" : "s"}.
+								</p>
+								<p class="text-sm text-muted-foreground mt-2">
+									Confirming will:
+								</p>
+								<ul class="text-sm text-foreground mt-1 ml-4 list-disc space-y-1" data-testid="cascade-archive-effects">
+									<li>Archive the parent goal.</li>
+									<li>Archive all <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"} (children of children too).</li>
+									<li>Tear down every running team session under this tree.</li>
+								</ul>
+								<p class="text-xs text-muted-foreground/80 mt-3 italic">
+									Cascade is required — child goals can't be orphaned. Cancel if you'd like to back out.
+								</p>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup({ archived: 0 }), children: "Cancel", disabled: confirming })}
+									${Button({
+										variant: "default",
+										onClick: () => doConfirm(),
+										disabled: confirming,
+										className: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+										children: confirming
+											? "Archiving…"
+											: `Archive parent + ${descendantCount} descendant${descendantCount === 1 ? "" : "s"}`,
+									})}
+								</div>
+							`,
+						})}
+					`,
+				}),
+				container,
+			);
+		};
+		renderDialog();
+	});
+}
+
+export interface CascadePauseResult { paused: number }
+
+/**
+ * Pause a goal with optional cascade. Cascade defaults ON when descendants
+ * exist. Skips the dialog when descendantCount === 0.
+ */
+/**
+ * Cascade-stop confirmation. Returns:
+ *  - "no-descendants" — invoked with `descendantTeamCount === 0`; the
+ *    caller is expected to short-circuit BEFORE calling this dialog
+ *    (see `teardownTeamWithDialog`). The variant is retained as a
+ *    defensive sentinel for direct callers.
+ *  - "cascade"        — user picked "Stop all teams"
+ *  - "cancel"         — user dismissed
+ *
+ * Renamed from "this-only" → "no-descendants" (R-024 / R-040): the old
+ * name implied a user-pickable variant, but the dialog never offered
+ * a "this-only" button — the value was returned only when there were
+ * no descendants to begin with.
+ */
+export async function showStopTeamDialog(
+	goal: { id: string; title: string },
+	descendantTeamCount: number,
+	descendants: Array<{ id: string; title: string }>,
+): Promise<"no-descendants" | "cascade" | "cancel"> {
+	if (descendantTeamCount === 0) return "no-descendants";
+	return new Promise<"no-descendants" | "cascade" | "cancel">((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		let working = false;
+
+		const cleanup = (result: "no-descendants" | "cascade" | "cancel") => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const doCascade = async () => {
+			if (working) return;
+			working = true;
+			renderDialog();
+			cleanup("cascade");
+		};
+
+		const renderDialog = () => {
+			const previewLines = descendants.slice(0, 5).map(d => html`<li class="truncate">${d.title}</li>`);
+			const overflow = descendants.length > 5 ? html`<li class="text-muted-foreground italic">…and ${descendants.length - 5} more</li>` : "";
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => cleanup("cancel"),
+					width: "min(480px, 92vw)",
+					height: "auto",
+					backdropClassName: "bg-black/50 backdrop-blur-sm",
+					children: html`
+						${DialogContent({
+							children: html`
+								${DialogHeader({ title: "Stop team" })}
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-stop-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantTeamCount}</span>
+									descendant goal${descendantTeamCount === 1 ? "" : "s"} with running team${descendantTeamCount === 1 ? "" : "s"}.
+								</p>
+								<p class="text-sm text-muted-foreground mt-2">
+									Stopping just this goal's team would leave the descendant teams running and burning tokens. Cascade-stop tears down all of them.
+								</p>
+								<ul class="text-sm text-foreground mt-2 ml-4 list-disc space-y-0.5" data-testid="cascade-stop-descendants">
+									${previewLines}${overflow}
+								</ul>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup("cancel"), children: "Cancel", disabled: working })}
+									<span data-testid="cascade-stop-confirm">${Button({
+										variant: "default",
+										disabled: working,
+										onClick: () => doCascade(),
+										children: working ? "Stopping…" : `Stop all ${descendantTeamCount + 1} teams`,
+									})}</span>
+								</div>
+							`,
+						})}
+					`,
+				}),
+				container,
+			);
+		};
+		renderDialog();
+	});
+}
+
+export async function showPauseGoalDialog(goal: Goal, descendantCount: number): Promise<CascadePauseResult> {
+	if (descendantCount === 0) {
+		const res = await gatewayFetch(`/api/goals/${goal.id}/pause`, {
+			method: "POST",
+			body: JSON.stringify({ cascade: false }),
+		});
+		const data = await res.json().catch(() => null);
+		if (!res.ok) {
+			showConnectionError("Failed to pause goal", `HTTP ${res.status}`);
+			return { paused: 0 };
+		}
+		return { paused: typeof data?.paused === "number" ? data.paused : 0 };
+	}
+
+	return new Promise<CascadePauseResult>((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		let cascade = true;
+		let working = false;
+
+		const cleanup = (result: CascadePauseResult) => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const doConfirm = async () => {
+			if (working) return;
+			working = true;
+			renderDialog();
+			try {
+				const res = await gatewayFetch(`/api/goals/${goal.id}/pause`, {
+					method: "POST",
+					body: JSON.stringify({ cascade }),
+				});
+				const body = await res.json().catch(() => null);
+				if (!res.ok) {
+					working = false;
+					renderDialog();
+					showConnectionError("Failed to pause goal", `HTTP ${res.status}`);
+					cleanup({ paused: 0 });
+					return;
+				}
+				cleanup({ paused: typeof body?.paused === "number" ? body.paused : 0 });
+			} catch (err) {
+				working = false;
+				renderDialog();
+				showConnectionError("Failed to pause goal", err instanceof Error ? err.message : String(err));
+				cleanup({ paused: 0 });
+			}
+		};
+
+		const renderDialog = () => {
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => cleanup({ paused: 0 }),
+					width: "min(440px, 92vw)",
+					height: "auto",
+					backdropClassName: "bg-black/50 backdrop-blur-sm",
+					children: html`
+						${DialogContent({
+							children: html`
+								${DialogHeader({ title: "Pause goal" })}
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-pause-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantCount}</span>
+									descendant goal${descendantCount === 1 ? "" : "s"}.
+								</p>
+								<p class="text-sm text-muted-foreground mt-2">
+									Pausing a goal stops its team-lead from receiving new prompts. By default we cascade so descendants pause too — uncheck if you want to pause only this goal.
+								</p>
+								<label class="flex items-start gap-2 mt-3 text-sm text-foreground cursor-pointer">
+									<input type="checkbox"
+										?checked=${cascade}
+										class="mt-0.5"
+										data-testid="cascade-pause-checkbox"
+										@change=${(e: Event) => { cascade = (e.target as HTMLInputElement).checked; renderDialog(); }} />
+									<span>Also pause <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"}</span>
+								</label>
+								<p class="text-xs text-muted-foreground/80 mt-2 italic" data-testid="cascade-pause-limitations">
+									Note: pausing stops new gate verifications and interrupts any streaming agents (they stay registered, not removed). Paused goals resume from where they left off when you call Resume.
+								</p>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup({ paused: 0 }), children: "Cancel", disabled: working })}
+									<span data-testid="cascade-pause-confirm">${Button({
+										variant: "default",
+										disabled: working,
+										onClick: () => doConfirm(),
+										children: working ? "Pausing…" : (cascade ? `Pause goal + ${descendantCount} descendant${descendantCount === 1 ? "" : "s"}` : "Pause goal"),
+									})}</span>
+								</div>
+							`,
+						})}
+					`,
+				}),
+				container,
+			);
+		};
+		renderDialog();
+	});
+}
+
+export interface CascadeResumeResult { resumed: number }
+
+/** Resume a goal with optional cascade. Checkbox defaults OFF (resume target only). */
+export async function showResumeGoalDialog(goal: Goal, descendantCount: number): Promise<CascadeResumeResult> {
+	if (descendantCount === 0) {
+		const res = await gatewayFetch(`/api/goals/${goal.id}/resume`, {
+			method: "POST",
+			body: JSON.stringify({ cascade: false }),
+		});
+		const data = await res.json().catch(() => null);
+		if (!res.ok) {
+			showConnectionError("Failed to resume goal", `HTTP ${res.status}`);
+			return { resumed: 0 };
+		}
+		return { resumed: typeof data?.resumed === "number" ? data.resumed : 0 };
+	}
+
+	return new Promise<CascadeResumeResult>((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		let cascade = false; // default OFF for resume — targeted by default
+		let working = false;
+
+		const cleanup = (result: CascadeResumeResult) => {
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const doConfirm = async () => {
+			if (working) return;
+			working = true;
+			renderDialog();
+			try {
+				const res = await gatewayFetch(`/api/goals/${goal.id}/resume`, {
+					method: "POST",
+					body: JSON.stringify({ cascade }),
+				});
+				const body = await res.json().catch(() => null);
+				if (!res.ok) {
+					working = false;
+					renderDialog();
+					showConnectionError("Failed to resume goal", `HTTP ${res.status}`);
+					cleanup({ resumed: 0 });
+					return;
+				}
+				cleanup({ resumed: typeof body?.resumed === "number" ? body.resumed : 0 });
+			} catch (err) {
+				working = false;
+				renderDialog();
+				showConnectionError("Failed to resume goal", err instanceof Error ? err.message : String(err));
+				cleanup({ resumed: 0 });
+			}
+		};
+
+		const renderDialog = () => {
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => cleanup({ resumed: 0 }),
+					width: "min(440px, 92vw)",
+					height: "auto",
+					backdropClassName: "bg-black/50 backdrop-blur-sm",
+					children: html`
+						${DialogContent({
+							children: html`
+								${DialogHeader({ title: "Resume goal" })}
+								<p class="text-sm text-foreground mt-2" data-testid="cascade-resume-summary">
+									<span class="font-semibold">"${goal.title}"</span> has
+									<span class="font-semibold">${descendantCount}</span>
+									descendant goal${descendantCount === 1 ? "" : "s"} that may also be paused.
+								</p>
+								<p class="text-sm text-muted-foreground mt-2">
+									By default we resume only this goal. Check the box to also resume the descendants.
+								</p>
+								<label class="flex items-start gap-2 mt-3 text-sm text-foreground cursor-pointer">
+									<input type="checkbox"
+										?checked=${cascade}
+										class="mt-0.5"
+										data-testid="cascade-resume-checkbox"
+										@change=${(e: Event) => { cascade = (e.target as HTMLInputElement).checked; renderDialog(); }} />
+									<span>Also resume <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"}</span>
+								</label>
+							`,
+						})}
+						${DialogFooter({
+							className: "px-6 pb-4",
+							children: html`
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => cleanup({ resumed: 0 }), children: "Cancel", disabled: working })}
+									${Button({
+										variant: "default",
+										disabled: working,
+										onClick: () => doConfirm(),
+										children: working ? "Resuming…" : (cascade ? `Resume goal + ${descendantCount} descendant${descendantCount === 1 ? "" : "s"}` : "Resume goal"),
+									})}
+								</div>
+							`,
+						})}
+					`,
+				}),
+				container,
+			);
+		};
+		renderDialog();
+	});
+}
+
+// `countDescendants` moved to `./goal-descendants-count.js` so synchronous
+// callers (api.ts) don't statically pull this heavy module into the eager
+// session-runtime chunk. Re-exported here for backward compatibility.
+export { countDescendants } from "./goal-descendants-count.js";

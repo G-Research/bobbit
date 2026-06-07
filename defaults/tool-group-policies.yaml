@@ -1,4 +1,15 @@
 Ask: allow
+# Children group: nested-goal lifecycle tools (goal_spawn_child,
+# goal_plan_propose, goal_plan_status, goal_merge_child, goal_pause,
+# goal_resume, goal_archive_child, goal_decide_mutation, goal_set_policy).
+# Default `never` so the tools are stripped from every non-team-lead agent's
+# allowedTools (and tool-docs prompt) — they are exclusively a team-lead
+# orchestration surface and would not work from a worker session anyway.
+# The team-lead role re-grants them via per-tool `always-allow` in
+# `defaults/roles/team-lead.yaml`, which beats this group default
+# (resolveGrantPolicy step 1 > step 4). Pinned by
+# tests/role-children-tools-policy.test.ts.
+Children: never
 # Skills group: gates the `activate_skill` tool, which lets the model autonomously
 # invoke any discovered slash skill mid-turn (Agent Skills level-1 progressive
 # disclosure). Set to `never` project-wide to suppress autonomous activation;

@@ -30,7 +30,7 @@ import type { ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
-import type { PromptParts } from "./system-prompt.js";
+import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
@@ -56,6 +56,39 @@ function resolveGoalToolsExtPath(ctx: PipelineContext): string {
 function resolveProposalToolsExtPath(ctx: PipelineContext): string {
 	if (ctx.toolManager) return ctx.toolManager.getExtensionPath("proposals", "extension.ts");
 	return path.join(TOOLS_DIR, "proposals", "extension.ts");
+}
+
+/**
+ * Build a NestingContext from a goal for the team-lead system prompt. Walks
+ * the parent chain (at most one hop for the parent, one hop for the root) to
+ * resolve titles and branches.
+ *
+ * Returns `{ team: true, parent: undefined }` for a root team goal so Stanza A
+ * renders, and `{ team: true, parent: {...} }` for a child team goal so
+ * Stanza B fires its "DO NOT raise a PR / DO NOT spawn siblings" guardrail.
+ * For non-team goals returns `{ team: false }` — `buildNestingContextSection`
+ * short-circuits and no section renders.
+ */
+function buildNestingContext(
+	goal: import("./goal-store.js").PersistedGoal,
+	goalManager: GoalManager,
+): NestingContext {
+	const ctx: NestingContext = { team: !!goal.team, goalBranch: goal.branch };
+	if (!goal.team) return ctx;
+	if (goal.parentGoalId) {
+		const parent = goalManager.getGoal(goal.parentGoalId);
+		if (parent) {
+			ctx.parent = { id: parent.id, title: parent.title, branch: parent.branch };
+		}
+	}
+	const rootId = goal.rootGoalId;
+	if (rootId && rootId !== goal.id) {
+		const root = goalManager.getGoal(rootId);
+		if (root) {
+			ctx.root = { id: root.id, title: root.title, branch: root.branch };
+		}
+	}
+	return ctx;
 }
 
 /** Delegate spawn timeout (30 seconds). */
@@ -190,6 +223,8 @@ export interface PipelineContext {
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
+	/** S1 — per-session capability secret store (see session-secret.ts). */
+	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	costTracker: CostTracker;
@@ -298,7 +333,14 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
-		env: { BOBBIT_SESSION_ID: plan.id, ...plan.env },
+		// S1: inject the per-session capability secret alongside the session id.
+		// Only this session's process receives its own secret — see
+		// `src/server/auth/session-secret.ts`.
+		env: {
+			BOBBIT_SESSION_ID: plan.id,
+			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),
+			...plan.env,
+		},
 	};
 	if (ctx.agentCliPath) {
 		plan.bridgeOptions.cliPath = ctx.agentCliPath;
@@ -441,7 +483,9 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
-			baseSystemPromptPath: undefined,
+			// Include the base system prompt so assistant sessions
+			// (goal/project/tool assistants) get it by default.
+			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
 			goalSpec: assistantGoalSpec,
@@ -462,7 +506,9 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
-			baseSystemPromptPath: undefined,
+			// Delegates still get the global base system prompt. The task spec is
+			// layered on top as goalSpec; AGENTS.md from the worktree is also included.
+			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
 			goalSpec: taskSpec,
@@ -495,6 +541,18 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			}
 		}
 
+		// Nesting awareness — only the team-lead session of a goal needs the
+		// root/child stanzas + the subgoal/team_spawn/task_create decision
+		// rule. Contributors and QA/reviewer sub-sessions get nothing here
+		// (they inherit their scope from their task spec). Stamping the
+		// stanza at the right role is what actually surfaces Stanza B's
+		// "DO NOT raise a PR / DO NOT spawn siblings" guardrail to child
+		// team-leads — before this was populated, the child agent had no
+		// structural awareness that its spec might be parent-flavoured.
+		const nestingContext = plan.roleName === "team-lead" && goal
+			? buildNestingContext(goal, ctx.goalManager)
+			: undefined;
+
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
@@ -511,6 +569,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			nestingContext,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
 	}
@@ -1200,4 +1259,7 @@ export function handleSetupFailure(
 	if (ctx.sandboxTokenStore && plan.projectId) {
 		ctx.sandboxTokenStore.removeSession(plan.projectId, session.id);
 	}
+
+	// 6. S1: drop the per-session capability secret.
+	ctx.sessionSecretStore.remove(session.id);
 }

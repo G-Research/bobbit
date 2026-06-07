@@ -1,0 +1,18 @@
+name: view_goal_spec
+description: "Read the current goal.spec content for a goal"
+summary: "Re-read the goal spec after a `goal_spec_changed` notification. The spec is already injected into your first user message at session start — do NOT call this on startup."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Proposals
+docs: >-
+  Mid-flight re-read escape hatch. The goal spec is already injected into
+  your first user message at session start — do NOT call this on startup.
+  Use only after a `goal_spec_changed` notification, when the user or a
+  parent agent has edited the spec while your session is running.
+
+
+  Parameters: goal_id (optional, defaults to the session's BOBBIT_GOAL_ID).
+  Returns the goal's title, id, updatedAt timestamp, spec length, and the
+  full spec body. Errors structurally if no goal_id is resolvable or the
+  goal is not found. Read-only: this tool does not mutate goal state.

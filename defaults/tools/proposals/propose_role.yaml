@@ -7,4 +7,40 @@ provider:
   extension: extension.ts
 group: Proposals
 docs: >-
-  Parameters: name (required), label (required), prompt (required), tools, accessory.
+  Required parameters: name (kebab-case identifier — used by workflows and the
+  team-spawn API; must be unique), label (human-readable display name), prompt
+  (the role's system prompt — supports {{AGENT_ID}}, {{GOAL_BRANCH}}, and other
+  template variables; see defaults/roles/*.yaml for examples).
+
+  Optional parameters on the initial call: tools (comma-separated list of
+  allowed tool names), accessory (cosmetic icon).
+
+  ADDING ADVANCED FIELDS: the role YAML draft on disk supports the full role
+  schema (see defaults/roles/coder.yaml as a reference) — including
+  `toolPolicies` (Record<toolName, "allow" | "ask" | "never"> — overrides the
+  project tool-group policy per-role; canonical example: every contributor
+  declares `gate_signal: never` and `goal_spawn_child: never` so only team-
+  leads can signal gates / spawn sub-goals), `model` (string
+  "<provider>/<modelId>" — overrides the system default for sessions running
+  this role), `thinkingLevel`, and `description`. After the initial
+  propose_role call seeds the draft, use edit_proposal(type="role",
+  old_text=..., new_text=...) to add these fields surgically.
+
+  Cascade: roles are project-scoped by default but cascade builtin → server →
+  project. To override a builtin role for one project, propose with the
+  builtin's name and the override is applied at the project layer.
+
+  PERMANENT vs EPHEMERAL — when to use what:
+    - propose_role (THIS tool): the role belongs in the project's permanent
+      role library because OTHER goals will also use it. Lives forever until
+      the user explicitly deletes it via the role manager.
+    - inlineRoles on propose_goal / goal_spawn_child: the role only matters
+      for one goal (and its subgoals). Snapshotted onto the goal record at
+      creation time; resolved BEFORE the project role cascade by the
+      verification harness and team-spawn. Doesn't show up in the role
+      manager UI; goes away with the goal.
+  When in doubt, prefer ephemeral (inlineRoles) — the user can always promote
+  it later; it's harder to undo a permanent role that was only ever used once.
+
+  Mid-session vs setup: this tool works in either mode. Mid-session, the user
+  sees a diff against the current role definition.

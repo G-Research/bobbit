@@ -40,22 +40,29 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
-	it("source: bridge env merge preserves caller-supplied env after BOBBIT_SESSION_ID", () => {
+	it("source: bridge env merge preserves caller-supplied env after BOBBIT_SESSION_ID + secret", () => {
 		const src = readFileSync(
 			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
 			"utf-8",
 		);
-		// Verify the env-spread shape: { BOBBIT_SESSION_ID: plan.id, ...plan.env }
+		// Verify the env-spread shape seeds BOBBIT_SESSION_ID first, then the S1
+		// per-session BOBBIT_SESSION_SECRET, then spreads caller env LAST (so a
+		// caller-supplied env can never override the session id or its secret):
+		//   { BOBBIT_SESSION_ID: plan.id, BOBBIT_SESSION_SECRET: ..., ...plan.env }
 		assert.ok(
-			/env:\s*\{\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*\.\.\.plan\.env\s*\}/.test(src),
-			"bridge env must seed BOBBIT_SESSION_ID first, then spread caller env",
+			/env:\s*\{\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\.\.\.plan\.env,?\s*\}/.test(src),
+			"bridge env must seed BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET first, then spread caller env",
 		);
 	});
 
-	it("functional: replicated env-construction logic seeds BOBBIT_SESSION_ID", () => {
+	it("functional: replicated env-construction logic seeds BOBBIT_SESSION_ID + secret before caller env", () => {
 		// Faithful reproduction of the env-merge in resolveBridgeOptions.
 		function buildBridgeEnv(plan: { id: string; env?: Record<string, string>; delegateOf?: string }) {
-			let env: Record<string, string> = { BOBBIT_SESSION_ID: plan.id, ...(plan.env ?? {}) };
+			let env: Record<string, string> = {
+				BOBBIT_SESSION_ID: plan.id,
+				BOBBIT_SESSION_SECRET: `secret-for-${plan.id}`,
+				...(plan.env ?? {}),
+			};
 			if (plan.delegateOf) {
 				env = { ...env, BOBBIT_DELEGATE_OF: plan.delegateOf };
 			}
@@ -64,6 +71,7 @@ describe("session-setup spawn env contract", () => {
 
 		const env1 = buildBridgeEnv({ id: "sess-abc-123" });
 		assert.equal(env1.BOBBIT_SESSION_ID, "sess-abc-123");
+		assert.equal(env1.BOBBIT_SESSION_SECRET, "secret-for-sess-abc-123");
 
 		const env2 = buildBridgeEnv({ id: "delegate-xyz", delegateOf: "parent-1" });
 		assert.equal(env2.BOBBIT_SESSION_ID, "delegate-xyz");

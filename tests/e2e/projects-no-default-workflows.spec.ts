@@ -49,7 +49,7 @@ test.beforeAll(() => { token = readE2EToken(); });
 
 test.describe("No default workflow scaffold", () => {
 	test("Case A — POST /api/projects without workflows persists with zero workflows", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-a-"));
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-a-")));
 		gitInit(root);
 
 		const projName = `nodef-a-${Date.now()}`;
@@ -83,7 +83,7 @@ test.describe("No default workflow scaffold", () => {
 	});
 
 	test("Case B — workflows in proposal are kept exactly, no defaults merged", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-b-"));
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-b-")));
 		gitInit(root);
 
 		const projName = `nodef-b-${Date.now()}`;
@@ -117,8 +117,12 @@ test.describe("No default workflow scaffold", () => {
 		expect(wf["quick-fix"]).toBeUndefined();
 	});
 
-	test("Case C — goal-creation side-effects do not seed workflows into a zero-workflows project", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-"));
+	test("Case C — goal-creation in a zero-workflows project auto-seeds default workflows", async () => {
+		// Auto-seeding always persists to disk (7b75dca4): when a goal is first
+		// created in a project with no workflows, the server seeds the canonical
+		// defaults (general, feature, bug-fix, parent) so the goal can succeed.
+		// Pinned by goal-creation-auto-seed.spec.ts and this test.
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
 		const projName = `nodef-c-${Date.now()}`;
@@ -131,12 +135,9 @@ test.describe("No default workflow scaffold", () => {
 
 		const yamlPath = path.join(root, ".bobbit", "config", "project.yaml");
 		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
-		const before = fs.readFileSync(yamlPath, "utf-8");
 		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
 
-		// Best-effort: try creating a goal. Whether it succeeds or fails, the
-		// invariant is that project.yaml's workflows block is unchanged.
-		await fetch(`${base()}/api/goals`, {
+		const goalRes = await fetch(`${base()}/api/goals`, {
 			method: "POST",
 			headers: headers(),
 			body: JSON.stringify({
@@ -144,15 +145,12 @@ test.describe("No default workflow scaffold", () => {
 				cwd: root,
 				projectId: project.id,
 				team: false,
-				// no workflowId — exercises the empty-workflows path
+				autoStartTeam: false,
+				workflowId: "feature", // workflowId triggers auto-seeding on empty project
 			}),
-		}).catch(() => { /* either outcome is fine */ });
-
-		// Re-read and verify no seeding happened.
-		const after = fs.readFileSync(yamlPath, "utf-8");
-		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
-		// File should be byte-identical w.r.t. the workflows section. Compare
-		// whole file as a stronger assertion.
-		expect(after).toBe(before);
+		});
+		// Goal creation should succeed and project.yaml should now have workflows.
+		expect([200, 201]).toContain(goalRes.status);
+		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
 	});
 });

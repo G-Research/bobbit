@@ -10,16 +10,30 @@ docs: >-
   Parameters: name (required), root_path (required), build_command, test_command,
   typecheck_command, test_unit_command, test_e2e_command, worktree_setup_command,
   sandbox, components, workflows, config_directories (array of {path, types[]}),
-  sandbox_tokens (array of {key, enabled}). Each component accepts a
-  `config: Record<string, string>` map of opaque key→string entries (max 100 per
-  component); QA-testing keys live there now (qa_start_command, qa_health_check,
-  qa_browser_entry, qa_max_duration_minutes, qa_max_scenarios — all stringified).
-  Inline env vars directly into qa_start_command (e.g. "PORT=$PORT NODE_ENV=test
-  npm start"); there is no separate qa_env field. Native-YAML fields
-  (config_directories, sandbox_tokens) MUST be sent as structured types — the
-  server rejects JSON-encoded strings for these fields with 400. Top-level
-  qa_start_command / qa_build_command / qa_health_check / qa_browser_entry /
-  qa_env / qa_max_duration_minutes / qa_max_scenarios are rejected with 400 and
-  a message pointing at components[].config[]. Also works mid-session against an
-  already-registered project: the user reviews a diff and accepts without
-  terminating the session.
+  sandbox_tokens (array of {key, enabled}).
+
+  WORKFLOWS: workflows are defined here, not via a separate tool. Each entry in
+  `workflows[]` is a full Workflow object — id, name, description, gates[] (each
+  with id, name, dependsOn[], verify[]), and the standard meta-fields. Omitting
+  `workflows` from a mid-session propose_project call leaves the project's
+  existing workflow set untouched (shallow-merge). To replace the set, send the
+  full new array; to surgically tweak gates of an in-flight draft, use
+  edit_proposal(type="project", old_text=..., new_text=...). Workflow shape is
+  documented in defaults/workflow-authoring-guide.md. Workflows are project-
+  scoped only — there is no system-scope cascade.
+
+  COMPONENTS: each component accepts a `config: Record<string, string>` map of
+  opaque key→string entries (max 100 per component); QA-testing keys live there
+  now (qa_start_command, qa_health_check, qa_browser_entry,
+  qa_max_duration_minutes, qa_max_scenarios — all stringified). Inline env vars
+  directly into qa_start_command (e.g. "PORT=$PORT NODE_ENV=test npm start");
+  there is no separate qa_env field.
+
+  GOTCHAS: Native-YAML fields (config_directories, sandbox_tokens) MUST be sent
+  as structured types — the server rejects JSON-encoded strings for these fields
+  with 400. Top-level qa_start_command / qa_build_command / qa_health_check /
+  qa_browser_entry / qa_env / qa_max_duration_minutes / qa_max_scenarios are
+  rejected with 400 and a message pointing at components[].config[].
+
+  This tool also works mid-session against an already-registered project: the
+  user reviews a diff and accepts without terminating the session.

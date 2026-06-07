@@ -218,7 +218,7 @@ test.describe("Cancel Verification API", () => {
 			const { goalId } = setup;
 
 			// Archive the goal via DELETE
-			const archiveRes = await apiFetch(`/api/goals/${goalId}`, {
+			const archiveRes = await apiFetch(`/api/goals/${goalId}?cascade=true`, {
 				method: "DELETE",
 			});
 			expect(archiveRes.ok).toBe(true);

@@ -261,6 +261,25 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 		if (newBody === opts.body) return opts;
 		return { ...opts, body: newBody as BodyInit };
 	}
+	// POST /api/projects: canonicalize rootPath via realpathSync so tests
+	// using tmpdir()-derived paths (which on macOS are symlinks /var/folders
+	// -> /private/var/folders) don't 400 with code:"symlink_root", AND so
+	// the value stored in the registry matches what the test compares
+	// against in subsequent GETs. Tests that deliberately exercise the
+	// symlink-rejection path use rawApiFetch() or page-driven UI and bypass
+	// this entirely.
+	if (method === "POST" && path === "/api/projects" && typeof opts.body === "string") {
+		try {
+			const parsed = JSON.parse(opts.body) as Record<string, unknown>;
+			if (typeof parsed === "object" && parsed !== null && typeof parsed.rootPath === "string") {
+				let rp = parsed.rootPath;
+				try { const fs = await import("node:fs"); rp = fs.realpathSync(rp); } catch { /* path may not exist yet */ }
+				if (rp !== parsed.rootPath) {
+					return { ...opts, body: JSON.stringify({ ...parsed, rootPath: rp }) };
+				}
+			}
+		} catch { /* not JSON, leave alone */ }
+	}
 	return opts;
 }
 
@@ -405,21 +424,162 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 	} catch { /* best-effort */ }
 }
 
+/**
+ * The OPERATOR-class Children REST endpoints guarded by the S1 authz check
+ * (`src/server/auth/children-mutation-authz.ts`): `pause`, `resume`, and
+ * mutation `decision`. These are the human-in-the-loop verbs the web UI
+ * drives, so a verified `bobbit_session` cookie authorizes them. A node
+ * `apiFetch` carries no cookie, so without one these would 403; we therefore
+ * auto-inject the gateway-minted cookie. (Browser-initiated requests carry the
+ * cookie automatically and don't need this.) Tests that deliberately exercise
+ * the agent/deny path use `rawApiFetch` with explicit headers.
+ *
+ * NOTE: the ORCHESTRATION-class verbs (`spawn-child`, plan `PATCH`,
+ * `integrate-child`, `policy`) are NOT in this set. The cookie does NOT bypass
+ * an orchestration check (it is mintable by any holder of the shared admin
+ * token), so auto-injecting it would not authorize them. Tests that drive
+ * orchestration must authenticate as the goal's team-lead — see
+ * `seedTeamLeadHeader()` below.
+ */
+const CHILDREN_MUTATION_PATH =
+	/^\/api\/goals\/[^/]+\/(pause|resume|mutation\/[^/]+\/decision)$/;
+
+/**
+ * Authorize an ORCHESTRATION-class Children mutation (`spawn-child`, plan
+ * `PATCH`, `integrate-child`, `policy`) as the goal's team-lead.
+ *
+ * S1: orchestration authz no longer trusts the public `X-Bobbit-Spawning-
+ * Session` header — it derives the AUTHENTIC caller by resolving the per-session
+ * `X-Bobbit-Session-Secret` server-side (see `session-secret.ts`). So this seam
+ * does two things: (1) registers a minimal team entry so `getTeamState` returns
+ * the team-lead id, and (2) registers a capability secret in the gateway's
+ * `SessionSecretStore` mapped to that same team-lead id. It returns BOTH headers
+ * — the public spawning-session header (for `spawnedBySessionId` stamping) and
+ * the secret (the actual auth credential). Production establishes the team-lead
+ * via `TeamManager.startTeam` (which spawns a real session and injects its
+ * secret); the mock E2E harness short-circuits both.
+ *
+ * Pass the harness GATEWAY object (which exposes `.teamManager` and
+ * `.sessionManager`), e.g.:
+ *
+ *   await apiFetch(`/api/goals/${id}/spawn-child`, {
+ *     method: "POST", body, headers: seedTeamLeadHeader(gateway, id),
+ *   });
+ *
+ * Idempotent: reuses an already-established team-lead for the goal. Pass an
+ * explicit `sessionId` when the spawnedBy-cascade assertions need a specific
+ * team-lead identity.
+ */
+export function seedTeamLeadHeader(
+	gateway: any,
+	goalId: string,
+	sessionId?: string,
+): Record<string, string> {
+	// Back-compat: callers historically passed `gateway.teamManager`. Accept
+	// either the gateway (preferred — needed to reach the secret store) or a
+	// bare teamManager.
+	const teamManager = gateway?.teamManager ?? gateway;
+	const secretStore = gateway?.sessionManager?.sessionSecretStore ?? gateway?.sessionSecretStore;
+	const existing = teamManager?.getTeamState?.(goalId)?.teamLeadSessionId;
+	const tl = (typeof existing === "string" && existing.trim())
+		? existing.trim()
+		: (sessionId && sessionId.trim() ? sessionId.trim() : `e2e-teamlead-${goalId}`);
+	if (!existing) {
+		// Reach into the in-memory team map (mirrors gate-verification-resume's
+		// teamStore.put pattern). A minimal entry is enough for getTeamState to
+		// return the team-lead id the authz check compares against.
+		teamManager?.teams?.set?.(goalId, {
+			goalId,
+			teamLeadSessionId: tl,
+			agents: [],
+			maxConcurrent: 12,
+		});
+	}
+	const headers: Record<string, string> = { "X-Bobbit-Spawning-Session": tl };
+	// S1: register + send the capability secret that resolves to the team-lead.
+	if (secretStore?.getOrCreateSecret) {
+		headers["X-Bobbit-Session-Secret"] = secretStore.getOrCreateSecret(tl);
+	}
+	return headers;
+}
+
+/**
+ * Lazily capture the gateway-minted `bobbit_session` cookie for the human/UI
+ * operator authz path. In localhost mode the gateway issues the cookie on the
+ * first authenticated response that doesn't already carry one (see
+ * `issueCookieIfMissing` in src/server/server.ts). Cached per-port for worker
+ * isolation. Returns "" if (unexpectedly) no cookie was minted, in which case
+ * we fall back to no extra header and let the call fail loudly.
+ */
+const _humanCookieCache: Record<string, string> = {};
+async function humanSessionCookie(): Promise<string> {
+	const p = port();
+	if (_humanCookieCache[p]) return _humanCookieCache[p];
+	try {
+		const resp = await fetch(`${base()}/api/goals`, {
+			headers: { Authorization: `Bearer ${token()}` },
+		});
+		const setCookies = (resp.headers as any).getSetCookie?.() as string[] | undefined
+			?? (resp.headers.get("set-cookie") ? [resp.headers.get("set-cookie") as string] : []);
+		const cookie = setCookies
+			.map((c) => c.split(";")[0])
+			.find((c) => c.startsWith("bobbit_session=")) ?? "";
+		if (cookie) _humanCookieCache[p] = cookie;
+		return cookie;
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * For OPERATOR-class Children-mutation paths (pause / resume / mutation
+ * decision — see CHILDREN_MUTATION_PATH), authenticate as the human operator
+ * by adding the `bobbit_session` cookie — UNLESS the caller already supplied
+ * its own cookie or a spawning-session / session-id header (those tests are
+ * exercising a specific authz path and must be respected verbatim).
+ *
+ * Orchestration-class verbs are deliberately NOT covered here: the cookie does
+ * not bypass orchestration authz, so they authenticate as the team-lead via
+ * `seedTeamLeadHeader()` at the call site instead.
+ */
+async function withChildrenAuthzCookie(path: string, method: string, headers: Record<string, string>): Promise<Record<string, string>> {
+	const bare = path.split("?")[0];
+	// Child creation via `POST /api/goals` with a `parentGoalId` is now an
+	// OPERATOR-class Children mutation (the proposal UI drives it; see the S1
+	// authz block in server.ts). A node `apiFetch` carries no cookie, so child
+	// creation would 403 without one. We can't see the body here (only the
+	// path), so we cover ALL `POST /api/goals`; top-level goal creation ignores
+	// the cookie, so injecting it is harmless. Tests exercising the agent/deny
+	// path use `rawApiFetch` (which bypasses this) with explicit headers.
+	const isChildCreate = method.toUpperCase() === "POST" && bare === "/api/goals";
+	if (!CHILDREN_MUTATION_PATH.test(bare) && !isChildCreate) return headers;
+	const hasExplicitAuth = Object.keys(headers).some((k) => {
+		const lk = k.toLowerCase();
+		if ((lk === "x-bobbit-spawning-session" || lk === "x-bobbit-session-id") && headers[k]) return true;
+		if (lk === "cookie" && /bobbit_session=/.test(headers[k] || "")) return true;
+		return false;
+	});
+	if (hasExplicitAuth) return headers;
+	const cookie = await humanSessionCookie();
+	return cookie ? { ...headers, Cookie: cookie } : headers;
+}
+
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	const injected = maybeInjectAcceptCanonical(path, await maybeInjectProjectId(path, opts));
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
 	const finalPath = await maybeInjectProjectIdQuery(path, method);
+	const authedHeaders = await withChildrenAuthzCookie(finalPath, method, {
+		"Content-Type": "application/json",
+		Authorization: `Bearer ${token()}`,
+		...(injected.headers as Record<string, string> || {}),
+	});
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
 			const resp = await fetch(`${base()}${finalPath}`, {
 				...injected,
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${token()}`,
-					...(injected.headers as Record<string, string> || {}),
-				},
+				headers: authedHeaders,
 			});
 			await maybeAutoSeedWorkflows(path, method, injected.body as unknown, resp);
 			return resp;
@@ -785,7 +945,12 @@ export async function createGoal(opts: {
 	autoStartTeam?: boolean;
 	projectId?: string;
 }): Promise<{ id: string; [k: string]: unknown }> {
-	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, ...opts };
+	// Default spec for tests that don't care about spec content. The server now
+	// requires a non-placeholder spec (>=20 chars) before starting a team, so the
+	// helper supplies a sensible default. Tests that exercise SPEC_REQUIRED call
+	// apiFetch("/api/goals", ...) directly and bypass this helper.
+	const defaultSpec = "E2E harness goal — spec autopopulated by createGoal() helper for tests that do not exercise spec content.";
+	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, spec: defaultSpec, ...opts };
 	if (!body.projectId) {
 		// Auto-inject harness default projectId when caller didn't specify one.
 		// Server prefers projectId over cwd. Tests that exercise the 400 path
@@ -805,9 +970,9 @@ export async function createGoal(opts: {
 	return resp.json();
 }
 
-/** Delete a goal (best-effort, for cleanup). */
-export async function deleteGoal(id: string): Promise<void> {
-	await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+/** Delete a goal (best-effort, for cleanup). Server requires explicit `cascade` query param (returns 422 CASCADE_REQUIRED when omitted). Cleanup paths default to cascade=true so descendants are archived together. */
+export async function deleteGoal(id: string, cascade = true): Promise<void> {
+	await apiFetch(`/api/goals/${id}?cascade=${cascade ? "true" : "false"}`, { method: "DELETE" }).catch(() => {});
 }
 
 /** Start a team for a goal, returns the team lead session ID. */
@@ -820,9 +985,9 @@ export async function startTeam(goalId: string): Promise<string> {
 	return data.sessionId;
 }
 
-/** Teardown a team (best-effort, for cleanup). */
-export async function teardownTeam(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}/team/teardown`, { method: "POST" }).catch(() => {});
+/** Teardown a team (best-effort, for cleanup). Server returns 422 CASCADE_REQUIRED when `cascade` is omitted, so cleanup paths must always send it. */
+export async function teardownTeam(goalId: string, cascade = true): Promise<void> {
+	await apiFetch(`/api/goals/${goalId}/team/teardown?cascade=${cascade ? "true" : "false"}`, { method: "POST" }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------

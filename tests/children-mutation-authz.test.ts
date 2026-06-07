@@ -1,0 +1,189 @@
+/**
+ * S1 — server-side team-lead authorization for the MUTATING Children REST
+ * endpoints. Pure-function unit tests for `authorizeChildrenMutation`.
+ *
+ * See `src/server/auth/children-mutation-authz.ts` for the threat model.
+ * The caller identity is the AUTHENTIC session id derived SERVER-SIDE from the
+ * per-session `X-Bobbit-Session-Secret` (never the forgeable public
+ * `X-Bobbit-Spawning-Session` header). The route resolves the secret via
+ * `SessionSecretStore.resolveSessionIdBySecret()` and passes the result as
+ * `authenticCallerSessionId` — `undefined` when the secret is missing/unknown
+ * (i.e. a forged public header with no secret).
+ *
+ * Mutations are split into two CLASSES (blast-radius reduction):
+ *
+ *   ORCHESTRATION (spawn-child, plan PATCH, integrate-child, policy) — the
+ *   cookie does NOT bypass (it is mintable by any holder of the shared admin
+ *   Bearer token). Authentic-team-lead-only:
+ *     - no authentic caller (no/unknown secret) → DENY (no-authentic-caller)
+ *     - authentic caller, no team-lead known    → DENY (no-team-lead)
+ *     - authentic caller == team-lead           → ALLOW (team-lead-match)
+ *     - authentic caller != team-lead           → DENY (team-lead-mismatch)
+ *     - even a verified human cookie             → still resolved via team-lead match
+ *
+ *   OPERATOR (pause, resume, mutation decision, archive-child) — the human/UI
+ *   verbs. A verified bobbit_session cookie is accepted; otherwise authentic
+ *   team-lead match (identical to orchestration).
+ */
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import { authorizeChildrenMutation, type ChildrenMutationClass } from "../src/server/auth/children-mutation-authz.ts";
+
+describe("authorizeChildrenMutation (S1) — OPERATOR class", () => {
+	const mutationClass: ChildrenMutationClass = "operator";
+
+	it("allows a verified human cookie regardless of authentic caller / team-lead", () => {
+		for (const caller of [undefined, "", "agent-x", "tl-1"]) {
+			for (const lead of [undefined, null, "tl-1", "tl-other"]) {
+				const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: true, authenticCallerSessionId: caller, teamLeadSessionId: lead });
+				assert.equal(r.ok, true, `caller=${JSON.stringify(caller)} lead=${JSON.stringify(lead)}`);
+				assert.equal(r.ok && r.reason, "human-cookie");
+			}
+		}
+	});
+
+	it("DENIES an absent authentic caller without a human cookie (closes the bypass)", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: undefined, teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "no-authentic-caller");
+	});
+
+	it("DENIES an empty/whitespace authentic caller without a human cookie (treated as absent)", () => {
+		for (const caller of ["", "   "]) {
+			const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: caller, teamLeadSessionId: "tl-1" });
+			assert.equal(r.ok, false, `caller=${JSON.stringify(caller)}`);
+			assert.equal(!r.ok && r.reason, "no-authentic-caller");
+		}
+	});
+
+	it("DENIES a non-human caller when the goal has no established team-lead (teamless goals are human-only)", () => {
+		for (const lead of [undefined, null, ""]) {
+			const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "agent-x", teamLeadSessionId: lead });
+			assert.equal(r.ok, false, `lead=${JSON.stringify(lead)}`);
+			assert.equal(!r.ok && r.reason, "no-team-lead");
+		}
+	});
+
+	it("allows a verified human cookie on a teamless goal (the only authorized mutator)", () => {
+		for (const lead of [undefined, null, ""]) {
+			const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: true, authenticCallerSessionId: undefined, teamLeadSessionId: lead });
+			assert.equal(r.ok, true, `lead=${JSON.stringify(lead)}`);
+			assert.equal(r.ok && r.reason, "human-cookie");
+		}
+	});
+
+	it("allows when the authentic caller matches the team-lead session", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "tl-1", teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, true);
+		assert.equal(r.ok && r.reason, "team-lead-match");
+	});
+
+	it("matches after trimming surrounding whitespace", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "  tl-1  ", teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, true);
+		assert.equal(r.ok && r.reason, "team-lead-match");
+	});
+
+	it("DENIES when the authentic caller does NOT match the team-lead session", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "agent-x", teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "team-lead-mismatch");
+	});
+});
+
+describe("authorizeChildrenMutation (S1) — ORCHESTRATION class (cookie does NOT bypass)", () => {
+	const mutationClass: ChildrenMutationClass = "orchestration";
+
+	it("IGNORES a verified human cookie — a cookie-only caller with no secret is denied", () => {
+		// The cookie is mintable by any holder of the shared admin token, so it
+		// must NOT bypass an orchestration (team-lead-only) mutation.
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: true, authenticCallerSessionId: undefined, teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "no-authentic-caller");
+	});
+
+	it("IGNORES the cookie even on a teamless goal — denied (no-authentic-caller)", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: true, authenticCallerSessionId: undefined, teamLeadSessionId: undefined });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "no-authentic-caller");
+	});
+
+	it("a verified human cookie does NOT override an authentic-caller/team-lead MISMATCH", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: true, authenticCallerSessionId: "agent-x", teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "team-lead-mismatch");
+	});
+
+	it("DENIES an absent authentic caller (no cookie)", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: undefined, teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "no-authentic-caller");
+	});
+
+	it("DENIES an authentic caller on a teamless goal (no-team-lead)", () => {
+		for (const lead of [undefined, null, ""]) {
+			const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "agent-x", teamLeadSessionId: lead });
+			assert.equal(r.ok, false, `lead=${JSON.stringify(lead)}`);
+			assert.equal(!r.ok && r.reason, "no-team-lead");
+		}
+	});
+
+	it("ALLOWS the team-lead (authentic caller resolved from the secret), cookie irrelevant", () => {
+		for (const cookie of [true, false]) {
+			const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: cookie, authenticCallerSessionId: "tl-1", teamLeadSessionId: "tl-1" });
+			assert.equal(r.ok, true, `cookie=${cookie}`);
+			assert.equal(r.ok && r.reason, "team-lead-match");
+		}
+	});
+
+	it("matches after trimming surrounding whitespace", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "  tl-1  ", teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, true);
+		assert.equal(r.ok && r.reason, "team-lead-match");
+	});
+
+	it("DENIES a non-team-lead authentic caller (team-lead-mismatch)", () => {
+		const r = authorizeChildrenMutation({ mutationClass, isHumanOperator: false, authenticCallerSessionId: "agent-x", teamLeadSessionId: "tl-1" });
+		assert.equal(r.ok, false);
+		assert.equal(!r.ok && r.reason, "team-lead-mismatch");
+	});
+});
+
+describe("authorizeChildrenMutation (S1) — forgery: public header without the secret", () => {
+	// FORGERY MODEL: a rogue token-holder discovers the victim goal's PUBLIC
+	// team-lead session id and replays it as `X-Bobbit-Spawning-Session`. Since
+	// the route derives `authenticCallerSessionId` ONLY from the per-session
+	// secret (never the public header), a caller without a valid secret resolves
+	// to `undefined` here — exactly the no-authentic-caller deny. This pins that
+	// the pure function cannot be coaxed into ALLOW by a forged public header
+	// (which never reaches this function) regardless of class or cookie.
+	for (const mutationClass of ["orchestration", "operator"] as ChildrenMutationClass[]) {
+		it(`${mutationClass}: forged public header (no resolved secret) → DENY, never ALLOW`, () => {
+			// authenticCallerSessionId === undefined models "secret missing/unknown",
+			// which is what resolveSessionIdBySecret returns for a forged header.
+			const r = authorizeChildrenMutation({
+				mutationClass,
+				isHumanOperator: false,
+				authenticCallerSessionId: undefined,
+				teamLeadSessionId: "victim-team-lead",
+			});
+			assert.equal(r.ok, false, `${mutationClass} must deny a secret-less forged caller`);
+			assert.equal(!r.ok && r.reason, "no-authentic-caller");
+		});
+
+		it(`${mutationClass}: a FOREIGN secret (resolves to a non-lead session) → team-lead-mismatch`, () => {
+			// A valid-but-foreign secret resolves to the attacker's OWN session id,
+			// which is not the victim's team-lead → mismatch, even though the
+			// attacker also replays the correct public team-lead header.
+			const r = authorizeChildrenMutation({
+				mutationClass,
+				isHumanOperator: false,
+				authenticCallerSessionId: "attacker-session",
+				teamLeadSessionId: "victim-team-lead",
+			});
+			assert.equal(r.ok, false);
+			assert.equal(!r.ok && r.reason, "team-lead-mismatch");
+		});
+	}
+});

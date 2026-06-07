@@ -1,0 +1,27 @@
+name: goal_pause
+description: "Pause the current goal (and optionally descendants)"
+summary: "Set paused=true on the goal; with cascade=true, also pause all descendants."
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Children
+docs: |-
+  Required: `cascade` (boolean — explicit, no default). When `cascade=false`, only the current goal is paused. When `cascade=true`, the entire descendant subtree is paused. Any in-flight gate verifications on paused goals are cancelled. Returns 200 `{ paused: <count> }`. Server returns 422 if `cascade` is omitted from the request body.
+
+  Optional: `childGoalId` (string) — when set, pause this specific direct child instead of the caller's own goal. The child must be a direct child (parentGoalId === caller's goalId). Returns 403 with code `NOT_DIRECT_CHILD` if not. `cascade` still applies to the named child's subtree.
+detail_docs: >-
+  ## Purpose
+
+
+  Pause the current goal so the harness suspends scheduling new work
+  against it. A paused child does NOT count as in-flight for the
+  parent's nudge-suppression heuristic (paused children must NOT count as in-flight — paused != failed) — the parent (or
+  user) must act to unpause / fix / archive before progress resumes.
+
+
+  ## Cascade
+
+
+  `cascade` is **required** and must be a boolean. The server is policy-
+  agnostic — the UI is the policy authority and decides whether to
+  cascade. Omitting `cascade` returns 422.
