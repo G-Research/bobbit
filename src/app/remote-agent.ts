@@ -2146,11 +2146,11 @@ export class RemoteAgent {
 				prefs.playAgentFinishSound === false ? "false" : "true";
 		}
 
-		// Apply subgoalsEnabled — default OFF. See subgoals-flag.ts.
-		if ("subgoalsEnabled" in prefs) {
-			document.documentElement.dataset.subgoalsEnabled =
-				prefs.subgoalsEnabled === true ? "true" : "false";
-		}
+		// Apply subgoalsEnabled — default OFF. See subgoals-flag.ts. Mirror
+		// unconditionally: the broadcast sends the full prefs object, so an
+		// unset pref is absent and must normalize to "false" (not retain stale).
+		document.documentElement.dataset.subgoalsEnabled =
+			prefs.subgoalsEnabled === true ? "true" : "false";
 		// Apply maxNestingDepth — default 3 when unset/invalid.
 		if ("maxNestingDepth" in prefs) {
 			document.documentElement.dataset.maxNestingDepth =

@@ -538,9 +538,9 @@ async function initApp() {
 					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
-					// Apply subgoalsEnabled — default ON (only explicit false opts out).
+					// Apply subgoalsEnabled — default OFF (only explicit true opts in).
 					document.documentElement.dataset.subgoalsEnabled =
-						prefs.subgoalsEnabled === false ? "false" : "true";
+						prefs.subgoalsEnabled === true ? "true" : "false";
 					// Apply maxNestingDepth — default 3 when unset/invalid.
 					document.documentElement.dataset.maxNestingDepth =
 						(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))
@@ -885,9 +885,9 @@ async function initApp() {
 			// Apply playAgentFinishSound — default ON when unset.
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";
-			// Apply subgoalsEnabled — default ON (only explicit false opts out).
+			// Apply subgoalsEnabled — default OFF (only explicit true opts in).
 			document.documentElement.dataset.subgoalsEnabled =
-				prefs.subgoalsEnabled === false ? "false" : "true";
+				prefs.subgoalsEnabled === true ? "true" : "false";
 			// Apply maxNestingDepth — default 3 when unset/invalid.
 			document.documentElement.dataset.maxNestingDepth =
 				(typeof prefs.maxNestingDepth === "number" && Number.isFinite(prefs.maxNestingDepth))

@@ -9,7 +9,7 @@
  *     effective value — system is the ceiling, descendants can only tighten).
  *
  * Plus the gate:
- *   - system pref `subgoalsEnabled` (default true in production; unset reads as enabled).
+ *   - system pref `subgoalsEnabled` (default false; unset reads as disabled).
  *   - per-goal optional override `subgoalsAllowed` (can disable but not
  *     enable when system is OFF — system is the ceiling).
  *
@@ -32,9 +32,9 @@ export interface SubgoalNestingPrefs {
 export function readSubgoalNestingPrefs(
 	prefsGet: (key: string) => unknown,
 ): SubgoalNestingPrefs {
-	// Production deviation from PR #497: subgoals default ON. An unset pref reads
-	// as enabled; only an explicit `false` disables the system-wide gate.
-	const subgoalsEnabled = prefsGet("subgoalsEnabled") !== false;
+	// Subgoals default OFF (aligned with PR #497). An unset pref reads as
+	// disabled; only an explicit `true` enables the system-wide gate.
+	const subgoalsEnabled = prefsGet("subgoalsEnabled") === true;
 	const rawDepth = prefsGet("maxNestingDepth");
 	const depth = (typeof rawDepth === "number" && Number.isFinite(rawDepth))
 		? rawDepth
