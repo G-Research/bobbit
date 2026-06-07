@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bobbit — Codebase Growth</title>
+<style>
+  :root {
+    --bg: var(--background, #14151a);
+    --fg: var(--foreground, #e7e9ee);
+    --card: var(--card, #1c1e26);
+    --muted: var(--muted-foreground, #9aa0ad);
+    --border: var(--border, #2a2d38);
+    --c1: var(--chart-1, #6ea8fe);
+    --c2: var(--chart-2, #5ed4a8);
+    --c3: var(--chart-3, #f0b450);
+    --c4: var(--chart-4, #d98cf0);
+    --c5: var(--chart-5, #f08a8a);
+    --c6: var(--chart-6, #7ad0d8);
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; padding:26px; }
+  .wrap { max-width:1040px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  .sub { color:var(--muted); margin:0 0 22px; font-size:13px; }
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:24px; }
+  .kpi { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .kpi .v { font-size:23px; font-weight:650; letter-spacing:-.5px; }
+  .kpi .l { color:var(--muted); font-size:12px; margin-top:2px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px 22px; margin-bottom:22px; }
+  .card h2 { font-size:15px; margin:0 0 6px; font-weight:600; }
+  .card .cap { color:var(--muted); font-size:12px; margin:0 0 14px; }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:14px; font-size:12.5px; }
+  .legend .li { display:flex; align-items:center; gap:7px; }
+  .dot { width:11px; height:11px; border-radius:3px; flex:none; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:right; padding:7px 8px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  th:first-child,td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:500; font-size:11.5px; }
+  tr:last-child td { border-bottom:none; }
+  .up { color:var(--c2); }
+  svg text { fill:var(--muted); font-size:11px; }
+  .grid-line { stroke:var(--border); stroke-width:1; }
+  .tbl-wrap { overflow-x:auto; }
+  footer { color:var(--muted); font-size:12px; margin-top:6px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Bobbit — Codebase Growth</h1>
+  <p class="sub">Cumulative lines by category, reconstructed from <code>git log --numstat</code> (added − deleted, first-parent history). 2026-02-17 → 2026-06-07 · 3,037 commits.</p>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v">~16 wk</div><div class="l">Span (≈3.8 months)</div></div>
+    <div class="kpi"><div class="v">478K</div><div class="l">Lines today</div></div>
+    <div class="kpi"><div class="v" id="kpi-rate">—</div><div class="l">Avg net lines/week</div></div>
+    <div class="kpi"><div class="v" id="kpi-peak">—</div><div class="l">Busiest week (commits)</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Cumulative lines by category</h2>
+    <p class="cap">Stacked — total height is the whole tracked codebase at each weekly snapshot.</p>
+    <svg id="area" width="100%" viewBox="0 0 980 380" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="card">
+    <h2>Commit activity per week</h2>
+    <p class="cap">First-parent commits landing each ISO week.</p>
+    <svg id="bars" width="100%" viewBox="0 0 980 220" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+
+  <div class="card">
+    <h2>Weekly snapshots</h2>
+    <div class="tbl-wrap"><table id="tbl"></table></div>
+  </div>
+
+  <footer>Net line counts (renames followed, binary files skipped); slightly under a full working-tree count due to history simplification.</footer>
+</div>
+
+<script>
+const cats = ["Production","Tests","Docs","Config/Data","Assets/Scripts","Other"];
+const colors = { "Production":"var(--c1)","Tests":"var(--c5)","Docs":"var(--c3)","Config/Data":"var(--c6)","Assets/Scripts":"var(--c2)","Other":"var(--c4)" };
+const series = [
+ {date:"2026-02-17",Production:0,Tests:692,Docs:237,"Config/Data":5409,"Assets/Scripts":0,Other:1913},
+ {date:"2026-03-15",Production:29304,Tests:4125,Docs:623,"Config/Data":7221,"Assets/Scripts":86,Other:2072},
+ {date:"2026-03-22",Production:52260,Tests:17198,Docs:2505,"Config/Data":14210,"Assets/Scripts":795,Other:5617},
+ {date:"2026-03-29",Production:63535,Tests:24783,Docs:2967,"Config/Data":16502,"Assets/Scripts":2570,Other:6063},
+ {date:"2026-04-05",Production:80354,Tests:40139,Docs:5497,"Config/Data":22788,"Assets/Scripts":3454,Other:6765},
+ {date:"2026-04-12",Production:89046,Tests:60083,Docs:13715,"Config/Data":23134,"Assets/Scripts":3719,Other:7163},
+ {date:"2026-04-19",Production:95157,Tests:70236,Docs:16244,"Config/Data":24132,"Assets/Scripts":3892,Other:7432},
+ {date:"2026-04-24",Production:99692,Tests:79428,Docs:20065,"Config/Data":23103,"Assets/Scripts":3952,Other:8173},
+ {date:"2026-05-03",Production:111402,Tests:103655,Docs:30508,"Config/Data":24144,"Assets/Scripts":4701,Other:8334},
+ {date:"2026-05-10",Production:118258,Tests:118311,Docs:35437,"Config/Data":25053,"Assets/Scripts":4918,Other:8464},
+ {date:"2026-05-17",Production:128753,Tests:138736,Docs:42803,"Config/Data":24681,"Assets/Scripts":5478,Other:8557},
+ {date:"2026-05-24",Production:136554,Tests:147225,Docs:46563,"Config/Data":24802,"Assets/Scripts":7042,Other:8625},
+ {date:"2026-05-31",Production:155611,Tests:161489,Docs:51101,"Config/Data":25248,"Assets/Scripts":7468,Other:8719},
+ {date:"2026-06-07",Production:183580,Tests:191443,Docs:60430,"Config/Data":25890,"Assets/Scripts":8133,Other:8779},
+];
+const commits = [
+ {week:"2026-W08",commits:6},{week:"2026-W11",commits:85},{week:"2026-W12",commits:450},
+ {week:"2026-W13",commits:508},{week:"2026-W14",commits:480},{week:"2026-W15",commits:183},
+ {week:"2026-W16",commits:63},{week:"2026-W17",commits:58},{week:"2026-W18",commits:115},
+ {week:"2026-W19",commits:106},{week:"2026-W20",commits:116},{week:"2026-W21",commits:71},
+ {week:"2026-W22",commits:56},{week:"2026-W23",commits:61},
+];
+const NS="http://www.w3.org/2000/svg";
+const fmt=n=>n.toLocaleString("en-US");
+const total = s => cats.reduce((a,c)=>a+s[c],0);
+function el(p,t,a){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e;}
+function mdLabel(d){const[ ,m,day]=d.split("-");return m+"/"+day;}
+
+// KPIs
+const grandTotal = total(series[series.length-1]);
+const weeks = 16;
+document.getElementById("kpi-rate").textContent = "+"+fmt(Math.round(grandTotal/weeks));
+const peak = commits.reduce((a,b)=>b.commits>a.commits?b:a);
+document.getElementById("kpi-peak").textContent = peak.commits;
+
+// ---- Stacked area ----
+(function(){
+  const svg=document.getElementById("area");
+  const W=980,H=380,ml=60,mr=18,mt=14,mb=34;
+  const iw=W-ml-mr, ih=H-mt-mb;
+  const n=series.length;
+  const maxY = Math.max(...series.map(total))*1.04;
+  const x = i => ml + iw*i/(n-1);
+  const y = v => mt + ih*(1 - v/maxY);
+  // gridlines
+  const steps=5;
+  for(let s=0;s<=steps;s++){
+    const v=maxY*s/steps, yy=y(v);
+    el(svg,"line",{x1:ml,y1:yy,x2:W-mr,y2:yy,class:"grid-line"});
+    const t=el(svg,"text",{x:ml-8,y:yy+3,"text-anchor":"end"});t.textContent=Math.round(v/1000)+"k";
+  }
+  // build stacks bottom->top
+  let base = series.map(()=>0);
+  cats.slice().reverse().forEach(()=>{}); // noop
+  // we want Production at bottom; iterate cats in order, accumulate
+  const order = cats; // bottom to top
+  let cum = series.map(()=>0);
+  order.forEach(cat=>{
+    const top = series.map((s,i)=>cum[i]+s[cat]);
+    let d="M"+x(0)+","+y(cum[0]);
+    for(let i=0;i<n;i++) d+=" L"+x(i)+","+y(top[i]);
+    for(let i=n-1;i>=0;i--) d+=" L"+x(i)+","+y(cum[i]);
+    d+=" Z";
+    el(svg,"path",{d,fill:colors[cat],"fill-opacity":"0.82",stroke:colors[cat],"stroke-width":"1","stroke-opacity":"0.9"});
+    cum=top;
+  });
+  // x labels
+  series.forEach((s,i)=>{
+    if(i%2===0||i===n-1){
+      const t=el(svg,"text",{x:x(i),y:H-12,"text-anchor":"middle"});t.textContent=mdLabel(s.date);
+    }
+  });
+  // total line on top
+  let dl="M"+x(0)+","+y(total(series[0]));
+  series.forEach((s,i)=>dl+=" L"+x(i)+","+y(total(s)));
+  el(svg,"path",{d:dl,fill:"none",stroke:"var(--fg)","stroke-width":"1.5","stroke-dasharray":"4 3","stroke-opacity":"0.5"});
+  series.forEach((s,i)=>el(svg,"circle",{cx:x(i),cy:y(total(s)),r:"2.5",fill:"var(--fg)","fill-opacity":"0.6"}));
+})();
+
+// legend
+document.getElementById("legend").innerHTML =
+  cats.map(c=>`<span class="li"><span class="dot" style="background:${colors[c]}"></span>${c} · ${fmt(series[series.length-1][c])}</span>`).join("")
+  + `<span class="li"><span class="dot" style="background:var(--fg);opacity:.5"></span>Total ${fmt(grandTotal)}</span>`;
+
+// ---- Commit bars ----
+(function(){
+  const svg=document.getElementById("bars");
+  const W=980,H=220,ml=40,mr=18,mt=12,mb=34;
+  const iw=W-ml-mr, ih=H-mt-mb;
+  const n=commits.length;
+  const maxC=Math.max(...commits.map(c=>c.commits))*1.08;
+  const bw=iw/n*0.62;
+  const steps=4;
+  for(let s=0;s<=steps;s++){
+    const v=maxC*s/steps, yy=mt+ih*(1-s/steps);
+    el(svg,"line",{x1:ml,y1:yy,x2:W-mr,y2:yy,class:"grid-line"});
+    const t=el(svg,"text",{x:ml-8,y:yy+3,"text-anchor":"end"});t.textContent=Math.round(v);
+  }
+  commits.forEach((c,i)=>{
+    const cx=ml+iw*(i+0.5)/n;
+    const h=ih*c.commits/maxC;
+    el(svg,"rect",{x:cx-bw/2,y:mt+ih-h,width:bw,height:h,rx:3,fill:"var(--c1)"});
+    const t=el(svg,"text",{x:cx,y:H-12,"text-anchor":"middle"});t.textContent=c.week.replace("2026-","");
+    const v=el(svg,"text",{x:cx,y:mt+ih-h-4,"text-anchor":"middle"});v.textContent=c.commits;v.setAttribute("fill","var(--fg)");
+  });
+})();
+
+// ---- Table ----
+(function(){
+  const t=document.getElementById("tbl");
+  let html="<thead><tr><th>Week</th>"+cats.map(c=>`<th>${c}</th>`).join("")+"<th>Total</th><th>Δ</th></tr></thead><tbody>";
+  series.forEach((s,i)=>{
+    const tot=total(s); const prev=i?total(series[i-1]):0; const delta=tot-prev;
+    html+="<tr><td>"+mdLabel(s.date)+"</td>"+cats.map(c=>`<td>${fmt(s[c])}</td>`).join("")
+      +`<td><b>${fmt(tot)}</b></td><td class="up">${i?"+"+fmt(delta):"—"}</td></tr>`;
+  });
+  html+="</tbody>";
+  t.innerHTML=html;
+})();
+</script>
+</body>
+</html>
