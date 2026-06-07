@@ -7,18 +7,18 @@
  * `settings-page.ts`. Callers consult this helper from UI gate sites without
  * having to await preferences.
  *
- * Default ON — only an explicit stored `false` (mirrored as the string
- * `"false"`) reads as disabled. A missing/undefined dataset value reads as
- * enabled, matching the server's unset → enabled default.
- * See docs/design/subgoals-experimental-toggle.md.
+ * Default OFF — only an explicit stored `true` (mirrored as the string
+ * `"true"`) reads as enabled. A missing/undefined dataset value reads as
+ * disabled, matching the server's unset → disabled default.
+ * See docs/nested-goals.md.
  */
 
 let testOverride: boolean | undefined;
 
 export function isSubgoalsEnabled(): boolean {
 	if (testOverride !== undefined) return testOverride;
-	if (typeof document === "undefined") return true;
-	return document.documentElement.dataset.subgoalsEnabled !== "false";
+	if (typeof document === "undefined") return false;
+	return document.documentElement.dataset.subgoalsEnabled === "true";
 }
 
 /**

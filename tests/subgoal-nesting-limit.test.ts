@@ -91,18 +91,18 @@ describe("readSubgoalNestingPrefs", () => {
 	it("returns defaults when prefs are empty", () => {
 		const prefs = new PreferencesStore(stateDir);
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
-		// Production default: subgoals are ON unless the pref is explicitly
-		// set to false (an unset pref reads as enabled — see
-		// readSubgoalNestingPrefs `!== false`).
-		assert.equal(r.subgoalsEnabled, true);
+		// Default OFF: subgoals are disabled unless the pref is explicitly
+		// set to true (an unset pref reads as disabled — see
+		// readSubgoalNestingPrefs `=== true`).
+		assert.equal(r.subgoalsEnabled, false);
 		assert.equal(r.maxNestingDepth, SYSTEM_MAX_NESTING_DEPTH_DEFAULT);
 	});
 
-	it("returns subgoalsEnabled=false only when the pref is explicitly false", () => {
+	it("returns subgoalsEnabled=true only when the pref is explicitly true", () => {
 		const prefs = new PreferencesStore(stateDir);
-		prefs.set("subgoalsEnabled", false);
+		prefs.set("subgoalsEnabled", true);
 		const r = readSubgoalNestingPrefs((k) => prefs.get(k));
-		assert.equal(r.subgoalsEnabled, false);
+		assert.equal(r.subgoalsEnabled, true);
 	});
 
 	it("round-trips maxNestingDepth via preferencesStore", () => {

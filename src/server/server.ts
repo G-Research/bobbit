@@ -896,7 +896,7 @@ export function createGateway(config: GatewayConfig) {
 	// `never` at policy time — silently dropped from every team-lead's tool
 	// surface. See docs/design/subgoals-experimental-toggle.md.
 	// Production deviation from PR #497: subgoals default ON — unset reads as enabled.
-	groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") !== false);
+	groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
@@ -2250,8 +2250,8 @@ async function handleApiRoute(
 
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
 	function requireSubgoalsEnabled(): boolean {
-		// Production deviation from PR #497: subgoals default ON — unset reads as enabled.
-		if (preferencesStore.get("subgoalsEnabled") !== false) return true;
+		// Subgoals default OFF (aligned with PR #497) — only an explicit `true` enables.
+		if (preferencesStore.get("subgoalsEnabled") === true) return true;
 		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
 		return false;
 	}

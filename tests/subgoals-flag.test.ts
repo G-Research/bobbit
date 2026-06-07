@@ -1,6 +1,6 @@
 /**
  * Unit tests for the client-side Subgoals (Experimental) flag helper.
- * See docs/design/subgoals-experimental-toggle.md.
+ * See docs/nested-goals.md.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -26,29 +26,29 @@ describe("isSubgoalsEnabled", () => {
 		delete (globalThis as { document?: unknown }).document;
 	});
 
-	it("defaults to true when dataset is unset (default-on)", () => {
-		// This is the path the goal-proposal modal relies on: with no stored
-		// preference the Allow-subgoals toggle + Max-depth control must render.
-		// See src/app/proposal-panels.ts goalProposalPanel() and the G1 fix.
-		assert.equal(isSubgoalsEnabled(), true);
+	it("defaults to false when dataset is unset (default-off)", () => {
+		// With no stored preference the goal-proposal modal must hide the
+		// Allow-subgoals toggle + Max-depth control. The user opts in via
+		// Settings → System → General → Subgoals.
+		assert.equal(isSubgoalsEnabled(), false);
 	});
 
-	it("returns true when dataset value is anything other than 'false'", () => {
-		const root = (globalThis as { document?: { documentElement: { dataset: Record<string, string> } } })
-			.document!.documentElement;
-		root.dataset.subgoalsEnabled = "true";
-		assert.equal(isSubgoalsEnabled(), true);
-		root.dataset.subgoalsEnabled = "1";
-		assert.equal(isSubgoalsEnabled(), true);
-		root.dataset.subgoalsEnabled = "";
-		assert.equal(isSubgoalsEnabled(), true);
-	});
-
-	it("returns false only when dataset value is the explicit string 'false'", () => {
+	it("returns false when dataset value is anything other than 'true'", () => {
 		const root = (globalThis as { document?: { documentElement: { dataset: Record<string, string> } } })
 			.document!.documentElement;
 		root.dataset.subgoalsEnabled = "false";
 		assert.equal(isSubgoalsEnabled(), false);
+		root.dataset.subgoalsEnabled = "1";
+		assert.equal(isSubgoalsEnabled(), false);
+		root.dataset.subgoalsEnabled = "";
+		assert.equal(isSubgoalsEnabled(), false);
+	});
+
+	it("returns true only when dataset value is the explicit string 'true'", () => {
+		const root = (globalThis as { document?: { documentElement: { dataset: Record<string, string> } } })
+			.document!.documentElement;
+		root.dataset.subgoalsEnabled = "true";
+		assert.equal(isSubgoalsEnabled(), true);
 	});
 
 	it("test override wins over dataset", () => {
@@ -62,8 +62,8 @@ describe("isSubgoalsEnabled", () => {
 		assert.equal(isSubgoalsEnabled(), false);
 	});
 
-	it("returns true in non-DOM environments when no test override is set", () => {
+	it("returns false in non-DOM environments when no test override is set", () => {
 		delete (globalThis as { document?: unknown }).document;
-		assert.equal(isSubgoalsEnabled(), true);
+		assert.equal(isSubgoalsEnabled(), false);
 	});
 });

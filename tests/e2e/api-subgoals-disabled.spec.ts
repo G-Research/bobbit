@@ -5,7 +5,7 @@
  * processing. With the flag ON, the gate is transparent (the request
  * proceeds and may fail for unrelated reasons — we just assert non-403).
  *
- * See docs/design/subgoals-experimental-toggle.md.
+ * See docs/nested-goals.md.
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, gitCwd } from "./e2e-setup.js";
@@ -16,6 +16,15 @@ async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {
 		method: "PUT",
 		body: JSON.stringify({ subgoalsEnabled: enabled }),
+	});
+	expect(resp.status).toBe(200);
+}
+
+/** Remove the stored pref entirely (PUT null) so the server sees an unset value. */
+async function unsetSubgoalsEnabled(): Promise<void> {
+	const resp = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ subgoalsEnabled: null }),
 	});
 	expect(resp.status).toBe(200);
 }
@@ -72,6 +81,21 @@ test.describe("Subgoals (Experimental) feature gate — REST routes", () => {
 
 	test("all nine routes return 403 SUBGOALS_DISABLED when flag is off @smoke", async () => {
 		await setSubgoalsEnabled(false);
+		const goal = await createGoalReady();
+		for (const route of ROUTES) {
+			const opts: RequestInit = { method: route.method };
+			if (route.body) opts.body = JSON.stringify(route.body);
+			const resp = await apiFetch(route.path(goal.id), opts);
+			expect(resp.status, `${route.name} status`).toBe(403);
+			const json = await resp.json().catch(() => ({}));
+			expect(json.code, `${route.name} code`).toBe("SUBGOALS_DISABLED");
+		}
+	});
+
+	test("all nine routes return 403 SUBGOALS_DISABLED on a fresh install (pref unset)", async () => {
+		// Unset the pref entirely (no stored value) — the new default reads OFF,
+		// so the REST layer must enforce SUBGOALS_DISABLED end-to-end.
+		await unsetSubgoalsEnabled();
 		const goal = await createGoalReady();
 		for (const route of ROUTES) {
 			const opts: RequestInit = { method: route.method };

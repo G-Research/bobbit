@@ -10,7 +10,8 @@
  *   4. Cleanup/undo — flip back ON, dataset and checkbox state agree.
  *
  * The harness defaults `subgoalsEnabled: true`. Each test resets via the
- * REST PUT it exercises, so cross-test interference is avoided.
+ * REST PUT it exercises, so cross-test interference is avoided. A fresh
+ * install (no stored pref) now reads as disabled — the default is OFF.
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
@@ -38,21 +39,21 @@ async function unsetFlag(): Promise<void> {
 }
 
 test.describe("Subgoals (Experimental) toggle", () => {
-	test("defaults ON when the pref is unset, and persists across reload", async ({ page }) => {
-		// Production default: unset/missing reads as enabled (mirrors the server's
-		// `subgoalsEnabled !== false` gate). G1 fix — UI must not default OFF.
+	test("defaults OFF when the pref is unset, and persists across reload", async ({ page }) => {
+		// Fresh-install default: unset/missing reads as disabled (mirrors the
+		// server's `subgoalsEnabled === true` gate). The user opts in via Settings.
 		await unsetFlag();
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");
 
 		const checkbox = page.locator("[data-testid='general-subgoals-enabled']");
 		await expect(checkbox).toBeVisible({ timeout: 10_000 });
-		await expect(checkbox).toBeChecked();
+		await expect(checkbox).not.toBeChecked();
 		await expect.poll(
 			() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
-		).toBe("true");
+		).toBe("false");
 
-		// Reload — still ON (pref still unset, default holds).
+		// Reload — still OFF (pref still unset, default holds).
 		await page.reload();
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
@@ -60,10 +61,10 @@ test.describe("Subgoals (Experimental) toggle", () => {
 		await navigateToHash(page, "#/settings/system/general");
 		const afterReload = page.locator("[data-testid='general-subgoals-enabled']");
 		await expect(afterReload).toBeVisible({ timeout: 5_000 });
-		await expect(afterReload).toBeChecked();
+		await expect(afterReload).not.toBeChecked();
 		await expect.poll(
 			() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
-		).toBe("true");
+		).toBe("false");
 
 		// Restore the harness default for subsequent specs/tests.
 		await resetFlag(true);

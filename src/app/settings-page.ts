@@ -2170,8 +2170,8 @@ function loadGeneralSettings() {
 					settingsShowTimestamps = !!prefs.showTimestamps;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
-					// Subgoals (Experimental) — default ON; only explicit false opts out. See docs/nested-goals.md.
-					settingsSubgoalsEnabled = prefs.subgoalsEnabled !== false;
+					// Subgoals (Experimental) — default OFF; only an explicit `true` enables. See docs/nested-goals.md.
+					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
 					const rawDepth = prefs.maxNestingDepth;
 					settingsMaxNestingDepth = (typeof rawDepth === "number" && Number.isFinite(rawDepth)) ? rawDepth : null;
 					const raw = prefs.skillsCatalogBudget;
