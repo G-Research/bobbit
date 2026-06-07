@@ -19,6 +19,7 @@
  */
 import { spawn, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NODE_UNIT_GLOBS } from "./test-phase-config.mjs";
@@ -34,10 +35,19 @@ if (!existsSync(join(projectRoot, "dist", "server"))) {
 const isWin = process.platform === "win32";
 const npx = isWin ? "npx.cmd" : "npx";
 
-// Optional node:test concurrency override (ladder rung 2). Node already runs
-// test FILES in parallel at availableParallelism(); this knob lets the gate
-// dial it explicitly if a box needs it. Unset ⇒ node's default.
-const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY;
+// The two runners are BOTH CPU-bound and each parallelises internally. Running
+// them concurrently while each grabs all cores oversubscribes the box (node's
+// availableParallelism()-wide run + Playwright's worker pool = ~2x cores) and
+// the contention starves slow browser fixtures past their 15s timeout — i.e.
+// full concurrency turns a green suite red. So we SPLIT the cores: each runner
+// gets ~half, summing to the core count, so they run genuinely in parallel
+// without oversubscription. Wall time then approaches max(node, browser)
+// instead of their sum, with no contention-induced timeouts.
+const cpus = availableParallelism();
+const half = Math.max(2, Math.floor(cpus / 2));
+const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || String(half);
+// Passed to Playwright via --workers (CLI overrides the config's default).
+const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(half);
 
 function run(label, args) {
 	return new Promise((res) => {
@@ -67,10 +77,12 @@ const nodeArgs = [
 	"--import", "./tests/helpers/css-stub-loader.mjs",
 	"--test",
 	"--test-force-exit",
-	...(nodeConcurrency ? [`--test-concurrency=${nodeConcurrency}`] : []),
+	`--test-concurrency=${nodeConcurrency}`,
 	...NODE_UNIT_GLOBS,
 ];
-const browserArgs = ["playwright", "test", "--config", "tests/playwright.config.ts"];
+const browserArgs = ["playwright", "test", "--config", "tests/playwright.config.ts", "--workers", browserWorkers];
+
+console.log(`[run-unit] ${cpus} cores → node --test-concurrency=${nodeConcurrency}, browser --workers=${browserWorkers}`);
 
 const overallStart = Date.now();
 const results = await Promise.all([
