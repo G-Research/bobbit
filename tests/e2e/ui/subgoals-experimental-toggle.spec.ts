@@ -216,7 +216,12 @@ test.describe("Subgoals (Experimental) toggle", () => {
 		await expect(titleInput).toBeVisible({ timeout: 20_000 });
 		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
 
-		// With subgoals ON, the Allow-subgoals control is present.
+		// With subgoals ON, the per-goal nesting controls are collated under the
+		// dedicated "Sub-goals" tab.
+		const subgoalsTab = page.locator("[data-testid='goal-proposal-tab-subgoals']");
+		await expect(subgoalsTab).toBeVisible({ timeout: 10_000 });
+		await subgoalsTab.click();
+
 		const subgoalsToggle = page.locator("[data-testid='goal-form-subgoals-toggle']");
 		await expect(subgoalsToggle).toBeVisible({ timeout: 10_000 });
 		// Enabling Allow-subgoals reveals the Max-depth input.
