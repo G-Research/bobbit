@@ -37,7 +37,6 @@ import {
 	fetchRoles,
 } from "./api.js";
 import {
-	renderWorkflowList,
 	renderWorkflowInspector,
 	renderWorkflowEditor,
 	clearWorkflowEditorController,
@@ -1157,11 +1156,13 @@ function renderGoalForm(config: GoalFormConfig) {
 // ============================================================================
 // PROPOSAL MODAL — WORKFLOW TAB
 //
-// Reuses renderWorkflowList / renderWorkflowInspector / renderWorkflowEditor
-// exported from src/app/workflow-page.ts so the DOM matches the main Workflows
-// page exactly. The editor runs in `goal-draft` scope: every mutation flows
-// back through `config.onInlineWorkflowChange` and NEVER mutates the project
-// workflow store.
+// A workflow <select> (synced to the Goal tab's picker via the shared
+// config.workflowId / config.onWorkflowChange) with a Customise/Revert toggle
+// to its right; the chosen workflow renders beneath in read-only inspector
+// form, or as the editor while customising. Reuses renderWorkflowInspector /
+// renderWorkflowEditor from src/app/workflow-page.ts. The editor runs in
+// `goal-draft` scope: every mutation flows back through
+// `config.onInlineWorkflowChange` and NEVER mutates the project workflow store.
 // ============================================================================
 function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const selectedId = config.workflowId;
@@ -1170,55 +1171,52 @@ function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
 	const customizing = !!config.customizingWorkflow && !!inline;
 	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
 	const displayWf = inline ?? selectedLibrary;
-	const dirtyIds = new Set<string>();
-	if (inline) dirtyIds.add(inline.id);
 	return html`
-		<div class="flex-1 overflow-hidden flex min-h-0"
+		<div class="flex-1 overflow-hidden flex flex-col min-h-0 min-w-0"
 			role="tabpanel"
 			id="goal-proposal-panel-workflow"
 			aria-labelledby="goal-proposal-tab-workflow"
 			data-testid="goal-proposal-panel-workflow">
-			<div class="w-64 shrink-0 border-r border-border overflow-y-auto p-3">
-				${workflows.length === 0
-					? html`<p class="text-xs text-muted-foreground">No workflows available for this project.</p>`
-					: renderWorkflowList({
-						workflows,
-						selectedId,
-						dirtyIds,
-						onSelect: (wf) => {
-							const ev = new Event("change");
-							Object.defineProperty(ev, "target", { value: { value: wf.id } });
-							config.onWorkflowChange(ev);
-							config.onResetWorkflow?.();
-						},
-						scope: "goal-draft",
-					})}
-			</div>
-			<div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 min-w-0">
-				<div class="flex items-center justify-end gap-2">
-					${customizing
-						? Button({
-								variant: "ghost",
-								size: "sm",
-								onClick: () => config.onResetWorkflow?.(),
-								children: html`<span data-testid="goal-proposal-workflow-reset">Reset to selected</span>`,
-						  })
-						: Button({
-								variant: "secondary",
-								size: "sm",
-								onClick: () => config.onCustomizeWorkflow?.(),
-								disabled: !selectedLibrary,
-								children: html`<span data-testid="goal-proposal-workflow-customize">Customize for this goal</span>`,
-						  })}
-				</div>
-				${customizing && inline
-					? renderWorkflowEditor({
-						workflow: inline,
-						onChange: (wf) => config.onInlineWorkflowChange?.(wf),
-						scope: "goal-draft",
-					})
-					: renderWorkflowInspector({ workflow: displayWf, scope: "goal-draft" })}
-			</div>
+			${workflows.length === 0
+				? html`<p class="text-xs text-muted-foreground px-5 pt-3">No workflows available for this project.</p>`
+				: html`
+					<div class="shrink-0 flex items-center gap-2 px-5 pt-3 md:pt-4 pb-3">
+						<label class="text-xs text-muted-foreground font-medium shrink-0">Workflow</label>
+						<select
+							class="flex-1 min-w-0 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							data-testid="goal-proposal-workflow-select"
+							.value=${selectedId}
+							@change=${config.onWorkflowChange}>
+							${workflows.map((w) => html`
+								<option value=${w.id} ?selected=${selectedId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							`)}
+						</select>
+						${customizing
+							? Button({
+									variant: "ghost",
+									size: "sm",
+									onClick: () => config.onResetWorkflow?.(),
+									children: html`<span data-testid="goal-proposal-workflow-reset">Revert to project definition</span>`,
+							  })
+							: Button({
+									variant: "secondary",
+									size: "sm",
+									onClick: () => config.onCustomizeWorkflow?.(),
+									disabled: !selectedLibrary,
+									children: html`<span data-testid="goal-proposal-workflow-customize">Customise for this goal</span>`,
+							  })}
+					</div>
+					<hr class="shrink-0 border-t border-border" />
+					<div class="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-3">
+						${customizing && inline
+							? renderWorkflowEditor({
+								workflow: inline,
+								onChange: (wf) => config.onInlineWorkflowChange?.(wf),
+								scope: "goal-draft",
+							})
+							: renderWorkflowInspector({ workflow: displayWf, scope: "goal-draft" })}
+					</div>
+				`}
 		</div>
 	`;
 }
