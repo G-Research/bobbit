@@ -176,8 +176,9 @@ Port all `tests/**` named in #497 except `*lsp*`/`tests/lsp/**`/
   flags. Team-lead at `depth == maxDepth` cannot spawn any child.
 - Server-side enforcement on both spawn paths: `403 SUBGOALS_DISABLED` /
   `403 NESTING_DEPTH_EXCEEDED`.
-- System `subgoalsEnabled` is the master gate; **default flipped ON** in
-  production (the one deliberate deviation from #497, which defaults OFF).
+- System `subgoalsEnabled` is the master gate; **defaults OFF**, aligned with
+  #497 (an earlier production deviation that flipped it ON has been reverted —
+  unset/missing reads as disabled, only an explicit `true` enables it).
 - Children merge locally into parent branch (`git merge --no-ff`); only root
   raises a PR; conflicts `git merge --abort` + preserve child.
 - Per-root concurrency semaphore (default 3, floor 1, max 8) is the scheduler.
@@ -200,12 +201,18 @@ Port all `tests/**` named in #497 except `*lsp*`/`tests/lsp/**`/
   spawn path returns `409 GOAL_PAUSED`; boot respawn supervisor skips paused
   goals.
 
-## Production deviation from #497
+## Production deviation from #497 (reverted)
 
-In `readSubgoalNestingPrefs` / the system prefs default, flip
-`subgoalsEnabled` default from `false` to `true`. Update the corresponding
-unit/E2E expectation accordingly. This is the only intentional behavioural
-change; everything else is verbatim.
+An earlier production build deviated from #497 by flipping the
+`subgoalsEnabled` default from `false` to `true` in `readSubgoalNestingPrefs` /
+the system prefs default. **That deviation has been reverted**: the default is
+now `false` (OFF), matching #497. Every `subgoalsEnabled !== false` (unset →
+enabled) read was inverted to `subgoalsEnabled === true` (unset → disabled), and
+the UI dataset mirror (`document.documentElement.dataset.subgoalsEnabled`)
+defaults to `"false"` when the preference is unset. Sub-goals are now an
+experimental, opt-in feature; the user enables them via
+Settings → System → General → Subgoals. There are no remaining intentional
+behavioural deviations from #497.
 
 ## Architecture / API contracts (self-contained)
 

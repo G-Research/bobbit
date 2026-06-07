@@ -25,22 +25,30 @@ drift away from the approved acceptance criteria.
 
 Sub-goals are gated at two levels. Both must be on for a goal to spawn children.
 
-### 1. System preference (master gate, default ON)
+### 1. System preference (master gate, default OFF)
 
 **Settings → System → General → Subgoals** (`data-testid="general-subgoals-enabled"`).
 This is the master switch. When it is OFF, the per-goal controls are hidden and
 no goal can spawn children regardless of its own flags — a per-goal flag can
 never override a system-level OFF.
 
-The toggle is **defaulted ON in production**. (This is the one intentional
-deviation from the reference PR #497, which shipped it OFF behind an
-experimental flag.)
+The toggle **defaults OFF**. Sub-goals are an experimental, opt-in capability:
+on a fresh install with no stored preference, subgoals read as disabled
+everywhere and the user must explicitly enable them here. Only an explicit
+stored `true` enables subgoals — an unset/missing preference reads as disabled.
+This aligns with the reference PR #497's original OFF default; an earlier
+production build deviated by shipping this ON, and that deviation has since been
+reverted.
+
+The server is the single source of truth for this gate. The toggle state is
+mirrored to `document.documentElement.dataset.subgoalsEnabled` (a UX-only flag,
+defaulting to `"false"` when the preference is unset) synchronously on change so
+the proposal form and other client-side gate sites flip immediately, without
+waiting on the `preferences_changed` broadcast.
 
 Beneath it, **Max subgoal depth** (`data-testid="general-max-nesting-depth"`) is
-a stepper clamped to `1..10` that sets the **system ceiling** for nesting depth.
-The toggle state is mirrored to `document.documentElement.dataset.subgoalsEnabled`
-synchronously on change so the proposal form and other client-side gate sites
-flip immediately, without waiting on the `preferences_changed` broadcast.
+a stepper clamped to `1..10` that sets the **system ceiling** for nesting depth
+(default 3).
 
 ### 2. Per-goal proposal controls
 
