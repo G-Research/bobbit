@@ -37,7 +37,6 @@ import { NODE_UNIT_GLOBS } from "../scripts/test-phase-config.mjs";
 
 const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TESTS_DIR, "..");
-const SELF = "test-phase-invariant.test.ts";
 
 // Playwright's built-in default when a project sets neither testMatch nor a
 // config-level testMatch. We only have .ts test files, so this subset suffices.
@@ -170,17 +169,20 @@ test("every test file is claimed by exactly one phase (no orphans, no double-cla
 
 test("runner-convention purity: .test.ts ⇒ node:test, .spec.ts ⇒ Playwright", () => {
 	const files = collectTestFiles(TESTS_DIR);
-	// Detect a static import / require of a module specifier. Built without a
-	// literal `from "<spec>"` sequence so this guard never flags its own source.
+	// Detect an ACTUAL import/require STATEMENT of a module specifier — not a
+	// bare substring. We require the specifier to be immediately preceded by an
+	// import keyword (`import "x"`), a re-export/binding `from`, or `require(`.
+	// A module name appearing as a plain string argument elsewhere in a file
+	// (e.g. this guard passes "@playwright/test" / "node:test" as arguments)
+	// is NOT preceded by any of those, so the guard can — and does — scan itself.
 	const importsModule = (src: string, spec: string): boolean => {
 		const q = spec.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(`(?:from|require\\(\\s*)\\s*["']${q}["']`).test(src);
+		return new RegExp(`(?:\\bfrom|\\bimport|\\brequire\\(\\s*)\\s*["']${q}["']`).test(src);
 	};
 
 	const offenders: string[] = [];
 	for (const abs of files) {
 		const name = abs.split(/[\\/]/).pop()!;
-		if (name === SELF) continue; // self uses node:test (it is a .test.ts) — exempt from the scan to avoid pattern self-match
 		const src = readFileSync(abs, "utf8");
 		const repoRel = toPosix(relative(REPO_ROOT, abs));
 		if (name.endsWith(".test.ts") && importsModule(src, "@playwright/test")) {

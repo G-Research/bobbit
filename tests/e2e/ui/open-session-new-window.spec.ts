@@ -113,24 +113,25 @@ test.describe("Open session in new window (UI)", () => {
 		const otherDeepLink = await expectedDeepLink(page, otherId);
 		await stubWindowOpen(page);
 
-		// Root cause of the flake: a middle-click can be silently dropped when the
-		// row isn't yet a stable pointer target (mid-render, or not scrolled into
-		// view), leaving `__opened` empty and timing out the assertion below. Make
-		// it deterministic: ensure the row is actionable, then retry the middle-
-		// click until window.open fires. The handler calls window.open synchronously
-		// on click dispatch, so __opened is populated by the time click() resolves;
-		// we re-read immediately after, clicking at most once per poll iteration so
-		// a successful click is never double-counted.
+		// Root cause of the flake: Playwright's real middle-click
+		// (`click({ button: "middle" })`) issues a middle mousedown, which Chromium
+		// can latch as autoscroll mode; the paired mouseup then cancels autoscroll
+		// WITHOUT firing `auxclick`. The row's handler is `@auxclick` gated on
+		// `e.button === 1` (src/app/render-helpers.ts), so under that race the
+		// handler never runs and `__opened` stays empty until the 15s timeout —
+		// the observed run-to-run flake. The product contract is precisely
+		// "an auxclick with button===1 opens the deep link in a new window", so we
+		// dispatch exactly that event. This exercises the real handler
+		// deterministically and removes the synthetic-input autoscroll quirk
+		// (the native middle-mousedown is browser behaviour, not Bobbit code).
 		await otherRow.scrollIntoViewIfNeeded();
 		await expect(otherRow).toBeVisible({ timeout: 10_000 });
-		await expect.poll(async () => {
-			let count = await page.evaluate(() => (window as any).__opened.length);
-			if (count === 0) {
-				await otherRow.click({ button: "middle" });
-				count = await page.evaluate(() => (window as any).__opened.length);
-			}
-			return count;
-		}, { timeout: 15_000 }).toBeGreaterThan(0);
+		await otherRow.evaluate((el) =>
+			el.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true })),
+		);
+		await expect
+			.poll(() => page.evaluate(() => (window as any).__opened.length), { timeout: 10_000 })
+			.toBeGreaterThan(0);
 
 		// The new window opened to the OTHER session's deep link...
 		await expect.poll(() => page.evaluate(() => (window as any).__opened)).toEqual([
