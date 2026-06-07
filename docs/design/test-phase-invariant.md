@@ -80,17 +80,38 @@ unit: npm run test:unit
 (was `npx playwright test --config tests/playwright.config.ts --reporter=line`.)
 `npm run test:unit` already chains node + browser fixtures.
 
-**Performance.** Combined wall time ≈ 58s + 77s ≈ **135s** sequential — over the
-<1min target. Mitigations, applied and measured by the coder:
+**Performance — concrete plan to hit the `<1min` target.** Combined wall time ≈
+58s + 77s ≈ **135s** when the two runners are chained sequentially with `&&`.
+The goal's `<1min` target is a hard target to drive toward, not a number to wave
+away. The coder applies the following remediation ladder, in order, re-measuring
+after each rung, and stops at the first rung that lands the combined gate phase
+under 60s:
 
-- The node runner is the cheaper win. Run it with explicit concurrency
-  (`--test-concurrency=<cpus>` / confirm node spawns file-level parallel
-  workers) to cut the ~58s. The browser fixtures already run at 50% workers.
-- Document the final measured wall time in `docs/testing-strategy.md`. The <1min
-  target is aspirational; the hard requirements are (a) both runners execute in
-  the gate, (b) genuine parallelism is applied, (c) the number is documented.
-  Browser fixtures alone are ~77s, so a sub-60s combined wall time is unlikely
-  on this hardware — document honestly rather than hiding tests to hit a number.
+1. **Run the two runners concurrently, not chained.** `test:unit` currently does
+   `node-tests && playwright-fixtures`. The node runner is CPU-light per file
+   and the browser fixtures are GPU/Chromium-bound, so they overlap well. Drive
+   both from one wrapper (e.g. a small `scripts/run-unit.mjs` that spawns both
+   and fails if either fails) so the gate wall time is `max(node, browser)` not
+   `node + browser`. That alone targets ~max(58s, 77s) ≈ 77s.
+2. **Cut the node ~58s with file-level concurrency.** Confirm/force node's
+   test-runner file parallelism (`--test-concurrency=<cpus>`); the 341 files are
+   independent. Expect the node leg to drop well under 60s, so it is no longer
+   the binding constraint.
+3. **Cut the browser ~77s** — it becomes the binding constraint after rung 1.
+   Raise `tests/playwright.config.ts` `workers` above the current 50%
+   (the fixtures are `file://`, no server contention, so they scale with cores),
+   and/or shard. Re-measure; target the combined `max(...)` under 60s.
+4. **If, after rungs 1–3, a hard floor above 60s remains on this hardware,**
+   document the *measured* floor, the exact parallelism applied, and the
+   specific binding constraint (e.g. "browser fixtures floor at ~65s at
+   workers=100% — Chromium launch + N fixtures / M cores"). This is the
+   documented-measurement escape the spec allows ("if it exceeds the <1min
+   target, apply parallelism/sharding; document the measured time") — used only
+   after a genuine parallelism effort, never as a first resort, and **never** by
+   hiding or skipping tests to make a number.
+
+The final measured wall time and the rung reached are recorded in
+`docs/testing-strategy.md`.
 
 ### 2. `e2e:` gate covers all non-LLM integration
 
@@ -104,24 +125,38 @@ Drop `--grep-invert 'mcp-integration|session-lifecycle-ui'`. Both already sit in
 the e2e config's `browser` project `testMatch` and use `gateway-harness.js` (mock
 MCP / mock agent — no real LLM); the grep-invert only filtered them out by title.
 
-**Fold `tests/fullstack/**`.** `tests/fullstack/session-lifecycle.spec.ts` is a
-near-duplicate of `tests/e2e/ui/session-lifecycle-ui.spec.ts` — both are "real UI
-in a real browser, mock agent backend". The difference is only the harness:
-fullstack uses the config-level `webServer` in `playwright-fullstack.config.ts`;
+**Fold `tests/fullstack/**` into the e2e phase (its coverage MUST run in the e2e
+gate).** The spec requires folding `tests/fullstack/**` into the e2e config and
+sequencing requires verifying `tests/fullstack/**` passes in the e2e harness
+before flipping the grep. So the fullstack coverage is **migrated, not dropped**.
+
+`tests/fullstack/session-lifecycle.spec.ts` is a near-duplicate of
+`tests/e2e/ui/session-lifecycle-ui.spec.ts` — both are "real UI in a real
+browser, mock agent backend". The only difference is the harness: fullstack uses
+the config-level `webServer` in `playwright-fullstack.config.ts`;
 session-lifecycle-ui uses `gateway-harness.js` with `E2E_SERVE_UI`. The e2e
 config uses the globalSetup + per-worker harness model, **not** a config-level
-`webServer`, so fullstack cannot be added as-is.
+`webServer`, so the fullstack spec cannot be added verbatim — it is **ported** to
+the `gateway-harness.js` (`E2E_SERVE_UI`) model and placed under `tests/e2e/ui/`
+so it runs in the e2e config's `browser` project (hence the e2e gate).
 
-Coder evaluates and picks the cleaner of:
-- **(a) If genuinely redundant** with session-lifecycle-ui: delete
-  `tests/fullstack/`, `playwright-fullstack.config.ts`, and the `test:fullstack`
-  script. Un-inverting session-lifecycle-ui already covers the journey.
-- **(b) If it has unique coverage**: port it to `gateway-harness.js`
-  (`E2E_SERVE_UI`) under `tests/e2e/ui/`, then delete the fullstack config +
-  `tests/fullstack/` dir + `fullstack-setup`/`fullstack-teardown`.
+Procedure (no path deletes coverage):
+1. Port `session-lifecycle.spec.ts` to the gateway-harness model under
+   `tests/e2e/ui/` (mirroring its twin). Run it in the e2e harness and confirm
+   green — this satisfies the spec's "verify fullstack passes in the e2e harness"
+   sequencing step.
+2. Only after the ported spec is green in the e2e phase, retire the old
+   `playwright-fullstack.config.ts`, the `tests/fullstack/` dir, and
+   `fullstack-setup`/`fullstack-teardown`.
+3. If, while porting, the ported assertions turn out to be a strict subset of
+   what `session-lifecycle-ui.spec.ts` already asserts, **first** fold any
+   non-overlapping assertion into `session-lifecycle-ui.spec.ts` so no assertion
+   is lost, confirm that merged spec green in the e2e phase, and then drop the
+   now-fully-redundant ported file. The end state either way: every assertion
+   that `tests/fullstack/**` used to make now executes in the e2e gate.
 
-Either way the fullstack config is deleted and the spec's coverage lands in the
-e2e gate. The guard test will confirm no orphan remains.
+The guard test confirms no orphan remains and that the fullstack coverage now
+lives in an e2e-claimed location.
 
 ### 3. Relocate the real-LLM test
 
@@ -177,14 +212,23 @@ asserts:
    - `tests/manual-integration/**` (exempt bucket).
    A file matched by **zero** phases (orphan) **or two** phases (double-claimed)
    fails the test, naming the file and the offending phases.
-2. **No `tests/lsp/**`** node:test specs are claimed by Playwright (they're node
-   runner specs the unit Playwright config deliberately ignores). Treat `lsp/` as
-   node-runner unit coverage or assert it's explicitly ignored — pin whichever
-   matches the runtime so it can't silently drift.
-3. **Runner-convention purity.** No `*.test.ts` imports `@playwright/test`
-   (would mean a node file wrongly written as a Playwright spec), and no
-   `*.spec.ts` imports `node:test` (the node runner convention). This keeps the
-   two-runner split from drifting.
+2. **Runner-convention purity (repo-wide, no `.spec.ts` exception).** Exactly as
+   the spec states: no `*.test.ts` imports `@playwright/test` (a node file
+   wrongly written as a Playwright spec), and no `*.spec.ts` imports `node:test`
+   (the node-runner convention). The naming convention is unconditional —
+   `.test.ts` ⇒ node runner, `.spec.ts` ⇒ Playwright — so the guard never
+   carves out a `.spec.ts`-uses-node:test exception.
+
+   `tests/lsp/` is **currently empty** (the historical node:test specs that the
+   `tests/playwright.config.ts` comment refers to no longer exist). The guard
+   therefore needs no `lsp/` special case today. To prevent the convention from
+   silently re-drifting if `lsp/` specs are reintroduced, those files must be
+   named `*.test.ts` (node runner) — not `*.spec.ts` — and would then be claimed
+   by the unit node bucket like any other top-level `tests/*.test.ts`. The stale
+   `lsp/**` references in `tests/playwright.config.ts` `testIgnore` and its
+   comment are removed as part of this work (or kept only if a reintroduced
+   `lsp/` is wired into a bucket the guard recognizes). Net: no node-runner
+   `.spec.ts` exception survives, so check (2) cannot be weakened.
 
 Implementation approach: derive the glob/ignore lists by **reading the configs**
 where feasible (or a single shared constant the configs and the guard both
