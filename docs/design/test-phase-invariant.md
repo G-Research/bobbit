@@ -172,6 +172,29 @@ deletes `tests/playwright-e2e.config.ts` and the now-dead `test:e2e:real` script
 (or repoints it at the manual config). manual-integration is gate-exempt, so the
 hard requirement is only that the file lives there and is not orphaned-but-claimed.
 
+**Relocate the docker-only spec too (close the only remaining non-manual-integration
+exempt path).** `tests/e2e/sandbox-recovery-docker.spec.ts` is the one real-Docker
+spec that today lives under `tests/e2e/` but is excluded by **both** e2e-config
+projects (`testIgnore: **/sandbox-recovery-docker*`) and is instead run by
+`playwright-manual.config.ts`'s `docker-e2e` project. By the taxonomy it is a
+real-environment test and belongs in the exempt bucket — but the invariant is
+**path-based**, so it must physically live under `tests/manual-integration/`,
+not under `tests/e2e/` with an ignore. Therefore:
+- Move `tests/e2e/sandbox-recovery-docker.spec.ts` →
+  `tests/manual-integration/sandbox-recovery-docker.spec.ts` (fix relative
+  imports of `e2e-setup`/harness helpers accordingly; if it needs e2e helpers,
+  it should self-manage like the other manual specs).
+- Remove the `**/sandbox-recovery-docker*` `testIgnore` entries from both
+  `playwright-e2e.config.ts` projects (no longer needed — the file is gone from
+  `tests/e2e/`).
+- Update `playwright-manual.config.ts`: the `manual-integration` project
+  (`testDir: ./tests/manual-integration`) now collects it directly, so the
+  separate `docker-e2e` project can be dropped (or repointed) — the docker spec
+  is picked up by the manual-integration project like every other manual spec.
+After this move, the **only** path outside the unit/e2e gates is
+`tests/manual-integration/**`, exactly matching the invariant; the guard needs no
+manual-config awareness at all.
+
 ### 4. Collapse redundant Playwright configs
 
 Target end state: **3 gate-relevant configs** — `tests/playwright.config.ts`
@@ -205,13 +228,24 @@ asserts:
    - unit browser fixtures: `tests/playwright.config.ts` `testMatch`/`testIgnore`
      (top-level `tests/*.spec.ts` minus `e2e/`, `fullstack/`, `manual-integration/`,
      `lsp/`),
-   - e2e config: `playwright-e2e.config.ts` projects' `testDir`/`testMatch`/
-     `testIgnore` (incl. the docker-only specs that the e2e config ignores but
-     `playwright-manual.config.ts`'s `docker-e2e` project runs — those count as
-     covered by manual),
-   - `tests/manual-integration/**` (exempt bucket).
+   - e2e config: the union, across `playwright-e2e.config.ts` projects, of files
+     matched by a project's `testDir`+`testMatch` and not excluded by that
+     project's `testIgnore` (a file is e2e-covered if **any** project runs it),
+   - `tests/manual-integration/**` (the **only** exempt bucket — path-based).
    A file matched by **zero** phases (orphan) **or two** phases (double-claimed)
    fails the test, naming the file and the offending phases.
+
+   **No fourth bucket.** The exempt set is *exactly* the path
+   `tests/manual-integration/**` — nothing else. In particular, a spec that the
+   e2e config `testIgnore`s but some other config (e.g.
+   `playwright-manual.config.ts`'s `docker-e2e` project) happens to collect does
+   **not** count as covered; the guard treats it as an orphan and fails. This is
+   why change #3 physically relocates the docker-only spec into
+   `tests/manual-integration/` rather than leaving it in `tests/e2e/` excluded by
+   the e2e config. The guard's coverage check never consults
+   `playwright-manual.config.ts`; only the unit node glob, the unit browser
+   fixtures config, the e2e config, and the `tests/manual-integration/**` path
+   participate.
 2. **Runner-convention purity (repo-wide, no `.spec.ts` exception).** Exactly as
    the spec states: no `*.test.ts` imports `@playwright/test` (a node file
    wrongly written as a Playwright spec), and no `*.spec.ts` imports `node:test`
@@ -276,6 +310,11 @@ The guard must itself be matched by the unit node runner (it is a top-level
 - `playwright-manual.config.ts` — host the relocated compaction (self-managed
   server) if not in-spec.
 - **Move**: `tests/compaction.spec.ts` → `tests/manual-integration/`.
+- **Move**: `tests/e2e/sandbox-recovery-docker.spec.ts` →
+  `tests/manual-integration/` (close the last non-`manual-integration/` exempt
+  path); drop the `sandbox-recovery-docker` `testIgnore` from
+  `playwright-e2e.config.ts` and the `docker-e2e` project from
+  `playwright-manual.config.ts`.
 - **Migrate/delete**: `tests/fullstack/session-lifecycle.spec.ts` (+ setup/teardown).
 - **Delete**: `playwright-e2e-smoke.config.ts`, `playwright-e2e-standard.config.ts`,
   `playwright-e2e-coverage.config.ts`, `playwright-fullstack.config.ts`,
