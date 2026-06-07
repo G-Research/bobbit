@@ -15,7 +15,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash, sendMessage, createSessionViaUI } from "./ui-helpers.js";
 
 /** Reset the flag at the API layer so each test starts deterministically. */
 async function resetFlag(value: boolean): Promise<void> {
@@ -157,5 +157,97 @@ test.describe("Subgoals (Experimental) toggle", () => {
 		await navigateToHash(page, "#/settings/system/general");
 		const final = page.locator("[data-testid='general-subgoals-enabled']");
 		await expect(final).toBeChecked();
+	});
+
+	test("ON→OFF cleanup: flip OFF from ON and the dataset / checkbox agree across reload", async ({ page }) => {
+		await resetFlag(true);
+		await openApp(page);
+		await navigateToHash(page, "#/settings/system/general");
+
+		const checkbox = page.locator("[data-testid='general-subgoals-enabled']");
+		await expect(checkbox).toBeVisible({ timeout: 10_000 });
+		await expect(checkbox).toBeChecked();
+		await expect.poll(
+			() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
+		).toBe("true");
+
+		const offResp = page.waitForResponse(
+			r => r.url().includes("/api/preferences") && r.request().method() === "PUT" && r.status() === 200,
+		);
+		await checkbox.click();
+		await expect(checkbox).not.toBeChecked();
+		await offResp;
+		await expect.poll(
+			() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
+		).toBe("false");
+
+		// Reload — still OFF.
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/settings/system/general");
+		const final = page.locator("[data-testid='general-subgoals-enabled']");
+		await expect(final).toBeVisible({ timeout: 5_000 });
+		await expect(final).not.toBeChecked();
+		await expect.poll(
+			() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
+		).toBe("false");
+
+		// Restore the harness default for subsequent specs/tests.
+		await resetFlag(true);
+	});
+
+	test("proposal panel renders the per-goal subgoal controls when subgoals are ON", async ({ page }) => {
+		// The per-goal Allow-subgoals / Max-depth controls live on the
+		// regular-session goal-proposal panel (renderGoalForm wired with
+		// onSubgoalsAllowedChange + subgoalsEnabled), gated by isSubgoalsEnabled().
+		// Set the pref BEFORE opening the app so the dataset flag is correct on
+		// first paint (isSubgoalsEnabled() reads the dataset at render time).
+		await resetFlag(true);
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		// Mock agent emits a propose_goal titled "E2E Test Goal" when the prompt
+		// contains "GOAL_PROPOSAL".
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+		// With subgoals ON, the Allow-subgoals control is present.
+		const subgoalsToggle = page.locator("[data-testid='goal-form-subgoals-toggle']");
+		await expect(subgoalsToggle).toBeVisible({ timeout: 10_000 });
+		// Enabling Allow-subgoals reveals the Max-depth input.
+		await subgoalsToggle.click();
+		await expect(
+			page.locator("[data-testid='goal-form-max-depth']"),
+		).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("proposal panel hides the per-goal subgoal controls when subgoals are OFF/unset", async ({ page }) => {
+		// Unset the pref (fresh-install default) BEFORE opening the app so the
+		// dataset reads "false" on first paint.
+		await unsetFlag();
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+		// With subgoals OFF, neither per-goal control is rendered.
+		await expect(
+			page.locator("[data-testid='goal-form-subgoals-toggle']"),
+		).toHaveCount(0);
+		await expect(
+			page.locator("[data-testid='goal-form-max-depth']"),
+		).toHaveCount(0);
+
+		// Restore the harness default for subsequent specs/tests.
+		await resetFlag(true);
 	});
 });
