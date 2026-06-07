@@ -60,8 +60,12 @@ describe("runSubgoalStep — dependsOn scheduling enforcement", () => {
 		assert.ok(bChild, "B child should be created");
 		assert.equal(bChild.state, "blocked", "B must be created blocked while A is unmerged");
 
-		// A (no deps) should start its team; B (blocked) must NOT.
-		const aChild = findChild("A");
+		// A (no deps) should start its team; B (blocked) must NOT. A and B are
+		// spawned concurrently, so under heavy parallel load (full suite, many
+		// node:test files at once) A's child-creation can lag past the moment B
+		// is observed blocked — poll for it rather than asserting on first read.
+		let aChild = findChild("A");
+		for (let i = 0; i < 400 && !aChild; i++) { await sleep(5); aChild = findChild("A"); }
 		assert.ok(aChild, "A child should be created");
 		for (let i = 0; i < 200 && !teamStarted.includes(aChild.id); i++) await sleep(5);
 		assert.equal(teamStarted.includes(aChild.id), true, "A's team should start (no deps)");
