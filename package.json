@@ -32,7 +32,7 @@
     "test:e2e:smoke": "npm run build --silent && npm run test:e2e:run -- --grep @smoke",
     "test:manual": "npm run build && npx playwright test --config playwright-manual.config.ts",
     "test:unit-coverage": "npx c8 --reporter=text --temp-directory=coverage/unit-tmp --reports-dir=coverage/unit --src=src/server npx tsx --test --test-force-exit tests/*.test.ts",
-    "test:coverage": "npm run build:server && shx rm -rf coverage && NODE_V8_COVERAGE=coverage/tmp npm run test:e2e:run -- --project api && npx c8 --temp-directory=coverage/tmp --src=src/server npx tsx --test --test-force-exit tests/workflow-manager-logic.test.ts tests/task-state-machine.test.ts tests/name-validation.test.ts tests/gate-store-logic.test.ts tests/system-prompt.test.ts tests/session-store.test.ts tests/cost-tracker.test.ts tests/event-buffer.test.ts tests/staff-trigger-engine.test.ts && npx c8 report --temp-directory=coverage/tmp --reports-dir=coverage --reporter=html --reporter=lcov --reporter=text",
+    "test:coverage": "npm run build:server && shx rm -rf coverage && node scripts/run-coverage.mjs",
     "test": "npm run build && npm run test:unit && npm run test:e2e:run --",
     "clean": "shx rm -rf dist",
     "prepublishOnly": "npm run build",
