@@ -25,10 +25,12 @@ full surface-selection rule and complete token reference.
      bridge whenever the parent has these tokens. Include the chart and
      semantic ones if you reference them.
      NEVER add surface tokens (--background, --foreground, --muted-foreground,
-     --card, --border) here, and NEVER alias them like
-     `--muted: var(--muted-foreground, #9aa0ad)` — a single-mode fallback
-     produces INVISIBLE muted text in standalone tabs / the bridge race.
-     Reference surface tokens directly; the injected snapshot supplies them. */
+     --card, --border) here, NEVER alias them with a single-mode fallback like
+     `--muted: var(--muted-foreground, #9aa0ad)`, and NEVER name a custom prop
+     after a real token (`--muted` is a real surface-bg token — the live bridge
+     mirrors it inline and overwrites your alias, making text light-on-light in
+     the preview pane). Reference surface tokens directly, or alias only with a
+     non-colliding name (--bg, --fg, --c1). */
   :root {
     --chart-1: oklch(0.52 0.18 250);
     --chart-2: oklch(0.55 0.16 60);

@@ -214,7 +214,33 @@ need to track theme switches exactly.
 By far the most common rendered-output defect is **muted text that disappears**
 (`--muted-foreground`, captions, `.sub`, table headers). The real theme values
 are WCAG-safe in both modes — so when text vanishes, *your CSS caused it*, not
-the theme. Two root causes, one rule each:
+the theme. Three root causes, one rule each:
+
+### ❌ Never reuse a real theme-token name for your own alias
+
+The single most insidious version of this bug. `--muted` is a **real Bobbit
+token** — a muted *surface background* (a light ~0.9-lightness colour in light
+mode), **not** a text colour. If you alias it to a foreground:
+
+```css
+/* WRONG — --muted is already a real token (a surface bg). */
+:root { --muted: var(--muted-foreground); }
+.sub  { color: var(--muted); }   /* you THINK this is grey text… */
+```
+
+the live bridge mirrors the real `--muted` (the light surface) as an **inline**
+style on the iframe root, and inline styles **beat your `:root` alias**. So
+`color: var(--muted)` resolves to the light surface colour → light-on-light →
+invisible. This only manifests with the live bridge (the **preview pane**);
+standalone / inline render has no bridge to clobber the alias, so it looks fine
+— *the exact "fine inline, broken in preview" signature.*
+
+**Rule: never name a custom property after a real token** (`--muted`,
+`--card`, `--border`, `--accent`, `--ring`, `--primary`, `--secondary`,
+`--popover`, …). Either reference the real token directly
+(`color: var(--muted-foreground)`) or, for a genuine alias, pick a name that
+cannot collide (`--c1`, `--bg`, `--fg`, `--mut-fg`). The bridge mirrors *every*
+real `--*`, so any collision is silently overwritten.
 
 ### ❌ Never alias a surface token with a single-mode fallback
 
@@ -248,23 +274,32 @@ body { background: var(--background); color: var(--foreground); }
 .sub  { color: var(--muted-foreground); }
 ```
 
-If you genuinely need a fallback for a surface token (you almost never do —
-the snapshot ships them), you MUST supply a **matched `:root` + `.dark` pair**
-so light and dark stay internally consistent — never a lone single-mode hex:
-
-```css
-:root  { --background: #ffffff; --foreground: #1a1a1a; --muted-foreground: #5c5c5c; }
-.dark  { --background: #14151a; --foreground: #e7e9ee; --muted-foreground: #9aa0ad; }
-```
+**Do not add a surface-token fallback at all for anything rendered inside
+Bobbit** (`preview_open`, inline `.html` render). Both surfaces inject a
+complete, contrast-correct, *palette-matched* `:root`/`.dark` snapshot, and the
+live bridge mirrors the app's tokens on top. A standalone fallback can only
+make things worse here — see the next rule. The single exception is an HTML
+file that will *only ever* be opened directly from disk **outside** Bobbit
+(never via `preview_open` or inline render); only then supply a **matched
+`:root` + `.dark` pair** so light and dark stay internally consistent (never a
+lone single-mode hex). If there is any chance the file is previewed in Bobbit,
+omit it.
 
 ### ❌ Never override the snapshot from your own `:root{}`
 
-The server injects a complete, contrast-correct `:root`/`.dark` theme snapshot.
-A surface token you redeclare in your own `:root{}` block comes *later* in
-source order and silently wins — re-introducing the single-mode trap above.
-Keep your `:root{}` fallback block limited to **chart and semantic tokens
-only** (see previous section); never put `--background`, `--foreground`,
-`--card`, `--muted`, `--muted-foreground`, or `--border` in it.
+The server injects a complete, contrast-correct, palette-matched `:root`/`.dark`
+theme snapshot *before* your `<style>`. A surface token you redeclare in your
+own `:root{}`/`.dark{}` block comes **later in source order at equal
+specificity, so it silently wins** — replacing the real palette (e.g.
+`--background: oklch(0.935 0.012 148)` for the forest theme) with your flat
+hardcode (`#ffffff`). The inline-render surface masks this (its live bridge
+sets values *inline*, which beat your `:root`), but the preview pane relies on
+the snapshot, so the **same document renders correctly inline yet off-theme /
+broken in the preview pane.** Keep your `:root{}` block limited to **chart and
+semantic tokens only** (see previous section); never put `--background`,
+`--foreground`, `--card`, `--muted-foreground`, or `--border` in `:root`/`.dark`.
+Reference them directly with `var(--…)` and let the snapshot + bridge supply
+the values.
 
 ### Self-check before you ship
 
@@ -367,6 +402,10 @@ write `class="bg-card"` than `style="background: var(--card)"`.
 - ❌ Alias a surface token with a single-mode fallback:
   `--muted: var(--muted-foreground, #9aa0ad)` — invisible text when the bridge
   can't run. Reference the token directly instead.
+- ❌ Name a custom property after a real token (`--muted: var(--muted-foreground)`).
+  `--muted` is a real surface-bg token; the live bridge mirrors it inline and
+  overwrites your alias, so the text becomes light-on-light in the preview pane
+  (yet looks fine inline). Use a non-colliding name or reference directly.
 - ❌ Put `--background`/`--foreground`/`--muted-foreground`/`--card`/`--border`
   in your own `:root{}` block — it overrides the server's contrast-safe snapshot.
 - ❌ Use `@media (prefers-color-scheme: dark)` — read the OS, not Bobbit.

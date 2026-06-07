@@ -5,12 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Bobbit — Codebase Growth</title>
 <style>
+  /* Reference the real theme tokens directly. The preview route injects a
+     contrast-safe :root/.dark snapshot and the live bridge mirrors the app's
+     tokens, so NEVER redeclare surface tokens (--background, --foreground,
+     --card, --muted-foreground, --border) here — that overrides the snapshot
+     and forces flat, off-theme colours. Only chart fallbacks (single-mode
+     mid-tones, legible in both modes) belong here. */
   :root {
-    --bg: var(--background, #14151a);
-    --fg: var(--foreground, #e7e9ee);
-    --card: var(--card, #1c1e26);
-    --muted: var(--muted-foreground, #9aa0ad);
-    --border: var(--border, #2a2d38);
+    --bg: var(--background);
+    --fg: var(--foreground);
     --c1: var(--chart-1, #6ea8fe);
     --c2: var(--chart-2, #5ed4a8);
     --c3: var(--chart-3, #f0b450);
@@ -23,27 +26,27 @@
     font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; padding:26px; }
   .wrap { max-width:1040px; margin:0 auto; }
   h1 { font-size:22px; margin:0 0 2px; }
-  .sub { color:var(--muted); margin:0 0 22px; font-size:13px; }
+  .sub { color:var(--muted-foreground); margin:0 0 22px; font-size:13px; }
   .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:24px; }
   .kpi { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
   .kpi .v { font-size:23px; font-weight:650; letter-spacing:-.5px; }
-  .kpi .l { color:var(--muted); font-size:12px; margin-top:2px; }
+  .kpi .l { color:var(--muted-foreground); font-size:12px; margin-top:2px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px 22px; margin-bottom:22px; }
   .card h2 { font-size:15px; margin:0 0 6px; font-weight:600; }
-  .card .cap { color:var(--muted); font-size:12px; margin:0 0 14px; }
+  .card .cap { color:var(--muted-foreground); font-size:12px; margin:0 0 14px; }
   .legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:14px; font-size:12.5px; }
   .legend .li { display:flex; align-items:center; gap:7px; }
   .dot { width:11px; height:11px; border-radius:3px; flex:none; }
   table { width:100%; border-collapse:collapse; font-size:12.5px; }
   th,td { text-align:right; padding:7px 8px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; white-space:nowrap; }
   th:first-child,td:first-child { text-align:left; }
-  th { color:var(--muted); font-weight:500; font-size:11.5px; }
+  th { color:var(--muted-foreground); font-weight:500; font-size:11.5px; }
   tr:last-child td { border-bottom:none; }
   .up { color:var(--c2); }
-  svg text { fill:var(--muted); font-size:11px; }
+  svg text { fill:var(--muted-foreground); font-size:11px; }
   .grid-line { stroke:var(--border); stroke-width:1; }
   .tbl-wrap { overflow-x:auto; }
-  footer { color:var(--muted); font-size:12px; margin-top:6px; text-align:center; }
+  footer { color:var(--muted-foreground); font-size:12px; margin-top:6px; text-align:center; }
 </style>
 </head>
 <body>
