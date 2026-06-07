@@ -21,6 +21,8 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 
 **Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~3.4k tests, and at a half-core split (`--test-concurrency=12`) it is the long pole at ~90s while the browser fixtures finish at ~76s. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`.
 
+**Measured e2e wall time (24-core dev box): ~6.5–7 min**, dominated by the `browser` project (~5.2 min when run standalone). Retries do **not** inflate this: back-to-back runs measured `--retries=3` at ~6.5 min and `--retries=0` at ~6.5–7.1 min — the retry budget is flake *insurance*, not steady-state cost. The number is above the ~5 min aspiration. Binding constraint: the `browser` project runs an in-process gateway + Chromium per worker; the worker budget below is deliberately conservative to avoid the cross-worker filesystem/CPU contention that historically produced flakes, and the spec mandated folding the previously `--grep-invert`-excluded `mcp-integration` + `session-lifecycle-ui` specs back into this project. Raising the worker budget to chase <5 min reintroduces exactly the contention flakes the budget exists to prevent, so it is not a free lever — see [E2E suite parallelism budget](#e2e-suite-parallelism-budget).
+
 ## Current State
 
 ### Test Inventory
@@ -29,7 +31,7 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 |-------|-------|-------|---------|-------------|
 | Unit · node (node:test logic) | ~340 | ~3.4k | long pole of the ~90s unit wall | `--test-concurrency=N/2` |
 | Unit · browser (file:// fixtures) | ~120 | ~1.3k | finishes ~76s within the unit wall | `--workers=N/2` |
-| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5 min (incl. retries) | api 4 / browser 3 workers |
+| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5–7 min (retries add ~0; browser project ~5.2 min standalone) | api 4 / browser 3 workers |
 | Manual integration (real agent/LLM + Docker) | ~11 | serial | ~5 min | **None** |
 
 (Counts are order-of-magnitude; the authoritative membership is the phase-invariant guard, not this table.)
@@ -619,6 +621,23 @@ and static UI serving. The browser and real-push projects stay spec-serial
 inside their project workers because their setup costs and filesystem side
 effects are heavier. The API project remains fully parallel because it uses the
 in-process harness and benefits from all four workers.
+
+**`retries: 3` vs the retries:0 aspiration.** `tests/e2e/README.md` states the
+target end-state — `retries: 0`, no `@quarantine` tag, every flake root-caused.
+The shipped config still carries `retries: 3` and a tail of heavy `browser`
+specs (several `@quarantine`-labelled: `proposal-panel-streaming`,
+`goal-creation`, `stories-goal-routing`, …) plus a few un-labelled contract
+tests (`sidebar-keyboard-nav`, `verification-progress-indicator`) still time out
+intermittently under 4-way Chromium contention. At `--retries=0` a full run
+typically surfaces 0–2 such failures; `retries: 3` rescues them so the gate is
+green. This is **pre-existing contention debt**, not introduced by the
+phase-invariant work — driving the `browser` project to a genuine retries:0
+zero-flake state (per the README) is its own hardening goal. When a clearly
+root-causable flake is found it is fixed in place rather than masked — e.g.
+`open-session-new-window`'s middle-click was rewritten to dispatch the
+`auxclick` event its handler contracts on, because Playwright's real
+middle-click intermittently latched Chromium autoscroll and swallowed the
+`auxclick`.
 
 ### Playwright transform-cache isolation
 
