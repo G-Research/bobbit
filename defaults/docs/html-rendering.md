@@ -209,6 +209,72 @@ semantic tokens you reference — never for surface tokens (`--background`,
 `--foreground`, `--card`, etc.) which the bridge ships universally and which
 need to track theme switches exactly.
 
+## The #1 contrast bug: invisible muted text
+
+By far the most common rendered-output defect is **muted text that disappears**
+(`--muted-foreground`, captions, `.sub`, table headers). The real theme values
+are WCAG-safe in both modes — so when text vanishes, *your CSS caused it*, not
+the theme. Two root causes, one rule each:
+
+### ❌ Never alias a surface token with a single-mode fallback
+
+This is the trap that produces invisible text:
+
+```css
+/* WRONG — freezes one mode. The fallback hexes are picked for DARK mode,
+   but nothing guarantees the page renders in dark mode. */
+:root {
+  --bg:    var(--background, #14151a);   /* dark fallback */
+  --muted: var(--muted-foreground, #9aa0ad); /* dark-grey fallback */
+}
+body { background: var(--bg); }
+.sub  { color: var(--muted); }
+```
+
+When the live bridge can't run — **"open in new tab" standalone previews**
+(the bridge early-returns because `parent === window`) or the **HMR/sandbox
+race** — those fallbacks are used verbatim. A dark-grey fallback on a light
+surface (or vice-versa) is invisible, because the bg fallback and the fg
+fallback were chosen for *different* modes.
+
+**Rule: reference surface tokens directly. Do not create aliases like
+`--muted: var(--muted-foreground, #hex)`.** Write `color: var(--muted-foreground)`
+and let the bridge + the server-injected `:root`/`.dark` snapshot supply a
+mode-correct, contrast-safe value:
+
+```css
+/* RIGHT — no alias, no single-mode hex. */
+body { background: var(--background); color: var(--foreground); }
+.sub  { color: var(--muted-foreground); }
+```
+
+If you genuinely need a fallback for a surface token (you almost never do —
+the snapshot ships them), you MUST supply a **matched `:root` + `.dark` pair**
+so light and dark stay internally consistent — never a lone single-mode hex:
+
+```css
+:root  { --background: #ffffff; --foreground: #1a1a1a; --muted-foreground: #5c5c5c; }
+.dark  { --background: #14151a; --foreground: #e7e9ee; --muted-foreground: #9aa0ad; }
+```
+
+### ❌ Never override the snapshot from your own `:root{}`
+
+The server injects a complete, contrast-correct `:root`/`.dark` theme snapshot.
+A surface token you redeclare in your own `:root{}` block comes *later* in
+source order and silently wins — re-introducing the single-mode trap above.
+Keep your `:root{}` fallback block limited to **chart and semantic tokens
+only** (see previous section); never put `--background`, `--foreground`,
+`--card`, `--muted`, `--muted-foreground`, or `--border` in it.
+
+### Self-check before you ship
+
+You cannot see the rendered pixels. Before each `preview_open`, mentally
+verify: every text colour resolves to a `*-foreground` token whose background
+is the *matching* surface token (`--muted-foreground` on `--background`/`--card`,
+`--card-foreground` on `--card`, `--chart-N-foreground` on a `--chart-N` fill).
+Never put a muted/low-contrast colour on a tinted or coloured background, and
+never stack `opacity` or `color-mix(... transparent)` on already-muted text.
+
 ## Iteration loop — collaborate, don't soliloquise
 
 Visual work is iterative by nature. Optimise the loop:
@@ -298,6 +364,11 @@ write `class="bg-card"` than `style="background: var(--card)"`.
 - ❌ Rely on undeclared sibling assets; declare them with `assets` or `manifest`.
 - ❌ Use a relative `preview_open(file=...)` path for a reusable file-backed preview.
 - ❌ Define `:root { --background: ... }` to "lock the palette".
+- ❌ Alias a surface token with a single-mode fallback:
+  `--muted: var(--muted-foreground, #9aa0ad)` — invisible text when the bridge
+  can't run. Reference the token directly instead.
+- ❌ Put `--background`/`--foreground`/`--muted-foreground`/`--card`/`--border`
+  in your own `:root{}` block — it overrides the server's contrast-safe snapshot.
 - ❌ Use `@media (prefers-color-scheme: dark)` — read the OS, not Bobbit.
 - ❌ Hardcode `#ffffff`, `rgba(0,0,0,0.5)`, `oklch(0.21 0.008 145)`.
 - ❌ Wrap a theme variable: `oklch(var(--primary))` — the variable already is one.

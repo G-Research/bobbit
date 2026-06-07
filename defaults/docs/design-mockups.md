@@ -22,6 +22,12 @@ For the full surface-selection rule (when to write a file vs. when to use the
 panel) and complete theme-token reference, see
 [`defaults/docs/html-rendering.md`](html-rendering.md).
 
+**Reference theme tokens directly** — never alias a surface token with a
+single-mode fallback (`--muted: var(--muted-foreground, #9aa0ad)`) and never
+put surface tokens in your own `:root{}`. Both freeze one mode and make muted
+text invisible in standalone tabs / the bridge race. See the "invisible muted
+text" section of `html-rendering.md`.
+
 ## Process — do the homework first
 
 Before writing any mockup HTML, **read the actual source code** to understand:
