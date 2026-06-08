@@ -239,4 +239,51 @@ describe("ActionDispatcher — cache + invalidation", () => {
 		d.invalidate();
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { v: 2 });
 	});
+
+	it("an invalidate() during an in-flight import never caches the STALE module under the fresh epoch", async () => {
+		// Regression for the TOCTOU race (analog of the client renderer race): if
+		// invalidate() runs WHILE loadModule's `await import(url)` is in flight, a
+		// late read of this.epoch would cache the just-imported (stale) module as if
+		// it belonged to the FRESH epoch — and under coarse mtime resolution the next
+		// dispatch would then serve it. The epoch-snapshot guard must re-load with
+		// the advanced epoch instead, so the stale handler is never served.
+		const base = path.join(tmp, "case-inflight-race");
+		const modPath = path.join(base, "demo", "actions.mjs");
+		// v1 pauses at a top-level await so its SOURCE is committed (read + parsed)
+		// before we rewrite the file — the in-flight import stays v1 while we mutate
+		// the on-disk file underneath it.
+		writeTool(base, "demo", {
+			moduleName: "actions.mjs",
+			actionsJs: `await new Promise((r) => setTimeout(r, 200));\nexport const actions = { retry: async () => ({ v: 1 }) };`,
+		});
+		// Pin a clean whole-second mtime so utimesSync round-trips EXACTLY (no
+		// sub-second truncation): we then force the SAME mtime on v2, making the
+		// epoch guard the ONLY thing that can distinguish stale from fresh — i.e.
+		// the coarse-mtime case the epoch exists for. Without the guard the cache
+		// hit (same mtime + same post-invalidate epoch) would serve stale v1.
+		const fixed = new Date(Math.floor((Date.now() - 60_000) / 1000) * 1000);
+		fs.utimesSync(modPath, fixed, fixed);
+
+		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "actions.mjs" }), { rate: null });
+
+		// Start a dispatch; its import pauses at v1's top-level await (epoch 0).
+		const inflight = d.dispatch("sample_action", "retry", ctx(), {});
+		// Let the loader read + begin evaluating v1 (now parked at the TLA) BEFORE
+		// we mutate the file, so the in-flight import is committed to v1.
+		await new Promise((r) => setTimeout(r, 60));
+		// Rewrite the handler to v2, force the SAME mtime, then invalidate WHILE the
+		// v1 import is still in flight (cache cleared + epoch bumped to 1).
+		fs.writeFileSync(modPath, `export const actions = { retry: async () => ({ v: 2 }) };`);
+		fs.utimesSync(modPath, fixed, fixed);
+		d.invalidate();
+
+		// Let the in-flight v1 import resolve. With the guard it observes the fresh
+		// epoch and re-loads v2 (never caching stale v1); we don't assert its return
+		// value (the contract only promises it is not stale-cached).
+		await inflight;
+
+		// The pinning assertion: the NEXT dispatch must serve v2. Without the guard,
+		// stale v1 was cached under epoch 1 and (same mtime) is served here → v1.
+		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { v: 2 });
+	});
 });

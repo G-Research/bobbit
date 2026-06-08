@@ -166,32 +166,66 @@ export class ActionDispatcher {
 		return abs;
 	}
 
+	/** Max in-flight-race reloads before we give up caching (see loadModule).
+	 *  Bounds the retry so a pathological storm of concurrent invalidate() calls
+	 *  cannot spin loadModule forever. */
+	private static readonly MAX_INFLIGHT_RELOADS = 5;
+
 	/** Load (or return cached) the winning actions module for a tool. */
 	private async loadModule(tool: string, resolver: ActionToolLocationResolver = this.toolManager): Promise<ActionsModule | null> {
-		const abs = this.resolveModulePath(tool, resolver);
-		if (!abs) return null;
+		// Bounded retry loop: an invalidate() that races an in-flight import must
+		// NEVER cause the just-imported (potentially stale) module to be cached
+		// under the now-advanced epoch. We re-resolve + reload with the fresh epoch
+		// instead. The loop is capped so repeated invalidation cannot infinite-loop.
+		for (let attempt = 0; ; attempt++) {
+			const abs = this.resolveModulePath(tool, resolver);
+			if (!abs) return null;
 
-		let stat: fs.Stats;
-		try {
-			stat = fs.statSync(abs);
-		} catch {
-			return null; // module file does not exist
+			let stat: fs.Stats;
+			try {
+				stat = fs.statSync(abs);
+			} catch {
+				return null; // module file does not exist
+			}
+
+			const hit = this.cache.get(abs);
+			if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return hit.module;
+
+			// Snapshot the epoch BEFORE building the URL / awaiting the import. The
+			// cache-bust query is derived from THIS snapshot (not a late read of
+			// this.epoch), and we only cache the result if the epoch is unchanged
+			// when the import resolves — so a module is never cached under an epoch
+			// it was not imported for.
+			const epochAtStart = this.epoch;
+			// Cache-bust by mtime + epoch so a changed (or post-invalidate) file is
+			// always re-imported even under coarse mtime resolution.
+			const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epochAtStart}`;
+			const imported = (await import(url)) as Partial<ActionsModule> & Record<string, unknown>;
+			const actions = imported.actions ?? (imported.default as ActionsModule | undefined)?.actions;
+			if (!actions || typeof actions !== "object") {
+				throw new ActionError(500, `actions module for tool "${tool}" has no 'actions' export`);
+			}
+			const module: ActionsModule = { actions: actions as Record<string, ActionHandler> };
+
+			if (this.epoch === epochAtStart) {
+				// No invalidate() raced us: safe to cache under the epoch we imported for.
+				this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: epochAtStart, module });
+				return module;
+			}
+
+			// invalidate() ran while this import was in flight (cache cleared + epoch
+			// bumped). The module we just imported is potentially stale, so we must
+			// NOT cache it under the now-current epoch. Re-resolve + reload with the
+			// fresh epoch so the next dispatch sees a clean, correctly-keyed entry.
+			if (attempt >= ActionDispatcher.MAX_INFLIGHT_RELOADS) {
+				// Retry cap exhausted (a storm of invalidations): return the freshest
+				// import WITHOUT caching it, so the NEXT dispatch reloads cleanly
+				// against the then-current epoch. The invariant (never cache under a
+				// mismatched epoch) is preserved.
+				return module;
+			}
+			// loop: re-resolve + reload against the advanced epoch.
 		}
-
-		const hit = this.cache.get(abs);
-		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return hit.module;
-
-		// Cache-bust by mtime + epoch so a changed (or post-invalidate) file is
-		// always re-imported even under coarse mtime resolution.
-		const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${this.epoch}`;
-		const imported = (await import(url)) as Partial<ActionsModule> & Record<string, unknown>;
-		const actions = imported.actions ?? (imported.default as ActionsModule | undefined)?.actions;
-		if (!actions || typeof actions !== "object") {
-			throw new ActionError(500, `actions module for tool "${tool}" has no 'actions' export`);
-		}
-		const module: ActionsModule = { actions: actions as Record<string, ActionHandler> };
-		this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: this.epoch, module });
-		return module;
 	}
 
 	/**

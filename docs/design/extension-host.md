@@ -601,7 +601,13 @@ split-brain, and a project-scope pack (or a project pack shadowing a global tool
 its OWN handler. With no project (server/global scope) the `?? toolManager` fallback keeps
 the path byte-identical. Load via
 `await import(pathToFileURL(abs).href)`. **Cache** is a
-`Map<absPath, { mtimeMs; module }>`; a stale mtime reloads (mirrors `scanToolsDirCached`).
+`Map<absPath, { mtimeMs; epoch; module }>`; a stale mtime reloads (mirrors `scanToolsDirCached`),
+and an `epoch` counter (bumped by `invalidate()`) cache-busts the import URL so a
+post-invalidate load is fresh even under coarse (Windows) mtime resolution. **In-flight loads
+are epoch-guarded** (analog of the renderer `loadGeneration` guard, §4a): `loadModule`
+snapshots the epoch before `await import(...)` and only caches the result if the epoch is
+unchanged on resolve — otherwise it re-loads under the advanced epoch (bounded retry), so an
+`invalidate()` racing an in-flight import can never cache a stale module under the fresh epoch.
 
 **Endpoint** `POST /api/tools/:tool/actions/:action` in `server.ts::handleApiRoute`,
 modeled on `/api/internal/mcp-call` (server.ts:10930). Body `{ sessionId, toolUseId, args }`.
