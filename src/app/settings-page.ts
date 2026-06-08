@@ -7,7 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
 import { live } from "lit/directives/live.js";
-import { ArrowLeft, Brain, Check, FlaskConical, Gauge, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
+import { ArrowLeft, Brain, Bug, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -953,16 +953,23 @@ function loadHarnessStatus(): void {
 	});
 }
 
-async function togglePerfInstrumentation(): Promise<void> {
-	settingsPerfInstrumentation = !settingsPerfInstrumentation;
-	// Arm/disarm the NEXT reload immediately via the localStorage mirror; the
-	// current page is already past its boot marks.
-	setPerfInstrumentationEnabled(settingsPerfInstrumentation);
+async function toggleDebugMode(): Promise<void> {
+	const on = !isClientDebugEnabled();
+	// Single switch (dev-harness only). Turns on:
+	//   • the floating DBG button → dumps a client diagnostics report into the
+	//     composer (see client-debug.ts), and
+	//   • boot-timing perf instrumentation, so the report's Performance section
+	//     has the boot waterfall (and the on-disk sink still records).
+	// Both flags are localStorage-backed and persist across reload; the perf
+	// server preference is mirrored so a fresh browser re-arms correctly.
+	setClientDebugEnabled(on);
+	settingsPerfInstrumentation = on;
+	setPerfInstrumentationEnabled(on);
 	renderApp();
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
-			body: JSON.stringify({ devPerfInstrumentation: settingsPerfInstrumentation }),
+			body: JSON.stringify({ devPerfInstrumentation: on }),
 		});
 	} catch { /* the localStorage mirror still governs the next reload */ }
 }
@@ -985,13 +992,8 @@ async function requestSettingsRestart(): Promise<void> {
 	renderApp();
 }
 
-function toggleClientDebug(): void {
-	setClientDebugEnabled(!isClientDebugEnabled());
-	renderApp();
-}
-
-function renderPerfInstrumentationToggle() {
-	const on = settingsPerfInstrumentation;
+function renderDebugModeToggle() {
+	const on = isClientDebugEnabled();
 	return html`
 		<button
 			class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border transition-colors ${on
@@ -999,12 +1001,12 @@ function renderPerfInstrumentationToggle() {
 				: "border-border bg-background text-foreground hover:bg-secondary"}"
 			role="switch"
 			aria-checked=${on ? "true" : "false"}
-			data-testid="perf-instrumentation-toggle"
-			@click=${togglePerfInstrumentation}
-			title="Record reload performance stats to .bobbit/state/boot-timing.jsonl on each full reload. Applies on the next reload."
+			data-testid="debug-mode-toggle"
+			@click=${toggleDebugMode}
+			title="Debug mode: show the floating DBG button (dumps a client diagnostics report — environment, viewport/safe-area, performance, app state — into the composer) and record boot-timing perf stats. Applies on the next reload."
 		>
-			${icon(Gauge, "xs")}
-			<span>Perf ${on ? "On" : "Off"}</span>
+			${icon(Bug, "xs")}
+			<span>Debug ${on ? "On" : "Off"}</span>
 		</button>
 	`;
 }
@@ -1019,7 +1021,7 @@ function renderHarnessRestartControl() {
 			${harnessRestartState === "error" && harnessRestartError ? html`
 				<span class="text-xs text-destructive max-w-[40vw] sm:max-w-[18rem] truncate" title=${harnessRestartError}>${harnessRestartError}</span>
 			` : ""}
-			${renderPerfInstrumentationToggle()}
+			${renderDebugModeToggle()}
 			<button
 				class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-60 disabled:pointer-events-none"
 				?disabled=${requesting || requested}
@@ -2398,24 +2400,6 @@ function renderGeneralTab() {
 			<div class="flex flex-col gap-2">
 				<h2 class="text-sm font-semibold text-foreground uppercase tracking-wider" data-testid="general-appearance-heading">Appearance</h2>
 				${renderSidebarFontScaleControl()}
-			</div>
-			<div class="flex flex-col gap-1.5">
-				<label class="flex items-center gap-2 cursor-pointer">
-					<input
-						type="checkbox"
-						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
-						data-testid="general-client-debug"
-						.checked=${isClientDebugEnabled()}
-						@change=${toggleClientDebug}
-					/>
-					<span class="text-sm font-medium text-foreground">Client debug</span>
-				</label>
-				<p class="text-xs text-muted-foreground ml-6">
-					Show a floating <strong>DBG</strong> button in the chat view that dumps a
-					client diagnostics report (environment, viewport / safe-area, performance,
-					app state) into the message composer — so it can be read or sent to an agent
-					on devices where DevTools is unavailable (e.g. installed mobile PWAs).
-				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">

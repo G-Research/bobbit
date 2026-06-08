@@ -16,16 +16,24 @@ build is actually live* can only be observed on the real device.
 
 A flag-gated diagnostic lives in `src/app/client-debug.ts`.
 
-- **Enable it:** Settings → General → **Client debug** (checkbox). It flips the
-  `bobbit-client-debug` localStorage flag. The toggle is reachable on a phone
-  (unlike the harness-only Perf toggle), which is the whole point.
+- **Enable it:** Settings → the **Debug** toggle next to *Restart Server* in the
+  footer. It's the unified dev switch (it flips the `bobbit-client-debug`
+  localStorage flag AND arms boot-timing perf). **Dev-harness only** — it's gated
+  on the *server's* harness status (`harnessRestartAvailable`), so it appears
+  whenever the gateway runs under the dev harness, including on a phone pointed
+  at that dev gateway (which is the whole point); it's hidden on production
+  gateways.
 - **Use it:** a small floating **DBG** button appears in the chat view (desktop
   *and* mobile). Tapping it dumps a fenced, copy-pasteable report **into the
   message composer** so the user can read it or send it to you.
-- **Report sections:** `Environment`, `Viewport / layout`, `Performance`, plus
-  any registered via `registerDebugSection(name, fn)` (e.g. `App state`, wired
-  from `render.ts`). Add new sections there or via the registry — keep
-  `client-debug.ts` generic, not bug-specific.
+- **Report sections:** `Environment` (incl. `build=` id), `Viewport / layout`,
+  `Performance`, plus any registered via `registerDebugSection(name, fn)` (e.g.
+  `App state`, wired from `render.ts`). Add new sections there or via the
+  registry — keep `client-debug.ts` generic, not bug-specific.
+- **Build id:** the DBG button shows a short build id and the report's
+  `Environment` section prints `build=…`. Use it to confirm the device is
+  running the build you just shipped (the #1 gotcha when iterating on a hard-to-
+  reload installed PWA).
 
 **Getting a dump from the user:** ask them to enable the flag, tap **DBG**, and
 send the message. On desktop you can instead run `collectClientDebug()` logic

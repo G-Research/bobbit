@@ -410,15 +410,19 @@ registerDebugSection("App state", () => {
 
 /** Flag-gated floating "DBG" button (desktop + mobile). Dumps the client-debug
  *  report into the composer. Fixed-position so it's layout-independent; hidden
- *  unless the Client debug flag is on (Settings → General → Debugging). */
+ *  unless Debug mode is on (Settings → dev-harness footer). Shows a short build
+ *  id so you can confirm at a glance which build the device is actually running
+ *  (the #1 question when iterating on a hard-to-reload installed PWA). */
 function renderClientDebugButton() {
 	if (!isClientDebugEnabled()) return "";
+	const rawBuild = (globalThis as { __BOBBIT_BUILD_ID__?: string }).__BOBBIT_BUILD_ID__;
+	const build = rawBuild ? rawBuild.slice(-6) : "dev";
 	return html`
 		<button
 			data-testid="client-debug-button"
 			@click=${() => dumpClientDebugToComposer()}
-			style="position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:2147483646;background:color-mix(in oklch, var(--primary) 88%, black);color:var(--primary-foreground);font-size:10px;font-weight:700;letter-spacing:0.03em;padding:6px 8px;border:none;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.4);opacity:0.85;"
-			title="Dump client debug report into the composer">DBG</button>
+			style="position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:2147483646;background:color-mix(in oklch, var(--primary) 88%, black);color:var(--primary-foreground);font-size:10px;font-weight:700;letter-spacing:0.03em;padding:6px 8px;border:none;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.4);opacity:0.85;line-height:1.15;text-align:center;"
+			title="Dump client debug report into the composer (build ${build})">DBG<br><span style="font-weight:500;opacity:0.85;">${build}</span></button>
 	`;
 }
 

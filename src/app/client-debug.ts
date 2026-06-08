@@ -67,7 +67,9 @@ function environmentSection(): string {
 	const standalone =
 		(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
 		(navigator as any).standalone === true;
+	const build = (globalThis as { __BOBBIT_BUILD_ID__?: string }).__BOBBIT_BUILD_ID__ ?? "dev";
 	return [
+		`build=${build}`,
 		`standalone=${standalone}  navigator.standalone=${(navigator as any).standalone}`,
 		`dpr=${window.devicePixelRatio}  lang=${navigator.language}  online=${navigator.onLine}`,
 		`screen=${screen.width}x${screen.height}  avail=${screen.availWidth}x${screen.availHeight}`,
