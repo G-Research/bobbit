@@ -6,24 +6,32 @@ shape REAL, **purely additively**. No change to v1 signatures in
 (`src/shared/extension-host/host-api.ts` declares it `as const`); each capability flips
 its `host.capabilities` flag `false → true` as it lands.
 
-**Source of truth:** `docs/design/extension-host.md` (the frozen v1 contract — do NOT edit
-it). This doc is the build plan a coder executes with **zero further architectural
-decisions**. Every signature below already exists frozen in v1; Phase 2 adds method
-*bodies* and wires capabilities through the SAME authorization path Phase 1 built.
+**Source of truth:** `docs/design/extension-host.md` (the frozen v1 contract). Do not
+change v1 signatures/types in that doc — they stay byte-identical (frozen). Its §3/§6
+prose **status notes** are flipped from "frozen, not implemented" → "implemented" as each
+capability lands (a status edit, not a contract change — see §16). This doc is the build
+plan a coder executes with **zero further architectural decisions**. Every signature below
+already exists frozen in v1; Phase 2 adds method *bodies* and wires capabilities through
+the SAME authorization path Phase 1 built.
 
 **Reuse, do not refork (hard constraint).** Three Phase-1 chokepoints are reused verbatim:
 
-- **Per-session action guard** — `authorizeActionRequest()` /
+- **Per-session authorization guard** — `authorizeActionRequest()` /
   `transcriptHasToolUse()` (`src/server/extension-host/action-guard.ts:53` / `:106`).
-  Every scoped Phase-2 capability (`store` / `session` / `callRoute`) routes through it.
+  `invokeAction` and `session.postMessage` (tool-call-scoped) keep the full
+  `authorizeActionRequest` (incl. toolUseId-ownership) verbatim. The pack-scoped
+  capabilities (`store` / `session.read*` / `callRoute`) route through a new
+  `authorizeScopedRequest()` — the SAME guard MINUS the toolUseId-ownership step (§2a). It
+  is not a weakening of the action guard; it is the correct narrower authz for calls where
+  no specific tool call is being acted on.
 - **Generation-guarded renderer-registry chokepoint** — `applyRegistration()`
   (`src/ui/tools/renderer-registry.ts:95`) and the `{override}` /
   `unregisterPackRenderer` / `displacedBuiltins` machinery. Panels (B4) reuse this exact
   loader+reconcile pattern; they do not introduce a parallel registry.
 - **Epoch-guarded module cache** — `ActionDispatcher` cache + `epoch` + bounded
   in-flight reload (`src/server/extension-host/action-dispatcher.ts:176` `loadModule`,
-  `:142` `invalidate`). Route modules (B3) and store handlers reuse this loader; the
-  worker/vm isolation (C3) wraps its single invocation seam.
+  `:142` `invalidate`). Route modules (B3) reuse this loader; the worker isolation (C3)
+  wraps its single invocation seam (actions + routes only — stores run no pack code).
 
 **Invariants preserved (pinned by existing tests; must stay green):**
 
@@ -46,7 +54,7 @@ decisions**. Every signature below already exists frozen in v1; Phase 2 adds met
 | B4 | `host.ui.openPanel` | `ui` (panel) | `panels:` | `pack-panels.ts` |
 | C1 | `host.ui.navigate` + entrypoints | `ui` (nav) | `entrypoints:` | `pack-entrypoints.ts` |
 | C2 | `host.session.{postMessage,subscribe}` | `session` (write) | — | (extends B2 files) |
-| C3 | server-module isolation | (hardening — no flag) | — | `module-host-worker.ts` |
+| C3 | server-module isolation (actions + routes only) | (hardening — no flag) | — | `module-host-worker.ts` |
 | D1 | artifacts-as-pack (litmus) | — | renderer+panels+stores | `market-packs/artifacts/` |
 | D2 | pr-walkthrough-as-pack (litmus) | — | panels+routes+stores+entrypoints | `market-packs/pr-walkthrough/` |
 
@@ -57,6 +65,16 @@ implemented: `ui` flips after **C1** (openPanel+navigate); `session` flips after
 `try/catch` or by reading `host.contractVersion`; this matches the v1 doc's "single source
 of truth = capabilities" rule and avoids a half-true flag. (Sub-flag granularity is NOT
 added — that would change the frozen `HostCapabilities` shape.)
+
+**Capability-signaling convention (binding).** The `host.capabilities` namespace flag is
+the **single source of truth** for whether a capability is usable. A pack MUST NOT rely on
+a method while its flag is `false`. Bobbit's OWN slices MAY land method bodies ahead of the
+flip (e.g. `session.read*` bodies ship in **B2**, but the `session` flag does not flip
+until **C2**); during that interim the bodies are **internal-only** — no pack and no
+acceptance test consumes them until the flag is `true`. Concretely, the litmus packs that
+use session reads (D2) depend on **C2** (the flag-flip slice), not merely on B2 (the body
+slice). This keeps "a flag is true ⇒ every member of that namespace is callable by packs"
+an invariant, while letting Bobbit implement incrementally.
 
 ---
 
@@ -196,6 +214,67 @@ touches.
 
 ---
 
+## 2a. Scoped-request authorization + panel/entrypoint host context
+
+**Deps:** A. **Lands with A** (foundation for every scoped capability). Two pieces: a
+narrower authorization guard, and the host-context binding for calls that originate from a
+panel/entrypoint rather than from a specific tool call.
+
+### 2a.1 `authorizeScopedRequest` — the action guard MINUS toolUseId-ownership
+
+The Phase-1 action endpoint is **tool-call-scoped**: it acts on a specific `toolUseId`, so
+`authorizeActionRequest` (`action-guard.ts:53`) requires that the caller owns that
+`toolUseId` (`transcriptHasToolUse`, `:106`). But `store.*`, `callRoute`, and
+`session.read*` are **pack-scoped**, not tool-call-scoped — no specific tool call is being
+acted on, and a panel/entrypoint may originate the call with no owned `toolUseId` at all.
+For these, `toolUseId`-ownership is the wrong check.
+
+Factor the guard so toolUseId-ownership is a **separate, capability-specific** step:
+
+```ts
+// action-guard.ts — NEW export, reusing the same primitives
+export function authorizeScopedRequest(opts): ScopedAuthzResult;
+//   1. header-canonical session id (single-sourced, never from body alone)
+//   2. body session id === header session id  (reject mismatch)
+//   3. session resolves (project context + sessionStore)
+//   4. the pack's contributing `tool` ∈ the session's allowedTools
+//   5. → returns { sessionId, sessionToolManager } so the caller server-derives packId (A)
+// It is authorizeActionRequest WITHOUT step (6) transcriptHasToolUse(toolUseId).
+```
+
+`authorizeScopedRequest` is **not a weakening** of the action guard: it keeps every check
+except the one that only makes sense when a concrete tool call is the subject. `toolUseId`
+is OPTIONAL on scoped requests (a panel/entrypoint call legitimately has none). Allocation:
+
+| Endpoint | Guard | toolUseId-ownership? |
+|---|---|---|
+| `invokeAction` (Phase 1) | `authorizeActionRequest` | **required** (unchanged) |
+| `session.postMessage` (C2) | `authorizeActionRequest` | **required** (drives the agent) |
+| `store.*` (B1) | `authorizeScopedRequest` | not required |
+| `callRoute` (B3) | `authorizeScopedRequest` | not required |
+| `session.read*` (B2) | `authorizeScopedRequest` | not required |
+
+### 2a.2 Panel / entrypoint host context binding
+
+A renderer's host API is built `getHostApi(sessionId, toolUseId, packTool)` (A.3). A panel
+or entrypoint has no tool call, so it binds `{ sessionId, packTool, packId, contributionId }`
+from the **opening context**:
+
+- A **renderer** that opens a panel carries `sessionId` + `packTool` already; it passes
+  them to `openPanel`, and the panel host API is built `getHostApi(sessionId, undefined,
+  packTool)` — `toolUseId` is `undefined`.
+- An **entrypoint** carries `packTool` from its own contribution; the active session
+  supplies `sessionId`. Same `getHostApi(sessionId, undefined, packTool)`.
+
+So a panel/entrypoint can call `store.*` / `callRoute` / `session.read*` (they route through
+`authorizeScopedRequest`, which needs no `toolUseId`), but it CANNOT call `invokeAction` or
+`session.postMessage` without a real user-gesture-originated `toolUseId` (those keep
+`authorizeActionRequest`). The user-gesture requirement for `postMessage` is still enforced;
+no auto-invoke/post on mount (v1 §5 v). This closes the D2 gap where a panel-originated
+`callRoute`/`store`/`readToolCall` had no owned `toolUseId` to satisfy the action guard.
+
+---
+
 ## 3. Slice B1 — `stores:` + `host.store.*`
 
 **Deps:** A. **Flag:** `store`. **Reserved key:** `stores:`.
@@ -233,22 +312,23 @@ export function createPackStore(opts?: { rootDir?: string }): PackStore;
 
 ### B1.2 Endpoint: `POST /api/ext/store/:op` (server.ts, near `:5216`)
 
-Body `{ sessionId, toolUseId, tool, key, value?, prefix? }`; `:op ∈ {get,put,list}`.
-**Guard ordering (reuse Phase-1 guard verbatim):**
+Body `{ sessionId, toolUseId?, tool, key, value?, prefix? }`; `:op ∈ {get,put,list}`.
+**Guard ordering (pack-scoped — reuse §2a):**
 
 ```
-1. authorizeActionRequest({...})  → same guard as the action endpoint (action-guard.ts:53)
-   (header-canonical session, body===header, allowedTools, toolUseId ownership)
+1. authorizeScopedRequest({...})  → header-canonical session, body===header, session
+   resolves, `tool` ∈ allowedTools  (§2a; toolUseId NOT required — panels may originate)
 2. resolvePackIdentityForTool(sessionToolManager, tool)  → packId  (A; server-derived)
 3. reject if !ident.isPack  → 403
 4. packStore[op](ident.packId, key, ...)  under the dispatcher timeout/try-catch
 5. audit + json(result)
 ```
 
-Because step 1 is `authorizeActionRequest`, store inherits the allowedTools gate by
-construction (v1 §5 "Phase-2 capabilities inherit the same rule"). The `tool` in the body
-identifies which contribution; the guard verifies the caller owns a toolUseId for it, and
-identity is derived server-side from it — the client never names a pack.
+Because step 1 is `authorizeScopedRequest`, store inherits the allowedTools gate by
+construction (v1 §5 "Phase-2 capabilities inherit the same rule") without demanding a tool
+call the caller may not have. The `tool` in the body identifies which contribution; the
+guard verifies the caller is authorized for that tool in this session, and identity is
+derived server-side from it — the client never names a pack.
 
 ### B1.3 Server-host wiring
 
@@ -308,14 +388,15 @@ shape-tolerance (handles `tool_use` / `toolCall` / `toolCallId`, `id`/`tool_use_
 ### B2.2 Endpoints (server.ts)
 
 ```
-GET  /api/ext/session/transcript   ?offset&limit&pattern   → TranscriptEnvelope
-GET  /api/ext/session/tool-call    ?toolUseId               → ToolCallRecord | null
+GET  /api/ext/session/transcript   ?tool&offset&limit&pattern   → TranscriptEnvelope
+GET  /api/ext/session/tool-call    ?tool&toolUseId               → ToolCallRecord | null
 ```
 
-**Guard ordering (own-session-scoped reads):**
+**Guard ordering (pack-scoped, own-session reads — reuse §2a):**
 
 ```
-1. authorizeActionRequest({...})  → header-canonical session (action-guard.ts:53)
+1. authorizeScopedRequest({...})  → header-canonical session, `tool` (query) ∈ allowedTools
+   (§2a; toolUseId NOT required — panels/entrypoints may originate the read)
 2. read THE HEADER-BOUND session's transcript only:
    projectContextManager.getContextForSession(headerSessionId)?.sessionStore.get(headerSessionId)
    (the exact own-session read mcp-call uses, server.ts:11108) → agentSessionFile → sessionFileRead
@@ -333,11 +414,14 @@ another session id.
   against the adapter (bound `sessionId`). Keep `postMessage` throwing until C2.
 - Client host (`src/app/host-api.ts`): replace `session.readTranscript`/`readToolCall`
   stubs with `gatewayFetch` GETs; keep `postMessage`/`subscribe` throwing until C2. Do
-  NOT flip `flags.session` yet (it spans writes too) — but expose the read methods so D2's
-  `readToolCall` works. **Decision:** add an internal client guard so the read methods work
-  while `capabilities.session` stays `false` until C2; document that D1/D2 packs call the
-  read methods directly (try/catch), matching v1's "capabilities is the single source of
-  truth, sub-namespaces may be partially live".
+  NOT flip `flags.session` yet (it spans writes too).
+- **Capability-signaling (per §0 convention):** the read bodies that ship here are
+  **internal-only** until the `session` flag flips in **C2**. Because the flag is the
+  single source of truth, no pack and no acceptance test consumes `session.read*` while
+  `capabilities.session === false`. That is why D2 (which uses `readToolCall`) depends on
+  **C2**, not on B2 — it must not read the transcript before the namespace is officially
+  live. Bobbit lands the bodies early purely to decouple the work; the flip in C2 is what
+  makes them publicly callable.
 
 > Alternative considered: split `session` into `sessionRead`/`sessionWrite` flags. Rejected
 > — changes the frozen `HostCapabilities` shape (a v1 break). Partial-namespace-live with a
@@ -369,27 +453,33 @@ export class RouteDispatcher {
 **Reuse, not refork:** `RouteDispatcher` is structurally `ActionDispatcher` with `routes`
 instead of `actions`. Extract the shared loader (epoch cache, bounded in-flight reload,
 permit-held-until-settle, `runWithTimeout`) into a small base or shared helper so both
-dispatchers use ONE copy — the C3 worker/vm seam then wraps that single helper. The route
+dispatchers use ONE copy — the C3 worker-isolation seam then wraps that single helper. The route
 module path comes from a new `routes.module` contribution (default `routes.js`), resolved
 via the same `resolveToolLocation` location as actions.
 
-### B3.2 Endpoint: `POST /api/ext/<pack>/:name` (server.ts)
+### B3.2 Endpoint: `POST /api/ext/route/:name` (server.ts)
 
-The `<pack>` segment is **server-recomputed**, never trusted from the URL. Flow:
+There is **no `<pack>` URL segment** — the only routable namespace is the one the server
+derives from the `tool` the caller proves it owns, so there is nothing to forge. Body
+`{ sessionId, toolUseId?, tool, init }` (`init` = v1 `HostRouteInit`: `method`/`body`/
+`query`, **no path**). Flow:
 
 ```
-1. authorizeActionRequest({...})  → header-canonical session, allowedTools, toolUseId ownership
-2. resolvePackIdentityForTool(sessionToolManager, body.tool) → ident  (A)
-3. REJECT 403 if the URL `<pack>` segment !== ident.packId
-   (the namespace constraint: a pack can only address its OWN /api/ext/<thisPack>/*)
-4. routeDispatcher.dispatch(body.tool, name, ctx, {method,query,body}, sessionToolManager)
+1. authorizeScopedRequest({...})  → header-canonical session, body===header, session
+   resolves, pack's contributing `tool` ∈ allowedTools  (§2a; toolUseId NOT required)
+2. resolvePackIdentityForTool(sessionToolManager, body.tool) → ident  (A; server-derived)
+3. reject 403 if !ident.isPack
+4. routeDispatcher.dispatch(body.tool, name, ctx, init, sessionToolManager)
+   — dispatches ONLY against THAT pack's `routes.js` (the pack derived from `tool`)
 5. audit + json(result)
 ```
 
-The client `callRoute(name, init)` (v1 `HostRouteInit`: `method`/`body`/`query`, **no
-path**) builds the URL as `/api/ext/${packId}/${name}` — but the client does not know
-`packId`; it sends `tool=packTool` and the server derives + verifies `packId` (step 2/3).
-So even a forged URL segment is rejected against the server-derived identity (v1 §3.2).
+The client `callRoute(name, init)` POSTs to `/api/ext/route/${encodeURIComponent(name)}`
+with body `{ sessionId, toolUseId?, tool: packTool, init }`. The client never knows or
+sends a `packId`: it names only the `tool` whose renderer/panel it was served for, and the
+server maps tool → winning pack (step 2). **Namespace guarantee, by construction:** a pack
+can reach only its OWN routes because the routed pack is *derived* from a tool the caller
+is authorized for — there is no caller-supplied namespace segment to validate (v1 §3.2).
 
 ### B3.3 Wiring
 
@@ -515,7 +605,8 @@ Body `{ sessionId, toolUseId, tool, role: "user"|"system", text, resumeTurn? }`.
 **Guard ordering (user-gesture, header-bound, audited):**
 
 ```
-1. authorizeActionRequest({...})  → header-canonical session (action-guard.ts:53)
+1. authorizeActionRequest({...})  → header-canonical session + toolUseId-ownership
+   (action-guard.ts:53; postMessage is tool-call-scoped — NOT authorizeScopedRequest)
 2. require role ∈ {user,system}; reject empty text
 3. post into the HEADER-BOUND session ONLY:
    - resumeTurn !== false → sessionManager.enqueuePrompt(headerSessionId, text, {source:"extension"})
@@ -547,54 +638,88 @@ internal wire. Scoped to the bound session.
 
 ---
 
-## 9. Slice C3 — server-module isolation (worker/vm)
+## 9. Slice C3 — server-module isolation (worker_threads)
 
-**Deps:** the slices whose handlers it isolates (actions B-baseline, routes B3, store
-handlers B1). **No flag** (hardening). Realizes the blast-radius seam Phase 1 left open
-(`action-dispatcher.ts` `runWithTimeout` doc: "does NOT terminate timed-out work").
+**Deps:** the slices whose pack server modules it isolates — **actions (B-baseline) +
+routes (B3) ONLY**. **No flag** (hardening). Stores are NOT isolated here: a store is a
+host-backed KV reached through `ctx.host.store.*`; no pack code runs in the store path, so
+there is nothing to confine (the store endpoint runs entirely in the parent). Realizes the
+blast-radius seam Phase 1 left open (`action-dispatcher.ts` `runWithTimeout` doc: "does NOT
+terminate timed-out work").
 
 ### C3.1 Decision: `worker_threads` (NOT `node:vm`)
 
 `node:vm` does NOT bound CPU/memory and cannot be force-terminated mid-loop (a `while(1)`
 hangs the event loop). `worker_threads.Worker` supports `worker.terminate()` (true
 terminate-on-timeout) and `resourceLimits` (`maxOldGenerationSizeMb`, `stackSizeMb`) for
-memory caps. **Choose `worker_threads`.**
+memory caps. **Choose `worker_threads`.** Note that `worker_threads` does NOT by itself
+confine `process`/env/fs/network/built-ins — a worker inherits the parent env and can
+`require('node:fs')` unless we explicitly deny it. C3.2 therefore adds a confinement
+bootstrap; "isolation" in this doc means *that bootstrap + empty env + terminate/resource
+caps*, not the bare worker.
 
 ### C3.2 New file: `src/server/extension-host/module-host-worker.ts`
 
-One-line responsibility: run a pack server module (`actions`/`routes`/store handler) in a
-terminate-able worker with resource caps, behind a request/response message protocol.
+One-line responsibility: run a pack server module (`actions` or `routes` member) in a
+confined, terminate-able worker with resource caps, behind a request/response message
+protocol whose ONLY granted capability is the host-API proxy.
 
 ```ts
-export interface ModuleHostOptions { timeoutMs: number; maxOldGenerationSizeMb?: number; }
+export interface ModuleHostOptions { timeoutMs: number; maxOldGenerationSizeMb?: number; stackSizeMb?: number; }
 export interface InvokeRequest { absModulePath: string; epoch: number; exportKind: "actions"|"routes"; member: string; ctx: SerializableCtx; arg: unknown; }
 export class ModuleHost {
   constructor(opts: ModuleHostOptions);
-  /** Run member in a worker; terminate on timeout → ActionError(504). */
+  /** Run member in a confined worker; terminate on timeout → ActionError(504). */
   async invoke(req: InvokeRequest): Promise<unknown>;
   dispose(): void;
 }
 ```
 
-- **Message protocol:** parent posts `{absModulePath, epoch, member, ctx, arg}`; worker
-  dynamic-`import()`s the module (the SAME epoch-cache-busted URL the dispatcher builds,
-  `action-dispatcher.ts:loadModule`), invokes `module[exportKind][member](ctx, arg)`,
-  posts `{ok,result}` or `{error}`. `ctx.host` capabilities that touch server state
-  (store/session) are proxied back to the parent over the same channel (the worker has NO
-  ambient `process`/gateway access — v1 §5 isolation).
-- **Terminate path:** parent races a timer; on timeout `worker.terminate()` (TRUE
-  cancellation, unlike Phase 1's permit-hold) and reject `ActionError(504)`.
-- **Resource caps:** `new Worker(..., { resourceLimits: { maxOldGenerationSizeMb,
-  stackSizeMb } })`.
+**Confinement (the real model — not "a bare worker_threads is a sandbox"):**
+
+- **Empty env:** start the worker with NO inherited environment —
+  `new Worker(bootstrapPath, { env: {}, workerData, resourceLimits, execArgv })`. The
+  worker holds no gateway token and no secret (those live only in the parent process env).
+- **Module-load deny-hook (runs BEFORE the pack module):** `bootstrapPath` is a confinement
+  bootstrap that installs a loader/require interception (`module.register` /
+  `Module._load` proxy / loader hook) which **denies** the pack module graph access to
+  `node:fs`, `node:child_process`, `node:net`, `node:http`, `node:https`,
+  `node:worker_threads`, and `node:process` (beyond a frozen minimal shim). It also
+  freezes/removes dangerous globals before the pack module is imported. After installing
+  the hook, the bootstrap dynamic-`import()`s the pack module (the SAME epoch-cache-busted
+  URL the dispatcher builds, `action-dispatcher.ts:loadModule`).
+- **Host-API-proxy-only capability:** the ONLY capability the pack code is handed is the
+  `ctx.host` proxy over the parent `MessagePort`. Host calls that touch server state
+  (`store` / `session`) are marshalled to the parent and authorized there (the worker has
+  no ambient `process`/gateway access — v1 §5 isolation).
+- **Message protocol:** parent posts `{absModulePath, epoch, member, ctx, arg}`; the
+  bootstrap invokes `module[exportKind][member](ctx, arg)` and posts `{ok,result}` or
+  `{error}`; host-API calls flow back over the same channel as request/response frames.
+
+**Resource caps & the CPU control:**
+
+- **Memory:** `new Worker(..., { resourceLimits: { maxOldGenerationSizeMb, stackSizeMb } })`.
+- **CPU / wall-time:** `worker_threads` has **no per-core CPU throttle**. CPU-exhaustion is
+  bounded by **terminate-on-timeout**: the parent races a timer and on timeout calls
+  `worker.terminate()` (TRUE cancellation, unlike Phase 1's permit-hold), rejecting
+  `ActionError(504)`. A runaway `while(1)` is *killed* by the timeout — terminate-on-timeout
+  IS the CPU control, and acceptance/test language is worded that way (no claim of a CPU
+  quota that `worker_threads` cannot deliver).
+
+**Documented fallback.** If full built-in denial proves infeasible in the target Node
+version, the shipped floor is: **terminate-on-timeout + memory caps + empty-env**, with the
+residual (a pack module could still `require` some built-ins) documented as a known
+limitation. The loader-deny confinement above is the **target**; the floor is the
+guaranteed minimum so the slice always lands a real blast-radius reduction.
 
 ### C3.3 Migration onto the SINGLE invocation seam
 
 Phase 1 left exactly one invocation seam: `return await handler(ctx, args)` in
 `ActionDispatcher.dispatch` (`action-dispatcher.ts`, "SINGLE invocation seam (design §5
 iv)"). C3 replaces that one line with `return await this.moduleHost.invoke({...})` —
-**callers unchanged**. The shared dispatcher base (B3.1) means routes + store handlers ride
-the same seam. Behind a config flag (default on) so it can be disabled if a pack needs
-in-process for debugging.
+**callers unchanged**. The shared dispatcher base (B3.1) means actions + routes ride the
+same seam (stores have no pack module, so they are not on this seam). Behind a config flag
+(default on) so it can be disabled if a pack needs in-process for debugging.
 
 ---
 
@@ -630,7 +755,9 @@ ready"). The deletion is a separate task gated on D1 parity E2E green.
 
 ## 11. Slice D2 — pr-walkthrough-as-pack (litmus, maximal case)
 
-**Deps:** B4, B3, B1, C1, B2 (`readToolCall`). Uses ALL reserved keys.
+**Deps:** B4, B3, B1, C1, **C2** (`session.readToolCall` — D2 consumes session reads, so
+it depends on the slice that FLIPS the `session` flag, not merely on the B2 body slice;
+see the §0 capability-signaling convention). Uses ALL reserved keys.
 
 ### D2.1 Pack layout
 
@@ -640,9 +767,11 @@ ready"). The deletion is a separate task gated on D1 parity E2E green.
   `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts`. Opened via
   `host.ui.openPanel({ panelId, params: { jobId } })`.
 - `routes:` — re-express `handlePrWalkthroughApiRoute` (`src/server/pr-walkthrough/routes.ts`,
-  wired at `server.ts:2268`) as a pack `routes.js` module under `/api/ext/pr-walkthrough/*`.
-  The viewer loads its changeset/diff bundle via `host.callRoute("bundle", { query: { jobId } })`
-  — NEVER a raw fetch (v1 §6.2).
+  wired at `server.ts:2268`) as a pack `routes.js` module. The viewer loads its
+  changeset/diff bundle via `host.callRoute("bundle", { query: { jobId } })` — which POSTs
+  `/api/ext/route/bundle` with `tool=<pr-walkthrough tool>`; the server derives the pack
+  from that tool and dispatches the pack's OWN `routes.js` (B3.2). NEVER a raw fetch
+  (v1 §6.2).
 - `stores:` — re-express `walkthrough-store.ts`
   (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) onto `host.store.*`,
   pack-scoped.
@@ -650,7 +779,9 @@ ready"). The deletion is a separate task gated on D1 parity E2E green.
   `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (the SPA already has
   the `"walkthrough"` route — `routing.ts:5`/`:47`).
 - `host.session.readToolCall` — read the `submit_pr_walkthrough_yaml` tool call's
-  input/output (B2 read) instead of bespoke transcript access.
+  input/output (B2 implements the body; usable here only once C2 flips the `session` flag)
+  instead of bespoke transcript access. The panel-originated read is authorized via
+  `authorizeScopedRequest` (§2a), so it needs no owned `toolUseId`.
 
 ### D2.2 Test adaptation + deletion
 
@@ -670,10 +801,12 @@ task per YES-file in flight; the team-lead rebases the next on merge.
   to share it. Owns: `renderer-registry.ts` (sole editor). Otherwise skip (B4 mirrors).
 
 ### Wave 1 — Foundation
-- **A** pack identity. New: `pack-identity.ts`. Shared: `server-host-api.ts` (add
+- **A** pack identity + scoped authz (§2a). New: `pack-identity.ts`. Shared:
+  `action-guard.ts` (add `authorizeScopedRequest`), `server-host-api.ts` (add
   packId/contributionId), `server.ts` (thread into action endpoint `:5216`),
   `tool-contributions.ts` (no-op or prep). Threads `packTool` through `types.ts` +
-  `Messages.ts`/`ToolGroup.ts` + client `host-api.ts` signature.
+  `Messages.ts`/`ToolGroup.ts` + client `host-api.ts` signature; defines the
+  panel/entrypoint host-context binding (§2a.2) the B/C slices consume.
   *Must land + test before any B slice.*
 
 ### Wave 2 — Capability slices (parallel after A, serialized on shared files)
@@ -700,14 +833,15 @@ task per YES-file in flight; the team-lead rebases the next on merge.
 - **C2 session writes.** Shared: `server.ts` (+message endpoint), `server-host-api.ts`
   (postMessage body + flip `flags.session`), client `host-api.ts` (postMessage/subscribe +
   flip `flags.session`). Deps: B2.
-- **C3 isolation.** New: `module-host-worker.ts`. Edits the single seam in
-  `action-dispatcher.ts` (+ shared dispatcher base from B3) — single-owner of the seam line.
-  Deps: B1/B3 (handlers to isolate).
+- **C3 isolation.** New: `module-host-worker.ts` (+ confinement bootstrap). Edits the
+  single seam in `action-dispatcher.ts` (+ shared dispatcher base from B3) — single-owner
+  of the seam line. Deps: B3 (routes) + the action baseline. Isolates **actions + routes
+  only** (stores run no pack code).
 
 ### Wave 4 — Litmus (after their deps)
 - **D1 artifacts pack.** New: `market-packs/artifacts/`. Deps: B4, B1. + staged deletion PR.
-- **D2 pr-walkthrough pack.** New: `market-packs/pr-walkthrough/`. Deps: B4, B3, B1, C1, B2.
-  + staged deletion PR.
+- **D2 pr-walkthrough pack.** New: `market-packs/pr-walkthrough/`. Deps: B4, B3, B1, C1,
+  **C2** (session-read flag flip). + staged deletion PR.
 
 No two concurrent tasks own the same NEW file; the only contention is the five §1 shared
 files, all serialized above.
@@ -722,19 +856,19 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 
 | Slice | Test (file) | Asserts | Accept # |
 |---|---|---|---|
-| A | `extension-host-pack-identity.test.ts` | packId derived from market-pack baseDir segment; non-pack → empty; caller `args`/`packId` cannot override server-derived id; cross-pack denial precondition | 2,4 |
-| B1 | `extension-host-pack-store.test.ts` | put/get/list round-trip; keys namespaced under `<packId>/`; a second pack cannot read first pack's key (cross-pack read rejected); key traversal (`../`) rejected; non-pack rejected; guard ordering (allowedTools → identity) | 2,4 |
+| A | `extension-host-pack-identity.test.ts` | packId derived from market-pack baseDir segment; non-pack → empty; caller `args`/`packId` cannot override server-derived id; cross-pack denial precondition; `authorizeScopedRequest` accepts a request with NO toolUseId but still enforces session-binding + allowedTools, and rejects body/header session mismatch | 2,4 |
+| B1 | `extension-host-pack-store.test.ts` | put/get/list round-trip; keys namespaced under `<packId>/`; a second pack cannot read first pack's key (cross-pack read rejected); key traversal (`../`) rejected; non-pack rejected; guard ordering via `authorizeScopedRequest` (allowedTools → identity; succeeds without toolUseId) | 2,4 |
 | B2 | `extension-host-contract-adapter.test.ts` | JSONL rows → `HostMessage`/`HostContentBlock`/`ToolCallRecord`; both tool_use shapes mapped; `CONTRACT_VERSION === HOST_CONTRACT_VERSION`; unknown block types tolerated; read scoped to own session (other session id has no parameter) | 2,4 |
-| B3 | `extension-host-route-dispatcher.test.ts` | route resolution + precedence (pack shadows builtin); namespace constraint (URL `<pack>` ≠ server id → 403); guard reuse; epoch cache invalidation | 2,4 |
+| B3 | `extension-host-route-dispatcher.test.ts` | route resolution + precedence (pack shadows builtin); namespace-by-construction (`tool` → server-derived pack; dispatch hits ONLY that pack's `routes.js`; no `<pack>` URL segment to forge); `authorizeScopedRequest` reuse (no toolUseId required); epoch cache invalidation | 2,4 |
 | B4 | `pack-panels-reconcile.spec.ts` (`file://`) | panel loader registers/reconciles; reload survival (re-driven from metadata); uninstall reconcile (generation-guarded); override; theme-token + sandbox conventions present | 2,4 |
 | C1 | `pack-entrypoints.spec.ts` | entrypoint kinds register; `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount | 2,4 |
 | C2 | `extension-host-session-write.test.ts` | postMessage authorized against header-bound session; resumeTurn vs non-resume; every post audited; cross-session post impossible | 2,4 |
-| C3 | `extension-host-module-isolation.test.ts` | worker terminate-on-timeout (true cancellation of `while(1)`); `resourceLimits` memory cap rejects oversized alloc; crash isolated → error not process death; seam swap leaves callers unchanged | 3 |
+| C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; **a pack module CANNOT `require`/import `node:fs`/`node:child_process`/network built-ins** (deny-hook); **a pack module CANNOT read `process.env` secrets** (empty-env worker); crash isolated → error not process death; seam swap leaves callers unchanged | 3 |
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |
 | — | `host-api-v1-frozen.test.ts` (extend/add) | `HOST_API_VERSION===1` unchanged; v1 types compile unchanged; capabilities flip per host | 2 |
 | — | existing `pack-marketplace.test.ts` / budget tests | `buildPackList` byte-identical; tool-description budget; AGENTS budget | invariants |
 | **D1** | `tests/e2e/ui/artifacts-pack.spec.ts` (**mandatory E2E**) | install → inline pill renders → open viewer panel → persist across reload (store) → uninstall reconciles | **1** |
-| **D2** | `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (**mandatory E2E**) | install → entrypoint launches → panel renders from pack `callRoute` + store → deep-link route → uninstall | **1** |
+| **D2** | `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (**mandatory E2E**) | install → entrypoint launches → panel renders from pack `callRoute` (`/api/ext/route/bundle` with `tool`) + store → `readToolCall` after `session` flag live → deep-link route → uninstall | **1** |
 
 Gate: `npm run check`, `npm run test:unit`, `npm run test:e2e` green; the two litmus E2Es
 are the acceptance proofs.
@@ -752,27 +886,69 @@ are the acceptance proofs.
    `session.*` reads (B2) + writes (C2), `callRoute` (B3), `ui.*` openPanel (B4) +
    navigate (C1). Flags: `store`→B1, `callRoute`→B3, `ui`→C1, `session`→C2. Pinned by the
    v1-frozen compile test.
-3. **Pack server modules run in worker/vm isolation with terminate-on-timeout + caps.** →
-   **C3** (`module-host-worker.ts`, `worker_threads` + `terminate()` + `resourceLimits`),
-   migrated onto the single `ActionDispatcher.dispatch` seam.
+3. **Pack server modules (actions + routes) run in worker isolation with
+   terminate-on-timeout + caps.** → **C3** (`module-host-worker.ts`, `worker_threads` +
+   empty env + module-load deny-hook + host-API-proxy-only + `terminate()` +
+   `resourceLimits`), migrated onto the single `ActionDispatcher.dispatch` seam.
+   CPU-exhaustion is bounded by **terminate-on-timeout** (worker_threads has no per-core
+   throttle); memory by `resourceLimits`. Stores run no pack code, so they are out of
+   scope. Floor if full built-in denial is infeasible: terminate-on-timeout + memory caps +
+   empty-env, with documented residual (§9).
 4. **A third-party pack could implement any surface using only public contributions + the
-   Host API — no privileged escape hatch.** → guaranteed by routing every scoped capability
-   (B1/B2/B3/C2) through `authorizeActionRequest` keyed off the **server-derived** pack
-   identity (A); `callRoute` namespace-constrained (B3.2 step 3); `store` keys
-   pack-namespaced (B1.1); no `gateway.fetch` reintroduced. Pinned by the cross-pack denial
-   + namespace-constraint unit tests.
+   Host API — no privileged escape hatch.** → guaranteed by routing the tool-call-scoped
+   capabilities (`invokeAction`, `session.postMessage`) through `authorizeActionRequest`
+   and the pack-scoped capabilities (`store`/`callRoute`/`session.read*`) through
+   `authorizeScopedRequest` (§2a), both keyed off the **server-derived** pack identity (A) —
+   never a caller field; `callRoute`'s namespace is the pack derived from the proven `tool`
+   (B3.2 — no forgeable URL segment); `store` keys pack-namespaced (B1.1); no `gateway.fetch`
+   reintroduced. Pinned by the cross-pack denial + namespace unit tests.
 
 ---
 
 ## 15. Security recap (the Host API stays the single boundary)
 
-- All scoped capabilities (`store`/`session`/`callRoute`) call `authorizeActionRequest`
-  (`action-guard.ts:53`) FIRST, then key off the **server-resolved** `packId` (A) — never a
-  caller field. `callRoute` is namespace-constrained to `/api/ext/<thisPack>/*` (B3.2);
-  `store` keys are pack-namespaced with path-traversal re-validation (B1.1).
+- The pack-scoped capabilities (`store`/`session.read*`/`callRoute`) call
+  `authorizeScopedRequest` (§2a — the action guard MINUS toolUseId-ownership) FIRST, then
+  key off the **server-resolved** `packId` (A) — never a caller field. The tool-call-scoped
+  capabilities (`invokeAction`, `session.postMessage`) keep the full
+  `authorizeActionRequest` (`action-guard.ts:53`, incl. toolUseId-ownership). `callRoute`'s
+  reachable namespace is the pack the server derives from the proven `tool` — there is no
+  `<pack>` URL segment to forge (B3.2); `store` keys are pack-namespaced with
+  path-traversal re-validation (B1.1).
 - `session.postMessage`/resume (C2) is highest-risk: user-gesture-only, header-bound
-  session, every post/resume audited.
+  session, every post/resume audited. Panel/entrypoint-originated calls bind their host
+  context (`sessionId`/`packTool`) from the opening context (§2a.2) and CANNOT reach
+  `postMessage`/`invokeAction` without a real user-gesture `toolUseId`.
 - `panels`/`entrypoints` (B4/C1) run on the main UI thread over LLM-influenced data: iframe
   `sandbox` preserved, theme tokens only, no auto-invoke/navigation on mount.
-- Server-module isolation (C3) bounds blast radius: terminate-on-timeout, mem/cpu caps, no
-  ambient `process`/gateway access except through the Host API proxy channel.
+- Server-module isolation (C3, actions + routes only) bounds blast radius:
+  terminate-on-timeout (the CPU control), memory `resourceLimits`, empty-env worker, and a
+  module-load deny-hook — no ambient `process`/gateway access except through the host-API
+  proxy channel.
+
+---
+
+## 16. Documentation deliverables
+
+The goal requires three docs to land alongside the code (owned by the workflow
+**documentation gate / docs-writer**, not by a capability slice). They are part of
+acceptance, not optional.
+
+1. **`docs/design/extension-host.md` — status flip + new notes.** The v1 SIGNATURES/types
+   stay **byte-identical** (frozen). Only the §3/§6 prose **status notes** change: as each
+   capability lands, flip its "frozen, not implemented" note to "implemented" (a status
+   edit, never a contract change). Add a short note on the internal→contract **adapter
+   layer** (B2.1) and the **server-module isolation model** (C3: empty-env worker +
+   deny-hook + host-API-proxy-only + terminate-on-timeout). This reconciles the
+   top-of-doc caveat: "do not change v1 signatures; §3/§6 status notes are flipped to
+   'implemented' as capabilities land."
+2. **`docs/extension-host-authoring.md` — extend** with authoring guidance for
+   `panels`/`stores`/`routes`/`entrypoints` + `host.session.*`, plus the **two migration
+   case studies** (artifacts-as-pack D1, pr-walkthrough-as-pack D2).
+3. **`docs/marketplace.md` — threat model update** for `routes`/`stores`/`panels`/
+   `session`-write + the worker isolation model (terminate-on-timeout as the CPU control,
+   empty-env, deny-hook, host-API-proxy-only; the `authorizeScopedRequest` vs
+   `authorizeActionRequest` split).
+
+Each deliverable maps to the workflow's documentation gate; the docs-writer signals it once
+the corresponding capabilities have merged.
