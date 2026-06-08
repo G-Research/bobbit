@@ -4,6 +4,7 @@ import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
+import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -35,6 +36,8 @@ interface BaseToolInfo {
 	filePath: string;
 	/** Absolute path to the tools/ parent directory where this tool was found. */
 	baseDir: string;
+	/** Extension-host contribution points parsed from the tool YAML (design §2). */
+	contributions: ToolContributions;
 }
 
 export interface ToolInfo {
@@ -45,10 +48,29 @@ export interface ToolInfo {
 	detail_docs?: string;
 	hasRenderer: boolean;
 	rendererFile?: string;
+	/** Extension-host renderer delivery (design §2.5): "pack" ⇒ serve + lazy-import the
+	 *  pre-built ESM renderer at runtime; "builtin" ⇒ display-only metadata. */
+	rendererKind?: "builtin" | "pack";
+	/** True when the tool declares an `actions:` server-actions module (design §2.5). */
+	hasActions?: boolean;
+	/** Optional declared action-name allowlist (from `actions.names`). */
+	actionNames?: string[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
 	params?: string[];
+}
+
+/** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
+ *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
+ *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames"> {
+	const c = base.contributions;
+	return {
+		rendererKind: computeRendererKind(base.baseDir, base.renderer),
+		hasActions: !!c.actions,
+		actionNames: c.actions?.names,
+	};
 }
 
 function parseParamsField(value: unknown): string[] | undefined {
@@ -112,6 +134,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 								groupDir,
 								filePath,
 								baseDir,
+								contributions: parseContributions(data, filePath),
 							});
 						}
 					} catch (err) {
@@ -145,6 +168,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 						groupDir: "",
 						filePath,
 						baseDir,
+						contributions: parseContributions(data, filePath),
 					});
 				}
 			} catch (err) {
@@ -412,6 +436,7 @@ export class ToolManager {
 			detail_docs: tool.detail_docs,
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
+			...contributionFields(tool),
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
 		}));
@@ -428,6 +453,7 @@ export class ToolManager {
 			detail_docs: tool.detail_docs,
 			hasRenderer: !!tool.renderer,
 			rendererFile: tool.renderer,
+			...contributionFields(tool),
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
 		}));
@@ -467,6 +493,7 @@ export class ToolManager {
 			detail_docs: base.detail_docs,
 			hasRenderer: !!base.renderer,
 			rendererFile: base.renderer,
+			...contributionFields(base),
 			grantPolicy: base.grantPolicy,
 			params: base.params,
 		};

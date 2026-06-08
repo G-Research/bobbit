@@ -2069,6 +2069,13 @@ export interface ToolInfo {
 	detail_docs?: string;
 	hasRenderer?: boolean;
 	rendererFile?: string;
+	/** Extension-host renderer delivery (design extension-host.md §2.5): "pack" ⇒ the UI
+	 *  serves + lazy-imports the pre-built ESM renderer at runtime; "builtin" ⇒ metadata. */
+	rendererKind?: "builtin" | "pack";
+	/** True when the tool ships a server-actions module (`actions:` in the tool YAML). */
+	hasActions?: boolean;
+	/** Optional declared action-name allowlist (from `actions.names`). */
+	actionNames?: string[];
 	grantPolicy?: string;
 }
 
