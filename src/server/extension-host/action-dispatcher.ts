@@ -229,35 +229,41 @@ export class ActionDispatcher {
 	}
 
 	/**
-	 * Run a handler under the per-call timeout + try/catch isolation seam. This
-	 * is the ONLY place `module.actions[action](ctx, args)` is invoked, so the
-	 * execution strategy (worker/vm) can be swapped here without touching callers.
+	 * Race an already-running handler promise against the per-call timeout, with
+	 * try/catch isolation (a handler reject/throw becomes an ActionError, never a
+	 * process-level crash). Returns/rejects PROMPTLY to the caller: on timeout the
+	 * caller gets a 504 immediately even though `work` keeps executing in the
+	 * background (caller-facing latency is bounded by `timeoutMs`).
+	 *
+	 * NOTE on cancellation: this does NOT terminate a timed-out handler — `work`
+	 * runs to completion (or forever). True cancellation/termination of a runaway
+	 * handler requires the Phase-2 worker/vm isolation seam (an explicit Phase-1
+	 * non-goal). Phase 1 bounds blast radius by PERMIT-HOLDING (see `dispatch`):
+	 * the concurrency permit is released only when `work` actually settles, so a
+	 * hung handler keeps occupying its slot until it does.
 	 */
-	private runWithTimeout(handler: ActionHandler, ctx: ActionHandlerCtx, args: unknown): Promise<unknown> {
+	private runWithTimeout(work: Promise<unknown>, timeoutMs: number): Promise<unknown> {
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
 			const timer = setTimeout(() => {
 				if (settled) return;
 				settled = true;
 				reject(new ActionError(504, "action handler timed out"));
-			}, this.timeoutMs);
-			// Wrap in Promise.resolve so a synchronous throw is captured too.
-			Promise.resolve()
-				.then(() => handler(ctx, args))
-				.then(
-					(result) => {
-						if (settled) return;
-						settled = true;
-						clearTimeout(timer);
-						resolve(result);
-					},
-					(err) => {
-						if (settled) return;
-						settled = true;
-						clearTimeout(timer);
-						reject(err instanceof ActionError ? err : new ActionError(500, err instanceof Error ? err.message : String(err)));
-					},
-				);
+			}, timeoutMs);
+			work.then(
+				(result) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					resolve(result);
+				},
+				(err) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					reject(err instanceof ActionError ? err : new ActionError(500, err instanceof Error ? err.message : String(err)));
+				},
+			);
 		});
 	}
 
@@ -287,6 +293,13 @@ export class ActionDispatcher {
 			throw new ActionError(429, "too many concurrent actions in flight");
 		}
 		this.inFlight++;
+		// The concurrency permit is released either by the `finally` below (when no
+		// handler ever started — load/resolve failures) OR, once a handler IS
+		// invoked, by the handler promise's OWN settle (see below). `permitHeldByHandler`
+		// hands ownership of the decrement from `finally` to the handler-settle path
+		// so the permit is held until the handler ACTUALLY settles — not merely until
+		// `runWithTimeout`'s race settles.
+		let permitHeldByHandler = false;
 		try {
 			const module = await this.loadModule(tool, resolver);
 			if (!module) throw new ActionError(404, `no actions module found for tool "${tool}"`);
@@ -299,9 +312,38 @@ export class ActionDispatcher {
 			}
 			const handler = module.actions[action];
 			if (typeof handler !== "function") throw new ActionError(404, `unknown action "${action}" for tool "${tool}"`);
-			return await this.runWithTimeout(handler, ctx, args);
+
+			// SINGLE invocation seam (design §5 iv): the ONLY place a handler is
+			// invoked, so the execution strategy (worker/vm) can be swapped here
+			// without touching callers. Wrap in Promise.resolve so a synchronous
+			// throw is captured as a rejection.
+			const handlerPromise = Promise.resolve().then(() => handler(ctx, args));
+
+			// BLAST-RADIUS CORRECTNESS: the permit must bound actual handler
+			// EXECUTION, not request lifetime. A timed-out handler's underlying
+			// promise keeps running (Phase 1 has no true cancellation — that needs
+			// the Phase-2 worker/vm seam), so we release the permit only when
+			// `handlerPromise` ACTUALLY settles, NOT when `runWithTimeout`'s race
+			// settles. Consequence: a handler that hangs forever keeps its permit
+			// forever; once `maxConcurrent` hung-but-timed-out handlers accumulate,
+			// further dispatches are correctly rejected with the over-capacity error
+			// — a buggy/malicious pack saturates its OWN cap instead of spawning
+			// unbounded zombie executions.
+			permitHeldByHandler = true;
+			// Detached settle-tracking: both arms decrement exactly once. The reject
+			// arm also consumes a late handler rejection (after the caller already
+			// got a 504), preventing an unhandled-rejection warning.
+			void handlerPromise.then(
+				() => { this.inFlight--; },
+				() => { this.inFlight--; },
+			);
+
+			return await this.runWithTimeout(handlerPromise, this.timeoutMs);
 		} finally {
-			this.inFlight--;
+			// Release the permit ONLY for the no-handler-started paths (rate ok but
+			// load/resolve/unknown-action failed). Once a handler started, the
+			// handler-settle path above owns the decrement.
+			if (!permitHeldByHandler) this.inFlight--;
 		}
 	}
 }

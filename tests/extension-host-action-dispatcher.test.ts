@@ -197,6 +197,66 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		assert.deepEqual(await first, { ok: 1 });
 	});
 
+	it("a hung-but-TIMED-OUT handler keeps holding its concurrency permit until it actually settles", async () => {
+		// Blast-radius correctness (the WHOLE point of the cap): the permit must
+		// bound actual handler EXECUTION, not request lifetime. A handler that hangs
+		// forever times out PROMPTLY for the caller, but its underlying promise keeps
+		// running — so it must keep occupying its slot. Otherwise repeated timed-out
+		// calls accumulate unbounded zombie executions despite `maxConcurrent`.
+		//
+		// Handlers resolve via a process-global registry the test controls (the
+		// fixture module runs in THIS process), so we can settle one on demand and
+		// prove capacity frees only then.
+		const G = globalThis as Record<string, unknown>;
+		const KEY = "__extHostPermitTestResolvers";
+		G[KEY] = [] as ((v: unknown) => void)[];
+		const resolvers = () => G[KEY] as ((v: unknown) => void)[];
+
+		const base = path.join(tmp, "case-permit-hold");
+		writeTool(base, "demo", {
+			actionsJs:
+				`export const actions = { retry: () => new Promise((resolve) => { ` +
+				`(globalThis["${KEY}"]).push(resolve); }) };`,
+		});
+		const maxConcurrent = 3;
+		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 40, maxConcurrent });
+
+		// Fire `maxConcurrent` dispatches. Each increments inFlight synchronously at
+		// entry, then its handler hangs (never resolves) → each times out promptly.
+		const hung = Array.from({ length: maxConcurrent }, () => d.dispatch("sample_action", "retry", ctx(), {}));
+		// Every call returns 504 to the caller (prompt timeout) ...
+		await Promise.all(
+			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
+		);
+		// ... but the hung handlers are STILL executing and STILL hold their permits.
+		// The next dispatch (number maxConcurrent+1) must be rejected over-capacity,
+		// proving timed-out-but-hung handlers still count toward the cap.
+		await assert.rejects(
+			() => d.dispatch("sample_action", "retry", ctx(), {}),
+			(e) => e instanceof ActionError && e.status === 429,
+		);
+		// All permits are accounted for to the hung handlers (none leaked).
+		assert.equal(resolvers().length, maxConcurrent);
+
+		// Settle ONE hung handler → its permit is released and capacity frees by one.
+		resolvers().shift()!({ done: true });
+		// Let the handler-settle microtask run the permit decrement.
+		await new Promise((r) => setTimeout(r, 10));
+
+		// A fresh dispatch is now ADMITTED (past the concurrency gate). It runs the
+		// (hanging) handler and times out with 504 — NOT 429 — which proves the slot
+		// freed (a still-full cap would have rejected with 429 before invoking it).
+		await assert.rejects(
+			() => d.dispatch("sample_action", "retry", ctx(), {}),
+			(e) => e instanceof ActionError && e.status === 504,
+		);
+
+		// Cleanup: settle every remaining hung handler so no permit/promise lingers.
+		for (const r of resolvers().splice(0)) r({ done: true });
+		await new Promise((r) => setTimeout(r, 10));
+		delete G[KEY];
+	});
+
 	it("per-session rate limit → 429 once the bucket drains", async () => {
 		const base = path.join(tmp, "case-rate");
 		writeTool(base, "demo", { actionsJs: `export const actions = { retry: async () => ({ ok: 1 }) };` });
