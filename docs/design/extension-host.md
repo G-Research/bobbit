@@ -258,8 +258,11 @@ must compile as written.
 // src/shared/extension-host/host-api.ts (NEW)
 
 /** Bumped only on a BREAKING change to any member below. Additive-only after v1: adding a
- *  new method/namespace does NOT bump this. Renderers feature-detect via `host.version`
- *  (and per-capability presence checks) rather than assuming a member exists. */
+ *  new method/namespace does NOT bump this. Renderers feature-detect AVAILABILITY via
+ *  `host.capabilities` (the single source of truth for what is IMPLEMENTED on this host) —
+ *  NOT via member-presence checks, because reserved Phase-2 namespaces are present-but-
+ *  throwing stubs (see HostCapabilities). `host.version` only identifies the contract
+ *  revision; it never implies a member is implemented. */
 export const HOST_API_VERSION = 1 as const;
 
 /** Versions the Host-API-OWNED data contracts (HostMessage / HostContentBlock /
@@ -284,6 +287,18 @@ export interface HostApi {
 
 	/** Version of the Host-API-owned data contracts. See HOST_CONTRACT_VERSION. */
 	readonly contractVersion: number;
+
+	/**
+	 * The SINGLE SOURCE OF TRUTH for which capabilities are actually IMPLEMENTED on this
+	 * host. Authors MUST feature-detect via `host.capabilities.<name>` (or
+	 * `host.capabilities.has(name)`), NOT via member-presence checks: reserved Phase-2
+	 * namespaces (`callRoute`/`session`/`ui`/`store`) are present-but-throwing stubs for
+	 * type stability, so `if (host.callRoute)` / `if (host.store)` would WRONGLY succeed.
+	 * On a Phase-1 host this reads `{ invokeAction: true, requestRender: true,
+	 * callRoute: false, session: false, ui: false, store: false }`. A Phase-2 host that
+	 * implements a capability flips its flag to `true` (purely additive — no signature or
+	 * version churn). */
+	readonly capabilities: HostCapabilities;
 
 	/**
 	 * Force the active tool block(s) to repaint. PHASE 1: implemented by dispatching a
@@ -334,6 +349,30 @@ export interface HostApi {
 
 	/** Ownership-scoped persistence. PHASE 2 (frozen, not implemented). */
 	readonly store: HostStoreApi;
+}
+
+/**
+ * Readonly capability map — the SINGLE SOURCE OF TRUTH for availability (`host.capabilities`).
+ * Each named capability flag is `true` only when that capability is IMPLEMENTED on the
+ * running host. Reserved Phase-2 namespaces are present-but-throwing on the HostApi for
+ * type stability, so member-presence checks are unreliable; this map is authoritative.
+ * Additive-only: a Phase-2 host flips a flag from `false` to `true` (no version bump). The
+ * `has(name)` helper is a string-keyed convenience over the same flags. */
+export interface HostCapabilities {
+	/** Phase-1 — always true on any v1 host. */
+	readonly invokeAction: boolean;
+	/** Phase-1 client-only — true in a DOM/renderer context. */
+	readonly requestRender: boolean;
+	/** Phase-2 — pack-scoped typed route calls. False on a Phase-1 host. */
+	readonly callRoute: boolean;
+	/** Phase-2 — transcript/message/event surface. False on a Phase-1 host. */
+	readonly session: boolean;
+	/** Phase-2 — panel/navigation surface. False on a Phase-1 host. */
+	readonly ui: boolean;
+	/** Phase-2 — ownership-scoped persistence. False on a Phase-1 host. */
+	readonly store: boolean;
+	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
+	has(name: string): boolean;
 }
 
 /** PHASE 2 — frozen, not implemented. Typed request to a pack's OWN contributed route.
@@ -461,6 +500,61 @@ export interface ToolRenderContext {
 the Host API to BOTH the session id and the renderer's own `toolUseId`, so
 `invokeAction(tool, action, args)` keeps its clean frozen signature while still supplying a
 verified `toolUseId` to the endpoint internally. No other renderer call sites change.
+
+### 3.2 Pack-identity binding (TRUSTED, server-derived — never caller-supplied)
+
+The durability + isolation claims for the scoped Phase-2 capabilities — `callRoute`
+addressing only the pack's OWN `/api/ext/<thisPack>/*` namespace, and `store.*` keys
+namespaced to the owning pack — rest on the Host API knowing **which pack** it belongs to.
+A Host API instance is therefore bound not only to `sessionId`/`toolUseId` but to a
+**TRUSTED pack identity** that extension code can never set or forge.
+
+**Internal construction contract.** Beyond the Phase-1 client `getHostApi(sessionId,
+toolUseId)`, the durable construction shape is:
+
+```ts
+// internal — NOT a pack-callable API; identity fields are host-derived, never caller-supplied.
+createHostApi({ sessionId, toolUseId, packId, contributionId }): HostApi
+```
+
+`packId` and `contributionId` are derived from the **RESOLVED WINNING contribution /
+module-load context** — the very same pack-precedence resolution that served the renderer
+or loaded the actions module — NOT from any caller-supplied name, query param, or `args`
+field. There is no parameter through which a renderer/handler can name a different pack.
+
+**How the binding is established per surface:**
+
+- **Renderers (Phase 1):** the identity comes from the resolved pack tool whose renderer
+  Blob was served — `GET /api/tools/:tool/renderer` resolved the winning
+  `{baseDir, groupDir, rendererFile}` via `resolveToolLocation(tool)`; that winning
+  `baseDir` (the market-pack root) IS the pack identity. The client loader closes over the
+  tool name + project scope it fetched the Blob for, so a renderer is structurally tied to
+  the pack that won that tool name.
+- **Server action handlers (Phase 1):** the dispatcher already resolves the winning
+  provider / on-disk location via `ToolManager.resolveToolLocation` before loading
+  `actions.js`. **That resolution IS the pack identity** — the `baseDir`/`groupDir` of the
+  loaded module determine `packId`; the handler's `ctx` carries it as a host-derived field,
+  never read from `args`/body.
+- **Panels + entrypoints (Phase 2):** identity comes from the contribution that registered
+  them — the resolved `panels:`/`entrypoints:` entry's owning pack — established at
+  contribution-load time exactly as renderers/actions are, and threaded into the panel's
+  `createHostApi` call.
+
+**How `callRoute`/`store` authorization USES it (server-side).** The gateway keys
+`/api/ext/<pack>/*` route dispatch and store-namespace ownership off the **SERVER-RESOLVED**
+pack identity (derived from the session + tool/contribution resolution above), never off a
+client-claimed pack/name in the request. So:
+
+- `callRoute(name, init)` resolves `name` ONLY within the bound pack's own `routes:`
+  namespace; the gateway computes the `<pack>` segment from the server-resolved identity, so
+  one pack physically cannot address another pack's routes or an arbitrary gateway path.
+- `store.get/put/list` prefixes every key with the bound pack's namespace server-side, so
+  one pack cannot read or write another pack's store.
+
+This server-derived-identity rule is exactly what makes the Phase-2 scoping **durable and
+secure**: because the pack segment is never client-influenced, no Phase-2 implementation can
+widen it without re-opening the contract — and the LLM (which can forge `args`/`sessionId`/
+`toolUseId`) has no field through which to impersonate another pack.
 
 ---
 
@@ -728,6 +822,30 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   > (static `dist/`). The `/* @vite-ignore */` stops Vite from trying to pre-bundle a
   > runtime URL. The fetch is authed (the bare module URL would not carry the bearer).
 
+**Renderer authoring constraints (a pack renderer MUST honor these).**
+
+- **Theme tokens ONLY.** No hardcoded colours (no hex/`rgb()`/named colours). Reference the
+  design-system CSS custom properties (`var(--background)`, `var(--foreground)`,
+  `var(--card)`, `var(--muted-foreground)`, `var(--border)`, `var(--primary)`, the
+  `--chart-1..6` categorical palette, and the `--positive`/`--negative`/`--warning`/`--info`
+  semantic slots) or the project's Tailwind utility classes that map onto them, so the
+  renderer tracks dark/light/palette switches like every built-in renderer. Do not define a
+  private `:root{}` palette and do not use `prefers-color-scheme`.
+- **Preserve iframe `sandbox` attributes.** A renderer that embeds an `<iframe>` (preview /
+  artifact-style surfaces) MUST keep the existing `sandbox` attribute set — it is a security
+  control, not styling; never widen or drop it. Renderers run on the main UI thread over
+  LLM-influenced data (§5 control v), so the sandbox is load-bearing.
+- **`isCustom` / card-wrapper contract.** `render()` returns `{ content, isCustom }`.
+  `isCustom: false` (the default for the litmus sample) means the host WRAPS `content` in
+  the standard tool card (border, padding, header alignment) — emit only the inner content
+  and use `renderHeader(state, icon, label)` for the header row, matching every built-in.
+  `isCustom: true` means the host applies NO card wrapper and the renderer owns its entire
+  visual frame (the artifact-pill / full-surface pattern) — it must then supply its own
+  spacing/border so it sits correctly among carded blocks. Pack renderers SHOULD prefer
+  `isCustom: false` unless they intentionally own the whole surface. The placeholder and
+  load-failure fallbacks both use `isCustom: false`, so a wrapped renderer swaps in without
+  layout shift.
+
 **Files touched (4a):** `src/server/server.ts` (+1 route), `src/server/agent/tool-manager.ts`
 + `builtin-config.ts` (`rendererKind`), `src/app/api.ts` (`ToolInfo` wire fields),
 `src/app/pack-renderers.ts` (NEW), one app-init call site, `src/ui/tools/types.ts`.
@@ -844,13 +962,23 @@ import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostApi } from "../shared
 /** Build the Phase-1 client Host API bound to a given session AND the renderer's own
  *  toolUseId. invokeAction supplies BOTH to the endpoint internally, so packs never put
  *  identity fields in `args`. Phase-2 namespaces throw a clear "not implemented in
- *  Phase 1" error so misuse is loud, not silent. There is NO gateway member — invokeAction
- *  is the only pack→server path. */
+ *  Phase 1" error so misuse is loud, not silent — and `capabilities` reports them as
+ *  `false` so authors feature-detect correctly instead of relying on member presence.
+ *  There is NO gateway member — invokeAction is the only pack→server path.
+ *
+ *  This is the CLIENT-side construction; the server analogue is the internal
+ *  `createHostApi({ sessionId, toolUseId, packId, contributionId })` contract (§3.2),
+ *  where packId/contributionId are SERVER-DERIVED from the resolved winning contribution
+ *  — never passed by extension code. */
 export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
 	const notImpl = (m: string) => { throw new Error(`host.${m} is reserved for Phase 2`); };
+	// Phase-1 host: only invokeAction + requestRender are implemented. `capabilities` is
+	// the single source of truth; the throwing stubs below exist only for type stability.
+	const flags = { invokeAction: true, requestRender: true, callRoute: false, session: false, ui: false, store: false };
 	return {
 		version: HOST_API_VERSION,
 		contractVersion: HOST_CONTRACT_VERSION,
+		capabilities: { ...flags, has: (name: string) => (flags as Record<string, boolean>)[name] === true },
 		requestRender: () => {
 			// renderApp() alone won't re-run the memoized tool components (props
 			// unchanged); requestToolRender() dispatches TOOL_RENDER_REQUESTED_EVENT
@@ -907,7 +1035,7 @@ in exactly one place.
 | iii | **toolUseId existence + ownership (anti-replay/forgery)** | Resolve the **header-bound** session's transcript via `projectContextManager.getContextForSession(headerSessionId)?.sessionStore.get(headerSessionId)` and scan its messages for a `tool_use`/`toolCall` block whose `id === toolUseId` **and** whose tool name `=== :tool`. Reject (409) if absent — blocks replays and forged ids referencing another tool. | **Yes — unit** |
 | iii-b | **Single-sourced session identity** | The `x-bobbit-session-id` HEADER is the canonical identity. The request body's `sessionId` is accepted only to fail fast on a mismatch — `body.sessionId === headerSessionId` is required (403 otherwise) BEFORE any allowedTools/toolUseId check; every downstream check uses the header-bound session. Prevents authorizing with one session and inspecting/acting on another's transcript. | **Yes — unit** |
 | iii-c | **Action-result propagation (no privileged mutation)** | An action's result flows back ONLY as the `invokeAction` promise's JSON; the renderer applies it to **its own local state** (module-level Map / `LitElement` `@state`) and re-renders via `ctx.host.requestRender()` or native reactivity (§4a). Phase-1 handlers do NOT rewrite the transcript or persisted tool result — so a pack action cannot silently mutate session history. Turn-resume/message-post is frozen-for-Phase-2 (`host.session.*`). | **Yes — E2E** |
-| iv | **Blast radius** | Handlers run in the long-lived gateway process. Per-call **timeout** (`Promise.race`, default 30s); global **concurrency cap** (semaphore, default 8 in-flight); **try/catch isolation** so a thrown/handler-crash becomes a 500, never takes down the process; endpoint **rate-limit** (token bucket per session). A **seam** is left to run `actions.js` in a worker/`vm` later: the dispatcher only ever calls `module.actions[action](ctx, args)`, so swapping the execution strategy is local to `ActionDispatcher.dispatch`. | timeout+isolation **yes**; cap/rate-limit recommended |
+| iv | **Blast radius** | Handlers run in the long-lived gateway process. ALL FOUR controls are REQUIRED: per-call **timeout** (`Promise.race`, default 30s); global **concurrency cap** (semaphore, default 8 in-flight); **try/catch isolation** so a thrown/handler-crash becomes a 500, never takes down the process; endpoint **rate-limit** (token bucket per session). A **seam** is left to run `actions.js` in a worker/`vm` later: the dispatcher only ever calls `module.actions[action](ctx, args)`, so swapping the execution strategy is local to `ActionDispatcher.dispatch`. | **Yes — unit (all four: timeout, concurrency cap, isolation, rate-limit)** |
 | v | **UI thread** | Renderers run on the main thread over LLM-influenced data. Preserve existing iframe `sandbox` attributes (artifacts/preview unchanged). Pack renderers **must NOT auto-invoke actions on render** — `invokeAction` is only called from a user gesture (click). The litmus sample's Retry button enforces this; reviewers reject render-time invocation. | **Yes — E2E asserts no call before click** |
 | vi | **Audit** | Every action invocation logs `{ tool, action, sessionId, toolUseId, caller, outcome, durationMs }` via the existing logger. | recommended |
 
@@ -1032,8 +1160,12 @@ full shape install cleanly now.
 
 **Durability invariant (governs all post-v1 change).** v1 is **additive-only**: a Phase-2
 capability adds a method body + wires it through the one `allowedTools`-gated guard — no v1
-signature changes, no `HOST_API_VERSION` bump. Packs feature-detect via `host.version` /
-`host.contractVersion` and per-method presence checks. Deprecation policy: a member may be
+signature changes, no `HOST_API_VERSION` bump, and the implementing host flips the matching
+`host.capabilities` flag from `false` to `true`. Packs feature-detect AVAILABILITY via
+`host.capabilities.<name>` / `host.capabilities.has(name)` (the single source of truth —
+NOT member-presence checks, since reserved namespaces are present-but-throwing stubs), and
+read `host.version` / `host.contractVersion` only to identify the contract revision.
+Deprecation policy: a member may be
 marked `@deprecated` (kept working) for at least one MAJOR `HOST_API_VERSION` before
 removal, and removal is the ONLY thing that bumps the major. The load-bearing rule: **no
 member may ever become (or be replaced by) a raw transport / untyped passthrough** — one
@@ -1053,7 +1185,7 @@ was removed rather than retained "just in case."
 | **Allowlist-bypass guard** | `:tool` ∉ session `allowedTools` → 403; missing `x-bobbit-session-id` → 403; unknown session → 403. Mirrors mcp-call guard. | **yes** |
 | **Input validation** | `..`/abs `module`/`renderer` path → rejected at parse; `:action` ∉ `actions.names` → 404; `args` never eval'd (handler receives opaque object). | **yes** |
 | **toolUseId verification** | Forged/absent toolUseId → 409; toolUseId belonging to a *different* tool → 409. | **yes** |
-| Error isolation | Handler throws → 500, process survives; handler exceeds timeout → 504/500, slot released. | yes |
+| **Blast-radius controls (all four required)** | Handler throws → 500, process survives (**isolation**); handler exceeds **timeout** → 504/500, slot released; >cap concurrent handlers queue/reject (**concurrency cap**); burst beyond the per-session budget → 429 (**rate-limit**). | **yes** |
 | Cache invalidation | Install → handler available next call; update → new handler picked up; uninstall → 404; all without restart (drive `invalidateResolverCaches`). | yes |
 | Renderer/actions loader | `rendererKind` computed `"pack"` only for market `.js`; `GET /renderer` serves bytes as `text/javascript` with bearer-only auth (NO `allowedTools` check); factory missing → loader rejects → load-failure fallback registered. | yes |
 | **Renderer precedence (litmus parity)** | A pack that shadows a built-in interactive tool registers with `{ override: true }` and renders with the **PACK** renderer, not the eager builtin (`getToolRenderer(name)` resolves to the pack loader); a built-in NOT shadowed keeps its eager renderer. | **yes** |
