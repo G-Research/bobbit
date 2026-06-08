@@ -62,7 +62,7 @@ async function addProjectViaDialog(
 	return { dir, sessionId };
 }
 
-test.describe("Project proposal per-component config @quarantine", () => {
+test.describe("Project proposal per-component config", () => {
 	test("Components view renders config rows + per-component shallow-merge preserves config across proposals", async ({ page }) => {
 		await openApp(page);
 		const { dir, sessionId } = await addProjectViaDialog(page, "comp-cfg");

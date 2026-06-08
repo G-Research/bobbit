@@ -128,7 +128,7 @@ async function waitForProjectAssistantCleanup(
 	);
 }
 
-test.describe("Project assistant UX (consolidated) @quarantine", () => {
+test.describe("Project assistant UX (consolidated)", () => {
 	test.beforeEach(() => {
 		ensureE2EAgentAuth();
 	});

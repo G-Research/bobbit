@@ -88,7 +88,7 @@ async function waitForGateStatus(
 	);
 }
 
-test.describe("Optional steps API @quarantine", () => {
+test.describe("Optional steps API", () => {
 	test("enabledOptionalSteps persisted via API", async () => {
 		const workflowId = uniqueWorkflowId();
 		await createTestWorkflow(workflowId);

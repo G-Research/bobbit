@@ -48,8 +48,8 @@ async function openGoalForm(page: import("@playwright/test").Page) {
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 25_000 });
 }
 
-test.describe("Step description tooltips @quarantine", () => {
-	test("optional step tooltip renders workflow description and styling @quarantine", async ({ page }) => {
+test.describe("Step description tooltips", () => {
+	test("optional step tooltip renders workflow description and styling", async ({ page }) => {
 		await openGoalForm(page);
 
 		// Switch explicitly so the assertion is independent of the mock proposal's

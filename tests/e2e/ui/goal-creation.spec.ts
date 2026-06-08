@@ -119,8 +119,8 @@ test.beforeAll(async () => {
 	}, { timeout: 5_000 }).toBe("echo ready");
 });
 
-test.describe("Goal creation (full-stack UI) @quarantine", () => {
-	test("create goal via assistant flow @quarantine", async ({ page }) => {
+test.describe("Goal creation (full-stack UI)", () => {
+	test("create goal via assistant flow", async ({ page }) => {
 		await openGoalAssistantProposal(page);
 
 		// The assistant-embedded panel intentionally has no dismiss button.
