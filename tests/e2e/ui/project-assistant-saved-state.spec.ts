@@ -87,20 +87,25 @@ async function injectProjectProposal(
 	projectId: string,
 	rootPath: string,
 ): Promise<void> {
-	// Initial project-assistant draft hydration can finish after the first
-	// visible chat paint and clear the synthetic slot. Keep rendering the
-	// desired state until the registered panel and its scoped button are ready.
+	// connectToSession's async phase-2 hydrate calls restoreProjectDraft (a GET
+	// that can land late under load); with no saved draft it deletes the project
+	// slot. So our synthetic write can be wiped right after we set it. We re-write
+	// + re-render every poll iteration, and — crucially — gate readiness on OUR
+	// slot having SURVIVED (activeProposals.project.sessionId === sessionId) rather
+	// than on gatewaySessions[].projectId, which only populates after the slow
+	// background refreshSessions and previously burned the whole poll budget in the
+	// "client-hydrating" branch. Surviving slot ⇒ the one-shot hydrate-clear has
+	// already fired, so this is the real precondition the panel render depends on.
 	await expect.poll(async () => {
 		await writeRegisteredProjectProposalState(page, sessionId, rootPath);
 		await forceRender(page);
 
-		const clientReady = await page.evaluate(({ sessionId, projectId }) => {
+		const clientReady = await page.evaluate(({ sessionId }) => {
 			const state = (window as any).bobbitState;
-			const session = state?.gatewaySessions?.find((s: any) => s.id === sessionId);
 			return state?.selectedSessionId === sessionId
 				&& state?.assistantType === "project"
-				&& session?.projectId === projectId;
-		}, { sessionId, projectId });
+				&& state?.activeProposals?.project?.sessionId === sessionId;
+		}, { sessionId });
 		if (!clientReady) return "client-hydrating";
 
 		const panel = page.locator(REGISTERED_PROJECT_PROPOSAL_SELECTOR).first();
@@ -111,7 +116,7 @@ async function injectProjectProposal(
 		return label.includes("Apply Changes") && enabled ? "ready" : "button-not-ready";
 	}, {
 		timeout: 10_000,
-		intervals: [100, 250, 500],
+		intervals: [100, 150, 200],
 	}).toBe("ready");
 }
 
