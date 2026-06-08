@@ -55,7 +55,7 @@ the SAME authorization path Phase 1 built.
 | C1 | `host.ui.navigate` + entrypoints | `ui` (nav) | `entrypoints:` | `pack-entrypoints.ts` |
 | C2 | `host.session.{postMessage,subscribe}` | `session` (write) | — | (extends B2 files) |
 | C3 | server-module isolation (actions + routes only) | (hardening — no flag) | — | `module-host-worker.ts` |
-| D1 | artifacts-as-pack (litmus) | — | renderer+panels+stores | `market-packs/artifacts/` |
+| D1 | artifacts-as-pack (litmus) | — | renderer+panels+stores+navigate (C1, deep-link) | `market-packs/artifacts/` |
 | D2 | pr-walkthrough-as-pack (litmus) | — | panels+routes+stores+entrypoints | `market-packs/pr-walkthrough/` |
 
 `ui` and `session` are single flags spanning two sub-capabilities each (frozen as one
@@ -532,6 +532,11 @@ the client never knows `packId` (it only knows the `tool` it was served for; see
 the prior revision) — and a forgeable segment would be a weaker boundary than deriving the
 pack from a proven-owned tool. This is an equivalence, not a contract mismatch.
 
+> **Accepted by the team lead.** The goal's `/api/ext/<pack>/*` is namespace *intent*;
+> `POST /api/ext/route/:name` (tool → server-derived `packId`) is a deliberate,
+> security-equivalent refinement — a client-supplied `<pack>` URL segment is unbuildable —
+> and is ACCEPTED.
+
 ### B3.3 Wiring
 
 - Construct `RouteDispatcher` AND `RouteRegistry` near `actionDispatcher`
@@ -733,6 +738,12 @@ reached via `ctx.host.store.*`, so the spec's "store handlers" phrase has no pac
 surface to isolate. C3 isolates **actions + routes**, which are the only pack-supplied
 server modules; no required surface is left unisolated. (The store endpoint runs entirely
 in the parent; no pack code runs in the store path, so there is nothing to confine.)
+
+> **Accepted by the team lead.** C3 isolating **actions + routes only** is a deliberate,
+> ACCEPTED scope interpretation — Phase 2 ships no pack-supplied store-handler module
+> (stores are host-backed KV reached via `ctx.host.store.*`); if a future phase adds pack
+> store handlers they ride the same isolated seam.
+
 Realizes the
 blast-radius seam Phase 1 left open (`action-dispatcher.ts` `runWithTimeout` doc: "does NOT
 terminate timed-out work").
@@ -821,15 +832,41 @@ Phase 1 left exactly one invocation seam: `return await handler(ctx, args)` in
 `ActionDispatcher.dispatch` (`action-dispatcher.ts`, "SINGLE invocation seam (design §5
 iv)"). C3 replaces that one line with `return await this.moduleHost.invoke({...})` —
 **callers unchanged**. The shared dispatcher base (B3.1) means actions + routes ride the
-same seam (stores have no pack module, so they are not on this seam). Behind a config flag
-(default on) so it can be disabled if a pack needs in-process for debugging.
+same seam (stores have no pack module, so they are not on this seam).
+
+**Worker isolation is UNCONDITIONAL — there is no in-process production path (NON-NEGOTIABLE).**
+The seam ALWAYS routes through `ModuleHost.invoke`; there is **no config flag, env var, or
+runtime toggle that runs a pack server module in-process** in any shippable, packaged, or CI
+build. A second "in-process for debugging" path would be a production bypass of the C3
+isolation boundary (it would reintroduce ambient `process`/fs/network access on
+LLM-influenced code) and is therefore deleted, not gated — it directly violates acceptance
+#3/#4.
+
+If a local-dev debugging affordance is ever wanted, it is permitted ONLY under all three of
+these constraints (and the recommendation remains: do not add one):
+
+- **(a) Explicit local-dev mode only.** Honored solely when the gateway is running in an
+  explicit local-dev mode (e.g. an unpackaged dev checkout); NEVER in a packaged build or
+  under CI.
+- **(b) Hard-fail in packaged builds.** If the bypass flag/env is set while running a
+  packaged build (or CI), the gateway **refuses to boot** (startup hard-error) rather than
+  silently running pack code in-process. There is no "log a warning and continue" path.
+- **(c) Impossible to enable in the shipped configuration.** The shippable/packaged config
+  cannot express the bypass at all — the toggle is inert (ignored) and unsettable there, so
+  the shipped configuration can never disable isolation.
+
+The packaging boundary (packaged-build / CI detection) is the single point that enforces
+(a)–(c); a **config-invariant test** (§13, C3 row) pins that the shippable configuration
+cannot disable isolation — the bypass is inert or hard-errors in a packaged build.
 
 ---
 
 ## 10. Slice D1 — artifacts-as-pack (litmus)
 
-**Deps:** B4 (panels), B1 (stores), renderer (Phase 1). Proves a built-in re-expressed as a
-pack with parity.
+**Deps:** B4 (panels), B1 (stores), **C1** (`host.ui.navigate` — the artifact deep-link
+routes through navigation, so D1 depends on the slice that implements `navigate`/routing,
+not merely on B4+B1), renderer (Phase 1). Proves a built-in re-expressed as a pack with
+parity — including the **deep-link** parity that acceptance #1 requires of BOTH built-ins.
 
 ### D1.1 Pack layout
 
@@ -847,7 +884,33 @@ pack with parity.
   `host.store.get(artifactId)`. Restore-by-id across reload becomes `store.get` +
   `openPanel` (v1 §6.1 — no bespoke `/api/preview/artifacts/:id/restore` route).
 
-### D1.2 Test adaptation + deletion
+### D1.2 Artifact deep-link (parity with acceptance #1)
+
+Acceptance #1 requires both built-ins to **deep-link**. The artifacts pack contributes a
+deep-linkable target so a viewer can be reopened by id from a route/URL, rehydrating from
+the store and surviving reload:
+
+- **Target:** the pack declares a `route` (e.g. `"artifacts"`) — a deep-linkable SPA view
+  registered through C1's `entrypoints:`/route resolution (`pack-entrypoints.ts` +
+  `routing.ts` `RouteView`, §7). A pack never builds `#/...` strings; it calls
+  `host.ui.navigate({ route: "artifacts", params: { artifactId } })` (frozen v1
+  `RouteTarget`), and the router maps the structured target to the host-controlled view.
+- **Resolution chain:** `navigate({ route: "artifacts", params: { artifactId } })`
+  → router resolves the `"artifacts"` route → opens `artifacts.viewer` (the B4 panel) for
+  that `artifactId` via `host.ui.openPanel({ panelId: "artifacts.viewer", params: { artifactId } })`
+  → the viewer rehydrates its content from `host.store.get(artifactId)` (B1, pack-scoped).
+  The deep-link carries only the `artifactId`; all payload comes from the store, so a fresh
+  load (or reload) reconstructs the viewer identically.
+- **Reload survival:** because the route is part of the SPA hash/route scheme and the
+  payload lives in the pack store, navigating to (or reloading on) the deep-link route
+  reopens the viewer rehydrated from `store.get(artifactId)` with no dependence on
+  in-memory state — the same store-backed restore-by-id D1.1 already relies on.
+
+This makes artifact deep-link an opener-independent, store-rehydrated path identical in
+shape to D2's `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`
+entrypoint (§11), proving the `navigate`→route→panel→store chain on the simpler litmus pack.
+
+### D1.3 Test adaptation + deletion
 
 Adapt existing artifact tests to drive the pack. Once parity is proven (E2E green), the
 bespoke paths — `src/ui/tools/artifacts/*`, `src/server/preview/artifacts.ts` persist/restore
@@ -948,7 +1011,8 @@ task per YES-file in flight; the team-lead rebases the next on merge.
   only** (stores run no pack code).
 
 ### Wave 4 — Litmus (after their deps)
-- **D1 artifacts pack.** New: `market-packs/artifacts/`. Deps: B4, B1. + staged deletion PR.
+- **D1 artifacts pack.** New: `market-packs/artifacts/`. Deps: B4, B1, **C1** (`navigate`
+  for the artifact deep-link route — §10). + staged deletion PR.
 - **D2 pr-walkthrough pack.** New: `market-packs/pr-walkthrough/`. Deps: B4, B3, B1, C1,
   **C2** (session-read flag flip). + staged deletion PR.
 
@@ -973,10 +1037,11 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 | C1 | `pack-entrypoints.spec.ts` | entrypoint kinds register; `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount | 2,4 |
 | C2 | `extension-host-session-write.test.ts` | postMessage authorized against header-bound session; resumeTurn vs non-resume; every post audited; cross-session post impossible; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post | 2,4 |
 | C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; **a pack module CANNOT `require`/import `node:fs`/`node:child_process`/network built-ins** (deny-hook); **a pack module CANNOT read `process.env` secrets** (empty-env worker); crash isolated → error not process death; seam swap leaves callers unchanged | 3 |
+| C3 | `extension-host-isolation-config-invariant.test.ts` | **config-invariant: the shippable/packaged configuration CANNOT disable worker isolation** — no shipped config key/env toggles in-process execution; if a bypass flag/env is set under a packaged build (or CI) the gateway hard-fails at startup (refuses to boot), and the toggle is inert/unsettable in the shipped config (any dev-only affordance is honored only in explicit local-dev mode); the production seam ALWAYS routes through `ModuleHost.invoke` | 3,4 |
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |
 | — | `host-api-v1-frozen.test.ts` (extend/add) | `HOST_API_VERSION===1` unchanged; v1 types compile unchanged; capabilities flip per host | 2 |
 | — | existing `pack-marketplace.test.ts` / budget tests | `buildPackList` byte-identical; tool-description budget; AGENTS budget | invariants |
-| **D1** | `tests/e2e/ui/artifacts-pack.spec.ts` (**mandatory E2E**) | install → inline pill renders → open viewer panel → persist across reload (store) → uninstall reconciles | **1** |
+| **D1** | `tests/e2e/ui/artifacts-pack.spec.ts` (**mandatory E2E**) | install → inline pill renders → open viewer panel → persist across reload (store) → **deep-link: `navigate({route:"artifacts",params:{artifactId}})` opens the `artifacts.viewer` panel rehydrated from `store.get(artifactId)`, surviving reload on the deep-link route** → uninstall reconciles | **1** |
 | **D2** | `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (**mandatory E2E**) | install → entrypoint launches → panel renders from pack `callRoute` (`/api/ext/route/bundle` with `tool`) + store → `readToolCall` after `session` flag live → deep-link route → uninstall | **1** |
 
 Gate: `npm run check`, `npm run test:unit`, `npm run test:e2e` green; the two litmus E2Es
@@ -986,9 +1051,15 @@ are the acceptance proofs.
 
 ## 14. Acceptance criteria (from the goal) → satisfying slice
 
-1. **Both built-ins ship as installable packs with behavioral parity; bespoke paths
-   deleted (or deletion PR ready).** → **D1** (artifacts) + **D2** (pr-walkthrough), each
-   with its mandatory E2E and a staged deletion PR gated on parity.
+1. **Both built-ins ship as installable packs with behavioral parity (render, persist
+   across reload, deep-link); bespoke paths deleted (or deletion PR ready).** → **D1**
+   (artifacts) + **D2** (pr-walkthrough), each with its mandatory E2E and a staged deletion
+   PR gated on parity. **Deep-link parity is covered for BOTH:** D1 via
+   `host.ui.navigate({ route: "artifacts", params: { artifactId } })` → `artifacts.viewer`
+   panel rehydrated from `host.store.get(artifactId)` (§10 D1.2; §13 D1 E2E deep-link
+   assertion), D2 via `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`
+   (§11; §13 D2 E2E deep-link). Both deep-links are store-rehydrated and survive reload, and
+   depend on C1 (`navigate`).
 2. **Every reserved key live; every frozen Host API method implemented to v1 signature;
    `host.capabilities` all true; `HOST_API_VERSION` still 1 (v1 type compiles unchanged).**
    → `stores` (B1), `routes` (B3), `panels` (B4), `entrypoints` (C1); `store.*` (B1),
@@ -999,12 +1070,18 @@ are the acceptance proofs.
    terminate-on-timeout + caps, and no ambient access.** → **C3** (`module-host-worker.ts`,
    `worker_threads` + empty env + module-load deny-hook + host-API-proxy-only +
    `terminate()` + `resourceLimits`), migrated onto the single `ActionDispatcher.dispatch`
-   seam. **Built-in/process/network denial + no-ambient-access (except via the host-API
-   proxy) is a MANDATORY, non-optional requirement of this criterion** — a pack module
-   cannot import `node:fs`/`node:child_process`/network built-ins or read `process.env`
-   secrets. There is NO shippable fallback that leaves residual access; if the deny-hook is
-   infeasible an alternative isolation mechanism (restricted child-process runtime / stricter
-   loader) is REQUIRED before C3 passes (§9). **The "CPU caps" requirement is satisfied by
+   seam. **Isolation is UNCONDITIONAL in shipped builds** — there is no config flag, env
+   var, or runtime toggle that runs a pack server module in-process in any
+   shippable/packaged/CI build (the "in-process for debugging" bypass is deleted, not gated;
+   §9). Any local-dev debugging affordance is honored ONLY in explicit local-dev mode,
+   hard-fails at startup in packaged builds/CI, and is impossible to enable in the shipped
+   configuration; pinned by the §13 config-invariant test. **Built-in/process/network
+   denial + no-ambient-access (except via the host-API proxy) is a MANDATORY, non-optional
+   requirement of this criterion** — a pack module cannot import
+   `node:fs`/`node:child_process`/network built-ins or read `process.env` secrets. There is
+   NO shippable fallback that leaves residual access; if the deny-hook is infeasible an
+   alternative isolation mechanism (restricted child-process runtime / stricter loader) is
+   REQUIRED before C3 passes (§9). **The "CPU caps" requirement is satisfied by
    terminate-on-timeout (wall-time termination)** — `worker_threads` has no per-core throttle,
    so a runaway CPU loop is bounded by killing the worker on timeout; **memory caps via
    `resourceLimits`.** Stores run no pack code (no pack-supplied store-handler module — see
@@ -1017,7 +1094,10 @@ are the acceptance proofs.
    `authorizeScopedRequest` (§2a), both keyed off the **server-derived** pack identity (A) —
    never a caller field; `callRoute`'s namespace is the pack derived from the proven `tool`
    (B3.2 — no forgeable URL segment); `store` keys pack-namespaced (B1.1); no `gateway.fetch`
-   reintroduced. Pinned by the cross-pack denial + namespace unit tests.
+   reintroduced. **No in-process execution escape hatch:** worker isolation is unconditional
+   in shipped builds (no config can run pack server modules in-process — §9), so there is no
+   privileged path around the host-API boundary. Pinned by the cross-pack denial + namespace
+   unit tests and the §13 C3 config-invariant test.
 
 ---
 
@@ -1041,7 +1121,11 @@ are the acceptance proofs.
   `sandbox` preserved, theme tokens only, no auto-invoke/navigation on mount.
 - Server-module isolation (C3, actions + routes only) bounds blast radius:
   terminate-on-timeout (the CPU control, satisfying the "CPU caps" criterion), memory
-  `resourceLimits`, empty-env worker, and a module-load deny-hook. **No-ambient-access
+  `resourceLimits`, empty-env worker, and a module-load deny-hook. **Isolation is
+  UNCONDITIONAL in shipped builds** — no config can run a pack server module in-process
+  (the "in-process for debugging" bypass is deleted; any local-dev affordance hard-fails in
+  packaged builds/CI and is unsettable in the shipped config — §9, pinned by the §13
+  config-invariant test). **No-ambient-access
   (no `process`/gateway/fs/network access except through the host-API proxy channel) is a
   MANDATORY, non-negotiable boundary** — there is no shippable fallback that leaves residual
   access; if the deny-hook is infeasible an alternative isolation mechanism is required
