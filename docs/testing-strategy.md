@@ -1,16 +1,40 @@
 # Testing Strategy — Assessment & Path Forward
 
+## The phase invariant (read this first)
+
+Bobbit runs its tests through **workflow gates**, not `npm test`. The implementation gate runs four command steps against the goal branch — `build`, `check`, `unit`, `e2e` — whose commands live in `.bobbit/config/project.yaml`. Whatever the `unit:` / `e2e:` commands execute IS the test suite; anything they don't run is invisible and lets failures slip onto `master`.
+
+To make that a no-brainer, exactly one rule is enforced: **every test file under `tests/` except those under `tests/manual-integration/**` runs in exactly one phase — `unit` or `e2e`.** Three buckets, two runners in the unit phase:
+
+| Bucket | What | Runner / source of truth | Gate command |
+|--------|------|---------------------------|--------------|
+| **unit · node** | fast logic tests, no real LLM | `tsx --test` over `NODE_UNIT_GLOBS` in [`scripts/test-phase-config.mjs`](../scripts/test-phase-config.mjs) (`tests/*.test.ts` + `tests/contract/*.test.ts`) | `unit:` → `npm run test:unit` |
+| **unit · browser** | `file://` component fixtures, no server | `tests/playwright.config.ts` (`tests/*.spec.ts`, minus `e2e/`, `manual-integration/`) | `unit:` → `npm run test:unit` |
+| **e2e** | all remaining non-LLM integration | `playwright-e2e.config.ts` (union across its `api` / `api-realpush` / `browser` projects) | `e2e:` → `npx playwright test --config playwright-e2e.config.ts` |
+| **manual-integration** *(gate-exempt)* | real LLM / Docker | `playwright-manual.config.ts` | `npm run test:manual` only |
+
+`npm run test:unit` runs the two unit runners **concurrently** via [`scripts/run-unit.mjs`](../scripts/run-unit.mjs), splitting the cores between them (node `--test-concurrency=N/2`, browser `--workers=N/2`) so they run genuinely in parallel without oversubscribing the box — full concurrency starves slow browser fixtures past their 15s timeout.
+
+**Convention purity**: `*.test.ts` ⇒ node:test runner; `*.spec.ts` ⇒ Playwright. A `*.test.ts` must never import `@playwright/test`; a `*.spec.ts` must never import `node:test`. This is what keeps the two unit runners cleanly separable.
+
+**The guard**: [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) enumerates every `tests/**/*.{test,spec}.ts`, derives the bucket globs from the same configs/constant the runners use, and fails if any file is claimed by zero phases (orphan) or more than one (double-claim), or violates the runner convention. There is **no fourth bucket**: a spec that some other config (e.g. the manual `docker` project) happens to collect but that does not physically live under `tests/manual-integration/` is treated as an orphan — which is why the real-Docker and real-LLM specs physically live under `tests/manual-integration/` rather than under `tests/e2e/` with an ignore.
+
+**Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~3.4k tests, and at a half-core split (`--test-concurrency=12`) it is the long pole at ~90s while the browser fixtures finish at ~76s. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`.
+
+**Measured e2e wall time (24-core dev box): ~6.5–7 min**, dominated by the `browser` project (~5.2 min when run standalone). Retries do **not** inflate this: back-to-back runs measured `--retries=3` at ~6.5 min and `--retries=0` at ~6.5–7.1 min — the retry budget is flake *insurance*, not steady-state cost. The number is above the ~5 min aspiration. Binding constraint: the `browser` project runs an in-process gateway + Chromium per worker; the worker budget below is deliberately conservative to avoid the cross-worker filesystem/CPU contention that historically produced flakes, and the spec mandated folding the previously `--grep-invert`-excluded `mcp-integration` + `session-lifecycle-ui` specs back into this project. Raising the worker budget to chase <5 min reintroduces exactly the contention flakes the budget exists to prevent, and would also degrade robustness when up to ~4 suites run concurrently — so it is not a free lever. A sub-5-min single-suite wall is a deliberately-superseded non-goal; see [E2E suite parallelism budget](#e2e-suite-parallelism-budget).
+
 ## Current State
 
 ### Test Inventory
 
 | Layer | Files | Tests | Runtime | Parallelism |
 |-------|-------|-------|---------|-------------|
-| Unit (file:// fixtures + Node) | ~105 | ~625 | <30s | Full (Playwright workers) |
-| API E2E (in-process gateway) | 69 | ~438 | ~60s | 4 workers |
-| Browser E2E (spawned gateway) | ~32 | ~140 | ~90s | 3 workers, spec-serial |
-| Manual integration (real agent + Docker) | 1 | 8 serial steps | ~5 min | **None** |
-| **Total** | **~207** | **~1,211** | **~3 min + 5 min manual** | |
+| Unit · node (node:test logic) | ~340 | ~3.4k | long pole of the ~90s unit wall | `--test-concurrency=N/2` |
+| Unit · browser (file:// fixtures) | ~120 | ~1.3k | finishes ~76s within the unit wall | `--workers=N/2` |
+| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5–7 min (retries add ~0; browser project ~5.2 min standalone) | api 4 / browser 3 workers |
+| Manual integration (real agent/LLM + Docker) | ~11 | serial | ~5 min | **None** |
+
+(Counts are order-of-magnitude; the authoritative membership is the phase-invariant guard, not this table.)
 
 ### What Each Layer Actually Tests
 
@@ -520,15 +544,9 @@ npm run test:manual                 # Headless, API assertions only (~5 min)
 SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 ```
 
-### Real-LLM e2e lane (`npm run test:e2e:real`)
+### Real-LLM tests live under `tests/manual-integration/`
 
-A separate Playwright config — `tests/playwright-e2e.config.ts` — spawns an isolated gateway on port 3097 with `BOBBIT_DIR=.e2e-real-bobbit` for tests that need a real LLM. Currently exercised by `tests/compaction.spec.ts`; the manual-integration counterpart for the same feature is `tests/manual-integration/compaction-pressure.spec.ts`. See [compaction.md](compaction.md) for the feature-level walkthrough.
-
-```bash
-npm run test:e2e:real
-```
-
-This lane is opt-in (needs an API key) and is **not** part of `npm run test:e2e`.
+Any test that needs a real LLM call lives under `tests/manual-integration/` and runs only via `npm run test:manual` (real agent / Docker). There is **no** separate real-LLM e2e config or `test:e2e:real` script — those were retired so the only gate-exempt path is `tests/manual-integration/**` (see the phase invariant at the top of this doc). Compaction is covered there by `tests/manual-integration/compaction.spec.ts` (explicit `/compact`) and `tests/manual-integration/compaction-pressure.spec.ts` (auto-compaction). Both self-bootstrap an isolated gateway in-spec. See [compaction.md](compaction.md) for the feature-level walkthrough.
 
 **Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
 
@@ -603,6 +621,70 @@ and static UI serving. The browser and real-push projects stay spec-serial
 inside their project workers because their setup costs and filesystem side
 effects are heavier. The API project remains fully parallel because it uses the
 in-process harness and benefits from all four workers.
+
+**`retries: 3` is the deliberate current policy, not debt.** The flake-hardening
+effort root-caused the browser flake floor in place (see [Flake hardening](#flake-hardening-deterministic-waits)),
+removed every `@quarantine` label, and un-skipped the one flake-skipped spec.
+The config nonetheless **keeps** `retries: 3` and the current worker budget on
+purpose. Rationale: the dev box must support running up to ~4 e2e suites
+**concurrently** (overlapping worktrees / parallel goals). Under that mutual
+contention a suite can hit a transient cross-suite race — CPU/FS pressure, a
+goal-assistant cold-start timeout — unrelated to any real bug. `retries: 3`
+absorbs those transients so one suite's blip does not red-light an otherwise
+green concurrent run. The deterministic-wait hardening keeps the
+**first-attempt** failure rate low, so retries are a resilience margin, **not**
+a crutch for un-root-caused flakes.
+
+The original goal's `retries: 0` + sub-5-min asks are explicitly **superseded**
+by this decision. Retries are not being reduced to 0, and worker counts are not
+being raised: raising parallelism to chase a sub-5-min single-suite wall would
+manufacture the very contention this budget avoids and degrade concurrent-suite
+robustness. A sub-5-min single-suite wall was therefore not achieved and is out
+of scope under this policy.
+
+Measured evidence:
+
+- A single retries-free full suite runs ~6.5–7.0 min wall (~1270–1279 passed,
+  ~6 skipped).
+- **Two** full suites run concurrently at the committed `retries: 3` both passed
+  (exit 0): suite 1 with 0 failed / 1 flaky-retried (`qa-seed`), suite 2 with
+  0 failed / 2 flaky-retried (`dynamic-chat-tabs`, `repro-h3-snapshot-live-interleave`);
+  ~9.5–10.0 min each under mutual contention. So under concurrency the suite
+  absorbs ~1–2 transient flakes each with 0 hard failures.
+
+When a clearly root-causable flake is found it is fixed in place rather than
+masked — e.g. `open-session-new-window`'s middle-click was rewritten to dispatch
+the `auxclick` event its handler contracts on, because Playwright's real
+middle-click intermittently latched Chromium autoscroll and swallowed the
+`auxclick`.
+
+#### Flake hardening (deterministic waits)
+
+The hardening effort eliminated the browser flake floor across 15+ specs by
+replacing optimistic clicks and rAF-spin waits with **deterministic synchronization**:
+`toBeEnabled()` before clicking, `expect.poll(...)` on exact counts,
+`waitForResponse(...)`, and concrete data-attribute / element-count waits. Key fixes:
+
+- **Split the 60s `sidebar-keyboard-nav` mega-test into 6 budgeted tests**, each
+  well under the per-test timeout instead of one test racing a single 60s budget.
+- **Fixed a worker-scoped `prw-session` leak**: `pr-walkthrough-api` now cleans up
+  in `afterEach`/`afterAll` so a leaked session does not perturb later specs on
+  the same worker (the worker-scoped-leak pattern — see
+  [Flake-stabilization patterns](#flake-stabilization-patterns)).
+- **Id-scoped the `search-orphan-filter` orphan-drop assertions** (goal / session /
+  staff / message) to the inserted orphan row. The previous broad `type===`
+  assertion also counted unrelated real rows surfaced by `suggest: true` fuzzy
+  matching, so it flaked whenever live data happened to match.
+- **Un-skipped PPS-06** (proposal dismiss during streaming) after fixing a real
+  product bug: a mid-stream proposal dismiss did not stick.
+- **Removed every `@quarantine` label.** 11 non-flaking specs were exercised at
+  `repeat-each=20` to confirm stability before de-labelling; the genuinely flaky
+  ones were hardened first, then de-labelled. Zero `@quarantine` labels remain.
+
+The inventory also corrected a stale suspect list: `goal-creation`,
+`stories-goal-routing`, and `verification-progress-indicator` were named as
+intermittent offenders but did **not** flake under retry-free runs; all
+previously-named specs are now hardened and de-labelled.
 
 ### Playwright transform-cache isolation
 
@@ -709,12 +791,22 @@ fallback when the npm wrapper is unavailable, and its runner-cache isolation is
 weaker for the reason described above.
 
 `--retries=0` is a measurement flag only. The committed E2E config keeps
-`retries: 3` for normal runs so genuinely rare flakes do not red-light the full
-suite while they are being fixed.
+`retries: 3` for normal runs as a deliberate resilience margin for concurrent
+suites (see [Worker and retry counts](#worker-and-retry-counts)), so a transient
+cross-suite race does not red-light an otherwise green run. Use `--retries=0`
+only to surface first-attempt flakes during hardening or measurement, not as a
+target for the committed config.
 
 ### What not to change without re-measuring
 
-- Don't raise the top-level worker budget above 4 as a primary speed strategy.
+- Don't raise the top-level worker budget above 4, or the `browser` budget above
+  3, as a speed strategy. The budget is sized so up to ~4 suites can run
+  concurrently without mutual contention; raising it to chase a faster
+  single-suite wall manufactures exactly the cross-suite flakes the budget
+  exists to prevent. A sub-5-min single-suite wall is explicitly out of scope.
+- Don't reduce `retries: 3` to 0 in the committed config. It is the deliberate
+  concurrent-robustness margin, not temporary debt — see
+  [Worker and retry counts](#worker-and-retry-counts).
 - Don't set `fullyParallel: true` on the `browser` or `api-realpush` projects.
 - Don't serialise the `api` project; it is the lightweight in-process lane and
   benefits from its 4-worker budget.

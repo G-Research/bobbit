@@ -4,6 +4,12 @@
  * These tests use real agents (not mocks) and real Docker containers.
  * They are NOT included in `npm test`, `npm run test:unit`, or `npm run test:e2e`.
  *
+ * Everything under `tests/manual-integration/` is collected by the single
+ * `manual-integration` project below. This is the ONLY gate-exempt path — the
+ * real-LLM compaction spec and the real-Docker sandbox-recovery spec physically
+ * live here (not under `tests/e2e/` with an ignore) so the phase-invariant
+ * guard can treat the exempt set as exactly `tests/manual-integration/**`.
+ *
  * Run:  npm run test:manual
  */
 import { defineConfig } from "@playwright/test";
@@ -29,13 +35,6 @@ export default defineConfig({
 		{
 			name: "manual-integration",
 			testDir: "./tests/manual-integration",
-		},
-		{
-			name: "docker-e2e",
-			testDir: "./tests/e2e",
-			testMatch: [
-				"**/sandbox-recovery-docker*.spec.ts",
-			],
 		},
 	],
 });

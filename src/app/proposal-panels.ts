@@ -420,6 +420,12 @@ function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
 function dismissTypedProposal(type: ProposalType): void {
 	const slot = state.activeProposals[type];
 	const sessionId = slot?.sessionId ?? activeSessionId();
+	// If the proposal is still streaming, suppress the rest of the in-flight
+	// tool block so later (content-grown) deltas can't re-populate the panel —
+	// the content-fingerprint dismissal below only matches the body captured now.
+	if (isProposalStreaming(`${type}_proposal`)) {
+		state.remoteAgent?.dismissStreamingProposal(`${type}_proposal`);
+	}
 	clearProposalReviewState(sessionId, type);
 	if (sessionId && slot?.fields) markProposalDismissed(sessionId, type, slot.fields);
 	delete state.activeProposals[type];
@@ -3008,6 +3014,11 @@ function goalProposalPanel() {
 
 	const handleDismiss = () => {
 		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+		// Suppress the in-flight streaming block so later deltas don't re-open
+		// the just-dismissed goal proposal (see dismissStreamingProposal).
+		if (isProposalStreaming("goal_proposal")) {
+			state.remoteAgent?.dismissStreamingProposal("goal_proposal");
+		}
 		const sidEarly = activeSessionId();
 		if (sidEarly) clearProposalAnnotations(sidEarly, "goal");
 		resetProposalAnnCount("goal");

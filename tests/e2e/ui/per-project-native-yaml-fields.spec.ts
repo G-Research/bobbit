@@ -101,6 +101,16 @@ test.describe("Per-project native-YAML field editing", () => {
 			const addTokenBtn = page.getByRole("button", { name: /Add token/ });
 			await expect(addTokenBtn).toBeVisible({ timeout: 15_000 });
 
+			// Token entries are only seeded once host tokens have loaded
+			// (initSandboxEntries gates on hostTokens !== null); until then the
+			// editor shows "Detecting...". Clicking Add token before that seeding
+			// pushes into a throwaway array that is discarded when the entries are
+			// initialized, so the new row never renders. Wait for detection to
+			// finish (deterministic: "Detecting..." detaches once the fetch resolves,
+			// even to an empty list) and for the button to be actionable first.
+			await expect(page.getByText("Detecting...", { exact: true })).toHaveCount(0, { timeout: 15_000 });
+			await expect(addTokenBtn).toBeEnabled();
+
 			// Capture how many token rows currently exist so we can target
 			// our newly-added one even if host tokens (e.g. GITHUB_TOKEN) are
 			// already auto-listed.
@@ -109,7 +119,9 @@ test.describe("Per-project native-YAML field editing", () => {
 
 			// Click Add token; a new empty row appears with placeholder ENV_VAR.
 			await addTokenBtn.click();
-			await expect(tokenKeyInputs).toHaveCount(initialCount + 1, { timeout: 5_000 });
+			await expect(tokenKeyInputs).toHaveCount(initialCount + 1, { timeout: 10_000 });
+			// The newly-added row's key input must be present and editable before we fill it.
+			await expect(tokenKeyInputs.nth(initialCount)).toBeVisible({ timeout: 5_000 });
 
 			const tokenName = `BOBBIT_E2E_TOKEN_${Date.now()}`;
 			const newKeyInput = tokenKeyInputs.nth(initialCount);

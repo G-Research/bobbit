@@ -19,20 +19,34 @@ async function startStreamingProposal(
 	await sendMessage(page, `STAY_BUSY:propose_${type}:${n}${intervalMs ? `:${intervalMs}` : ""}`);
 }
 
-test.describe("Proposal panel streaming UX @quarantine", () => {
+test.describe("Proposal panel streaming UX", () => {
 	test("PPS-01 + PPS-02: goal — submit disabled and badge visible while streaming", async ({ page }) => {
-		await startStreamingProposal(page, "goal", 8);
+		// Spread the deltas (150 ms cadence) so even a CPU-starved browser is
+		// scheduled to paint the in-flight state between events instead of
+		// batching the whole stream + message_end into a single final render.
+		await startStreamingProposal(page, "goal", 10, 150);
 
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
-		await expect(badge).toBeVisible({ timeout: 15_000 });
-
-		// Submit button (Create Goal) is disabled while streaming.
 		const submitWrap = page.locator('[data-testid="proposal-primary-submit"]').first();
 		await expect(submitWrap).toBeVisible({ timeout: 15_000 });
 		const submitBtn = submitWrap.locator("button").first();
-		await expect(submitBtn).toBeDisabled({ timeout: 5_000 });
 
-		// After streaming ends, badge disappears and button enables.
+		// PPS-01 + PPS-02: the streaming badge and the disabled submit binding are
+		// BOTH derived from the same per-tag streaming flag, so they flip together
+		// in one render. Poll for the instant both hold simultaneously rather than
+		// asserting them sequentially — the latter can race the stream-end window
+		// (badge passes, stream ends, then `toBeDisabled` sees enabled). Polling on
+		// the consistent DOM snapshot removes the wall-clock dependency entirely.
+		await expect.poll(async () => {
+			const [badgeVisible, disabled] = await Promise.all([
+				badge.isVisible().catch(() => false),
+				submitBtn.isDisabled().catch(() => false),
+			]);
+			return badgeVisible && disabled;
+		}, { timeout: 15_000, intervals: [50, 100, 150] }).toBe(true);
+
+		// After streaming ends, badge disappears and button enables (both flip
+		// together at message_end).
 		await expect(badge).toBeHidden({ timeout: 15_000 });
 		await expect(submitBtn).toBeEnabled({ timeout: 5_000 });
 	});
@@ -116,12 +130,19 @@ test.describe("Proposal panel streaming UX @quarantine", () => {
 		void tailGap;
 	});
 
-	// PPS-06 is quarantined (see describe-block tag) and consistently fails after
-	// 3 retries in this environment — unrelated to the re-attempt project-binding
-	// fix on this branch. Skipping pending a dedicated quarantine-cleanup goal;
-	// the same workaround was applied on the nested-goals branch (commit 3aa176db).
-	test.skip("PPS-06: dismiss button clickable during streaming", async ({ page }) => {
-		await startStreamingProposal(page, "goal", 30);
+	// PPS-06: dismissing a proposal mid-stream must stick. Previously skipped
+	// because it consistently failed: the persistent dismissal is a content
+	// fingerprint, but each streaming delta grows the body, so the next delta no
+	// longer matched the dismissed fingerprint and re-populated the panel. The
+	// product fix (RemoteAgent.dismissStreamingProposal → wired from the goal
+	// panel's Dismiss handler) suppresses the rest of the in-flight tool block,
+	// so a mid-stream Dismiss now stays dismissed for the whole turn.
+	test("PPS-06: dismiss button clickable during streaming", async ({ page }) => {
+		// Long, spread window (20 deltas × 150 ms ≈ 3 s) so the Dismiss click
+		// lands well inside the stream and several MORE deltas arrive afterwards —
+		// that post-dismiss tail is exactly what would re-open the panel if the
+		// suppression regressed (see the idle re-assert below).
+		await startStreamingProposal(page, "goal", 20, 150);
 
 		// Wait for panel + dismiss button.
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
@@ -135,8 +156,22 @@ test.describe("Proposal panel streaming UX @quarantine", () => {
 		await expect(dismissBtn).toBeEnabled();
 		await dismissBtn.click();
 
-		// Title input should disappear.
+		// Title input should disappear immediately on dismiss.
 		await expect(titleInput).toBeHidden({ timeout: 5_000 });
+
+		// Sensitivity anchor: wait until the turn fully completes (agent idle).
+		// Without the suppression fix, the remaining streaming deltas — and the
+		// final message_end fire — would re-populate the goal proposal as a fresh
+		// first-emit (its grown body no longer matches the dismissed fingerprint),
+		// so the title input would re-appear by the time the turn ends. Asserting
+		// it stays hidden through completion makes this test fail if the product
+		// path regresses.
+		await page.waitForFunction(
+			() => (window as any).bobbitState?.remoteAgent?.state?.status === "idle",
+			null,
+			{ timeout: 15_000 },
+		);
+		await expect(titleInput).toBeHidden();
 	});
 
 	test("PPS-07: title input remains user-editable mid-stream", async ({ page }) => {
@@ -156,7 +191,12 @@ test.describe("Proposal panel streaming UX @quarantine", () => {
 
 	// Project panel — non-assistant flow also surfaces this proposal type.
 	test("PPS-01 + PPS-02: project — badge + disabled submit while streaming", async ({ page }) => {
-		await startStreamingProposal(page, "project", 6);
+		// 10 deltas × 150 ms ≈ 1.5 s. The project panel is heavier (it loads
+		// project views), so a tight (~360 ms) window let a contended browser
+		// batch the whole stream into one final render and never paint the badge,
+		// timing out `toBeVisible`. The spread cadence guarantees a mid-stream
+		// paint so the badge is observed before it clears.
+		await startStreamingProposal(page, "project", 10, 150);
 
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		await expect(badge).toBeVisible({ timeout: 20_000 });

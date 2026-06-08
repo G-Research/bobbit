@@ -6,7 +6,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
-test.describe("Optional steps @quarantine", () => {
+test.describe("Optional steps", () => {
 	test("goal proposal with options field is parsed", async ({ page }) => {
 		await openApp(page);
 

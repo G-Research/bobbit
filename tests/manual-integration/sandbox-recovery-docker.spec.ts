@@ -12,8 +12,8 @@
  * 4. Health monitor handles repeated container kills
  */
 import { execFileSync } from "node:child_process";
-import { test, expect } from "./in-process-harness.js";
-import { isDockerAvailable } from "./test-utils/docker.js";
+import { test, expect } from "../e2e/in-process-harness.js";
+import { isDockerAvailable } from "../e2e/test-utils/docker.js";
 import {
 	apiFetch,
 	readE2EToken,
@@ -22,7 +22,7 @@ import {
 	waitForSessionStatus,
 	agentEndPredicate,
 	defaultProjectId,
-} from "./e2e-setup.js";
+} from "../e2e/e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Docker-dependent tests: container health monitor and session recovery

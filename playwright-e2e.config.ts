@@ -125,8 +125,6 @@ export default {
 				"**/mcp-integration*",
 				"**/per-project-config-dirs*",
 				"**/port-auto-increment*",
-				// Docker-dependent tests — run via test:manual instead
-				"**/sandbox-recovery-docker*",
 				// Owned by the api-realpush project (different env).
 				"**/goal-archive-branch-cleanup*",
 			],
@@ -152,10 +150,6 @@ export default {
 				"**/mcp-integration*.spec.ts",
 				"**/per-project-config-dirs*.spec.ts",
 				"**/port-auto-increment*.spec.ts",
-			],
-			testIgnore: [
-				// Docker-dependent tests — run via test:manual instead
-				"**/sandbox-recovery-docker*",
 			],
 			workers: 3,
 			// Serialise browser specs within the project. Each browser worker

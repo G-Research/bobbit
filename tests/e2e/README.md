@@ -4,31 +4,59 @@
 
 The e2e config (`playwright-e2e.config.ts`) defines three Playwright projects:
 
-- **`api`** — In-process gateway, no browser. Runs API E2E specs. `retries: 0`.
+- **`api`** — In-process gateway, no browser. Runs API E2E specs. Workers: 4,
+  `fullyParallel: true`.
 - **`api-realpush`** — Same as `api` but with real `git push --delete`
   (no `BOBBIT_TEST_NO_PUSH=1`). Owns `goal-archive-branch-cleanup`.
 - **`browser`** — In-process gateway + Chromium UI. Runs UI specs. Workers: 3,
-  `fullyParallel: false`. `retries: 0`.
+  `fullyParallel: false`.
+
+The committed config runs `retries: 3` everywhere (top-level) — see
+[Retries: deliberate margin for concurrent suites](#retries-deliberate-margin-for-concurrent-suites).
 
 ## No quarantine, no skip-for-flake
 
-There is no quarantine project and no `@quarantine` tag. Every flake
-gets root-caused and fixed in place. If a test is too flaky to fix
+There is no quarantine project and no `@quarantine` tag — and as of the
+flake-hardening effort, no spec carries one. Every flake gets
+root-caused and fixed in place. If a test is too flaky to fix
 immediately, the right move is to revert the change that introduced it
 — not to hide the failure behind a separate project.
 
-Do not add `test.skip("flaky…")`. Do not add `retries: N` to a describe
-block or a project. Do not bump a timeout to make a slow product
-faster. If you find yourself wanting to do any of these, file a goal
-and stop.
+Do not add `test.skip("flaky…")`. Do not add `@quarantine` labels or a
+per-describe / per-project `retries: N` override. Do not bump a timeout
+to make a slow product faster. If you find yourself wanting to do any of
+these, file a goal and stop. The top-level `retries: 3` (below) is a
+resilience margin for concurrent runs, **not** a licence to leave a
+first-attempt flake un-root-caused.
 
-## Retries: 0 everywhere
+## Retries: deliberate margin for concurrent suites
 
-Both local development and CI run with `retries: 0`. Every flake gets
-root-caused and fixed in place. The temporary `retries: 2` previously
-used in CI was removed once the cross-worker FS contention work landed
-(tool-yaml rescan cache + `completedTurnCount` observability hook in
-the test framework — see commit history for details).
+The committed config runs `retries: 3` everywhere, and this is the
+deliberate current policy — **not** temporary debt. The rationale: the
+dev laptop must support running up to ~4 e2e suites **concurrently**
+(overlapping worktrees / parallel goals). Under that mutual contention a
+suite can hit a transient cross-suite race (CPU/FS pressure, a
+goal-assistant cold-start timeout) that has nothing to do with a real
+bug. `retries: 3` absorbs those transients so one suite's blip doesn't
+red-light an otherwise-green concurrent run.
+
+The deterministic-wait hardening (see `docs/testing-strategy.md` →
+*Flake hardening*) keeps the **first-attempt** failure rate low, so
+retries are a margin, not a crutch. Measured evidence:
+
+- A single retries-free full suite runs ~6.5–7.0 min wall
+  (~1270–1279 passed, ~6 skipped).
+- **Two** full suites run concurrently at the committed `retries: 3`
+  both passed (exit 0): one with 0 failed / 1 flaky-retried, the other
+  0 failed / 2 flaky-retried; ~9.5–10.0 min each under mutual
+  contention. So under concurrency the suite absorbs ~1–2 transient
+  flakes each with 0 hard failures.
+
+Retries are **not** being reduced to 0, and worker counts are **not**
+being raised to chase a sub-5-min single-suite time: raising parallelism
+would manufacture the very contention this budget avoids and hurt
+concurrent-suite robustness. A sub-5-min single-suite wall was therefore
+not pursued and is explicitly out of scope under this policy.
 
 ## Profiler (`BOBBIT_E2E_PROFILE=1`)
 

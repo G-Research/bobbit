@@ -42,7 +42,7 @@ async function deleteGoalByTitle(title: string) {
 	if (goal) await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
 }
 
-test.describe("Proposal tool blocks @quarantine", () => {
+test.describe("Proposal tool blocks", () => {
 	test("goal proposal tool card renders, persists, and reopens @smoke", async ({ page }) => {
 		await triggerGoalProposal(page);
 

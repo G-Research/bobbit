@@ -7,9 +7,9 @@ npm run build          # Full build (server + UI)
 npm run dev:harness    # Gateway via restart harness + vite (use this for dev)
 npm run restart-server # Rebuild & restart after server changes
 npm run check          # Type-check server + web (no emit)
-npm run test:unit      # Unit — file:// fixtures + Node runner (<30s)
-npm run test:e2e       # E2E — API (in-process) + browser (spawned gateway)
-npm run test:manual    # Manual integration — real agents + Docker (~5 min)
+npm run test:unit      # Unit phase — node:test logic + file:// browser fixtures, run concurrently (~90s)
+npm run test:e2e       # E2E phase — API (in-process) + browser (spawned gateway)
+npm run test:manual    # Manual integration — real agents/LLM + Docker (~5 min); ONLY gate-exempt path
 SCREENSHOTS=1 npm run test:manual  # + browser screenshots + HTML report
 ```
 
@@ -39,7 +39,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 ## Testing
 
 - **UI-only changes** → `test:unit`. **Server changes** → `test:unit` + `test:e2e`. **Session lifecycle / sandbox / worktree / restart** → also `test:manual`.
-- **Test types**: unit (`tests/*.spec.ts`, file:// fixtures), API E2E (`tests/e2e/*.spec.ts`, in-process gateway via `./in-process-harness.js`), browser E2E (`tests/e2e/ui/*.spec.ts`, spawned gateway via `../gateway-harness.js`).
+- **Test types**: unit·node (`tests/*.test.ts` via node:test), unit·browser (`tests/*.spec.ts`, file:// fixtures), API E2E (`tests/e2e/*.spec.ts`, in-process gateway), browser E2E (`tests/e2e/ui/*.spec.ts`, spawned gateway). **Phase invariant**: every test except `tests/manual-integration/**` runs in exactly one of unit/e2e, pinned by `tests/test-phase-invariant.test.ts`. See [docs/testing-strategy.md](docs/testing-strategy.md).
 - Tests run in isolation — never read/write `.bobbit/` directly; use the isolated dir from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent. Use `bash_bg`.
 - Prefer `file://` fixtures for new tests; use E2E only when you need a real server.

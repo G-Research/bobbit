@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession } from "./e2e-setup.js";
+import { apiFetch, createSession, deleteSession } from "./e2e-setup.js";
 
 type GitFixture = {
 	cwd: string;
@@ -75,10 +75,47 @@ function firstLineAnchor(result: any): { cardId: string; diffBlockId: string; li
 }
 
 test.describe("PR walkthrough REST API", () => {
+	// Sessions this spec mints server-side (parent launchers + their
+	// `prw-session-*` walkthrough children). These MUST be deleted: a leaked
+	// `prw-session-*` survives on the shared in-process API worker, and when
+	// project-delete-last.spec.ts later drains every project the orphaned child
+	// can no longer resolve its store — the server then throws
+	// "Cannot resolve store for session prw-session-...: not found in any project".
+	const createdSessionIds: string[] = [];
+
+	async function cleanupCreatedSessions(): Promise<void> {
+		// Delete in reverse creation order so children are removed before their
+		// parent launcher session.
+		while (createdSessionIds.length) {
+			const id = createdSessionIds.pop()!;
+			await deleteSession(id);
+		}
+	}
+
+	test.afterEach(cleanupCreatedSessions);
+
+	test.afterAll(async () => {
+		await cleanupCreatedSessions();
+		// Safety-net sweep: delete any walkthrough child session this spec may
+		// have minted that escaped the per-test tracking, so no `prw-session-*`
+		// orphan outlives the spec.
+		try {
+			const res = await apiFetch("/api/sessions");
+			if (res.ok) {
+				const body = await res.json();
+				const list: Array<{ id?: string }> = Array.isArray(body) ? body : (body.sessions ?? []);
+				for (const s of list) {
+					if (s.id && s.id.startsWith("prw-session-")) await deleteSession(s.id);
+				}
+			}
+		} catch { /* best-effort */ }
+	});
+
 	test("POST launch creates a real child walkthrough session through production route wiring", async () => {
 		const fixture = makeGitFixture();
 		try {
 			const parentSessionId = await createSession();
+			createdSessionIds.push(parentSessionId);
 			const launchBody = { sessionId: parentSessionId, cwd: fixture.cwd, prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha };
 			const launchResp = await apiFetch("/api/pr-walkthrough/launch", {
 				method: "POST",
@@ -86,6 +123,7 @@ test.describe("PR walkthrough REST API", () => {
 			});
 			expect(launchResp.status).toBe(201);
 			const launch = await launchResp.json();
+			if (launch.childSessionId) createdSessionIds.push(launch.childSessionId);
 			expect(launch.status).toBe("waiting_for_yaml");
 			expect(launch.job.parentSessionId).toBe(parentSessionId);
 			expect(launch.job.childSessionId).toBe(launch.childSessionId);

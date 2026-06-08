@@ -113,7 +113,7 @@ test.describe("search orphan filter & weak-match drop", () => {
 		await purgeInserted(tracker);
 	});
 
-	test("orphan goal is dropped server-side @quarantine", async ({ gateway }) => {
+	test("orphan goal is dropped server-side", async ({ gateway }) => {
 		const gw: any = gateway;
 		const token = uniqueToken("zzorphgoal");
 		await indexOrphan(tracker, {
@@ -130,18 +130,27 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "goal");
-		// Diagnostic dump: if we ever see leakage again, the failure message
-		// should tell us exactly which rows survived (and from where) so the
-		// next person doesn't have to repro under load.
-		if (hits.length !== 0) {
+		// Scope to the SPECIFIC orphan row we inserted (see the detailed rationale
+		// on the "orphan session" test below): flex-store search uses suggest:true
+		// + a forward/LatinAdvanced tokenizer, so a unique-token query can also
+		// surface unrelated REAL goal rows that fuzzy-match a sub-token. Those
+		// genuinely exist and are correctly KEPT, so counting every goal-type hit
+		// is a latent flake. The contract is narrower: our inserted ghost goal
+		// (no backing goal) must be dropped. Assert exactly that, by id.
+		const ourOrphan = out.results.filter(
+			(r: any) =>
+				r.type === "goal" &&
+				(r.id === `ghost-${token}` || r.goalId === `ghost-${token}`),
+		);
+		if (ourOrphan.length !== 0) {
 			console.error(
-				"[orphan-goal-flake] leaked goal hits:",
-				JSON.stringify(hits, null, 2),
+				"[orphan-goal-flake] our inserted orphan goal row survived the filter:",
+				JSON.stringify(ourOrphan, null, 2),
 			);
 		}
-		expect(hits.length).toBe(0);
-		// total tracks filtered length (may still include non-goal hits if any).
+		expect(ourOrphan.length).toBe(0);
+		// total tracks filtered length (independent contract — unaffected by which
+		// real rows fuzzy-match, since total is just the filtered page length).
 		expect(out.total).toBe(out.results.length);
 	});
 
@@ -162,11 +171,39 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "session");
-		if (hits.length !== 0) {
-			console.error("[orphan-sess-flake] leaked session hits:", JSON.stringify(hits, null, 2));
+		// Scope the assertion to the SPECIFIC orphan row we inserted, mirroring
+		// the robust id-based check in the "total equals filtered length" test
+		// below. The flex-store search runs with `suggest: true` (see
+		// flex-store.ts search opts), and the forward/LatinAdvanced tokenizer
+		// splits our token into sub-tokens — so under full-suite load a
+		// unique-token query can ALSO surface unrelated REAL session rows that
+		// fuzzy-match a sub-token. Those sessions genuinely exist, so the orphan
+		// filter correctly KEEPS them; counting every session-type hit therefore
+		// races on whatever real sessions the shared default-project index has
+		// accumulated. The orphan-filter contract this test pins is narrower: the
+		// orphan row we inserted (whose backing session does not exist) must be
+		// dropped. Assert exactly that — by id — so the test is deterministic and
+		// still fails if the orphan filter ever stops dropping our ghost row.
+		//
+		// Ruled-out alternative (so the next person needn't re-derive it): a
+		// fail-open / session-store hydration race. The session branch in
+		// ProjectContextManager._hitExists fail-opens ONLY when `sessionResolver`
+		// is unwired, and that is wired synchronously inside createGateway() at
+		// boot — it can never be null once tests run. A session store that isn't
+		// hydrated yet does NOT fail-open: it flows through getPersistedSession()
+		// → undefined → the hit is DROPPED. So a hydration race can only drop MORE
+		// rows, never keep our ghost — our orphan (no backing session) is always
+		// dropped. The indexOrphan() helper already awaits searchIndex.whenReady()
+		// and the upsert before we query, so the index is fully settled here too.
+		const ourOrphan = out.results.filter(
+			(r: any) =>
+				r.type === "session" &&
+				(r.id === `ghost-${token}` || r.sessionId === `ghost-session-${token}`),
+		);
+		if (ourOrphan.length !== 0) {
+			console.error("[orphan-sess-flake] our inserted orphan session row survived the filter:", JSON.stringify(ourOrphan, null, 2));
 		}
-		expect(hits.length).toBe(0);
+		expect(ourOrphan.length).toBe(0);
 	});
 
 	test("orphan staff is dropped server-side", async ({ gateway }) => {
@@ -185,11 +222,18 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "staff");
-		if (hits.length !== 0) {
-			console.error("[orphan-staff-flake] leaked staff hits:", JSON.stringify(hits, null, 2));
+		// Scope to the SPECIFIC orphan row we inserted (see the detailed rationale
+		// on the "orphan session" test): suggest:true fuzzy fallback can surface
+		// unrelated REAL staff rows for a unique-token query, which genuinely exist
+		// and are correctly KEPT. Our inserted ghost staff (no backing staff) must
+		// be dropped — assert exactly that, by id.
+		const ourOrphan = out.results.filter(
+			(r: any) => r.type === "staff" && r.id === `ghost-${token}`,
+		);
+		if (ourOrphan.length !== 0) {
+			console.error("[orphan-staff-flake] our inserted orphan staff row survived the filter:", JSON.stringify(ourOrphan, null, 2));
 		}
-		expect(hits.length).toBe(0);
+		expect(ourOrphan.length).toBe(0);
 	});
 
 	test("orphan message (parent session missing) is dropped server-side", async ({ gateway }) => {
@@ -209,11 +253,22 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "message");
-		if (hits.length !== 0) {
-			console.error("[orphan-msg-flake] leaked message hits:", JSON.stringify(hits, null, 2));
+		// Scope to the SPECIFIC orphan row we inserted (see the detailed rationale
+		// on the "orphan session" test): suggest:true fuzzy fallback can surface
+		// unrelated REAL message rows for a unique-token query, which genuinely
+		// exist and are correctly KEPT. Our inserted ghost message (parent session
+		// missing) must be dropped — assert exactly that, by id. Message ids keep
+		// their full `message:...` prefix (not stripped in toSearchResult).
+		const ourOrphan = out.results.filter(
+			(r: any) =>
+				r.type === "message" &&
+				(r.id === `message:ghost-sess-${token}:0:assistant:0` ||
+					r.sessionId === `ghost-sess-${token}`),
+		);
+		if (ourOrphan.length !== 0) {
+			console.error("[orphan-msg-flake] our inserted orphan message row survived the filter:", JSON.stringify(ourOrphan, null, 2));
 		}
-		expect(hits.length).toBe(0);
+		expect(ourOrphan.length).toBe(0);
 	});
 
 	test("weak-match message row (no <b> highlight) is dropped", async ({ gateway }) => {

@@ -316,22 +316,59 @@ async function openReview(page: Page): Promise<string> {
 	return review!.id;
 }
 
+// Wait until a tab's bounding box is stable across two animation frames before
+// using it as a drag anchor. SortableJS animates reorders (animation: 180ms),
+// so a box sampled mid-animation can be stale; this also confirms lit-html is
+// not mid-reconcile, i.e. the tab strip + Sortable instance have settled.
+async function stableTabBox(page: Page, locator: ReturnType<Page["locator"]>, label: string) {
+	let previous: { x: number; y: number; width: number; height: number } | null = null;
+	for (let i = 0; i < 40; i++) {
+		const box = await locator.boundingBox();
+		expect(box, `${label} should have a box`).not.toBeNull();
+		if (
+			previous &&
+			Math.abs(previous.x - box!.x) < 0.5 &&
+			Math.abs(previous.y - box!.y) < 0.5 &&
+			Math.abs(previous.width - box!.width) < 0.5 &&
+			Math.abs(previous.height - box!.height) < 0.5
+		) {
+			return box!;
+		}
+		previous = box!;
+		await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+	}
+	return previous!;
+}
+
 async function dragTab(page: Page, fromId: string, toId: string, options: { toLeftEdge?: boolean } = {}): Promise<void> {
 	const from = await tabById(page, fromId);
 	const to = await tabById(page, toId);
 	await expect(from, `drag source ${fromId}`).toBeVisible({ timeout: 10_000 });
 	await expect(to, `drag target ${toId}`).toBeVisible({ timeout: 10_000 });
-	const fromBox = await from.boundingBox();
-	const toBox = await to.boundingBox();
-	expect(fromBox, `drag source ${fromId} should have a box`).not.toBeNull();
-	expect(toBox, `drag target ${toId} should have a box`).not.toBeNull();
-	await page.mouse.move(fromBox!.x + fromBox!.width / 2, fromBox!.y + fromBox!.height / 2);
+	// Sync on a settled tab strip (boxes stable) so SortableJS has attached its
+	// drag handlers and is not mid-animation before we synthesise the drag.
+	const fromBox = await stableTabBox(page, from, `drag source ${fromId}`);
+	const toBox = await stableTabBox(page, to, `drag target ${toId}`);
+	const startX = fromBox.x + fromBox.width / 2;
+	const startY = fromBox.y + fromBox.height / 2;
+	const targetX = options.toLeftEdge ? toBox.x + 2 : toBox.x + toBox.width / 2;
+	const targetY = toBox.y + toBox.height / 2;
+	await page.mouse.move(startX, startY);
 	await page.mouse.down();
-	await page.mouse.move(
-		options.toLeftEdge ? toBox!.x + 2 : toBox!.x + toBox!.width / 2,
-		toBox!.y + toBox!.height / 2,
-		{ steps: 12 },
-	);
+	// Nudge past SortableJS's fallbackTolerance (4px) so the drag deterministically
+	// begins before we glide to the destination.
+	await page.mouse.move(startX - 8, startY, { steps: 3 });
+	// Glide in many small steps so SortableJS's fallback drag loop evaluates an
+	// onMove against every tab the cursor crosses — including the pinned target,
+	// whose guard must observe the drag to reject a before-pinned drop.
+	await page.mouse.move(targetX, targetY, { steps: 24 });
+	// Dwell on the destination: each repeated move is another onMove the loop
+	// processes, so the final drop position is evaluated deterministically rather
+	// than racing mouse-up against a busy main thread under contention.
+	for (let i = 0; i < 3; i++) {
+		await page.mouse.move(targetX, targetY);
+		await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+	}
 	await page.mouse.up();
 }
 
@@ -588,19 +625,14 @@ test.describe("Side-panel tab contract", () => {
 		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 10_000 });
 	});
 
-	// FIXME: Fails deterministically on origin/master HEAD 130595bb (4/4 attempts).
-	// NOT introduced by this branch — verified by running on a fresh worktree of
-	// origin/master with the same Playwright config; same symptom reproduces.
-	// Symptom: dragging a non-pinned tab before the pinned Inbox is allowed,
-	// failing the assertion "non-pinned tabs cannot be dropped before pinned Inbox".
-	// Suspected culprit: SortableJS `onMove` filter logic in render.ts::ensurePanelSortable
-	// — the pinned-tab guard either isn't firing for this specific drop target or
-	// the order is re-committed by `onEnd` despite the guard.
-	// Likely a real product bug introduced by the recent master chain:
-	//   98f7f0ce Chrome-style panel tab strip with SortableJS drag-and-drop
-	//   122f76fc Editable historical proposal tabs + render-time override
-	//   dac36684 Update tests + docs for Chrome-style tab system
-	// Restore to `test(...)` once those bugs are fixed on master.
+	// The product pinned-tab guard (render.ts::ensurePanelSortable onMove/onEnd) is
+	// correct; this test was a *contention* flake, not a product bug. Under heavy
+	// Chromium load the synthesised drag could resolve mouse-up before SortableJS's
+	// fallback loop evaluated the onMove over the pinned Inbox, so an earlier
+	// non-pinned swap committed and the order assertion failed (~1/5). The fix is in
+	// `dragTab`: it now settles on stable tab boxes, nudges past fallbackTolerance to
+	// start the drag, glides in fine steps so every crossed tab gets an onMove, and
+	// dwells on the destination so the final drop is evaluated deterministically.
 	test("6. Desktop drag reorder persists and cannot move tabs before pinned Inbox", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);

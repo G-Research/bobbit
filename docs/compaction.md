@@ -205,12 +205,13 @@ replaced case 12c.
 
 Two new lanes cover compaction end to end.
 
-### Real-LLM e2e
+### Real-LLM `/compact` test (manual-integration)
 
-`tests/compaction.spec.ts` runs under `tests/playwright-e2e.config.ts`,
-which spawns an isolated gateway on **port 3097** with
-`BOBBIT_DIR=.e2e-real-bobbit` so it cannot collide with the dev
-server's state. The test:
+`tests/manual-integration/compaction.spec.ts` is a real-LLM test, so it
+lives under `tests/manual-integration/` (the only gate-exempt path — see
+[testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first)).
+It self-bootstraps an isolated gateway in-spec (no shared `webServer`
+config) so it is collected by `playwright-manual.config.ts`. The test:
 
 1. Creates a project + session against the isolated gateway.
 2. Knocks down the model's `contextWindow` via `models.json` so a few
@@ -226,12 +227,11 @@ server's state. The test:
 Run it with:
 
 ```bash
-npm run test:e2e:real
+npm run test:manual
 ```
 
-This script (`package.json`) is separate from `npm run test:e2e`, which
-uses the root `playwright-e2e.config.ts`. The real-LLM lane needs an API
-key, so it is opt-in rather than part of the default e2e run.
+It needs an API key (real LLM), so it is opt-in and never part of the
+`unit` or `e2e` gates.
 
 ### Manual-integration pressure test
 
@@ -264,6 +264,6 @@ npm run test:manual
 | Reducer unit tests | `tests/message-reducer.test.ts` — cases 12, 12b, 12c, 12d, 12e |
 | Browser E2E (renderer lifecycle, file:// harness) | `tests/e2e/ui/compaction-widget.spec.ts`, `tests/fixtures/compaction-widget.html` |
 | Compact-cost regression | `tests/e2e/compact-cost-ws.spec.ts`, `tests/e2e/ui/compact-cost.spec.ts`, `tests/context-cost-stats.spec.ts` |
-| Real-LLM e2e | `tests/compaction.spec.ts`, `tests/playwright-e2e.config.ts` |
+| Real-LLM `/compact` (manual) | `tests/manual-integration/compaction.spec.ts` |
 | Manual-integration pressure test | `tests/manual-integration/compaction-pressure.spec.ts` |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |

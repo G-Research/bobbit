@@ -34,8 +34,17 @@ test("Settings → General → Customise system prompt creates file then no-ops"
 	const button = page.locator('[data-testid="general-customise-system-prompt"]');
 	await expect(button).toBeVisible({ timeout: 5_000 });
 
-	// First click — should create the file.
+	// First click — should create the file. Synchronize on the create round-trip
+	// resolving before asserting the confirmation: the status text is only set in
+	// customiseSystemPrompt()'s renderApp() AFTER the POST resolves (it shows
+	// "Working…" in the interim), so asserting the text immediately races the
+	// request and fast-fails under load.
+	const createResp = page.waitForResponse(
+		(r) => r.url().includes("/api/system-prompt/customise") && r.request().method() === "POST",
+		{ timeout: 10_000 },
+	);
 	await button.click();
+	await createResp;
 	await expect(page.getByText(/Created /)).toBeVisible({ timeout: 5_000 });
 	expect(existsSync(userPromptPath())).toBe(true);
 
@@ -45,7 +54,13 @@ test("Settings → General → Customise system prompt creates file then no-ops"
 	const button2 = page.locator('[data-testid="general-customise-system-prompt"]');
 	await expect(button2).toBeVisible({ timeout: 5_000 });
 
-	// Second click — file already exists, expect "Already exists".
+	// Second click — file already exists, expect "Already exists". Same
+	// round-trip synchronization as the first click.
+	const noopResp = page.waitForResponse(
+		(r) => r.url().includes("/api/system-prompt/customise") && r.request().method() === "POST",
+		{ timeout: 10_000 },
+	);
 	await button2.click();
+	await noopResp;
 	await expect(page.getByText(/Already exists/)).toBeVisible({ timeout: 5_000 });
 });

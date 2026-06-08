@@ -82,7 +82,7 @@ async function workflowOptionValues(page: import("@playwright/test").Page): Prom
 	);
 }
 
-test.describe("Goal proposal with invalid workflow (dropdown desync) @quarantine", () => {
+test.describe("Goal proposal with invalid workflow (dropdown desync)", () => {
 	test("inline goal-proposal panel normalizes a phantom workflow to a valid default", async ({ page }) => {
 		await openRegularSessionProposal(page);
 

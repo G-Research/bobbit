@@ -8,9 +8,8 @@ components:
     commands:
       build: npm run build
       check: npm run check
-      unit: npx playwright test --config tests/playwright.config.ts --reporter=line
-      e2e: npx playwright test --grep-invert 'mcp-integration|session-lifecycle-ui'
-        --config playwright-e2e.config.ts --reporter=line
+      unit: npm run test:unit
+      e2e: npx playwright test --config playwright-e2e.config.ts --reporter=line
     config:
       qa_start_command: BOBBIT_NO_OPEN='1' BOBBIT_LLM_REVIEW_SKIP='1'
         BOBBIT_SKIP_NPM_CI='1' PORT=$PORT WORK_DIR=$WORK_DIR
