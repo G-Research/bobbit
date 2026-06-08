@@ -1600,7 +1600,13 @@ export function doRenderApp(): void {
 		return;
 	}
 
-	// Gateway starting — server not yet responsive, polling until ready
+	// Gateway starting — server not yet responsive, polling until ready.
+	// Always expose a Connect escape hatch: the saved gateway URL/token can be
+	// stale (gateway address or token changed since the last QR scan), in which
+	// case waitForGateway() polls a dead address for up to 120s. Without a
+	// visible action the user is stuck staring at the loader (mobile repro:
+	// "bouncing bobbit forever, re-scanning the QR fixes it"). The button lets
+	// them reconnect / re-scan immediately instead of waiting for the timeout.
 	if (state.appView === "gateway-starting") {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
@@ -1610,10 +1616,31 @@ export function doRenderApp(): void {
 						<span class="text-base font-semibold text-foreground">Bobbit</span>
 					</div>
 					<div class="flex items-center gap-1 px-2">
+						${Button({
+							variant: "ghost",
+							size: "sm",
+							children: html`<span class="inline-flex items-center gap-1">${icon(Server, "sm")} <span class="text-xs">Connect</span></span>`,
+							onClick: openGatewayDialog,
+							title: "Connect to a different gateway",
+						})}
 						<theme-toggle></theme-toggle>
 					</div>
 				</div>
-				<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>
+				<div class="flex-1 min-h-0 flex flex-col">
+					<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>
+					<div class="shrink-0 flex flex-col items-center gap-3 px-8 pb-10 text-center">
+						<p class="text-sm text-muted-foreground max-w-sm">
+							Connecting to the gateway… If this doesn't resolve, the gateway
+							address may have changed — reconnect or re-scan the QR code.
+						</p>
+						${Button({
+							variant: "outline",
+							size: "sm",
+							onClick: openGatewayDialog,
+							children: html`<span class="inline-flex items-center gap-2">${icon(Server, "sm")} Reconnect</span>`,
+						})}
+					</div>
+				</div>
 			</div>
 		`, app);
 		return;
