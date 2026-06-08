@@ -40,7 +40,7 @@ import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
-import { ActionDispatcher, ActionError } from "./extension-host/action-dispatcher.js";
+import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { authorizeActionRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
@@ -5176,10 +5176,19 @@ async function handleApiRoute(
 	const rendererMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/renderer$/);
 	if (rendererMatch && req.method === "GET") {
 		const tool = decodeURIComponent(rendererMatch[1]);
+		// Resolve through the PROJECT-scoped tool manager when a projectId is given
+		// (design §4b — same `?? toolManager` fallback as GET /api/tools): a pack
+		// installed at PROJECT scope, or one that shadows a same-named global tool,
+		// must serve the PROJECT winner — never the split-brain server-level one.
+		const rendererProjectId = url.searchParams.get("projectId") || undefined;
+		const rendererTm = resolveActionToolManager(
+			toolManager,
+			rendererProjectId ? projectContextManager.getOrCreate(rendererProjectId)?.toolManager : undefined,
+		);
 		// Resolve the WINNING tool's on-disk location independent of `provider:`
 		// (design §4b — a pack renderer needs no provider). resolveToolLocation
 		// honors the same pack precedence as every other tool resolution.
-		const loc = toolManager.resolveToolLocation(tool);
+		const loc = rendererTm.resolveToolLocation(tool);
 		if (!loc || loc.rendererKind !== "pack" || !loc.rendererFile || !loc.baseDir) {
 			json({ error: "no pack renderer for this tool" }, 404);
 			return;
@@ -5213,7 +5222,24 @@ async function handleApiRoute(
 		const action = decodeURIComponent(actionMatch[2]);
 		const body = (await readBody(req)) ?? {};
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
-		const info = toolManager.getToolByName(tool);
+		// Resolve the tool through the SESSION's project-scoped tool manager (design
+		// §4b): the project is derived from the session, NOT from the client, so a
+		// project-scope pack (or a project pack shadowing a global tool) dispatches
+		// the SAME winner the session's tool resolution sees — no split-brain. The
+		// header session id is the canonical identity (the guard rejects a body/header
+		// mismatch or unknown session); resolving from it before the guard is safe
+		// because an invalid session falls back to the server-level manager and the
+		// guard then rejects the request anyway.
+		const actionHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const actionSessionProjectId = actionHeaderSid
+			? (sessionManager.getSession(actionHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(actionHeaderSid)?.projectId)
+			: undefined;
+		const sessionToolManager = resolveActionToolManager(
+			toolManager,
+			actionSessionProjectId ? projectContextManager.getOrCreate(actionSessionProjectId)?.toolManager : undefined,
+		);
+		const info = sessionToolManager.getToolByName(tool);
 
 		// Resolve a session's allowlist (live preferred, else persisted).
 		const resolveSession = (id: string): ActionGuardSession | undefined => {
@@ -5265,7 +5291,7 @@ async function handleApiRoute(
 		});
 		const start = Date.now();
 		try {
-			const result = await dispatcher.dispatch(tool, action, { host, sessionId: guard.sessionId, toolUseId, tool }, args);
+			const result = await dispatcher.dispatch(tool, action, { host, sessionId: guard.sessionId, toolUseId, tool }, args, sessionToolManager);
 			console.log(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
 			json(result ?? null);
 		} catch (err) {

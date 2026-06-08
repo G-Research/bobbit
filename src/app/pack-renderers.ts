@@ -20,7 +20,7 @@
 // with no install-time client state.
 
 import { html, nothing } from "lit";
-import { registerLazyToolRenderer, renderHeader } from "../ui/tools/renderer-registry.js";
+import { registerLazyToolRenderer, unregisterPackRenderer, renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 
 /** Host toolkit handed to a pack renderer's factory. Keeps the pack on the
@@ -33,6 +33,12 @@ export interface PackRendererToolInfo {
 	rendererKind?: string;
 }
 
+/** Names currently registered as pack renderers by {@link registerPackRenderers}.
+ *  Tracked so a later call can RECONCILE: any previously pack-owned name that is
+ *  no longer `rendererKind:"pack"` in the fresh metadata (uninstall, or a
+ *  precedence change) is unregistered, restoring the displaced built-in. */
+let packRegistered = new Set<string>();
+
 /**
  * Idempotent: register a lazy loader for every pack tool that ships a renderer.
  * Re-driven on every cold load AND after a marketplace install/uninstall (which
@@ -42,13 +48,23 @@ export interface PackRendererToolInfo {
  * WINNING provider for that tool name (it shadowed the built-in tool), so its
  * renderer must win too.
  */
-export function registerPackRenderers(tools: ReadonlyArray<PackRendererToolInfo>): void {
+export function registerPackRenderers(
+	tools: ReadonlyArray<PackRendererToolInfo>,
+	/** The active project id, threaded so the renderer Blob-fetch resolves the
+	 *  SAME winning provider the metadata fetch saw (design §4b — no split-brain:
+	 *  a project-scope pack, or a project pack shadowing a global tool, must serve
+	 *  its own renderer). Omitted for server/global scope. */
+	projectId?: string,
+): void {
+	const next = new Set<string>();
 	for (const t of tools) {
 		if (t.rendererKind !== "pack") continue;
+		next.add(t.name);
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 		registerLazyToolRenderer(
 			t.name,
 			async () => {
-				const url = `/api/tools/${encodeURIComponent(t.name)}/renderer`;
+				const url = `/api/tools/${encodeURIComponent(t.name)}/renderer${qs}`;
 				const resp = await gatewayFetch(url); // authed (admin bearer); no session binding needed
 				if (!resp.ok) throw new Error(`renderer ${t.name} HTTP ${resp.status}`);
 				const blob = await resp.blob();
@@ -65,4 +81,12 @@ export function registerPackRenderers(tools: ReadonlyArray<PackRendererToolInfo>
 			{ override: true },
 		);
 	}
+	// RECONCILE: any name we previously registered as a pack renderer but that is
+	// no longer pack-owned in the fresh metadata (uninstall / precedence change)
+	// must be torn down so the running UI stops using the stale pack renderer and
+	// restores any displaced built-in — without a page reload (design §4a).
+	for (const name of packRegistered) {
+		if (!next.has(name)) unregisterPackRenderer(name);
+	}
+	packRegistered = next;
 }

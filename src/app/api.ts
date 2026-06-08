@@ -2079,9 +2079,10 @@ export interface ToolInfo {
 	grantPolicy?: string;
 }
 
-export async function fetchTools(): Promise<ToolInfo[]> {
+export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
 	try {
-		const res = await gatewayFetch("/api/tools");
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
 		const data = await res.json();
 		const tools = data.tools || data || [];

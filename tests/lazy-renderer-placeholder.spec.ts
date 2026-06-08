@@ -150,6 +150,56 @@ test.describe("Pack renderer { override } precedence (extension-host §4a)", () 
 		await expect(page.locator("#probe [data-eager-button]")).toHaveCount(0);
 	});
 
+	test("unregister restores the displaced built-in renderer in place (uninstall reconciliation §4a)", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) Eager built-in, then a pack override that displaces it; render once to
+		//    kick off the lazy loader, then resolve the pack.
+		await page.evaluate(async () => {
+			(window as any).__registerEagerRenderer("reconcile_tool", "BUILTIN");
+			(window as any).__registerOverrideDeferredLazy("reconcile_tool");
+			(window as any).__renderRegistered("reconcile_tool"); // placeholder → starts load
+			const wait = (window as any).__waitForRendererLoaded("reconcile_tool");
+			(window as any).__resolveDeferredLazy("reconcile_tool", "PACK_RENDERER");
+			await wait;
+			(window as any).__renderRegistered("reconcile_tool");
+		});
+		// Pack renderer is effective; the built-in is suppressed.
+		await expect(page.locator("#probe [data-real-button]")).toContainText("PACK_RENDERER");
+		await expect(page.locator("#probe [data-eager-button]")).toHaveCount(0);
+
+		// 2) Unregister the pack (uninstall) → the displaced built-in is RESTORED.
+		await page.evaluate(() => {
+			(window as any).__unregisterPack("reconcile_tool");
+			(window as any).__renderRegistered("reconcile_tool");
+		});
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("BUILTIN");
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(0);
+	});
+
+	test("unregister of a pack tool with no built-in falls back to default (no renderer)", async ({ page }) => {
+		await gotoAndWait(page);
+
+		await page.evaluate(async () => {
+			(window as any).__registerOverrideDeferredLazy("orphan_pack_tool");
+			(window as any).__renderRegistered("orphan_pack_tool"); // placeholder → starts load
+			const wait = (window as any).__waitForRendererLoaded("orphan_pack_tool");
+			(window as any).__resolveDeferredLazy("orphan_pack_tool", "PACK_ONLY");
+			await wait;
+			(window as any).__renderRegistered("orphan_pack_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toContainText("PACK_ONLY");
+
+		await page.evaluate(() => {
+			(window as any).__unregisterPack("orphan_pack_tool");
+			(window as any).__renderRegistered("orphan_pack_tool");
+		});
+		// No built-in to restore → getToolRenderer returns undefined (default render).
+		await expect(page.locator("#probe [data-no-renderer]")).toHaveCount(1);
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+	});
+
 	test("an unshadowed built-in renderer is untouched by override registrations", async ({ page }) => {
 		await gotoAndWait(page);
 

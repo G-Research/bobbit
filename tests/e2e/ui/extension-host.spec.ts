@@ -14,7 +14,10 @@
  *      `message`), proving renderer-local state propagation (§4a).
  *   4. Reload → the pack renderer still loads (registration re-driven from
  *      /api/tools metadata — survives reload).
- *   5. Uninstall → /api/tools drops `sample_action` and a subsequent action
+ *   5. Uninstall → /api/tools drops `sample_action`; the client reconcile
+ *      (registerPackRenderers re-driven, as a marketplace mutation does) removes
+ *      the PACK renderer from the LIVE UI (Retry button gone) WITHOUT a reload
+ *      (Issue B — uninstall reconciliation, design §4a); a subsequent action
  *      POST → 404.
  *
  * WHY SERVER SCOPE: the action endpoint + renderer endpoint + GET /api/tools
@@ -28,47 +31,11 @@
  * widget, asserting on its DOM + reload restore).
  *
  * ───────────────────────────────────────────────────────────────────────────
- * STATUS: BLOCKED by two real Wave 1/2 integration bugs this litmus exposed
- * (the litmus doing its job — "if it fails to map cleanly, fix the SHAPE"):
- *
- *   FINDING #1 (renderer + actions cannot resolve a provider-less pack tool).
- *     ToolManager.getToolProviders() (src/server/agent/tool-manager.ts:623) only
- *     includes tools that declare a `provider:` — `if (tool.provider) map.set(...)`.
- *     The design §2.4 example pack tool declares NO provider, so the renderer
- *     endpoint (server.ts ~5185) and ActionDispatcher.resolveModulePath() both
- *     fail to find it → 404. Repro: delete the `provider:` block from
- *     sample_action.yaml → GET /api/tools/sample_action/renderer returns 404.
- *     Fix options: (a) include provider-less scanned tools in getToolProviders
- *     (carry baseDir/groupDir regardless of provider), or (b) resolve renderer/
- *     actions paths from getToolByName's BaseToolInfo (it already has baseDir/
- *     groupDir), or (c) mandate `provider:` on pack tools + update design §2.4.
- *     This spec WORKS AROUND it (the fixture YAML declares a provider) so it can
- *     reach finding #2.
- *
- *   FINDING #2 (action-result never repaints the tool block) — ACCEPTANCE-
- *     BLOCKING for litmus step 3 / design §8.2.3 / §5 iii-c. With the workaround
- *     in place the action POST succeeds end-to-end ([ext-action] outcome=ok) and
- *     the renderer stores the result + calls `ctx.host.requestRender()`, but the
- *     renderer's render() is NEVER re-invoked, so `pack-result` never appears.
- *     Root cause: `host.requestRender()` (src/app/host-api.ts) is "a thin wrapper
- *     over renderApp()" (design §4a), but renderApp() does NOT force the memoized
- *     <tool-group>/<tool-message> LitElement to re-run the renderer (its reactive
- *     props are unchanged). The lazy-load path works only because the registry
- *     ALSO dispatches TOOL_RENDERER_LOADED_EVENT (renderer-registry.ts) which the
- *     tool components listen to and requestUpdate() on — requestRender has no such
- *     force-update. The blessed interactive pattern (children-mutation-approval)
- *     sidesteps this with a self-contained @customElement + @state, but the
- *     Phase-1 host toolkit injects only { html, nothing, renderHeader } — NO
- *     LitElement/@customElement/@state — and a Blob-imported pack module cannot
- *     bare-import `lit` (no import map; §4a rejected import maps). So a pack
- *     renderer has NO working Phase-1 way to repaint after an action.
- *     Fix options: (a) make host.requestRender() dispatch TOOL_RENDERER_LOADED_
- *     EVENT (force tool components to requestUpdate), or (b) extend the host
- *     toolkit with LitElement/@customElement/@state so packs can mount a
- *     self-contained reactive element like children-mutation-approval.
- *
- * This spec + fixtures are correct and PASS once both are fixed; it is committed
- * but NOT pushed while blocked (failing-test protocol).
+ * History: the litmus initially exposed two Wave 1/2 integration bugs (resolving
+ * a provider-less pack tool; the action-result repaint via host.requestRender())
+ * — both fixed in Wave 4, so this spec is GREEN. Wave 5 added the §4a uninstall-
+ * reconciliation assertion (Issue B): an uninstall must drop the pack renderer
+ * from the running UI without a reload.
  * ───────────────────────────────────────────────────────────────────────────
  */
 import { fileURLToPath } from "node:url";
@@ -207,8 +174,7 @@ test.describe("Extension Host Phase 1 — litmus (full-stack UI)", () => {
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 		await expect(page.locator('[data-testid="pack-retry"]').first()).toBeVisible({ timeout: 25_000 });
 
-		// ── Step 5: uninstall → /api/tools drops sample_action, and a direct
-		// action POST → 404 (tool no longer declares actions). ──
+		// ── Step 5: uninstall → /api/tools drops sample_action. ──
 		const delRes = await apiFetch("/api/marketplace/installed", {
 			method: "DELETE",
 			body: JSON.stringify({ scope: "server", packName: PACK }),
@@ -217,6 +183,22 @@ test.describe("Extension Host Phase 1 — litmus (full-stack UI)", () => {
 
 		const afterTools = await listToolNames();
 		expect(afterTools.find((t) => t.name === TOOL), "sample_action must be gone after uninstall").toBeFalsy();
+
+		// Issue B (design §4a): re-drive the client reconcile exactly as a
+		// marketplace install/uninstall does (registerPackRenderers from a fresh
+		// /api/tools). The pack renderer must be torn down from the LIVE UI — the
+		// Retry button disappears WITHOUT a page reload (the tool block falls back
+		// to default rendering since no built-in shadowed it). The reconcile is
+		// idempotent, so poll-driving it (and swallowing any transient navigation
+		// from the out-of-band uninstall's WS broadcast) keeps the assertion
+		// deterministic.
+		await expect
+			.poll(async () => {
+				await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => { /* navigation race */ });
+				return page.locator('[data-testid="pack-retry"]').count();
+			}, { timeout: 15_000 })
+			.toBe(0);
+		await expect(page.locator('[data-testid="pack-result"]')).toHaveCount(0);
 
 		const postAfter = await apiFetch(`/api/tools/${TOOL}/actions/retry`, {
 			method: "POST",

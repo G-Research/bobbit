@@ -45,6 +45,12 @@ const inFlight = new Map<string, Promise<ToolRenderer>>();
 // `registerToolRenderer` for a pack-owned name is ignored so the pack always
 // wins (extension-host §4a renderer precedence). See registerLazyToolRenderer.
 const packOwned = new Set<string>();
+// Eager built-in renderers DISPLACED by a pack `{ override: true }`. Stashed at
+// override time so `unregisterPackRenderer` (uninstall / precedence change) can
+// RESTORE the built-in instead of leaving the tool with default rendering
+// (extension-host §4a — uninstall must reconcile the running UI without a
+// reload). Keyed by tool name.
+const displacedBuiltins = new Map<string, ToolRenderer>();
 
 /**
  * Register a custom tool renderer
@@ -85,11 +91,45 @@ export function registerLazyToolRenderer(
 	if (opts?.override) {
 		// Pack is the resolved winning provider for this tool name — its renderer
 		// must win too. Delete any eager entry and mark the name pack-owned so a
-		// later eager registration cannot reclaim it.
+		// later eager registration cannot reclaim it. Stash a displaced eager
+		// BUILT-IN (only on the first override, before the name is pack-owned) so
+		// unregisterPackRenderer can restore it on uninstall.
+		if (!packOwned.has(toolName)) {
+			const existing = toolRenderers.get(toolName);
+			if (existing) displacedBuiltins.set(toolName, existing);
+		}
 		toolRenderers.delete(toolName);
 		packOwned.add(toolName);
 	}
 	pendingLazy.set(toolName, loader);
+}
+
+/**
+ * Remove a pack renderer registered via `{ override: true }` and reconcile the
+ * running UI (extension-host §4a). Drops the name from every registry map
+ * (`toolRenderers`, `pendingLazy`, `inFlight`, `packOwned`) and RESTORES the
+ * built-in renderer stashed when the pack first displaced it — so after a pack
+ * uninstall (or a precedence change that drops the pack winner) a shadowed
+ * built-in renders again, and a pack tool with no built-in falls back to default
+ * rendering. No-op for a name that is not pack-owned. Dispatches the standard
+ * renderer-loaded event so mounted `<tool-message>`/`<tool-group>` blocks for
+ * the tool repaint immediately, without a page reload.
+ */
+export function unregisterPackRenderer(toolName: string): void {
+	if (!packOwned.has(toolName)) return;
+	toolRenderers.delete(toolName);
+	pendingLazy.delete(toolName);
+	inFlight.delete(toolName);
+	packOwned.delete(toolName);
+	const stashed = displacedBuiltins.get(toolName);
+	if (stashed) {
+		toolRenderers.set(toolName, stashed);
+		displacedBuiltins.delete(toolName);
+	}
+	// Repaint mounted tool blocks for this tool (same mechanism the lazy-load
+	// resolve uses); belt-and-braces top-down re-render too.
+	dispatchRendererLoaded(toolName);
+	try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
 }
 
 /** Custom DOM event dispatched on `document` after a lazy renderer resolves

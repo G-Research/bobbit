@@ -429,10 +429,17 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   because chunk names are content-hashed, and a second lit instance breaks reactive
   directives. Documented here so Phase 2 doesn't reopen it.)
 
-- **Gateway endpoint** `GET /api/tools/:tool/renderer` (`server.ts::handleApiRoute`):
+- **Gateway endpoint** `GET /api/tools/:tool/renderer?projectId=<id>` (`server.ts::handleApiRoute`):
   resolve the tool's winning `{baseDir, groupDir, rendererFile, rendererKind}` via
-  `toolManager.resolveToolLocation(tool)` — a provider-INDEPENDENT lookup sourced from
-  `loadToolDefinitions` (a pack renderer needs NO `provider:`); require
+  `resolveToolLocation(tool)` on the PROJECT-scoped tool manager when a `projectId` query
+  param is present (`(projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager`
+  — the same `?? toolManager` fallback as `GET /api/tools`, via the shared
+  `resolveActionToolManager` helper). This avoids a split-brain where a project-scope pack
+  (or a project pack shadowing a same-named global tool) would serve the wrong global
+  renderer; the client threads its active `projectId` into the renderer Blob fetch so it
+  resolves the SAME winner the `/api/tools` metadata reported. Resolution is a
+  provider-INDEPENDENT lookup sourced from `loadToolDefinitions` (a pack renderer needs NO
+  `provider:`); require
   `rendererKind === "pack"`; read the file at
   `path.join(baseDir, groupDir, rendererFile)` (re-validate the path stays within
   `baseDir/groupDir` — reject traversal); respond `200 text/javascript` with
@@ -458,17 +465,24 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
 
   const HOST_TOOLKIT = { html, nothing, renderHeader };
 
-  /** Idempotent: registers a lazy loader for every pack tool that ships a renderer.
-   *  Re-driven on every cold load AND after marketplace install/uninstall (which
-   *  re-fetches /api/tools). `{ override: true }` makes the pack loader the EFFECTIVE
-   *  renderer even when an eager builtin of the same name is already registered — because
+  /** Idempotent + RECONCILING: registers a lazy loader for every pack tool that ships a
+   *  renderer, and tears down any name it previously pack-registered that is no longer
+   *  `rendererKind:"pack"` in the fresh metadata (uninstall / precedence change — §4a
+   *  uninstall reconciliation). Re-driven on every cold load AND after marketplace
+   *  install/uninstall (which re-fetches /api/tools). The active `projectId` is threaded
+   *  in so the renderer Blob fetch resolves the SAME winner the metadata fetch saw (no
+   *  split-brain). `{ override: true }` makes the pack loader the EFFECTIVE renderer even
+   *  when an eager builtin of the same name is already registered — because
    *  `rendererKind === "pack"` means the pack is the resolved WINNING provider for that
    *  tool name (it shadowed the builtin tool), so its renderer must win too. */
-  export function registerPackRenderers(tools: Array<{ name: string; rendererKind?: string }>): void {
+  export function registerPackRenderers(tools: Array<{ name: string; rendererKind?: string }>, projectId?: string): void {
+    const next = new Set<string>();
     for (const t of tools) {
       if (t.rendererKind !== "pack") continue;
+      next.add(t.name);
+      const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
       registerLazyToolRenderer(t.name, async () => {
-        const url = `/api/tools/${encodeURIComponent(t.name)}/renderer`;
+        const url = `/api/tools/${encodeURIComponent(t.name)}/renderer${qs}`;
         const resp = await gatewayFetch(url);              // authed (admin bearer); no session binding needed
         if (!resp.ok) throw new Error(`renderer ${t.name} HTTP ${resp.status}`);
         const blob = await resp.blob();
@@ -483,8 +497,22 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
         }
       }, { override: true });
     }
+    // RECONCILE: unregister any previously pack-owned name absent from `next`.
+    for (const name of packRegistered) if (!next.has(name)) unregisterPackRenderer(name);
+    packRegistered = next;
   }
   ```
+
+  **Uninstall reconciliation (no reload, §4a).** `registerLazyToolRenderer(name, loader,
+  { override: true })` STASHES any eager built-in it displaces in a `displacedBuiltins`
+  map. The new `unregisterPackRenderer(name)` drops the name from every registry map
+  (`toolRenderers`, `pendingLazy`, `inFlight`, `packOwned`), RESTORES the stashed built-in
+  if one existed (else leaves the tool to default rendering), and dispatches the standard
+  renderer-loaded event so mounted `<tool-message>`/`<tool-group>` blocks repaint
+  immediately. `registerPackRenderers` calls it for any name it previously registered that
+  the fresh `/api/tools` no longer reports as a pack renderer — so a marketplace uninstall
+  (which re-drives `registerPackRenderers(await fetchTools(projectId), projectId)`) removes
+  the pack renderer from the RUNNING UI without a page reload.
 
   `registerLazyToolRenderer` already returns the **placeholder** on first
   `getToolRenderer` and installs the **load-failure** fallback on loader rejection
@@ -552,10 +580,20 @@ export class ActionDispatcher {
 }
 ```
 
-Resolution uses `toolManager.resolveToolLocation(tool)` (a provider-INDEPENDENT lookup that
+Resolution uses `resolveToolLocation(tool)` (a provider-INDEPENDENT lookup that
 resolves through the full builtin < market < user cascade in `loadToolDefinitions`) to
 obtain `baseDir` + `groupDir` + the `actions.module` path (default `"actions.js"`) in one
-call — a pack actions module needs NO `provider:`. Load via
+call — a pack actions module needs NO `provider:`. **The resolver is the SESSION's**
+**project-scoped tool manager**, not the server-level one: the endpoint derives the project
+from the session (`sessionManager.getSession(sid)?.projectId ?? getPersistedSession(sid)?.projectId`)
+and resolves `(projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager`
+(the shared `resolveActionToolManager` helper). The SAME session-project manager is used
+for BOTH the `getToolByName` metadata (allowlist / `hasActions` / `actionNames`) AND the
+location the `ActionDispatcher` consumes (passed as `dispatch(..., resolver)`), so the
+winning provider the dispatcher loads matches what the session's tool resolution sees — no
+split-brain, and a project-scope pack (or a project pack shadowing a global tool) dispatches
+its OWN handler. With no project (server/global scope) the `?? toolManager` fallback keeps
+the path byte-identical. Load via
 `await import(pathToFileURL(abs).href)`. **Cache** is a
 `Map<absPath, { mtimeMs; module }>`; a stale mtime reloads (mirrors `scanToolsDirCached`).
 
@@ -693,6 +731,14 @@ not contradict the single-choke-point claim. The boundary is precise:
   new server capability and NO new bypass: the LLM/UI can already call these endpoints with
   the admin token. So pre-existing endpoints keep their own authz; `fetch` adds nothing to
   authorize.
+- **The client host API is the choke point for the injected bearer.** `host-api.ts`
+  `withSession` (which assembles headers for both `gateway.fetch` and `invokeAction`)
+  STRIPS any caller-supplied `Authorization`/`authorization` header (case-insensitive, via
+  the dependency-free `stripAuthorizationHeaders` in `gateway-fetch.ts`) BEFORE delegating
+  to `gatewayFetch`, so a renderer cannot override the injected admin bearer by passing its
+  own `Authorization` in `init.headers` (the shared `gatewayFetch` spreads `options.headers`
+  AFTER setting `Authorization`, so the strip must happen at the host-api choke point). The
+  server-side host API already sets `Authorization` after the spread, so it is unaffected.
 - **The "authorize like tool calls" rule applies to the NEW typed entry points** the
   extension host introduces: the **action endpoint** (`/api/tools/:tool/actions/:action`,
   behind the `allowedTools` guard, control i) and the reserved Phase-2 **`routes:`** /

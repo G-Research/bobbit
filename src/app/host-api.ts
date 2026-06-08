@@ -14,24 +14,23 @@
 // Phase 2" error so misuse is obvious, not silent.
 
 import { HOST_API_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
-import { gatewayFetch } from "./gateway-fetch.js";
+import { gatewayFetch, stripAuthorizationHeaders } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it at
  *  server.ts:9030/10953). `gatewayFetch` supplies the Authorization bearer;
- *  callers must NOT pass their own. When no session is bound, the header is
- *  omitted and `gatewayFetch` behaves exactly as before. */
+ *  callers must NOT pass their own — this is the host-API security choke point
+ *  (extension-host.md §5.1), so any caller-supplied `Authorization` header is
+ *  STRIPPED here (case-insensitive) before delegating, ensuring the injected
+ *  bearer always wins regardless of how the renderer assembled its init. When no
+ *  session is bound the header is omitted, but the Authorization strip still
+ *  applies. */
 function withSession(init: RequestInit | undefined, sessionId: string | undefined): RequestInit {
-	if (!sessionId) return init ?? {};
-	return {
-		...init,
-		headers: {
-			...(init?.headers ?? {}),
-			"x-bobbit-session-id": sessionId,
-		},
-	};
+	const headers = stripAuthorizationHeaders(init?.headers);
+	if (sessionId) headers["x-bobbit-session-id"] = sessionId;
+	return { ...init, headers };
 }
 
 /** Build the Phase-1 client Host API bound to a given session AND the

@@ -53,6 +53,20 @@ export interface ActionToolLocationResolver {
 	resolveToolLocation(tool: string): { baseDir: string; groupDir: string; actionsModule?: string } | undefined;
 }
 
+/**
+ * Pick the tool-location resolver whose precedence a session's action/renderer
+ * resolution MUST honor: the session's PROJECT-scoped tool manager when one is
+ * available, else the server-level fallback (design §4b). A project pack that
+ * shadows a same-named global tool must serve/dispatch the PROJECT winner — never
+ * a split-brain global one. The renderer GET, the action POST metadata lookup,
+ * and the dispatcher's location resolution all run through this so they always
+ * agree on the winning provider. With no project (server/global scope) it returns
+ * the server-level resolver, keeping the zero-/server-scope path byte-identical.
+ */
+export function resolveActionToolManager<T>(serverTm: T, projectTm: T | undefined | null): T {
+	return projectTm ?? serverTm;
+}
+
 export interface ActionDispatcherOptions {
 	/** Per-call timeout in ms (default 30_000). */
 	timeoutMs?: number;
@@ -137,8 +151,8 @@ export class ActionDispatcher {
 	 * the group dir (design §5 ii). Returns null when the tool has no resolvable
 	 * on-disk location.
 	 */
-	private resolveModulePath(tool: string): string | null {
-		const loc = this.toolManager.resolveToolLocation(tool);
+	private resolveModulePath(tool: string, resolver: ActionToolLocationResolver = this.toolManager): string | null {
+		const loc = resolver.resolveToolLocation(tool);
 		if (!loc || !loc.baseDir) return null;
 		const dir = path.join(loc.baseDir, loc.groupDir || "");
 		const moduleRel = loc.actionsModule ?? "actions.js";
@@ -153,8 +167,8 @@ export class ActionDispatcher {
 	}
 
 	/** Load (or return cached) the winning actions module for a tool. */
-	private async loadModule(tool: string): Promise<ActionsModule | null> {
-		const abs = this.resolveModulePath(tool);
+	private async loadModule(tool: string, resolver: ActionToolLocationResolver = this.toolManager): Promise<ActionsModule | null> {
+		const abs = this.resolveModulePath(tool, resolver);
 		if (!abs) return null;
 
 		let stat: fs.Stats;
@@ -218,7 +232,18 @@ export class ActionDispatcher {
 	 * controls. Throws `ActionError` (carrying an HTTP status) on any failure;
 	 * the endpoint maps it to a JSON error response.
 	 */
-	async dispatch(tool: string, action: string, ctx: ActionHandlerCtx, args: unknown): Promise<unknown> {
+	async dispatch(
+		tool: string,
+		action: string,
+		ctx: ActionHandlerCtx,
+		args: unknown,
+		/** Optional per-call location resolver (the SESSION's project-scoped tool
+		 *  manager). Defaults to the server-level resolver passed to the constructor.
+		 *  The endpoint passes the session-project resolver so the module loaded
+		 *  matches the winner the session's tool resolution sees (design §4b, no
+		 *  split-brain). */
+		resolver: ActionToolLocationResolver = this.toolManager,
+	): Promise<unknown> {
 		// Per-session rate limit (cheap, before any fs/import work).
 		if (this.limiter && !this.limiter.allow(ctx.sessionId)) {
 			throw new ActionError(429, "action rate limit exceeded for this session");
@@ -229,7 +254,7 @@ export class ActionDispatcher {
 		}
 		this.inFlight++;
 		try {
-			const module = await this.loadModule(tool);
+			const module = await this.loadModule(tool, resolver);
 			if (!module) throw new ActionError(404, `no actions module found for tool "${tool}"`);
 			const handler = module.actions[action];
 			if (typeof handler !== "function") throw new ActionError(404, `unknown action "${action}" for tool "${tool}"`);

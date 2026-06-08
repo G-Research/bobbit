@@ -23,6 +23,7 @@ import path from "node:path";
 import {
 	ActionDispatcher,
 	ActionError,
+	resolveActionToolManager,
 	type ActionHandlerCtx,
 	type ActionToolLocationResolver,
 } from "../src/server/extension-host/action-dispatcher.ts";
@@ -182,6 +183,38 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { ok: 1 });
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { ok: 1 });
 		await assert.rejects(() => d.dispatch("sample_action", "retry", ctx(), {}), (e) => e instanceof ActionError && e.status === 429);
+	});
+});
+
+describe("resolveActionToolManager — project-scope precedence (no split-brain, design §4b)", () => {
+	it("returns the PROJECT tool manager when one is present (project pack wins)", () => {
+		const server = { id: "server" } as unknown as ActionToolLocationResolver;
+		const project = { id: "project" } as unknown as ActionToolLocationResolver;
+		assert.equal(resolveActionToolManager(server, project), project);
+	});
+
+	it("falls back to the SERVER manager when there is no project (server/global scope)", () => {
+		const server = { id: "server" } as unknown as ActionToolLocationResolver;
+		assert.equal(resolveActionToolManager(server, undefined), server);
+		assert.equal(resolveActionToolManager(server, null), server);
+	});
+
+	it("dispatch honors the per-call (project) resolver over the constructor (server) one", async () => {
+		// The constructor resolver points at a BUILTIN actions.js; a per-call
+		// resolver points at a PROJECT-pack actions.js that shadows it. The pack
+		// winner must run — proving the endpoint's session-project resolver wins.
+		const builtin = path.join(tmp, "case-percall", "builtin");
+		const projectPack = path.join(tmp, "case-percall", "project-pack");
+		writeTool(builtin, "demo", { actionsJs: `export const actions = { retry: async () => ({ from: "server" }) };` });
+		writeTool(projectPack, "demo", { actionsJs: `export const actions = { retry: async () => ({ from: "project" }) };` });
+		const d = new ActionDispatcher(resolver(builtin, "demo"), { rate: null });
+		// Default (constructor) resolver → builtin.
+		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { from: "server" });
+		// Per-call project resolver → project pack winner.
+		assert.deepEqual(
+			await d.dispatch("sample_action", "retry", ctx(), {}, resolver(projectPack, "demo")),
+			{ from: "project" },
+		);
 	});
 });
 

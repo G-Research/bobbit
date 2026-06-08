@@ -2,7 +2,7 @@
 // so we can exercise the lazy-renderer placeholder + resolve flow under a
 // file:// fixture.
 import { html, render } from "lit";
-import { registerLazyToolRenderer, registerToolRenderer, getToolRenderer } from "../../src/ui/tools/renderer-registry.js";
+import { registerLazyToolRenderer, registerToolRenderer, unregisterPackRenderer, getToolRenderer } from "../../src/ui/tools/renderer-registry.js";
 import type { ToolRenderer } from "../../src/ui/tools/types.js";
 import "../../src/ui/components/Messages.js";
 
@@ -118,6 +118,12 @@ const deferreds = new Map<string, Deferred<ToolRenderer>>();
 	}
 	// render() returns a ToolRenderResult { content, isCustom } — mount its content.
 	render(r.render(undefined, undefined, false).content, slot);
+};
+
+/** Tear down a pack renderer (uninstall / precedence change) — restores any
+ *  displaced eager built-in (extension-host §4a uninstall reconciliation). */
+(window as any).__unregisterPack = (toolName: string) => {
+	unregisterPackRenderer(toolName);
 };
 
 (window as any).__mountToolMessage = mountToolMessage;

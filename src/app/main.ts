@@ -89,6 +89,19 @@ loadPersistedPanelWorkspace(state);
 (window as any).__bobbitRenderTool = renderTool;
 import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
 
+// E2E test hook: re-drive pack-renderer reconciliation (extension-host §4a) the
+// SAME way a marketplace install/uninstall does (marketplace-page.ts), so browser
+// E2E can assert the running UI reconciles (stale pack renderer removed, built-in
+// restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
+(window as any).__bobbitReconcilePackRenderers = async () => {
+	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+		import("./api.js"),
+		import("./pack-renderers.js"),
+	]);
+	const pid = state.activeProjectId ?? undefined;
+	registerPackRenderers(await fetchTools(pid), pid);
+};
+
 function hasActiveProposalPanel(): boolean {
 	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
 }
@@ -529,7 +542,12 @@ async function initApp() {
 						import("./api.js"),
 						import("./pack-renderers.js"),
 					]);
-					registerPackRenderers(await fetchTools());
+					// Thread the active project so a project-scope pack's renderer
+					// metadata + Blob fetch resolve the same winner (design §4b). May be
+					// null this early in boot; server/global-scope packs still register
+					// (the marketplace refresh re-drives this with the active project).
+					const activeProjectId = state.activeProjectId ?? undefined;
+					registerPackRenderers(await fetchTools(activeProjectId), activeProjectId);
 				} catch { /* non-fatal — built-in renderers are unaffected */ }
 			})();
 

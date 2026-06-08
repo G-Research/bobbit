@@ -197,7 +197,12 @@ async function refreshConfigPages(): Promise<void> {
 				import("./api.js"),
 				import("./pack-renderers.js"),
 			]);
-			registerPackRenderers(await fetchTools());
+			// Resolve renderers for the marketplace's focused project so a
+			// project-scope install/uninstall reconciles + serves the right winner
+			// (design §4b). registerPackRenderers also tears down renderers no longer
+			// present — the uninstall reconciliation path (design §4a).
+			const projectId = currentProjectId();
+			registerPackRenderers(await fetchTools(projectId), projectId);
 		})().catch(() => {}),
 	]);
 }
