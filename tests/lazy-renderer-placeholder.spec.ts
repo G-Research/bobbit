@@ -322,3 +322,151 @@ test.describe("In-flight lazy load TOCTOU guard (generation token)", () => {
 		await expect(page.locator("#probe [data-real-button]")).toContainText("FRESH_B");
 	});
 });
+
+/**
+ * Writer-ordering MATRIX (Wave 10C). The renderer registry routes EVERY
+ * mutation through one generation-guarded chokepoint, so a deferred lazy load
+ * resolving AFTER a superseding write is structurally dropped — regardless of
+ * which writer superseded it. Each case drives a different ordering and asserts
+ * BOTH the resolved renderer AND that no resurrecting repaint event fired for
+ * the superseded resolve (the loaded-event-count helper).
+ */
+test.describe("Writer-ordering matrix: stale deferred applies are structurally dropped (Wave 10C)", () => {
+	test("lazy-start → eager registerToolRenderer → stale lazy resolves: the EAGER renderer wins (eager-gap fix)", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) A non-pack lazy renderer is registered and STARTED (placeholder shown).
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("eager_gap_tool", "LAZY", false);
+			(window as any).__renderRegistered("eager_gap_tool"); // starts the lazy load
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// 2) An EAGER registerToolRenderer lands for the SAME name while the lazy
+		//    load is still in flight. This must bump the generation + drop the
+		//    in-flight promise so the stale lazy can no longer resurrect over it.
+		const countAfterEager = await page.evaluate(() => {
+			(window as any).__registerEagerRenderer("eager_gap_tool", "EAGER_WINS");
+			(window as any).__renderRegistered("eager_gap_tool");
+			return (window as any).__loadedEventCount("eager_gap_tool");
+		});
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("EAGER_WINS");
+
+		// 3) The stale lazy resolves LAST — it must be a no-op (no write, no repaint).
+		const countAfterResolve = await page.evaluate(async () => {
+			(window as any).__resolveKeyedLazy("LAZY", "STALE_LAZY");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("eager_gap_tool");
+			return (window as any).__loadedEventCount("eager_gap_tool");
+		});
+		// Eager renderer still wins; the stale lazy never landed.
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("EAGER_WINS");
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+		// No resurrecting repaint fired for the superseded resolve.
+		expect(countAfterResolve).toBe(countAfterEager);
+	});
+
+	test("lazy-start → pack {override} → stale lazy resolves: the PACK renderer wins", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) A non-pack lazy renderer registered + started.
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("override_race_tool", "BUILTIN_LAZY", false);
+			(window as any).__renderRegistered("override_race_tool"); // starts builtin lazy load
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// 2) A pack { override } loader supersedes it mid-flight (bumps generation,
+		//    drops the in-flight builtin promise), then starts the pack load.
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("override_race_tool", "PACK", true);
+			(window as any).__renderRegistered("override_race_tool"); // starts pack load
+		});
+
+		// 3) The stale BUILTIN lazy resolves first — must be ignored.
+		await page.evaluate(async () => {
+			(window as any).__resolveKeyedLazy("BUILTIN_LAZY", "STALE_BUILTIN");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("override_race_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+
+		// 4) The pack loader resolves — it wins.
+		await page.evaluate(async () => {
+			const wait = (window as any).__waitForRendererLoaded("override_race_tool");
+			(window as any).__resolveKeyedLazy("PACK", "PACK_WINS");
+			await wait;
+			(window as any).__renderRegistered("override_race_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toContainText("PACK_WINS");
+	});
+
+	test("lazy-start → unregisterPackRenderer → stale lazy resolves: it does NOT resurrect", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) An eager builtin, then a pack { override } that displaces it; render
+		//    once to start the (still-pending) pack lazy load — placeholder shown.
+		await page.evaluate(() => {
+			(window as any).__registerEagerRenderer("unreg_race_tool", "BUILTIN");
+			(window as any).__registerOverrideDeferredLazy("unreg_race_tool");
+			(window as any).__renderRegistered("unreg_race_tool"); // starts pack load
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// 2) Uninstall the pack BEFORE the loader resolves → builtin restored.
+		const countAfterUnregister = await page.evaluate(() => {
+			(window as any).__unregisterPack("unreg_race_tool");
+			(window as any).__renderRegistered("unreg_race_tool");
+			return (window as any).__loadedEventCount("unreg_race_tool");
+		});
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("BUILTIN");
+
+		// 3) The superseded pack loader resolves LAST — no-op, no resurrection.
+		const countAfterResolve = await page.evaluate(async () => {
+			(window as any).__resolveDeferredLazy("unreg_race_tool", "STALE_PACK");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("unreg_race_tool");
+			return (window as any).__loadedEventCount("unreg_race_tool");
+		});
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("BUILTIN");
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+		expect(countAfterResolve).toBe(countAfterUnregister);
+	});
+
+	test("eager-then-override: a stale eager-era lazy load cannot resurrect after override claims the name", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) A non-pack lazy renderer registered + started (placeholder).
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("eager_then_override", "OLD_LAZY", false);
+			(window as any).__renderRegistered("eager_then_override"); // starts old lazy load
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// 2) An eager registration lands (bumps generation), then a pack override
+		//    claims the name (bumps again + marks pack-owned + starts the pack load).
+		await page.evaluate(() => {
+			(window as any).__registerEagerRenderer("eager_then_override", "MID_EAGER");
+			(window as any).__registerKeyedLazy("eager_then_override", "PACK", true);
+			(window as any).__renderRegistered("eager_then_override"); // starts pack load
+		});
+
+		// 3) The original lazy resolves LAST — two generations stale → no-op.
+		await page.evaluate(async () => {
+			(window as any).__resolveKeyedLazy("OLD_LAZY", "STALE_OLD");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("eager_then_override");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+		await expect(page.locator("#probe [data-eager-button]")).toHaveCount(0);
+
+		// 4) The pack loader resolves — it wins (pack-owned name, override precedence).
+		await page.evaluate(async () => {
+			const wait = (window as any).__waitForRendererLoaded("eager_then_override");
+			(window as any).__resolveKeyedLazy("PACK", "PACK_WINS");
+			await wait;
+			(window as any).__renderRegistered("eager_then_override");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toContainText("PACK_WINS");
+	});
+});
