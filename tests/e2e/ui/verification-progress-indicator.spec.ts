@@ -23,7 +23,7 @@
  * Marker: GATE_SIGNAL_PROGRESS_INDICATOR
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "../e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
 
 // Slow phase-0 step (~25s) so the verification stays observably in flight
@@ -40,10 +40,18 @@ function makeWorkflowId(): string {
 	return `progress-indicator-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function createTestWorkflow(workflowId: string): Promise<void> {
+async function createTestWorkflow(workflowId: string, projectId: string): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
+			// Pin the workflow registration to the SAME project the goal is
+			// created under (resolved once below). POST /api/workflows is
+			// project-scoped; without an explicit projectId both this call and
+			// createGoal() resolve the implicit "default" project independently,
+			// and a concurrent worker renaming/replacing it between the two calls
+			// lands the workflow in one project's store while the goal looks it up
+			// in another → intermittent 400 WORKFLOW_NOT_FOUND.
+			projectId,
 			id: workflowId,
 			name: "Progress Indicator Test",
 			description: "Inline workflow pinning the verification-progress indicator render path.",
@@ -99,10 +107,15 @@ async function expandLatestSignal(page: import("@playwright/test").Page): Promis
 test.describe("Verification progress indicator (full-stack UI) — GATE_SIGNAL_PROGRESS_INDICATOR", () => {
 	test("dashboard shows in-progress chips for a multi-step gate within one render tick, and persists across reload", async ({ page }) => {
 		const workflowId = makeWorkflowId();
-		await createTestWorkflow(workflowId);
+		// Resolve the default project ONCE and pin BOTH the workflow registration
+		// and the goal creation to it, so they can never disagree under load.
+		const projectId = await defaultProjectId();
+		expect(projectId, "GATE_SIGNAL_PROGRESS_INDICATOR: must resolve a default projectId").toBeTruthy();
+		await createTestWorkflow(workflowId, projectId as string);
 		const goal = await createGoal({
 			title: `Progress Indicator ${Date.now()}`,
 			workflowId,
+			projectId,
 		});
 		const goalId = goal.id;
 
