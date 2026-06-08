@@ -47,22 +47,31 @@
    against any subtle layout recalc effects in browsers/headless engines. The
    iOS blank-gap bug only reproduces in standalone mode anyway. */
 @media (display-mode: standalone) {
-	/* Fill the FULL screen via the document height chain instead of `100dvh`.
-	   On installed iOS PWAs (viewport-fit=cover + black-translucent) the page
-	   lays out to the entire screen, but `100dvh` resolves SHORT by the
-	   home-indicator inset — so the shell stops a few pt above the screen
-	   bottom and the body background shows through as an empty band, no matter
-	   what the composer does (this was the "blank section at the bottom").
-	   Anchoring to the document (html/body are already height:100% from
-	   index.html) pins the shell to the true screen edge. Browser tabs keep the
-	   `100dvh` rule above, which correctly tracks the dynamic toolbar there. */
+	/* iOS standalone "viewport lie" fix.
+	   On installed iOS PWAs the layout viewport reports `screen − safe-area-inset-top`
+	   (measured: screen 874, innerHeight/100dvh 812, inset-top 62) and pins content
+	   to the top, leaving a dead 62px band at the BOTTOM. Simply sizing the shell to
+	   100vh (=874) does NOT help: the *layout viewport* stays 812, so the extra 62px
+	   render below the visible fold.
+	   The trick (per github.com/spm1001/gueridon docs/ios-standalone-viewport.md):
+	   make html/body 1px TALLER than the lying viewport. That 1px overflow forces
+	   iOS to recalculate the viewport to the true screen height (874); afterwards
+	   the band disappears. The 1px overshoot is imperceptible and neutral in
+	   regular browsers. `overflow:hidden` does NOT help (iOS ignores it for
+	   viewport scrolling) and `-webkit-fill-available` keeps lying — both
+	   confirmed on-device.
+	   We use `100vh` (NOT `100dvh`): vh is the static large viewport that does
+	   NOT shrink/grow with the on-screen keyboard, so the recalc fires once and
+	   the keyboard open/close doesn't re-trigger iOS's slide animation. (dvh is
+	   dynamic — every keyboard dismissal grew it and re-ran the slide.) The
+	   initial recalc still fires because on-device 100vh already reads the true
+	   874 while the layout viewport lies at 812. */
 	html,
-	body,
-	#app {
-		height: 100%;
+	body {
+		height: calc(100vh + 1px);
 	}
 	.app-shell {
-		height: 100%;
+		height: 100vh;
 	}
 
 	.app-shell {
@@ -97,10 +106,15 @@
 		padding-left: env(safe-area-inset-left);
 		padding-right: env(safe-area-inset-right);
 	}
-	/* Composer background fills the home-indicator region; controls clear it.
-	   0.25rem mirrors the base `pb-1` so 0-inset devices are unchanged. */
+	/* Composer bottom padding. Reserving the FULL home-indicator inset (34px)
+	   leaves the whole indicator strip empty below the last row — wasted space,
+	   especially since the device's rounded corners already eat the extreme
+	   bottom. Reserve only HALF the inset so the composer drops flush with (and
+	   slightly past) the indicator line, reclaiming that strip while keeping the
+	   controls clear of the rounded corner. 0.25rem mirrors the base `pb-1` so
+	   0-inset devices are unchanged. */
 	[data-mobile-header] agent-interface .agent-input-area {
-		padding-bottom: calc(0.25rem + env(safe-area-inset-bottom)) !important;
+		padding-bottom: calc(0.25rem + env(safe-area-inset-bottom) / 2) !important;
 	}
 }
 
