@@ -399,6 +399,26 @@ export class MockAgentCore {
 			};
 		}
 
+		// Goal proposal pre-filled with the Sub-goals tab fields — used by
+		// goal-proposal-subgoal-prefill.spec.ts to assert the agent can set
+		// everything a human sets on that tab. Must precede the generic
+		// goal_proposal matcher (it contains the "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_SUBGOAL_PREFILL")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Prefilled Goal",
+					workflow: "general",
+					spec: "A goal whose Sub-goals tab is pre-filled by the agent.",
+					subgoalsAllowed: true,
+					maxNestingDepth: 2,
+					divergencePolicy: "autonomous",
+					maxConcurrentChildren: 4,
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
 		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 			return {
 				tool: "propose_goal",

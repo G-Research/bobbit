@@ -54,6 +54,10 @@ const GOAL_FRONTMATTER_KEYS = [
 	"inlineWorkflow",    // full Workflow object (snapshotted onto goal.workflow, bypasses store)
 	"inlineRoles",       // Record<roleName, Role> (snapshotted onto goal.inlineRoles)
 	"parentGoalId",      // optional parent goal id — when set, the created goal becomes a subgoal
+	"subgoalsAllowed",   // boolean — allow the team-lead to spawn sub-goals (Sub-goals tab toggle)
+	"maxNestingDepth",   // number — per-goal sub-goal nesting cap (clamped to the global ceiling)
+	"divergencePolicy",  // "strict"|"balanced"|"autonomous" — root-only plan-change autonomy
+	"maxConcurrentChildren", // number [1,8] — root-only concurrent child-team cap
 ] as const;
 
 /**
@@ -114,6 +118,26 @@ function validateGoalInlineFields(fields: Record<string, unknown>): ParseError |
 				}
 			}
 		}
+	}
+
+	// Per-goal nesting + orchestration scalars. All optional; validated only
+	// when present so an agent can pre-set what a human sets on the Sub-goals
+	// tab. Acceptance (POST /api/goals) re-clamps and applies root-only gating.
+	const sa = fields.subgoalsAllowed;
+	if (sa !== undefined && sa !== null && typeof sa !== "boolean") {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "subgoalsAllowed must be a boolean" };
+	}
+	const mnd = fields.maxNestingDepth;
+	if (mnd !== undefined && mnd !== null && (typeof mnd !== "number" || !Number.isInteger(mnd) || mnd < 1)) {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "maxNestingDepth must be an integer >= 1" };
+	}
+	const dp = fields.divergencePolicy;
+	if (dp !== undefined && dp !== null && dp !== "strict" && dp !== "balanced" && dp !== "autonomous") {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "divergencePolicy must be one of: strict, balanced, autonomous" };
+	}
+	const mcc = fields.maxConcurrentChildren;
+	if (mcc !== undefined && mcc !== null && (typeof mcc !== "number" || !Number.isInteger(mcc) || mcc < 1 || mcc > 8)) {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "maxConcurrentChildren must be an integer in [1, 8]" };
 	}
 	return null;
 }
