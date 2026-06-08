@@ -61,10 +61,12 @@ the SAME authorization path Phase 1 built.
 `ui` and `session` are single flags spanning two sub-capabilities each (frozen as one
 namespace in v1). They flip to `true` only when **all** members of that namespace are
 implemented: `ui` flips after **C1** (openPanel+navigate); `session` flips after **C2**
-(reads+writes). Until then renderers feature-detect by attempting the call inside a
-`try/catch` or by reading `host.contractVersion`; this matches the v1 doc's "single source
-of truth = capabilities" rule and avoids a half-true flag. (Sub-flag granularity is NOT
-added — that would change the frozen `HostCapabilities` shape.)
+(reads+writes). Until then packs gate **solely** on `host.capabilities` — the single source
+of truth — and MUST NOT rely on a method whose flag is `false`. There is no supported
+feature-detection path through internal early method bodies (no "attempt the call in a
+`try/catch`"); the flag is authoritative. This matches the v1 doc's "single source of truth
+= capabilities" rule and avoids a half-true flag. (Sub-flag granularity is NOT added — that
+would change the frozen `HostCapabilities` shape.)
 
 **Capability-signaling convention (binding).** The `host.capabilities` namespace flag is
 the **single source of truth** for whether a capability is usable. A pack MUST NOT rely on
@@ -457,6 +459,18 @@ dispatchers use ONE copy — the C3 worker-isolation seam then wraps that single
 module path comes from a new `routes.module` contribution (default `routes.js`), resolved
 via the same `resolveToolLocation` location as actions.
 
+**`routes:` is PACK-scoped, not opener-tool-scoped.** The route module is selected by the
+server-resolved `packId`, independent of which tool opened the surface that issued the
+`callRoute`. The opener `packTool` (carried in the request body) is used ONLY to derive
+`packId` (step 2 below); once derived, the server loads the route module from the pack's
+route contribution. Any panel, renderer, or entrypoint sharing that `packId` reaches the
+SAME routes — a panel opened from tool X can reach a route declared on tool Y in the same
+pack. **Deterministic selection rule (convention):** a pack declares `routes:` on a single
+designated tool; the server loads that one route module for the whole pack. (If more than
+one tool in a pack were to declare `routes:`, each route name resolves to its declaring
+tool's module — but the documented convention is one routes-bearing tool per pack to keep
+selection unambiguous.)
+
 ### B3.2 Endpoint: `POST /api/ext/route/:name` (server.ts)
 
 There is **no `<pack>` URL segment** — the only routable namespace is the one the server
@@ -480,6 +494,15 @@ sends a `packId`: it names only the `tool` whose renderer/panel it was served fo
 server maps tool → winning pack (step 2). **Namespace guarantee, by construction:** a pack
 can reach only its OWN routes because the routed pack is *derived* from a tool the caller
 is authorized for — there is no caller-supplied namespace segment to validate (v1 §3.2).
+
+**Reconciliation with the goal's `/api/ext/<pack>/*`.** The goal spec's `/api/ext/<pack>/*`
+shape describes the namespace *intent* — pack-scoped, constrained to the calling pack — not
+a literal wire format. The implementation realizes the SAME security property server-side
+via tool→`packId` derivation behind `POST /api/ext/route/:name`: a deliberate,
+security-equivalent refinement. A client-supplied `<pack>` URL segment is unbuildable —
+the client never knows `packId` (it only knows the `tool` it was served for; see Fix 1 in
+the prior revision) — and a forgeable segment would be a weaker boundary than deriving the
+pack from a proven-owned tool. This is an equivalence, not a contract mismatch.
 
 ### B3.3 Wiring
 
@@ -641,9 +664,14 @@ internal wire. Scoped to the bound session.
 ## 9. Slice C3 — server-module isolation (worker_threads)
 
 **Deps:** the slices whose pack server modules it isolates — **actions (B-baseline) +
-routes (B3) ONLY**. **No flag** (hardening). Stores are NOT isolated here: a store is a
-host-backed KV reached through `ctx.host.store.*`; no pack code runs in the store path, so
-there is nothing to confine (the store endpoint runs entirely in the parent). Realizes the
+routes (B3) ONLY**. **No flag** (hardening). **Store-handler scope (deliberate
+interpretation):** the goal spec lists C3 as isolating "actions, routes, store handlers",
+but Phase 2 has **NO pack-supplied store-handler module** — stores are host-backed KV
+reached via `ctx.host.store.*`, so the spec's "store handlers" phrase has no pack-code
+surface to isolate. C3 isolates **actions + routes**, which are the only pack-supplied
+server modules; no required surface is left unisolated. (The store endpoint runs entirely
+in the parent; no pack code runs in the store path, so there is nothing to confine.)
+Realizes the
 blast-radius seam Phase 1 left open (`action-dispatcher.ts` `runWithTimeout` doc: "does NOT
 terminate timed-out work").
 
@@ -699,18 +727,31 @@ export class ModuleHost {
 **Resource caps & the CPU control:**
 
 - **Memory:** `new Worker(..., { resourceLimits: { maxOldGenerationSizeMb, stackSizeMb } })`.
-- **CPU / wall-time:** `worker_threads` has **no per-core CPU throttle**. CPU-exhaustion is
-  bounded by **terminate-on-timeout**: the parent races a timer and on timeout calls
-  `worker.terminate()` (TRUE cancellation, unlike Phase 1's permit-hold), rejecting
-  `ActionError(504)`. A runaway `while(1)` is *killed* by the timeout — terminate-on-timeout
-  IS the CPU control, and acceptance/test language is worded that way (no claim of a CPU
-  quota that `worker_threads` cannot deliver).
+- **CPU / wall-time (the explicit CPU-cap mapping):** **The goal's "CPU caps" requirement
+  is satisfied by terminate-on-timeout (wall-time termination)** — `worker_threads` provides
+  no per-core CPU throttle, so a runaway CPU loop is bounded by *killing the worker on
+  timeout*. The parent races a timer and on timeout calls `worker.terminate()` (TRUE
+  cancellation, unlike Phase 1's permit-hold), rejecting `ActionError(504)`. A runaway
+  `while(1)` is *killed* by the timeout. **Memory caps are via `resourceLimits`.** This is
+  the binding acceptance statement for the CPU-cap criterion (acceptance #3): wall-time
+  termination IS the CPU-cap control — there is no claim of a CPU quota that
+  `worker_threads` cannot deliver.
 
-**Documented fallback.** If full built-in denial proves infeasible in the target Node
-version, the shipped floor is: **terminate-on-timeout + memory caps + empty-env**, with the
-residual (a pack module could still `require` some built-ins) documented as a known
-limitation. The loader-deny confinement above is the **target**; the floor is the
-guaranteed minimum so the slice always lands a real blast-radius reduction.
+**No shippable residual-access fallback (NON-NEGOTIABLE).** Built-in / process / network
+denial and no-ambient-access (except through the host-API proxy) are a **mandatory C3
+acceptance requirement** — not a best-effort target with a weaker floor. There is NO
+shippable configuration in which a pack module can `require`/import `node:fs`,
+`node:child_process`, or network built-ins, or read `process.env` secrets. If the chosen
+Node module-load deny-hook proves infeasible in the target Node version, an **alternative
+isolation mechanism is REQUIRED before C3 can pass** — e.g. a restricted child-process
+runtime (separate process with a deny-by-default module graph) or a stricter loader. The
+no-ambient-access boundary is not negotiable and has no fallback that leaves residual
+access.
+
+A configuration with only terminate-on-timeout + memory caps + empty-env but WITHOUT
+built-in/process/network denial is, at most, a NON-ACCEPTANCE interim milestone (a blocker
+state for tracking incremental progress) — it explicitly does NOT satisfy goal acceptance
+#3/#4 and must never be shipped as the Phase-2 end state.
 
 ### C3.3 Migration onto the SINGLE invocation seam
 
@@ -887,13 +928,20 @@ are the acceptance proofs.
    navigate (C1). Flags: `store`→B1, `callRoute`→B3, `ui`→C1, `session`→C2. Pinned by the
    v1-frozen compile test.
 3. **Pack server modules (actions + routes) run in worker isolation with
-   terminate-on-timeout + caps.** → **C3** (`module-host-worker.ts`, `worker_threads` +
-   empty env + module-load deny-hook + host-API-proxy-only + `terminate()` +
-   `resourceLimits`), migrated onto the single `ActionDispatcher.dispatch` seam.
-   CPU-exhaustion is bounded by **terminate-on-timeout** (worker_threads has no per-core
-   throttle); memory by `resourceLimits`. Stores run no pack code, so they are out of
-   scope. Floor if full built-in denial is infeasible: terminate-on-timeout + memory caps +
-   empty-env, with documented residual (§9).
+   terminate-on-timeout + caps, and no ambient access.** → **C3** (`module-host-worker.ts`,
+   `worker_threads` + empty env + module-load deny-hook + host-API-proxy-only +
+   `terminate()` + `resourceLimits`), migrated onto the single `ActionDispatcher.dispatch`
+   seam. **Built-in/process/network denial + no-ambient-access (except via the host-API
+   proxy) is a MANDATORY, non-optional requirement of this criterion** — a pack module
+   cannot import `node:fs`/`node:child_process`/network built-ins or read `process.env`
+   secrets. There is NO shippable fallback that leaves residual access; if the deny-hook is
+   infeasible an alternative isolation mechanism (restricted child-process runtime / stricter
+   loader) is REQUIRED before C3 passes (§9). **The "CPU caps" requirement is satisfied by
+   terminate-on-timeout (wall-time termination)** — `worker_threads` has no per-core throttle,
+   so a runaway CPU loop is bounded by killing the worker on timeout; **memory caps via
+   `resourceLimits`.** Stores run no pack code (no pack-supplied store-handler module — see
+   §9), so the spec's "store handlers" phrase has no surface to isolate; C3 isolates actions
+   + routes, the only pack-supplied server modules.
 4. **A third-party pack could implement any surface using only public contributions + the
    Host API — no privileged escape hatch.** → guaranteed by routing the tool-call-scoped
    capabilities (`invokeAction`, `session.postMessage`) through `authorizeActionRequest`
@@ -922,9 +970,13 @@ are the acceptance proofs.
 - `panels`/`entrypoints` (B4/C1) run on the main UI thread over LLM-influenced data: iframe
   `sandbox` preserved, theme tokens only, no auto-invoke/navigation on mount.
 - Server-module isolation (C3, actions + routes only) bounds blast radius:
-  terminate-on-timeout (the CPU control), memory `resourceLimits`, empty-env worker, and a
-  module-load deny-hook — no ambient `process`/gateway access except through the host-API
-  proxy channel.
+  terminate-on-timeout (the CPU control, satisfying the "CPU caps" criterion), memory
+  `resourceLimits`, empty-env worker, and a module-load deny-hook. **No-ambient-access
+  (no `process`/gateway/fs/network access except through the host-API proxy channel) is a
+  MANDATORY, non-negotiable boundary** — there is no shippable fallback that leaves residual
+  access; if the deny-hook is infeasible an alternative isolation mechanism is required
+  before C3 passes (§9). (No pack-supplied store-handler module exists, so the store path
+  has no pack code to isolate.)
 
 ---
 
