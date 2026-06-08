@@ -7,8 +7,13 @@
  *     the `started` promise so the UI dialog can display them.
  *   - `onSelect` with a single option must auto-pick that option's id
  *     (deterministic, no UI required).
- *   - `onSelect` with multiple options must reject with a clear "Bobbit does
- *     not support" error so the flow fails loudly rather than hanging.
+ *   - `onSelect` presented with the real Codex login-method options
+ *     (browser + device_code) must return the browser-login option id
+ *     (`"browser"` / `OPENAI_CODEX_BROWSER_LOGIN_METHOD`) so the flow uses
+ *     Bobbit's existing callback-server / paste-code UX.
+ *   - `onSelect` with multiple *unrecognised* options must reject with a clear
+ *     "Bobbit does not support" error so the flow fails loudly rather than
+ *     hanging.
  *
  * Strategy: register a fake `OAuthProviderInterface` with id `openai-codex`
  * via `pi-ai/oauth::registerOAuthProvider`; that override is honoured by
@@ -128,7 +133,38 @@ describe("oauthStartExternal — pi-ai 0.75 OAuthLoginCallbacks contract", () =>
 		await new Promise((r) => setTimeout(r, 10));
 	});
 
-	it("onSelect with multiple options rejects with a clear unsupported-flow error", async () => {
+	it("onSelect with the real Codex options returns the browser-login method id", async () => {
+		const capture: Capture = {};
+		installFakeProvider(capture);
+
+		const startPromise = oauthStart("openai-codex");
+
+		for (let i = 0; i < 100 && !capture.callbacks; i++) {
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		assert.ok(capture.callbacks);
+
+		capture.callbacks!.onAuth({ url: "https://example.test/auth" });
+		await startPromise;
+
+		const selected = await capture.callbacks!.onSelect({
+			message: "Select OpenAI Codex login method:",
+			options: [
+				{ id: "browser", label: "Browser login (default)" },
+				{ id: "device_code", label: "Device code login (headless)" },
+			],
+		});
+		assert.equal(
+			selected,
+			"browser",
+			"onSelect must deterministically pick the browser-login method",
+		);
+
+		capture.loginReject!(new Error("test teardown"));
+		await new Promise((r) => setTimeout(r, 10));
+	});
+
+	it("onSelect with multiple unrecognised options rejects with a clear unsupported-flow error", async () => {
 		const capture: Capture = {};
 		installFakeProvider(capture);
 
@@ -153,7 +189,7 @@ describe("oauthStartExternal — pi-ai 0.75 OAuthLoginCallbacks contract", () =>
 				],
 			}),
 			/does not support/i,
-			"multi-option onSelect must reject with a Bobbit-specific unsupported-flow error",
+			"multi-option unrecognised onSelect must reject with a Bobbit-specific unsupported-flow error",
 		);
 
 		capture.loginReject!(new Error("test teardown"));
