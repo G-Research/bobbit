@@ -40,6 +40,7 @@ import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
+import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -981,6 +982,11 @@ async function requestSettingsRestart(): Promise<void> {
 		harnessRestartState = "error";
 		harnessRestartError = result.error || "Restart request failed";
 	}
+	renderApp();
+}
+
+function toggleClientDebug(): void {
+	setClientDebugEnabled(!isClientDebugEnabled());
 	renderApp();
 }
 
@@ -2392,6 +2398,24 @@ function renderGeneralTab() {
 			<div class="flex flex-col gap-2">
 				<h2 class="text-sm font-semibold text-foreground uppercase tracking-wider" data-testid="general-appearance-heading">Appearance</h2>
 				${renderSidebarFontScaleControl()}
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-client-debug"
+						.checked=${isClientDebugEnabled()}
+						@change=${toggleClientDebug}
+					/>
+					<span class="text-sm font-medium text-foreground">Client debug</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Show a floating <strong>DBG</strong> button in the chat view that dumps a
+					client diagnostics report (environment, viewport / safe-area, performance,
+					app state) into the message composer — so it can be read or sent to an agent
+					on devices where DevTools is unavailable (e.g. installed mobile PWAs).
+				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">
 				<label class="flex items-center gap-2 cursor-pointer">

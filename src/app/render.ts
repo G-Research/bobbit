@@ -49,6 +49,7 @@ import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, 
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
 import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
+import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
@@ -383,6 +384,42 @@ function lazyPageCall(
 			(exp as () => void)();
 		}
 	}).catch(() => { _pageLoading[cacheKey] = false; });
+}
+
+// ============================================================================
+// CLIENT DEBUG (flag-gated diagnostics — see client-debug.ts)
+// ============================================================================
+
+// Register an "App state" section for the client-debug report (client-debug.ts
+// stays generic / DOM-only; render.ts has access to app state + routing). Add
+// more sections here or from other modules via registerDebugSection().
+registerDebugSection("App state", () => {
+	const route = getRouteFromHash();
+	const activeSid = activeSessionId();
+	return [
+		`route=${JSON.stringify(route)}`,
+		`appView=${state.appView}  connection=${state.connectionStatus}`,
+		`activeSessionId=${activeSid ?? "(none)"}  remoteAgent=${state.remoteAgent ? state.remoteAgent.gatewaySessionId : "(none)"}`,
+		`goals=${state.goals.length}  gatewaySessions=${state.gatewaySessions.length}  archivedSessions=${state.archivedSessions.length}`,
+		`activeProjectId=${state.activeProjectId ?? "(none)"}  projects=${state.projects.length}`,
+		`sessionsLoading=${state.sessionsLoading}  sessionsError=${state.sessionsError ?? "(none)"}`,
+		`theme=${document.documentElement.classList.contains("dark") ? "dark" : "light"}  palette=${document.documentElement.dataset.palette || "(default)"}`,
+		`subgoalsEnabled=${document.documentElement.dataset.subgoalsEnabled === "true"}`,
+	].join("\n");
+});
+
+/** Flag-gated floating "DBG" button (desktop + mobile). Dumps the client-debug
+ *  report into the composer. Fixed-position so it's layout-independent; hidden
+ *  unless the Client debug flag is on (Settings → General → Debugging). */
+function renderClientDebugButton() {
+	if (!isClientDebugEnabled()) return "";
+	return html`
+		<button
+			data-testid="client-debug-button"
+			@click=${() => dumpClientDebugToComposer()}
+			style="position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:2147483646;background:color-mix(in oklch, var(--primary) 88%, black);color:var(--primary-foreground);font-size:10px;font-weight:700;letter-spacing:0.03em;padding:6px 8px;border:none;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.4);opacity:0.85;"
+			title="Dump client debug report into the composer">DBG</button>
+	`;
 }
 
 // ============================================================================
@@ -2575,6 +2612,7 @@ export function doRenderApp(): void {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
+				${renderClientDebugButton()}
 				<div class="flex items-center border-b border-border shrink-0 header-shadow">
 					${state.sidebarCollapsed ? html`
 					<div class="w-14 shrink-0 flex items-center justify-center self-stretch" style="background: var(--sidebar);">
@@ -2617,6 +2655,7 @@ export function doRenderApp(): void {
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
 				${headerToast()}
+				${renderClientDebugButton()}
 				<div id="app-header"
 					class="fixed top-0 left-0 right-0 z-50 bg-background flex flex-col">
 					<div class="flex items-center justify-between border-b border-border">
