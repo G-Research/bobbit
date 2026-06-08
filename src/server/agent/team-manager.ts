@@ -8,6 +8,7 @@ import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
 import { GoalPausedError } from "./goal-paused-guard.js";
@@ -1408,10 +1409,13 @@ export class TeamManager {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
 		const teamLeadPromptTemplate = storedRole.promptTemplate;
-		const teamLeadPrompt = teamLeadPromptTemplate
-			.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
-			.replace(/\{\{AGENT_ID\}\}/g, `team-lead-${goalId.slice(0, 8)}`)
-			.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(roleStore));
+		const teamLeadPrompt = applyPromptConditionals(
+			teamLeadPromptTemplate
+				.replace(/\{\{GOAL_BRANCH\}\}/g, goal.branch || "main")
+				.replace(/\{\{AGENT_ID\}\}/g, `team-lead-${goalId.slice(0, 8)}`)
+				.replace(/\{\{AVAILABLE_ROLES\}\}/g, buildAvailableRolesList(roleStore)),
+			{ subGoalsEnabled: this.sessionManager.isSubgoalsEnabled },
+		);
 
 		// Create the team lead session with the team tools extension.
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.

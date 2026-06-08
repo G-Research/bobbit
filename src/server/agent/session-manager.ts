@@ -61,6 +61,7 @@ import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } f
 import { modelRecencyRank } from "./model-registry.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
+import { applyPromptConditionals } from "./prompt-conditionals.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -1073,6 +1074,16 @@ export class SessionManager {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
 	}
 
+	/**
+	 * System-scope Subgoals feature flag (experimental; default OFF). Drives
+	 * `{if:subGoalsEnabled}` conditional blocks in role/assistant prompt
+	 * templates so the team-lead/goal-assistant are not told about sub-goal
+	 * tooling that resolves to `never` when the feature is disabled.
+	 */
+	get isSubgoalsEnabled(): boolean {
+		return this.preferencesStore?.get("subgoalsEnabled") === true;
+	}
+
 	/** Get the role manager (used by the staff path to resolve role prompts). */
 	getRoleManager(): RoleManager | undefined {
 		return this.roleManager;
@@ -1697,6 +1708,7 @@ export class SessionManager {
 					}
 				}
 			}
+			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 			parts = {
 				// Assistant prompt reconstruction must include the base system prompt
 				// so it survives respawn / rebuild paths (not just initial session-setup).
@@ -1720,6 +1732,7 @@ export class SessionManager {
 				branch: goal?.branch,
 				agentId: `${session.role}-${(session.goalId || session.id).slice(0, 8)}`,
 				roleManager: this.roleManager,
+				subGoalsEnabled: this.isSubgoalsEnabled,
 			});
 			const roleName = rolePrompt ? session.role : undefined;
 
@@ -3515,6 +3528,7 @@ export class SessionManager {
 					}
 				}
 			}
+			assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, { subGoalsEnabled: this.isSubgoalsEnabled });
 
 			const promptPath = this.assemblePrompt(ps.id, {
 				// Restore/respawn path: keep the global base prompt so it reaches
@@ -3541,6 +3555,7 @@ export class SessionManager {
 				roleManager: this.roleManager,
 				getStaff: this.staffRecordSource ? (id) => this.staffRecordSource!.getStaff(id) : undefined,
 				resolveTemplate: (rn, pid) => this.resolveRolePromptTemplate(rn, pid),
+				subGoalsEnabled: this.isSubgoalsEnabled,
 			});
 
 			const promptPath = this.assemblePrompt(ps.id, {

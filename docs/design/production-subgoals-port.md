@@ -181,7 +181,7 @@ Port all `tests/**` named in #497 except `*lsp*`/`tests/lsp/**`/
   unset/missing reads as disabled, only an explicit `true` enables it).
 - Children merge locally into parent branch (`git merge --no-ff`); only root
   raises a PR; conflicts `git merge --abort` + preserve child.
-- Per-root concurrency semaphore (default 3, floor 1, max 8) is the scheduler.
+- Per-root concurrency semaphore (default 5, floor 1, max 8) is the scheduler.
   The shared `ChildTeamScheduler` (`child-team-scheduler.ts`, owned by the
   harness, reached by the REST routes via `verificationHarness.requestChildStart`
   / `notifyChildTerminal`) is the SINGLE authority for ALL child-team starts —

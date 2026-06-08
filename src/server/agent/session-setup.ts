@@ -20,6 +20,7 @@ import { RpcBridge } from "./rpc-bridge.js";
 import { sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
+import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { SessionStore } from "./session-store.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
@@ -72,8 +73,9 @@ function resolveProposalToolsExtPath(ctx: PipelineContext): string {
 function buildNestingContext(
 	goal: import("./goal-store.js").PersistedGoal,
 	goalManager: GoalManager,
+	subGoalsEnabled: boolean,
 ): NestingContext {
-	const ctx: NestingContext = { team: !!goal.team, goalBranch: goal.branch };
+	const ctx: NestingContext = { team: !!goal.team, goalBranch: goal.branch, subGoalsEnabled };
 	if (!goal.team) return ctx;
 	if (goal.parentGoalId) {
 		const parent = goalManager.getGoal(goal.parentGoalId);
@@ -474,6 +476,11 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 				}
 			}
 		}
+		// Resolve {if:subGoalsEnabled} blocks (e.g. the goal assistant's sub-goal
+		// guidance) against the system feature flag, mirroring the team-lead path.
+		assistantGoalSpec = applyPromptConditionals(assistantGoalSpec, {
+			subGoalsEnabled: ctx.groupPolicyStore?.getSubgoalsEnabled?.() ?? false,
+		});
 
 		// Use assistant role's tool restrictions
 		if (assistantRole && ctx.toolManager) {
@@ -550,7 +557,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		// team-leads — before this was populated, the child agent had no
 		// structural awareness that its spec might be parent-flavoured.
 		const nestingContext = plan.roleName === "team-lead" && goal
-			? buildNestingContext(goal, ctx.goalManager)
+			? buildNestingContext(goal, ctx.goalManager, ctx.groupPolicyStore?.getSubgoalsEnabled?.() ?? false)
 			: undefined;
 
 		const promptPath = ctx.assemblePrompt(plan.id, {

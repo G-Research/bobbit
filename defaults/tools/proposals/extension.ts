@@ -123,6 +123,10 @@ export default function (pi: ExtensionAPI) {
 			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
 			parentGoalId: Type.Optional(Type.String({ description: "Parent goal ID for a subgoal; omit for top-level (team-lead auto-fills)." })),
+			subgoalsAllowed: Type.Optional(Type.Boolean({ description: "Allow the team-lead to spawn sub-goals. Default off." })),
+			maxNestingDepth: Type.Optional(Type.Integer({ minimum: 1, description: "Per-goal sub-goal nesting cap; clamped to the global ceiling." })),
+			divergencePolicy: Type.Optional(Type.Union([Type.Literal("strict"), Type.Literal("balanced"), Type.Literal("autonomous")], { description: "Root-only plan-change autonomy (default balanced)." })),
+			maxConcurrentChildren: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "Root-only: max child teams running in parallel, 1-8 (default 5)." })),
 			inlineRoles: Type.Optional(Type.Record(Type.String(), Type.Object({
 				name: Type.String({ description: "Role id (kebab-case); must equal the map key." }),
 				label: Type.String({ description: "Display name." }),

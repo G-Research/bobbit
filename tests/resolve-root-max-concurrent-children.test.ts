@@ -43,11 +43,11 @@ function makeManager(): { gm: GoalManager; store: GoalStore } {
 }
 
 describe("GoalManager.resolveRootMaxConcurrentChildren", () => {
-	it("returns 3 when maxConcurrentChildren is unset", async () => {
+	it("returns 5 when maxConcurrentChildren is unset", async () => {
 		const { gm, store } = makeManager();
 		const root = await gm.createGoal("Root", tmpRoot, { workflowId: "general" });
 		assert.equal(store.get(root.id)?.maxConcurrentChildren, undefined);
-		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 3);
+		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 5);
 	});
 
 	it("returns the configured value when in [1, 8]", async () => {
@@ -78,9 +78,9 @@ describe("GoalManager.resolveRootMaxConcurrentChildren", () => {
 		assert.equal(gm.resolveRootMaxConcurrentChildren(root.id), 1);
 	});
 
-	it("returns 3 when rootGoalId is unknown (defensive — orphaned semaphore)", () => {
+	it("returns 5 when rootGoalId is unknown (defensive — orphaned semaphore)", () => {
 		const { gm } = makeManager();
-		assert.equal(gm.resolveRootMaxConcurrentChildren("nonexistent"), 3);
+		assert.equal(gm.resolveRootMaxConcurrentChildren("nonexistent"), 5);
 	});
 
 	it("returns 8 when value is exactly 8 (boundary check)", async () => {

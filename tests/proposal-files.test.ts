@@ -84,6 +84,45 @@ describe("goal proposal round-trip", () => {
 		}
 	});
 
+	it("round-trips the Sub-goals tab fields (subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren)", async () => {
+		const sgSid = "sess-subgoal-fields";
+		await writeProposalFile(stateDir, sgSid, "goal", {
+			title: "Nested Goal",
+			spec: "Body.\n",
+			subgoalsAllowed: true,
+			maxNestingDepth: 3,
+			divergencePolicy: "autonomous",
+			maxConcurrentChildren: 5,
+		});
+		const raw = await readProposalFile(stateDir, sgSid, "goal");
+		assert.match(raw!, /subgoalsAllowed: true/);
+		assert.match(raw!, /divergencePolicy: autonomous/);
+		const parsed = await parseProposalFile(stateDir, sgSid, "goal");
+		assert.equal(parsed.ok, true, JSON.stringify(parsed));
+		if (parsed.ok) {
+			assert.equal(parsed.value.fields.subgoalsAllowed, true);
+			assert.equal(parsed.value.fields.maxNestingDepth, 3);
+			assert.equal(parsed.value.fields.divergencePolicy, "autonomous");
+			assert.equal(parsed.value.fields.maxConcurrentChildren, 5);
+		}
+	});
+
+	it("rejects malformed Sub-goals tab fields with STRUCTURAL_VALIDATION_FAILED", async () => {
+		const fp = proposalFilePath(stateDir, sid, "goal");
+		const cases = [
+			"divergencePolicy: yolo",
+			"maxConcurrentChildren: 99",
+			"maxNestingDepth: 0",
+			"subgoalsAllowed: maybe",
+		];
+		for (const bad of cases) {
+			fs.writeFileSync(fp, `---\ntitle: G\n${bad}\n---\nbody\n`);
+			const parsed = await parseProposalFile(stateDir, sid, "goal");
+			assert.equal(parsed.ok, false, `expected rejection for: ${bad}`);
+			if (!parsed.ok) assert.equal(parsed.code, "STRUCTURAL_VALIDATION_FAILED", bad);
+		}
+	});
+
 	it("missing title yields MISSING_REQUIRED_FIELD on parse", async () => {
 		// Hand-craft a goal file with empty title
 		const fp = proposalFilePath(stateDir, sid, "goal");
