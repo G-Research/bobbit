@@ -533,6 +533,33 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   the Wave-6 generation guard drops any stale in-flight/loaded module so the loader is
   SWAPPED to the new project's renderer — and unregisters names absent for the new project.
 
+  **The reconcile is generation-guarded against out-of-order fetch completion (Wave-9B).**
+  `reconcilePackRenderersForProject` is async (it `await`s `/api/tools`), so two reconciles
+  can be in flight at once (e.g. a slow `reconcile(A)` from a boot/session-switch followed by
+  a fast `reconcile(B)`). The registry is GLOBAL, so a late `A` response must NOT overwrite
+  loaders already applied for `B`. Each call captures a module-scoped `++reconcileGeneration`
+  token BEFORE the await and, after the fetch resolves, applies ONLY if its token still
+  equals the live counter — a newer reconcile supersedes it and the stale response is
+  dropped (no `registerPackRenderers`, no dedupe mutation). The dedupe marker
+  (`lastReconciledProject`) is set ONLY after a successful, non-superseded apply (never
+  before the await): a failed or superseded attempt does not poison the dedupe, so a
+  retry/re-drive still works and the registry always ends matching the LAST REQUESTED
+  project — never whichever fetch happened to resolve last.
+
+  **Marketplace mutations reconcile to the active session's project, never the marketplace's
+  focused project (Wave-9B).** The marketplace page tracks a `focusProjectId` for the
+  *install scope* segment (which project an install/update/uninstall targets). Because the
+  renderer registry is GLOBAL, refreshing it after a mutation must follow the ACTIVE CHAT
+  SESSION's project (`marketplace-page.ts::activeSessionProjectId()` — the active session's
+  own `projectId`, falling back to `state.activeProjectId`, mirroring what session-manager
+  threads on connect), NOT `currentProjectId()` (the focused project). Otherwise a
+  project-scope install/uninstall for a NON-active project would immediately clobber the
+  renderers the still-active session uses, and returning from settings without a session
+  switch would never reconcile back. `reconcileRenderersForActiveSession()` FORCES a
+  re-fetch + re-register (the mutation changed the pack set, so the dedupe-guarded reconcile
+  alone would skip it) but ALWAYS scopes it to the active session's project — reconciling the
+  global registry back to that project.
+
   `registerLazyToolRenderer` already returns the **placeholder** on first
   `getToolRenderer` and installs the **load-failure** fallback on loader rejection
   (`renderer-registry.ts::startLoad`) — both reused unchanged. Registration is re-driven

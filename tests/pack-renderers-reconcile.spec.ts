@@ -101,4 +101,50 @@ test.describe("reconcilePackRenderersForProject (extension-host §4a/§4c)", () 
 		expect(loadCallsB.some((u: string) => u.includes("/api/tools/demo_pack_tool/renderer?projectId=B"))).toBe(true);
 		expect(loadCallsB.some((u: string) => u.includes("projectId=A"))).toBe(false);
 	});
+
+	test("out-of-order completion: a late reconcile(A) response does NOT clobber the registry already applied for B", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// reconcile(A) has a SLOW metadata fetch; reconcile(B) is fast. Start A
+		// first, then B; B's response lands first and applies, then A's late
+		// response must be DROPPED (superseded by the newer generation) — the
+		// registry must end on B's loaders, not A's.
+		const result = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__setToolsDelay("A", 120);
+			(window as any).__setToolsDelay("B", 0);
+			const pA = (window as any).__startReconcile("A"); // slow fetch
+			const pB = (window as any).__startReconcile("B"); // fast fetch, resolves first
+			await pB;
+			await pA; // let the stale A response settle (must be a no-op)
+			return true;
+		});
+		expect(result).toBe(true);
+
+		// The active loader must serve B's renderer — A's late apply was dropped.
+		const loadCalls = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__triggerLoad("demo_pack_tool");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(loadCalls.some((u: string) => u.includes("/api/tools/demo_pack_tool/renderer?projectId=B"))).toBe(true);
+		expect(loadCalls.some((u: string) => u.includes("projectId=A"))).toBe(false);
+
+		// dedupe is correct: a later reconcile(B) is skipped (B successfully
+		// applied), but a reconcile to a NEW project C still applies.
+		const callsDedupeB = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			await (window as any).__reconcile("B");
+			return (window as any).__calls();
+		});
+		expect(callsDedupeB.some((u: string) => u.includes("/api/tools"))).toBe(false);
+
+		const callsC = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			await (window as any).__reconcile("C");
+			return (window as any).__calls();
+		});
+		expect(callsC.some((u: string) => /\/api\/tools\?projectId=C$/.test(u))).toBe(true);
+	});
 });
