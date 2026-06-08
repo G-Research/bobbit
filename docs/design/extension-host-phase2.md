@@ -18,12 +18,14 @@ the SAME authorization path Phase 1 built.
 
 - **Per-session authorization guard** — `authorizeActionRequest()` /
   `transcriptHasToolUse()` (`src/server/extension-host/action-guard.ts:53` / `:106`).
-  `invokeAction` and `session.postMessage` (tool-call-scoped) keep the full
+  `invokeAction` (the ONLY tool-call-scoped capability) keeps the full
   `authorizeActionRequest` (incl. toolUseId-ownership) verbatim. The pack-scoped
-  capabilities (`store` / `session.read*` / `callRoute`) route through a new
-  `authorizeScopedRequest()` — the SAME guard MINUS the toolUseId-ownership step (§2a). It
-  is not a weakening of the action guard; it is the correct narrower authz for calls where
-  no specific tool call is being acted on.
+  capabilities (`store` / `session.read*` / `callRoute` / `session.postMessage`) route
+  through a new `authorizeScopedRequest()` — the SAME guard MINUS the toolUseId-ownership
+  step (§2a). `session.postMessage` adds a MANDATORY client user-gesture token + audit on
+  top of the scoped guard (it has no owned `toolUseId` when originated from a
+  panel/entrypoint). This is not a weakening of the action guard; it is the correct
+  narrower authz for calls where no specific tool call is being acted on.
 - **Generation-guarded renderer-registry chokepoint** — `applyRegistration()`
   (`src/ui/tools/renderer-registry.ts:95`) and the `{override}` /
   `unregisterPackRenderer` / `displacedBuiltins` machinery. Panels (B4) reuse this exact
@@ -226,10 +228,12 @@ panel/entrypoint rather than from a specific tool call.
 
 The Phase-1 action endpoint is **tool-call-scoped**: it acts on a specific `toolUseId`, so
 `authorizeActionRequest` (`action-guard.ts:53`) requires that the caller owns that
-`toolUseId` (`transcriptHasToolUse`, `:106`). But `store.*`, `callRoute`, and
-`session.read*` are **pack-scoped**, not tool-call-scoped — no specific tool call is being
-acted on, and a panel/entrypoint may originate the call with no owned `toolUseId` at all.
-For these, `toolUseId`-ownership is the wrong check.
+`toolUseId` (`transcriptHasToolUse`, `:106`). But `store.*`, `callRoute`,
+`session.read*`, and `session.postMessage` are **pack-scoped**, not tool-call-scoped — no
+specific prior tool call is being acted on (driving an agent turn does not act on one), and
+a panel/entrypoint may originate the call with no owned `toolUseId` at all. For these,
+`toolUseId`-ownership is the wrong check. (`session.postMessage` layers a MANDATORY client
+user-gesture token + audit on top of the scoped guard — §8 C2.1.)
 
 Factor the guard so toolUseId-ownership is a **separate, capability-specific** step:
 
@@ -250,11 +254,11 @@ is OPTIONAL on scoped requests (a panel/entrypoint call legitimately has none). 
 
 | Endpoint | Guard | toolUseId-ownership? |
 |---|---|---|
-| `invokeAction` (Phase 1) | `authorizeActionRequest` | **required** (unchanged) |
-| `session.postMessage` (C2) | `authorizeActionRequest` | **required** (drives the agent) |
+| `invokeAction` (Phase 1) | `authorizeActionRequest` | **required** (unchanged — the ONLY tool-call-scoped capability) |
 | `store.*` (B1) | `authorizeScopedRequest` | not required |
 | `callRoute` (B3) | `authorizeScopedRequest` | not required |
 | `session.read*` (B2) | `authorizeScopedRequest` | not required |
+| `session.postMessage` (C2) | `authorizeScopedRequest` + MANDATORY client user-gesture token | not required (panels/entrypoints have none; driving a turn acts on no prior tool call) |
 
 ### 2a.2 Panel / entrypoint host context binding
 
@@ -268,12 +272,18 @@ from the **opening context**:
 - An **entrypoint** carries `packTool` from its own contribution; the active session
   supplies `sessionId`. Same `getHostApi(sessionId, undefined, packTool)`.
 
-So a panel/entrypoint can call `store.*` / `callRoute` / `session.read*` (they route through
-`authorizeScopedRequest`, which needs no `toolUseId`), but it CANNOT call `invokeAction` or
-`session.postMessage` without a real user-gesture-originated `toolUseId` (those keep
-`authorizeActionRequest`). The user-gesture requirement for `postMessage` is still enforced;
-no auto-invoke/post on mount (v1 §5 v). This closes the D2 gap where a panel-originated
-`callRoute`/`store`/`readToolCall` had no owned `toolUseId` to satisfy the action guard.
+So a panel/entrypoint CAN call `store.*` / `callRoute` / `session.read*` **and**
+`session.postMessage` — all four route through `authorizeScopedRequest`, which needs no
+`toolUseId`. `session.postMessage` additionally requires a genuine client user-gesture
+token (C2.1) and is audited, so a panel/entrypoint may drive an agent turn ONLY from a real
+user gesture (no auto-post on mount, v1 §5 v) — but it is no longer blocked by the
+inapplicable toolUseId-ownership check. The ONLY capability a panel/entrypoint cannot reach
+is `invokeAction` (the lone tool-call-scoped capability, which keeps
+`authorizeActionRequest` + toolUseId-ownership because it acts on a specific prior tool
+call). This does NOT weaken security: `invokeAction`'s full guard is unchanged, and
+`postMessage` stays allowedTools-gated + header-bound + gesture-required + audited. This
+also closes the D2 gap where a panel-originated `callRoute`/`store`/`readToolCall`/
+`postMessage` had no owned `toolUseId` to satisfy the action guard.
 
 ---
 
@@ -630,35 +640,105 @@ element, handing it the `PanelTarget.params` (e.g. `{ artifactId }`).
 
 ### C1.1 New file: `src/app/pack-entrypoints.ts`
 
-One-line responsibility: register pack-contributed launchers and resolve structured
-navigation targets onto the SPA router.
+One-line responsibility: register pack-contributed launchers AND deep-linkable client
+routes, and resolve structured navigation targets onto the SPA router.
 
 ```ts
-export type EntrypointKind = "composer-slash" | "git-widget-button" | "command-palette";
-export interface EntrypointInfo { id: string; tool: string; kind: EntrypointKind; label: string; target: RouteTarget | PanelTarget; }
+// Launcher kinds (click → openPanel/navigate) PLUS a routable kind that declares a
+// deep-linkable CLIENT route. "route" entrypoints have NO label/click surface — they
+// register a routeId→panel mapping consumed by navigate + reload restoration.
+export type EntrypointKind = "composer-slash" | "git-widget-button" | "command-palette" | "route";
+export interface LauncherEntrypoint { id: string; tool: string; kind: "composer-slash" | "git-widget-button" | "command-palette"; label: string; target: RouteTarget | PanelTarget; }
+/** A deep-linkable client route: maps a routeId → the panel it opens + the param names
+ *  carried in the URL. `routeId` is the deep-link route name; `target` is the panel to
+ *  open; `paramKeys` are the param names serialized into / parsed from the hash. */
+export interface RouteEntrypoint { id: string; tool: string; kind: "route"; routeId: string; target: PanelTarget; paramKeys: string[]; }
+export type EntrypointInfo = LauncherEntrypoint | RouteEntrypoint;
 export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, projectId?: string): void;
+export function reconcilePackEntrypointsForProject(projectId: string | undefined): Promise<void>;
 /** Map a structured RouteTarget → the router's hash scheme (packs never build URLs). */
 export function navigateToTarget(target: RouteTarget): void;
 ```
 
-### C1.2 `navigate` resolution (no hash strings in packs)
+### C1.1a Client pack route registry (generation-guarded, project-scoped)
 
-`RouteTarget = { route: string; params? }` (frozen v1). `navigateToTarget` maps `route` to
-the SPA router (`src/app/routing.ts` — `RouteView` already includes `"walkthrough"`,
-`setHashRoute`, `getRouteFromHash`). A pack-declared `route` resolves to a host-controlled
-view; the pack never constructs `#/...` (v1 §3 structured addressing). Client
-`host.ui.navigate` body calls `navigateToTarget`; **flip `flags.ui = true`** now.
+The `kind:"route"` entrypoints populate a client-side **pack route registry** that lives in
+`pack-entrypoints.ts` and **mirrors the `pack-renderers.ts` / `pack-panels.ts`
+generation-guarded chokepoint** (do NOT fork it — copy the `applyRegistration` contract:
+capture generation before any await, drop superseded applies, reconcile-on-uninstall,
+project-scoped, reload-safe). The registry is keyed by `routeId`:
+
+```ts
+interface PackRouteEntry { routeId: string; targetPanelId: string; paramKeys: string[]; tool: string; projectId?: string; }
+//  routeId → PackRouteEntry   (at most ONE pack owns a routeId — see conflict handling)
+export function lookupPackRoute(routeId: string): PackRouteEntry | undefined;
+```
+
+- **Ownership:** entries are owned by the contributing pack (carrying `tool`/`projectId`),
+  so reconcile can drop a pack's routes precisely.
+- **Registration:** `registerPackEntrypoints` is idempotent + reconciling, re-driven from
+  `/api/tools` metadata (byte-for-byte the `registerPackRenderers`/`registerPackPanels`
+  shape). The same generation guard prevents a superseded async apply from clobbering a
+  newer registration.
+- **Reconcile-on-uninstall:** `reconcilePackEntrypointsForProject(projectId)` removes
+  routes (and launchers) whose declaring pack is no longer installed for that project — so
+  a deep-link to an uninstalled pack's route no longer resolves (mirrors panel/renderer
+  uninstall reconcile).
+
+### C1.2 `navigate` resolution + hash serialization (packs never build URLs)
+
+`RouteTarget = { route: string; params? }` (frozen v1). `navigateToTarget({ route, params })`
+maps the structured target onto the SPA router (`src/app/routing.ts`) — the pack never
+constructs a `#/...` string (v1 §3 structured addressing). Concrete scheme:
+
+- Add an **`ext` `RouteView`** to `routing.ts` alongside the existing `"walkthrough"`.
+- `navigateToTarget({ route, params })` looks up the registry (`lookupPackRoute(route)`),
+  filters `params` to the registered `paramKeys`, and calls the existing `setHashRoute`
+  helper to serialize **`#/ext/<routeId>?<url-encoded params>`** (e.g.
+  `#/ext/artifacts?artifactId=abc123`). `routeId` and each `paramKey`/value are
+  `encodeURIComponent`-escaped; only declared `paramKeys` are emitted.
+- If `route` is not in the registry, `navigate` is a no-op (the pack named an unknown
+  route — no crash, no raw URL).
+
+### C1.2a Reload restoration (`#/ext/<routeId>` → panel rehydrated from store)
+
+On load (and on hashchange), `getRouteFromHash` (`routing.ts`) detects the `ext` RouteView
+and parses `#/ext/<routeId>?<params>` into `{ view: "ext", routeId, params }`. The app's
+route handler then:
+
+1. `lookupPackRoute(routeId)` → `{ targetPanelId, paramKeys }` (no entry ⇒ ignore; the
+   owning pack may be uninstalled).
+2. Filters the parsed query to `paramKeys` and calls
+   `openPackPanel({ panelId: targetPanelId, params })` (B4 §6.3).
+3. The panel **rehydrates its content from `host.store.get(...)`** (B1) using the id param
+   (e.g. D1's `artifactId`) — the deep-link carries only ids, never payload, so a fresh
+   load reconstructs the panel identically and reload survives.
+
+This end-to-end flow (`navigate` → `#/ext/<routeId>?params` → `getRouteFromHash` → registry
+lookup → `openPackPanel` → `store.get`) is the canonical deep-link path D1/D2 reuse.
 
 ### C1.3 Entrypoint surfaces
 
 - **composer-slash:** register a slash-command into the composer's command list.
 - **git-widget-button / command-palette:** register a button/launcher; on click →
   `openPanel` or `navigate` (NO auto-invoke on mount — invocation is the user gesture).
+- **route:** registers a deep-linkable route only (no clickable surface); consumed by
+  `navigate` + reload restoration (C1.2/C1.2a).
 
 ### C1.4 `entrypoints:` activation (`tool-contributions.ts`)
 
-`parseEntrypoints(raw)` → typed `EntrypointContribution[]` (validate `kind` enum, `label`,
-structured `target`). Wire field `ToolInfo.entrypoints?: EntrypointContribution[]`.
+`parseEntrypoints(raw)` → typed `EntrypointContribution[]` (validate `kind` enum; for
+launcher kinds require `label` + structured `target`; for `kind:"route"` require
+`routeId` + `target.panelId` + a string-array `paramKeys`). Wire field
+`ToolInfo.entrypoints?: EntrypointContribution[]`. Per-tool parsing stays tolerant
+(malformed degrades, never rejects).
+
+**Duplicate `routeId` rejection (hard, deterministic — mirrors B3.4 `RouteRegistry`).**
+At metadata/registry-build time, if two packs (or two tools) declare the SAME `routeId`,
+that is a **hard rejection** naming the conflicting packs/tools + routeId — at most ONE
+pack owns a `routeId`, so `lookupPackRoute` is unambiguous. (Like B3's server route names,
+this is the rare real-conflict failure; per-tool parse stays tolerant because it cannot see
+other tools/packs — the conflict is only visible at registry build.)
 
 ---
 
@@ -668,13 +748,17 @@ structured `target`). Wire field `ToolInfo.entrypoints?: EntrypointContribution[
 
 ### C2.1 Endpoint: `POST /api/ext/session/message` (server.ts)
 
-Body `{ sessionId, toolUseId, tool, role: "user"|"system", text, resumeTurn? }`.
+Body `{ sessionId, toolUseId?, tool, role: "user"|"system", text, resumeTurn? }`
+(`toolUseId` is OPTIONAL — a panel/entrypoint origin has none).
 
-**Guard ordering (user-gesture, header-bound, audited):**
+**Guard ordering (pack-scoped + user-gesture, header-bound, audited):**
 
 ```
-1. authorizeActionRequest({...})  → header-canonical session + toolUseId-ownership
-   (action-guard.ts:53; postMessage is tool-call-scoped — NOT authorizeScopedRequest)
+1. authorizeScopedRequest({...})  → header-canonical session + body===header + session
+   resolves + the pack's `tool` ∈ allowedTools + server-derived packId  (§2a)
+   — NOT authorizeActionRequest: driving an agent turn does not act on a specific prior
+     tool call, so toolUseId-ownership is the WRONG check and toolUseId is NOT required.
+     This lets a panel/entrypoint (which binds toolUseId:undefined) call postMessage.
 2. require role ∈ {user,system}; reject empty text
 3. post into the HEADER-BOUND session ONLY:
    - resumeTurn !== false → sessionManager.enqueuePrompt(headerSessionId, text, {source:"extension"})
@@ -686,7 +770,12 @@ Body `{ sessionId, toolUseId, tool, role: "user"|"system", text, resumeTurn? }`.
 ```
 
 `postMessage` drives the agent, so the session is the **header-bound** session (never a
-parameter) and every call is audited.
+parameter) and every call is audited. Its security posture is: **allowedTools-gated +
+header-bound session + MANDATORY client user-gesture token (§below) + audited** — secure
+without the inapplicable toolUseId-ownership requirement. (Cross-session posting is
+impossible because the target session is the header-bound session, never a body parameter.)
+The full action guard WITH toolUseId-ownership is unchanged for `invokeAction` (the only
+tool-call-scoped capability).
 
 **User-gesture enforcement is a concrete client-internal gesture token — not a convention.**
 "Reviewers reject render-time posts" is not an enforceable data flow, so the client host
@@ -709,8 +798,11 @@ adds a transient **gesture context flag**:
 
 This mirrors `invokeAction`'s "no auto-invoke on mount" property (v1 §5 v), but makes it a
 checked precondition rather than a reviewer expectation. The server still independently
-authorizes every post (`authorizeActionRequest`, header-bound session, toolUseId-ownership,
-audit) — the gesture token is a client-side defense-in-depth, not the only gate.
+authorizes every post (`authorizeScopedRequest`: header-bound session, body===header,
+`tool` ∈ allowedTools, server-derived packId, audit) — the gesture token is a client-side
+defense-in-depth, not the only gate. (The server uses `authorizeScopedRequest`, not
+`authorizeActionRequest`, precisely so a panel/entrypoint with no owned `toolUseId` can
+still post when it holds a genuine user gesture.)
 
 ### C2.2 `subscribe` (live typed events)
 
@@ -890,21 +982,28 @@ Acceptance #1 requires both built-ins to **deep-link**. The artifacts pack contr
 deep-linkable target so a viewer can be reopened by id from a route/URL, rehydrating from
 the store and surviving reload:
 
-- **Target:** the pack declares a `route` (e.g. `"artifacts"`) — a deep-linkable SPA view
-  registered through C1's `entrypoints:`/route resolution (`pack-entrypoints.ts` +
-  `routing.ts` `RouteView`, §7). A pack never builds `#/...` strings; it calls
+- **Declaration (C1 route entrypoint):** the artifacts pack declares a deep-linkable route
+  via an `entrypoints:` `kind:"route"` contribution (§7.1):
+  `{ kind: "route", routeId: "artifacts", target: { panelId: "artifacts.viewer" }, paramKeys: ["artifactId"] }`.
+  At registry build this populates the client pack route registry (§7.1a) as
+  `"artifacts" → { targetPanelId: "artifacts.viewer", paramKeys: ["artifactId"] }`. A pack
+  never builds `#/...` strings; it calls
   `host.ui.navigate({ route: "artifacts", params: { artifactId } })` (frozen v1
-  `RouteTarget`), and the router maps the structured target to the host-controlled view.
-- **Resolution chain:** `navigate({ route: "artifacts", params: { artifactId } })`
-  → router resolves the `"artifacts"` route → opens `artifacts.viewer` (the B4 panel) for
-  that `artifactId` via `host.ui.openPanel({ panelId: "artifacts.viewer", params: { artifactId } })`
-  → the viewer rehydrates its content from `host.store.get(artifactId)` (B1, pack-scoped).
-  The deep-link carries only the `artifactId`; all payload comes from the store, so a fresh
-  load (or reload) reconstructs the viewer identically.
-- **Reload survival:** because the route is part of the SPA hash/route scheme and the
-  payload lives in the pack store, navigating to (or reloading on) the deep-link route
-  reopens the viewer rehydrated from `store.get(artifactId)` with no dependence on
-  in-memory state — the same store-backed restore-by-id D1.1 already relies on.
+  `RouteTarget`), and `navigateToTarget` serializes it through the registry.
+- **Resolution chain (through the registry, §7.1a/§7.2/§7.2a):**
+  `navigate({ route: "artifacts", params: { artifactId } })` → `lookupPackRoute("artifacts")`
+  + `paramKeys` filter → `setHashRoute` serializes **`#/ext/artifacts?artifactId=…`** →
+  `getRouteFromHash` parses the `ext` RouteView → `lookupPackRoute` resolves
+  `artifacts.viewer` → `openPackPanel({ panelId: "artifacts.viewer", params: { artifactId } })`
+  (the B4 panel) → the viewer rehydrates its content from `host.store.get(artifactId)` (B1,
+  pack-scoped). The deep-link carries only the `artifactId`; all payload comes from the
+  store, so a fresh load (or reload) reconstructs the viewer identically.
+- **Reload survival:** because the route lives in the SPA hash scheme (`#/ext/artifacts`)
+  and the payload lives in the pack store, reloading on the deep-link route re-runs
+  `getRouteFromHash` → registry lookup → `openPackPanel` → `store.get(artifactId)` with no
+  dependence on in-memory state — the same store-backed restore-by-id D1.1 already relies
+  on. Uninstalling the pack reconciles the route out of the registry (§7.1a), so the
+  deep-link no longer resolves.
 
 This makes artifact deep-link an opener-independent, store-rehydrated path identical in
 shape to D2's `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`
@@ -946,9 +1045,14 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
 - `stores:` — re-express `walkthrough-store.ts`
   (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) onto `host.store.*`,
   pack-scoped.
-- `entrypoints:` — git-widget button / command-palette launcher →
-  `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (the SPA already has
-  the `"walkthrough"` route — `routing.ts:5`/`:47`).
+- `entrypoints:` — TWO contributions: (1) a `kind:"route"` route entrypoint
+  `{ routeId: "pr-walkthrough", target: { panelId: "pr-walkthrough.panel" }, paramKeys: ["jobId"] }`
+  registering the deep-linkable route in the client pack route registry (§7.1a); (2) a
+  git-widget button / command-palette launcher whose click calls
+  `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })`, which serializes to
+  `#/ext/pr-walkthrough?jobId=…` and resolves through the registry to open the panel
+  rehydrated from `host.store.*` (§7.2/§7.2a). (This replaces the bespoke SPA
+  `"walkthrough"` route — `routing.ts:5`/`:47` — with the generic `ext` route surface.)
 - `host.session.readToolCall` — read the `submit_pr_walkthrough_yaml` tool call's
   input/output (B2 implements the body; usable here only once C2 flips the `session` flag)
   instead of bespoke transcript access. The panel-originated read is authorized via
@@ -998,9 +1102,14 @@ task per YES-file in flight; the team-lead rebases the next on merge.
   `host-api.ts` B1→B2→B3→B4; `server.ts` B1→B2→B3→B4; `server-host-api.ts` B1→B2.
 
 ### Wave 3 — after B
-- **C1 entrypoints + navigate.** New: `pack-entrypoints.ts`. Shared: `host-api.ts`
-  (navigate body + flip `flags.ui`), `tool-contributions.ts` (`parseEntrypoints`),
-  `routing.ts` (single-owner), `server.ts` (entrypoint metadata if needed). Deps: B4, B3.
+- **C1 entrypoints + navigate + client route registry.** New: `pack-entrypoints.ts`
+  (launchers + `kind:"route"` deep-link routes + the generation-guarded, reconcile-on-
+  uninstall, project-scoped client pack route registry — mirrors `pack-renderers.ts` /
+  `pack-panels.ts`, does NOT fork). Shared: `host-api.ts` (navigate body + flip
+  `flags.ui`), `tool-contributions.ts` (`parseEntrypoints` + duplicate-`routeId` rejection
+  at registry build), `routing.ts` (single-owner — adds the `ext` `RouteView` +
+  `#/ext/<routeId>?params` serialization/parse + reload-restoration handler that calls
+  `openPackPanel`), `server.ts` (entrypoint metadata if needed). Deps: B4, B3.
 - **C2 session writes.** New: `gesture-context.ts` (client gesture token — C2-owned).
   Shared: `server.ts` (+message endpoint), `server-host-api.ts` (postMessage body + flip
   `flags.session`), client `host-api.ts` (postMessage/subscribe + flip `flags.session`;
@@ -1034,8 +1143,8 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 | B2 | `extension-host-contract-adapter.test.ts` | JSONL rows → `HostMessage`/`HostContentBlock`/`ToolCallRecord`; both tool_use shapes mapped; `CONTRACT_VERSION === HOST_CONTRACT_VERSION`; unknown block types tolerated; read scoped to own session (other session id has no parameter) | 2,4 |
 | B3 | `extension-host-route-dispatcher.test.ts` | route resolution + precedence (pack shadows builtin); namespace-by-construction (`tool` → server-derived pack; dispatch hits ONLY that pack's route; no `<pack>` URL segment to forge); **pack-level registry: opener tool X calling a route DECLARED by a different tool Y in the SAME pack resolves + dispatches Y's module correctly** (proves pack-scoped, opener-independent); **duplicate route names across a pack are rejected at metadata/registry-build time**; unknown route name → 404; `authorizeScopedRequest` reuse (no toolUseId required); epoch/registry cache invalidation | 2,4 |
 | B4 | `pack-panels-reconcile.spec.ts` (`file://`) | panel loader registers/reconciles; reload survival (re-driven from metadata); uninstall reconcile (generation-guarded); override; theme-token + sandbox conventions present | 2,4 |
-| C1 | `pack-entrypoints.spec.ts` | entrypoint kinds register; `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount | 2,4 |
-| C2 | `extension-host-session-write.test.ts` | postMessage authorized against header-bound session; resumeTurn vs non-resume; every post audited; cross-session post impossible; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post | 2,4 |
+| C1 | `pack-entrypoints.spec.ts` (`file://`) | entrypoint kinds register (incl. `kind:"route"`); `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount; **client route registry: an arbitrary THIRD-PARTY fixture pack (not artifacts/pr-walkthrough) registering `{kind:"route", routeId:"thirdparty.demo", target:{panelId:…}, paramKeys:[…]}` → `navigate({route:"thirdparty.demo",params})` serializes `#/ext/thirdparty.demo?…` and opens its panel**; **reload restoration: loading on `#/ext/<routeId>?params` → `getRouteFromHash` → `lookupPackRoute` → `openPackPanel` rehydrated from `store.get`**; **uninstall reconcile drops the route (`lookupPackRoute` returns undefined; deep-link no longer resolves)**; **duplicate `routeId` across packs rejected at registry build** | 1,2,4 |
+| C2 | `extension-host-session-write.test.ts` | postMessage authorized via **`authorizeScopedRequest`** against the header-bound session (NOT `authorizeActionRequest`); **postMessage SUCCEEDS from a panel/entrypoint context with NO `toolUseId` when a user gesture is active**; resumeTurn vs non-resume; every post audited; **cross-session post impossible (target = header-bound session, never a body param)**; body/header session mismatch rejected; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws synchronously), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post | 2,4 |
 | C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; **a pack module CANNOT `require`/import `node:fs`/`node:child_process`/network built-ins** (deny-hook); **a pack module CANNOT read `process.env` secrets** (empty-env worker); crash isolated → error not process death; seam swap leaves callers unchanged | 3 |
 | C3 | `extension-host-isolation-config-invariant.test.ts` | **config-invariant: the shippable/packaged configuration CANNOT disable worker isolation** — no shipped config key/env toggles in-process execution; if a bypass flag/env is set under a packaged build (or CI) the gateway hard-fails at startup (refuses to boot), and the toggle is inert/unsettable in the shipped config (any dev-only affordance is honored only in explicit local-dev mode); the production seam ALWAYS routes through `ModuleHost.invoke` | 3,4 |
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |
@@ -1088,13 +1197,17 @@ are the acceptance proofs.
    §9), so the spec's "store handlers" phrase has no surface to isolate; C3 isolates actions
    + routes, the only pack-supplied server modules.
 4. **A third-party pack could implement any surface using only public contributions + the
-   Host API — no privileged escape hatch.** → guaranteed by routing the tool-call-scoped
-   capabilities (`invokeAction`, `session.postMessage`) through `authorizeActionRequest`
-   and the pack-scoped capabilities (`store`/`callRoute`/`session.read*`) through
-   `authorizeScopedRequest` (§2a), both keyed off the **server-derived** pack identity (A) —
-   never a caller field; `callRoute`'s namespace is the pack derived from the proven `tool`
-   (B3.2 — no forgeable URL segment); `store` keys pack-namespaced (B1.1); no `gateway.fetch`
-   reintroduced. **No in-process execution escape hatch:** worker isolation is unconditional
+   Host API — no privileged escape hatch.** → guaranteed by routing the lone
+   tool-call-scoped capability (`invokeAction`) through `authorizeActionRequest` and the
+   pack-scoped capabilities (`store`/`callRoute`/`session.read*`/`session.postMessage`)
+   through `authorizeScopedRequest` (§2a), both keyed off the **server-derived** pack
+   identity (A) — never a caller field. `session.postMessage` adds a mandatory user-gesture
+   token + audit on top of the scoped guard (so a panel/entrypoint can drive a turn only
+   from a real gesture, never on mount, and never cross-session). `callRoute`'s namespace is
+   the pack derived from the proven `tool` (B3.2 — no forgeable URL segment); `store` keys
+   pack-namespaced (B1.1); the client deep-link route is the server-independent
+   `#/ext/<routeId>` registry surface (C1.1a, no privileged route), and no `gateway.fetch`
+   is reintroduced. **No in-process execution escape hatch:** worker isolation is unconditional
    in shipped builds (no config can run pack server modules in-process — §9), so there is no
    privileged path around the host-API boundary. Pinned by the cross-pack denial + namespace
    unit tests and the §13 C3 config-invariant test.
@@ -1103,20 +1216,24 @@ are the acceptance proofs.
 
 ## 15. Security recap (the Host API stays the single boundary)
 
-- The pack-scoped capabilities (`store`/`session.read*`/`callRoute`) call
-  `authorizeScopedRequest` (§2a — the action guard MINUS toolUseId-ownership) FIRST, then
-  key off the **server-resolved** `packId` (A) — never a caller field. The tool-call-scoped
-  capabilities (`invokeAction`, `session.postMessage`) keep the full
-  `authorizeActionRequest` (`action-guard.ts:53`, incl. toolUseId-ownership). `callRoute`'s
-  reachable namespace is the pack the server derives from the proven `tool` — there is no
-  `<pack>` URL segment to forge (B3.2); `store` keys are pack-namespaced with
-  path-traversal re-validation (B1.1).
-- `session.postMessage`/resume (C2) is highest-risk: user-gesture-only (enforced by a
-  client-internal **gesture token** set only by genuine user-gesture handlers and
-  consumed+cleared by `postMessage`, which throws if absent — C2.1), header-bound session,
-  every post/resume audited. Panel/entrypoint-originated calls bind their host context
-  (`sessionId`/`packTool`) from the opening context (§2a.2) and CANNOT reach
-  `postMessage`/`invokeAction` without a real user-gesture `toolUseId`.
+- The pack-scoped capabilities (`store`/`session.read*`/`callRoute`/`session.postMessage`)
+  call `authorizeScopedRequest` (§2a — the action guard MINUS toolUseId-ownership) FIRST,
+  then key off the **server-resolved** `packId` (A) — never a caller field. The ONLY
+  tool-call-scoped capability, `invokeAction`, keeps the full `authorizeActionRequest`
+  (`action-guard.ts:53`, incl. toolUseId-ownership). `callRoute`'s reachable namespace is
+  the pack the server derives from the proven `tool` — there is no `<pack>` URL segment to
+  forge (B3.2); `store` keys are pack-namespaced with path-traversal re-validation (B1.1).
+- `session.postMessage`/resume (C2) is highest-risk: it uses `authorizeScopedRequest`
+  (allowedTools-gated + header-bound session + body===header + server-derived packId) PLUS
+  a MANDATORY user-gesture token (enforced by a client-internal **gesture token** set only
+  by genuine user-gesture handlers and consumed+cleared by `postMessage`, which throws if
+  absent — C2.1), and every post/resume is audited. It does NOT require toolUseId-ownership
+  (driving an agent turn acts on no specific prior tool call), so a panel/entrypoint — which
+  binds its host context (`sessionId`/`packTool`) from the opening context (§2a.2) with
+  `toolUseId:undefined` — CAN post WHEN it holds a real user gesture, but never on mount.
+  Cross-session posting is impossible (target = header-bound session, never a body param).
+  The ONLY capability a panel/entrypoint cannot reach is `invokeAction` (it keeps
+  `authorizeActionRequest` + toolUseId-ownership) — unchanged, so security is not weakened.
 - `panels`/`entrypoints` (B4/C1) run on the main UI thread over LLM-influenced data: iframe
   `sandbox` preserved, theme tokens only, no auto-invoke/navigation on mount.
 - Server-module isolation (C3, actions + routes only) bounds blast radius:
