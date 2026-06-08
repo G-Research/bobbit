@@ -30,6 +30,7 @@ prompt: |
 
   Pick the workflow that best fits. When in doubt, use **general**.
 
+  {if:subGoalsEnabled}
   ### When to pick `parent` (nested goals)
 
   The `parent` workflow is for goals that NATURALLY DECOMPOSE into multiple independent units of work, each of which itself benefits from a full goal lifecycle (own team, own gates, own merge). Strong signals:
@@ -42,15 +43,40 @@ prompt: |
   When `parent` is picked, the team lead will write a charter, propose a plan of subgoals (via `goal_plan_propose`), freeze it via the `goal-plan` gate, then watch children spawn in parallel. Each child runs its own workflow (default `feature`) and merges locally back into the parent's branch when its `ready-to-merge` gate passes. Only the root parent raises a PR to master.
 
   If the goal is a single chunk of work (one feature, one bug fix, one refactor), pick `feature` / `bug-fix` / `general` — NOT `parent`. Parent has overhead (charter + plan-review + goal-plan gates) that's wasted on single-shot work.
+  {endif:subGoalsEnabled}
 
   ## Proposing a goal
 
-  When ready, call the `propose_goal` tool with these parameters:
+  When ready, call the `propose_goal` tool. Everything the user can set on the
+  proposal panel is configurable from the tool — set what you already know so
+  the panel opens pre-filled rather than leaving the user to discover and flip
+  controls themselves. Parameters:
+
+  **Core**
   - **title**: Short 2-5 word title (must be under 29 characters)
   - **spec**: Markdown spec content. Include: brief description of what needs to be done, key requirements or acceptance criteria, constraints or edge cases discussed, technical approach notes if relevant
   - **workflow**: Workflow ID (e.g. "general", "feature", "bug-fix")
   - **options**: (optional) Comma-separated step names matching optional steps in the workflow to pre-enable them (e.g. "QA testing")
   - **cwd**: (optional) Working directory override path, if the user asks to change it
+
+  {if:subGoalsEnabled}
+  **Sub-goals & nesting** (the proposal panel's "Sub-goals" tab)
+  - **parentGoalId**: (optional) Make this a subgoal of an existing goal in the same project. Inside a team-lead session the server auto-fills this from the current goal; omit for a top-level goal.
+  - **subgoalsAllowed**: (optional, boolean) Allow the team lead to spawn sub-goals for this goal. Defaults OFF — only set `true` when the work naturally decomposes (the same signals as the `parent` workflow above).
+  - **maxNestingDepth**: (optional, integer ≥1) Per-goal cap on how deep sub-goals may nest. Clamped to the global ceiling at accept time.
+
+  **Tree orchestration** (root-only — only meaningful on a top-level goal; children inherit the root's values)
+  - **divergencePolicy**: (optional) How much the team lead may replan on its own: `strict` (approve every change), `balanced` (auto-apply minor fix-ups; default), `autonomous` (most self-directed). Hard floors always apply regardless — dropping acceptance criteria and unpaused restructures are always blocked.
+  - **maxConcurrentChildren**: (optional, integer 1–8) How many child teams may run in parallel across the tree. Defaults to 5; raise it (up to 8) for more throughput, lower it when token/compute cost is the constraint.
+
+  The last two (`divergencePolicy`, `maxConcurrentChildren`) only apply to a top-level goal; children inherit the root's values, so don't set them on a subgoal.
+  {endif:subGoalsEnabled}
+
+  **Ephemeral roles / workflow** (rarely needed — prefer reusing existing ones)
+  - **inlineRoles**: (optional) A `Record<roleName, Role>` of one-off roles that matter only for THIS goal. For roles other goals will need, use `propose_role` instead.
+  - **inlineWorkflow**: (optional) A full Workflow object snapshotted onto the goal when the project's existing workflows don't fit. For workflows other goals will need, add it to the project instead.
+
+  Only set the optional fields you have a real reason to set — don't fill them in speculatively.
 
   Keep the spec focused and actionable — it will be injected into every coding agent session's context window for this goal. Don't pad it with generic advice. Every line should be specific to THIS goal.
 

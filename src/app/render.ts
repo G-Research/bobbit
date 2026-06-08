@@ -48,6 +48,8 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
+import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
+import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
@@ -385,6 +387,46 @@ function lazyPageCall(
 }
 
 // ============================================================================
+// CLIENT DEBUG (flag-gated diagnostics — see client-debug.ts)
+// ============================================================================
+
+// Register an "App state" section for the client-debug report (client-debug.ts
+// stays generic / DOM-only; render.ts has access to app state + routing). Add
+// more sections here or from other modules via registerDebugSection().
+registerDebugSection("App state", () => {
+	const route = getRouteFromHash();
+	const activeSid = activeSessionId();
+	return [
+		`route=${JSON.stringify(route)}`,
+		`appView=${state.appView}  connection=${state.connectionStatus}`,
+		`activeSessionId=${activeSid ?? "(none)"}  remoteAgent=${state.remoteAgent ? state.remoteAgent.gatewaySessionId : "(none)"}`,
+		`goals=${state.goals.length}  gatewaySessions=${state.gatewaySessions.length}  archivedSessions=${state.archivedSessions.length}`,
+		`activeProjectId=${state.activeProjectId ?? "(none)"}  projects=${state.projects.length}`,
+		`sessionsLoading=${state.sessionsLoading}  sessionsError=${state.sessionsError ?? "(none)"}`,
+		`theme=${document.documentElement.classList.contains("dark") ? "dark" : "light"}  palette=${document.documentElement.dataset.palette || "(default)"}`,
+		`subgoalsEnabled=${document.documentElement.dataset.subgoalsEnabled === "true"}`,
+	].join("\n");
+});
+
+/** Flag-gated floating "DBG" button (desktop + mobile). Dumps the client-debug
+ *  report into the composer. Fixed-position so it's layout-independent; hidden
+ *  unless Debug mode is on (Settings → dev-harness footer). Shows a short build
+ *  id so you can confirm at a glance which build the device is actually running
+ *  (the #1 question when iterating on a hard-to-reload installed PWA). */
+function renderClientDebugButton() {
+	if (!isClientDebugEnabled()) return "";
+	const rawBuild = (globalThis as { __BOBBIT_BUILD_ID__?: string }).__BOBBIT_BUILD_ID__;
+	const build = rawBuild ? rawBuild.slice(-6) : "dev";
+	return html`
+		<button
+			data-testid="client-debug-button"
+			@click=${() => dumpClientDebugToComposer()}
+			style="position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:2147483646;background:color-mix(in oklch, var(--primary) 88%, black);color:var(--primary-foreground);font-size:10px;font-weight:700;letter-spacing:0.03em;padding:6px 8px;border:none;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.4);opacity:0.85;line-height:1.15;text-align:center;"
+			title="Dump client debug report into the composer (build ${build})">DBG<br><span style="font-weight:500;opacity:0.85;">${build}</span></button>
+	`;
+}
+
+// ============================================================================
 // MOBILE LANDING PAGE
 // ============================================================================
 
@@ -530,9 +572,22 @@ function renderMobileLanding() {
 										staffList = filterStaffByQuery(staffList, q);
 									}
 									const projectsForRender = projectOrderForRender();
+									// Sub-goals spawned by a team-lead are rendered NESTED under that
+									// team-lead inside renderGoalGroup (Path A — renderSpawnedChildGoalRow).
+									// They must therefore be excluded from the flat top-level goal list
+									// here, or they'd render in two places at once (nested AND top-level).
+									// Mirrors the desktop sidebar's `computeSpawnedClaim` exclusion in
+									// renderProjectContent. See docs/nested-goals.md.
+									const claimedGoalIds = computeSpawnedClaim(
+										[...liveGoals, ...(state.showArchived ? archivedGoals : [])] as any,
+										state.gatewaySessions,
+										state.archivedSessions,
+										state.showArchived,
+									);
+									const topLevelGoals = liveGoals.filter(g => !claimedGoalIds.has(g.id));
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of projectsForRender) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
-										for (const g of liveGoals) {
+										for (const g of topLevelGoals) {
 											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
 											const bucket = projectMap.get(g.projectId);
 											if (!bucket) { console.warn("[mobile] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
@@ -1586,7 +1641,13 @@ export function doRenderApp(): void {
 		return;
 	}
 
-	// Gateway starting — server not yet responsive, polling until ready
+	// Gateway starting — server not yet responsive, polling until ready.
+	// Always expose a Connect escape hatch: the saved gateway URL/token can be
+	// stale (gateway address or token changed since the last QR scan), in which
+	// case waitForGateway() polls a dead address for up to 120s. Without a
+	// visible action the user is stuck staring at the loader (mobile repro:
+	// "bouncing bobbit forever, re-scanning the QR fixes it"). The button lets
+	// them reconnect / re-scan immediately instead of waiting for the timeout.
 	if (state.appView === "gateway-starting") {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
@@ -1596,10 +1657,31 @@ export function doRenderApp(): void {
 						<span class="text-base font-semibold text-foreground">Bobbit</span>
 					</div>
 					<div class="flex items-center gap-1 px-2">
+						${Button({
+							variant: "ghost",
+							size: "sm",
+							children: html`<span class="inline-flex items-center gap-1">${icon(Server, "sm")} <span class="text-xs">Connect</span></span>`,
+							onClick: openGatewayDialog,
+							title: "Connect to a different gateway",
+						})}
 						<theme-toggle></theme-toggle>
 					</div>
 				</div>
-				<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>
+				<div class="flex-1 min-h-0 flex flex-col">
+					<div class="flex-1 min-h-0">${bobbitLoadingAnimation()}</div>
+					<div class="shrink-0 flex flex-col items-center gap-3 px-8 pb-10 text-center">
+						<p class="text-sm text-muted-foreground max-w-sm">
+							Connecting to the gateway… If this doesn't resolve, the gateway
+							address may have changed — reconnect or re-scan the QR code.
+						</p>
+						${Button({
+							variant: "outline",
+							size: "sm",
+							onClick: openGatewayDialog,
+							children: html`<span class="inline-flex items-center gap-2">${icon(Server, "sm")} Reconnect</span>`,
+						})}
+					</div>
+				</div>
 			</div>
 		`, app);
 		return;
@@ -2534,6 +2616,7 @@ export function doRenderApp(): void {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
+				${renderClientDebugButton()}
 				<div class="flex items-center border-b border-border shrink-0 header-shadow">
 					${state.sidebarCollapsed ? html`
 					<div class="w-14 shrink-0 flex items-center justify-center self-stretch" style="background: var(--sidebar);">
@@ -2576,6 +2659,7 @@ export function doRenderApp(): void {
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
 				${headerToast()}
+				${renderClientDebugButton()}
 				<div id="app-header"
 					class="fixed top-0 left-0 right-0 z-50 bg-background flex flex-col">
 					<div class="flex items-center justify-between border-b border-border">

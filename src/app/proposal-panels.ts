@@ -760,7 +760,7 @@ function renderSubgoalOrchestration(config: GoalFormConfig): TemplateResult | st
 	if (config.parentGoalId) {
 		const root = findRootGoal(config.parentGoalId);
 		const pol = (root?.divergencePolicy as string) || "balanced";
-		const cc = root?.maxConcurrentChildren ?? 3;
+		const cc = root?.maxConcurrentChildren ?? 5;
 		return html`
 			<div class="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] leading-snug text-muted-foreground" data-testid="goal-form-orchestration-inherited">
 				Concurrency and plan-change autonomy are owned by the top-level goal${root ? html` <span class="text-foreground/70 font-medium">${root.title}</span>` : ""} and inherited across the tree: <span class="text-foreground/80 font-medium">${cc} parallel</span> · <span class="text-foreground/80 font-medium">${pol}</span>.
@@ -768,9 +768,10 @@ function renderSubgoalOrchestration(config: GoalFormConfig): TemplateResult | st
 		`;
 	}
 
-	// Root goal: editable controls. Default to the max (8) — favour throughput;
-	// the human dials it down when cost/compute is the constraint.
-	const concurrency = Math.max(1, Math.min(8, config.maxConcurrentChildrenValue ?? 8));
+	// Root goal: editable controls. Display the server's default (5) when the
+	// user hasn't overridden it; submission keeps the field unset in that case
+	// so the server stays the single source of truth for the default.
+	const concurrency = Math.max(1, Math.min(8, config.maxConcurrentChildrenValue ?? 5));
 	const policy = config.divergencePolicyValue ?? "balanced";
 	const activeDesc = DIVERGENCE_OPTS.find(o => o.id === policy)?.desc ?? "";
 	return html`
@@ -2804,6 +2805,8 @@ function syncProposalFormState(): void {
 	const proposal = raw as undefined | {
 		title: string; spec: string; cwd?: string; workflow?: string; options?: string;
 		parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
+		subgoalsAllowed?: boolean; maxNestingDepth?: number;
+		divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
 	};
 	if (!proposal) return;
 
@@ -2834,7 +2837,7 @@ function syncProposalFormState(): void {
 	}
 
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}`;
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -2855,10 +2858,16 @@ function syncProposalFormState(): void {
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
 		: [];
 	_proposalSaving = false;
-	_proposalSubgoalsAllowed = null;
-	_proposalMaxNestingDepth = null;
-	_proposalDivergencePolicy = null;
-	_proposalMaxConcurrentChildren = null;
+	// Seed the per-goal nesting + orchestration controls from the proposal so an
+	// agent can pre-set everything a human sets on the Sub-goals tab. Absent
+	// fields fall back to null = "inherit default" (submission still defaults
+	// subgoalsAllowed to off and maxConcurrentChildren to its max).
+	_proposalSubgoalsAllowed = typeof proposal.subgoalsAllowed === "boolean" ? proposal.subgoalsAllowed : null;
+	_proposalMaxNestingDepth = typeof proposal.maxNestingDepth === "number" ? proposal.maxNestingDepth : null;
+	_proposalDivergencePolicy = (proposal.divergencePolicy === "strict" || proposal.divergencePolicy === "balanced" || proposal.divergencePolicy === "autonomous")
+		? proposal.divergencePolicy
+		: null;
+	_proposalMaxConcurrentChildren = typeof proposal.maxConcurrentChildren === "number" ? proposal.maxConcurrentChildren : null;
 }
 
 function goalProposalPanel() {
@@ -2941,10 +2950,13 @@ function goalProposalPanel() {
 				const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
 					? _proposalDivergencePolicy
 					: undefined;
-				// Default to the max (8) so the created goal matches the value
-				// shown on the tab even when the user never touches the stepper.
-				const maxConcurrentChildrenField = isRootProposal && allowsChildren
-					? (_proposalMaxConcurrentChildren ?? 8)
+				// Only forward an explicit value when the user actually changed the
+				// stepper; an untouched control stays unset so the goal resolves to
+				// the server default (resolveRootMaxConcurrentChildren). This avoids
+				// baking a literal default into stored data and keeps the default a
+				// single source of truth on the server.
+				const maxConcurrentChildrenField = isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
+					? _proposalMaxConcurrentChildren
 					: undefined;
 				// Customised inline workflow takes precedence over the library
 				// workflowId. inlineRoles is only forwarded when non-empty.

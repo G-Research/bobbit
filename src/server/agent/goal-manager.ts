@@ -801,7 +801,9 @@ export class GoalManager {
 
 	/**
 	 * Per-tree concurrency cap for `runSubgoalStep`. Reads root's
-	 * `maxConcurrentChildren`. Defaults: 3.
+	 * `maxConcurrentChildren`. Defaults: 5 (single source of truth for the
+	 * unset default — the proposal panel only stores a value when the user
+	 * overrides it, so an absent field must resolve to the same default here).
 	 *
 	 * C4: the result is ALWAYS an integer in [1, 8]. A fractional stored
 	 * value (e.g. `1.5`) is floored before clamping so it can never let an
@@ -811,8 +813,8 @@ export class GoalManager {
 	 */
 	resolveRootMaxConcurrentChildren(rootGoalId: string): number {
 		const root = this.store.get(rootGoalId);
-		if (!root) return 3;
-		const raw = Math.floor(Number(root.maxConcurrentChildren ?? 3));
+		if (!root) return 5;
+		const raw = Math.floor(Number(root.maxConcurrentChildren ?? 5));
 		if (!Number.isFinite(raw)) return 1;
 		return Math.max(1, Math.min(8, raw));
 	}

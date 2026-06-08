@@ -23,7 +23,9 @@ import {
 	isAncestorCycle,
 	extendAncestors,
 	computeTitleSuffixes,
+	computeSpawnedClaim,
 	type SpawnedChildLike,
+	type SessionLike,
 } from "../src/app/sidebar-spawned-children.ts";
 
 function g(over: Partial<SpawnedChildLike> & { id: string }): SpawnedChildLike {
@@ -122,6 +124,78 @@ describe("selectSpawnedChildren — filter, dedupe, sort", () => {
 	it("returns [] when no goal matches", () => {
 		const goals = [g({ id: "a", parentGoalId: "OTHER", spawnedBySessionId: "L" })];
 		assert.deepEqual(selectSpawnedChildren(goals, "P", "L", false), []);
+	});
+});
+
+describe("computeSpawnedClaim — ids the team-lead nested path will claim", () => {
+	// This is the helper the mobile landing (render.ts) relies on to exclude
+	// sub-goals from the FLAT top-level goal list: any sub-goal claimed here is
+	// rendered nested under its parent's team-lead via renderSpawnedChildGoalRow,
+	// so it must NOT also appear as a top-level goal row. Pre-fix, mobile looped
+	// over every live goal and rendered each via renderGoalGroup, so a claimed
+	// sub-goal appeared BOTH nested AND at top level — the reported bug.
+	const lead = (over: Partial<SessionLike> & { id: string }): SessionLike => ({
+		role: "team-lead",
+		status: "running",
+		...over,
+	});
+
+	it("claims a sub-goal spawned by its parent's live team-lead (mobile dedup scenario)", () => {
+		const goals = [
+			g({ id: "P", createdAt: 1 }),
+			g({ id: "child", parentGoalId: "P", spawnedBySessionId: "TL", createdAt: 2 }),
+			g({ id: "unrelated", createdAt: 3 }),
+		];
+		const sessions = [lead({ id: "TL", teamGoalId: "P" })];
+		const claimed = computeSpawnedClaim(goals, sessions, [], false);
+		assert.equal(claimed.has("child"), true, "spawned child is claimed → excluded from top-level list");
+		assert.equal(claimed.has("P"), false);
+		assert.equal(claimed.has("unrelated"), false);
+	});
+
+	it("claims via goalId-matched team-lead too (not just teamGoalId)", () => {
+		const goals = [
+			g({ id: "P", createdAt: 1 }),
+			g({ id: "child", parentGoalId: "P", spawnedBySessionId: "TL", createdAt: 2 }),
+		];
+		const sessions = [lead({ id: "TL", goalId: "P" })];
+		assert.equal(computeSpawnedClaim(goals, sessions, [], false).has("child"), true);
+	});
+
+	it("does NOT claim a sub-goal when the parent has no team-lead session", () => {
+		const goals = [
+			g({ id: "P", createdAt: 1 }),
+			g({ id: "child", parentGoalId: "P", spawnedBySessionId: "TL", createdAt: 2 }),
+		];
+		// No team-lead session in the roster → nothing nested → child stays top-level.
+		assert.equal(computeSpawnedClaim(goals, [], [], false).size, 0);
+	});
+
+	it("excludes archived children unless showArchived is set", () => {
+		const goals = [
+			g({ id: "P", createdAt: 1 }),
+			g({ id: "arc", parentGoalId: "P", spawnedBySessionId: "TL", createdAt: 2, archived: true }),
+		];
+		const sessions = [lead({ id: "TL", teamGoalId: "P" })];
+		assert.equal(computeSpawnedClaim(goals, sessions, [], false).has("arc"), false);
+		assert.equal(computeSpawnedClaim(goals, sessions, [], true).has("arc"), true);
+	});
+
+	it("claims children of an archived team-lead when showArchived is set", () => {
+		const goals = [
+			g({ id: "P", createdAt: 1 }),
+			g({ id: "child", parentGoalId: "P", spawnedBySessionId: "ARC-TL", createdAt: 2 }),
+		];
+		const archivedSessions = [lead({ id: "ARC-TL", teamGoalId: "P", status: "archived" })];
+		assert.equal(computeSpawnedClaim(goals, [], archivedSessions, false).has("child"), false,
+			"archived team-lead is ignored when showArchived is off");
+		assert.equal(computeSpawnedClaim(goals, [], archivedSessions, true).has("child"), true);
+	});
+
+	it("returns empty when there are no spawned children", () => {
+		const goals = [g({ id: "P", createdAt: 1 }), g({ id: "Q", createdAt: 2 })];
+		const sessions = [lead({ id: "TL", teamGoalId: "P" })];
+		assert.equal(computeSpawnedClaim(goals, sessions, [], false).size, 0);
 	});
 });
 

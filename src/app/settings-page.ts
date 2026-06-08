@@ -7,7 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
 import { live } from "lit/directives/live.js";
-import { ArrowLeft, Brain, Check, FlaskConical, Gauge, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
+import { ArrowLeft, Brain, Bug, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import {
 	getShortcuts,
 	formatBinding,
@@ -40,6 +40,7 @@ import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
+import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -952,16 +953,23 @@ function loadHarnessStatus(): void {
 	});
 }
 
-async function togglePerfInstrumentation(): Promise<void> {
-	settingsPerfInstrumentation = !settingsPerfInstrumentation;
-	// Arm/disarm the NEXT reload immediately via the localStorage mirror; the
-	// current page is already past its boot marks.
-	setPerfInstrumentationEnabled(settingsPerfInstrumentation);
+async function toggleDebugMode(): Promise<void> {
+	const on = !isClientDebugEnabled();
+	// Single switch (dev-harness only). Turns on:
+	//   • the floating DBG button → dumps a client diagnostics report into the
+	//     composer (see client-debug.ts), and
+	//   • boot-timing perf instrumentation, so the report's Performance section
+	//     has the boot waterfall (and the on-disk sink still records).
+	// Both flags are localStorage-backed and persist across reload; the perf
+	// server preference is mirrored so a fresh browser re-arms correctly.
+	setClientDebugEnabled(on);
+	settingsPerfInstrumentation = on;
+	setPerfInstrumentationEnabled(on);
 	renderApp();
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
-			body: JSON.stringify({ devPerfInstrumentation: settingsPerfInstrumentation }),
+			body: JSON.stringify({ devPerfInstrumentation: on }),
 		});
 	} catch { /* the localStorage mirror still governs the next reload */ }
 }
@@ -984,8 +992,8 @@ async function requestSettingsRestart(): Promise<void> {
 	renderApp();
 }
 
-function renderPerfInstrumentationToggle() {
-	const on = settingsPerfInstrumentation;
+function renderDebugModeToggle() {
+	const on = isClientDebugEnabled();
 	return html`
 		<button
 			class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border transition-colors ${on
@@ -993,12 +1001,12 @@ function renderPerfInstrumentationToggle() {
 				: "border-border bg-background text-foreground hover:bg-secondary"}"
 			role="switch"
 			aria-checked=${on ? "true" : "false"}
-			data-testid="perf-instrumentation-toggle"
-			@click=${togglePerfInstrumentation}
-			title="Record reload performance stats to .bobbit/state/boot-timing.jsonl on each full reload. Applies on the next reload."
+			data-testid="debug-mode-toggle"
+			@click=${toggleDebugMode}
+			title="Debug mode: show the floating DBG button (dumps a client diagnostics report — environment, viewport/safe-area, performance, app state — into the composer) and record boot-timing perf stats. Applies on the next reload."
 		>
-			${icon(Gauge, "xs")}
-			<span>Perf ${on ? "On" : "Off"}</span>
+			${icon(Bug, "xs")}
+			<span>Debug ${on ? "On" : "Off"}</span>
 		</button>
 	`;
 }
@@ -1013,7 +1021,7 @@ function renderHarnessRestartControl() {
 			${harnessRestartState === "error" && harnessRestartError ? html`
 				<span class="text-xs text-destructive max-w-[40vw] sm:max-w-[18rem] truncate" title=${harnessRestartError}>${harnessRestartError}</span>
 			` : ""}
-			${renderPerfInstrumentationToggle()}
+			${renderDebugModeToggle()}
 			<button
 				class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-60 disabled:pointer-events-none"
 				?disabled=${requesting || requested}

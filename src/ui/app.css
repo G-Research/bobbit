@@ -47,12 +47,74 @@
    against any subtle layout recalc effects in browsers/headless engines. The
    iOS blank-gap bug only reproduces in standalone mode anyway. */
 @media (display-mode: standalone) {
+	/* iOS standalone "viewport lie" fix.
+	   On installed iOS PWAs the layout viewport reports `screen − safe-area-inset-top`
+	   (measured: screen 874, innerHeight/100dvh 812, inset-top 62) and pins content
+	   to the top, leaving a dead 62px band at the BOTTOM. Simply sizing the shell to
+	   100vh (=874) does NOT help: the *layout viewport* stays 812, so the extra 62px
+	   render below the visible fold.
+	   The trick (per github.com/spm1001/gueridon docs/ios-standalone-viewport.md):
+	   make html/body 1px TALLER than the lying viewport. That 1px overflow forces
+	   iOS to recalculate the viewport to the true screen height (874); afterwards
+	   the band disappears. The 1px overshoot is imperceptible and neutral in
+	   regular browsers. `overflow:hidden` does NOT help (iOS ignores it for
+	   viewport scrolling) and `-webkit-fill-available` keeps lying — both
+	   confirmed on-device.
+	   We use `100vh` (NOT `100dvh`): vh is the static large viewport that does
+	   NOT shrink/grow with the on-screen keyboard, so the recalc fires once and
+	   the keyboard open/close doesn't re-trigger iOS's slide animation. (dvh is
+	   dynamic — every keyboard dismissal grew it and re-ran the slide.) The
+	   initial recalc still fires because on-device 100vh already reads the true
+	   874 while the layout viewport lies at 812. */
+	html,
+	body {
+		height: calc(100vh + 1px);
+	}
+	.app-shell {
+		height: 100vh;
+	}
+
 	.app-shell {
 		padding-top: env(safe-area-inset-top);
 		padding-right: env(safe-area-inset-right);
 		padding-bottom: env(safe-area-inset-bottom);
 		padding-left: env(safe-area-inset-left);
 		box-sizing: border-box;
+	}
+
+	/* Connected mobile layout ([data-mobile-header]) uses a FIXED header
+	   overlay at the top and a composer pinned to the bottom.
+
+	     1. A `position: fixed` header anchors to the VIEWPORT and ignores the
+	        shell's padding-top, so the shell's top inset does nothing for it —
+	        the header content lands under the status bar / Dynamic Island
+	        ("top cut off"). The header must carry the top inset itself.
+
+	     2. The shell now reaches the true screen bottom (height:100% above), so
+	        the composer carries the home-indicator inset as padding: its
+	        background fills the indicator region while its controls sit above
+	        it. No empty band, no controls under the indicator.
+
+	   Drop the shell's top/bottom insets here (header + composer own them);
+	   left/right insets stay on the shell for the landscape notch. */
+	.app-shell[data-mobile-header] {
+		padding-top: 0;
+		padding-bottom: 0;
+	}
+	[data-mobile-header] #app-header {
+		padding-top: env(safe-area-inset-top);
+		padding-left: env(safe-area-inset-left);
+		padding-right: env(safe-area-inset-right);
+	}
+	/* Composer bottom padding. Reserving the FULL home-indicator inset (34px)
+	   leaves the whole indicator strip empty below the last row — wasted space,
+	   especially since the device's rounded corners already eat the extreme
+	   bottom. Reserve only HALF the inset so the composer drops flush with (and
+	   slightly past) the indicator line, reclaiming that strip while keeping the
+	   controls clear of the rounded corner. 0.25rem mirrors the base `pb-1` so
+	   0-inset devices are unchanged. */
+	[data-mobile-header] agent-interface .agent-input-area {
+		padding-bottom: calc(0.25rem + env(safe-area-inset-bottom) / 2) !important;
 	}
 }
 

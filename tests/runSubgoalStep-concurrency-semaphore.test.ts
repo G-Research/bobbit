@@ -49,11 +49,11 @@ describe("runSubgoalStep — concurrency semaphore (§3.5)", () => {
 			`semaphore must cap concurrency at 2, observed peak ${maxObserved}`);
 	});
 
-	it("uses default cap=3 when maxConcurrentChildren is unset on root", async () => {
+	it("uses default cap=5 when maxConcurrentChildren is unset on root", async () => {
 		const fx = await buildFixture();
 		after(() => fx.cleanup());
 		// No maxConcurrentChildren set on parent.
-		assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 3);
+		assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 5);
 
 		let inFlight = 0;
 		let maxObserved = 0;
@@ -65,13 +65,13 @@ describe("runSubgoalStep — concurrency semaphore (§3.5)", () => {
 			return "passed";
 		});
 
-		const steps = [0, 1, 2, 3, 4, 5].map(i => buildSubgoalStep({ planId: `d-${i}`, title: `Leaf ${i}` }));
+		const steps = [0, 1, 2, 3, 4, 5, 6].map(i => buildSubgoalStep({ planId: `d-${i}`, title: `Leaf ${i}` }));
 		const actives = steps.map(() => buildActive(fx.parent.id));
 		await Promise.all(steps.map((s, i) =>
 			fx.harness.runSubgoalStep(s, actives[i].signal, actives[i].active, 0),
 		));
 
-		assert.equal(maxObserved, 3, `default cap=3, observed peak ${maxObserved}`);
+		assert.equal(maxObserved, 5, `default cap=5, observed peak ${maxObserved}`);
 	});
 
 	it("clamps user-supplied cap above 8 to the hard max of 8", async () => {

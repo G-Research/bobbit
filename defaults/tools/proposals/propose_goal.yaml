@@ -1,7 +1,7 @@
 name: propose_goal
 description: "Submit goal proposal with title, spec, workflow"
 summary: "Propose a goal for user review"
-params: [title, spec, cwd?, workflow?, options?]
+params: [title, spec, cwd?, workflow?, options?, parentGoalId?, subgoalsAllowed?, maxNestingDepth?, divergencePolicy?, maxConcurrentChildren?, inlineRoles?, inlineWorkflow?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -19,6 +19,16 @@ docs: >-
   in the same project; when called from inside a team-lead session the server
   auto-fills from the current goal so this param is usually omitted; pass the
   id explicitly to override or omit to create a top-level goal).
+
+  SUB-GOAL + ORCHESTRATION SETTINGS (everything a human can set on the
+  proposal panel's Sub-goals tab — set these to pre-fill the panel instead of
+  leaving them to the user at accept time): subgoalsAllowed (boolean — let the
+  team-lead spawn sub-goals; default off), maxNestingDepth (integer ≥1 —
+  per-goal nesting cap, clamped to the global ceiling), divergencePolicy
+  (root-only plan-change autonomy: strict | balanced | autonomous, default
+  balanced), maxConcurrentChildren (root-only integer 1–8 — child teams run in
+  parallel, default 5). The last two are tree-wide and only apply to top-level
+  goals; children inherit the root's values.
 
   EPHEMERAL ROLES (`inlineRoles`): when an existing role doesn't fit and the
   custom role would only matter for THIS goal (e.g. a one-off

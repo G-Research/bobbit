@@ -7,7 +7,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { getOAuthProvider, type OAuthCredentials } from "@earendil-works/pi-ai/oauth";
+import { getOAuthProvider, OPENAI_CODEX_BROWSER_LOGIN_METHOD, type OAuthCredentials } from "@earendil-works/pi-ai/oauth";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
 
@@ -249,12 +249,28 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 		onPrompt: async () => manualCodePromise,
 		onManualCodeInput: async () => manualCodePromise,
 		onSelect: async (prompt) => {
-			// Bobbit has no generic OAuth selection UI today. If the provider
-			// presents a single option, auto-pick it deterministically (this is
-			// safe — there is nothing for the user to choose). Otherwise fail
-			// loudly so the flow surfaces a clear error rather than hanging
-			// indefinitely waiting for a UI that does not exist.
+			// Bobbit has no generic OAuth selection UI today, so resolve the
+			// selection deterministically:
+			//  1. A single option is safe to auto-pick — there is nothing for the
+			//     user to choose.
+			//  2. With multiple options (e.g. Codex's "Select OpenAI Codex login
+			//     method" prompt), prefer the browser-login method. Browser login
+			//     uses Bobbit's existing local-callback-server flow and already has
+			//     the click-the-URL (onAuth) and paste-the-code (onPrompt /
+			//     onManualCodeInput) fallbacks wired up, preserving the current UX.
+			//     Match the exported id first, then fall back to an id/label
+			//     heuristic so we still pick browser if the id ever changes.
+			//  3. Otherwise fail loudly so the flow surfaces a clear error rather
+			//     than hanging on a UI that does not exist.
 			if (prompt.options.length === 1) return prompt.options[0].id;
+			const browserOption =
+				prompt.options.find((o) => o.id === OPENAI_CODEX_BROWSER_LOGIN_METHOD) ??
+				prompt.options.find(
+					(o) =>
+						o.id.toLowerCase().includes("browser") ||
+						(o.label?.toLowerCase().includes("browser") ?? false),
+				);
+			if (browserOption) return browserOption.id;
 			const available = prompt.options.map((o) => o.label).join(", ");
 			throw new Error(
 				`OAuth provider requested a selection Bobbit does not support yet (\"${prompt.message}\"; options: ${available || "none"})`,

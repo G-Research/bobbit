@@ -196,6 +196,15 @@ export interface NestingContext {
 	parent?: { id: string; title: string; branch?: string };
 	/** Set when this goal has a non-self root (i.e. it is a child or grandchild). */
 	root?: { id: string; title: string; branch?: string };
+	/**
+	 * System-scope Subgoals feature flag. When false, the Children tools resolve
+	 * to `never`, so the tool-dependent stanzas (root orchestration, the
+	 * subgoal/team_spawn/task_create decision rule, and the "spawn deeper
+	 * children" bullet) are omitted. A child goal's POSITION guardrails (don't
+	 * raise a PR, branch merges into parent) are always emitted — a child can
+	 * outlive the flag being turned off.
+	 */
+	subGoalsEnabled?: boolean;
 }
 
 /**
@@ -213,16 +222,20 @@ export function buildNestingContextSection(ctx: NestingContext): string | undefi
 	const parts: string[] = [];
 
 	if (!ctx.parent) {
-		// Stanza A — top-level root
-		parts.push(
-			"## Goal nesting context (TOP-LEVEL ROOT)\n\n" +
-			"You are the team lead of a TOP-LEVEL (root) goal. This is the only goal in the tree that opens a pull request to `master`.\n\n" +
-			"**Your special responsibilities:**\n" +
-			"- After ready-to-merge passes, raise the PR via `gh pr create` (or, if `gh` is not installed in this environment, tell the user to create the PR manually). Child goals MUST NOT raise PRs.\n" +
-			"- Decide whether to decompose this work into nested sub-goals: see \"When to use subgoal vs team_spawn vs task_create\" below.\n" +
-			"- The root's `maxConcurrentChildren` (default 3, max 8) caps parallelism for the WHOLE tree — your tool `goal_set_policy` adjusts it.\n" +
-			"- The root's `divergencePolicy` (strict / balanced / autonomous) controls how mid-flight plan mutations are classified — see plan-mutation classifier docs."
-		);
+		// Stanza A — top-level root. Tool-dependent (decompose / concurrency /
+		// divergence), so omitted entirely when the Subgoals feature is off —
+		// a root with no Children tools has nothing to act on here.
+		if (ctx.subGoalsEnabled) {
+			parts.push(
+				"## Goal nesting context (TOP-LEVEL ROOT)\n\n" +
+				"You are the team lead of a TOP-LEVEL (root) goal. This is the only goal in the tree that opens a pull request to `master`.\n\n" +
+				"**Your special responsibilities:**\n" +
+				"- After ready-to-merge passes, raise the PR via `gh pr create` (or, if `gh` is not installed in this environment, tell the user to create the PR manually). Child goals MUST NOT raise PRs.\n" +
+				"- Decide whether to decompose this work into nested sub-goals: see \"When to use subgoal vs team_spawn vs task_create\" below.\n" +
+				"- The root's `maxConcurrentChildren` (default 5, max 8) caps parallelism for the WHOLE tree — your tool `goal_set_policy` adjusts it.\n" +
+				"- The root's `divergencePolicy` (strict / balanced / autonomous) controls how mid-flight plan mutations are classified — see plan-mutation classifier docs."
+			);
+		}
 	} else {
 		// Stanza B — child team-lead
 		const parentTitle = ctx.parent.title || ctx.parent.id;
@@ -241,12 +254,17 @@ export function buildNestingContextSection(ctx: NestingContext): string | undefi
 			"- **DO NOT raise a PR.** Only the root team-lead raises a PR (to `master`). If you call `gh pr create`, you create work the root must clean up.\n" +
 			"- **DO NOT spawn sibling goals.** Your siblings already exist (or will be spawned by your parent). If you need work that sounds like a sibling, surface it to your parent via `ready-to-merge` feedback rather than spawning it yourself.\n" +
 			`- Your worktree was created off \`${parentBranch}\` HEAD at spawn time. Sibling goals spawned later see your committed work after the parent's merge.\n` +
-			"- If a sibling completed before you started, you should already see their commits via the parent's branch tip.\n" +
-			"- You MAY decompose YOUR own work into deeper nested sub-goals (not siblings) via `goal_spawn_child` if the work is large enough to warrant its own team-lead. Rule of thumb: sub-goals are for decomposition WITHIN your spec, not expansion BEYOND your spec."
+			"- If a sibling completed before you started, you should already see their commits via the parent's branch tip." +
+			// Deeper-nesting bullet is tool-dependent — only when subgoals are on.
+			(ctx.subGoalsEnabled
+				? "\n- You MAY decompose YOUR own work into deeper nested sub-goals (not siblings) via `goal_spawn_child` if the work is large enough to warrant its own team-lead. Rule of thumb: sub-goals are for decomposition WITHIN your spec, not expansion BEYOND your spec."
+				: "")
 		);
 	}
 
-	// Stanza C — always present for team goals
+	// Stanza C — the subgoal/team_spawn/task_create decision rule. Tool-dependent
+	// (references goal_spawn_child / goal_plan_propose), so only when subgoals are on.
+	if (ctx.subGoalsEnabled) {
 	parts.push(
 		"## When to use `subgoal` vs `team_spawn` vs `task_create`\n\n" +
 		"You have THREE delegation primitives. Pick the right one:\n\n" +
@@ -266,7 +284,10 @@ export function buildNestingContextSection(ctx: NestingContext): string | undefi
 		"**Dependency scheduling works on every workflow type**, but the full classifier + freeze + approve flow requires the `parent` workflow (or any workflow with an `execution` gate). Without an `execution` gate, `goal_plan_propose` falls back to direct spawning with `dependsOn` enforced by the scheduler — a child with unmet deps is created in the scheduler-managed `blocked` state (its team/worktree is not started) and auto-resumes (`blocked`→`todo`) when its last dependency merges. This is NOT operator pause: `blocked` is a distinct scheduler axis, and `goal_pause`/`goal_resume` neither set nor clear dependency-blocking. Plan-mutation classification is unavailable in this mode.\n\n" +
 		"**Note: repeated plan changes (>5) on a parent-workflow goal trigger auto-pause for human review.** The freeze classifier (see plan-mutation docs) tracks `replanCount` per goal — if you keep restructuring the frozen plan, the system will pause the goal and surface a mutation-approval card to the user. Plan once, plan well; don't churn."
 	);
+	}
 
+	// With subgoals off, a root goal contributes no stanzas at all.
+	if (parts.length === 0) return undefined;
 	return parts.join("\n\n");
 }
 

@@ -94,6 +94,18 @@
 			html, body { margin: 0; padding: 0; height: 100%; }
 			body { background: #f5f6f3; color: #1a1d1a; }
 			html.dark body { background: #2b2d2b; color: #e8eae5; }
+			/* iOS standalone "viewport lie" fix, applied INLINE so it runs at first
+			   paint. iOS reports a layout viewport shorter than the screen (by the
+			   top safe-area inset) and pins content to the top, leaving a dead band
+			   at the bottom. Making html/body 1px taller than that lying viewport
+			   forces iOS to recalculate to the true screen height. Triggering it here
+			   (during the boot skeleton) rather than from the JS-bundled app.css means
+			   iOS performs its native expansion animation during launch, before the
+			   app content is visible — so the user doesn't see the "slide into place".
+			   Mirrored in src/ui/app.css; see that file for the full rationale. */
+			@media (display-mode: standalone) {
+				html, body { height: calc(100vh + 1px); }
+			}
 
 			.bobbit-skeleton {
 				position: fixed;
