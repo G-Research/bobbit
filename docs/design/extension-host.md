@@ -226,6 +226,16 @@ export interface HostApi {
 	readonly gateway: HostGatewayApi;
 
 	/**
+	 * Request a top-down UI re-render of the current view. PHASE 1: implemented as a
+	 * thin wrapper over the app's existing renderApp() (already imported by
+	 * renderer-registry.ts). A renderer calls this AFTER an action resolves so its
+	 * locally-held result (renderer-local state, §4a) is painted. Client-only — it
+	 * touches no server state and is a no-op in non-DOM contexts (unit fixtures).
+	 * Renderers that mount their own LitElement use native reactivity and ignore this.
+	 */
+	requestRender(): void;
+
+	/**
 	 * Invoke a server action handler contributed by a tool.
 	 * PHASE 1: implemented. POSTs /api/tools/:tool/actions/:action.
 	 *
@@ -356,24 +366,49 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
 
   ```js
   // market-packs/retry-demo/tools/demo/SampleActionRenderer.js  (authored by pack)
+  // A module-level Map keyed by toolUseId holds the latest action result, so the
+  // renderer survives re-mounts (transcript re-render) without mutating the transcript —
+  // exactly the children-mutation-approval pattern (src/ui/lazy/children-mutation-approval.ts).
   export default function createRenderer({ html, nothing, renderHeader }) {
+    const lastResult = new Map(); // toolUseId → handler JSON
     return {
       render(params, result, isStreaming, ctx) {
+        const shown = lastResult.get(ctx?.toolUseId);
+        const onRetry = async () => {
+          const data = await ctx.host?.invokeAction("sample_action", "retry", {});
+          lastResult.set(ctx.toolUseId, data);   // store handler result locally
+          ctx.host?.requestRender?.();           // ask the host to re-render this block
+        };
         return {
           isCustom: false,
           content: html`
             <div class="flex items-center justify-between gap-2">
               ${renderHeader(result?.isError ? "error" : "complete", null, "Sample")}
-              <button data-testid="pack-retry"
-                @click=${() => ctx.host?.invokeAction("sample_action", "retry", {})}>
-                Retry
-              </button>
+              ${shown ? html`<span data-testid="pack-result">${shown.message}</span>` : nothing}
+              <button data-testid="pack-retry" @click=${onRetry}>Retry</button>
             </div>`,
         };
       },
     };
   }
   ```
+
+  **Action-result propagation contract (Phase 1) — renderer-local state, no transcript
+  mutation.** `host.invokeAction` resolves with the handler's JSON result. The renderer
+  owns that result: it stores it in **local component state** (a module-level `Map` keyed by
+  `toolUseId`, or a mounted `LitElement` with `@state` — both survive transcript re-render)
+  and re-renders its own DOM. This is byte-for-byte the existing
+  `children-mutation-approval` mechanism (a `LitElement` with `@state` + a module-level
+  `decisionMemory` map keyed by `requestId` — it never mutates the transcript). Phase 1
+  adds one small host hook, `ctx.host.requestRender()` (a thin wrapper over the app's
+  existing `renderApp()`, already imported by `renderer-registry.ts`), so a renderer can
+  request a top-down re-render after an action resolves; renderers that mount their own
+  `LitElement` use its native reactivity instead and ignore `requestRender`. The tool-call
+  `result` passed to `render()` is **unchanged** by an action — actions do NOT rewrite the
+  transcript or the persisted tool result in Phase 1 (handlers that genuinely need to
+  resume the agent turn or post a message use the frozen-for-Phase-2 `host.session.*`). The
+  E2E (§8.2) asserts the renderer's OWN DOM updates (the `pack-result` element reflects the
+  handler's returned value) after the click.
 
   Passing `html`/`nothing`/`renderHeader` from the **host's own `lit` instance** sidesteps
   bare-import resolution and the dual-lit-singleton hazard entirely. (Rejected alternative:
@@ -513,15 +548,21 @@ modeled on `/api/internal/mcp-call` (server.ts:10930). Body `{ sessionId, toolUs
 Flow (full guard sequence in §5):
 
 ```
-1. require x-bobbit-session-id header  → else 403
-2. resolve session (live or persisted via projectContextManager) → else 403
-3. require :tool ∈ session.allowedTools (same check as mcp-call:10974) → else 403
-4. if actions.names present, require :action ∈ names → else 404
-5. verify toolUseId exists in sessionId AND was a call of :tool → else 409 (§5 iii)
-6. rate-limit + concurrency-cap check → else 429
-7. dispatcher.dispatch(...) under per-call timeout + try/catch
-8. audit-log {tool, action, sessionId, toolUseId, caller, outcome, ms}
-9. json(result)   |   json({error}, 4xx/500) on failure
+1. require x-bobbit-session-id header  → else 403      (HEADER is the canonical identity)
+2. require body.sessionId === headerSessionId          → else 403 (reject cross-session)
+3. resolve session (live or persisted via projectContextManager) → else 403
+4. require :tool ∈ session.allowedTools (same check as mcp-call:10974) → else 403
+5. if actions.names present, require :action ∈ names → else 404
+6. verify toolUseId exists in THE HEADER-BOUND session AND was a call of :tool → else 409 (§5 iii)
+7. rate-limit + concurrency-cap check → else 429
+8. dispatcher.dispatch(...) under per-call timeout + try/catch
+9. audit-log {tool, action, sessionId, toolUseId, caller, outcome, ms}
+10. json(result)   |   json({error}, 4xx/500) on failure
+
+# Session identity is single-sourced from the x-bobbit-session-id HEADER. The body
+# sessionId is accepted only to fail fast on a mismatch (step 2); ALL downstream checks
+# (allowedTools, toolUseId ownership, transcript scan) use the header-bound session, so an
+# action can never authorize with one session and inspect/act on another's transcript.
 ```
 
 **Cache invalidation (synchronous).** `invalidateResolverCaches()` (server.ts:2238)
@@ -549,6 +590,7 @@ dispatcher near `toolManager`).
 ```ts
 // src/app/host-api.ts (NEW)
 import { gatewayFetch } from "./gateway-fetch.js";
+import { renderApp } from "./state.js";   // existing top-down re-render entry point
 import { HOST_API_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
 
 /** Build the Phase-1 client Host API bound to a given session AND the renderer's own
@@ -562,6 +604,7 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 		gateway: {
 			fetch: (path, init) => gatewayFetch(path, withSession(init, sessionId)),
 		},
+		requestRender: () => { try { renderApp(); } catch { /* non-DOM (unit) — no-op */ } },
 		async invokeAction(tool, action, args) {
 			// sessionId + toolUseId come from the bound render context, NOT from args.
 			// args is pure action-domain input, validated/whitelisted by the handler.
@@ -604,7 +647,9 @@ in exactly one place.
 |---|---|---|---|
 | i | **Allowlist-bypass fix** | The **action** endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈ the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call` (server.ts:10953–10976): require `x-bobbit-session-id`, resolve the session (live or persisted), reject if `:tool` not in `allowedTools`. The LLM can curl the endpoint, so this guard — not the agent layer's `allowedTools` — is the real gate. The **renderer** endpoint (`GET /api/tools/:tool/renderer`) is EXEMPT from the allowedTools check: it serves trusted pack module bytes (a static-asset-equivalent, not a capability invocation), so it needs only the admin bearer (see §5.1). The reserved Phase-2 `routes:`/`stores:` inherit the action endpoint's allowedTools-gated rule by design. | **Yes — unit** |
 | ii | **Input validation / no traversal** | `:tool`/`:action` matched against resolved tool + `actions.names`; `module`/`renderer` paths re-validated to stay within `baseDir/groupDir` (no `..`, no abs); `args` passed to the handler as opaque JSON — never `eval`/`exec`/`require`-d; `sessionId`/`toolUseId` treated as untrusted strings, never used to build filesystem/session paths beyond a store `get`. | **Yes — unit** |
-| iii | **toolUseId existence + ownership (anti-replay/forgery)** | Resolve the session transcript via `projectContextManager.getContextForSession(sessionId)?.sessionStore.get(sessionId)` and scan its messages for a `tool_use`/`toolCall` block whose `id === toolUseId` **and** whose tool name `=== :tool`. Reject (409) if absent — blocks replays and forged ids referencing another tool. | **Yes — unit** |
+| iii | **toolUseId existence + ownership (anti-replay/forgery)** | Resolve the **header-bound** session's transcript via `projectContextManager.getContextForSession(headerSessionId)?.sessionStore.get(headerSessionId)` and scan its messages for a `tool_use`/`toolCall` block whose `id === toolUseId` **and** whose tool name `=== :tool`. Reject (409) if absent — blocks replays and forged ids referencing another tool. | **Yes — unit** |
+| iii-b | **Single-sourced session identity** | The `x-bobbit-session-id` HEADER is the canonical identity. The request body's `sessionId` is accepted only to fail fast on a mismatch — `body.sessionId === headerSessionId` is required (403 otherwise) BEFORE any allowedTools/toolUseId check; every downstream check uses the header-bound session. Prevents authorizing with one session and inspecting/acting on another's transcript. | **Yes — unit** |
+| iii-c | **Action-result propagation (no privileged mutation)** | An action's result flows back ONLY as the `invokeAction` promise's JSON; the renderer applies it to **its own local state** (module-level Map / `LitElement` `@state`) and re-renders via `ctx.host.requestRender()` or native reactivity (§4a). Phase-1 handlers do NOT rewrite the transcript or persisted tool result — so a pack action cannot silently mutate session history. Turn-resume/message-post is frozen-for-Phase-2 (`host.session.*`). | **Yes — E2E** |
 | iv | **Blast radius** | Handlers run in the long-lived gateway process. Per-call **timeout** (`Promise.race`, default 30s); global **concurrency cap** (semaphore, default 8 in-flight); **try/catch isolation** so a thrown/handler-crash becomes a 500, never takes down the process; endpoint **rate-limit** (token bucket per session). A **seam** is left to run `actions.js` in a worker/`vm` later: the dispatcher only ever calls `module.actions[action](ctx, args)`, so swapping the execution strategy is local to `ActionDispatcher.dispatch`. | timeout+isolation **yes**; cap/rate-limit recommended |
 | v | **UI thread** | Renderers run on the main thread over LLM-influenced data. Preserve existing iframe `sandbox` attributes (artifacts/preview unchanged). Pack renderers **must NOT auto-invoke actions on render** — `invokeAction` is only called from a user gesture (click). The litmus sample's Retry button enforces this; reviewers reject render-time invocation. | **Yes — E2E asserts no call before click** |
 | vi | **Audit** | Every action invocation logs `{ tool, action, sessionId, toolUseId, caller, outcome, durationMs }` via the existing logger. | recommended |
@@ -718,6 +763,8 @@ parsed-and-reserved today so packs authored against the full shape install clean
 | Manifest schema | Phase-2 keys (`panels`/`routes`/`stores`/`entrypoints`) accepted + ignored, NOT rejected; malformed block degrades (tool still loads). | yes |
 | **Tool-description budget** | `tests/tool-description-budget.test.ts` still passes after the new tool-metadata wire fields (`rendererKind`/`hasActions`/`actionNames`) + contributions parsing — no tool description exceeds its pinned budget. | yes |
 | **`buildPackList` byte-identical** | With zero market packs, resolution is unchanged (renderers/actions add nothing), per the existing `buildPackList` byte-identical invariant test. | yes |
+| **Single-sourced session identity** | `body.sessionId !== x-bobbit-session-id` header → 403 BEFORE allowedTools/toolUseId checks; toolUseId is verified against the header-bound session only (a valid toolUseId from a *different* session → 409). | **yes** |
+| **Action-result contract** | `invokeAction` resolves with the handler's JSON; no transcript/persisted-tool-result mutation occurs (assert the stored session record is byte-identical before/after a successful action). | yes |
 
 ### 8.2 Browser E2E (mandatory) — `tests/e2e/ui/extension-host.spec.ts`
 
@@ -729,7 +776,9 @@ fixture shipping the `retry-demo` pack (§2.4):
 2. Open a session whose transcript contains a `sample_action` tool call → it **renders
    with the pack renderer** (placeholder → real renderer; assert the Retry button, and
    assert **no** action POST fired before any click — control v).
-3. Click **Retry** → action POST → tool block updates from the handler result.
+3. Click **Retry** → action POST → the renderer's OWN DOM updates from the handler result
+   (assert the `pack-result` element appears/reflects the handler's returned value; the
+   transcript/persisted tool result is unchanged — renderer-local state per §4a).
 4. Reload the page → renderer still loads (registration re-driven from metadata; control
    §4a survives-reload).
 5. Uninstall the pack → renderer + actions gone (`/api/tools` drops it; subsequent action
