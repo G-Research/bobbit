@@ -56,7 +56,7 @@
 	}
 
 	/* Connected mobile layout ([data-mobile-header]) uses a FIXED header
-	   overlay at the top and a flush composer at the bottom. Two consequences
+	   overlay at the top and a composer pinned to the bottom. Two consequences
 	   for safe areas:
 
 	     1. A `position: fixed` header anchors to the VIEWPORT and ignores the
@@ -64,13 +64,17 @@
 	        the header content lands under the status bar / Dynamic Island
 	        ("top cut off"). The header must carry the top inset itself.
 
-	     2. If the shell ALSO reserves padding-bottom here, the composer ends
-	        above the home-indicator zone and the reserved inset shows through
-	        as a detached blank band below the input ("blank space at bottom").
+	     2. Reserving padding-bottom (on the shell OR the composer) for the home
+	        indicator leaves an empty dark band below the composer — there's no
+	        visible bar to fill it, so it just reads as wasted space in a
+	        full-screen app. The composer should run edge-to-edge instead; the
+	        home indicator is translucent and only overlaps the bottom-most
+	        (non-primary) row, which is acceptable.
 
-	   Fix: drop the shell's top/bottom insets in this layout and push them onto
-	   the header (top) and the composer (bottom) so both edges fill cleanly.
-	   Left/right insets stay on the shell (landscape notch). */
+	   Fix: drop the shell's top/bottom insets in this layout, push the top
+	   inset onto the fixed header, and reserve NOTHING at the bottom so the
+	   composer fills to the screen edge. Left/right insets stay on the shell
+	   (landscape notch). */
 	.app-shell[data-mobile-header] {
 		padding-top: 0;
 		padding-bottom: 0;
@@ -79,12 +83,6 @@
 		padding-top: env(safe-area-inset-top);
 		padding-left: env(safe-area-inset-left);
 		padding-right: env(safe-area-inset-right);
-	}
-	/* Composer reaches the bottom edge; its controls clear the home indicator.
-	   0.25rem mirrors the base `pb-1` so non-inset (Android / 0-inset) devices
-	   are visually identical to before. */
-	[data-mobile-header] agent-interface .agent-input-area {
-		padding-bottom: calc(0.25rem + env(safe-area-inset-bottom)) !important;
 	}
 }
 
