@@ -16,6 +16,13 @@ let toolsResponse: Array<{ name: string; rendererKind?: string }> = [
 	{ name: "demo_pack_tool", rendererKind: "pack" },
 ];
 
+// Per-project artificial delay (ms) applied to the /api/tools metadata fetch.
+// Used to simulate OUT-OF-ORDER completion: a slow reconcile(A) whose response
+// lands AFTER a fast reconcile(B) must NOT clobber B's loaders (Wave-9B race fix).
+const toolsDelayByProject = new Map<string, number>();
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 // A trivial ESM renderer module the fake /renderer endpoint serves. The loader
 // imports it via a Blob URL; we only assert on the request URL (recorded before
 // fetch resolves), so the import succeeding is not required for the assertions.
@@ -28,6 +35,12 @@ const RENDERER_MODULE =
 	if (url.includes("/renderer")) {
 		return new Response(RENDERER_MODULE, { status: 200, headers: { "Content-Type": "text/javascript" } });
 	}
+	// /api/tools metadata — optionally delayed per the requested project id so a
+	// test can make reconcile(A) resolve AFTER reconcile(B).
+	const m = /[?&]projectId=([^&]*)/.exec(url);
+	const pid = m ? decodeURIComponent(m[1]) : "";
+	const delay = toolsDelayByProject.get(pid) ?? 0;
+	if (delay > 0) await sleep(delay);
 	return new Response(JSON.stringify({ tools: toolsResponse }), {
 		status: 200,
 		headers: { "Content-Type": "application/json" },
@@ -35,9 +48,13 @@ const RENDERER_MODULE =
 };
 
 (window as any).__setTools = (t: Array<{ name: string; rendererKind?: string }>) => { toolsResponse = t; };
+(window as any).__setToolsDelay = (pid: string, ms: number) => { toolsDelayByProject.set(pid, ms); };
 (window as any).__calls = (): string[] => fetchCalls.slice();
 (window as any).__clearCalls = () => { fetchCalls.length = 0; };
 (window as any).__reconcile = (pid?: string): Promise<void> => reconcilePackRenderersForProject(pid);
+// Start a reconcile WITHOUT awaiting (returns the promise) so a test can
+// interleave two reconciles and resolve them out of order.
+(window as any).__startReconcile = (pid?: string): Promise<void> => reconcilePackRenderersForProject(pid);
 (window as any).__register = (pid?: string) => registerPackRenderers(toolsResponse, pid);
 (window as any).__triggerLoad = (name: string) => { getToolRenderer(name); };
 (window as any).__flush = async (): Promise<void> => { await new Promise(r => setTimeout(r, 30)); };

@@ -96,10 +96,20 @@ export function registerPackRenderers(
  *  for the global/no-project scope) so the first global-scope reconcile still
  *  fires rather than being swallowed by the dedupe guard. */
 const UNRECONCILED = Symbol("unreconciled");
-/** The project id of the LAST reconcile (or {@link UNRECONCILED} before any).
- *  Used only as a cheap dedupe guard — re-driving on a REAL project change
- *  always wins. */
+/** The project id of the last SUCCESSFULLY-APPLIED, non-superseded reconcile (or
+ *  {@link UNRECONCILED} before any). Used only as a cheap dedupe guard — set
+ *  AFTER a successful apply (never before the await), so a failed or superseded
+ *  attempt does not poison the dedupe and a retry/re-drive still works. */
 let lastReconciledProject: string | undefined | typeof UNRECONCILED = UNRECONCILED;
+
+/** Monotonic generation token. Each `reconcilePackRenderersForProject` captures
+ *  `++reconcileGeneration` at the START; after its `await fetchTools` resolves it
+ *  applies ONLY if its captured token still equals the live counter. A newer
+ *  reconcile (started after it) bumps the counter and supersedes it — so an
+ *  out-of-order late response cannot overwrite the GLOBAL renderer registry with
+ *  a stale project's loaders. The registry always ends matching the LAST
+ *  REQUESTED project, never whichever fetch happened to resolve last. */
+let reconcileGeneration = 0;
 
 /**
  * Re-drive pack-renderer registration for `projectId`: fetch the tool metadata
@@ -119,14 +129,24 @@ let lastReconciledProject: string | undefined | typeof UNRECONCILED = UNRECONCIL
  * session's project.)
  */
 export async function reconcilePackRenderersForProject(projectId: string | undefined): Promise<void> {
-	// Skip a redundant re-drive when the project is unchanged from the last one.
+	// Skip a redundant re-drive only when the LAST SUCCESSFULLY-APPLIED reconcile
+	// already targeted this project (set after apply, below).
 	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === projectId) return;
-	lastReconciledProject = projectId;
+	// Capture a generation token BEFORE the await so a later reconcile supersedes us.
+	const gen = ++reconcileGeneration;
 	try {
-		registerPackRenderers(await fetchTools(projectId), projectId);
+		const tools = await fetchTools(projectId);
+		// A newer reconcile started while our fetch was in flight — it owns the
+		// registry + dedupe now. Drop this stale response: do NOT apply, do NOT
+		// touch lastReconciledProject (else a late A-response could strand the UI
+		// on project A while the active project is B, and a re-drive to B would be
+		// wrongly deduped).
+		if (gen !== reconcileGeneration) return;
+		registerPackRenderers(tools, projectId);
+		// Mark applied only AFTER a successful, non-superseded apply.
+		lastReconciledProject = projectId;
 	} catch {
-		// Non-fatal — built-in renderers are unaffected. Reset the guard so a later
-		// call for the same project retries instead of being deduped away.
-		lastReconciledProject = UNRECONCILED;
+		// Non-fatal — built-in renderers are unaffected. Leave lastReconciledProject
+		// untouched so a later call for this project retries instead of being deduped.
 	}
 }
