@@ -21,7 +21,7 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 
 **Measured unit wall time (24-core dev box): ~90s** (down from ~135s when the two runners were chained with `&&`). This is above the <1min aspiration. Binding constraint: both unit runners are CPU-bound and parallelise internally; the node logic suite alone is ~3.4k tests, and at a half-core split (`--test-concurrency=12`) it is the long pole at ~90s while the browser fixtures finish at ~76s. Giving either runner all cores oversubscribes the box and reintroduces contention-induced timeouts, so the split is the fastest **green** configuration. Sharding the node suite across processes is the next lever if the box shrinks. See the parallelism-ladder discussion in `docs/design/test-phase-invariant.md`.
 
-**Measured e2e wall time (24-core dev box): ~6.5–7 min**, dominated by the `browser` project (~5.2 min when run standalone). Retries do **not** inflate this: back-to-back runs measured `--retries=3` at ~6.5 min and `--retries=0` at ~6.5–7.1 min — the retry budget is flake *insurance*, not steady-state cost. The number is above the ~5 min aspiration. Binding constraint: the `browser` project runs an in-process gateway + Chromium per worker; the worker budget below is deliberately conservative to avoid the cross-worker filesystem/CPU contention that historically produced flakes, and the spec mandated folding the previously `--grep-invert`-excluded `mcp-integration` + `session-lifecycle-ui` specs back into this project. Raising the worker budget to chase <5 min reintroduces exactly the contention flakes the budget exists to prevent, so it is not a free lever — see [E2E suite parallelism budget](#e2e-suite-parallelism-budget).
+**Measured e2e wall time (24-core dev box): ~6.5–7 min**, dominated by the `browser` project (~5.2 min when run standalone). Retries do **not** inflate this: back-to-back runs measured `--retries=3` at ~6.5 min and `--retries=0` at ~6.5–7.1 min — the retry budget is flake *insurance*, not steady-state cost. The number is above the ~5 min aspiration. Binding constraint: the `browser` project runs an in-process gateway + Chromium per worker; the worker budget below is deliberately conservative to avoid the cross-worker filesystem/CPU contention that historically produced flakes, and the spec mandated folding the previously `--grep-invert`-excluded `mcp-integration` + `session-lifecycle-ui` specs back into this project. Raising the worker budget to chase <5 min reintroduces exactly the contention flakes the budget exists to prevent, and would also degrade robustness when up to ~4 suites run concurrently — so it is not a free lever. A sub-5-min single-suite wall is a deliberately-superseded non-goal; see [E2E suite parallelism budget](#e2e-suite-parallelism-budget).
 
 ## Current State
 
@@ -622,22 +622,69 @@ inside their project workers because their setup costs and filesystem side
 effects are heavier. The API project remains fully parallel because it uses the
 in-process harness and benefits from all four workers.
 
-**`retries: 3` vs the retries:0 aspiration.** `tests/e2e/README.md` states the
-target end-state — `retries: 0`, no `@quarantine` tag, every flake root-caused.
-The shipped config still carries `retries: 3` and a tail of heavy `browser`
-specs (several `@quarantine`-labelled: `proposal-panel-streaming`,
-`goal-creation`, `stories-goal-routing`, …) plus a few un-labelled contract
-tests (`sidebar-keyboard-nav`, `verification-progress-indicator`) still time out
-intermittently under 4-way Chromium contention. At `--retries=0` a full run
-typically surfaces 0–2 such failures; `retries: 3` rescues them so the gate is
-green. This is **pre-existing contention debt**, not introduced by the
-phase-invariant work — driving the `browser` project to a genuine retries:0
-zero-flake state (per the README) is its own hardening goal. When a clearly
-root-causable flake is found it is fixed in place rather than masked — e.g.
-`open-session-new-window`'s middle-click was rewritten to dispatch the
-`auxclick` event its handler contracts on, because Playwright's real
+**`retries: 3` is the deliberate current policy, not debt.** The flake-hardening
+effort root-caused the browser flake floor in place (see [Flake hardening](#flake-hardening-deterministic-waits)),
+removed every `@quarantine` label, and un-skipped the one flake-skipped spec.
+The config nonetheless **keeps** `retries: 3` and the current worker budget on
+purpose. Rationale: the dev box must support running up to ~4 e2e suites
+**concurrently** (overlapping worktrees / parallel goals). Under that mutual
+contention a suite can hit a transient cross-suite race — CPU/FS pressure, a
+goal-assistant cold-start timeout — unrelated to any real bug. `retries: 3`
+absorbs those transients so one suite's blip does not red-light an otherwise
+green concurrent run. The deterministic-wait hardening keeps the
+**first-attempt** failure rate low, so retries are a resilience margin, **not**
+a crutch for un-root-caused flakes.
+
+The original goal's `retries: 0` + sub-5-min asks are explicitly **superseded**
+by this decision. Retries are not being reduced to 0, and worker counts are not
+being raised: raising parallelism to chase a sub-5-min single-suite wall would
+manufacture the very contention this budget avoids and degrade concurrent-suite
+robustness. A sub-5-min single-suite wall was therefore not achieved and is out
+of scope under this policy.
+
+Measured evidence:
+
+- A single retries-free full suite runs ~6.5–7.0 min wall (~1270–1279 passed,
+  ~6 skipped).
+- **Two** full suites run concurrently at the committed `retries: 3` both passed
+  (exit 0): suite 1 with 0 failed / 1 flaky-retried (`qa-seed`), suite 2 with
+  0 failed / 2 flaky-retried (`dynamic-chat-tabs`, `repro-h3-snapshot-live-interleave`);
+  ~9.5–10.0 min each under mutual contention. So under concurrency the suite
+  absorbs ~1–2 transient flakes each with 0 hard failures.
+
+When a clearly root-causable flake is found it is fixed in place rather than
+masked — e.g. `open-session-new-window`'s middle-click was rewritten to dispatch
+the `auxclick` event its handler contracts on, because Playwright's real
 middle-click intermittently latched Chromium autoscroll and swallowed the
 `auxclick`.
+
+#### Flake hardening (deterministic waits)
+
+The hardening effort eliminated the browser flake floor across 15+ specs by
+replacing optimistic clicks and rAF-spin waits with **deterministic synchronization**:
+`toBeEnabled()` before clicking, `expect.poll(...)` on exact counts,
+`waitForResponse(...)`, and concrete data-attribute / element-count waits. Key fixes:
+
+- **Split the 60s `sidebar-keyboard-nav` mega-test into 6 budgeted tests**, each
+  well under the per-test timeout instead of one test racing a single 60s budget.
+- **Fixed a worker-scoped `prw-session` leak**: `pr-walkthrough-api` now cleans up
+  in `afterEach`/`afterAll` so a leaked session does not perturb later specs on
+  the same worker (the worker-scoped-leak pattern — see
+  [Flake-stabilization patterns](#flake-stabilization-patterns)).
+- **Id-scoped the `search-orphan-filter` orphan-drop assertions** (goal / session /
+  staff / message) to the inserted orphan row. The previous broad `type===`
+  assertion also counted unrelated real rows surfaced by `suggest: true` fuzzy
+  matching, so it flaked whenever live data happened to match.
+- **Un-skipped PPS-06** (proposal dismiss during streaming) after fixing a real
+  product bug: a mid-stream proposal dismiss did not stick.
+- **Removed every `@quarantine` label.** 11 non-flaking specs were exercised at
+  `repeat-each=20` to confirm stability before de-labelling; the genuinely flaky
+  ones were hardened first, then de-labelled. Zero `@quarantine` labels remain.
+
+The inventory also corrected a stale suspect list: `goal-creation`,
+`stories-goal-routing`, and `verification-progress-indicator` were named as
+intermittent offenders but did **not** flake under retry-free runs; all
+previously-named specs are now hardened and de-labelled.
 
 ### Playwright transform-cache isolation
 
@@ -744,12 +791,22 @@ fallback when the npm wrapper is unavailable, and its runner-cache isolation is
 weaker for the reason described above.
 
 `--retries=0` is a measurement flag only. The committed E2E config keeps
-`retries: 3` for normal runs so genuinely rare flakes do not red-light the full
-suite while they are being fixed.
+`retries: 3` for normal runs as a deliberate resilience margin for concurrent
+suites (see [Worker and retry counts](#worker-and-retry-counts)), so a transient
+cross-suite race does not red-light an otherwise green run. Use `--retries=0`
+only to surface first-attempt flakes during hardening or measurement, not as a
+target for the committed config.
 
 ### What not to change without re-measuring
 
-- Don't raise the top-level worker budget above 4 as a primary speed strategy.
+- Don't raise the top-level worker budget above 4, or the `browser` budget above
+  3, as a speed strategy. The budget is sized so up to ~4 suites can run
+  concurrently without mutual contention; raising it to chase a faster
+  single-suite wall manufactures exactly the cross-suite flakes the budget
+  exists to prevent. A sub-5-min single-suite wall is explicitly out of scope.
+- Don't reduce `retries: 3` to 0 in the committed config. It is the deliberate
+  concurrent-robustness margin, not temporary debt — see
+  [Worker and retry counts](#worker-and-retry-counts).
 - Don't set `fullyParallel: true` on the `browser` or `api-realpush` projects.
 - Don't serialise the `api` project; it is the lightweight in-process lane and
   benefits from its 4-worker budget.
