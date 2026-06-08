@@ -16,6 +16,7 @@ import {
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision } from "./api.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
+import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
@@ -1025,6 +1026,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId)
 			|| state.archivedSessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
+		// Re-drive pack-renderer registration for THIS session's project so a
+		// reload / deep-link into a session whose project differs from the boot
+		// active/default resolves the right project-scope renderers (design §4a/§4c).
+		// Fire-and-forget — never block the session switch.
+		void reconcilePackRenderersForProject(sessionForPalette?.projectId).catch(() => {});
 
 		// Reset session-scoped global state so it doesn't bleed from the previous session.
 		// If the session was just created server-side (e.g. via a back-channel API
@@ -1178,6 +1184,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	const sessionForPalette = state.gatewaySessions.find(s => s.id === sessionId)
 		|| state.archivedSessions.find(s => s.id === sessionId);
 	applyProjectPalette(sessionForPalette?.projectId);
+	// Re-drive pack renderers for this session's project (see fast-path above).
+	void reconcilePackRenderersForProject(sessionForPalette?.projectId).catch(() => {});
 
 	// Phase 2: async hydrate
 	const gen = state.switchGeneration;
@@ -2195,6 +2203,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				}
 				// Re-apply project palette after refreshSessions (session may now have projectId)
 				applyProjectPalette(sessionForRole?.projectId);
+				// The session's project may have only just become known here — re-drive
+				// pack renderers for it (deduped if unchanged; design §4a/§4c).
+				void reconcilePackRenderersForProject(sessionForRole?.projectId).catch(() => {});
 				// Apply cwd/branch if not set earlier (sessionData wasn't in gatewaySessions yet)
 				if (state.chatPanel?.agentInterface && !state.chatPanel.agentInterface.cwd && sessionForRole?.cwd) {
 					state.chatPanel.agentInterface.cwd = sessionForRole.cwd;

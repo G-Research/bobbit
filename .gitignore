@@ -69,6 +69,7 @@ tests/fixtures/ask-user-choices-renderer-bundle.css
 tests/fixtures/settings-models-tab-bundle.css
 tests/fixtures/preview-renderer-bundle.css
 tests/fixtures/api-error-forwarding-bundle.css
+tests/fixtures/pack-renderers-reconcile-bundle.css
 tests/fixtures/spurious-idle-unread-bundle.css
 tests/fixtures/notification-policy-bundle.css
 tests/fixtures/review-tool-active-guard-bundle.css

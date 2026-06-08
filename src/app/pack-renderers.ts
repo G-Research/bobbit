@@ -22,6 +22,7 @@
 import { html, nothing } from "lit";
 import { registerLazyToolRenderer, unregisterPackRenderer, renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
+import { fetchTools } from "./api.js";
 
 /** Host toolkit handed to a pack renderer's factory. Keeps the pack on the
  *  app's single `lit` instance and standard `renderHeader()` shape. */
@@ -89,4 +90,43 @@ export function registerPackRenderers(
 		if (!next.has(name)) unregisterPackRenderer(name);
 	}
 	packRegistered = next;
+}
+
+/** Sentinel: no reconcile has run yet. Distinct from `undefined` (reconciled
+ *  for the global/no-project scope) so the first global-scope reconcile still
+ *  fires rather than being swallowed by the dedupe guard. */
+const UNRECONCILED = Symbol("unreconciled");
+/** The project id of the LAST reconcile (or {@link UNRECONCILED} before any).
+ *  Used only as a cheap dedupe guard — re-driving on a REAL project change
+ *  always wins. */
+let lastReconciledProject: string | undefined | typeof UNRECONCILED = UNRECONCILED;
+
+/**
+ * Re-drive pack-renderer registration for `projectId`: fetch the tool metadata
+ * scoped to that project and (re-)register every pack renderer with the CURRENT
+ * project id. Because the lazy loader closes over `projectId` (it serves the
+ * project-scoped renderer Blob), a project CHANGE must replace the loaders —
+ * `registerPackRenderers` re-registers (override) each pack tool with the new
+ * project id (the Wave 6 generation guard drops any stale in-flight/loaded
+ * module on re-register) and unregisters names absent for the new project.
+ *
+ * Called BOTH at boot AND whenever the ACTIVE session's project is
+ * established/changes (session-manager, alongside `applyProjectPalette`). Cheap
+ * dedupe guard skips a redundant re-drive when the project hasn't changed;
+ * correctness (re-drive on real change) takes priority. Fire-and-forget +
+ * try/catch — never blocks session switch; built-in renderers are unaffected on
+ * failure. (design §4a/§4c — pack-renderer registration follows the active
+ * session's project.)
+ */
+export async function reconcilePackRenderersForProject(projectId: string | undefined): Promise<void> {
+	// Skip a redundant re-drive when the project is unchanged from the last one.
+	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === projectId) return;
+	lastReconciledProject = projectId;
+	try {
+		registerPackRenderers(await fetchTools(projectId), projectId);
+	} catch {
+		// Non-fatal — built-in renderers are unaffected. Reset the guard so a later
+		// call for the same project retries instead of being deduped away.
+		lastReconciledProject = UNRECONCILED;
+	}
 }

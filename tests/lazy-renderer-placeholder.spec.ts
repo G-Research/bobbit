@@ -178,6 +178,42 @@ test.describe("Pack renderer { override } precedence (extension-host §4a)", () 
 		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(0);
 	});
 
+	test("unregister restores a displaced LAZY builtin loader (not just eager) §4a", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) A LAZY builtin loader is registered (lives in pendingLazy, not yet
+		//    loaded — like team_*/task_*/gate_*), THEN a pack { override } shadows
+		//    it BEFORE it loads. Two distinct deferred keys so we can resolve the
+		//    builtin loader independently of the pack loader.
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("lazy_builtin_tool", "BUILTIN_LOADER", false);
+			(window as any).__registerKeyedLazy("lazy_builtin_tool", "PACK_LOADER", true);
+			(window as any).__renderRegistered("lazy_builtin_tool"); // pack placeholder → starts pack load
+		});
+		// Pack override is effective → its placeholder, not the builtin.
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// 2) Unregister the pack (uninstall) → the displaced LAZY builtin loader is
+		//    RE-ARMED in pendingLazy (NOT lost to default rendering).
+		await page.evaluate(() => {
+			(window as any).__unregisterPack("lazy_builtin_tool");
+			(window as any).__renderRegistered("lazy_builtin_tool"); // builtin loader → placeholder, starts builtin load
+		});
+		// getToolRenderer re-triggered the restored builtin lazy loader → placeholder
+		// again (NOT [data-no-renderer], which would mean the loader was lost).
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+		await expect(page.locator("#probe [data-no-renderer]")).toHaveCount(0);
+
+		// 3) Resolve the BUILTIN loader → the real specialized builtin renderer lands.
+		await page.evaluate(async () => {
+			const wait = (window as any).__waitForRendererLoaded("lazy_builtin_tool");
+			(window as any).__resolveKeyedLazy("BUILTIN_LOADER", "LAZY_BUILTIN");
+			await wait;
+			(window as any).__renderRegistered("lazy_builtin_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toContainText("LAZY_BUILTIN");
+	});
+
 	test("unregister of a pack tool with no built-in falls back to default (no renderer)", async ({ page }) => {
 		await gotoAndWait(page);
 

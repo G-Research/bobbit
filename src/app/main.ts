@@ -538,16 +538,14 @@ async function initApp() {
 			// survives reload. A zero-pack install resolves to an empty list (no-op).
 			void (async () => {
 				try {
-					const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
-						import("./api.js"),
-						import("./pack-renderers.js"),
-					]);
+					const { reconcilePackRenderersForProject } = await import("./pack-renderers.js");
 					// Thread the active project so a project-scope pack's renderer
 					// metadata + Blob fetch resolve the same winner (design §4b). May be
-					// null this early in boot; server/global-scope packs still register
-					// (the marketplace refresh re-drives this with the active project).
-					const activeProjectId = state.activeProjectId ?? undefined;
-					registerPackRenderers(await fetchTools(activeProjectId), activeProjectId);
+					// null this early in boot; server/global-scope packs still register,
+					// and connecting to a session re-drives this with the SESSION's
+					// project (session-manager) so a reload / deep-link into a session
+					// whose project differs from the active/default resolves correctly.
+					await reconcilePackRenderersForProject(state.activeProjectId ?? undefined);
 				} catch { /* non-fatal — built-in renderers are unaffected */ }
 			})();
 

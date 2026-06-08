@@ -66,12 +66,19 @@ function bumpLoadGeneration(toolName: string): void {
 // `registerToolRenderer` for a pack-owned name is ignored so the pack always
 // wins (extension-host §4a renderer precedence). See registerLazyToolRenderer.
 const packOwned = new Set<string>();
-// Eager built-in renderers DISPLACED by a pack `{ override: true }`. Stashed at
-// override time so `unregisterPackRenderer` (uninstall / precedence change) can
-// RESTORE the built-in instead of leaving the tool with default rendering
-// (extension-host §4a — uninstall must reconcile the running UI without a
-// reload). Keyed by tool name.
-const displacedBuiltins = new Map<string, ToolRenderer>();
+// A built-in renderer DISPLACED by a pack `{ override: true }`. A built-in may
+// be registered EAGERLY (`toolRenderers`) or LAZILY (`pendingLazy` loader —
+// many builtins are, e.g. `team_*`/`task_*`/`gate_*` in tools/index.ts). We
+// stash WHICHEVER existed at override time as a discriminated value so
+// `unregisterPackRenderer` (uninstall / precedence change) can RESTORE the
+// correct kind instead of only ever restoring an eager renderer (which would
+// lose a specialized lazy builtin to default rendering). Extension-host §4a —
+// uninstall must reconcile the running UI without a reload.
+type DisplacedBuiltin =
+	| { kind: "eager"; renderer: ToolRenderer }
+	| { kind: "lazy"; loader: LazyRendererLoader };
+// Keyed by tool name.
+const displacedBuiltins = new Map<string, DisplacedBuiltin>();
 
 /**
  * Register a custom tool renderer
@@ -112,12 +119,16 @@ export function registerLazyToolRenderer(
 	if (opts?.override) {
 		// Pack is the resolved winning provider for this tool name — its renderer
 		// must win too. Delete any eager entry and mark the name pack-owned so a
-		// later eager registration cannot reclaim it. Stash a displaced eager
+		// later eager registration cannot reclaim it. Stash the displaced
 		// BUILT-IN (only on the first override, before the name is pack-owned) so
-		// unregisterPackRenderer can restore it on uninstall.
+		// unregisterPackRenderer can restore it on uninstall. The builtin may be
+		// eager (`toolRenderers`) OR lazy (a `pendingLazy` loader not yet loaded —
+		// e.g. team_*/task_*/gate_*) — stash whichever exists, eager first.
 		if (!packOwned.has(toolName)) {
-			const existing = toolRenderers.get(toolName);
-			if (existing) displacedBuiltins.set(toolName, existing);
+			const existingEager = toolRenderers.get(toolName);
+			const existingLazy = pendingLazy.get(toolName);
+			if (existingEager) displacedBuiltins.set(toolName, { kind: "eager", renderer: existingEager });
+			else if (existingLazy) displacedBuiltins.set(toolName, { kind: "lazy", loader: existingLazy });
 		}
 		toolRenderers.delete(toolName);
 		packOwned.add(toolName);
@@ -133,9 +144,11 @@ export function registerLazyToolRenderer(
  * Remove a pack renderer registered via `{ override: true }` and reconcile the
  * running UI (extension-host §4a). Drops the name from every registry map
  * (`toolRenderers`, `pendingLazy`, `inFlight`, `packOwned`) and RESTORES the
- * built-in renderer stashed when the pack first displaced it — so after a pack
- * uninstall (or a precedence change that drops the pack winner) a shadowed
- * built-in renders again, and a pack tool with no built-in falls back to default
+ * built-in stashed when the pack first displaced it — re-`set`ting an eager
+ * renderer, or re-`set`ting the `pendingLazy` loader so the next
+ * `getToolRenderer` lazy-loads the real builtin — so after a pack uninstall
+ * (or a precedence change that drops the pack winner) a shadowed built-in
+ * renders again, and a pack tool with no built-in falls back to default
  * rendering. No-op for a name that is not pack-owned. Dispatches the standard
  * renderer-loaded event so mounted `<tool-message>`/`<tool-group>` blocks for
  * the tool repaint immediately, without a page reload.
@@ -151,7 +164,13 @@ export function unregisterPackRenderer(toolName: string): void {
 	packOwned.delete(toolName);
 	const stashed = displacedBuiltins.get(toolName);
 	if (stashed) {
-		toolRenderers.set(toolName, stashed);
+		if (stashed.kind === "eager") {
+			toolRenderers.set(toolName, stashed.renderer);
+		} else {
+			// Re-arm the builtin lazy loader; getToolRenderer will load it on next use
+			// (under the bumped generation, so the prior pack load can't resurrect).
+			pendingLazy.set(toolName, stashed.loader);
+		}
 		displacedBuiltins.delete(toolName);
 	}
 	// Repaint mounted tool blocks for this tool (same mechanism the lazy-load

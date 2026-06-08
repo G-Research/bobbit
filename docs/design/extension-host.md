@@ -504,15 +504,34 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   ```
 
   **Uninstall reconciliation (no reload, §4a).** `registerLazyToolRenderer(name, loader,
-  { override: true })` STASHES any eager built-in it displaces in a `displacedBuiltins`
-  map. The new `unregisterPackRenderer(name)` drops the name from every registry map
-  (`toolRenderers`, `pendingLazy`, `inFlight`, `packOwned`), RESTORES the stashed built-in
-  if one existed (else leaves the tool to default rendering), and dispatches the standard
-  renderer-loaded event so mounted `<tool-message>`/`<tool-group>` blocks repaint
-  immediately. `registerPackRenderers` calls it for any name it previously registered that
-  the fresh `/api/tools` no longer reports as a pack renderer — so a marketplace uninstall
-  (which re-drives `registerPackRenderers(await fetchTools(projectId), projectId)`) removes
-  the pack renderer from the RUNNING UI without a page reload.
+  { override: true })` STASHES whichever built-in it displaces in a `displacedBuiltins`
+  map as a discriminated value — `{ kind: "eager", renderer }` for an eager `toolRenderers`
+  entry OR `{ kind: "lazy", loader }` for a `pendingLazy` loader that has not loaded yet
+  (many builtins are registered lazily, e.g. `team_*`/`task_*`/`gate_*` in
+  `tools/index.ts`). The new `unregisterPackRenderer(name)` drops the name from every
+  registry map (`toolRenderers`, `pendingLazy`, `inFlight`, `packOwned`) and RESTORES the
+  stashed built-in accordingly — re-`set`ting the eager renderer, or re-arming the
+  `pendingLazy` loader so the next `getToolRenderer` lazy-loads the REAL builtin (under the
+  bumped generation, so the prior pack load cannot resurrect) — else it leaves the tool to
+  default rendering. It then dispatches the standard renderer-loaded event so mounted
+  `<tool-message>`/`<tool-group>` blocks repaint immediately. `registerPackRenderers` calls
+  it for any name it previously registered that the fresh `/api/tools` no longer reports as
+  a pack renderer — so a marketplace uninstall (which re-drives
+  `registerPackRenderers(await fetchTools(projectId), projectId)`) removes the pack
+  renderer from the RUNNING UI without a page reload.
+
+  **Registration follows the active session's project (§4c).** The lazy loader closes over
+  `projectId` (it fetches the project-scoped renderer Blob). Boot registers with the boot
+  active/default project, but a page reload or deep-link into a session whose project
+  differs must re-resolve: `reconcilePackRenderersForProject(projectId)` (pack-renderers.ts)
+  fetches `/api/tools` scoped to that project and re-drives `registerPackRenderers` with the
+  CURRENT project id. It is called at boot AND whenever the ACTIVE session's project is
+  established/changes (session-manager.ts, alongside `applyProjectPalette(...projectId)`),
+  fire-and-forget + try/catch so it never blocks the session switch. A cheap dedupe guard
+  skips a redundant re-drive when the project is unchanged; on a REAL change
+  `registerPackRenderers` re-registers (override) every pack tool with the new project id —
+  the Wave-6 generation guard drops any stale in-flight/loaded module so the loader is
+  SWAPPED to the new project's renderer — and unregisters names absent for the new project.
 
   `registerLazyToolRenderer` already returns the **placeholder** on first
   `getToolRenderer` and installs the **load-failure** fallback on loader rejection
