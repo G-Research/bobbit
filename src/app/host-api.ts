@@ -16,6 +16,7 @@
 import { HOST_API_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
+import { requestToolRender } from "../ui/tools/renderer-registry.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it at
@@ -47,11 +48,18 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 			fetch: (path, init) => gatewayFetch(path, withSession(init, sessionId)),
 		},
 		requestRender: () => {
+			// A top-down renderApp() alone does NOT re-run the memoized tool
+			// components' renderers (their reactive props are unchanged), so a pack
+			// renderer's post-action local state would never paint. Dispatch the
+			// dedicated force-repaint event so mounted <tool-message>/<tool-group>
+			// elements requestUpdate() and re-run render() — mirroring the
+			// TOOL_RENDERER_LOADED_EVENT lazy-load mechanism (design §4a).
 			try {
 				renderApp();
 			} catch {
 				/* non-DOM (unit fixtures) — no-op */
 			}
+			requestToolRender();
 		},
 		async invokeAction(tool, action, args) {
 			// sessionId + toolUseId come from the BOUND render context, NOT from

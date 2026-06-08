@@ -36,7 +36,8 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 2. **Server actions.** A pack tool ships `tools/<group>/actions.js` exporting
    `export const actions = { retry: async (ctx, args) => {…} }`. The gateway resolves the
    winning module through the **same precedence** `ToolManager` already uses
-   (`getToolProviders()` → `{baseDir, groupDir}`), caches it keyed by resolved path+mtime,
+   (`resolveToolLocation()` → `{baseDir, groupDir, actionsModule}`, provider-independent),
+   caches it keyed by resolved path+mtime,
    and invalidates synchronously inside the existing `invalidateResolverCaches()`. Endpoint
    `POST /api/tools/:tool/actions/:action` with body `{ sessionId, toolUseId, args }`.
 
@@ -168,6 +169,9 @@ name: sample_action
 description: A demo tool with a Retry button wired to a server action handler.
 group: Demo
 summary: Demo tool — renders a Retry button.
+# NOTE: a pack tool needs NO `provider:` — the renderer endpoint and the
+# ActionDispatcher resolve the renderer/actions on-disk location via
+# `ToolManager.resolveToolLocation()`, which is provider-independent (§4b).
 renderer: SampleActionRenderer.js          # pre-built ESM, beside this YAML
 actions:
   module: actions.js                         # exports { retry: async (ctx, args) => {…} }
@@ -226,11 +230,14 @@ export interface HostApi {
 	readonly gateway: HostGatewayApi;
 
 	/**
-	 * Request a top-down UI re-render of the current view. PHASE 1: implemented as a
-	 * thin wrapper over the app's existing renderApp() (already imported by
-	 * renderer-registry.ts). A renderer calls this AFTER an action resolves so its
-	 * locally-held result (renderer-local state, §4a) is painted. Client-only — it
-	 * touches no server state and is a no-op in non-DOM contexts (unit fixtures).
+	 * Force the active tool block(s) to repaint. PHASE 1: implemented by dispatching a
+	 * dedicated `TOOL_RENDER_REQUESTED_EVENT` (renderer-registry.ts) that mounted
+	 * <tool-message>/<tool-group> elements listen for and `requestUpdate()` on — the
+	 * SAME mechanism the lazy-load path uses (`TOOL_RENDERER_LOADED_EVENT`). A bare
+	 * `renderApp()` is NOT sufficient: the memoized tool components have unchanged
+	 * reactive props, so their renderer would not re-run. A renderer calls this AFTER
+	 * an action resolves so its locally-held result (renderer-local state, §4a) is
+	 * painted. Client-only — touches no server state, no-op in non-DOM contexts.
 	 * Renderers that mount their own LitElement use native reactivity and ignore this.
 	 */
 	requestRender(): void;
@@ -383,6 +390,8 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
           isCustom: false,
           content: html`
             <div class="flex items-center justify-between gap-2">
+              <!-- renderHeader tolerates a null icon (skips the icon span), so a
+                   toolkit-only pack renderer needn't ship a lucide icon node. -->
               ${renderHeader(result?.isError ? "error" : "complete", null, "Sample")}
               ${shown ? html`<span data-testid="pack-result">${shown.message}</span>` : nothing}
               <button data-testid="pack-retry" @click=${onRetry}>Retry</button>
@@ -400,10 +409,14 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   and re-renders its own DOM. This is byte-for-byte the existing
   `children-mutation-approval` mechanism (a `LitElement` with `@state` + a module-level
   `decisionMemory` map keyed by `requestId` — it never mutates the transcript). Phase 1
-  adds one small host hook, `ctx.host.requestRender()` (a thin wrapper over the app's
-  existing `renderApp()`, already imported by `renderer-registry.ts`), so a renderer can
-  request a top-down re-render after an action resolves; renderers that mount their own
-  `LitElement` use its native reactivity instead and ignore `requestRender`. The tool-call
+  adds one small host hook, `ctx.host.requestRender()`, which dispatches a dedicated
+  `TOOL_RENDER_REQUESTED_EVENT` (renderer-registry.ts) that mounted
+  `<tool-message>`/`<tool-group>` elements listen for and `requestUpdate()` on — the SAME
+  force-repaint mechanism the lazy-load path uses (`TOOL_RENDERER_LOADED_EVENT`). A bare
+  `renderApp()` is NOT enough: the memoized tool components have unchanged reactive props,
+  so their renderer would not re-run and the post-action local state would never paint.
+  Renderers that mount their own `LitElement` use its native reactivity instead and ignore
+  `requestRender`. The tool-call
   `result` passed to `render()` is **unchanged** by an action — actions do NOT rewrite the
   transcript or the persisted tool result in Phase 1 (handlers that genuinely need to
   resume the agent turn or post a message use the frozen-for-Phase-2 `host.session.*`). The
@@ -417,8 +430,9 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   directives. Documented here so Phase 2 doesn't reopen it.)
 
 - **Gateway endpoint** `GET /api/tools/:tool/renderer` (`server.ts::handleApiRoute`):
-  resolve the tool's winning `{baseDir, groupDir, renderer}` via
-  `toolManager.getToolProviders().get(tool)` + `getToolByName(tool)`; require
+  resolve the tool's winning `{baseDir, groupDir, rendererFile, rendererKind}` via
+  `toolManager.resolveToolLocation(tool)` — a provider-INDEPENDENT lookup sourced from
+  `loadToolDefinitions` (a pack renderer needs NO `provider:`); require
   `rendererKind === "pack"`; read the file at
   `path.join(baseDir, groupDir, rendererFile)` (re-validate the path stays within
   `baseDir/groupDir` — reject traversal); respond `200 text/javascript` with
@@ -525,8 +539,9 @@ export type ActionsModule = { actions: Record<string, ActionHandler> };
 export class ActionDispatcher {
 	constructor(private toolManager: ToolManager) {}
 
-	/** Resolve {baseDir, groupDir} for the WINNING tool (full cascade incl. market
-	 *  roots) and load <baseDir>/<groupDir>/<module>. Cached by abs-path + mtime. */
+	/** Resolve {baseDir, groupDir, actionsModule} for the WINNING tool via
+	 *  resolveToolLocation (full cascade incl. market roots, provider-independent) and
+	 *  load <baseDir>/<groupDir>/<module>. Cached by abs-path + mtime. */
 	private async loadModule(tool: string): Promise<ActionsModule | null> { /* … */ }
 
 	/** Phase-1 entry point. Throws ActionError with a status code on any failure. */
@@ -537,10 +552,11 @@ export class ActionDispatcher {
 }
 ```
 
-Resolution uses `toolManager.getToolProviders().get(tool)` (already resolves through the
-full builtin < market < user cascade in `loadToolDefinitions`) to obtain `baseDir` +
-`groupDir`, then `getToolByName(tool)` for the `actions.module` path (default
-`"actions.js"`). Load via `await import(pathToFileURL(abs).href)`. **Cache** is a
+Resolution uses `toolManager.resolveToolLocation(tool)` (a provider-INDEPENDENT lookup that
+resolves through the full builtin < market < user cascade in `loadToolDefinitions`) to
+obtain `baseDir` + `groupDir` + the `actions.module` path (default `"actions.js"`) in one
+call — a pack actions module needs NO `provider:`. Load via
+`await import(pathToFileURL(abs).href)`. **Cache** is a
 `Map<absPath, { mtimeMs; module }>`; a stale mtime reloads (mirrors `scanToolsDirCached`).
 
 **Endpoint** `POST /api/tools/:tool/actions/:action` in `server.ts::handleApiRoute`,
@@ -604,7 +620,13 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 		gateway: {
 			fetch: (path, init) => gatewayFetch(path, withSession(init, sessionId)),
 		},
-		requestRender: () => { try { renderApp(); } catch { /* non-DOM (unit) — no-op */ } },
+		requestRender: () => {
+			// renderApp() alone won't re-run the memoized tool components (props
+			// unchanged); requestToolRender() dispatches TOOL_RENDER_REQUESTED_EVENT
+			// so mounted <tool-message>/<tool-group> requestUpdate() and repaint (§4a).
+			try { renderApp(); } catch { /* non-DOM (unit) — no-op */ }
+			requestToolRender();
+		},
 		async invokeAction(tool, action, args) {
 			// sessionId + toolUseId come from the bound render context, NOT from args.
 			// args is pure action-domain input, validated/whitelisted by the handler.

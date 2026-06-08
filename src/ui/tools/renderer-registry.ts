@@ -106,6 +106,25 @@ function dispatchRendererLoaded(toolName: string): void {
 	}
 }
 
+/** Custom DOM event dispatched on `document` when a pack renderer calls
+ *  `host.requestRender()` after an action resolves (design §4a). The memoized
+ *  `<tool-message>`/`<tool-group>` LitElements have unchanged reactive props,
+ *  so a top-down `renderApp()` alone never re-runs their renderer. Mounted tool
+ *  components listen for this event and pull their own `requestUpdate()` — the
+ *  SAME mechanism `TOOL_RENDERER_LOADED_EVENT` uses for the lazy-load repaint —
+ *  so the renderer re-runs and paints its updated renderer-local state. */
+export const TOOL_RENDER_REQUESTED_EVENT = "bobbit-tool-render-requested";
+
+/** Force mounted tool components to re-run their renderer (host.requestRender,
+ *  design §4a). Dispatched in addition to the app's top-down `renderApp()`. */
+export function requestToolRender(): void {
+	try {
+		document.dispatchEvent(new CustomEvent(TOOL_RENDER_REQUESTED_EVENT));
+	} catch {
+		/* document may not exist in some test fixtures */
+	}
+}
+
 function startLoad(toolName: string, loader: LazyRendererLoader): void {
 	if (inFlight.has(toolName)) return;
 	const p = loader()
@@ -214,8 +233,10 @@ export function renderHeader(
 	text: string | TemplateResult,
 	trailing?: TemplateResult | typeof nothing,
 ): TemplateResult {
+	// Tolerate a null/undefined icon (a pack renderer that ships no lucide icon —
+	// design §4a): skip the icon span rather than letting createElement(null) throw.
 	const statusIcon = (iconComponent: any, color: string) =>
-		html`<span class="inline-block ${color}">${icon(iconComponent, "sm")}</span>`;
+		iconComponent ? html`<span class="inline-block ${color}">${icon(iconComponent, "sm")}</span>` : nothing;
 
 	switch (state) {
 		case "inprogress":
@@ -275,8 +296,10 @@ export function renderCollapsibleHeader(
 	defaultExpanded = false,
 	trailing?: TemplateResult | typeof nothing,
 ): TemplateResult {
+	// Tolerate a null/undefined icon (see renderHeader) — skip the span instead
+	// of throwing in lucide createElement(null).
 	const statusIcon = (iconComponent: any, color: string) =>
-		html`<span class="inline-block ${color}">${icon(iconComponent, "sm")}</span>`;
+		iconComponent ? html`<span class="inline-block ${color}">${icon(iconComponent, "sm")}</span>` : nothing;
 
 	const toggleContent = (e: Event) => {
 		e.preventDefault();

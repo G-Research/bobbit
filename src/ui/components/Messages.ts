@@ -12,7 +12,7 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { marked } from "marked";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderTool } from "../tools/index.js";
-import { TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
+import { TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { fetchToolContent } from "../utils/fetch-tool-content.js";
@@ -586,6 +586,12 @@ export class ToolMessage extends LitElement {
 		}
 	};
 
+	// host.requestRender() (a pack renderer repainting after an action resolves)
+	// dispatches this. Pull our own update so the renderer re-runs and paints its
+	// updated renderer-local state — props are unchanged so renderApp() alone
+	// would not re-run it (design §4a).
+	private _onRenderRequested = () => { this.requestUpdate(); };
+
 	// For the non-blocking ask_user_choices widget: when a new message arrives,
 	// the tool_use card may need to flip to Answered mode because the transcript
 	// now contains a matching `[ask_user_choices_response ...]` envelope.
@@ -645,6 +651,7 @@ export class ToolMessage extends LitElement {
 		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
@@ -653,6 +660,7 @@ export class ToolMessage extends LitElement {
 		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 

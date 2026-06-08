@@ -13,7 +13,7 @@ import {
 	ChevronUp,
 } from "lucide";
 import { renderTool } from "../tools/index.js";
-import { isSkippedToolResult, TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
+import { isSkippedToolResult, TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
 import { state as appState } from "../../app/state.js";
 import { getHostApi } from "../../app/host-api.js";
 
@@ -95,15 +95,23 @@ export class ToolGroup extends LitElement {
 		}
 	};
 
+	// host.requestRender() (a pack renderer repainting after an action resolves)
+	// dispatches this. Pull our own update so the renderer re-runs and paints its
+	// updated renderer-local state — props are unchanged so renderApp() alone
+	// would not re-run it (design §4a).
+	private _onRenderRequested = () => { this.requestUpdate(); };
+
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
 		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 	}
 
 	override disconnectedCallback(): void {
 		super.disconnectedCallback();
 		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 	}
 
 	private _toggle() {

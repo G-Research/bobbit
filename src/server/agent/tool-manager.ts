@@ -615,6 +615,38 @@ export class ToolManager {
 		return base?.provider;
 	}
 
+	/**
+	 * Resolve the WINNING tool's on-disk location + extension-host contribution
+	 * metadata, sourced from `loadToolDefinitions()` so it honors the SAME pack
+	 * precedence/shadowing every other resolution uses (design §4b). Unlike
+	 * `getToolProviders()` (which gates on `provider:` for the MCP/extension
+	 * activation path), this returns location for ANY scanned tool — a pack tool
+	 * declaring `renderer:`/`actions:` needs NO `provider:` to be served/dispatched.
+	 * Case-insensitive lookup, matching `getToolByName`.
+	 */
+	resolveToolLocation(name: string): {
+		baseDir: string;
+		groupDir: string;
+		rendererFile?: string;
+		actionsModule?: string;
+		rendererKind?: "builtin" | "pack";
+		actionNames?: string[];
+	} | undefined {
+		const nameLower = name.toLowerCase();
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
+		if (!base) return undefined;
+		const c = base.contributions;
+		return {
+			baseDir: base.baseDir,
+			groupDir: base.groupDir,
+			rendererFile: base.renderer,
+			actionsModule: c.actions?.module,
+			rendererKind: computeRendererKind(base.baseDir, base.renderer),
+			actionNames: c.actions?.names,
+		};
+	}
+
 	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
 	getToolProviders(): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());

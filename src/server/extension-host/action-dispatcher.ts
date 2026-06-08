@@ -4,8 +4,9 @@
 // docs/design/extension-host.md §4b / §5). A pack tool ships
 // `tools/<group>/actions.js` exporting `export const actions = { retry: ... }`.
 // The dispatcher resolves the WINNING module through the SAME precedence
-// `ToolManager` already uses (`getToolProviders()` → `{baseDir, groupDir}`),
-// loads + caches it keyed by absolute-path + mtime (mirroring
+// `ToolManager` already uses (`resolveToolLocation()` → `{baseDir, groupDir,
+// actionsModule}`, independent of `provider:` — design §4b), loads + caches it
+// keyed by absolute-path + mtime (mirroring
 // `scanToolsDirCached`), and runs the handler under the blast-radius controls
 // from §5 control iv: a per-call TIMEOUT, a global CONCURRENCY cap, a per-session
 // token-bucket RATE limit, and try/catch ISOLATION so a crashing handler becomes
@@ -18,8 +19,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { parse } from "yaml";
-import { parseContributions } from "../agent/tool-contributions.js";
 import type { ServerHostApi } from "./server-host-api.js";
 
 /** The verified context handed to an action handler (design §4b). */
@@ -47,9 +46,11 @@ export class ActionError extends Error {
 	}
 }
 
-/** Minimal structural view of `ToolManager` the dispatcher depends on. */
-export interface ActionToolProviderResolver {
-	getToolProviders(): Map<string, { baseDir: string; groupDir: string }>;
+/** Minimal structural view of `ToolManager` the dispatcher depends on. Resolves
+ *  the winning tool's on-disk location + its `actions.module` independent of
+ *  `provider:` (design §4b). */
+export interface ActionToolLocationResolver {
+	resolveToolLocation(tool: string): { baseDir: string; groupDir: string; actionsModule?: string } | undefined;
 }
 
 export interface ActionDispatcherOptions {
@@ -112,7 +113,7 @@ export class ActionDispatcher {
 	private epoch = 0;
 
 	constructor(
-		private readonly toolManager: ActionToolProviderResolver,
+		private readonly toolManager: ActionToolLocationResolver,
 		opts: ActionDispatcherOptions = {},
 	) {
 		this.timeoutMs = opts.timeoutMs ?? 30_000;
@@ -130,36 +131,17 @@ export class ActionDispatcher {
 
 	/**
 	 * Resolve the absolute on-disk path of a tool's actions module, honoring
-	 * `ToolManager` precedence (the winning provider's baseDir/groupDir) and the
-	 * tool YAML's `actions.module` (default "actions.js"). Re-validates the path
-	 * stays within the group dir (design §5 ii). Returns null when the tool has
-	 * no resolvable provider directory.
+	 * `ToolManager` precedence (the winning tool's baseDir/groupDir via
+	 * `resolveToolLocation`, independent of `provider:`) and the tool YAML's
+	 * `actions.module` (default "actions.js"). Re-validates the path stays within
+	 * the group dir (design §5 ii). Returns null when the tool has no resolvable
+	 * on-disk location.
 	 */
 	private resolveModulePath(tool: string): string | null {
-		const provider = this.toolManager.getToolProviders().get(tool);
-		if (!provider || !provider.baseDir) return null;
-		const dir = path.join(provider.baseDir, provider.groupDir || "");
-
-		// Find the tool's YAML to read its `actions.module` (default actions.js).
-		let moduleRel = "actions.js";
-		try {
-			for (const file of fs.readdirSync(dir)) {
-				if (!/\.ya?ml$/i.test(file)) continue;
-				try {
-					const yamlPath = path.join(dir, file);
-					const data = parse(fs.readFileSync(yamlPath, "utf-8"));
-					if (data && typeof data === "object" && typeof (data as { name?: unknown }).name === "string" &&
-						(data as { name: string }).name.toLowerCase() === tool.toLowerCase()) {
-						const c = parseContributions(data, yamlPath);
-						if (c.actions?.module) moduleRel = c.actions.module;
-						break;
-					}
-				} catch { /* skip malformed YAML — fall through to default */ }
-			}
-		} catch {
-			// Group dir unreadable/missing — nothing to load.
-			return null;
-		}
+		const loc = this.toolManager.resolveToolLocation(tool);
+		if (!loc || !loc.baseDir) return null;
+		const dir = path.join(loc.baseDir, loc.groupDir || "");
+		const moduleRel = loc.actionsModule ?? "actions.js";
 
 		const abs = path.resolve(dir, moduleRel);
 		// Path-traversal re-validation: abs must stay within `dir`.

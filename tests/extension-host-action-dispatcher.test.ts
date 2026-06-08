@@ -24,15 +24,23 @@ import {
 	ActionDispatcher,
 	ActionError,
 	type ActionHandlerCtx,
-	type ActionToolProviderResolver,
+	type ActionToolLocationResolver,
 } from "../src/server/extension-host/action-dispatcher.ts";
 
 let tmp: string;
 
-/** Build a stub ToolManager whose single tool resolves to {baseDir, groupDir}. */
-function resolver(baseDir: string, groupDir: string, tool = "sample_action"): ActionToolProviderResolver {
+/** Build a stub ToolManager whose single tool resolves to {baseDir, groupDir}.
+ *  `actionsModule` mirrors what ToolManager.resolveToolLocation supplies from
+ *  the tool YAML's `actions.module` (undefined ⇒ dispatcher defaults to actions.js). */
+function resolver(
+	baseDir: string,
+	groupDir: string,
+	opts: { tool?: string; actionsModule?: string } = {},
+): ActionToolLocationResolver {
+	const tool = opts.tool ?? "sample_action";
 	return {
-		getToolProviders: () => new Map([[tool, { baseDir, groupDir }]]),
+		resolveToolLocation: (name) =>
+			name === tool ? { baseDir, groupDir, actionsModule: opts.actionsModule } : undefined,
 	};
 }
 
@@ -81,7 +89,7 @@ describe("ActionDispatcher — resolution + happy path", () => {
 			yaml: `name: sample_action\ndescription: d\ngroup: Demo\nactions:\n  module: handlers.js\n`,
 			actionsJs: `export const actions = { retry: async () => ({ from: "handlers.js" }) };`,
 		});
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null });
+		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "handlers.js" }), { rate: null });
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { from: "handlers.js" });
 	});
 
@@ -108,7 +116,7 @@ describe("ActionDispatcher — resolution + happy path", () => {
 
 describe("ActionDispatcher — error isolation + blast-radius", () => {
 	it("unknown tool provider → 404", async () => {
-		const d = new ActionDispatcher({ getToolProviders: () => new Map() }, { rate: null });
+		const d = new ActionDispatcher({ resolveToolLocation: () => undefined }, { rate: null });
 		await assert.rejects(() => d.dispatch("nope", "retry", ctx(), {}), (e) => e instanceof ActionError && e.status === 404);
 	});
 
@@ -188,7 +196,7 @@ describe("ActionDispatcher — cache + invalidation", () => {
 			moduleName: "actions.mjs",
 			actionsJs: `export const actions = { retry: async () => ({ v: 1 }) };`,
 		});
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null });
+		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "actions.mjs" }), { rate: null });
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { v: 1 });
 
 		// Rewrite the handler source at the same path. Without invalidate the

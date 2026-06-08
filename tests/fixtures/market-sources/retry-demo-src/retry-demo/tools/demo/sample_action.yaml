@@ -8,17 +8,10 @@ summary: Demo tool — renders a Retry button wired to a server action.
 #    loadable under plain node, so it is named `.mjs` (a `.js` with `export` and
 #    no package.json would load as CJS and fail) — see Wave 2B integration note.
 #
-# NOTE (FINDING #1 — Wave 1/2 integration bug, see spec header): the design §2.4
-# example pack tool declares NO `provider:`. But the renderer endpoint and the
-# ActionDispatcher resolve the tool via ToolManager.getToolProviders(), which
-# only includes tools that declare a `provider:` (tool-manager.ts:623,
-# `if (tool.provider) map.set(...)`). Without this block the renderer endpoint
-# 404s ("no pack renderer for this tool") and the action 404s. This `provider:`
-# is therefore a WORKAROUND, not litmus-required authoring — remove it to
-# reproduce finding #1.
-provider:
-  type: bobbit-extension
-  extension: actions.mjs
+# A pack tool needs NO `provider:` — the renderer endpoint and the
+# ActionDispatcher resolve the tool's on-disk location via
+# ToolManager.resolveToolLocation(), which is independent of `provider:`
+# (Wave 4 fix; design §4b).
 renderer: SampleActionRenderer.js
 actions:
   module: actions.mjs

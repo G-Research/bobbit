@@ -5176,18 +5176,16 @@ async function handleApiRoute(
 	const rendererMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/renderer$/);
 	if (rendererMatch && req.method === "GET") {
 		const tool = decodeURIComponent(rendererMatch[1]);
-		const info = toolManager.getToolByName(tool);
-		if (!info || info.rendererKind !== "pack" || !info.rendererFile) {
+		// Resolve the WINNING tool's on-disk location independent of `provider:`
+		// (design §4b — a pack renderer needs no provider). resolveToolLocation
+		// honors the same pack precedence as every other tool resolution.
+		const loc = toolManager.resolveToolLocation(tool);
+		if (!loc || loc.rendererKind !== "pack" || !loc.rendererFile || !loc.baseDir) {
 			json({ error: "no pack renderer for this tool" }, 404);
 			return;
 		}
-		const provider = toolManager.getToolProviders().get(tool);
-		if (!provider || !provider.baseDir) {
-			json({ error: "no pack renderer for this tool" }, 404);
-			return;
-		}
-		const groupAbs = path.join(provider.baseDir, provider.groupDir || "");
-		const fileAbs = path.resolve(groupAbs, info.rendererFile);
+		const groupAbs = path.join(loc.baseDir, loc.groupDir || "");
+		const fileAbs = path.resolve(groupAbs, loc.rendererFile);
 		// Path-traversal re-validation: fileAbs must stay within the group dir.
 		const rel = path.relative(groupAbs, fileAbs);
 		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
