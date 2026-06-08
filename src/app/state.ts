@@ -832,10 +832,15 @@ export function getSidebarData(): SidebarData {
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
-	// Exclude staff sessions even before state.staffList loads by also checking
-	// assistantType. Without this, a race between fetchStaff() and initial render
-	// shows staff sessions in the Sessions bucket until the staff list arrives.
-	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !s.parentSessionId && !staffSessionIds.has(s.id) && (s as any).assistantType !== "staff").sort((a, b) => a.createdAt - b.createdAt);
+	// Exclude *staff-agent* sessions (the permanent sessions owned by staff
+	// agents in state.staffList) — they render under the dedicated Staff header.
+	// These are matched purely by `staffSessionIds`: staff-agent sessions are
+	// created with `assistantType: undefined` (see staff-manager's createSession
+	// calls), so do NOT also filter on `assistantType === "staff"` — that value
+	// only ever belongs to the ephemeral *staff-creation assistant* (the wand),
+	// which must appear in the Sessions bucket exactly like the goal/role/tool/
+	// project creation assistants do.
+	const ungroupedSessions = state.gatewaySessions.filter((s) => !s.goalId && !s.teamGoalId && !s.delegateOf && !s.parentSessionId && !staffSessionIds.has(s.id)).sort((a, b) => a.createdAt - b.createdAt);
 	const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
 	const liveGoals = sortedGoals.filter(g => !g.archived);
 	const archivedGoals = sortedGoals.filter(g => g.archived);
