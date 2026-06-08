@@ -21,12 +21,17 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 1. **Renderer delivery.** A pack ships a **pre-built ES module** at
    `tools/<group>/<renderer>.js`. The gateway serves it as `text/javascript` from
    `GET /api/tools/:tool/renderer`. On cold load the UI reads `/api/tools`, and for every
-   tool with `rendererKind: "pack"` calls `registerLazyToolRenderer(name, loader)` where
-   `loader` does `import(/* @vite-ignore */ url)` and hands the module a **host toolkit**
+   tool with `rendererKind: "pack"` calls
+   `registerLazyToolRenderer(name, loader, { override: true })` where `loader` does
+   `import(/* @vite-ignore */ url)` and hands the module a **host toolkit**
    (the app's own `lit` `html`/`nothing` + `renderHeader`) via a factory export — so pack
    renderers never bare-import `lit` and the lit singleton is never duplicated. Existing
    placeholder + load-failure fallbacks are reused verbatim. Survives reload because
    registration is re-driven from tool metadata, not from a one-shot install event.
+   Because `rendererKind` is computed from the resolved **winning** provider, a pack that
+   shadows a built-in interactive tool wins the renderer too: the `{ override: true }`
+   registration shadows any eager built-in renderer of the same name (the litmus parity
+   case). A built-in not shadowed by any pack keeps its eager renderer unchanged.
 
 2. **Server actions.** A pack tool ships `tools/<group>/actions.js` exporting
    `export const actions = { retry: async (ctx, args) => {…} }`. The gateway resolves the
@@ -223,6 +228,13 @@ export interface HostApi {
 	/**
 	 * Invoke a server action handler contributed by a tool.
 	 * PHASE 1: implemented. POSTs /api/tools/:tool/actions/:action.
+	 *
+	 * `sessionId` and `toolUseId` are NOT parameters: they come from the render
+	 * context the Host API was bound to (getHostApi(sessionId, toolUseId), §4c) and
+	 * are supplied to the endpoint internally. `args` is therefore PURE action-domain
+	 * input — it is whitelisted/validated by the handler and never carries identity
+	 * fields like toolUseId. The bound toolUseId is always the renderer's OWN tool
+	 * call; acting on a different tool call is out of Phase-1 scope.
 	 * Resolves with the handler's JSON result; rejects on guard/handler failure.
 	 */
 	invokeAction<TArgs = unknown, TResult = unknown>(
@@ -248,6 +260,14 @@ export interface HostGatewayApi {
 	 * `path` is a gateway-relative path (e.g. "/api/goals/:id"). The wrapper injects the
 	 * Authorization bearer + the caller's session id header; callers must NOT pass their
 	 * own Authorization header.
+	 *
+	 * AUTHORIZATION BOUNDARY (see §5.1): this is deliberately NO MORE privileged than the
+	 * app's existing gatewayFetch. It reaches PRE-EXISTING gateway endpoints, each of which
+	 * enforces its own authorization; it creates no new server capability and no new
+	 * bypass (the LLM/UI can already call these endpoints with the admin token). It is the
+	 * lower-level interop seam for renderers that re-express built-ins which today POST to
+	 * existing endpoints directly. The PRIMARY, recommended pack→server path is
+	 * `invokeAction` (tool-authorized through the action endpoint guard).
 	 */
 	fetch(path: string, init?: RequestInit): Promise<Response>;
 }
@@ -311,8 +331,10 @@ export interface ToolRenderContext {
 ```
 
 `Messages.ts` (≈ line 691) and `ToolGroup.ts` (≈ line 165) construct the ctx; they add
-`host: getHostApi(sessionIdCtx)` (the client Host API impl, §4c). No other renderer call
-sites change.
+`host: getHostApi(sessionIdCtx, toolUseIdCtx)` (the client Host API impl, §4c) — binding
+the Host API to BOTH the session id and the renderer's own `toolUseId`, so
+`invokeAction(tool, action, args)` keeps its clean frozen signature while still supplying a
+verified `toolUseId` to the endpoint internally. No other renderer call sites change.
 
 ---
 
@@ -343,7 +365,7 @@ sites change.
             <div class="flex items-center justify-between gap-2">
               ${renderHeader(result?.isError ? "error" : "complete", null, "Sample")}
               <button data-testid="pack-retry"
-                @click=${() => ctx.host?.invokeAction("sample_action", "retry", { toolUseId: ctx.toolUseId })}>
+                @click=${() => ctx.host?.invokeAction("sample_action", "retry", {})}>
                 Retry
               </button>
             </div>`,
@@ -366,8 +388,13 @@ sites change.
   `path.join(baseDir, groupDir, rendererFile)` (re-validate the path stays within
   `baseDir/groupDir` — reject traversal); respond `200 text/javascript` with
   `Cache-Control: no-cache` (renderers change on pack update). 404 if no pack renderer.
-  This endpoint requires the same `x-bobbit-session-id` + allowedTools guard as actions
-  (§5) — it serves only renderers for tools the caller may use.
+  **This endpoint requires the admin bearer like every `/api/*` route, but NOT a
+  per-session `allowedTools` check.** Serving the renderer MODULE BYTES is not a server
+  capability invocation — it is equivalent to serving a static UI asset, and the renderer
+  JS is trusted pack source (trust decided at source-add time). The allowedTools guard
+  applies to the *action* endpoint (capability invocation), not to module delivery; the
+  UI-thread risk (§5 control v) is handled client-side and is unchanged. Path-traversal
+  re-validation on the renderer file path stays.
 
 - **Client bootstrap** `src/app/pack-renderers.ts` (NEW), called once on cold load from
   the app init path (after `/api/tools` is first fetched, alongside existing tool-manager
@@ -384,13 +411,16 @@ sites change.
 
   /** Idempotent: registers a lazy loader for every pack tool that ships a renderer.
    *  Re-driven on every cold load AND after marketplace install/uninstall (which
-   *  re-fetches /api/tools). Already-registered eager builtins are never overwritten. */
+   *  re-fetches /api/tools). `{ override: true }` makes the pack loader the EFFECTIVE
+   *  renderer even when an eager builtin of the same name is already registered — because
+   *  `rendererKind === "pack"` means the pack is the resolved WINNING provider for that
+   *  tool name (it shadowed the builtin tool), so its renderer must win too. */
   export function registerPackRenderers(tools: Array<{ name: string; rendererKind?: string }>): void {
     for (const t of tools) {
       if (t.rendererKind !== "pack") continue;
       registerLazyToolRenderer(t.name, async () => {
         const url = `/api/tools/${encodeURIComponent(t.name)}/renderer`;
-        const resp = await gatewayFetch(url);              // authed; honors x-bobbit-session-id
+        const resp = await gatewayFetch(url);              // authed (admin bearer); no session binding needed
         if (!resp.ok) throw new Error(`renderer ${t.name} HTTP ${resp.status}`);
         const blob = await resp.blob();
         const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
@@ -402,7 +432,7 @@ sites change.
         } finally {
           URL.revokeObjectURL(objUrl);
         }
-      });
+      }, { override: true });
     }
   }
   ```
@@ -411,8 +441,22 @@ sites change.
   `getToolRenderer` and installs the **load-failure** fallback on loader rejection
   (`renderer-registry.ts::startLoad`) — both reused unchanged. Registration is re-driven
   from metadata on every cold load, so it **survives page reload** with no install-time
-  state. Eager builtins registered in `tools/index.ts` win (registry `get` checks eager
-  first), so a pack can never silently shadow a builtin renderer in Phase 1.
+  state.
+
+  **Renderer precedence honors the winning-provider decision (no split-brain).** A pack
+  that shadows a built-in interactive tool resolves to `rendererKind: "pack"` (its
+  `baseDir` is the market-pack root that won the tool name in `ToolManager`'s cascade), so
+  it must serve the PACK renderer, not the eager builtin — otherwise it would get pack
+  *actions* but the built-in *renderer*, breaking the litmus parity goal. The concrete
+  mechanism: `registerLazyToolRenderer(name, loader, { override?: boolean })` gains an
+  `override` option. When `override` is true the registry **deletes any eager
+  `toolRenderers` entry** for `name` and records the name as pack-owned, so the lazy pack
+  loader becomes the effective renderer; a later eager registration for a pack-owned name
+  is ignored. Pack registration always runs after the synchronous eager registrations in
+  `tools/index.ts` (it is driven from the `/api/tools` fetch), so override reliably wins.
+  `getToolRenderer` stays eager-first and unchanged — override guarantees no eager entry
+  survives for pack-owned names. A built-in NOT shadowed by any pack keeps its eager
+  renderer (unchanged).
 
   > **Serving via Blob URL vs direct URL.** `import(objUrl)` from a Blob avoids
   > cross-origin/module-MIME edge cases and works identically in dev (Vite) and prod
@@ -507,9 +551,11 @@ dispatcher near `toolManager`).
 import { gatewayFetch } from "./gateway-fetch.js";
 import { HOST_API_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
 
-/** Build the Phase-1 client Host API for a given session. Phase-2 namespaces throw
- *  a clear "not implemented in Phase 1" error so misuse is loud, not silent. */
-export function getHostApi(sessionId: string | undefined): HostApi {
+/** Build the Phase-1 client Host API bound to a given session AND the renderer's own
+ *  toolUseId. invokeAction supplies BOTH to the endpoint internally, so packs never put
+ *  identity fields in `args`. Phase-2 namespaces throw a clear "not implemented in
+ *  Phase 1" error so misuse is loud, not silent. */
+export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
 	const notImpl = (m: string) => { throw new Error(`host.${m} is reserved for Phase 2`); };
 	return {
 		version: HOST_API_VERSION,
@@ -517,9 +563,11 @@ export function getHostApi(sessionId: string | undefined): HostApi {
 			fetch: (path, init) => gatewayFetch(path, withSession(init, sessionId)),
 		},
 		async invokeAction(tool, action, args) {
+			// sessionId + toolUseId come from the bound render context, NOT from args.
+			// args is pure action-domain input, validated/whitelisted by the handler.
 			const resp = await gatewayFetch(
 				`/api/tools/${encodeURIComponent(tool)}/actions/${encodeURIComponent(action)}`,
-				withSession({ method: "POST", body: JSON.stringify({ sessionId, toolUseId: (args as any)?.toolUseId, args }) }, sessionId),
+				withSession({ method: "POST", body: JSON.stringify({ sessionId, toolUseId, args }) }, sessionId),
 			);
 			if (!resp.ok) throw new Error(`invokeAction ${tool}/${action} HTTP ${resp.status}`);
 			return resp.json();
@@ -533,7 +581,9 @@ export function getHostApi(sessionId: string | undefined): HostApi {
 
 `withSession(init, sid)` adds the `x-bobbit-session-id` header (same propagation
 `extension.ts` uses, server reads at server.ts:9030/10953). `gatewayFetch` supplies the
-bearer. `Messages.ts`/`ToolGroup.ts` set `ctx.host = getHostApi(sessionIdCtx)`.
+bearer. `Messages.ts`/`ToolGroup.ts` set `ctx.host = getHostApi(sessionIdCtx, toolUseIdCtx)`
+— the bound `toolUseId` is the renderer's own tool call (acting on a different tool call is
+out of Phase-1 scope).
 
 **The `ServerHostApi` (handler `ctx.host`)** is the server-side analogue exposing only an
 **audited, scoped** gateway fetch in Phase 1 (no raw `process`/`fs`/`exec` handed to
@@ -552,7 +602,7 @@ in exactly one place.
 
 | # | Control | Mechanism | Acceptance-blocking? |
 |---|---|---|---|
-| i | **Allowlist-bypass fix** | Action + renderer endpoints require `:tool` ∈ the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call` (server.ts:10953–10976): require `x-bobbit-session-id`, resolve the session (live or persisted), reject if `:tool` not in `allowedTools`. The LLM can curl the endpoint, so this guard — not the agent layer's `allowedTools` — is the real gate. | **Yes — unit** |
+| i | **Allowlist-bypass fix** | The **action** endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈ the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call` (server.ts:10953–10976): require `x-bobbit-session-id`, resolve the session (live or persisted), reject if `:tool` not in `allowedTools`. The LLM can curl the endpoint, so this guard — not the agent layer's `allowedTools` — is the real gate. The **renderer** endpoint (`GET /api/tools/:tool/renderer`) is EXEMPT from the allowedTools check: it serves trusted pack module bytes (a static-asset-equivalent, not a capability invocation), so it needs only the admin bearer (see §5.1). The reserved Phase-2 `routes:`/`stores:` inherit the action endpoint's allowedTools-gated rule by design. | **Yes — unit** |
 | ii | **Input validation / no traversal** | `:tool`/`:action` matched against resolved tool + `actions.names`; `module`/`renderer` paths re-validated to stay within `baseDir/groupDir` (no `..`, no abs); `args` passed to the handler as opaque JSON — never `eval`/`exec`/`require`-d; `sessionId`/`toolUseId` treated as untrusted strings, never used to build filesystem/session paths beyond a store `get`. | **Yes — unit** |
 | iii | **toolUseId existence + ownership (anti-replay/forgery)** | Resolve the session transcript via `projectContextManager.getContextForSession(sessionId)?.sessionStore.get(sessionId)` and scan its messages for a `tool_use`/`toolCall` block whose `id === toolUseId` **and** whose tool name `=== :tool`. Reject (409) if absent — blocks replays and forged ids referencing another tool. | **Yes — unit** |
 | iv | **Blast radius** | Handlers run in the long-lived gateway process. Per-call **timeout** (`Promise.race`, default 30s); global **concurrency cap** (semaphore, default 8 in-flight); **try/catch isolation** so a thrown/handler-crash becomes a 500, never takes down the process; endpoint **rate-limit** (token bucket per session). A **seam** is left to run `actions.js` in a worker/`vm` later: the dispatcher only ever calls `module.actions[action](ctx, args)`, so swapping the execution strategy is local to `ActionDispatcher.dispatch`. | timeout+isolation **yes**; cap/rate-limit recommended |
@@ -562,6 +612,33 @@ in exactly one place.
 **What is NOT a new risk:** arbitrary gateway access / code execution — the LLM already
 has the token + shell. We are not widening that; we are adding *typed* entry points and
 **closing** the allowlist bypass they would otherwise open.
+
+### 5.1 `host.gateway.fetch` vs the single choke point
+
+The "authorize gateway calls like tool calls" requirement could read as if every
+`host.gateway.fetch` call must pass the `allowedTools` guard. It does not — and that does
+not contradict the single-choke-point claim. The boundary is precise:
+
+- **`host.gateway.fetch` is deliberately NO MORE privileged than the app's existing
+  `gatewayFetch`.** It reaches **pre-existing** gateway endpoints, each of which already
+  enforces its own authorization (e.g. the `goal_plan_propose` approval flow already POSTs
+  to `/api/goals/:id/mutation/:requestId/decision` via `gatewayFetch`). It introduces NO
+  new server capability and NO new bypass: the LLM/UI can already call these endpoints with
+  the admin token. So pre-existing endpoints keep their own authz; `fetch` adds nothing to
+  authorize.
+- **The "authorize like tool calls" rule applies to the NEW typed entry points** the
+  extension host introduces: the **action endpoint** (`/api/tools/:tool/actions/:action`,
+  behind the `allowedTools` guard, control i) and the reserved Phase-2 **`routes:`** /
+  **`stores:`** (which inherit the same `allowedTools`-gated rule by design). These are the
+  new capability surfaces, and each routes through that one guard.
+- **The single choke point, stated accurately:** every NEW capability entry point created
+  by the extension host routes through one `allowedTools`-gated guard; pre-existing
+  endpoints retain their own authorization. The renderer-module endpoint is not a
+  capability entry point (it serves trusted bytes), so it is bearer-only (§4a, control i).
+- **Recommended path.** The PRIMARY, recommended pack→server path is
+  `host.invokeAction` (tool-authorized through the action endpoint). `host.gateway.fetch`
+  is the lower-level interop seam, used by renderers re-expressing built-ins that today
+  call existing endpoints directly — e.g. the `goal_plan_propose` approval re-expression.
 
 ---
 
@@ -636,8 +713,11 @@ parsed-and-reserved today so packs authored against the full shape install clean
 | **toolUseId verification** | Forged/absent toolUseId → 409; toolUseId belonging to a *different* tool → 409. | **yes** |
 | Error isolation | Handler throws → 500, process survives; handler exceeds timeout → 504/500, slot released. | yes |
 | Cache invalidation | Install → handler available next call; update → new handler picked up; uninstall → 404; all without restart (drive `invalidateResolverCaches`). | yes |
-| Renderer/actions loader | `rendererKind` computed `"pack"` only for market `.js`; `GET /renderer` serves bytes as `text/javascript`; factory missing → loader rejects → load-failure fallback registered. | yes |
+| Renderer/actions loader | `rendererKind` computed `"pack"` only for market `.js`; `GET /renderer` serves bytes as `text/javascript` with bearer-only auth (NO `allowedTools` check); factory missing → loader rejects → load-failure fallback registered. | yes |
+| **Renderer precedence (litmus parity)** | A pack that shadows a built-in interactive tool registers with `{ override: true }` and renders with the **PACK** renderer, not the eager builtin (`getToolRenderer(name)` resolves to the pack loader); a built-in NOT shadowed keeps its eager renderer. | **yes** |
 | Manifest schema | Phase-2 keys (`panels`/`routes`/`stores`/`entrypoints`) accepted + ignored, NOT rejected; malformed block degrades (tool still loads). | yes |
+| **Tool-description budget** | `tests/tool-description-budget.test.ts` still passes after the new tool-metadata wire fields (`rendererKind`/`hasActions`/`actionNames`) + contributions parsing — no tool description exceeds its pinned budget. | yes |
+| **`buildPackList` byte-identical** | With zero market packs, resolution is unchanged (renderers/actions add nothing), per the existing `buildPackList` byte-identical invariant test. | yes |
 
 ### 8.2 Browser E2E (mandatory) — `tests/e2e/ui/extension-host.spec.ts`
 
