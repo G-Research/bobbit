@@ -518,7 +518,13 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   `getToolRenderer` and installs the **load-failure** fallback on loader rejection
   (`renderer-registry.ts::startLoad`) — both reused unchanged. Registration is re-driven
   from metadata on every cold load, so it **survives page reload** with no install-time
-  state.
+  state. A **superseded in-flight load is generation-guarded**: `startLoad` captures a
+  per-name `loadGeneration` token before awaiting the loader, and
+  `unregisterPackRenderer` / re-registration bump it — so if a pack is uninstalled or a
+  different renderer is registered for the same name while its lazy import is in flight, the
+  stale promise resolves to a **no-op** (no `toolRenderers` write, no resurrecting repaint),
+  preserving the uninstall reconciliation above (the load-failure path is guarded the same
+  way).
 
   **Renderer precedence honors the winning-provider decision (no split-brain).** A pack
   that shadows a built-in interactive tool resolves to `rendererKind: "pack"` (its

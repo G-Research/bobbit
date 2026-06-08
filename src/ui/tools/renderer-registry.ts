@@ -40,6 +40,27 @@ export type LazyRendererLoader = () => Promise<ToolRenderer | { default: ToolRen
 const pendingLazy = new Map<string, LazyRendererLoader>();
 // In-flight loads: name → promise (so concurrent renders share one fetch)
 const inFlight = new Map<string, Promise<ToolRenderer>>();
+// Per-name load-generation token. Bumped whenever a tool name's renderer
+// registration changes (re-register / uninstall). `startLoad` captures the
+// generation BEFORE awaiting the loader and re-checks it on resolve/reject; a
+// load started under a stale generation becomes a no-op (it must NOT write the
+// renderer back into `toolRenderers` nor dispatch a resurrecting repaint). This
+// closes the TOCTOU race where a pack renderer's lazy import is in-flight when
+// the pack is uninstalled / a different renderer is registered for the same
+// name — the old promise would otherwise resurrect the stale renderer and
+// defeat the uninstall reconciliation (extension-host §4a).
+const loadGeneration = new Map<string, number>();
+
+/**
+ * Invalidate any in-flight lazy load for `toolName`: bump its generation token
+ * (so a superseded load becomes a no-op on resolve) and drop the shared
+ * `inFlight` promise so a fresh registration can start a NEW load under the
+ * bumped generation. Called on every registration change for a name.
+ */
+function bumpLoadGeneration(toolName: string): void {
+	loadGeneration.set(toolName, (loadGeneration.get(toolName) ?? 0) + 1);
+	inFlight.delete(toolName);
+}
 // Pack-owned renderer names (registered via { override: true }). The pack lazy
 // loader is the EFFECTIVE renderer for these names; a later eager
 // `registerToolRenderer` for a pack-owned name is ignored so the pack always
@@ -101,6 +122,10 @@ export function registerLazyToolRenderer(
 		toolRenderers.delete(toolName);
 		packOwned.add(toolName);
 	}
+	// Registering a (possibly different) loader for this name supersedes any
+	// in-flight load started under the prior registration — invalidate it so a
+	// late resolve cannot write the previous renderer back (TOCTOU guard).
+	bumpLoadGeneration(toolName);
 	pendingLazy.set(toolName, loader);
 }
 
@@ -119,7 +144,10 @@ export function unregisterPackRenderer(toolName: string): void {
 	if (!packOwned.has(toolName)) return;
 	toolRenderers.delete(toolName);
 	pendingLazy.delete(toolName);
-	inFlight.delete(toolName);
+	// Invalidate any in-flight pack load (bumps the generation + drops inFlight)
+	// so a late resolve of the uninstalled pack's loader becomes a no-op and
+	// cannot resurrect the stale renderer (TOCTOU guard).
+	bumpLoadGeneration(toolName);
 	packOwned.delete(toolName);
 	const stashed = displacedBuiltins.get(toolName);
 	if (stashed) {
@@ -167,10 +195,22 @@ export function requestToolRender(): void {
 
 function startLoad(toolName: string, loader: LazyRendererLoader): void {
 	if (inFlight.has(toolName)) return;
-	const p = loader()
+	// Capture the generation BEFORE awaiting the loader. If it changes while the
+	// load is in flight (uninstall / re-register), this load is superseded and
+	// must not mutate the registry or dispatch a repaint (TOCTOU guard).
+	const gen = loadGeneration.get(toolName) ?? 0;
+	const isSuperseded = () => (loadGeneration.get(toolName) ?? 0) !== gen;
+	const p: Promise<ToolRenderer> = loader()
 		.then(mod => {
-			const renderer = (mod as any)?.default ?? mod;
-			toolRenderers.set(toolName, renderer as ToolRenderer);
+			const renderer = ((mod as any)?.default ?? mod) as ToolRenderer;
+			if (isSuperseded()) {
+				// A newer registration/uninstall replaced this name while the load
+				// was in flight. Drop only OUR own inFlight entry (a fresh load may
+				// have installed a newer promise) and bail — no write, no repaint.
+				if (inFlight.get(toolName) === p) inFlight.delete(toolName);
+				return renderer;
+			}
+			toolRenderers.set(toolName, renderer);
 			pendingLazy.delete(toolName);
 			inFlight.delete(toolName);
 			// Notify mounted tool-message / tool-group instances FIRST so each
@@ -178,12 +218,18 @@ function startLoad(toolName: string, loader: LazyRendererLoader): void {
 			dispatchRendererLoaded(toolName);
 			// Belt-and-braces top-down re-render.
 			try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
-			return renderer as ToolRenderer;
+			return renderer;
 		})
 		.catch((err) => {
+			const fallback = makeLoadFailureRenderer(toolName);
+			if (isSuperseded()) {
+				// Superseded load failed — swallow silently (the name is no longer
+				// this loader's) and do NOT install a fallback or repaint.
+				if (inFlight.get(toolName) === p) inFlight.delete(toolName);
+				return fallback;
+			}
 			// eslint-disable-next-line no-console
 			console.error(`[tool-registry] failed to lazy-load renderer for "${toolName}":`, err);
-			const fallback = makeLoadFailureRenderer(toolName);
 			toolRenderers.set(toolName, fallback);
 			pendingLazy.delete(toolName);
 			inFlight.delete(toolName);

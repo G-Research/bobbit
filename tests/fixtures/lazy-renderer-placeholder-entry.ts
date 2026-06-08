@@ -82,6 +82,39 @@ const deferreds = new Map<string, Deferred<ToolRenderer>>();
 	registerLazyToolRenderer(toolName, () => Promise.reject(new Error(message)));
 };
 
+// ── TOCTOU race helpers: a controllable loader keyed independently of the tool
+//    name, so we can register a DIFFERENT loader for the same name and resolve
+//    each loader on demand (a re-registration overwrites the by-name deferred). ──
+
+/** Register a pack lazy renderer whose deferred is stored under `key` (distinct
+ *  from the tool name) so two loaders can race for the same name. */
+(window as any).__registerKeyedLazy = (toolName: string, key: string, override = false) => {
+	const d = defer<ToolRenderer>();
+	deferreds.set(key, d);
+	registerLazyToolRenderer(toolName, () => d.promise, override ? { override: true } : undefined);
+};
+
+(window as any).__resolveKeyedLazy = (key: string, label: string) => {
+	const d = deferreds.get(key);
+	if (!d) throw new Error(`no deferred for key ${key}`);
+	d.resolve(makeStubRealRenderer(label));
+};
+
+// Count `bobbit-tool-renderer-loaded` events per tool name so a test can assert
+// that a SUPERSEDED in-flight load does NOT dispatch a resurrecting repaint.
+const loadedEventLog: string[] = [];
+document.addEventListener("bobbit-tool-renderer-loaded", (e) => {
+	const name = (e as CustomEvent).detail?.toolName;
+	if (typeof name === "string") loadedEventLog.push(name);
+});
+(window as any).__loadedEventCount = (toolName: string): number =>
+	loadedEventLog.filter(n => n === toolName).length;
+
+/** Flush microtasks + a macrotask so an in-flight loader's settled handlers run. */
+(window as any).__flush = async (): Promise<void> => {
+	await new Promise(r => setTimeout(r, 30));
+};
+
 // ── { override } precedence helpers (extension-host §4a) ──
 
 /** Register an eager (built-in style) renderer that emits a labelled button. */

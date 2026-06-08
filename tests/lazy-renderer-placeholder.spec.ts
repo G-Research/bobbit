@@ -215,3 +215,74 @@ test.describe("Pack renderer { override } precedence (extension-host §4a)", () 
 		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(0);
 	});
 });
+
+test.describe("In-flight lazy load TOCTOU guard (generation token)", () => {
+	test("unregister while a load is in flight: a late resolve does NOT resurrect the pack renderer", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// Eager built-in, then a pack override that displaces it. Render once to
+		// kick off the (still-pending) lazy loader — placeholder is shown.
+		await page.evaluate(() => {
+			(window as any).__registerEagerRenderer("race_tool", "BUILTIN");
+			(window as any).__registerOverrideDeferredLazy("race_tool");
+			(window as any).__renderRegistered("race_tool"); // placeholder → starts load
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// Uninstall the pack BEFORE the loader resolves → built-in is restored.
+		const countAfterUnregister = await page.evaluate(() => {
+			(window as any).__unregisterPack("race_tool");
+			(window as any).__renderRegistered("race_tool");
+			return (window as any).__loadedEventCount("race_tool");
+		});
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("BUILTIN");
+
+		// NOW resolve the superseded loader. It must be a no-op: no write, no repaint.
+		const countAfterResolve = await page.evaluate(async () => {
+			(window as any).__resolveDeferredLazy("race_tool", "STALE_PACK");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("race_tool");
+			return (window as any).__loadedEventCount("race_tool");
+		});
+
+		// The stale renderer never landed — the restored built-in still renders.
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("BUILTIN");
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+		// No resurrecting repaint fired for the superseded resolve.
+		expect(countAfterResolve).toBe(countAfterUnregister);
+	});
+
+	test("re-register a different renderer while a load is in flight: the stale load is ignored, the new one wins", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// Loader A registered + started (placeholder shown).
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("rereg_tool", "A", true);
+			(window as any).__renderRegistered("rereg_tool"); // starts load A
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+
+		// Re-register a DIFFERENT loader B for the same name (bumps generation +
+		// drops the in-flight A promise so B can start a fresh load), then start it.
+		await page.evaluate(() => {
+			(window as any).__registerKeyedLazy("rereg_tool", "B", true);
+			(window as any).__renderRegistered("rereg_tool"); // starts load B
+		});
+
+		// Resolve the STALE loader A first — must be ignored.
+		await page.evaluate(async () => {
+			(window as any).__resolveKeyedLazy("A", "STALE_A");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("rereg_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toHaveCount(0);
+
+		// Resolve the fresh loader B — it wins.
+		await page.evaluate(async () => {
+			(window as any).__resolveKeyedLazy("B", "FRESH_B");
+			await (window as any).__flush();
+			(window as any).__renderRegistered("rereg_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toContainText("FRESH_B");
+	});
+});
