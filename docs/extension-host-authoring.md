@@ -194,25 +194,24 @@ export const actions = {
 
 The returned object is JSON-serialized back to the renderer as the `invokeAction` result. Here `message` flows into the renderer's `pack-result` element.
 
-### Using `host.gateway.fetch` from a handler
+### What `ctx.host` exposes (and what it deliberately does NOT)
 
-When a handler needs to reach the gateway, use `ctx.host.gateway.fetch(path, init)` rather than constructing your own request:
+There is **no `host.gateway.fetch`** and no other raw passthrough. The durable v1 contract removes the escape hatch on purpose: Bobbit *serves* a typed contract rather than handing extensions a window into internals. The only sanctioned pack→server path is the action endpoint itself — which is exactly the call your renderer already made via `invokeAction` and which the gateway has already authorized and audited.
 
-```js
-export const actions = {
-  readSession: async (ctx, _args) => {
-    // path is gateway-relative and MUST start with "/"; absolute URLs are rejected.
-    const resp = await ctx.host.gateway.fetch(`/api/sessions/${ctx.sessionId}`);
-    return resp.json();
-  },
-};
-```
+In Phase 1 the server-side `ctx.host` therefore carries only:
 
-`host.gateway.fetch` injects the admin bearer and the bound `x-bobbit-session-id` header, derives the gateway base URL from the **trusted bound socket** (never a client-supplied `Host:` header), strips any caller-supplied `Authorization`, and audits every call. It is deliberately **no more privileged** than the app's own authenticated fetch — it reaches pre-existing endpoints, each of which enforces its own authorization. It introduces no new capability. The frozen `host.session.*` / `host.store.*` namespaces throw a loud "reserved for Phase 2" if called.
+- `ctx.host.version` / `ctx.host.contractVersion` — the frozen contract revisions.
+- `ctx.host.capabilities` — the **single source of truth** for what is implemented (a Phase-1 server host reports `{ callRoute: false, session: false, store: false }`).
+
+The frozen Phase-2 namespaces `ctx.host.session.*` and `ctx.host.store.*` are present-but-throwing stubs — calling one throws a loud `host.<member> is reserved for Phase 2` rather than failing silently. **Feature-detect with `ctx.host.capabilities.<name>` / `ctx.host.capabilities.has(name)`, never with member-presence checks** (`if (ctx.host.store)` would wrongly succeed against the stub).
+
+A handler that genuinely needs raw `fs` / `process` / `exec` imports them directly — it already runs as trusted host code in the gateway process. The point of removing `gateway.fetch` is not to constrain trusted handler code, but to keep the *pack→server boundary* a typed, authorized contract with no raw transport to misdirect (see the security note below).
+
+The durable forward path for reaching the gateway is the Phase-2, pack-scoped, typed `host.callRoute(name, init)` — frozen in [`src/shared/extension-host/host-api.ts`](../src/shared/extension-host/host-api.ts), not implemented in Phase 1. It reaches **only** the calling pack's OWN `/api/ext/<thisPack>/*` routes (it is impossible to address an arbitrary gateway path), authorized through the same per-session `allowedTools` guard as `invokeAction`. That is how a future pack will fetch its own dynamic server data without ever exposing a raw fetch.
 
 ### Blast-radius controls you get for free
 
-Handlers run in the long-lived gateway process, so Bobbit bounds the damage a buggy or hostile handler can do: a **per-call timeout** (default 30s, returns 504 to the caller while the underlying promise keeps its concurrency permit until it actually settles), a **global concurrency cap** (default 8 in-flight), a **per-session token-bucket rate limit**, **try/catch isolation** (a throw becomes a 500, never a process crash), and **audit logging** of every invocation. You do not configure these from the pack; design your handlers to be fast and side-effect-careful regardless.
+Handlers run in the long-lived gateway process, so Bobbit bounds the damage a buggy or hostile handler can do: a **per-call timeout** (default 30s) that spans **both** the module load+evaluation *and* the handler execution — it returns 504 to the caller while the underlying promise keeps its concurrency permit until it actually settles; a **global concurrency cap** (default 8 in-flight); a **per-session token-bucket rate limit**; **try/catch isolation** (a throw becomes a 500, never a process crash); and **audit logging** of every invocation. You do not configure these from the pack; design your handlers to be fast and side-effect-careful regardless.
 
 ## Step 5 — the client→server call (Host API recap)
 
@@ -226,7 +225,26 @@ const result = await ctx.host.invokeAction("sample_action", "retry", { /* args *
 - This POSTs `/api/tools/sample_action/actions/retry` with `{ sessionId, toolUseId, args }`. The endpoint authorizes the call **like a tool call**: it requires `x-bobbit-session-id`, `body.sessionId === header`, `:tool` in the session's `allowedTools`, `:action` in `actions.names` (when declared), and a `toolUseId` that exists in the header-bound session and was a call of `:tool`. Because the LLM can `curl` this endpoint directly with the admin token, *this* guard — not the agent layer — is the real gate.
 - It resolves with the handler's JSON result, or rejects on a guard/handler failure.
 
-For the lower-level interop seam (re-expressing a built-in that already POSTs to an existing endpoint), a renderer can also call `ctx.host.gateway.fetch(path, init)`. Prefer `invokeAction` — it is the tool-authorized path.
+`invokeAction` is the **only** Phase-1 pack→server path — there is no lower-level raw-fetch seam. The endpoint is built same-origin inside the client Host API ([`src/app/host-api.ts`](../src/app/host-api.ts)), so there is no caller-supplied URL or `Authorization` header anywhere in the flow.
+
+### Feature-detection and the durable forward path
+
+From a renderer, check capabilities the same way the server side does — via `ctx.host.capabilities`, never member presence:
+
+```js
+if (ctx.host.capabilities.invokeAction) { /* Phase-1, always true on a v1 host */ }
+if (ctx.host.capabilities.has("callRoute")) { /* Phase-2 only; false today */ }
+```
+
+A Phase-1 host reports `{ invokeAction: true, requestRender: true, callRoute: false, session: false, ui: false, store: false }`. The reserved Phase-2 members (`callRoute`, `session`, `ui`, `store`) are present-but-throwing stubs for type stability — `if (ctx.host.store)` would wrongly succeed, which is exactly why `capabilities` is the single source of truth. `ctx.host.version` (`HOST_API_VERSION`) and `ctx.host.contractVersion` (`HOST_CONTRACT_VERSION`) identify the contract revision only; they never imply a member is implemented.
+
+When Phase 2 lands, the durable shape is already frozen in [`src/shared/extension-host/host-api.ts`](../src/shared/extension-host/host-api.ts) and your code is forward-compatible:
+
+- **`host.callRoute(name, init)`** — the typed, pack-scoped replacement for raw fetch. It reaches only your pack's OWN `/api/ext/<thisPack>/*` routes, addressed by declared `name` (there is no `path`/URL field), authorized like a tool call.
+- **Host-API-owned data contracts** — `HostMessage`, `HostContentBlock`, `ToolCallRecord`, and typed session-event payloads are stable shapes the contract *owns* and versions (`HOST_CONTRACT_VERSION`), mapped from Bobbit's internal wire format by an internal→contract adapter. Packs read these instead of Bobbit internals, so internal refactors never break a pack.
+- **Structured addressing** — `host.ui.openPanel(target)` / `host.ui.navigate(target)` take typed `{ panelId | route, params }` objects, never hash strings, so the contract never bakes in today's router.
+
+Write against `capabilities` today and these become available additively — no signature churn, no version bump.
 
 ## Step 6 — install, test, iterate
 
@@ -248,7 +266,8 @@ The Host API is the single security boundary. As an author, your obligations are
 - [ ] **Keep `args` identity-free** — `sessionId`/`toolUseId` come from the verified context, not from args.
 - [ ] **Don't bare-import `lit`** in a renderer — use the factory toolkit.
 - [ ] **Use theme tokens**, preserve any iframe `sandbox` attributes, and never mutate the transcript from a renderer.
-- [ ] **Go through `ctx.host.gateway.fetch`** for gateway access (relative paths only); don't hand-roll auth headers.
+- [ ] **Go through `host.invokeAction`** for every pack→server call — it is the sole, tool-authorized path. Do not hand-roll a gateway request or reach for any raw fetch; there is none by design.
+- [ ] **Feature-detect via `host.capabilities`**, never member presence — reserved Phase-2 members are present-but-throwing stubs.
 
 The deeper model — the allowlist-bypass fix, `toolUseId` ownership verification, single-sourced session identity, and the worker/vm isolation seam left for Phase 2 — is documented in [docs/design/extension-host.md §5](design/extension-host.md).
 
