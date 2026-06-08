@@ -564,13 +564,40 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
   `getToolRenderer` and installs the **load-failure** fallback on loader rejection
   (`renderer-registry.ts::startLoad`) — both reused unchanged. Registration is re-driven
   from metadata on every cold load, so it **survives page reload** with no install-time
-  state. A **superseded in-flight load is generation-guarded**: `startLoad` captures a
-  per-name `loadGeneration` token before awaiting the loader, and
-  `unregisterPackRenderer` / re-registration bump it — so if a pack is uninstalled or a
-  different renderer is registered for the same name while its lazy import is in flight, the
-  stale promise resolves to a **no-op** (no `toolRenderers` write, no resurrecting repaint),
-  preserving the uninstall reconciliation above (the load-failure path is guarded the same
-  way).
+  state.
+
+  **All registry mutations route through ONE generation-guarded chokepoint
+  (`applyRegistration`); stale deferred applies are structurally dropped (Wave 10C).** The
+  recurring TOCTOU class was per-call-site: each writer path independently had to remember
+  to bump/check the `loadGeneration` token, and a writer that forgot (e.g. the eager
+  `registerToolRenderer`, which did NOT bump the generation) reopened the race — a non-pack
+  lazy load already in flight could resolve later and overwrite a newer eager registration.
+  The fix is structural: EVERY change to what a tool name resolves to — eager
+  `registerToolRenderer`, `registerLazyToolRenderer` (incl. `{override}`),
+  `unregisterPackRenderer`, and the deferred `startLoad` success/failure applies — now
+  passes through a single internal `applyRegistration(toolName, capturedGen, mutate, opts)`
+  helper, and `toolRenderers`/`pendingLazy` are ONLY ever written from inside its `mutate()`
+  callback. The helper has two modes:
+
+  - **Immediate intent** (`capturedGen === null`): a registration/removal that supersedes
+    prior intent. It FIRST bumps `loadGeneration[toolName]` (and drops the shared `inFlight`
+    promise), so any in-flight lazy load for the name can no longer resurrect over the write,
+    then applies `mutate()` unconditionally. `registerToolRenderer` now uses this path —
+    closing the eager gap with the same guard every other writer already used.
+  - **Deferred apply** (`capturedGen` is the token `startLoad` captured before awaiting,
+    with `opts.ownPromise` set): it cleans up ONLY this load's own `inFlight` entry
+    (identity-checked, so a fresh load's newer promise is never clobbered), then applies
+    `mutate()` ONLY if the captured generation is still current — else the load resolves to a
+    **no-op** (no `toolRenderers` write, no resurrecting repaint). The load-failure path is
+    guarded identically (a superseded failure also skips the fallback install + the
+    `console.error`).
+
+  So whether a stale in-flight load is superseded by an uninstall, a pack `{override}`, OR a
+  newer eager registration, the late resolve cannot defeat the reconciliation — the
+  invariant lives in exactly one place instead of being re-derived (and forgotten) per
+  writer. A writer-ordering matrix in `tests/lazy-renderer-placeholder.spec.ts` pins each
+  ordering and asserts both the winning renderer AND that no resurrecting repaint event
+  fired for the superseded resolve.
 
   **Renderer precedence honors the winning-provider decision (no split-brain).** A pack
   that shadows a built-in interactive tool resolves to `rendererKind: "pack"` (its

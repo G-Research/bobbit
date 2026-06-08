@@ -40,26 +40,84 @@ export type LazyRendererLoader = () => Promise<ToolRenderer | { default: ToolRen
 const pendingLazy = new Map<string, LazyRendererLoader>();
 // In-flight loads: name → promise (so concurrent renders share one fetch)
 const inFlight = new Map<string, Promise<ToolRenderer>>();
-// Per-name load-generation token. Bumped whenever a tool name's renderer
-// registration changes (re-register / uninstall). `startLoad` captures the
-// generation BEFORE awaiting the loader and re-checks it on resolve/reject; a
-// load started under a stale generation becomes a no-op (it must NOT write the
-// renderer back into `toolRenderers` nor dispatch a resurrecting repaint). This
-// closes the TOCTOU race where a pack renderer's lazy import is in-flight when
-// the pack is uninstalled / a different renderer is registered for the same
-// name — the old promise would otherwise resurrect the stale renderer and
-// defeat the uninstall reconciliation (extension-host §4a).
+// Per-name load-generation token. Bumped by EVERY immediate registration/removal
+// (eager register, lazy register/override, unregister) via the single
+// `applyRegistration` chokepoint below. `startLoad` captures the generation
+// BEFORE awaiting the loader and re-checks it (again, through the chokepoint) on
+// resolve/reject; a load started under a now-stale generation becomes a no-op (it
+// must NOT write the renderer back into `toolRenderers` nor dispatch a
+// resurrecting repaint). This closes the TOCTOU race where a renderer's lazy
+// import is in-flight when the registration is superseded — by an uninstall, a
+// pack `{override}`, OR an eager `registerToolRenderer` for the same name — and
+// the old promise would otherwise resurrect the stale renderer and defeat the
+// reconciliation (extension-host §4a).
 const loadGeneration = new Map<string, number>();
 
 /**
  * Invalidate any in-flight lazy load for `toolName`: bump its generation token
  * (so a superseded load becomes a no-op on resolve) and drop the shared
  * `inFlight` promise so a fresh registration can start a NEW load under the
- * bumped generation. Called on every registration change for a name.
+ * bumped generation. Used only by {@link applyRegistration} for fresh intent.
  */
 function bumpLoadGeneration(toolName: string): void {
 	loadGeneration.set(toolName, (loadGeneration.get(toolName) ?? 0) + 1);
 	inFlight.delete(toolName);
+}
+
+/**
+ * THE single chokepoint through which EVERY change to what a tool name resolves
+ * to must pass — eager `registerToolRenderer`, `registerLazyToolRenderer`
+ * (incl. `{override}`), `unregisterPackRenderer`, and the deferred `startLoad`
+ * success/failure applies. Centralizing the writes makes a stale write
+ * STRUCTURALLY impossible: `toolRenderers` / `pendingLazy` are only ever mutated
+ * from inside `mutate()` here, and the generation check lives in exactly one
+ * place instead of being re-implemented (and forgotten) per call site.
+ *
+ * Two modes, selected by `capturedGen`:
+ *
+ *  - **Immediate intent** (`capturedGen === null`): a registration/removal that
+ *    supersedes prior intent. The guard FIRST bumps `loadGeneration[toolName]`
+ *    (and drops the shared `inFlight` promise) so any in-flight lazy load for the
+ *    name can no longer resurrect over this write, then runs `mutate()`
+ *    unconditionally. This is the fix for the eager gap: `registerToolRenderer`
+ *    now bumps the generation like every other writer.
+ *
+ *  - **Deferred apply** (`capturedGen` is the number `startLoad` captured before
+ *    awaiting, with `opts.ownPromise` set): the guard cleans up ONLY this load's
+ *    own `inFlight` entry (identity-checked — a fresh load may have installed a
+ *    newer promise we must not clobber), then runs `mutate()` ONLY if the
+ *    captured generation is still current. A superseded deferred apply no-ops:
+ *    no `toolRenderers`/`pendingLazy` write, no resurrecting repaint.
+ *
+ * @returns `true` if `mutate()` ran, `false` if the deferred apply was dropped
+ *   as stale.
+ */
+function applyRegistration(
+	toolName: string,
+	capturedGen: number | null,
+	mutate: () => void,
+	opts?: { ownPromise?: Promise<ToolRenderer>; repaint?: boolean },
+): boolean {
+	if (capturedGen === null) {
+		// Fresh intent: supersede any prior intent (including an in-flight load).
+		bumpLoadGeneration(toolName);
+	} else {
+		// Deferred apply: drop only OUR own inFlight entry (identity-checked).
+		if (opts?.ownPromise && inFlight.get(toolName) === opts.ownPromise) {
+			inFlight.delete(toolName);
+		}
+		// Superseded while in flight → no write, no repaint.
+		if ((loadGeneration.get(toolName) ?? 0) !== capturedGen) return false;
+	}
+	mutate();
+	if (opts?.repaint) {
+		// Notify mounted tool-message / tool-group instances FIRST so each can
+		// pull its own update even if renderApp() short-circuits, then belt-and-
+		// braces top-down re-render.
+		dispatchRendererLoaded(toolName);
+		try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
+	}
+	return true;
 }
 // Pack-owned renderer names (registered via { override: true }). The pack lazy
 // loader is the EFFECTIVE renderer for these names; a later eager
@@ -88,8 +146,14 @@ export function registerToolRenderer(toolName: string, renderer: ToolRenderer): 
 	// renderer. Ignore the eager (built-in) registration so the pack wins
 	// regardless of registration order.
 	if (packOwned.has(toolName)) return;
-	toolRenderers.set(toolName, renderer);
-	pendingLazy.delete(toolName);
+	// Route through the chokepoint as fresh intent: this bumps the generation
+	// (and drops any in-flight lazy load) BEFORE installing, so a non-pack lazy
+	// load already in flight for this name can no longer resolve later and
+	// overwrite this newer eager registration (the eager-gap TOCTOU fix).
+	applyRegistration(toolName, null, () => {
+		toolRenderers.set(toolName, renderer);
+		pendingLazy.delete(toolName);
+	});
 }
 
 /** Options for {@link registerLazyToolRenderer}. */
@@ -116,28 +180,31 @@ export function registerLazyToolRenderer(
 	loader: LazyRendererLoader,
 	opts?: RegisterLazyOptions,
 ): void {
-	if (opts?.override) {
-		// Pack is the resolved winning provider for this tool name — its renderer
-		// must win too. Delete any eager entry and mark the name pack-owned so a
-		// later eager registration cannot reclaim it. Stash the displaced
-		// BUILT-IN (only on the first override, before the name is pack-owned) so
-		// unregisterPackRenderer can restore it on uninstall. The builtin may be
-		// eager (`toolRenderers`) OR lazy (a `pendingLazy` loader not yet loaded —
-		// e.g. team_*/task_*/gate_*) — stash whichever exists, eager first.
-		if (!packOwned.has(toolName)) {
-			const existingEager = toolRenderers.get(toolName);
-			const existingLazy = pendingLazy.get(toolName);
-			if (existingEager) displacedBuiltins.set(toolName, { kind: "eager", renderer: existingEager });
-			else if (existingLazy) displacedBuiltins.set(toolName, { kind: "lazy", loader: existingLazy });
+	// Fresh intent through the chokepoint: bumping the generation supersedes any
+	// in-flight load started under the prior registration so a late resolve
+	// cannot write the previous renderer back (TOCTOU guard). All map writes —
+	// the override displacement bookkeeping and the loader install — happen
+	// inside the guarded mutate() so the registry is only ever written here.
+	applyRegistration(toolName, null, () => {
+		if (opts?.override) {
+			// Pack is the resolved winning provider for this tool name — its renderer
+			// must win too. Delete any eager entry and mark the name pack-owned so a
+			// later eager registration cannot reclaim it. Stash the displaced
+			// BUILT-IN (only on the first override, before the name is pack-owned) so
+			// unregisterPackRenderer can restore it on uninstall. The builtin may be
+			// eager (`toolRenderers`) OR lazy (a `pendingLazy` loader not yet loaded —
+			// e.g. team_*/task_*/gate_*) — stash whichever exists, eager first.
+			if (!packOwned.has(toolName)) {
+				const existingEager = toolRenderers.get(toolName);
+				const existingLazy = pendingLazy.get(toolName);
+				if (existingEager) displacedBuiltins.set(toolName, { kind: "eager", renderer: existingEager });
+				else if (existingLazy) displacedBuiltins.set(toolName, { kind: "lazy", loader: existingLazy });
+			}
+			toolRenderers.delete(toolName);
+			packOwned.add(toolName);
 		}
-		toolRenderers.delete(toolName);
-		packOwned.add(toolName);
-	}
-	// Registering a (possibly different) loader for this name supersedes any
-	// in-flight load started under the prior registration — invalidate it so a
-	// late resolve cannot write the previous renderer back (TOCTOU guard).
-	bumpLoadGeneration(toolName);
-	pendingLazy.set(toolName, loader);
+		pendingLazy.set(toolName, loader);
+	});
 }
 
 /**
@@ -155,28 +222,27 @@ export function registerLazyToolRenderer(
  */
 export function unregisterPackRenderer(toolName: string): void {
 	if (!packOwned.has(toolName)) return;
-	toolRenderers.delete(toolName);
-	pendingLazy.delete(toolName);
-	// Invalidate any in-flight pack load (bumps the generation + drops inFlight)
-	// so a late resolve of the uninstalled pack's loader becomes a no-op and
-	// cannot resurrect the stale renderer (TOCTOU guard).
-	bumpLoadGeneration(toolName);
-	packOwned.delete(toolName);
-	const stashed = displacedBuiltins.get(toolName);
-	if (stashed) {
-		if (stashed.kind === "eager") {
-			toolRenderers.set(toolName, stashed.renderer);
-		} else {
-			// Re-arm the builtin lazy loader; getToolRenderer will load it on next use
-			// (under the bumped generation, so the prior pack load can't resurrect).
-			pendingLazy.set(toolName, stashed.loader);
+	// Fresh intent through the chokepoint. The generation bump invalidates any
+	// in-flight pack load so a late resolve of the uninstalled pack's loader
+	// becomes a no-op and cannot resurrect the stale renderer (TOCTOU guard); the
+	// `repaint` flag dispatches the standard renderer-loaded event (so mounted
+	// blocks repaint without a reload) plus a belt-and-braces top-down re-render.
+	applyRegistration(toolName, null, () => {
+		toolRenderers.delete(toolName);
+		pendingLazy.delete(toolName);
+		packOwned.delete(toolName);
+		const stashed = displacedBuiltins.get(toolName);
+		if (stashed) {
+			if (stashed.kind === "eager") {
+				toolRenderers.set(toolName, stashed.renderer);
+			} else {
+				// Re-arm the builtin lazy loader; getToolRenderer will load it on next use
+				// (under the bumped generation, so the prior pack load can't resurrect).
+				pendingLazy.set(toolName, stashed.loader);
+			}
+			displacedBuiltins.delete(toolName);
 		}
-		displacedBuiltins.delete(toolName);
-	}
-	// Repaint mounted tool blocks for this tool (same mechanism the lazy-load
-	// resolve uses); belt-and-braces top-down re-render too.
-	dispatchRendererLoaded(toolName);
-	try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
+	}, { repaint: true });
 }
 
 /** Custom DOM event dispatched on `document` after a lazy renderer resolves
@@ -214,46 +280,34 @@ export function requestToolRender(): void {
 
 function startLoad(toolName: string, loader: LazyRendererLoader): void {
 	if (inFlight.has(toolName)) return;
-	// Capture the generation BEFORE awaiting the loader. If it changes while the
-	// load is in flight (uninstall / re-register), this load is superseded and
-	// must not mutate the registry or dispatch a repaint (TOCTOU guard).
+	// Capture the generation BEFORE awaiting the loader. Both settled handlers
+	// route their write through `applyRegistration` as a DEFERRED apply (passing
+	// the captured generation + this load's own promise): if the generation
+	// changed while the load was in flight (uninstall / re-register / a newer
+	// eager registration), the chokepoint drops the write and the repaint —
+	// structurally, not via a per-call-site re-check.
 	const gen = loadGeneration.get(toolName) ?? 0;
-	const isSuperseded = () => (loadGeneration.get(toolName) ?? 0) !== gen;
 	const p: Promise<ToolRenderer> = loader()
 		.then(mod => {
 			const renderer = ((mod as any)?.default ?? mod) as ToolRenderer;
-			if (isSuperseded()) {
-				// A newer registration/uninstall replaced this name while the load
-				// was in flight. Drop only OUR own inFlight entry (a fresh load may
-				// have installed a newer promise) and bail — no write, no repaint.
-				if (inFlight.get(toolName) === p) inFlight.delete(toolName);
-				return renderer;
-			}
-			toolRenderers.set(toolName, renderer);
-			pendingLazy.delete(toolName);
-			inFlight.delete(toolName);
-			// Notify mounted tool-message / tool-group instances FIRST so each
-			// can pull its own update even if renderApp() short-circuits.
-			dispatchRendererLoaded(toolName);
-			// Belt-and-braces top-down re-render.
-			try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
+			applyRegistration(toolName, gen, () => {
+				toolRenderers.set(toolName, renderer);
+				pendingLazy.delete(toolName);
+			}, { ownPromise: p, repaint: true });
 			return renderer;
 		})
 		.catch((err) => {
 			const fallback = makeLoadFailureRenderer(toolName);
-			if (isSuperseded()) {
-				// Superseded load failed — swallow silently (the name is no longer
-				// this loader's) and do NOT install a fallback or repaint.
-				if (inFlight.get(toolName) === p) inFlight.delete(toolName);
-				return fallback;
+			const applied = applyRegistration(toolName, gen, () => {
+				toolRenderers.set(toolName, fallback);
+				pendingLazy.delete(toolName);
+			}, { ownPromise: p, repaint: true });
+			// Only log a real (non-superseded) failure — a superseded load whose
+			// name was reclaimed is expected to no-op silently.
+			if (applied) {
+				// eslint-disable-next-line no-console
+				console.error(`[tool-registry] failed to lazy-load renderer for "${toolName}":`, err);
 			}
-			// eslint-disable-next-line no-console
-			console.error(`[tool-registry] failed to lazy-load renderer for "${toolName}":`, err);
-			toolRenderers.set(toolName, fallback);
-			pendingLazy.delete(toolName);
-			inFlight.delete(toolName);
-			dispatchRendererLoaded(toolName);
-			try { renderApp(); } catch { /* state module may not exist in unit-test fixtures */ }
 			// Resolve to the fallback so the inFlight promise does not surface
 			// as an unhandled rejection — callers ignore the value anyway.
 			return fallback;
