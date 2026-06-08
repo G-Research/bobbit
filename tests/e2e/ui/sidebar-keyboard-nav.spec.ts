@@ -211,25 +211,35 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		if (projectB) await apiFetch(`/api/projects/${projectB.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("visible row IDs, wrap order, search filtering, project collapse/expand, goal auto-open, and archived cycle", async ({ page }) => {
-		test.setTimeout(60_000);
-		await page.addInitScript(() => {
-			if (!sessionStorage.getItem("navkb-show-archived-seeded")) {
-				localStorage.setItem("bobbit-show-archived", "false");
-				sessionStorage.setItem("navkb-show-archived-seeded", "1");
-			}
-		});
-		await openApp(page);
-		await waitForShortcutsReady(page);
-		await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
-
-		const requiredNavIds = [
+	// Build the canonical set of nav ids the sidebar must always render for the
+	// fixture projects/goals/sessions created in beforeAll.
+	function buildRequiredNavIds(): string[] {
+		return [
 			`project:${projectA!.id}`,
 			`project:${projectB!.id}`,
 			...liveGoalIds.map((id) => `goal:${id}`),
 			...createdSessionIds.map((id) => `session:${id}`),
 		];
-		const domOrder = await waitForStableNavOrder(page, requiredNavIds);
+	}
+
+	// Open the app with a deterministic Show-Archived seed and wait until the
+	// keyboard-shortcut layer + sidebar are live. Each test below gets a fresh
+	// browser context, so seeding localStorage here fully isolates its starting
+	// filter state (no cross-test leakage). This was previously one 60s mega-test
+	// that tipped over its budget under Chromium contention; splitting it gives
+	// each scenario its own 30s budget while preserving every assertion.
+	async function openSidebar(page: Page, showArchived: boolean): Promise<void> {
+		await page.addInitScript((sa) => {
+			localStorage.setItem("bobbit-show-archived", sa ? "true" : "false");
+		}, showArchived);
+		await openApp(page);
+		await waitForShortcutsReady(page);
+		await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
+	}
+
+	test("visible row IDs cover every kind and Ctrl+Arrow wraps at both ends", async ({ page }) => {
+		await openSidebar(page, false);
+		const domOrder = await waitForStableNavOrder(page, buildRequiredNavIds());
 		expect(domOrder.length, `${MARK}: sidebar must emit data-nav-id rows`).toBeGreaterThan(3);
 		const kinds = new Set(domOrder.map((id) => id.split(":")[0]));
 		for (const k of ["project", "goal", "session"]) {
@@ -248,13 +258,20 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		await pressCtrlArrow(page, "ArrowUp");
 		await waitForActiveNavId(page, domOrder[domOrder.length - 1]);
 		expect(await activeNavId(page), `${MARK}: Ctrl+ArrowUp from first row must wrap to last`).toBe(domOrder[domOrder.length - 1]);
+	});
 
+	test("search filtering restricts the keyboard cycle to matching rows", async ({ page }) => {
+		await openSidebar(page, false);
+		await waitForStableNavOrder(page, buildRequiredNavIds());
+
+		// The search box debounces input by 200ms before publishing to
+		// state.searchQuery (ui/components/SearchBox.ts); under contention a single
+		// fill's debounced dispatch can be dropped, so re-issue until it applies.
 		const searchInput = page.locator("input[data-search]");
-		await searchInput.fill("KBNavGoalA");
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.searchQuery ?? ""),
-			{ timeout: 5_000 },
-		).toBe("KBNavGoalA");
+		await expect.poll(async () => {
+			await searchInput.fill("KBNavGoalA");
+			return page.evaluate(() => (window as any).bobbitState?.searchQuery ?? "");
+		}, { timeout: 10_000, intervals: [250, 400, 700, 1000] }).toBe("KBNavGoalA");
 		const filtered = await waitForStableNavOrder(page, [`goal:${liveGoalIds[0]}`]);
 		expect(filtered.length, `${MARK}: search must still render at least one nav row`).toBeGreaterThan(0);
 		await resetNavStart(page);
@@ -262,13 +279,15 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		for (const v of visitedFiltered) {
 			expect(filtered.includes(v), `${MARK}: Ctrl+ArrowDown under search visited filtered-out row ${v}`).toBe(true);
 		}
-		await searchInput.fill("");
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.searchQuery ?? ""),
-			{ timeout: 5_000 },
-		).toBe("");
+		await expect.poll(async () => {
+			await searchInput.fill("");
+			return page.evaluate(() => (window as any).bobbitState?.searchQuery ?? "");
+		}, { timeout: 10_000, intervals: [250, 400, 700, 1000] }).toBe("");
+	});
 
-		const beforeCollapse = await waitForStableNavOrder(page, requiredNavIds);
+	test("Ctrl+Arrow collapses and expands a project while keeping the active row", async ({ page }) => {
+		await openSidebar(page, false);
+		const beforeCollapse = await waitForStableNavOrder(page, buildRequiredNavIds());
 		const projectNavId = `project:${projectA!.id}`;
 		const headerLocator = page.locator(`[data-nav-id="${projectNavId}"]`);
 		expect(await headerLocator.count(), `${MARK}: Project A header must have data-nav-id`).toBeGreaterThan(0);
@@ -308,13 +327,16 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		await waitForActiveNavId(page, projectNavId);
 		expect(await activeNavId(page), `${MARK}: Ctrl+ArrowLeft must not move active row`).toBe(projectNavId);
 		expect((await waitForStableNavOrder(page, [projectNavId], projectAChildren)).length, `${MARK}: Ctrl+ArrowLeft on expanded project must collapse`).toBeLessThan(afterExpand.length);
+	});
 
-		const domForGoal = await waitForStableNavOrder(page);
+	test("landing on a goal header routes to its goal dashboard", async ({ page }) => {
+		await openSidebar(page, false);
+		const domForGoal = await waitForStableNavOrder(page, buildRequiredNavIds());
 		const goalEntry = domForGoal.find((id) => id.startsWith("goal:"));
 		expect(goalEntry, `${MARK}: sidebar must include a goal row in nav order`).toBeTruthy();
 		const goalId = goalEntry!.split(":")[1];
 		await resetNavStart(page);
-		landed = false;
+		let landed = false;
 		for (let i = 0; i < domForGoal.length + 1; i++) {
 			await pressCtrlArrow(page, "ArrowDown");
 			await nextFrame(page);
@@ -324,6 +346,11 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		const hash = await page.evaluate(() => window.location.hash);
 		expect(hash, `${MARK}: landing on goal header must route to goal dashboard`).toContain(goalId);
 		expect(hash).toMatch(/#\/goal\//);
+	});
+
+	test("archived rows join the keyboard cycle only when Show Archived is on", async ({ page }) => {
+		await openSidebar(page, false);
+		await waitForStableNavOrder(page, buildRequiredNavIds());
 
 		const projectBNavId = `project:${projectB!.id}`;
 		const liveGoalBNavId = `goal:${liveGoalIds[1]}`;
@@ -357,6 +384,27 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		const onIds = await waitForStableNavOrder(page, [archHeaderNavId, archGoalNavId]);
 		expect(onIds.includes(archHeaderNavId), `${MARK}: archived header in DOM when Show Archived is on`).toBe(true);
 		expect(onIds.includes(archGoalNavId), `${MARK}: archived goal in DOM when Show Archived is on`).toBe(true);
+		await resetNavStart(page);
+		const visitedOn = new Set((await walkDown(page, onIds.length + 2, onIds)).filter((id): id is string => !!id));
+		expect(visitedOn.has(archHeaderNavId), `${MARK}: archived header visited when Show Archived is on`).toBe(true);
+		expect(visitedOn.has(archGoalNavId), `${MARK}: archived goal visited when Show Archived is on`).toBe(true);
+	});
+
+	test("Show Archived persists across reload and can be turned back off", async ({ page }) => {
+		await openSidebar(page, true);
+
+		const projectBNavId = `project:${projectB!.id}`;
+		const liveGoalBNavId = `goal:${liveGoalIds[1]}`;
+		const archHeaderNavId = `archived-header:${projectB!.id}`;
+		const archGoalNavId = `goal:${archivedGoalId}`;
+
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+			{ timeout: 5_000 },
+		).toBe(true);
+		await expect(page.locator(`[data-nav-id="${archHeaderNavId}"]`), `${MARK}: archived header must render when Show Archived is on`).toHaveCount(1, { timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="${archGoalNavId}"]`), `${MARK}: archived goal must render when Show Archived is on`).toHaveCount(1, { timeout: 10_000 });
+		const onIds = await waitForStableNavOrder(page, [archHeaderNavId, archGoalNavId]);
 		await resetNavStart(page);
 		const visitedOn = new Set((await walkDown(page, onIds.length + 2, onIds)).filter((id): id is string => !!id));
 		expect(visitedOn.has(archHeaderNavId), `${MARK}: archived header visited when Show Archived is on`).toBe(true);
