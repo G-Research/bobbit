@@ -1,14 +1,36 @@
-# Bobbit Extension Host — Phase 1 (frozen shape)
+# Bobbit Extension Host — Durable v1 Contract
 
-**Status:** design (frozen). Phase 1 builds the inner slice; the whole VS Code-shaped
-contribution model + Host API is frozen here as committed TypeScript interfaces and a
-validated manifest schema, so Phase 2 is purely additive.
+**Status:** design (v1, durable). Phase 1 builds the inner slice; the whole VS Code-shaped
+contribution model + Host API is committed here as a **durable v1 contract** — TypeScript
+interfaces and a validated manifest schema — so Phase 2 is **purely additive** and never
+re-opens a v1 shape.
 
-This is the authoritative design for goal *Extension Host Phase 1*. It is the source of
+This is the authoritative design for the *Extension Host* goal. It is the source of
 truth a coder implements Phase 1 from with no further architectural decisions. It also
 freezes the contribution-point manifest, the full Host API, and proves (on paper) that
-`artifacts` and the PR-walkthrough collapse onto the frozen shape with **zero** changes
-to Phase-1 types.
+`artifacts` and the PR-walkthrough collapse onto the v1 shape with **zero** changes to v1
+types.
+
+**Durability principle (the whole point of v1).** Every host capability is a **typed,
+named, versioned, capability-scoped method**. There is **no raw transport and no escape
+hatch**: the Host API is a contract Bobbit *serves*, not a window into Bobbit internals.
+Consequences encoded throughout this doc:
+
+- **No `gateway.fetch`.** A raw authenticated fetch against the live REST surface would
+  couple every pack to today's endpoints and re-open a token-leak surface. It is removed.
+  `invokeAction` (tool-authorized) is the ONLY Phase-1 pack→server path; a pack-scoped,
+  typed `callRoute` (Phase 2) is the durable replacement for "a pack needs its own dynamic
+  server data" — scoped to the pack's OWN contributed `routes:` namespace, never arbitrary
+  gateway paths.
+- **Host-API-owned data contracts.** Transcript/message/event shapes are stable types this
+  contract OWNS (`HostMessage`, `HostContentBlock`, `ToolCallRecord`, typed event
+  payloads) — never `unknown[]` mirrors of Bobbit's internal wire format. Bobbit maps its
+  internal types onto these via a documented **internal→contract adapter layer**, so
+  internals can be refactored freely without breaking packs.
+- **Structured addressing.** `ui.openPanel` / `ui.navigate` take typed `{ panelId|route,
+  params }` objects, never hash strings that bake in today's router.
+- **The invariant:** *one un-typed passthrough makes the whole abstraction a fiction.* No
+  member of the Host API is a raw passthrough.
 
 Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolver,
 `buildPackList`, scopes/precedence, the byte-identical invariant) and
@@ -16,7 +38,7 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 
 ---
 
-## 0. TL;DR — the three Phase-1 decisions
+## 0. TL;DR — the three Phase-1 decisions (v1 contract)
 
 1. **Renderer delivery.** A pack ships a **pre-built ES module** at
    `tools/<group>/<renderer>.js`. The gateway serves it as `text/javascript` from
@@ -41,11 +63,17 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
    and invalidates synchronously inside the existing `invalidateResolverCaches()`. Endpoint
    `POST /api/tools/:tool/actions/:action` with body `{ sessionId, toolUseId, args }`.
 
-3. **Host API (Phase-1 surface).** `host.gateway.fetch(path, init)` and
-   `host.invokeAction(tool, action, args)` only, exposed to renderers via a new optional
-   `ToolRenderContext.host?: HostApi`. Built-in renderers are unchanged (they ignore it).
-   The full `host.session.*` / `host.ui.*` / `host.store.*` namespace is frozen as
-   interfaces but **not** implemented.
+3. **Host API (Phase-1 surface).** `host.invokeAction(tool, action, args)` (plus the
+   client-only `host.requestRender()`) — exposed to renderers via a new optional
+   `ToolRenderContext.host?: HostApi`. **There is no `gateway.fetch`:** `invokeAction` is
+   the sole pack→server path and is authorized exactly like a tool call. Built-in
+   renderers are unchanged (they ignore the field). The full `host.session.*` /
+   `host.ui.*` / `host.store.*` namespace — plus the pack-scoped, typed `host.callRoute`
+   (the durable replacement for raw fetch) — is frozen as interfaces but **not**
+   implemented. Removing `gateway.fetch` also deletes the Host-header trusted-base-URL
+   token-leak surface (the whole `resolveTrustedGatewayBaseUrl` concern) — a net security
+   simplification, and behavior-neutral for Phase 1 (the retry-demo litmus uses only
+   `invokeAction`).
 
 ---
 
@@ -62,11 +90,17 @@ VS Code-shaped: declarative **contribution points** in the tool/pack manifest, t
   │  (lazy import)    │   │                                                                          │
   │                   │   │  POST /api/tools/:tool/actions/:action→ ActionDispatcher                  │
   │  ToolRenderContext│──▶┼──   │  guard (allowedTools) ─ verify toolUseId ─ load actions.js ─ run    │
-  │     .host: HostApi│   │     └── ctx: ServerHostApi (gateway-scoped fetch, audit, timeout)         │
+  │     .host: HostApi│   │     └── ctx: ServerHostApi (scoped, audited, timeout)                     │
   └───────────────────┘   │                                                                          │
-        ▲   host.gateway.fetch / host.invokeAction (the ONLY way extension code touches internals)   │
+        ▲   host.invokeAction (Phase 1, the ONLY pack→server path; tool-authorized)                  │
+        ┄   host.callRoute / host.session.* / host.ui.* / host.store.* (Phase 2, typed + scoped)     │
         └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+There is no raw-fetch arrow: every sanctioned arrow is a typed, named, authorized method.
+The Phase-1 arrow is `host.invokeAction`; the Phase-2 arrows (`host.callRoute` against the
+pack's OWN `routes:` namespace, `host.session.*`, `host.ui.*`, `host.store.*`) are all
+typed and scoped, never a raw passthrough.
 
 - **Client host** (browser, this app's Vite bundle): lazy-loads a pack's UI module and
   registers it as a tool renderer. Lives in `src/ui/tools/` + a new bootstrap in
@@ -201,33 +235,55 @@ single signal the client bootstrap keys off (§4a).
 
 ---
 
-## 3. Frozen Host API
+## 3. Frozen Host API (durable v1 contract)
 
 Committed as interfaces in a new shared module `src/shared/extension-host/host-api.ts`
-(importable by both `src/ui` and `src/server`). **Phase 1 implements only `gateway` and
-`invokeAction`.** Everything else is frozen-not-implemented: the interfaces are real and
-doc-commented so Phase-2 implementations are purely additive (add the method body + wire
-the capability through the same authorization path — no signature churn).
+(importable by both `src/ui` and `src/server`). **Phase 1 implements only `invokeAction`
+and the client-only `requestRender`.** Everything else is frozen-not-implemented: the
+interfaces are real and doc-commented so Phase-2 implementations are purely additive (add
+the method body + wire the capability through the same authorization path — no signature
+churn).
+
+**This is the contract Bobbit serves, not a window into Bobbit.** Every member is a typed,
+named, capability-scoped method. There is **no `gateway.fetch`** and no other raw
+passthrough. The data shapes (`HostMessage`, `HostContentBlock`, `ToolCallRecord`, event
+payloads) are **owned by this contract** and versioned by `HOST_CONTRACT_VERSION`; Bobbit
+maps its INTERNAL session/message types onto them through a documented
+**internal→contract adapter layer** (`src/server/extension-host/contract-adapter.ts`,
+implemented in Phase 2), so Bobbit can refactor its internals freely without breaking
+packs. The interfaces below are the literal spec the implementation wave executes to and
+must compile as written.
 
 ```ts
 // src/shared/extension-host/host-api.ts (NEW)
 
-/** Bumped only on a breaking change to any member below. Phase-2 additions that only
- *  ADD members do NOT bump this. Renderers may read host.version to feature-detect. */
+/** Bumped only on a BREAKING change to any member below. Additive-only after v1: adding a
+ *  new method/namespace does NOT bump this. Renderers feature-detect via `host.version`
+ *  (and per-capability presence checks) rather than assuming a member exists. */
 export const HOST_API_VERSION = 1 as const;
+
+/** Versions the Host-API-OWNED data contracts (HostMessage / HostContentBlock /
+ *  ToolCallRecord / event payloads). Bumped only on a BREAKING change to those shapes.
+ *  Kept distinct from HOST_API_VERSION so the surface and the data model can evolve
+ *  independently; packs may read it to feature-detect contract-shape additions. The
+ *  internal→contract adapter (§3, Phase 2) is the single place Bobbit's internal types
+ *  are mapped onto these versioned shapes. */
+export const HOST_CONTRACT_VERSION = 1 as const;
 
 /**
  * The single, versioned, capability-scoped object through which ALL extension code
- * (client renderers and, in Phase 2, panels/entrypoints) touches Bobbit internals.
- * Every member is mediated + authorized in one place (the gateway action/route guards
- * and the client wrappers). There are no privileged escape hatches.
+ * (client renderers and, in Phase 2, panels/entrypoints) touches Bobbit. Every member is
+ * a typed, named, authorized method, mediated in one place (the gateway action/route
+ * guards and the client wrappers). There are NO raw passthroughs and NO privileged escape
+ * hatches — that invariant is what makes v1 durable (one un-typed passthrough would make
+ * the whole abstraction a fiction).
  */
 export interface HostApi {
 	/** Frozen API version. See HOST_API_VERSION. */
 	readonly version: number;
 
-	/** Gateway access, scoped + audited. PHASE 1: implemented. */
-	readonly gateway: HostGatewayApi;
+	/** Version of the Host-API-owned data contracts. See HOST_CONTRACT_VERSION. */
+	readonly contractVersion: number;
 
 	/**
 	 * Force the active tool block(s) to repaint. PHASE 1: implemented by dispatching a
@@ -260,6 +316,16 @@ export interface HostApi {
 		args: TArgs,
 	): Promise<TResult>;
 
+	/**
+	 * Call one of the CONTRIBUTING PACK'S OWN typed routes (the durable replacement for a
+	 * raw gateway fetch). PHASE 2 (frozen, not implemented). `name` resolves ONLY within
+	 * the calling pack's `/api/ext/<thisPack>/*` namespace — it is impossible to address
+	 * an arbitrary gateway path. Authorized through the same per-session `allowedTools`
+	 * guard as `invokeAction` (§5). This is how a pack's renderer/panel fetches its OWN
+	 * dynamic server data (e.g. the PR-walkthrough viewer reading its changeset bundle).
+	 */
+	callRoute<TResult = unknown>(name: string, init?: HostRouteInit): Promise<TResult>;
+
 	/** Transcript + message capabilities. PHASE 2 (frozen, not implemented). */
 	readonly session: HostSessionApi;
 
@@ -270,44 +336,44 @@ export interface HostApi {
 	readonly store: HostStoreApi;
 }
 
-export interface HostGatewayApi {
-	/**
-	 * Authenticated fetch against the gateway, same credentials/headers as the app.
-	 * PHASE 1: implemented as a thin wrapper over src/app/gateway-fetch.ts::gatewayFetch.
-	 * `path` is a gateway-relative path (e.g. "/api/goals/:id"). The wrapper injects the
-	 * Authorization bearer + the caller's session id header; callers must NOT pass their
-	 * own Authorization header.
-	 *
-	 * AUTHORIZATION BOUNDARY (see §5.1): this is deliberately NO MORE privileged than the
-	 * app's existing gatewayFetch. It reaches PRE-EXISTING gateway endpoints, each of which
-	 * enforces its own authorization; it creates no new server capability and no new
-	 * bypass (the LLM/UI can already call these endpoints with the admin token). It is the
-	 * lower-level interop seam for renderers that re-express built-ins which today POST to
-	 * existing endpoints directly. The PRIMARY, recommended pack→server path is
-	 * `invokeAction` (tool-authorized through the action endpoint guard).
-	 */
-	fetch(path: string, init?: RequestInit): Promise<Response>;
+/** PHASE 2 — frozen, not implemented. Typed request to a pack's OWN contributed route.
+ *  No `path`/URL field exists by design: the route is addressed by its declared `name`
+ *  within the pack's namespace, never by a gateway-relative path. */
+export interface HostRouteInit {
+	/** HTTP method for the route. Default "GET". */
+	method?: "GET" | "POST" | "PUT" | "DELETE";
+	/** JSON body (POST/PUT). Serialized by the host; never a raw string/stream. */
+	body?: unknown;
+	/** Typed query params appended to the route. */
+	query?: Record<string, string | number | boolean>;
 }
 
-/** PHASE 2 — frozen, not implemented. Read/post the current session's transcript. */
+/** PHASE 2 — frozen, not implemented. Read/post the current session's transcript.
+ *  All shapes returned/accepted here are Host-API-OWNED contract types (below), produced
+ *  by the internal→contract adapter — never Bobbit's internal wire format. */
 export interface HostSessionApi {
-	/** Read the current session's transcript (paginated envelope), mirroring
-	 *  GET /api/sessions/:id/transcript. */
+	/** Read the current session's transcript (paginated envelope of HostMessages). */
 	readTranscript(opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope>;
-	/** Read a single tool call (params + result) by tool_use id from this session. */
+	/** Read a single tool call (input + output) by tool_use id from this session. */
 	readToolCall(toolUseId: string): Promise<ToolCallRecord | null>;
 	/** Post a user/system message into the current session (may resume the agent turn). */
 	postMessage(msg: PostMessageInput): Promise<void>;
-	/** Subscribe to live session events (tool results, status). Returns an unsubscribe fn. */
-	subscribe(event: SessionEvent, cb: (payload: unknown) => void): () => void;
+	/** Subscribe to live, TYPED session events. Returns an unsubscribe fn. The callback
+	 *  payload is discriminated on the event name (see HostSessionEventMap). */
+	subscribe<E extends HostSessionEventName>(
+		event: E,
+		cb: (payload: HostSessionEventMap[E]) => void,
+	): () => void;
 }
 
-/** PHASE 2 — frozen, not implemented. Drive non-chat UI surfaces. */
+/** PHASE 2 — frozen, not implemented. Drive non-chat UI surfaces. Targets are STRUCTURED
+ *  typed objects, never hash strings — so the contract never bakes in today's router. */
 export interface HostUiApi {
-	/** Open (or focus) a contributed panel, handing it an opaque payload. */
-	openPanel(panelId: string, payload?: unknown): void;
-	/** Navigate the SPA to a contributed route (e.g. "#/ext/pr-walkthrough/123"). */
-	navigate(route: string): void;
+	/** Open (or focus) a contributed panel, handing it typed params. */
+	openPanel(target: PanelTarget): void;
+	/** Navigate the SPA to a contributed route, by structured target. The host maps the
+	 *  target onto whatever URL scheme the router uses; packs never construct URLs. */
+	navigate(target: RouteTarget): void;
 }
 
 /** PHASE 2 — frozen, not implemented. Ownership-scoped server persistence.
@@ -319,12 +385,54 @@ export interface HostStoreApi {
 	list(prefix?: string): Promise<string[]>;
 }
 
-// ── Phase-2 payload shapes (frozen so impls are additive) ──
+// ── Structured UI addressing (frozen; no hash strings) ──
+export interface PanelTarget { panelId: string; params?: Record<string, unknown>; }
+export interface RouteTarget { route: string; params?: Record<string, unknown>; }
+
+// ── Host-API-OWNED data contracts (versioned by HOST_CONTRACT_VERSION) ──
+// These are STABLE shapes the contract owns. Bobbit's internal session/message types are
+// mapped onto them by the internal→contract adapter (Phase 2), decoupling packs from any
+// internal refactor. They are deliberately NOT `unknown` mirrors of the internal wire.
+
+/** A single transcript message in contract form. */
+export interface HostMessage {
+	id: string;
+	role: "user" | "assistant" | "system";
+	content: HostContentBlock[];
+	/** Unix epoch milliseconds. */
+	ts: number;
+}
+
+/** Discriminated union of message content blocks. Additive: new `type`s may be added in
+ *  later contract versions; consumers must tolerate unknown types (render nothing). */
+export type HostContentBlock =
+	| { type: "text"; text: string }
+	| { type: "tool_use"; toolUseId: string; tool: string; input: unknown }
+	| { type: "tool_result"; toolUseId: string; output: unknown; isError: boolean };
+
+/** A single tool call's input + output, in contract form. */
+export interface ToolCallRecord {
+	toolUseId: string;
+	tool: string;
+	input: unknown;
+	output: unknown;
+	isError: boolean;
+}
+
 export interface ReadTranscriptOpts { offset?: number; limit?: number; pattern?: string; }
-export interface TranscriptEnvelope { total: number; returned: number; messages: unknown[]; }
-export interface ToolCallRecord { toolUseId: string; tool: string; params: unknown; result: unknown; isError: boolean; }
+export interface TranscriptEnvelope { total: number; returned: number; messages: HostMessage[]; }
 export interface PostMessageInput { role: "user" | "system"; text: string; resumeTurn?: boolean; }
-export type SessionEvent = "tool_result" | "status" | "message";
+
+// ── Typed session events (frozen; payloads are discriminated, never bare `unknown`) ──
+export interface HostSessionEventMap {
+	/** A tool call produced (or updated) its result. */
+	tool_result: { record: ToolCallRecord };
+	/** The session's run status changed. */
+	status: { status: "idle" | "running" | "error"; detail?: string };
+	/** A new message was appended to the transcript. */
+	message: { message: HostMessage };
+}
+export type HostSessionEventName = keyof HostSessionEventMap;
 ```
 
 ### 3.1 Exposure to renderers (`ToolRenderContext` extension)
@@ -341,7 +449,8 @@ export interface ToolRenderContext {
 	getAskResponseAnswers?: (toolUseId: string) => /* …unchanged… */ null;
 
 	/** NEW: Phase-1 Host API. Present for ALL renderers (built-in + pack). Built-in
-	 *  renderers ignore it; pack renderers use it for gateway.fetch / invokeAction.
+	 *  renderers ignore it; pack renderers use it for invokeAction / requestRender
+	 *  (there is no gateway.fetch — invokeAction is the sole pack→server path).
 	 *  Optional so unit fixtures that construct a bare ctx keep compiling. */
 	host?: HostApi;
 }
@@ -631,7 +740,7 @@ verified `toolUseId` to the endpoint internally. No other renderer call sites ch
 ```ts
 // src/server/extension-host/action-dispatcher.ts (NEW)
 export interface ActionHandlerCtx {
-	/** Phase-1 server Host API surface (audited gateway fetch, scoped). */
+	/** Phase-1 server Host API surface (scoped, audited). No raw fetch/process/fs. */
 	host: ServerHostApi;
 	/** The verified calling session id. */
 	sessionId: string;
@@ -730,19 +839,18 @@ dispatcher near `toolManager`).
 // src/app/host-api.ts (NEW)
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";   // existing top-down re-render entry point
-import { HOST_API_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
+import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
 
 /** Build the Phase-1 client Host API bound to a given session AND the renderer's own
  *  toolUseId. invokeAction supplies BOTH to the endpoint internally, so packs never put
  *  identity fields in `args`. Phase-2 namespaces throw a clear "not implemented in
- *  Phase 1" error so misuse is loud, not silent. */
+ *  Phase 1" error so misuse is loud, not silent. There is NO gateway member — invokeAction
+ *  is the only pack→server path. */
 export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
 	const notImpl = (m: string) => { throw new Error(`host.${m} is reserved for Phase 2`); };
 	return {
 		version: HOST_API_VERSION,
-		gateway: {
-			fetch: (path, init) => gatewayFetch(path, withSession(init, sessionId)),
-		},
+		contractVersion: HOST_CONTRACT_VERSION,
 		requestRender: () => {
 			// renderApp() alone won't re-run the memoized tool components (props
 			// unchanged); requestToolRender() dispatches TOOL_RENDER_REQUESTED_EVENT
@@ -760,6 +868,7 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 			if (!resp.ok) throw new Error(`invokeAction ${tool}/${action} HTTP ${resp.status}`);
 			return resp.json();
 		},
+		callRoute: () => notImpl("callRoute"),
 		session: { readTranscript: () => notImpl("session.readTranscript"), /* …all Phase-2… */ } as any,
 		ui: { openPanel: () => notImpl("ui.openPanel"), navigate: () => notImpl("ui.navigate") },
 		store: { get: () => notImpl("store.get"), put: () => notImpl("store.put"), list: () => notImpl("store.list") },
@@ -769,15 +878,18 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 
 `withSession(init, sid)` adds the `x-bobbit-session-id` header (same propagation
 `extension.ts` uses, server reads at server.ts:9030/10953). `gatewayFetch` supplies the
-bearer. `Messages.ts`/`ToolGroup.ts` set `ctx.host = getHostApi(sessionIdCtx, toolUseIdCtx)`
-— the bound `toolUseId` is the renderer's own tool call (acting on a different tool call is
-out of Phase-1 scope).
+bearer for the ONE endpoint the client Host API calls in Phase 1
+(`POST /api/tools/:tool/actions/:action`). `Messages.ts`/`ToolGroup.ts` set
+`ctx.host = getHostApi(sessionIdCtx, toolUseIdCtx)` — the bound `toolUseId` is the
+renderer's own tool call (acting on a different tool call is out of Phase-1 scope).
 
-**The `ServerHostApi` (handler `ctx.host`)** is the server-side analogue exposing only an
-**audited, scoped** gateway fetch in Phase 1 (no raw `process`/`fs`/`exec` handed to
-handlers; handlers that need those import them directly, but the doc'd convention is to go
-through `ctx.host`). Frozen `ServerHostApi` mirrors `HostApi.gateway`/`store`/`session`
-server-side, with only `gateway` live in Phase 1.
+**The `ServerHostApi` (handler `ctx.host`)** is the server-side analogue. **Phase 1 exposes
+no members** (handlers receive `{ host, sessionId, toolUseId, tool }` and use the verified
+identity fields; the durable convention is that any future server capability handlers need
+— store access, pack-scoped route helpers, the internal→contract adapter — is added to
+`ServerHostApi` as a typed method, never as raw `process`/`fs`/`exec`). Frozen
+`ServerHostApi` mirrors the Phase-2 `HostApi.store`/`session` surface server-side; nothing
+in it is a raw passthrough.
 
 ---
 
@@ -803,57 +915,67 @@ in exactly one place.
 has the token + shell. We are not widening that; we are adding *typed* entry points and
 **closing** the allowlist bypass they would otherwise open.
 
-### 5.1 `host.gateway.fetch` vs the single choke point
+**Attack surface REMOVED by dropping `gateway.fetch`.** Earlier drafts exposed a raw
+`host.gateway.fetch`. To let a renderer reach the gateway from an arbitrary embedding it
+had to resolve a *trusted base URL* (the `resolveTrustedGatewayBaseUrl` machinery,
+Host-header–derived), which is itself a token-leak surface — a forged/poisoned Host header
+could steer the injected admin bearer at an attacker-chosen origin. Removing `gateway.fetch`
+deletes that entire concern: the only endpoint the client Host API calls in Phase 1 is the
+same-origin action endpoint, and the durable Phase-2 replacement (`host.callRoute`) is
+scoped to the pack's OWN `/api/ext/<pack>/*` namespace and authorized like a tool call.
+There is no raw-fetch capability to misdirect, so the trusted-base-URL surface is gone.
 
-The "authorize gateway calls like tool calls" requirement could read as if every
-`host.gateway.fetch` call must pass the `allowedTools` guard. It does not — and that does
-not contradict the single-choke-point claim. The boundary is precise:
+### 5.1 The single choke point — `invokeAction` + scoped Phase-2 capabilities
 
-- **`host.gateway.fetch` is deliberately NO MORE privileged than the app's existing
-  `gatewayFetch`.** It reaches **pre-existing** gateway endpoints, each of which already
-  enforces its own authorization (e.g. the `goal_plan_propose` approval flow already POSTs
-  to `/api/goals/:id/mutation/:requestId/decision` via `gatewayFetch`). It introduces NO
-  new server capability and NO new bypass: the LLM/UI can already call these endpoints with
-  the admin token. So pre-existing endpoints keep their own authz; `fetch` adds nothing to
-  authorize.
-- **The client host API is the choke point for the injected bearer.** `host-api.ts`
-  `withSession` (which assembles headers for both `gateway.fetch` and `invokeAction`)
-  STRIPS any caller-supplied `Authorization`/`authorization` header (case-insensitive, via
-  the dependency-free `stripAuthorizationHeaders` in `gateway-fetch.ts`) BEFORE delegating
-  to `gatewayFetch`, so a renderer cannot override the injected admin bearer by passing its
-  own `Authorization` in `init.headers` (the shared `gatewayFetch` spreads `options.headers`
-  AFTER setting `Authorization`, so the strip must happen at the host-api choke point). The
-  server-side host API already sets `Authorization` after the spread, so it is unaffected.
-- **The "authorize like tool calls" rule applies to the NEW typed entry points** the
-  extension host introduces: the **action endpoint** (`/api/tools/:tool/actions/:action`,
-  behind the `allowedTools` guard, control i) and the reserved Phase-2 **`routes:`** /
-  **`stores:`** (which inherit the same `allowedTools`-gated rule by design). These are the
-  new capability surfaces, and each routes through that one guard.
-- **The single choke point, stated accurately:** every NEW capability entry point created
-  by the extension host routes through one `allowedTools`-gated guard; pre-existing
-  endpoints retain their own authorization. The renderer-module endpoint is not a
-  capability entry point (it serves trusted bytes), so it is bearer-only (§4a, control i).
-- **Recommended path.** The PRIMARY, recommended pack→server path is
-  `host.invokeAction` (tool-authorized through the action endpoint). `host.gateway.fetch`
-  is the lower-level interop seam, used by renderers re-expressing built-ins that today
-  call existing endpoints directly — e.g. the `goal_plan_propose` approval re-expression.
+The boundary is now exactly the set of NEW typed entry points the extension host
+introduces; there is no raw escape hatch to reason around.
+
+- **`invokeAction` is the only Phase-1 pack→server path, and it is authorized like a tool
+  call.** The action endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈
+  the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call`
+  (control i). The LLM can `curl` the endpoint, so this guard — not the agent layer's
+  `allowedTools` — is the real gate.
+- **Phase-2 capabilities inherit the same rule by construction.** `host.callRoute` (the
+  pack-scoped route capability), `host.store.*`, and `host.session.*` all route through the
+  one `allowedTools`-gated guard. `callRoute` additionally constrains the target to the
+  calling pack's OWN `/api/ext/<thisPack>/*` namespace — a pack can never address another
+  pack's routes or an arbitrary gateway path. This is the durable replacement for the
+  removed raw fetch: dynamic pack data comes from typed, pack-owned, authorized routes.
+- **The renderer-module endpoint is not a capability entry point.** `GET
+  /api/tools/:tool/renderer` serves trusted pack module bytes (a static-asset-equivalent),
+  so it is bearer-only — EXEMPT from the `allowedTools` check (§4a, control i). Path
+  traversal on the renderer file is still re-validated.
+- **The injected bearer never leaves same-origin.** With no `gateway.fetch`, there is no
+  caller-supplied URL or `Authorization` header to sanitize on the client: `host-api.ts`
+  builds the single action-endpoint request itself (same-origin, `withSession` adds only
+  `x-bobbit-session-id`; `gatewayFetch` adds the bearer). The previous
+  `stripAuthorizationHeaders` / trusted-base-URL defenses are unnecessary because the
+  capability that required them no longer exists.
+- **The single choke point, stated accurately:** every capability entry point created by
+  the extension host (the action endpoint today; `callRoute`/`stores`/`session` in Phase 2)
+  routes through one `allowedTools`-gated guard; the renderer-module endpoint serves
+  trusted bytes and is bearer-only. There is exactly one un-typed surface in the whole
+  design — none — which is the property that makes v1 durable.
 
 ---
 
-## 6. Migration sketch — artifacts & PR-walkthrough onto the frozen shape
+## 6. Migration sketch — artifacts & PR-walkthrough onto the v1 shape
 
-Goal: prove both collapse onto the frozen contribution points + Host API with **zero**
-changes to Phase-1 shapes. Where something didn't map, the fix was applied to the frozen
-shape above (noted inline), per the litmus rule.
+Goal: prove both collapse onto the v1 contribution points + Host API with **zero** changes
+to v1 shapes — and crucially, **without any raw `gateway.fetch`**. Where something didn't
+map, the fix was applied to the frozen shape above (noted inline), per the litmus rule.
+The key durability result: PR-walkthrough's dynamic data, which an earlier draft reached
+via `host.gateway.fetch`, maps cleanly onto the pack's OWN typed `routes:` via
+`host.callRoute` — so removing the escape hatch costs no behavioral parity.
 
 ### 6.1 `artifacts` (`src/ui/tools/artifacts/`, `preview/artifacts.ts`)
 
 | Existing behavior | Frozen primitive |
 |---|---|
 | `artifacts-tool-renderer.ts` renders an inline pill + opens the artifact viewer | `renderer:` (Phase-1) for the inline pill; **`panels:`** (reserved) for the viewer surface |
-| `ArtifactPill` "open" click mounts `ArtifactElement` in a panel | `host.ui.openPanel("artifacts.viewer", { artifactId })` |
+| `ArtifactPill` "open" click mounts `ArtifactElement` in a panel | `host.ui.openPanel({ panelId: "artifacts.viewer", params: { artifactId } })` (structured target) |
 | `persistPreviewArtifact` / `restorePreviewArtifact` server-side (server.ts:9890/9991) | **`stores:`** (reserved) → `host.store.put/get(artifactId)`; ownership-scoped to the artifacts pack |
-| Restore-by-id across reload (`POST /api/preview/artifacts/:id/restore`) | `host.store.get` + `host.ui.openPanel` — no bespoke route needed |
+| Restore-by-id across reload (`POST /api/preview/artifacts/:id/restore`) | `host.store.get` + `host.ui.openPanel({ panelId, params })` — no bespoke route, no raw fetch |
 
 Maps cleanly. Artifacts need `toolRenderers` + `panels` + `stores` — all frozen. **No
 Phase-1 shape change required.** The Blob-URL renderer-delivery decision (§4a) is exactly
@@ -865,21 +987,30 @@ serve+lazy-import mechanism keyed off `panels[].entry`).
 | Existing behavior | Frozen primitive |
 |---|---|
 | `submit.yaml` / `read_pr_walkthrough_bundle.yaml` / `readonly_bash.yaml` tools | tool YAMLs + `renderer:` for any inline tool blocks |
-| `PrWalkthroughPanel.ts` full-surface viewer | **`panels:`** → `host.ui.openPanel("pr-walkthrough.panel", { jobId })` |
-| Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (git-widget button / command palette) + `host.ui.navigate("#/ext/pr-walkthrough/:jobId")` |
-| `handlePrWalkthroughApiRoute` bespoke endpoints (server.ts:2259) | **`routes:`** → `/api/ext/pr-walkthrough/*` namespaced gateway endpoints, reached via `host.gateway.fetch` |
+| `PrWalkthroughPanel.ts` full-surface viewer | **`panels:`** → `host.ui.openPanel({ panelId: "pr-walkthrough.panel", params: { jobId } })` |
+| Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (git-widget button / command palette) + `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (structured — the host maps it to the router's URL scheme; the pack never builds a hash string) |
+| `handlePrWalkthroughApiRoute` bespoke endpoints (server.ts:2259) | **`routes:`** → the pack's OWN `/api/ext/pr-walkthrough/*` namespace, reached via the typed, pack-scoped `host.callRoute(name, init)` — **never** a raw gateway fetch |
+| Loading the changeset/diff bundle for the viewer | `host.callRoute("bundle", { query: { jobId } })` against the pack's own route — dynamic data without an escape hatch |
 | Persisted walkthrough store (`STORE_SCHEMA_VERSION`, job/changeset state) | **`stores:`** → `host.store.*`, pack-scoped |
-| `submit_pr_walkthrough_yaml` writing results back | `host.invokeAction("submit_pr_walkthrough", "publish", …)` (Phase-1 actions shape) **or** a `routes:` POST — both frozen |
+| `submit_pr_walkthrough_yaml` writing results back | `host.invokeAction("submit_pr_walkthrough", "publish", …)` (Phase-1 actions shape) **or** a `routes:` POST via `host.callRoute` — both typed + frozen |
 
 PR-walkthrough is the maximal case: `routes` + `stores` + `panels` + `entrypoints`. All
-four are reserved keys in §2; all the dynamic behaviors route through `host.gateway.fetch`
-/ `host.ui.*` / `host.store.*` / `host.invokeAction`, all frozen in §3. **No Phase-1 shape
+four are reserved keys in §2; every dynamic behavior routes through a TYPED, scoped
+capability — `host.callRoute` (the pack's own routes), `host.ui.*` (structured targets),
+`host.store.*` (pack-scoped), `host.invokeAction` — all frozen in §3, **with no raw
+`gateway.fetch`**. Parity holds without the escape hatch: the viewer's dynamic data comes
+from its OWN pack routes via `callRoute`, not from arbitrary gateway paths. **No v1 shape
 change required.**
 
-> **Shape fix applied during this exercise.** The initial frozen `HostUiApi` had only
-> `openPanel`; PR-walkthrough's deep-link/launcher need forced adding `navigate(route)` and
-> the `entrypoints:` reserved key (both now in §2/§3). This is the litmus test doing its
-> job — the shape was corrected here, before Phase 1 froze it, so Phase 2 is additive.
+> **Shape fixes applied during this exercise.** (1) The initial `HostUiApi` had only
+> `openPanel`; PR-walkthrough's deep-link/launcher need forced adding `navigate(target)` and
+> the `entrypoints:` reserved key (both now in §2/§3). (2) The initial draft routed
+> PR-walkthrough's dynamic data through a raw `host.gateway.fetch`; the durability review
+> replaced that with the pack-scoped, typed `host.callRoute` against the pack's OWN
+> `routes:` namespace, and removed `gateway.fetch` entirely. (3) `openPanel`/`navigate`
+> were re-typed from `(id, payload)` / `(hashString)` to structured `{ panelId|route,
+> params }` targets so the contract never bakes in today's router. This is the litmus test
+> doing its job — the shape was corrected here, while v1 is unmerged, so Phase 2 is additive.
 
 ---
 
@@ -887,14 +1018,27 @@ change required.**
 
 **Built in Phase 1:** pack renderer serving + runtime lazy registration (§4a); actions
 module resolution + endpoint + dispatch + cache invalidation (§4b); `ToolRenderContext.host`
-+ client/server Host API for `gateway.fetch` + `invokeAction` (§4c); the allowlist-bypass
-fix + input validation + toolUseId verification + blast-radius controls (§5); the frozen
-interfaces + manifest schema committed (§2/§3); this doc.
++ client/server Host API for `invokeAction` + the client-only `requestRender` (§4c) — there
+is **no `gateway.fetch`** to build; the allowlist-bypass fix + input validation +
+toolUseId verification + blast-radius controls (§5); the frozen v1 interfaces + manifest
+schema committed (§2/§3); this doc.
 
 **Frozen, NOT built (Phase 2+):** `panels`, `stores`, `routes`, `entrypoints`;
-`host.session.*` / `host.ui.*` / `host.store.*`; server-module worker/vm isolation. MCP +
-AGENTS remain non-installable (unchanged from marketplace MVP). Phase-2 keys are
-parsed-and-reserved today so packs authored against the full shape install cleanly now.
+`host.callRoute` (the pack-scoped route capability), `host.session.*` / `host.ui.*` /
+`host.store.*`; the internal→contract adapter (`src/server/extension-host/contract-adapter.ts`);
+server-module worker/vm isolation. MCP + AGENTS remain non-installable (unchanged from
+marketplace MVP). Phase-2 keys are parsed-and-reserved today so packs authored against the
+full shape install cleanly now.
+
+**Durability invariant (governs all post-v1 change).** v1 is **additive-only**: a Phase-2
+capability adds a method body + wires it through the one `allowedTools`-gated guard — no v1
+signature changes, no `HOST_API_VERSION` bump. Packs feature-detect via `host.version` /
+`host.contractVersion` and per-method presence checks. Deprecation policy: a member may be
+marked `@deprecated` (kept working) for at least one MAJOR `HOST_API_VERSION` before
+removal, and removal is the ONLY thing that bumps the major. The load-bearing rule: **no
+member may ever become (or be replaced by) a raw transport / untyped passthrough** — one
+un-typed passthrough makes the abstraction a fiction, which is exactly why `gateway.fetch`
+was removed rather than retained "just in case."
 
 ---
 
