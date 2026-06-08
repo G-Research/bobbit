@@ -1,0 +1,7 @@
+name: retry-demo
+description: Extension Host Phase-1 litmus pack — a tool with a Retry button wired to a server action handler.
+version: 1.0.0
+contents:
+  roles: []
+  tools: [demo]
+  skills: []
