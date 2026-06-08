@@ -324,6 +324,14 @@ export class RemoteAgent {
 	// preventing re-fires on message re-scan (reconnect, refresh).
 	private _processedProposalIds = new Set<string>();
 
+	// Tracks the tool_use block ID of the proposal currently STREAMING for each
+	// tag (e.g. "goal_proposal"). Set on every streaming delta; cleared when the
+	// stream finalizes (message_end) or the turn ends. Used by
+	// dismissStreamingProposal() so a mid-stream Dismiss can suppress the rest of
+	// the in-flight tool block — without it, the next (content-grown) delta would
+	// fail the content-fingerprint dismissal check and re-populate the panel.
+	private _streamingProposalBlockIdByTag: Record<string, string> = {};
+
 	// Task timing — track when the agent started working so we can
 	// notify the user if a long task finishes while the tab is hidden.
 	private _taskStartTime: number | null = null;
@@ -1128,6 +1136,7 @@ export class RemoteAgent {
 		for (const k of Object.keys(state.proposalStreamingByTag)) {
 			state.proposalStreamingByTag[k] = false;
 		}
+		this._streamingProposalBlockIdByTag = {};
 	}
 
 	/** Drain any pending out-of-order events whose predecessor has now arrived. */
@@ -1923,6 +1932,9 @@ export class RemoteAgent {
 			const tagKey = `${proposalType}_proposal`;
 			if (streaming) {
 				state.proposalStreamingByTag[tagKey] = true;
+				// Record the in-flight block so a mid-stream Dismiss can suppress
+				// the rest of THIS tool block (see dismissStreamingProposal).
+				if (blockId) this._streamingProposalBlockIdByTag[tagKey] = blockId;
 			}
 			// Slice E gap-closure: run the unified onProposal BEFORE the legacy
 			// per-type callback so plugin.mergeFields sees the un-mutated prev
@@ -1941,6 +1953,7 @@ export class RemoteAgent {
 			if (!streaming && blockId) {
 				this._processedProposalIds.add(blockId);
 				state.proposalStreamingByTag[tagKey] = false;
+				delete this._streamingProposalBlockIdByTag[tagKey];
 				// Persist to sessionStorage so it survives page refresh
 				if (this._sessionId) {
 					try {
@@ -1955,6 +1968,25 @@ export class RemoteAgent {
 			const msgId = message.id || "";
 			if (msgId) this._toolProposalMessageIds.add(msgId);
 		}
+	}
+
+	/**
+	 * Dismiss the proposal currently STREAMING for `tagKey` (e.g. "goal_proposal").
+	 *
+	 * The persistent dismissal in `markProposalDismissed` is a content-fingerprint
+	 * match. During streaming the proposal body grows on every delta, so a
+	 * fingerprint captured at click time no longer matches the next delta and the
+	 * panel re-populates. To make a mid-stream Dismiss stick we add the active
+	 * streaming tool-block id to the processed set: every subsequent streaming
+	 * delta AND the final message_end fire for that block are then skipped by the
+	 * dedup guard in `_checkToolProposals`. No-op when nothing is streaming for the
+	 * tag (callers gate on `isProposalStreaming`).
+	 */
+	dismissStreamingProposal(tagKey: string): void {
+		const blockId = this._streamingProposalBlockIdByTag[tagKey];
+		if (blockId) this._processedProposalIds.add(blockId);
+		delete this._streamingProposalBlockIdByTag[tagKey];
+		state.proposalStreamingByTag[tagKey] = false;
 	}
 
 	/** Check an assistant message for legacy XML proposal blocks and fire the matching callback.
@@ -2249,6 +2281,7 @@ export class RemoteAgent {
 				for (const k of Object.keys(state.proposalStreamingByTag)) {
 					state.proposalStreamingByTag[k] = false;
 				}
+				this._streamingProposalBlockIdByTag = {};
 
 				// Notify: beep + favicon badge — only when the human is actually needed.
 				// Team members/delegates escalate to their parent silently; team leads
