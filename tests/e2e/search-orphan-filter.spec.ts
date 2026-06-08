@@ -130,18 +130,27 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "goal");
-		// Diagnostic dump: if we ever see leakage again, the failure message
-		// should tell us exactly which rows survived (and from where) so the
-		// next person doesn't have to repro under load.
-		if (hits.length !== 0) {
+		// Scope to the SPECIFIC orphan row we inserted (see the detailed rationale
+		// on the "orphan session" test below): flex-store search uses suggest:true
+		// + a forward/LatinAdvanced tokenizer, so a unique-token query can also
+		// surface unrelated REAL goal rows that fuzzy-match a sub-token. Those
+		// genuinely exist and are correctly KEPT, so counting every goal-type hit
+		// is a latent flake. The contract is narrower: our inserted ghost goal
+		// (no backing goal) must be dropped. Assert exactly that, by id.
+		const ourOrphan = out.results.filter(
+			(r: any) =>
+				r.type === "goal" &&
+				(r.id === `ghost-${token}` || r.goalId === `ghost-${token}`),
+		);
+		if (ourOrphan.length !== 0) {
 			console.error(
-				"[orphan-goal-flake] leaked goal hits:",
-				JSON.stringify(hits, null, 2),
+				"[orphan-goal-flake] our inserted orphan goal row survived the filter:",
+				JSON.stringify(ourOrphan, null, 2),
 			);
 		}
-		expect(hits.length).toBe(0);
-		// total tracks filtered length (may still include non-goal hits if any).
+		expect(ourOrphan.length).toBe(0);
+		// total tracks filtered length (independent contract — unaffected by which
+		// real rows fuzzy-match, since total is just the filtered page length).
 		expect(out.total).toBe(out.results.length);
 	});
 
@@ -213,11 +222,18 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "staff");
-		if (hits.length !== 0) {
-			console.error("[orphan-staff-flake] leaked staff hits:", JSON.stringify(hits, null, 2));
+		// Scope to the SPECIFIC orphan row we inserted (see the detailed rationale
+		// on the "orphan session" test): suggest:true fuzzy fallback can surface
+		// unrelated REAL staff rows for a unique-token query, which genuinely exist
+		// and are correctly KEPT. Our inserted ghost staff (no backing staff) must
+		// be dropped — assert exactly that, by id.
+		const ourOrphan = out.results.filter(
+			(r: any) => r.type === "staff" && r.id === `ghost-${token}`,
+		);
+		if (ourOrphan.length !== 0) {
+			console.error("[orphan-staff-flake] our inserted orphan staff row survived the filter:", JSON.stringify(ourOrphan, null, 2));
 		}
-		expect(hits.length).toBe(0);
+		expect(ourOrphan.length).toBe(0);
 	});
 
 	test("orphan message (parent session missing) is dropped server-side", async ({ gateway }) => {
@@ -237,11 +253,22 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "message");
-		if (hits.length !== 0) {
-			console.error("[orphan-msg-flake] leaked message hits:", JSON.stringify(hits, null, 2));
+		// Scope to the SPECIFIC orphan row we inserted (see the detailed rationale
+		// on the "orphan session" test): suggest:true fuzzy fallback can surface
+		// unrelated REAL message rows for a unique-token query, which genuinely
+		// exist and are correctly KEPT. Our inserted ghost message (parent session
+		// missing) must be dropped — assert exactly that, by id. Message ids keep
+		// their full `message:...` prefix (not stripped in toSearchResult).
+		const ourOrphan = out.results.filter(
+			(r: any) =>
+				r.type === "message" &&
+				(r.id === `message:ghost-sess-${token}:0:assistant:0` ||
+					r.sessionId === `ghost-sess-${token}`),
+		);
+		if (ourOrphan.length !== 0) {
+			console.error("[orphan-msg-flake] our inserted orphan message row survived the filter:", JSON.stringify(ourOrphan, null, 2));
 		}
-		expect(hits.length).toBe(0);
+		expect(ourOrphan.length).toBe(0);
 	});
 
 	test("weak-match message row (no <b> highlight) is dropped", async ({ gateway }) => {
