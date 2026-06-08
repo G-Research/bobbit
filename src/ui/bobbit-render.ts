@@ -528,6 +528,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 			<div class="bobbit-blob__flask"></div>
 			<div class="bobbit-blob__wand"></div>
 			<div class="bobbit-blob__wizard-hat"></div>
+			<div class="bobbit-blob__nurse-cap"></div>
 			<div class="bobbit-blob__stamp"></div>
 			<div class="bobbit-blob__clipboard"></div>
 			<div class="bobbit-blob__shadow"></div>
@@ -581,6 +582,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 					<div class="bobbit-blob__flask"></div>
 					<div class="bobbit-blob__wand"></div>
 					<div class="bobbit-blob__wizard-hat"></div>
+					<div class="bobbit-blob__nurse-cap"></div>
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 				</div>
