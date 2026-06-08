@@ -162,11 +162,28 @@ test.describe("search orphan filter & weak-match drop", () => {
 		});
 
 		const out = await searchAll(gw, token, projectId);
-		const hits = out.results.filter((r: any) => r.type === "session");
-		if (hits.length !== 0) {
-			console.error("[orphan-sess-flake] leaked session hits:", JSON.stringify(hits, null, 2));
+		// Scope the assertion to the SPECIFIC orphan row we inserted, mirroring
+		// the robust id-based check in the "total equals filtered length" test
+		// below. The flex-store search runs with `suggest: true` (see
+		// flex-store.ts search opts), and the forward/LatinAdvanced tokenizer
+		// splits our token into sub-tokens — so under full-suite load a
+		// unique-token query can ALSO surface unrelated REAL session rows that
+		// fuzzy-match a sub-token. Those sessions genuinely exist, so the orphan
+		// filter correctly KEEPS them; counting every session-type hit therefore
+		// races on whatever real sessions the shared default-project index has
+		// accumulated. The orphan-filter contract this test pins is narrower: the
+		// orphan row we inserted (whose backing session does not exist) must be
+		// dropped. Assert exactly that — by id — so the test is deterministic and
+		// still fails if the orphan filter ever stops dropping our ghost row.
+		const ourOrphan = out.results.filter(
+			(r: any) =>
+				r.type === "session" &&
+				(r.id === `ghost-${token}` || r.sessionId === `ghost-session-${token}`),
+		);
+		if (ourOrphan.length !== 0) {
+			console.error("[orphan-sess-flake] our inserted orphan session row survived the filter:", JSON.stringify(ourOrphan, null, 2));
 		}
-		expect(hits.length).toBe(0);
+		expect(ourOrphan.length).toBe(0);
 	});
 
 	test("orphan staff is dropped server-side", async ({ gateway }) => {
