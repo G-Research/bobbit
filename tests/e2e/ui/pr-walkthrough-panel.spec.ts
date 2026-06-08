@@ -427,6 +427,50 @@ async function setupWalkthrough(
 	return { ...ready, parentSessionId: waiting.parentSessionId, childSessionId: waiting.childSessionId, jobId: waiting.jobId };
 }
 
+/**
+ * Inject synthetic walkthrough cards through the AUTHORITATIVE panel tab state,
+ * not just the Lit element. The app binds
+ * `<pr-walkthrough-panel .cards=${tab.state.cards}>` (src/app/render.ts), so
+ * setting `panel.cards` directly is reverted by the very next app re-render —
+ * and the live child agent session triggers such re-renders asynchronously
+ * (streaming / status updates). When that clobber lands mid-interaction it
+ * resets `.cards` to the fixture payload, which detaches the synthetic diff DOM
+ * ("element was detached from the DOM" / "<html> intercepts pointer events"
+ * churn) and was the root cause of the context-toggle 30s-timeout and
+ * inline-mode flakes. Writing the synthetic data into `tab.state` first makes
+ * every subsequent re-render REPRODUCE the same diff, so the DOM stays stable.
+ */
+async function injectWalkthroughCards(
+	page: Page,
+	data: { changeset: Record<string, unknown>; cards: unknown[]; status?: string },
+): Promise<void> {
+	await page.evaluate(async (payload) => {
+		const status = payload.status ?? "ready";
+		const applyToTab = (tab: any) => {
+			if (!tab || (tab.kind !== "walkthrough" && tab.legacyTab !== "walkthrough")) return;
+			tab.state = { ...(tab.state || {}), status, changeset: payload.changeset, cards: payload.cards };
+		};
+		const s = (window as any).__bobbitState ?? (window as any).bobbitState;
+		if (s) {
+			(s.panelTabs || []).forEach(applyToTab);
+			for (const list of Object.values(s.panelTabsBySession || {})) {
+				(list as any[] | undefined)?.forEach(applyToTab);
+			}
+			(window as any).__bobbitRenderApp?.();
+		}
+		const panel = document.querySelector("pr-walkthrough-panel") as any;
+		if (panel) {
+			panel.changeset = payload.changeset;
+			panel.cards = payload.cards;
+			panel.status = status;
+			// A malformed-hunk regression fixture can throw synchronously inside the
+			// reactive update pre-fix; swallow so the test can still assert on the
+			// captured pageerror / rendered DOM.
+			try { await panel.updateComplete; } catch { /* surfaced via pageerror */ }
+		}
+	}, data);
+}
+
 async function expectActiveDiffMode(page: Page, mode: "split" | "inline") {
 	const diff = activeCard(page).getByTestId("pr-walkthrough-diff-block").first();
 	await expect(diff, `active diff should be in ${mode} mode`).toHaveAttribute("data-diff-mode", mode, { timeout: 10_000 });
@@ -883,8 +927,7 @@ This is the author's source description with **markdown**.
 
 	test("diff hunks default to compact GitHub-like context and can expand on demand", async ({ page }) => {
 		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
-		await page.evaluate(async () => {
-			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
+		{
 			const focalIndex = 27;
 			const lines = Array.from({ length: 55 }, (_, index) => ({
 				id: `ctx-${index + 1}`,
@@ -894,17 +937,17 @@ This is the author's source description with **markdown**.
 				kind: index === focalIndex ? "add" : "context",
 				text: index === focalIndex ? "added focal line" : index === 23 ? "function contextFixture() {" : `context ${index + 1}`,
 			}));
-			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Long context fixture", filesChanged: 1, additions: 1, deletions: 0 };
-			walkthrough.cards = [{
-				id: "long-context-card",
-				phaseId: "significant",
-				title: "Long context hunk",
-				summary: "This card verifies compact diff context.",
-				diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,55 +1,55 @@ function fallbackSignature() {", lines }] }],
-			}];
-			walkthrough.status = "ready";
-			await walkthrough.updateComplete;
-		});
+			await injectWalkthroughCards(page, {
+				changeset: { baseSha: "base", headSha: "head", provider: "github", title: "Long context fixture", filesChanged: 1, additions: 1, deletions: 0 },
+				cards: [{
+					id: "long-context-card",
+					phaseId: "significant",
+					title: "Long context hunk",
+					summary: "This card verifies compact diff context.",
+					diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,55 +1,55 @@ function fallbackSignature() {", lines }] }],
+				}],
+			});
+		}
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title")).toContainText("Long context hunk");
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "far context should be hidden by default").toBeHidden();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"]`), "near context should remain visible by default").toBeVisible();
@@ -970,8 +1013,7 @@ This is the author's source description with **markdown**.
 
 	test("diff hunk headers prefer the containing declaration scope over later visible symbols", async ({ page }) => {
 		await setupWalkthrough(page, { width: 1100, height: 820 });
-		await page.evaluate(async () => {
-			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
+		{
 			const focalIndex = 27;
 			const lines = Array.from({ length: 55 }, (_, index) => ({
 				id: `visible-sig-${index + 1}`,
@@ -987,17 +1029,17 @@ This is the author's source description with **markdown**.
 							? "interface SideBySidePair {"
 							: `context ${index + 1}`,
 			}));
-			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Visible context fixture", filesChanged: 1, additions: 1, deletions: 0 };
-			walkthrough.cards = [{
-				id: "visible-signature-card",
-				phaseId: "significant",
-				title: "Visible signature hunk",
-				summary: "This card verifies containing scope context.",
-				diffBlocks: [{ id: "visible-signature-block", filePath: "src/context.ts", hunks: [{ id: "visible-signature-hunk", header: "@@ -1,55 +1,55 @@", lines }] }],
-			}];
-			walkthrough.status = "ready";
-			await walkthrough.updateComplete;
-		});
+			await injectWalkthroughCards(page, {
+				changeset: { baseSha: "base", headSha: "head", provider: "github", title: "Visible context fixture", filesChanged: 1, additions: 1, deletions: 0 },
+				cards: [{
+					id: "visible-signature-card",
+					phaseId: "significant",
+					title: "Visible signature hunk",
+					summary: "This card verifies containing scope context.",
+					diffBlocks: [{ id: "visible-signature-block", filePath: "src/context.ts", hunks: [{ id: "visible-signature-hunk", header: "@@ -1,55 +1,55 @@", lines }] }],
+				}],
+			});
+		}
 
 		const hunkHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
 		await expect(hunkHeader.locator(".hunk-signature"), "containing declaration scope should label the blue row instead of the next visible interface").toContainText("const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [");
@@ -1006,8 +1048,7 @@ This is the author's source description with **markdown**.
 
 	test("diff hunk headers hide empty top-of-file context labels", async ({ page }) => {
 		await setupWalkthrough(page, { width: 1100, height: 820 });
-		await page.evaluate(async () => {
-			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
+		{
 			const focalIndex = 2;
 			const lines = Array.from({ length: 35 }, (_, index) => ({
 				id: `top-file-${index + 1}`,
@@ -1017,17 +1058,17 @@ This is the author's source description with **markdown**.
 				kind: index === focalIndex ? "add" : "context",
 				text: index === focalIndex ? "const topLevelChange = true;" : `context ${index + 1}`,
 			}));
-			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Top of file fixture", filesChanged: 1, additions: 1, deletions: 0 };
-			walkthrough.cards = [{
-				id: "top-file-card",
-				phaseId: "significant",
-				title: "Top file hunk",
-				summary: "This card verifies empty top-of-file context labels.",
-				diffBlocks: [{ id: "top-file-block", filePath: "src/top.ts", hunks: [{ id: "top-file-hunk", header: "@@ -1,35 +1,35 @@", lines }] }],
-			}];
-			walkthrough.status = "ready";
-			await walkthrough.updateComplete;
-		});
+			await injectWalkthroughCards(page, {
+				changeset: { baseSha: "base", headSha: "head", provider: "github", title: "Top of file fixture", filesChanged: 1, additions: 1, deletions: 0 },
+				cards: [{
+					id: "top-file-card",
+					phaseId: "significant",
+					title: "Top file hunk",
+					summary: "This card verifies empty top-of-file context labels.",
+					diffBlocks: [{ id: "top-file-block", filePath: "src/top.ts", hunks: [{ id: "top-file-hunk", header: "@@ -1,35 +1,35 @@", lines }] }],
+				}],
+			});
+		}
 
 		const firstLine = activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="top-file-1"]`);
 		const firstHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
@@ -1490,16 +1531,14 @@ This is the author's source description with **markdown**.
 		const targetHunk = headerlessCard.diffBlocks[0].hunks[0] as { header?: string };
 		delete targetHunk.header;
 
-		await page.evaluate(async (injectedCards) => {
-			const panel = document.querySelector("pr-walkthrough-panel") as any;
-			panel.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Header-less fixture", filesChanged: 1, additions: 1, deletions: 0 };
-			panel.cards = injectedCards;
-			panel.status = "ready";
-			// Pre-fix the synchronous Lit render throws inside this reactive update; swallow
-			// the rejection so the test can still assert on the rendered DOM and on the
-			// captured console/pageerror signal below.
-			try { await panel.updateComplete; } catch { /* surfaced via pageerror */ }
-		}, [headerlessCard]);
+		// Route through tab state (injectWalkthroughCards) so a live-agent-driven app
+		// re-render cannot clobber the injected card back to the fixture mid-test.
+		// The helper swallows the pre-fix synchronous render throw; the regression is
+		// still asserted via the captured console/pageerror signal below.
+		await injectWalkthroughCards(page, {
+			changeset: { baseSha: "base", headSha: "head", provider: "github", title: "Header-less fixture", filesChanged: 1, additions: 1, deletions: 0 },
+			cards: [headerlessCard],
+		});
 
 		const card = activeCard(page);
 		await expect(card, "panel must still render a card when one hunk header is undefined").toBeVisible({ timeout: 10_000 });
