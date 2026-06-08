@@ -23,7 +23,8 @@ import type { ServerHostApi } from "./server-host-api.js";
 
 /** The verified context handed to an action handler (design §4b). */
 export interface ActionHandlerCtx {
-	/** Phase-1 server Host API surface (audited gateway fetch, scoped). */
+	/** Phase-1 server Host API surface (bound identity + frozen Phase-2 stubs;
+	 *  no raw gateway passthrough). */
 	host: ServerHostApi;
 	/** The verified calling session id. */
 	sessionId: string;

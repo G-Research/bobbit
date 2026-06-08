@@ -42,7 +42,7 @@ import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { authorizeActionRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
-import { createServerHostApi, resolveTrustedGatewayBaseUrl } from "./extension-host/server-host-api.js";
+import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
@@ -5282,17 +5282,13 @@ async function handleApiRoute(
 
 		const toolUseId = (body as { toolUseId: string }).toolUseId;
 		const args = (body as { args?: unknown }).args;
-		// SECURITY (design §5.1): derive the gateway base from the TRUSTED bound
-		// socket, never from the user-controlled `Host:` header. The admin bearer
-		// injected by host.gateway.fetch must only ever reach the real local gateway
-		// — a forged `Host: attacker.example` must NOT redirect it off-box.
-		const gatewayBaseUrl = resolveTrustedGatewayBaseUrl(req.socket as {
-			localAddress?: string; localPort?: number; encrypted?: boolean;
-		});
+		// The durable v1 Host API has NO gateway.fetch / raw passthrough: the action
+		// endpoint is same-origin and built here, so there is no caller-supplied URL
+		// or Authorization header to sanitize. `ctx.host` carries only the bound
+		// identity (+ frozen Phase-2 stubs).
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
-			gatewayBaseUrl,
-			authToken: config.authToken,
+			toolUseId,
 		});
 		const start = Date.now();
 		try {

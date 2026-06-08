@@ -4,28 +4,16 @@
 // (design docs/design/extension-host.md §4c / §5). It is the server-host
 // analogue of the client `HostApi` (src/shared/extension-host/host-api.ts):
 // the single, capability-scoped object through which a handler touches Bobbit
-// internals. Phase 1 implements ONLY an audited, scoped `gateway.fetch`; the
-// frozen `session`/`store` namespaces throw a loud "reserved for Phase 2" so
-// misuse is never silent.
+// internals.
 //
-// SECURITY (design §5.1): `gateway.fetch` is deliberately NO MORE privileged
-// than the app's existing authenticated fetch — it reaches PRE-EXISTING gateway
-// endpoints, each of which enforces its own authorization. It introduces no new
-// capability. Handlers that genuinely need raw `fs`/`process`/`exec` import them
-// directly; the documented convention is to go through `ctx.host`.
+// There is NO `gateway.fetch` and no raw passthrough — that escape hatch (and
+// with it the Host-header trusted-base-URL token-leak surface) is removed in the
+// durable v1 contract. Phase 1 exposes only the bound session/tool identity +
+// `capabilities`; the frozen `callRoute`/`session`/`store` namespaces throw a
+// loud "reserved for Phase 2" so misuse is never silent. Handlers that genuinely
+// need raw `fs`/`process`/`exec` import them directly.
 
-import { HOST_API_VERSION } from "../../shared/extension-host/host-api.js";
-
-/** Phase-1 server gateway surface — a scoped, audited authenticated fetch. */
-export interface ServerHostGatewayApi {
-	/**
-	 * Authenticated fetch against the gateway. `path` MUST be a gateway-relative
-	 * path beginning with "/" (e.g. "/api/goals/123"); absolute URLs are rejected.
-	 * The wrapper injects the admin bearer + the bound session-id header and
-	 * audits the call. Callers must NOT pass their own Authorization header.
-	 */
-	fetch(path: string, init?: RequestInit): Promise<Response>;
-}
+import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 
 /** PHASE 2 — frozen, not implemented. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
@@ -41,80 +29,43 @@ export interface ServerHostSessionApi {
 	postMessage(msg: unknown): Promise<void>;
 }
 
+/** Readonly capability map — the SINGLE SOURCE OF TRUTH for what is IMPLEMENTED on the
+ *  server host. On a Phase-1 server host only the bound identity is available; the
+ *  scoped Phase-2 capabilities are `false`. */
+export interface ServerHostCapabilities {
+	/** Phase-2 — pack-scoped typed route calls. False on a Phase-1 host. */
+	readonly callRoute: boolean;
+	/** Phase-2 — transcript/message/event surface. False on a Phase-1 host. */
+	readonly session: boolean;
+	/** Phase-2 — ownership-scoped persistence. False on a Phase-1 host. */
+	readonly store: boolean;
+	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
+	has(name: string): boolean;
+}
+
 /**
- * The server-side Host API. Phase 1 implements only `gateway`; `session`/`store`
- * are frozen interfaces whose members throw until Phase 2 wires them through the
- * same authorization path (purely additive — no signature churn).
+ * The server-side Host API. Phase 1 exposes the bound identity + `capabilities`;
+ * `session`/`store` are frozen interfaces whose members throw until Phase 2 wires
+ * them through the same authorization path (purely additive — no signature churn).
  */
 export interface ServerHostApi {
 	/** Frozen API version. See HOST_API_VERSION. */
 	readonly version: number;
-	/** Gateway access, scoped + audited. PHASE 1: implemented. */
-	readonly gateway: ServerHostGatewayApi;
+	/** Version of the Host-API-owned data contracts. See HOST_CONTRACT_VERSION. */
+	readonly contractVersion: number;
+	/** The SINGLE SOURCE OF TRUTH for which capabilities are implemented on this host. */
+	readonly capabilities: ServerHostCapabilities;
 	/** Ownership-scoped persistence. PHASE 2 (frozen, not implemented). */
 	readonly store: ServerHostStoreApi;
 	/** Transcript + message capabilities. PHASE 2 (frozen, not implemented). */
 	readonly session: ServerHostSessionApi;
 }
 
-/** Structured audit record emitted for every `gateway.fetch`. */
-export interface ServerHostAuditEvent {
-	kind: "gateway.fetch";
-	sessionId: string;
-	method: string;
-	path: string;
-	status?: number;
-	error?: string;
-	durationMs: number;
-}
-
 export interface CreateServerHostApiOptions {
-	/** The verified calling session id (bound for the host header + audit). */
+	/** The verified calling session id (bound for the handler context). */
 	sessionId: string;
-	/** Gateway base URL (e.g. "https://127.0.0.1:3001"); `path` is appended. */
-	gatewayBaseUrl: string;
-	/** Admin bearer token injected into every gateway.fetch. */
-	authToken?: string;
-	/** Optional audit sink. Defaults to a console.log line. */
-	audit?: (event: ServerHostAuditEvent) => void;
-	/** Injectable fetch (tests). Defaults to globalThis.fetch. */
-	fetchImpl?: typeof fetch;
-}
-
-/** The trusted subset of a request socket used to derive the gateway base URL. */
-export interface TrustedRequestSocket {
-	/** The local address the request actually landed on (OS-supplied, not header-controlled). */
-	localAddress?: string;
-	/** The local port the request actually landed on (OS-supplied; == the bound port). */
-	localPort?: number;
-	/** True when the request arrived over TLS. */
-	encrypted?: boolean;
-}
-
-/**
- * Derive the SERVER-side gateway base URL for `host.gateway.fetch` from a TRUSTED
- * value — the actual bound socket the request landed on — NEVER from a
- * user-controlled header (e.g. `Host:`). Deriving the base from `req.headers.host`
- * would let a forged `Host: attacker.example` redirect the admin-bearer-injecting
- * `gateway.fetch` to an attacker origin, leaking the token (design §5.1).
- *
- * `socket.localAddress`/`localPort` are supplied by the OS for the connection this
- * very request arrived on, so a fetch back to that origin always reaches the real
- * local gateway and the injected bearer never leaves the box. IPv6 addresses are
- * bracket-wrapped; loopback is the fallback when the address is unavailable.
- */
-export function resolveTrustedGatewayBaseUrl(socket: TrustedRequestSocket | undefined): string {
-	const proto = socket?.encrypted ? "https" : "http";
-	const rawAddr = socket?.localAddress && socket.localAddress.length > 0 ? socket.localAddress : "127.0.0.1";
-	// IPv6 literals must be bracketed in a URL authority.
-	const host = rawAddr.includes(":") ? `[${rawAddr}]` : rawAddr;
-	const port = socket?.localPort;
-	return `${proto}://${host}${port ? `:${port}` : ""}`;
-}
-
-function defaultAudit(event: ServerHostAuditEvent): void {
-	console.log(`[ext-host] ${event.kind} session=${event.sessionId} ${event.method} ${event.path} ` +
-		`→ ${event.error ? `error: ${event.error}` : event.status} (${event.durationMs}ms)`);
+	/** The verified tool_use id this action is acting on (bound identity). */
+	toolUseId?: string;
 }
 
 function notImplemented(member: string): never {
@@ -124,38 +75,17 @@ function notImplemented(member: string): never {
 /**
  * Build the Phase-1 server Host API bound to a single verified session.
  * The returned object is what the ActionDispatcher hands to a handler as
- * `ctx.host`.
+ * `ctx.host`. It carries no raw transport: the only sanctioned pack→server path
+ * is the action endpoint itself (which already authorizes + audits the call).
  */
 export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHostApi {
-	const audit = opts.audit ?? defaultAudit;
-	const doFetch = opts.fetchImpl ?? (globalThis.fetch as typeof fetch | undefined);
+	void opts.sessionId;
+	void opts.toolUseId;
 
-	const gateway: ServerHostGatewayApi = {
-		async fetch(path: string, init?: RequestInit): Promise<Response> {
-			if (typeof path !== "string" || !path.startsWith("/")) {
-				throw new Error("host.gateway.fetch: path must be a gateway-relative path starting with '/'");
-			}
-			if (!doFetch) {
-				throw new Error("host.gateway.fetch: no fetch implementation available");
-			}
-			// Defense in depth: a handler must not supply its own Authorization.
-			const headers = new Headers(init?.headers ?? {});
-			if (opts.authToken) headers.set("Authorization", `Bearer ${opts.authToken}`);
-			headers.set("x-bobbit-session-id", opts.sessionId);
-
-			const method = (init?.method ?? "GET").toUpperCase();
-			const start = Date.now();
-			const base = opts.gatewayBaseUrl.replace(/\/+$/, "");
-			try {
-				const resp = await doFetch(`${base}${path}`, { ...init, headers });
-				audit({ kind: "gateway.fetch", sessionId: opts.sessionId, method, path, status: resp.status, durationMs: Date.now() - start });
-				return resp;
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				audit({ kind: "gateway.fetch", sessionId: opts.sessionId, method, path, error: message, durationMs: Date.now() - start });
-				throw err;
-			}
-		},
+	const flags = { callRoute: false, session: false, store: false };
+	const capabilities: ServerHostCapabilities = {
+		...flags,
+		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 	};
 
 	const store: ServerHostStoreApi = {
@@ -170,5 +100,5 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		postMessage: () => notImplemented("session.postMessage"),
 	};
 
-	return { version: HOST_API_VERSION, gateway, store, session };
+	return { version: HOST_API_VERSION, contractVersion: HOST_CONTRACT_VERSION, capabilities, store, session };
 }

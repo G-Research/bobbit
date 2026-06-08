@@ -30,10 +30,10 @@ export interface ToolRenderContext {
 	}> | null;
 	/**
 	 * Phase-1 Extension Host API (design extension-host.md §3/§4c), bound to this
-	 * render's `sessionId` + `toolUseId`. Pack renderers use it to call back to
-	 * the gateway (`host.gateway.fetch`) and invoke server action handlers
-	 * (`host.invokeAction`). Built-in renderers ignore it. Optional so existing
-	 * renderers and test fixtures need no change.
+	 * render's `sessionId` + `toolUseId`. Pack renderers reach the server via
+	 * `host.invokeAction` (tool-authorized) — there is no `host.gateway.fetch` or
+	 * other raw passthrough in the durable v1 contract. Built-in renderers ignore
+	 * it. Optional so existing renderers and test fixtures need no change.
 	 */
 	host?: HostApi;
 }

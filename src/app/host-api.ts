@@ -9,42 +9,62 @@
 // keeps its clean frozen signature while still supplying identity to the action
 // endpoint internally (packs never put identity fields in `args`).
 //
-// Phase-1 implements ONLY `gateway.fetch`, `requestRender`, and `invokeAction`.
-// The Phase-2 namespaces (`session`/`ui`/`store`) throw a loud "reserved for
-// Phase 2" error so misuse is obvious, not silent.
+// Phase-1 implements ONLY `requestRender` and `invokeAction`. There is NO
+// `gateway.fetch` and no raw passthrough: the action endpoint is same-origin and
+// built here. The Phase-2 members (`callRoute`/`session`/`ui`/`store`) throw a
+// loud "reserved for Phase 2" error so misuse is obvious, not silent;
+// `host.capabilities` is the single source of truth for what is implemented.
 
-import { HOST_API_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
-import { gatewayFetch, stripAuthorizationHeaders } from "./gateway-fetch.js";
+import {
+	HOST_API_VERSION,
+	HOST_CONTRACT_VERSION,
+	type HostApi,
+} from "../shared/extension-host/host-api.js";
+import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
- *  propagation `defaults/tools/agent/extension.ts` uses (server reads it at
- *  server.ts:9030/10953). `gatewayFetch` supplies the Authorization bearer;
- *  callers must NOT pass their own — this is the host-API security choke point
- *  (extension-host.md §5.1), so any caller-supplied `Authorization` header is
- *  STRIPPED here (case-insensitive) before delegating, ensuring the injected
- *  bearer always wins regardless of how the renderer assembled its init. When no
- *  session is bound the header is omitted, but the Authorization strip still
- *  applies. */
+ *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
+ *  bound session is the host-API security context; `gatewayFetch` supplies the
+ *  Authorization bearer. When no session is bound the header is omitted. */
 function withSession(init: RequestInit | undefined, sessionId: string | undefined): RequestInit {
-	const headers = stripAuthorizationHeaders(init?.headers);
+	const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
 	if (sessionId) headers["x-bobbit-session-id"] = sessionId;
 	return { ...init, headers };
 }
 
 /** Build the Phase-1 client Host API bound to a given session AND the
  *  renderer's own toolUseId. `invokeAction` supplies BOTH to the endpoint
- *  internally, so packs never put identity fields in `args`. Phase-2 namespaces
- *  throw a clear "not implemented in Phase 1" error so misuse is loud. */
+ *  internally, so packs never put identity fields in `args`. `capabilities` is
+ *  the single source of truth; the Phase-2 stubs below exist only for type
+ *  stability and throw a clear "reserved for Phase 2" error.
+ *
+ *  This is the CLIENT-side construction; the server analogue is the internal
+ *  `createServerHostApi({ sessionId, toolUseId, ... })` contract (§3.2), where
+ *  pack identity is SERVER-DERIVED from the resolved winning contribution —
+ *  never passed by extension code. */
 export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
 	const notImpl = (m: string): never => {
 		throw new Error(`host.${m} is reserved for Phase 2`);
 	};
+	// Phase-1 host: only invokeAction + requestRender are implemented. `capabilities`
+	// is the single source of truth; the throwing stubs below exist only for type
+	// stability and MUST NOT be feature-detected by member presence.
+	const flags = {
+		invokeAction: true,
+		requestRender: true,
+		callRoute: false,
+		session: false,
+		ui: false,
+		store: false,
+	};
 	return {
 		version: HOST_API_VERSION,
-		gateway: {
-			fetch: (path, init) => gatewayFetch(path, withSession(init, sessionId)),
+		contractVersion: HOST_CONTRACT_VERSION,
+		capabilities: {
+			...flags,
+			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		requestRender: () => {
 			// A top-down renderApp() alone does NOT re-run the memoized tool
@@ -63,7 +83,8 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 		async invokeAction(tool, action, args) {
 			// sessionId + toolUseId come from the BOUND render context, NOT from
 			// args. args is pure action-domain input, validated/whitelisted by the
-			// handler server-side.
+			// handler server-side. The endpoint is same-origin: no caller-supplied
+			// URL or Authorization header, so there is nothing to sanitize.
 			const resp = await gatewayFetch(
 				`/api/tools/${encodeURIComponent(tool)}/actions/${encodeURIComponent(action)}`,
 				withSession(
@@ -75,6 +96,7 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 			return resp.json();
 		},
 		// ── Phase 2 (frozen, not implemented) ──
+		callRoute: () => notImpl("callRoute"),
 		session: {
 			readTranscript: () => notImpl("session.readTranscript"),
 			readToolCall: () => notImpl("session.readToolCall"),

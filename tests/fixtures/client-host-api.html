@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Client Host API fixture</title>
+</head>
+<body>
+<div id="container"></div>
+<script>
+	try { localStorage.setItem("gateway.url", "http://127.0.0.1:1"); } catch {}
+	try { localStorage.setItem("gateway.token", "test"); } catch {}
+</script>
+<script src="./client-host-api-bundle.js"></script>
+</body>
+</html>
