@@ -96,7 +96,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	// CT-01-b / CT-01-c: Abort mid-stream and re-send
 	// ---------------------------------------------------------------
 
-	test("CT-01-b/c: Abort mid-stream preserves editor and allows re-send @smoke @quarantine", async () => {
+	test("CT-01-b/c: Abort mid-stream preserves editor and allows re-send @smoke", async () => {
 		const abortStory = defineStory({
 			id: "CT-01-b",
 			title: "Abort mid-stream preserves partial response",
