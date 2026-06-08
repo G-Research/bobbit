@@ -48,6 +48,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
+import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
@@ -530,9 +531,22 @@ function renderMobileLanding() {
 										staffList = filterStaffByQuery(staffList, q);
 									}
 									const projectsForRender = projectOrderForRender();
+									// Sub-goals spawned by a team-lead are rendered NESTED under that
+									// team-lead inside renderGoalGroup (Path A — renderSpawnedChildGoalRow).
+									// They must therefore be excluded from the flat top-level goal list
+									// here, or they'd render in two places at once (nested AND top-level).
+									// Mirrors the desktop sidebar's `computeSpawnedClaim` exclusion in
+									// renderProjectContent. See docs/nested-goals.md.
+									const claimedGoalIds = computeSpawnedClaim(
+										[...liveGoals, ...(state.showArchived ? archivedGoals : [])] as any,
+										state.gatewaySessions,
+										state.archivedSessions,
+										state.showArchived,
+									);
+									const topLevelGoals = liveGoals.filter(g => !claimedGoalIds.has(g.id));
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of projectsForRender) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
-										for (const g of liveGoals) {
+										for (const g of topLevelGoals) {
 											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
 											const bucket = projectMap.get(g.projectId);
 											if (!bucket) { console.warn("[mobile] goal has no matching project bucket — skipping", g.id, g.projectId); continue; }
