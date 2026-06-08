@@ -257,6 +257,66 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		delete G[KEY];
 	});
 
+	it("a hung MODULE IMPORT (top-level await) times out promptly (504) and holds its permit until the import settles", async () => {
+		// GAP COVERAGE: the per-call timeout must bound MODULE LOAD + EVALUATION,
+		// not just handler execution. Before the fix, dispatch() did an UNBOUNDED
+		// `await loadModule(...)` and only THEN wrapped the handler in the timeout —
+		// so a pack actions module with a hanging top-level `await` (or a stalled
+		// dynamic import) left dispatch() awaiting forever, never returning a 504 and
+		// holding its permit indefinitely. The existing timeout tests only hang
+		// INSIDE the handler (after import succeeds), so this load path was uncovered.
+		//
+		// The fixture's `.mjs` parks MODULE EVALUATION at a top-level await the test
+		// controls via a process-global resolver — so the dynamic import() never
+		// settles, exercising the LOAD path (not the handler). All dispatches share
+		// the same URL, so Node evaluates the module once (one parked resolver) while
+		// every in-flight import() awaits that single evaluation.
+		const G = globalThis as Record<string, unknown>;
+		const KEY = "__extHostHungImportResolvers";
+		G[KEY] = [] as ((v: unknown) => void)[];
+		const resolvers = () => G[KEY] as ((v: unknown) => void)[];
+
+		const base = path.join(tmp, "case-hung-import");
+		writeTool(base, "demo", {
+			moduleName: "actions.mjs",
+			actionsJs:
+				`await new Promise((resolve) => { (globalThis["${KEY}"]).push(resolve); });\n` +
+				`export const actions = { retry: async () => ({ ok: 1 }) };`,
+		});
+		const maxConcurrent = 3;
+		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "actions.mjs" }), { rate: null, timeoutMs: 40, maxConcurrent });
+
+		// Fire maxConcurrent dispatches. Each increments inFlight synchronously at
+		// entry, then parks at the hanging import (LOAD) → each times out promptly
+		// with 504 instead of hanging dispatch() forever.
+		const hung = Array.from({ length: maxConcurrent }, () => d.dispatch("sample_action", "retry", ctx(), {}));
+		await Promise.all(
+			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
+		);
+
+		// The cap is saturated by the still-LOADING modules → the next dispatch is
+		// rejected over-capacity (429), proving a hung LOAD counts toward the cap
+		// exactly like a hung handler (permit held, not leaked early, no unbounded
+		// await). At least one resolver is parked (one shared module evaluation).
+		await assert.rejects(
+			() => d.dispatch("sample_action", "retry", ctx(), {}),
+			(e) => e instanceof ActionError && e.status === 429,
+		);
+		assert.ok(resolvers().length >= 1, "module evaluation should be parked at the top-level await");
+
+		// Settle the parked import → module finishes evaluating, every in-flight
+		// load completes, its (fast) handler runs, and every permit is released.
+		for (const r of resolvers().splice(0)) r(undefined);
+		// Allow the load+handler+settle microtasks/macrotasks to flush.
+		await new Promise((r) => setTimeout(r, 60));
+
+		// Capacity has freed: a fresh dispatch is ADMITTED past the concurrency gate
+		// and now succeeds (module cached, handler fast) — a still-full cap would
+		// have rejected with 429 before invoking it.
+		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { ok: 1 });
+		delete G[KEY];
+	});
+
 	it("per-session rate limit → 429 once the bucket drains", async () => {
 		const base = path.join(tmp, "case-rate");
 		writeTool(base, "demo", { actionsJs: `export const actions = { retry: async () => ({ ok: 1 }) };` });
