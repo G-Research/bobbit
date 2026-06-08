@@ -1988,7 +1988,7 @@ export class AgentInterface extends LitElement {
 				</div>
 
 				<!-- Input Area -->
-				<div class="shrink-0 pt-0 pb-1">
+				<div class="shrink-0 pt-0 pb-1 agent-input-area">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' || this.goalId || this.teamGoalId ? html`
 						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:${this._isNarrow ? '75%' : 'calc(100% - 8rem)'}; --pill-h: 22px">

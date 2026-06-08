@@ -47,6 +47,24 @@
    against any subtle layout recalc effects in browsers/headless engines. The
    iOS blank-gap bug only reproduces in standalone mode anyway. */
 @media (display-mode: standalone) {
+	/* Fill the FULL screen via the document height chain instead of `100dvh`.
+	   On installed iOS PWAs (viewport-fit=cover + black-translucent) the page
+	   lays out to the entire screen, but `100dvh` resolves SHORT by the
+	   home-indicator inset — so the shell stops a few pt above the screen
+	   bottom and the body background shows through as an empty band, no matter
+	   what the composer does (this was the "blank section at the bottom").
+	   Anchoring to the document (html/body are already height:100% from
+	   index.html) pins the shell to the true screen edge. Browser tabs keep the
+	   `100dvh` rule above, which correctly tracks the dynamic toolbar there. */
+	html,
+	body,
+	#app {
+		height: 100%;
+	}
+	.app-shell {
+		height: 100%;
+	}
+
 	.app-shell {
 		padding-top: env(safe-area-inset-top);
 		padding-right: env(safe-area-inset-right);
@@ -56,25 +74,20 @@
 	}
 
 	/* Connected mobile layout ([data-mobile-header]) uses a FIXED header
-	   overlay at the top and a composer pinned to the bottom. Two consequences
-	   for safe areas:
+	   overlay at the top and a composer pinned to the bottom.
 
 	     1. A `position: fixed` header anchors to the VIEWPORT and ignores the
 	        shell's padding-top, so the shell's top inset does nothing for it —
 	        the header content lands under the status bar / Dynamic Island
 	        ("top cut off"). The header must carry the top inset itself.
 
-	     2. Reserving padding-bottom (on the shell OR the composer) for the home
-	        indicator leaves an empty dark band below the composer — there's no
-	        visible bar to fill it, so it just reads as wasted space in a
-	        full-screen app. The composer should run edge-to-edge instead; the
-	        home indicator is translucent and only overlaps the bottom-most
-	        (non-primary) row, which is acceptable.
+	     2. The shell now reaches the true screen bottom (height:100% above), so
+	        the composer carries the home-indicator inset as padding: its
+	        background fills the indicator region while its controls sit above
+	        it. No empty band, no controls under the indicator.
 
-	   Fix: drop the shell's top/bottom insets in this layout, push the top
-	   inset onto the fixed header, and reserve NOTHING at the bottom so the
-	   composer fills to the screen edge. Left/right insets stay on the shell
-	   (landscape notch). */
+	   Drop the shell's top/bottom insets here (header + composer own them);
+	   left/right insets stay on the shell for the landscape notch. */
 	.app-shell[data-mobile-header] {
 		padding-top: 0;
 		padding-bottom: 0;
@@ -83,6 +96,11 @@
 		padding-top: env(safe-area-inset-top);
 		padding-left: env(safe-area-inset-left);
 		padding-right: env(safe-area-inset-right);
+	}
+	/* Composer background fills the home-indicator region; controls clear it.
+	   0.25rem mirrors the base `pb-1` so 0-inset devices are unchanged. */
+	[data-mobile-header] agent-interface .agent-input-area {
+		padding-bottom: calc(0.25rem + env(safe-area-inset-bottom)) !important;
 	}
 }
 

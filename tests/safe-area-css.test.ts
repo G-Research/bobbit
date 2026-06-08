@@ -1,16 +1,18 @@
 /**
  * Pins the iOS-PWA safe-area CSS for the connected mobile layout.
  *
- * The in-flow layouts (sidebar/landing/disconnected) get their status-bar
- * inset from `.app-shell { padding-top: env(safe-area-inset-top) }`. But the
- * connected chat view renders its header as `position: fixed`, which anchors
- * to the viewport and IGNORES the shell's padding — so the header lands under
- * the status bar ("top cut off") unless it carries the inset itself. The
- * bottom is handled by NOT reserving the home-indicator inset at all (the
- * composer runs edge-to-edge), since reserving it just left an empty dark band
- * below the composer in the full-screen PWA. This regression test guards the
- * scoped rules that zero the shell's top/bottom insets and move the top inset
- * onto the fixed header.
+ * Two distinct iOS-standalone bugs are covered:
+ *
+ *   1. "Top cut off" — the connected chat view's header is `position: fixed`,
+ *      which anchors to the viewport and IGNORES the shell's padding, so it
+ *      must carry the status-bar inset itself.
+ *
+ *   2. "Blank band at the bottom" — `100dvh` resolves SHORT by the
+ *      home-indicator inset on installed iOS PWAs, so the shell stops above
+ *      the screen bottom and the body background shows through. The standalone
+ *      block re-anchors the height chain to the document (height:100%) so the
+ *      shell fills the true screen edge; the composer then carries the bottom
+ *      inset so its background fills the indicator region with controls above.
  *
  * iOS safe-area insets can't be emulated in Playwright/headless Chromium
  * (env(safe-area-inset-*) is always 0), so we assert on the stylesheet source
@@ -44,16 +46,25 @@ function standaloneBlock(source: string): string {
 describe("ui/app.css — iOS PWA safe-area rules", () => {
 	const block = standaloneBlock(css);
 
+	it("anchors the height chain to the document so the shell fills the full screen (no 100dvh bottom gap)", () => {
+		assert.match(
+			block,
+			/html\s*,\s*body\s*,\s*#app\s*\{\s*height:\s*100%/,
+			"standalone must set html/body/#app to height:100% so the shell reaches the true screen edge",
+		);
+		assert.match(block, /\.app-shell\s*\{\s*height:\s*100%/);
+	});
+
 	it("base .app-shell reserves all four safe-area insets", () => {
 		assert.match(block, /\.app-shell\s*\{[^}]*padding-top:\s*env\(safe-area-inset-top\)/);
 		assert.match(block, /\.app-shell\s*\{[^}]*padding-bottom:\s*env\(safe-area-inset-bottom\)/);
 	});
 
-	it("connected mobile layout zeroes the shell's top/bottom insets (fixed header owns top; composer runs edge-to-edge at bottom)", () => {
+	it("connected mobile layout zeroes the shell's top/bottom insets (fixed header + composer own them)", () => {
 		assert.match(
 			block,
 			/\.app-shell\[data-mobile-header\]\s*\{[^}]*padding-top:\s*0[^}]*padding-bottom:\s*0/,
-			"the [data-mobile-header] shell must zero top/bottom padding so the fixed header fills the top and the composer fills the bottom edge",
+			"the [data-mobile-header] shell must zero top/bottom padding; the fixed header and composer carry those insets",
 		);
 	});
 
@@ -64,14 +75,10 @@ describe("ui/app.css — iOS PWA safe-area rules", () => {
 		);
 	});
 
-	it("does NOT reserve a bottom safe-area inset in the connected layout (no empty band below the composer)", () => {
-		// The home-indicator inset would only render as wasted dark space here,
-		// so nothing in the standalone block should pad the bottom for it except
-		// the shell's base rule (which the [data-mobile-header] override zeroes).
-		assert.doesNotMatch(
+	it("composer carries the bottom inset so its background fills the home-indicator region", () => {
+		assert.match(
 			block,
-			/agent-input-area[^}]*env\(safe-area-inset-bottom\)/,
-			"the composer must not reserve the bottom inset (it runs edge-to-edge)",
+			/\[data-mobile-header\][^{]*\.agent-input-area\s*\{[^}]*padding-bottom:\s*calc\(0\.25rem \+ env\(safe-area-inset-bottom\)\)/,
 		);
 	});
 });
