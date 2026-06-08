@@ -169,9 +169,13 @@ test.describe("Pre-compaction history affordance", () => {
 
 		const widget = page.locator("[data-testid='pre-compaction-history']");
 		await expect(widget).toHaveCount(1, { timeout: 15_000 });
-		// Count fetch fires lazily on viewport hit \u2014 scroll into view to be
-		// sure, then wait for the data-state to flip to "collapsed".
-		await widget.scrollIntoViewIfNeeded();
+		// The explicit refreshCount() above deterministically triggers the
+		// count fetch, so we do NOT need (and must not) scroll the widget into
+		// view: the data-state div is re-created when _total flips
+		// null\u2192number, and scrollIntoViewIfNeeded() on a handle resolved just
+		// before that re-render detaches mid-action ("Element is not attached
+		// to the DOM"). The auto-retrying toHaveAttribute below re-resolves the
+		// locator each poll, so it waits for the flip without holding a handle.
 		await expect(widget).toHaveAttribute("data-state", "collapsed", { timeout: 15_000 });
 
 		const toggle = page.locator("[data-testid='pre-compaction-toggle']");
@@ -213,11 +217,13 @@ test.describe("Pre-compaction history affordance", () => {
 		});
 		await expect(card).toHaveCount(1, { timeout: 20_000 });
 		const widget2 = page.locator("[data-testid='pre-compaction-history']");
-		await widget2.scrollIntoViewIfNeeded();
 		await page.evaluate(() => {
 			const el = document.querySelector("bobbit-pre-compaction-history") as any;
 			el?.refreshCount?.();
 		});
+		// No scrollIntoViewIfNeeded() here either \u2014 refreshCount() drives the
+		// fetch and the auto-retrying assertion re-resolves across the
+		// re-render that swaps the data-state div (see first site above).
 		await expect(widget2).toHaveAttribute("data-state", "collapsed", { timeout: 20_000 });
 		await page.locator("[data-testid='pre-compaction-toggle']").click();
 		await expect(widget2).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });
