@@ -68,11 +68,14 @@ Each pack has an **Install** button with a scope picker. Installing copies the p
 
 Why a blanket warning rather than a tool-pack-only one? The old model implied a false binary — tool packs dangerous, role/skill packs safe. In reality every pack is risky once installed, because roles and skills become instructions to an LLM that has shell access. The Add-source panel includes an expandable **"Why?"** disclosure (collapsed by default) explaining the risk spectrum across the three entity types, highest to lowest:
 
-- **Tools** — ship `extension.ts` / `_shared/` code that runs **directly in the Bobbit server process on the host**, deterministically, with no LLM and no sandbox in the loop. This is the highest, most immediate risk.
+- **Tools** — ship code that runs **directly in the Bobbit server process on the host**, deterministically, with no LLM and no sandbox in the loop. This is the highest, most immediate risk. Three distinct code surfaces ship in a tool pack:
+  - **`extension.ts` / `_shared/`** — the tool implementation, run in the gateway process.
+  - **Server action handlers** (`actions:` contribution, [Extension Host](#extension-contributions-tool-renderers--server-actions)) — `actions.mjs` modules the gateway dynamically imports and runs **in the long-lived gateway process** when a renderer invokes an action via the sole pack→server path, `host.invokeAction`. The action endpoint (`POST /api/tools/:tool/actions/:action`) is same-origin and **authorized like a tool call** — it requires `:tool` to be in the calling session's `allowedTools` and verifies the supplied `toolUseId` actually exists in that session and was a call of `:tool` (because the LLM can `curl` it directly, this guard, not the agent layer, is the real gate). Unlike subprocess-isolated tool extensions, a crashing or hung handler runs in-process; Bobbit caps blast radius (a per-call timeout spanning **both** module load+eval *and* handler execution, a global concurrency cap, a per-session rate limit, try/catch isolation, and audit logging) but the handler code is still trusted host code. Handler inputs (`args`, `sessionId`, `toolUseId`) are **LLM-influenced and forgeable** — handlers must validate/whitelist them and never `eval`/`exec` them.
+  - **UI-thread renderers** (`renderer:` contribution) — pre-built ESM modules the browser lazily imports and runs **on the main UI thread**, over LLM-influenced tool data. They render tool blocks and can call server actions. Renderers must not auto-invoke actions on render (action calls require a user gesture), must preserve iframe `sandbox` attributes, and use theme tokens only.
 - **Skills** — free-form instructions an agent tends to follow literally. An agent with shell access can be directed to do damage.
 - **Roles** — persona/behavior steering; influential but more diffuse. Still drives an LLM with tool access.
 
-There is no signing or sandboxing yet, so the source-level trust decision is the only safeguard.
+There is no signing or sandboxing yet, so the source-level trust decision is the only safeguard. The full extension-host threat model — the allowlist-bypass fix, input validation, `toolUseId` ownership verification, and the blast-radius controls — is in [docs/design/extension-host.md §5](design/extension-host.md).
 
 ### Viewing provenance
 
@@ -188,6 +191,66 @@ scope: project                   # global-user | server | project
 
 The canonical installed identity is `pack.yaml`'s `name` (not the source subdir name): the pack installs into `market-packs/<manifest-name>/`, and the `pack_order` key and resolver `PackEntry.id` all use that name.
 
+## Extension contributions: tool renderers & server actions
+
+A tool pack can ship more than a tool implementation — it can contribute **how its tool blocks look in the chat** (a renderer) and **interactive server-side behavior** (action handlers). This is the **Extension Host**: the same VS Code-shaped contribution model that will eventually let packs ship side panels, routes, and persistent stores. **Phase 1** (shipped) covers the inner slice — tool renderers and server actions — and freezes the rest of the shape as reserved manifest keys + typed interfaces. See [docs/design/extension-host.md](design/extension-host.md) for the full design and the artifacts / PR-walkthrough migration sketch, and the [Extension Host authoring guide](extension-host-authoring.md) for a step-by-step walkthrough.
+
+**Why this lives in packs.** Before the extension host, tool renderers were hardcoded into the UI bundle and there was no way for a tool to run interactive server logic on a button click. Making both packable means a pack can re-express any built-in interactive tool (the litmus test: a pack tool with a **Retry** button wired to a handler) with no privileged escape hatch — every capability flows through one mediated Host API, which is also the single security choke point.
+
+**The durability invariant: no raw escape hatch.** A renderer reaches the server through exactly one Phase-1 path — `host.invokeAction(tool, action, args)`, authorized like a tool call. There is **no `host.gateway.fetch`** and no other raw transport. This is deliberate: Bobbit *serves* a typed, versioned contract rather than handing extensions a window into internals, so the abstraction stays durable (one un-typed passthrough would make it a fiction) and Phase-2 capabilities can be added purely additively. Removing the raw-fetch capability also eliminates the trusted-base-URL / `Host:`-header token-leak surface a raw fetch would have required — the action endpoint is same-origin and the client builds the request itself, so there is no caller-supplied URL or `Authorization` header to misdirect. The durable Phase-2 replacement for reaching the server is the typed, pack-scoped `host.callRoute(name, init)` (frozen, not implemented), which reaches only the calling pack's OWN `/api/ext/<thisPack>/*` routes. See the [Extension Host authoring guide](extension-host-authoring.md) and [design doc](design/extension-host.md) for the full Host API.
+
+### The two load-bearing tool-YAML keys
+
+Contributions are declared **per tool**, in the tool's YAML (`tools/<group>/<tool>.yaml`) — the same files `ToolManager` already scans. Two keys are load-bearing in Phase 1:
+
+```yaml
+# market-packs/<pack>/tools/<group>/<tool>.yaml
+name: sample_action
+description: A demo tool with a Retry button wired to a server action handler.
+group: Demo
+renderer: SampleActionRenderer.js   # pre-built ESM renderer, beside this YAML
+actions:
+  module: actions.mjs               # server actions module (default: actions.js)
+  names: [retry]                    # optional action-name allowlist (defense in depth)
+```
+
+- **`renderer:`** — path (relative to the tool's group dir) to a **pre-built ESM** renderer module. For built-in tools this field is display-only metadata; for **pack** tools it becomes load-bearing — the gateway serves the module and the browser lazily imports it.
+- **`actions:`** — the server actions module plus an optional explicit allowlist of action names. `actions.module` defaults to `actions.js`; `actions.names`, when present, is enforced by the endpoint *before* the module loads.
+
+A pack tool needs **no `provider:`** — the renderer endpoint and the action dispatcher resolve the tool's on-disk location via `ToolManager.resolveToolLocation()`, which is provider-independent.
+
+The Phase-2 keys `panels:`, `entrypoints:`, `routes:`, and `stores:` are **parsed-and-reserved**: validated for shape, retained verbatim, and never rejected — so a pack authored against the full future shape installs and resolves cleanly on a Phase-1 server. Path-bearing values (`renderer`, `actions.module`) are rejected at parse time if they contain `..` segments or are absolute (traversal guard); a malformed contributions block degrades gracefully (the tool still loads, with a `console.warn`) and is never fatal.
+
+### `.mjs` vs `.js` — ESM-loadability of the actions module
+
+The renderer module is imported by the **browser** (via a Blob URL) where `.js` ESM is fine. The actions module is imported by the **gateway** under plain Node, where a bare `.js` file containing `export` resolves as **CommonJS** (because the surrounding project has no `package.json` `"type": "module"`) and throws. Ship the actions module as **`.mjs`** so Node loads it as ESM, and point `actions.module` at it:
+
+```js
+// tools/<group>/actions.mjs
+export const actions = {
+  retry: async (ctx, args) => ({ message: "retried", at: Date.now() }),
+};
+```
+
+The renderer module, served to the browser and imported as ESM regardless of extension, stays `.js` (the `rendererKind` computation recognizes a pack renderer by a `.js` extension under a `market-packs/` path).
+
+### Where the files live in an installed pack
+
+```
+<scope>/.bobbit/config/market-packs/<pack>/
+  pack.yaml
+  tools/<group>/
+    <tool>.yaml                 # renderer: + actions: contributions
+    SampleActionRenderer.js     # pre-built ESM renderer (browser-imported)
+    actions.mjs                 # server action handlers (gateway-imported)
+```
+
+### Precedence, project scoping, and cache invalidation
+
+- **Pack precedence / shadowing** — renderers and actions resolve through the **same precedence** as every other tool (`buildPackList` / `PackResolver` / `ToolManager`: builtin < market packs in `pack_order` < user pack, per scope). A pack that shadows a same-named built-in interactive tool wins the **renderer too** (the UI registers it with `{ override: true }`), so it gets behavioral parity — pack actions *and* pack renderer, never a split-brain mix.
+- **Project scoping** — both the renderer endpoint and the action endpoint resolve through the **session's project-scoped** tool manager (falling back to the server-level one when there is no project), so a project-scope pack — or a project pack shadowing a global tool — serves and dispatches its own winner. The client threads the active `projectId` into the renderer fetch so the browser loads the same winner the `/api/tools` metadata reported.
+- **Cache invalidation (synchronous)** — install, update, uninstall, and pack-order changes all call `invalidateResolverCaches()`, which drops the loaded-actions-module cache and the tool-scan cache synchronously. The next action call picks up (or 404s) the freshly installed/updated/removed handler with **no server restart and no client reload** — the UI re-fetches `/api/tools` and reconciles its renderer registry (re-registering pack renderers, restoring displaced built-ins on uninstall) live.
+
 ## REST API
 
 All marketplace routes live in `server.ts::handleApiRoute()`. Full request/response contracts and the error matrix are in [design §9 / §9.1 / §9.2](design/pack-based-marketplace.md#9-rest-api-surface).
@@ -209,7 +272,16 @@ All marketplace routes live in `server.ts::handleApiRoute()`. Full request/respo
 
 `scope` ∈ `"global-user" | "server" | "project"`; `projectId` is required when `scope === "project"`. Install/update/uninstall and pack-order changes invalidate the resolver cache and the slash-skills TTL cache synchronously, so a subsequent `GET /api/roles|tools|skills` reflects the change without a client reload.
 
-The existing `/api/roles`, `/api/tools`, `/api/skills` endpoints keep their shape but now source data from `PackResolver`. The `origin` field gained a `user` value (for global-user packs) and every entity carries `originPackId` / `originPackName` (both `null` for builtin/user entities).
+The existing `/api/roles`, `/api/tools`, `/api/skills` endpoints keep their shape but now source data from `PackResolver`. The `origin` field gained a `user` value (for global-user packs) and every entity carries `originPackId` / `originPackName` (both `null` for builtin/user entities). The `/api/tools` `ToolInfo` payload additionally carries the extension-host wire fields `rendererKind` (`"builtin" | "pack"`), `hasActions`, and `actionNames`.
+
+### Extension-host endpoints
+
+Two routes serve the extension-host contributions (full contract + the security guard sequence in [docs/design/extension-host.md §4](design/extension-host.md)):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/tools/:tool/renderer?projectId=` | Serve a **pack** tool's pre-built ESM renderer module bytes as `text/javascript`. Admin-bearer only (serving module bytes is static-asset-equivalent, not a capability invocation); 404 when the tool has no pack renderer. |
+| `POST /api/tools/:tool/actions/:action` | Invoke a pack tool's server action handler. Body `{ sessionId, toolUseId, args }`. **Authorized like a tool call** (the LLM can `curl` it directly): requires `x-bobbit-session-id`, `body.sessionId === header`, `:tool ∈ session.allowedTools`, `:action ∈ actions.names` (when declared), and a `toolUseId` that exists in the header-bound session and was a call of `:tool`. Returns the handler's JSON result. |
 
 ## Architecture (developer)
 

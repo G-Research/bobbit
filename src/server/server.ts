@@ -40,6 +40,9 @@ import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
+import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
+import { authorizeActionRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
+import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
@@ -854,6 +857,10 @@ export function createGateway(config: GatewayConfig) {
 	const roleManager = new RoleManager(roleStore);
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
+	// Extension host (design docs/design/extension-host.md §4b): the action
+	// dispatcher lives for the gateway process lifetime; its module cache is
+	// dropped synchronously by invalidateResolverCaches() on pack mutations.
+	const actionDispatcher = new ActionDispatcher(toolManager);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
@@ -1172,7 +1179,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2216,10 +2223,12 @@ async function handleApiRoute(
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
+	actionDispatcher?: ActionDispatcher,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
+	const dispatcher = actionDispatcher!;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -2235,7 +2244,7 @@ async function handleApiRoute(
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); };
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -5156,6 +5165,143 @@ async function handleApiRoute(
 			}
 		} catch { /* dir doesn't exist */ }
 		return null;
+	}
+
+	// GET /api/tools/:tool/renderer — serve a PACK tool's pre-built ESM renderer
+	// module bytes (design docs/design/extension-host.md §4a). Admin-bearer ONLY
+	// (enforced before handleApiRoute): serving the module bytes is a static-asset-
+	// equivalent, NOT a capability invocation, so there is deliberately NO
+	// allowedTools check here (that gate is on the ACTION endpoint below). The
+	// renderer file path is re-validated to stay within the tool's group dir.
+	const rendererMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/renderer$/);
+	if (rendererMatch && req.method === "GET") {
+		const tool = decodeURIComponent(rendererMatch[1]);
+		// Resolve through the PROJECT-scoped tool manager when a projectId is given
+		// (design §4b — same `?? toolManager` fallback as GET /api/tools): a pack
+		// installed at PROJECT scope, or one that shadows a same-named global tool,
+		// must serve the PROJECT winner — never the split-brain server-level one.
+		const rendererProjectId = url.searchParams.get("projectId") || undefined;
+		const rendererTm = resolveActionToolManager(
+			toolManager,
+			rendererProjectId ? projectContextManager.getOrCreate(rendererProjectId)?.toolManager : undefined,
+		);
+		// Resolve the WINNING tool's on-disk location independent of `provider:`
+		// (design §4b — a pack renderer needs no provider). resolveToolLocation
+		// honors the same pack precedence as every other tool resolution.
+		const loc = rendererTm.resolveToolLocation(tool);
+		if (!loc || loc.rendererKind !== "pack" || !loc.rendererFile || !loc.baseDir) {
+			json({ error: "no pack renderer for this tool" }, 404);
+			return;
+		}
+		const groupAbs = path.join(loc.baseDir, loc.groupDir || "");
+		const fileAbs = path.resolve(groupAbs, loc.rendererFile);
+		// Path-traversal re-validation: fileAbs must stay within the group dir.
+		const rel = path.relative(groupAbs, fileAbs);
+		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+			json({ error: "invalid renderer path" }, 404);
+			return;
+		}
+		let source: string;
+		try {
+			source = fs.readFileSync(fileAbs, "utf-8");
+		} catch {
+			json({ error: "renderer module not found" }, 404);
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "text/javascript", "Cache-Control": "no-cache" });
+		res.end(source);
+		return;
+	}
+
+	// POST /api/tools/:tool/actions/:action — invoke a pack tool's server action
+	// handler (design §4b / §5). The LLM can curl this directly, so the
+	// allowedTools guard here — NOT the agent layer — is the real gate (§5 i).
+	const actionMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/actions\/([^/]+)$/);
+	if (actionMatch && req.method === "POST") {
+		const tool = decodeURIComponent(actionMatch[1]);
+		const action = decodeURIComponent(actionMatch[2]);
+		const body = (await readBody(req)) ?? {};
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		// Resolve the tool through the SESSION's project-scoped tool manager (design
+		// §4b): the project is derived from the session, NOT from the client, so a
+		// project-scope pack (or a project pack shadowing a global tool) dispatches
+		// the SAME winner the session's tool resolution sees — no split-brain. The
+		// header session id is the canonical identity (the guard rejects a body/header
+		// mismatch or unknown session); resolving from it before the guard is safe
+		// because an invalid session falls back to the server-level manager and the
+		// guard then rejects the request anyway.
+		const actionHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const actionSessionProjectId = actionHeaderSid
+			? (sessionManager.getSession(actionHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(actionHeaderSid)?.projectId)
+			: undefined;
+		const sessionToolManager = resolveActionToolManager(
+			toolManager,
+			actionSessionProjectId ? projectContextManager.getOrCreate(actionSessionProjectId)?.toolManager : undefined,
+		);
+		const info = sessionToolManager.getToolByName(tool);
+
+		// Resolve a session's allowlist (live preferred, else persisted).
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		// Verify the toolUseId exists in the HEADER-BOUND session's transcript and
+		// was a call of :tool (anti-replay/forgery; §5 iii / iii-b).
+		const verifyToolUse = async (sid: string, toolUseId: string, t: string): Promise<boolean> => {
+			const ps = sessionManager.getPersistedSession(sid);
+			if (!ps?.agentSessionFile) return false;
+			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+			return transcriptHasToolUse(content, toolUseId, t);
+		};
+
+		const guard = await authorizeActionRequest({
+			tool,
+			action,
+			headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			toolUseId: (body as { toolUseId?: unknown }).toolUseId,
+			resolveSession,
+			actionNames: info?.actionNames,
+			verifyToolUse,
+		});
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		// The tool must actually declare an actions module (checked after authz so
+		// an unauthorized caller never learns whether the tool has actions).
+		if (!info?.hasActions) {
+			json({ error: `tool "${tool}" has no actions` }, 404);
+			return;
+		}
+
+		const toolUseId = (body as { toolUseId: string }).toolUseId;
+		const args = (body as { args?: unknown }).args;
+		// The durable v1 Host API has NO gateway.fetch / raw passthrough: the action
+		// endpoint is same-origin and built here, so there is no caller-supplied URL
+		// or Authorization header to sanitize. `ctx.host` carries only the bound
+		// identity (+ frozen Phase-2 stubs).
+		const host = createServerHostApi({
+			sessionId: guard.sessionId,
+			toolUseId,
+		});
+		const start = Date.now();
+		try {
+			const result = await dispatcher.dispatch(tool, action, { host, sessionId: guard.sessionId, toolUseId, tool }, args, sessionToolManager);
+			console.log(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
+			json(result ?? null);
+		} catch (err) {
+			const status = err instanceof ActionError ? err.status : 500;
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			json({ error: message }, status);
+		}
+		return;
 	}
 
 	// POST /api/tools/:name/customize — copy tool group to a target scope

@@ -1,0 +1,18 @@
+name: sample_action
+description: A demo tool with a Retry button wired to a server action handler.
+group: Demo
+summary: Demo tool — renders a Retry button wired to a server action.
+# Phase-1 load-bearing contributions (design docs/design/extension-host.md §2.4):
+#  - renderer: a pre-built ESM module served to the browser + lazily imported.
+#  - actions:  a server actions module loaded by the gateway. It MUST be ESM-
+#    loadable under plain node, so it is named `.mjs` (a `.js` with `export` and
+#    no package.json would load as CJS and fail) — see Wave 2B integration note.
+#
+# A pack tool needs NO `provider:` — the renderer endpoint and the
+# ActionDispatcher resolve the tool's on-disk location via
+# ToolManager.resolveToolLocation(), which is independent of `provider:`
+# (Wave 4 fix; design §4b).
+renderer: SampleActionRenderer.js
+actions:
+  module: actions.mjs
+  names: [retry]

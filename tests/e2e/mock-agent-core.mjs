@@ -473,6 +473,15 @@ export class MockAgentCore {
 
 		if (lower.includes("mock_error")) return { mockError: true };
 
+		// Extension-host litmus (tests/e2e/ui/extension-host.spec.ts): emit a
+		// `sample_action` tool call so the retry-demo pack's PACK renderer mounts in
+		// the live session view. The toolId is STABLE so the browser E2E can write a
+		// matching transcript line for the action endpoint's toolUseId-ownership
+		// check (design §5 iii) and the rendered ctx.toolUseId == the persisted id.
+		if (text.includes("SAMPLE_ACTION_TOOL")) {
+			return { tool: "sample_action", input: {}, output: "sample action tool executed", toolId: "tu-sample-1" };
+		}
+
 		// Autonomous skill activation: drives the activate_skill tool path.
 		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).
 		const activateMatch = text.match(/please\s+activate_skill\s+([\w-]+)(?:\s+([\s\S]*))?$/i);
@@ -1749,7 +1758,10 @@ export class MockAgentCore {
 	}
 
 	async _handleSingleTool(toolAction) {
-		const toolId = `tool_${Date.now()}`;
+		// Honor an explicit stable toolId when provided (extension-host litmus), else
+		// the default per-call id. A stable id lets a test correlate the rendered
+		// tool block with the persisted transcript entry.
+		const toolId = toolAction.toolId || `tool_${Date.now()}`;
 		this.emit({ type: "tool_execution_start", toolName: toolAction.tool, toolId, input: toolAction.input });
 
 		// Run the actual tool effect against the real filesystem / shell where

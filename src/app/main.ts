@@ -89,6 +89,19 @@ loadPersistedPanelWorkspace(state);
 (window as any).__bobbitRenderTool = renderTool;
 import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
 
+// E2E test hook: re-drive pack-renderer reconciliation (extension-host §4a) the
+// SAME way a marketplace install/uninstall does (marketplace-page.ts), so browser
+// E2E can assert the running UI reconciles (stale pack renderer removed, built-in
+// restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
+(window as any).__bobbitReconcilePackRenderers = async () => {
+	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+		import("./api.js"),
+		import("./pack-renderers.js"),
+	]);
+	const pid = state.activeProjectId ?? undefined;
+	registerPackRenderers(await fetchTools(pid), pid);
+};
+
 function hasActiveProposalPanel(): boolean {
 	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
 }
@@ -519,6 +532,22 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		try {
 			await waitForGateway(savedUrl, savedToken);
+
+			// Register pack-contributed tool renderers (extension-host §4a). Fire-and-
+			// forget so it never blocks boot; re-driven from /api/tools metadata so it
+			// survives reload. A zero-pack install resolves to an empty list (no-op).
+			void (async () => {
+				try {
+					const { reconcilePackRenderersForProject } = await import("./pack-renderers.js");
+					// Thread the active project so a project-scope pack's renderer
+					// metadata + Blob fetch resolve the same winner (design §4b). May be
+					// null this early in boot; server/global-scope packs still register,
+					// and connecting to a session re-drives this with the SESSION's
+					// project (session-manager) so a reload / deep-link into a session
+					// whose project differs from the active/default resolves correctly.
+					await reconcilePackRenderersForProject(state.activeProjectId ?? undefined);
+				} catch { /* non-fatal — built-in renderers are unaffected */ }
+			})();
 
 			// Load saved preferences (palette, timestamps, AI gateway)
 			try {

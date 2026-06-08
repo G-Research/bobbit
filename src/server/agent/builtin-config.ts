@@ -18,6 +18,7 @@ import type { Role, GrantPolicy } from "./role-store.js";
 import { normalizeGrantPolicy, validateModelString, validateThinkingLevel } from "./role-store.js";
 import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
+import { parseContributions, computeRendererKind } from "./tool-contributions.js";
 
 // ── Shared parse helpers (single source of truth) ───────────────
 //
@@ -72,7 +73,8 @@ export function parseRolesDir(rolesDir: string): Role[] {
 	return roles;
 }
 
-function toolInfoFrom(data: any, fallbackGroup: string): ToolInfo {
+function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePath: string): ToolInfo {
+	const contributions = parseContributions(data, filePath);
 	return {
 		name: data.name,
 		description: data.description || "",
@@ -81,6 +83,9 @@ function toolInfoFrom(data: any, fallbackGroup: string): ToolInfo {
 		detail_docs: data.detail_docs,
 		hasRenderer: !!data.renderer,
 		rendererFile: data.renderer,
+		rendererKind: computeRendererKind(baseDir, data.renderer),
+		hasActions: !!contributions.actions,
+		actionNames: contributions.actions?.names,
 		grantPolicy: data.grantPolicy,
 		params: Array.isArray(data.params)
 			? data.params.filter((p: unknown): p is string => typeof p === "string")
@@ -117,7 +122,7 @@ export function parseToolsDir(toolsDir: string): ToolInfo[] {
 					const data = parse(fs.readFileSync(path.join(groupPath, file.name), "utf-8"));
 					if (!data?.name || seen.has(data.name)) continue;
 					seen.add(data.name);
-					tools.push(toolInfoFrom(data, entry.name));
+					tools.push(toolInfoFrom(data, entry.name, toolsDir, path.join(groupPath, file.name)));
 				} catch (err) {
 					console.error(`[builtin-config] Failed to parse tool ${file.name}:`, err);
 				}
@@ -132,7 +137,7 @@ export function parseToolsDir(toolsDir: string): ToolInfo[] {
 			const data = parse(fs.readFileSync(path.join(toolsDir, entry.name), "utf-8"));
 			if (!data?.name || seen.has(data.name)) continue;
 			seen.add(data.name);
-			tools.push(toolInfoFrom(data, "Other"));
+			tools.push(toolInfoFrom(data, "Other", toolsDir, path.join(toolsDir, entry.name)));
 		} catch (err) {
 			console.error(`[builtin-config] Failed to parse tool ${entry.name}:`, err);
 		}

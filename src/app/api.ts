@@ -2069,12 +2069,20 @@ export interface ToolInfo {
 	detail_docs?: string;
 	hasRenderer?: boolean;
 	rendererFile?: string;
+	/** Extension-host renderer delivery (design extension-host.md §2.5): "pack" ⇒ the UI
+	 *  serves + lazy-imports the pre-built ESM renderer at runtime; "builtin" ⇒ metadata. */
+	rendererKind?: "builtin" | "pack";
+	/** True when the tool ships a server-actions module (`actions:` in the tool YAML). */
+	hasActions?: boolean;
+	/** Optional declared action-name allowlist (from `actions.names`). */
+	actionNames?: string[];
 	grantPolicy?: string;
 }
 
-export async function fetchTools(): Promise<ToolInfo[]> {
+export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
 	try {
-		const res = await gatewayFetch("/api/tools");
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/tools${qs}`);
 		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch tools: ${res.status}`);
 		const data = await res.json();
 		const tools = data.tools || data || [];

@@ -128,6 +128,40 @@ function currentProjectId(): string | undefined {
 	return focusProjectId || state.activeProjectId || state.projects[0]?.id || undefined;
 }
 
+/** The ACTIVE CHAT SESSION's project — the project the GLOBAL tool-renderer
+ *  registry must follow (extension-host §4c), NOT the marketplace's focused
+ *  project ({@link currentProjectId}). Mirrors what session-manager threads into
+ *  `reconcilePackRenderersForProject` on session connect: the active session's
+ *  own `projectId`, falling back to the active project, else undefined. Using the
+ *  marketplace focus here would let a project-scope install/uninstall for a
+ *  NON-active project clobber the renderers the still-active session uses. */
+export function activeSessionProjectId(): string | undefined {
+	const sid = state.selectedSessionId || state.remoteAgent?.gatewaySessionId;
+	const session = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
+	return session?.projectId || state.activeProjectId || undefined;
+}
+
+/** Re-drive pack-contributed tool-renderer registration after a marketplace
+ *  mutation (install/update/uninstall/reorder), extension-host §4a/§4c.
+ *
+ *  The renderer registry is GLOBAL and must follow the ACTIVE CHAT SESSION's
+ *  project ({@link activeSessionProjectId}), NOT the marketplace's focused
+ *  project — else a project-scope mutation for a non-active project would clobber
+ *  the renderers the still-active session uses (finding #2). We FORCE a re-fetch
+ *  + re-register here (the mutation changed the pack set, so the dedupe-guarded
+ *  `reconcilePackRenderersForProject` alone would skip it) but ALWAYS scope it to
+ *  the active session's project, reconciling the registry back to that project.
+ *  `registerPackRenderers` also tears down renderers no longer present — the
+ *  uninstall reconciliation path (§4a). Best-effort; never throws. */
+export async function reconcileRenderersForActiveSession(): Promise<void> {
+	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+		import("./api.js"),
+		import("./pack-renderers.js"),
+	]);
+	const projectId = activeSessionProjectId();
+	registerPackRenderers(await fetchTools(projectId), projectId);
+}
+
 export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	if (showLoading) {
 		loading = true;
@@ -189,6 +223,11 @@ async function refreshConfigPages(): Promise<void> {
 		import("./role-manager-page.js").then((m) => m.loadRolePageData()).catch(() => {}),
 		import("./tool-manager-page.js").then((m) => m.loadToolPageData()).catch(() => {}),
 		import("./skills-page.js").then((m) => m.loadSkillsPageData(false)).catch(() => {}),
+		// Re-drive pack-contributed tool-renderer registration (extension-host
+		// §4a/§4c) so an installed/uninstalled pack's renderer appears/updates
+		// without a reload — scoped to the ACTIVE CHAT SESSION's project, not the
+		// marketplace's focused project (finding #2). Idempotent + best-effort.
+		reconcileRenderersForActiveSession().catch(() => {}),
 	]);
 }
 

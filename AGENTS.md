@@ -57,7 +57,7 @@ Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
 **Forks**: open PRs against the fork's `master`, not the upstream repo.
 
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the full worktree story — branch namespaces, start-point/`base_ref` ([docs/design/base-ref.md](docs/design/base-ref.md)), and the worktree-stash hazard (never `git stash` in a session worktree).
+Full worktree story — branch namespaces, `base_ref`, the `git stash` hazard: [docs/dev-workflow.md](docs/dev-workflow.md).
 
 ## Maintaining this file
 
@@ -69,4 +69,4 @@ AGENTS.md is loaded into **every** agent turn. Keep it small and general.
 
 ## Reference docs
 
-[docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/nested-goals.md](docs/nested-goals.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md)
+[docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/nested-goals.md](docs/nested-goals.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md) · [docs/extension-host-authoring.md](docs/extension-host-authoring.md)
