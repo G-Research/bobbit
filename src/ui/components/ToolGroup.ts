@@ -14,6 +14,8 @@ import {
 } from "lucide";
 import { renderTool } from "../tools/index.js";
 import { isSkippedToolResult, TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
+import { state as appState } from "../../app/state.js";
+import { getHostApi } from "../../app/host-api.js";
 
 /** Icon lookup by tool name — mirrors individual renderers */
 const TOOL_ICONS: Record<string, any> = {
@@ -162,7 +164,13 @@ export class ToolGroup extends LitElement {
 						<div class="mt-3 flex flex-col gap-3">
 							${this.toolCalls.map((tc) => {
 								const result = this.toolResultsById?.get(tc.id);
-								const renderResult = renderTool(tc.name, tc.arguments, result, false);
+								const sessionIdCtx = appState.remoteAgent?.gatewaySessionId;
+								const renderResult = renderTool(tc.name, tc.arguments, result, false, {
+									toolUseId: tc.id,
+									toolCallInput: (tc as any).input,
+									sessionId: sessionIdCtx,
+									host: getHostApi(sessionIdCtx, tc.id),
+								});
 								if (renderResult.isCustom) {
 									return renderResult.content;
 								}

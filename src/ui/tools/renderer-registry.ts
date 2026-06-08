@@ -40,13 +40,32 @@ export type LazyRendererLoader = () => Promise<ToolRenderer | { default: ToolRen
 const pendingLazy = new Map<string, LazyRendererLoader>();
 // In-flight loads: name → promise (so concurrent renders share one fetch)
 const inFlight = new Map<string, Promise<ToolRenderer>>();
+// Pack-owned renderer names (registered via { override: true }). The pack lazy
+// loader is the EFFECTIVE renderer for these names; a later eager
+// `registerToolRenderer` for a pack-owned name is ignored so the pack always
+// wins (extension-host §4a renderer precedence). See registerLazyToolRenderer.
+const packOwned = new Set<string>();
 
 /**
  * Register a custom tool renderer
  */
 export function registerToolRenderer(toolName: string, renderer: ToolRenderer): void {
+	// A pack claimed this name via override — its lazy loader is the effective
+	// renderer. Ignore the eager (built-in) registration so the pack wins
+	// regardless of registration order.
+	if (packOwned.has(toolName)) return;
 	toolRenderers.set(toolName, renderer);
 	pendingLazy.delete(toolName);
+}
+
+/** Options for {@link registerLazyToolRenderer}. */
+export interface RegisterLazyOptions {
+	/** When true, this lazy loader is the EFFECTIVE renderer for `toolName`:
+	 *  any eager `toolRenderers` entry is deleted and the name is recorded as
+	 *  pack-owned so a later eager `registerToolRenderer` for it is ignored
+	 *  (extension-host §4a — a pack that shadows a built-in tool wins its
+	 *  renderer too). */
+	override?: boolean;
 }
 
 /**
@@ -54,8 +73,22 @@ export function registerToolRenderer(toolName: string, renderer: ToolRenderer): 
  * `getToolRenderer(name)` returns a tiny placeholder renderer (spinner +
  * tool name) and kicks off `loader()`. When the real renderer resolves it
  * replaces the registration and `renderApp()` is called to re-render.
+ *
+ * With `{ override: true }` the registration shadows any eager built-in
+ * renderer of the same name (pack precedence — see {@link RegisterLazyOptions}).
  */
-export function registerLazyToolRenderer(toolName: string, loader: LazyRendererLoader): void {
+export function registerLazyToolRenderer(
+	toolName: string,
+	loader: LazyRendererLoader,
+	opts?: RegisterLazyOptions,
+): void {
+	if (opts?.override) {
+		// Pack is the resolved winning provider for this tool name — its renderer
+		// must win too. Delete any eager entry and mark the name pack-owned so a
+		// later eager registration cannot reclaim it.
+		toolRenderers.delete(toolName);
+		packOwned.add(toolName);
+	}
 	pendingLazy.set(toolName, loader);
 }
 

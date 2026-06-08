@@ -520,6 +520,19 @@ async function initApp() {
 		try {
 			await waitForGateway(savedUrl, savedToken);
 
+			// Register pack-contributed tool renderers (extension-host §4a). Fire-and-
+			// forget so it never blocks boot; re-driven from /api/tools metadata so it
+			// survives reload. A zero-pack install resolves to an empty list (no-op).
+			void (async () => {
+				try {
+					const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+						import("./api.js"),
+						import("./pack-renderers.js"),
+					]);
+					registerPackRenderers(await fetchTools());
+				} catch { /* non-fatal — built-in renderers are unaffected */ }
+			})();
+
 			// Load saved preferences (palette, timestamps, AI gateway)
 			try {
 				const prefRes = await gatewayFetch("/api/preferences");

@@ -189,6 +189,16 @@ async function refreshConfigPages(): Promise<void> {
 		import("./role-manager-page.js").then((m) => m.loadRolePageData()).catch(() => {}),
 		import("./tool-manager-page.js").then((m) => m.loadToolPageData()).catch(() => {}),
 		import("./skills-page.js").then((m) => m.loadSkillsPageData(false)).catch(() => {}),
+		// Re-drive pack-contributed tool-renderer registration (extension-host §4a)
+		// so an installed/uninstalled pack's renderer appears/updates without a
+		// reload. `{ override: true }` registration is idempotent.
+		(async () => {
+			const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+				import("./api.js"),
+				import("./pack-renderers.js"),
+			]);
+			registerPackRenderers(await fetchTools());
+		})().catch(() => {}),
 	]);
 }
 

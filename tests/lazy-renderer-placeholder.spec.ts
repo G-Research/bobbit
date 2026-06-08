@@ -114,3 +114,54 @@ test.describe("Lazy tool renderer placeholder", () => {
 		await expect(page.locator("tool-message [data-lazy-renderer-placeholder-btn]")).toHaveCount(0);
 	});
 });
+
+test.describe("Pack renderer { override } precedence (extension-host §4a)", () => {
+	test("override shadows a pre-registered eager renderer; resolves to the pack renderer", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// 1) Eager built-in registered first, THEN a pack lazy with { override: true }.
+		await page.evaluate(() => {
+			(window as any).__registerEagerRenderer("shadow_tool", "EAGER");
+			(window as any).__registerOverrideDeferredLazy("shadow_tool");
+			(window as any).__renderRegistered("shadow_tool");
+		});
+
+		// getToolRenderer must return the pack loader's PLACEHOLDER, not the eager
+		// renderer — override deleted the eager entry + recorded the name pack-owned.
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+		await expect(page.locator("#probe [data-eager-button]")).toHaveCount(0);
+
+		// 2) A LATER eager registration for the pack-owned name is ignored.
+		await page.evaluate(() => {
+			(window as any).__registerEagerRenderer("shadow_tool", "LATE_EAGER");
+			(window as any).__renderRegistered("shadow_tool");
+		});
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(1);
+		await expect(page.locator("#probe [data-eager-button]")).toHaveCount(0);
+
+		// 3) Once the pack loader resolves, getToolRenderer returns the PACK renderer.
+		await page.evaluate(async () => {
+			const wait = (window as any).__waitForRendererLoaded("shadow_tool");
+			(window as any).__resolveDeferredLazy("shadow_tool", "PACK_RENDERER");
+			await wait;
+			(window as any).__renderRegistered("shadow_tool");
+		});
+		await expect(page.locator("#probe [data-real-button]")).toContainText("PACK_RENDERER");
+		await expect(page.locator("#probe [data-eager-button]")).toHaveCount(0);
+	});
+
+	test("an unshadowed built-in renderer is untouched by override registrations", async ({ page }) => {
+		await gotoAndWait(page);
+
+		await page.evaluate(() => {
+			// One tool gets a pack override; a DIFFERENT tool keeps its eager renderer.
+			(window as any).__registerEagerRenderer("plain_tool", "PLAIN");
+			(window as any).__registerOverrideDeferredLazy("other_tool");
+			(window as any).__renderRegistered("plain_tool");
+		});
+
+		// The unshadowed builtin renders its eager output — no placeholder.
+		await expect(page.locator("#probe [data-eager-button]")).toContainText("PLAIN");
+		await expect(page.locator("#probe [data-lazy-renderer-placeholder-btn]")).toHaveCount(0);
+	});
+});

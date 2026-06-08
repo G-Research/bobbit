@@ -2,7 +2,7 @@
 // so we can exercise the lazy-renderer placeholder + resolve flow under a
 // file:// fixture.
 import { html, render } from "lit";
-import { registerLazyToolRenderer } from "../../src/ui/tools/renderer-registry.js";
+import { registerLazyToolRenderer, registerToolRenderer, getToolRenderer } from "../../src/ui/tools/renderer-registry.js";
 import type { ToolRenderer } from "../../src/ui/tools/types.js";
 import "../../src/ui/components/Messages.js";
 
@@ -80,6 +80,44 @@ const deferreds = new Map<string, Deferred<ToolRenderer>>();
 
 (window as any).__registerRejectingLazy = (toolName: string, message: string) => {
 	registerLazyToolRenderer(toolName, () => Promise.reject(new Error(message)));
+};
+
+// ── { override } precedence helpers (extension-host §4a) ──
+
+/** Register an eager (built-in style) renderer that emits a labelled button. */
+(window as any).__registerEagerRenderer = (toolName: string, label: string) => {
+	registerToolRenderer(toolName, {
+		render() {
+			return { content: html`<button data-eager-button>${label}</button>`, isCustom: false };
+		},
+	});
+};
+
+/** Register a pack lazy renderer with { override: true } — should shadow any
+ *  eager renderer of the same name and become the effective renderer. */
+(window as any).__registerOverrideDeferredLazy = (toolName: string) => {
+	const d = defer<ToolRenderer>();
+	deferreds.set(toolName, d);
+	registerLazyToolRenderer(toolName, () => d.promise, { override: true });
+};
+
+/** Resolve getToolRenderer(name) and render its output into a probe slot so the
+ *  test can assert which renderer (placeholder / eager / resolved pack) is
+ *  effective. Returns nothing; assertions read the DOM. */
+(window as any).__renderRegistered = (toolName: string, slotId = "probe") => {
+	let slot = document.getElementById(slotId);
+	if (!slot) {
+		slot = document.createElement("div");
+		slot.id = slotId;
+		document.body.appendChild(slot);
+	}
+	const r = getToolRenderer(toolName);
+	if (!r) {
+		render(html`<span data-no-renderer></span>`, slot);
+		return;
+	}
+	// render() returns a ToolRenderResult { content, isCustom } — mount its content.
+	render(r.render(undefined, undefined, false).content, slot);
 };
 
 (window as any).__mountToolMessage = mountToolMessage;
