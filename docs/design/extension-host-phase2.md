@@ -438,7 +438,8 @@ another session id.
 ### B3.1 New file: `src/server/extension-host/route-dispatcher.ts`
 
 One-line responsibility: load + dispatch a pack's contributed route module, mirroring
-`ActionDispatcher` (epoch cache + timeout + single invocation seam).
+`ActionDispatcher` (epoch cache + timeout + single invocation seam), plus a **pack-level
+route registry** that deterministically maps `(packId, routeName) → declaring tool`.
 
 ```ts
 export type RouteHandlerCtx = ActionHandlerCtx;   // reuse: {host, sessionId, toolUseId, tool}
@@ -450,6 +451,20 @@ export class RouteDispatcher {
   invalidate(): void;          // wired into invalidateResolverCaches (server.ts:2247)
   async dispatch(tool: string, name: string, ctx: RouteHandlerCtx, req: ..., resolver?): Promise<unknown>;
 }
+
+/** Pack-level route index: which tool in a pack declares which route name, and the
+ *  resolved module path for that tool. Built lazily from tool metadata + cached on the
+ *  project-scoped tool manager; invalidated alongside the dispatchers in
+ *  invalidateResolverCaches (server.ts:2247). */
+export class RouteRegistry {
+  constructor(resolver: ActionToolLocationResolver);
+  /** For `packId`, enumerate the pack's tools (those whose winning baseDir resolves to
+   *  that packId), collect their `routes:` contributions into a single
+   *  `routeName → { declaringTool, modulePath }` map (built once, cached), and look up
+   *  `routeName`. Returns undefined if the pack declares no such route. */
+  resolve(packId: string, routeName: string): { declaringTool: string; modulePath: string } | undefined;
+  invalidate(): void;          // wired into invalidateResolverCaches (server.ts:2247)
+}
 ```
 
 **Reuse, not refork:** `RouteDispatcher` is structurally `ActionDispatcher` with `routes`
@@ -457,19 +472,25 @@ instead of `actions`. Extract the shared loader (epoch cache, bounded in-flight 
 permit-held-until-settle, `runWithTimeout`) into a small base or shared helper so both
 dispatchers use ONE copy — the C3 worker-isolation seam then wraps that single helper. The route
 module path comes from a new `routes.module` contribution (default `routes.js`), resolved
-via the same `resolveToolLocation` location as actions.
+via the same `resolveToolLocation` location as actions. `RouteRegistry` lives in the SAME
+new file (no new §1 shared file); it is built lazily and cached on the project-scoped tool
+manager and reuses `resolveToolLocation` to find each declaring tool's `modulePath`.
 
-**`routes:` is PACK-scoped, not opener-tool-scoped.** The route module is selected by the
-server-resolved `packId`, independent of which tool opened the surface that issued the
-`callRoute`. The opener `packTool` (carried in the request body) is used ONLY to derive
-`packId` (step 2 below); once derived, the server loads the route module from the pack's
-route contribution. Any panel, renderer, or entrypoint sharing that `packId` reaches the
-SAME routes — a panel opened from tool X can reach a route declared on tool Y in the same
-pack. **Deterministic selection rule (convention):** a pack declares `routes:` on a single
-designated tool; the server loads that one route module for the whole pack. (If more than
-one tool in a pack were to declare `routes:`, each route name resolves to its declaring
-tool's module — but the documented convention is one routes-bearing tool per pack to keep
-selection unambiguous.)
+**`routes:` is PACK-scoped, not opener-tool-scoped — resolved via the registry, NOT the
+opener tool's location.** The route module is selected by the server-resolved `packId`,
+independent of which tool opened the surface that issued the `callRoute`. The opener
+`packTool` (carried in the request body) is used ONLY to authorize the caller and derive
+`packId` (B3.2 steps 1–2); the route **module** is then resolved from
+`RouteRegistry.resolve(packId, name) → { declaringTool, modulePath }`, NOT from the opener
+tool's `resolveToolLocation`. This removes the prior contradiction (opener-tool-scoped
+module lookup vs pack-scoped intent): any panel, renderer, or entrypoint sharing that
+`packId` reaches the SAME routes — a panel opened from tool X can reach a route declared on
+tool Y in the same pack, because the registry indexes every routes-bearing tool in the
+pack. **Deterministic conflict handling (hard rule):** a pack MUST NOT declare the same
+route name on two tools; duplicates are **rejected at parse/metadata-build time** (B3.4 —
+the one place a pack IS rejected for a real conflict). The registry therefore has at most
+one declaring tool per `(packId, routeName)`, so resolution is unambiguous regardless of
+how many tools in the pack declare `routes:`.
 
 ### B3.2 Endpoint: `POST /api/ext/route/:name` (server.ts)
 
@@ -480,12 +501,19 @@ derives from the `tool` the caller proves it owns, so there is nothing to forge.
 
 ```
 1. authorizeScopedRequest({...})  → header-canonical session, body===header, session
-   resolves, pack's contributing `tool` ∈ allowedTools  (§2a; toolUseId NOT required)
+   resolves, opener `body.tool` ∈ allowedTools  (§2a; toolUseId NOT required)
+   — body.tool is used ONLY to authorize the caller + derive packId (steps 1–2)
 2. resolvePackIdentityForTool(sessionToolManager, body.tool) → ident  (A; server-derived)
 3. reject 403 if !ident.isPack
-4. routeDispatcher.dispatch(body.tool, name, ctx, init, sessionToolManager)
-   — dispatches ONLY against THAT pack's `routes.js` (the pack derived from `tool`)
-5. audit + json(result)
+4. routeRegistry.resolve(ident.packId, name) → { declaringTool, modulePath }
+   — reject 404 if undefined (the pack declares no such route)
+   — the route MODULE is resolved from the registry's declaringTool for that packId,
+     NOT from the opener body.tool (this is the fix for the prior contradiction)
+5. routeDispatcher.dispatch(declaringTool, name, ctx, init, sessionToolManager)
+   — ctx carries the SAME packId-bound host context (identity from ident.packId, NOT the
+     opener tool), so a route opened from tool X but declared on tool Y runs with the
+     pack's identity, not X's
+6. audit + json(result)
 ```
 
 The client `callRoute(name, init)` POSTs to `/api/ext/route/${encodeURIComponent(name)}`
@@ -506,9 +534,11 @@ pack from a proven-owned tool. This is an equivalence, not a contract mismatch.
 
 ### B3.3 Wiring
 
-- Construct `RouteDispatcher` near `actionDispatcher` (`server.ts:863`); add
-  `routeDispatcher.invalidate()` into `invalidateResolverCaches` (`server.ts:2247`,
-  alongside `dispatcher.invalidate()`).
+- Construct `RouteDispatcher` AND `RouteRegistry` near `actionDispatcher`
+  (`server.ts:863`); add BOTH `routeDispatcher.invalidate()` and
+  `routeRegistry.invalidate()` into `invalidateResolverCaches` (`server.ts:2247`,
+  alongside `dispatcher.invalidate()`) so a pack install/uninstall rebuilds the pack-level
+  route index.
 - Client `host.callRoute` body in `src/app/host-api.ts`; flip `flags.callRoute = true`.
 - Server `ServerHostApi.callRoute` is NOT added (frozen server surface has no callRoute —
   server handlers reach their own routes by calling the function directly; `callRoute` is a
@@ -520,6 +550,16 @@ pack from a proven-owned tool. This is an equivalence, not a contract mismatch.
 `parseRoutes(raw)` → `RouteContribution = { module?: string; names?: string[] }` (mirrors
 `parseActions`, same path-safety via `isSafeRelativePath`). Add wire field
 `ToolInfo.routeNames?: string[]`.
+
+**Duplicate-route rejection (the one hard parse-time conflict).** Per-tool parsing stays
+tolerant (malformed `routes:` degrades, never rejects — same as every other contribution).
+But when the pack-level `RouteRegistry` for a `packId` is built (B3.1), if two tools in the
+SAME pack declare the SAME route name, that is a **hard, deterministic rejection** with a
+clear error naming the conflicting tools + route — packs are otherwise never rejected, so
+this is the single real-conflict failure. Rejection is at metadata/registry-build time
+(not per-tool parse, which cannot see other tools), guaranteeing at most one declaring tool
+per `(packId, routeName)` and making `RouteRegistry.resolve` unambiguous. Cross-pack route
+names never collide (the registry is keyed by `packId`).
 
 ---
 
@@ -641,9 +681,31 @@ Body `{ sessionId, toolUseId, tool, role: "user"|"system", text, resumeTurn? }`.
 ```
 
 `postMessage` drives the agent, so the session is the **header-bound** session (never a
-parameter) and every call is audited. The user-gesture requirement is enforced client-side
-exactly like `invokeAction` (no auto-invoke on mount — v1 §5 v); reviewers reject
-render-time posts.
+parameter) and every call is audited.
+
+**User-gesture enforcement is a concrete client-internal gesture token — not a convention.**
+"Reviewers reject render-time posts" is not an enforceable data flow, so the client host
+adds a transient **gesture context flag**:
+
+- A small client-internal module (e.g. `src/app/gesture-context.ts`, single-owner of C2 on
+  the client) exposes `runWithUserGesture(fn)` / an `activeGesture` flag. The flag is set
+  ONLY by genuine user-gesture handlers — entrypoint launchers (C1), git-widget/command-
+  palette button clicks, composer-slash invocation — which wrap their handler body in
+  `runWithUserGesture(...)`.
+- `host.session.postMessage` **consumes and clears** the flag: on call it reads
+  `activeGesture`, and if absent **throws synchronously** (`"postMessage requires a user
+  gesture"`) so a render/mount-time post fails loudly; if present it clears the flag (a
+  gesture authorizes exactly one post, no latching) and proceeds to the POST. The flag is
+  client-internal state, NOT a method parameter — so the frozen v1 `postMessage` signature
+  is **unchanged**.
+- The frozen v1 contract cannot carry a gesture token in the signature (that would be a v1
+  break), so enforcement is necessarily this client-internal gesture context PLUS UI
+  call-site review — but the token is the load-bearing mechanism; review is secondary.
+
+This mirrors `invokeAction`'s "no auto-invoke on mount" property (v1 §5 v), but makes it a
+checked precondition rather than a reviewer expectation. The server still independently
+authorizes every post (`authorizeActionRequest`, header-bound session, toolUseId-ownership,
+audit) — the gesture token is a client-side defense-in-depth, not the only gate.
 
 ### C2.2 `subscribe` (live typed events)
 
@@ -810,9 +872,14 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
 - `routes:` — re-express `handlePrWalkthroughApiRoute` (`src/server/pr-walkthrough/routes.ts`,
   wired at `server.ts:2268`) as a pack `routes.js` module. The viewer loads its
   changeset/diff bundle via `host.callRoute("bundle", { query: { jobId } })` — which POSTs
-  `/api/ext/route/bundle` with `tool=<pr-walkthrough tool>`; the server derives the pack
-  from that tool and dispatches the pack's OWN `routes.js` (B3.2). NEVER a raw fetch
-  (v1 §6.2).
+  `/api/ext/route/bundle` with `tool=<pr-walkthrough tool>`; the server authorizes that
+  tool, derives the pack, then resolves the `"bundle"` route via
+  `RouteRegistry.resolve(packId, "bundle")` and dispatches the registry's declaring-tool
+  module (B3.2). Because the panel is opened from the pack's panel surface (a DIFFERENT
+  tool than the routes-bearing tool may be the opener), the **registry — not the opener
+  tool's location — is what makes the panel-originated `callRoute("bundle", ...)` reliably
+  reach the pack's route module**; this is the concrete acceptance proof that pack-level
+  route resolution is opener-independent. NEVER a raw fetch (v1 §6.2).
 - `stores:` — re-express `walkthrough-store.ts`
   (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) onto `host.store.*`,
   pack-scoped.
@@ -871,9 +938,10 @@ task per YES-file in flight; the team-lead rebases the next on merge.
 - **C1 entrypoints + navigate.** New: `pack-entrypoints.ts`. Shared: `host-api.ts`
   (navigate body + flip `flags.ui`), `tool-contributions.ts` (`parseEntrypoints`),
   `routing.ts` (single-owner), `server.ts` (entrypoint metadata if needed). Deps: B4, B3.
-- **C2 session writes.** Shared: `server.ts` (+message endpoint), `server-host-api.ts`
-  (postMessage body + flip `flags.session`), client `host-api.ts` (postMessage/subscribe +
-  flip `flags.session`). Deps: B2.
+- **C2 session writes.** New: `gesture-context.ts` (client gesture token — C2-owned).
+  Shared: `server.ts` (+message endpoint), `server-host-api.ts` (postMessage body + flip
+  `flags.session`), client `host-api.ts` (postMessage/subscribe + flip `flags.session`;
+  postMessage consumes the gesture token). Deps: B2.
 - **C3 isolation.** New: `module-host-worker.ts` (+ confinement bootstrap). Edits the
   single seam in `action-dispatcher.ts` (+ shared dispatcher base from B3) — single-owner
   of the seam line. Deps: B3 (routes) + the action baseline. Isolates **actions + routes
@@ -900,10 +968,10 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 | A | `extension-host-pack-identity.test.ts` | packId derived from market-pack baseDir segment; non-pack → empty; caller `args`/`packId` cannot override server-derived id; cross-pack denial precondition; `authorizeScopedRequest` accepts a request with NO toolUseId but still enforces session-binding + allowedTools, and rejects body/header session mismatch | 2,4 |
 | B1 | `extension-host-pack-store.test.ts` | put/get/list round-trip; keys namespaced under `<packId>/`; a second pack cannot read first pack's key (cross-pack read rejected); key traversal (`../`) rejected; non-pack rejected; guard ordering via `authorizeScopedRequest` (allowedTools → identity; succeeds without toolUseId) | 2,4 |
 | B2 | `extension-host-contract-adapter.test.ts` | JSONL rows → `HostMessage`/`HostContentBlock`/`ToolCallRecord`; both tool_use shapes mapped; `CONTRACT_VERSION === HOST_CONTRACT_VERSION`; unknown block types tolerated; read scoped to own session (other session id has no parameter) | 2,4 |
-| B3 | `extension-host-route-dispatcher.test.ts` | route resolution + precedence (pack shadows builtin); namespace-by-construction (`tool` → server-derived pack; dispatch hits ONLY that pack's `routes.js`; no `<pack>` URL segment to forge); `authorizeScopedRequest` reuse (no toolUseId required); epoch cache invalidation | 2,4 |
+| B3 | `extension-host-route-dispatcher.test.ts` | route resolution + precedence (pack shadows builtin); namespace-by-construction (`tool` → server-derived pack; dispatch hits ONLY that pack's route; no `<pack>` URL segment to forge); **pack-level registry: opener tool X calling a route DECLARED by a different tool Y in the SAME pack resolves + dispatches Y's module correctly** (proves pack-scoped, opener-independent); **duplicate route names across a pack are rejected at metadata/registry-build time**; unknown route name → 404; `authorizeScopedRequest` reuse (no toolUseId required); epoch/registry cache invalidation | 2,4 |
 | B4 | `pack-panels-reconcile.spec.ts` (`file://`) | panel loader registers/reconciles; reload survival (re-driven from metadata); uninstall reconcile (generation-guarded); override; theme-token + sandbox conventions present | 2,4 |
 | C1 | `pack-entrypoints.spec.ts` | entrypoint kinds register; `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount | 2,4 |
-| C2 | `extension-host-session-write.test.ts` | postMessage authorized against header-bound session; resumeTurn vs non-resume; every post audited; cross-session post impossible | 2,4 |
+| C2 | `extension-host-session-write.test.ts` | postMessage authorized against header-bound session; resumeTurn vs non-resume; every post audited; cross-session post impossible; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post | 2,4 |
 | C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; **a pack module CANNOT `require`/import `node:fs`/`node:child_process`/network built-ins** (deny-hook); **a pack module CANNOT read `process.env` secrets** (empty-env worker); crash isolated → error not process death; seam swap leaves callers unchanged | 3 |
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |
 | — | `host-api-v1-frozen.test.ts` (extend/add) | `HOST_API_VERSION===1` unchanged; v1 types compile unchanged; capabilities flip per host | 2 |
@@ -963,9 +1031,11 @@ are the acceptance proofs.
   reachable namespace is the pack the server derives from the proven `tool` — there is no
   `<pack>` URL segment to forge (B3.2); `store` keys are pack-namespaced with
   path-traversal re-validation (B1.1).
-- `session.postMessage`/resume (C2) is highest-risk: user-gesture-only, header-bound
-  session, every post/resume audited. Panel/entrypoint-originated calls bind their host
-  context (`sessionId`/`packTool`) from the opening context (§2a.2) and CANNOT reach
+- `session.postMessage`/resume (C2) is highest-risk: user-gesture-only (enforced by a
+  client-internal **gesture token** set only by genuine user-gesture handlers and
+  consumed+cleared by `postMessage`, which throws if absent — C2.1), header-bound session,
+  every post/resume audited. Panel/entrypoint-originated calls bind their host context
+  (`sessionId`/`packTool`) from the opening context (§2a.2) and CANNOT reach
   `postMessage`/`invokeAction` without a real user-gesture `toolUseId`.
 - `panels`/`entrypoints` (B4/C1) run on the main UI thread over LLM-influenced data: iframe
   `sandbox` preserved, theme tokens only, no auto-invoke/navigation on mount.
