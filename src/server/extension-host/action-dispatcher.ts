@@ -290,6 +290,13 @@ export class ActionDispatcher {
 		try {
 			const module = await this.loadModule(tool, resolver);
 			if (!module) throw new ActionError(404, `no actions module found for tool "${tool}"`);
+			// Own-property check: never resolve inherited members (e.g. `constructor`,
+			// `toString`) when no `actions.names` allowlist gated the action name. The
+			// handler must be an OWN, enumerable-or-not property of the actions object
+			// AND a function — otherwise the action is unknown.
+			if (!Object.prototype.hasOwnProperty.call(module.actions, action)) {
+				throw new ActionError(404, `unknown action "${action}" for tool "${tool}"`);
+			}
 			const handler = module.actions[action];
 			if (typeof handler !== "function") throw new ActionError(404, `unknown action "${action}" for tool "${tool}"`);
 			return await this.runWithTimeout(handler, ctx, args);

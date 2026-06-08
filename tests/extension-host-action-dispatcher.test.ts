@@ -135,6 +135,27 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		await assert.rejects(() => d.dispatch("sample_action", "doesnotexist", ctx(), {}), (e) => e instanceof ActionError && e.status === 404);
 	});
 
+	it("inherited property name (constructor/toString) is rejected as unknown, never executed", async () => {
+		// A module WITHOUT an `actions.names` allowlist: `module.actions[action]` for
+		// `constructor`/`toString` would resolve an inherited Object.prototype member
+		// (a function!) and execute it. The own-property guard must reject it as 404.
+		const base = path.join(tmp, "case-inherited");
+		writeTool(base, "demo", {
+			yaml: `name: sample_action\ndescription: d\ngroup: Demo\nactions:\n  module: actions.js\n`,
+			actionsJs: `export const actions = { retry: async () => ({ ok: 1 }) };`,
+		});
+		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null });
+		for (const evil of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+			await assert.rejects(
+				() => d.dispatch("sample_action", evil, ctx(), {}),
+				(e) => e instanceof ActionError && e.status === 404,
+				`expected ${evil} to be rejected as unknown action`,
+			);
+		}
+		// The real own action still works.
+		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { ok: 1 });
+	});
+
 	it("module without an actions export → 500", async () => {
 		const base = path.join(tmp, "case-no-export");
 		writeTool(base, "demo", { actionsJs: `export const notActions = {};` });

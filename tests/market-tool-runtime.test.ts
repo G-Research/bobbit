@@ -202,3 +202,53 @@ describe("market pack overlaying a shared builtin group (finding #1)", () => {
 		assert.deepEqual(new Set(tm.getAllToolNames()), resolverNames([newGrp]));
 	});
 });
+
+// ── Fix 2: rendererKind + resolveToolLocation must source the renderer from the
+//    PARSED/validated contribution, NOT the raw YAML `renderer:` field. An unsafe
+//    renderer path (e.g. `../evil.js`) is dropped by parseContributions, so it must
+//    NOT be advertised as rendererKind:"pack" (which would make the client register
+//    a pack renderer that only fails later at the GET endpoint). It must degrade to
+//    rendererKind:"builtin" with no pack renderer path.
+describe("renderer-path validation flows into rendererKind + resolveToolLocation (Fix 2)", () => {
+	// A market-pack root whose path contains a real `market-packs` segment, so the
+	// rendererKind helper treats a `.js` renderer as "pack".
+	const pf = fs.mkdtempSync(path.join(TMP, "renderer-validation-"));
+	const pack = path.join(pf, ".bobbit", "config", "market-packs", "demo", "tools");
+	const cfg = path.join(pf, "config");
+	fs.mkdirSync(path.join(cfg, "tools"), { recursive: true });
+
+	// Safe renderer → must stay rendererKind:"pack" + resolveToolLocation returns it.
+	w(path.join(pack, "demo", "safe_tool.yaml"),
+		`name: safe_tool\ndescription: safe\ngroup: demo\nrenderer: SafeRenderer.js\n`);
+	w(path.join(pack, "demo", "SafeRenderer.js"), "export default {};\n");
+	// Unsafe renderer (path traversal) → parseContributions drops it; must degrade.
+	w(path.join(pack, "demo", "evil_tool.yaml"),
+		`name: evil_tool\ndescription: evil\ngroup: demo\nrenderer: ../evil.js\n`);
+
+	function tm(): InstanceType<typeof ToolManager> {
+		__resetToolScanCache();
+		const m = new ToolManager(cfg, path.join(pf, "builtin", "tools"));
+		m.setMarketToolRootsProvider(() => [pack]);
+		return m;
+	}
+
+	it("a safe .js renderer still resolves as a pack renderer", () => {
+		const m = tm();
+		assert.equal(m.getToolByName("safe_tool")!.rendererKind, "pack");
+		const loc = m.resolveToolLocation("safe_tool");
+		assert.equal(loc!.rendererKind, "pack");
+		assert.equal(loc!.rendererFile, "SafeRenderer.js");
+	});
+
+	it("an unsafe `../evil.js` renderer is NOT advertised as pack and resolveToolLocation returns no pack renderer", () => {
+		const m = tm();
+		// Dropped renderer ⇒ rendererKind must NOT be "pack".
+		const byName = m.getToolByName("evil_tool")!;
+		assert.notEqual(byName.rendererKind, "pack");
+		assert.equal(byName.rendererKind, "builtin");
+		// resolveToolLocation must NOT hand the renderer GET endpoint a pack path.
+		const loc = m.resolveToolLocation("evil_tool");
+		assert.notEqual(loc!.rendererKind, "pack");
+		assert.equal(loc!.rendererFile, undefined);
+	});
+});

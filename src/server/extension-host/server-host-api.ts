@@ -81,6 +81,37 @@ export interface CreateServerHostApiOptions {
 	fetchImpl?: typeof fetch;
 }
 
+/** The trusted subset of a request socket used to derive the gateway base URL. */
+export interface TrustedRequestSocket {
+	/** The local address the request actually landed on (OS-supplied, not header-controlled). */
+	localAddress?: string;
+	/** The local port the request actually landed on (OS-supplied; == the bound port). */
+	localPort?: number;
+	/** True when the request arrived over TLS. */
+	encrypted?: boolean;
+}
+
+/**
+ * Derive the SERVER-side gateway base URL for `host.gateway.fetch` from a TRUSTED
+ * value — the actual bound socket the request landed on — NEVER from a
+ * user-controlled header (e.g. `Host:`). Deriving the base from `req.headers.host`
+ * would let a forged `Host: attacker.example` redirect the admin-bearer-injecting
+ * `gateway.fetch` to an attacker origin, leaking the token (design §5.1).
+ *
+ * `socket.localAddress`/`localPort` are supplied by the OS for the connection this
+ * very request arrived on, so a fetch back to that origin always reaches the real
+ * local gateway and the injected bearer never leaves the box. IPv6 addresses are
+ * bracket-wrapped; loopback is the fallback when the address is unavailable.
+ */
+export function resolveTrustedGatewayBaseUrl(socket: TrustedRequestSocket | undefined): string {
+	const proto = socket?.encrypted ? "https" : "http";
+	const rawAddr = socket?.localAddress && socket.localAddress.length > 0 ? socket.localAddress : "127.0.0.1";
+	// IPv6 literals must be bracketed in a URL authority.
+	const host = rawAddr.includes(":") ? `[${rawAddr}]` : rawAddr;
+	const port = socket?.localPort;
+	return `${proto}://${host}${port ? `:${port}` : ""}`;
+}
+
 function defaultAudit(event: ServerHostAuditEvent): void {
 	console.log(`[ext-host] ${event.kind} session=${event.sessionId} ${event.method} ${event.path} ` +
 		`→ ${event.error ? `error: ${event.error}` : event.status} (${event.durationMs}ms)`);

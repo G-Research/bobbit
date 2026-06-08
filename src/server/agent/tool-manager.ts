@@ -67,7 +67,11 @@ export interface ToolInfo {
 function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames"> {
 	const c = base.contributions;
 	return {
-		rendererKind: computeRendererKind(base.baseDir, base.renderer),
+		// Source the renderer from the PARSED/validated contribution — NOT the raw
+		// `base.renderer` — so an unsafe/dropped renderer path (e.g. `../evil.js`,
+		// rejected by parseContributions) yields rendererKind "builtin", never "pack".
+		// For safe paths `c.renderer === base.renderer`, so this is byte-identical.
+		rendererKind: computeRendererKind(base.baseDir, c.renderer),
 		hasActions: !!c.actions,
 		actionNames: c.actions?.names,
 	};
@@ -640,9 +644,12 @@ export class ToolManager {
 		return {
 			baseDir: base.baseDir,
 			groupDir: base.groupDir,
-			rendererFile: base.renderer,
+			// Renderer sourced from the PARSED/validated contribution so a dropped
+			// unsafe path resolves to no pack renderer (rendererKind "builtin",
+			// rendererFile undefined) instead of a path the GET endpoint would reject.
+			rendererFile: c.renderer,
 			actionsModule: c.actions?.module,
-			rendererKind: computeRendererKind(base.baseDir, base.renderer),
+			rendererKind: computeRendererKind(base.baseDir, c.renderer),
 			actionNames: c.actions?.names,
 		};
 	}
