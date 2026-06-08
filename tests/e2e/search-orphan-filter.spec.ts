@@ -175,6 +175,17 @@ test.describe("search orphan filter & weak-match drop", () => {
 		// orphan row we inserted (whose backing session does not exist) must be
 		// dropped. Assert exactly that — by id — so the test is deterministic and
 		// still fails if the orphan filter ever stops dropping our ghost row.
+		//
+		// Ruled-out alternative (so the next person needn't re-derive it): a
+		// fail-open / session-store hydration race. The session branch in
+		// ProjectContextManager._hitExists fail-opens ONLY when `sessionResolver`
+		// is unwired, and that is wired synchronously inside createGateway() at
+		// boot — it can never be null once tests run. A session store that isn't
+		// hydrated yet does NOT fail-open: it flows through getPersistedSession()
+		// → undefined → the hit is DROPPED. So a hydration race can only drop MORE
+		// rows, never keep our ghost — our orphan (no backing session) is always
+		// dropped. The indexOrphan() helper already awaits searchIndex.whenReady()
+		// and the upsert before we query, so the index is fully settled here too.
 		const ourOrphan = out.results.filter(
 			(r: any) =>
 				r.type === "session" &&
