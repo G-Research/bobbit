@@ -1335,6 +1335,7 @@ html {
 .bobbit-blob--archived .bobbit-blob__flask,
 .bobbit-blob--archived .bobbit-blob__wand,
 .bobbit-blob--archived .bobbit-blob__wizard-hat,
+.bobbit-blob--archived .bobbit-blob__nurse-cap,
 .bobbit-blob--archived .bobbit-blob__stamp,
 .bobbit-blob--archived .bobbit-blob__clipboard,
 .bobbit-blob--archived .bobbit-blob__zzz,
@@ -2369,6 +2370,73 @@ html {
 }
 .bobbit-blob--compact-pop .bobbit-blob__clipboard {
 	animation: blob-compact-pop-rigid 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+
+/* ===== Nurse cap overlay (white folded cap with red cross, addsHeight hat) ===== */
+/* Mirrors the crown's rule set exactly (same scale/origin/margin, same state
+   follow-animations), with two deliberate differences:
+     1. a half-sprite-pixel downward `translate` so the brim hugs the head, and
+     2. its own white+red box-shadow art.
+   Counter-hue-rotated like the crown so it never shifts color. */
+.bobbit-blob__nurse-cap {
+	display: none;
+}
+/* Push the whole bobbit down when capped to prevent dome-tip clipping */
+.bobbit-nurse-cap .bobbit-blob {
+	padding-top: 6px;
+}
+.bobbit-nurse-cap .bobbit-blob__nurse-cap {
+	display: block;
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	transform-origin: 5px 8px; /* same as sprite */
+	transform: scale(4);
+	/* Seat half a sprite pixel (0.5 × 4 = 2 CSS px) lower than the crown so the
+	   brim hugs the head. Independent `translate` composes with the bob / idle
+	   `transform` animations instead of being overwritten (same trick the
+	   bandana uses). */
+	translate: 0 2px;
+	margin: 8px 18px 28px 17px;
+	image-rendering: pixelated;
+	/* Counter hue-rotate so the cap stays white + red across session hues */
+	filter: hue-rotate(calc(-1 * var(--bobbit-hue-rotate, 0deg)));
+	box-shadow:
+		3px -2px 0 #000, 4px -2px 0 #000, 5px -2px 0 #000, 6px -2px 0 #000, 7px -2px 0 #000,
+		2px -1px 0 #000, 3px -1px 0 #ffffff, 4px -1px 0 #ffffff, 5px -1px 0 #ef4444, 6px -1px 0 #ffffff, 7px -1px 0 #f3f4f6, 8px -1px 0 #000,
+		2px 0px 0 #000, 3px 0px 0 #ffffff, 4px 0px 0 #ef4444, 5px 0px 0 #ef4444, 6px 0px 0 #ef4444, 7px 0px 0 #f3f4f6, 8px 0px 0 #000,
+		1px 1px 0 #000, 2px 1px 0 #ffffff, 3px 1px 0 #ffffff, 4px 1px 0 #ffffff, 5px 1px 0 #ef4444, 6px 1px 0 #f3f4f6, 7px 1px 0 #f3f4f6, 8px 1px 0 #e5e7eb, 9px 1px 0 #000,
+		1px 2px 0 #000, 2px 2px 0 #000, 3px 2px 0 #000, 4px 2px 0 #000, 5px 2px 0 #000, 6px 2px 0 #000, 7px 2px 0 #000, 8px 2px 0 #000, 9px 2px 0 #000;
+	/* Match sprite's busy animation so the cap moves in sync */
+	animation: blob-busy-move 10s cubic-bezier(0.34, 1, 0.64, 1) infinite;
+}
+/* Cap follows all sprite state animations (reuses the crown keyframes) */
+.bobbit-blob--idle .bobbit-blob__nurse-cap {
+	animation: blob-crown-idle-sleep-breathe 3.6s ease-in-out infinite;
+	animation-delay: var(--bobbit-idle-phase, 0s);
+	transform: scale(4) translateX(-7px) translateY(0.75px);
+}
+.bobbit-blob--exit .bobbit-blob__nurse-cap {
+	animation: blob-exit 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+.bobbit-blob--exit-roll .bobbit-blob__nurse-cap {
+	animation: blob-exit-roll 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
+}
+.bobbit-blob--enter .bobbit-blob__nurse-cap {
+	animation: blob-enter 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
+}
+.bobbit-blob--enter-roll .bobbit-blob__nurse-cap {
+	animation: blob-enter-roll 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards !important;
+}
+.bobbit-blob--compact-shake .bobbit-blob__nurse-cap {
+	animation: blob-compact-shake 0.8s ease-in-out forwards !important;
+}
+.bobbit-blob--compacting .bobbit-blob__nurse-cap {
+	animation: blob-compact-squash 3s ease-in-out infinite !important;
+}
+.bobbit-blob--compact-pop .bobbit-blob__nurse-cap {
+	animation: blob-compact-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards !important;
 }
 
 /* Disney 12-principles bounce:

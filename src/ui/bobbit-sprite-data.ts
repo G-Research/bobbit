@@ -481,6 +481,38 @@ export const ACCESSORY_CLIPBOARD: AccessorySpriteData = {
   ],
 };
 
+/**
+ * Nurse cap accessory — white folded cap with a red cross. addsHeight hat.
+ * Sidebar coordinates (yOffset=2, addsHeight=true). Stepped dome (rows -2..0)
+ * flaring to a folded brim (row 1) with the brim outline at row 2 — the same
+ * row the crown / wizard-hat brim sits on, so it seats identically on the head
+ * one row above the eyes. The centred red cross (vertical x5 rows -1..1,
+ * horizontal arms x4-6 row 0) is the medical signifier; the right side is
+ * lightly shaded (#f3f4f6 / #e5e7eb) for a light-from-upper-left read.
+ *
+ * Like the crown, this is counter-hue-rotated at render time so it stays white
+ * and red across every session palette (it is NOT in the flask exception set).
+ */
+export const ACCESSORY_NURSE_CAP: AccessorySpriteData = {
+  id: 'nurse-cap',
+  label: 'Nurse Cap',
+  yOffset: 2,
+  addsHeight: true,
+  blobYAdjust: 0,
+  pixels: [
+    // Row -2: dome top outline
+    [3, -2, '#000'], [4, -2, '#000'], [5, -2, '#000'], [6, -2, '#000'], [7, -2, '#000'],
+    // Row -1: upper cap (white) + cross top
+    [2, -1, '#000'], [3, -1, '#ffffff'], [4, -1, '#ffffff'], [5, -1, '#ef4444'], [6, -1, '#ffffff'], [7, -1, '#f3f4f6'], [8, -1, '#000'],
+    // Row 0: cap (white) + cross arms
+    [2, 0, '#000'], [3, 0, '#ffffff'], [4, 0, '#ef4444'], [5, 0, '#ef4444'], [6, 0, '#ef4444'], [7, 0, '#f3f4f6'], [8, 0, '#000'],
+    // Row 1: folded brim (widest) + cross bottom + right-side shade
+    [1, 1, '#000'], [2, 1, '#ffffff'], [3, 1, '#ffffff'], [4, 1, '#ffffff'], [5, 1, '#ef4444'], [6, 1, '#f3f4f6'], [7, 1, '#f3f4f6'], [8, 1, '#e5e7eb'], [9, 1, '#000'],
+    // Row 2: brim bottom outline (same row as crown / wizard-hat brim)
+    [1, 2, '#000'], [2, 2, '#000'], [3, 2, '#000'], [4, 2, '#000'], [5, 2, '#000'], [6, 2, '#000'], [7, 2, '#000'], [8, 2, '#000'], [9, 2, '#000'],
+  ],
+};
+
 /** Registry of all accessories by ID */
 export const ACCESSORIES: Record<string, AccessorySpriteData> = {
   'crown':       ACCESSORY_CROWN,
@@ -495,6 +527,7 @@ export const ACCESSORIES: Record<string, AccessorySpriteData> = {
   'wand':        ACCESSORY_WAND,
   'stamp':       ACCESSORY_STAMP,
   'clipboard':   ACCESSORY_CLIPBOARD,
+  'nurse-cap':   ACCESSORY_NURSE_CAP,
 };
 
 /** All accessory IDs (excluding "none") */
