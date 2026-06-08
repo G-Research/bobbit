@@ -36,6 +36,7 @@ const STAFF_ACCESSORY_IDS = new Set([
 	"wand",
 	"stamp",
 	"clipboard",
+	"nurse-cap",
 ]);
 
 export function normalizeStaffAccessory(value: unknown): string {
