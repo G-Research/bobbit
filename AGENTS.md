@@ -24,6 +24,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 - **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Tool descriptions are budget-pinned by `tests/tool-description-budget.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; `config-cascade.ts` + `slash-skills.ts` are adapters. See [docs/marketplace.md](docs/marketplace.md).
+- **Extension host** (packable tool renderers + server actions): `src/server/extension-host/`, `src/app/pack-renderers.ts`, `src/shared/extension-host/host-api.ts`. See [docs/extension-host-authoring.md](docs/extension-host-authoring.md) · [docs/design/extension-host.md](docs/design/extension-host.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
 - **Tests**: `tests/` (unit), `tests/e2e/` (API), `tests/e2e/ui/` (browser), `tests/manual-integration/` (real agents + Docker).
