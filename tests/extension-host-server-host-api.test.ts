@@ -6,13 +6,13 @@
  * Durable v1 contract: there is NO `gateway.fetch` / raw passthrough (the action
  * endpoint is the only sanctioned pack→server path; removing the hatch also
  * deleted the Host-header trusted-base-URL token-leak surface). The server host
- * exposes the bound identity + `capabilities`; the not-yet-implemented scoped Phase-2
- * namespaces (`callRoute`/`session`) are present-but-throwing stubs. Slice B1 implements
- * `store`, delegating to the injected pack-scoped PackStore.
+ * exposes the bound identity + `capabilities`. `session` (reads B2 + write C2) and
+ * `store` (B1) are implemented; `callRoute`/`ui` are CLIENT-ONLY surfaces and are
+ * intentionally NOT server-host capability members (Fix 3) — a server handler calls
+ * its routes directly and has no UI, so their absence is by design, not a gap.
  *
  * Pinned invariants:
- *   - `capabilities` is the single source of truth: callRoute/session false; store true (B1).
- *   - The not-yet-implemented session namespace throws a loud "reserved for Phase 2".
+ *   - `capabilities` is the single source of truth: session + store true; callRoute/ui absent.
  *   - `store` delegates to the injected PackStore, scoped to the server-derived packId.
  *   - `version`/`contractVersion` are exposed.
  */
@@ -21,15 +21,20 @@ import assert from "node:assert/strict";
 import { createServerHostApi } from "../src/server/extension-host/server-host-api.ts";
 
 describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
-	it("capabilities reports the scoped Phase-2 caps (store implemented in B1)", () => {
+	it("capabilities reports the server-host caps (session + store) — callRoute/ui are client-only", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
-		assert.equal(host.capabilities.callRoute, false);
 		// Slice C2: session flips true (reads from B2 + write here = full namespace).
 		assert.equal(host.capabilities.session, true);
 		// Slice B1: store is implemented — the flag flips true.
 		assert.equal(host.capabilities.store, true);
+		assert.equal(host.capabilities.has("session"), true);
 		assert.equal(host.capabilities.has("store"), true);
+		// `callRoute`/`ui` are CLIENT-ONLY surfaces: NOT members of the server host
+		// capability map (Fix 3). `has()` returns false for them — not a gap, by design.
+		assert.equal((host.capabilities as Record<string, unknown>).callRoute, undefined);
+		assert.equal((host.capabilities as Record<string, unknown>).ui, undefined);
 		assert.equal(host.capabilities.has("callRoute"), false);
+		assert.equal(host.capabilities.has("ui"), false);
 		assert.equal(host.capabilities.has("nonexistent"), false);
 	});
 

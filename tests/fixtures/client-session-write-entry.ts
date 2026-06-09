@@ -13,14 +13,24 @@ const calls: Captured[] = [];
 (window as any).__calls = (): Captured[] => calls;
 (window as any).__reset = (): void => { calls.length = 0; };
 
-// Capture every fetch; return a 200 JSON ok so postMessage resolves.
+// Capture every fetch; return a 200 JSON ok so postMessage resolves. The Fix-5
+// gesture endpoint returns a single-use nonce so the trusted minter (kicked inside
+// runWithUserGesture) yields a token that postMessage attaches as `gestureNonce`.
 window.fetch = (async (input: any, init?: any): Promise<Response> => {
 	const url = typeof input === "string" ? input : (input?.url ?? String(input));
 	let body: any;
 	try { body = init?.body ? JSON.parse(init.body) : undefined; } catch { body = init?.body; }
 	calls.push({ url, method: init?.method ?? "GET", body });
+	if (url.includes("/api/ext/session/gesture")) {
+		return new Response(JSON.stringify({ nonce: "test-nonce" }), { status: 200, headers: { "Content-Type": "application/json" } });
+	}
 	return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 }) as any;
+
+// Helper: the captured POST to /api/ext/session/message (if any).
+const messageCall = (): Captured | undefined => calls.find((c) => c.url.includes("/api/ext/session/message"));
+(window as any).__messageCall = messageCall;
+(window as any).__gestureFired = (): boolean => calls.some((c) => c.url.includes("/api/ext/session/gesture"));
 
 // A panel/entrypoint origin binds toolUseId:undefined — postMessage must still work.
 const host = (): any => getHostApi("sess-1", undefined, "sample_action");
@@ -36,14 +46,15 @@ const host = (): any => getHostApi("sess-1", undefined, "sample_action");
 	}
 };
 
-// Inside a genuine gesture → the POST fires to the C2 endpoint with the bound tool.
-(window as any).__postWithGesture = async (): Promise<{ posted: boolean; body: any }> => {
+// Inside a genuine gesture → the POST fires to the C2 endpoint with the bound tool
+// AND carries the server-minted gesture nonce (Fix 5).
+(window as any).__postWithGesture = async (): Promise<{ posted: boolean; body: any; gestureFired: boolean }> => {
 	const h = host();
 	const p: Promise<void> = runWithUserGesture(() =>
 		h.session.postMessage({ role: "user", text: "hi", resumeTurn: false }));
 	await p;
-	const last = calls[calls.length - 1];
-	return { posted: !!last, body: last?.body };
+	const msg = messageCall();
+	return { posted: !!msg, body: msg?.body, gestureFired: (window as any).__gestureFired() };
 };
 
 // One gesture authorizes exactly ONE post: a second synchronous post throws.

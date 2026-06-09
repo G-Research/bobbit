@@ -9,9 +9,16 @@
 // There is NO `gateway.fetch` and no raw passthrough — that escape hatch (and
 // with it the Host-header trusted-base-URL token-leak surface) is removed in the
 // durable v1 contract. Phase 1 exposes only the bound session/tool identity +
-// `capabilities`; the frozen `callRoute`/`session`/`store` namespaces throw a
-// loud "reserved for Phase 2" so misuse is never silent. Handlers that genuinely
-// need raw `fs`/`process`/`exec` import them directly.
+// `capabilities`; the frozen `session`/`store` namespaces throw a loud "reserved
+// for Phase 2" so misuse is never silent. Handlers that genuinely need raw
+// `fs`/`process`/`exec` import them directly.
+//
+// `callRoute` and `ui` are CLIENT-ONLY surfaces (renderers/panels). A server
+// handler reaches its own pack's route by calling the function directly, and a
+// server module has no UI to drive — so there is no server-side `callRoute`/`ui`
+// by design (NOT an unimplemented gap). They are deliberately ABSENT from the
+// server capability map; the frozen v1 CLIENT contract still reports
+// `capabilities.callRoute === true` (see src/app/host-api.ts).
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
@@ -36,10 +43,12 @@ export interface ServerHostSessionApi {
 
 /** Readonly capability map — the SINGLE SOURCE OF TRUTH for what is IMPLEMENTED on the
  *  server host. On a Phase-1 server host only the bound identity is available; the
- *  scoped Phase-2 capabilities are `false`. */
+ *  scoped Phase-2 capabilities are `false`.
+ *
+ *  NOTE: `callRoute` and `ui` are CLIENT-ONLY surfaces and are intentionally NOT
+ *  members here (a server handler calls its routes directly; a server module has no
+ *  UI). Their absence is by design, not an unimplemented gap. */
 export interface ServerHostCapabilities {
-	/** Phase-2 — pack-scoped typed route calls. False on a Phase-1 host. */
-	readonly callRoute: boolean;
 	/** Phase-2 — transcript/message/event surface. False on a Phase-1 host. */
 	readonly session: boolean;
 	/** Ownership-scoped persistence (Slice B1). True once the store backend is wired. */
@@ -127,7 +136,8 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// process-singleton PackStore, scoped to the SERVER-DERIVED closure packId
 	// (never caller-supplied), so a handler can only ever touch its own pack's keys.
 	// Slice C2: `session` flips TRUE (reads from B2 + write here = full namespace live).
-	const flags = { callRoute: false, session: true, store: true };
+	// `callRoute`/`ui` are client-only surfaces — deliberately absent (not gaps).
+	const flags = { session: true, store: true };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
