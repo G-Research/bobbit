@@ -49,9 +49,39 @@ describe("createServerHostApi — Phase-2 namespaces are frozen-not-implemented"
 		assert.throws(() => host.store.list(), /reserved for Phase 2/);
 	});
 
-	it("session.* throws 'reserved for Phase 2'", () => {
-		assert.throws(() => host.session.readTranscript(), /reserved for Phase 2/);
-		assert.throws(() => host.session.readToolCall("tu"), /reserved for Phase 2/);
+	// Slice B2 implemented the own-session READS; only the WRITE stays frozen (C2).
+	it("session.postMessage throws 'reserved for Phase 2' (write lands in C2)", () => {
 		assert.throws(() => host.session.postMessage({}), /reserved for Phase 2/);
+	});
+});
+
+describe("createServerHostApi — Slice B2 own-session reads (contract adapter)", () => {
+	const jsonl = [
+		JSON.stringify({ type: "message", id: "e1", message: { role: "assistant", content: [
+			{ type: "tool_use", id: "tu-1", name: "sample_action", input: { a: 1 } },
+		] } }),
+		JSON.stringify({ type: "message", id: "e2", message: { role: "user", content: [
+			{ type: "tool_result", tool_use_id: "tu-1", content: "out", is_error: false },
+		] } }),
+	].join("\n");
+	const host = createServerHostApi({
+		sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t",
+		readOwnTranscript: async () => jsonl,
+	});
+
+	it("readTranscript maps the bound session's transcript to a contract envelope", async () => {
+		const env = await host.session.readTranscript();
+		assert.equal(env.total, 2);
+		assert.equal(env.messages[0].content[0].type, "tool_use");
+	});
+
+	it("readToolCall joins a tool_use with its result by id", async () => {
+		const rec = await host.session.readToolCall("tu-1");
+		assert.deepEqual(rec, { toolUseId: "tu-1", tool: "sample_action", input: { a: 1 }, output: "out", isError: false });
+	});
+
+	it("reads reject when no gateway transcript reader is bound", async () => {
+		const noReader = createServerHostApi({ sessionId: "s", packId: "", contributionId: "g/t" });
+		await assert.rejects(() => noReader.session.readTranscript(), /gateway transcript reader/);
 	});
 });

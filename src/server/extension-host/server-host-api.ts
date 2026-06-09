@@ -14,6 +14,8 @@
 // need raw `fs`/`process`/`exec` import them directly.
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
+import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
+import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 
 /** PHASE 2 — frozen, not implemented. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
@@ -22,10 +24,12 @@ export interface ServerHostStoreApi {
 	list(prefix?: string): Promise<string[]>;
 }
 
-/** PHASE 2 — frozen, not implemented. Mirrors HostSessionApi server-side. */
+/** Mirrors HostSessionApi server-side. Slice B2 implements the own-session READS
+ *  (`readTranscript`/`readToolCall`) through the contract adapter; `postMessage`
+ *  stays frozen-not-implemented until C2. */
 export interface ServerHostSessionApi {
-	readTranscript(opts?: unknown): Promise<unknown>;
-	readToolCall(toolUseId: string): Promise<unknown>;
+	readTranscript(opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope>;
+	readToolCall(toolUseId: string): Promise<ToolCallRecord | null>;
 	postMessage(msg: unknown): Promise<void>;
 }
 
@@ -73,6 +77,11 @@ export interface CreateServerHostApiOptions {
 	packId: string;
 	/** SERVER-DERIVED contributing tool/group key (`${groupDir}/${tool}`). */
 	contributionId: string;
+	/** Read the BOUND (own) session's raw transcript JSONL (Slice B2). Injected by
+	 *  the gateway so `session.read*` can map rows through the contract adapter.
+	 *  Own-session by construction — there is no parameter for another session. When
+	 *  absent (non-gateway context), the session reads throw a clear error. */
+	readOwnTranscript?: () => Promise<string | null>;
 }
 
 function notImplemented(member: string): never {
@@ -95,6 +104,16 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	void opts.packId;
 	void opts.contributionId;
 
+	// Slice B2: own-session transcript reader (header-bound session, supplied by the
+	// gateway). The reads below map its rows through the single contract adapter.
+	const readOwnTranscript = opts.readOwnTranscript;
+	const requireReader = (member: string): (() => Promise<string | null>) => {
+		if (!readOwnTranscript) {
+			throw new Error(`host.session.${member} requires a gateway transcript reader`);
+		}
+		return readOwnTranscript;
+	};
+
 	const flags = { callRoute: false, session: false, store: false };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
@@ -107,9 +126,19 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		list: () => notImplemented("store.list"),
 	};
 
+	// Slice B2: own-session READS are implemented against the contract adapter; the
+	// `session` capability flag stays FALSE until C2 adds writes (the namespace flips
+	// live as a whole — capability-signaling convention, design §0/§4 B2.3). Bobbit
+	// lands the read bodies early purely to decouple the work.
 	const session: ServerHostSessionApi = {
-		readTranscript: () => notImplemented("session.readTranscript"),
-		readToolCall: () => notImplemented("session.readToolCall"),
+		readTranscript: async (sessionOpts) => {
+			const jsonl = await requireReader("readTranscript")();
+			return buildTranscriptEnvelope(transcriptToHostMessages(jsonl), sessionOpts);
+		},
+		readToolCall: async (toolUseId) => {
+			const jsonl = await requireReader("readToolCall")();
+			return transcriptToToolCall(jsonl, toolUseId);
+		},
 		postMessage: () => notImplemented("session.postMessage"),
 	};
 
