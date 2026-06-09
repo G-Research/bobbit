@@ -310,9 +310,6 @@ function mountPackPanelTab(panelId: string, reg: RegisteredPanel, params?: Recor
 	}
 }
 
-/** Build the per-session Host API a panel render is handed (design extension-host-
- *  phase2 §2a.2 — panel host-context binding). A panel has no tool call, so it binds
- *  `{ sessionId, toolUseId: undefined, packTool }` from the OPENING context: the active
 /** Remove the side-panel tab of an uninstalled panel from every session that has
  *  it open (reconcile-on-uninstall). Best-effort + guarded. */
 function removePackPanelTab(panelId: string): void {
@@ -334,9 +331,18 @@ function removePackPanelTab(panelId: string): void {
 /**
  * Render the content of a mounted pack-panel tab (called from the panel render
  * layer). Returns the loaded panel's `render(params)` projection, or a standard
- * loading placeholder until the lazy module resolves (the load is kicked off by
- * `openPackPanel`; this never starts one, keeping render pure). A panel that is
- * no longer registered (uninstalled) renders nothing.
+ * loading placeholder until the lazy module resolves. A panel that is no longer
+ * registered (uninstalled) renders nothing.
+ *
+ * RELOAD-SAFETY: a persisted side-panel tab is restored by panel-workspace
+ * WITHOUT going through `openPackPanel`, so on a fresh page load `loadedPanels`
+ * is empty even though the panel is registered (after reconcile). To keep the
+ * persistent panel behavior working, a registered-but-not-yet-loaded panel
+ * kicks off its module load HERE at render time (render-time lazy load). This
+ * reuses the same generation-guarded `loadPanelModule` chokepoint — `inFlight`
+ * de-dupes concurrent/repeat renders so at most one fetch runs, and the loader
+ * repaints via `renderApp()` on resolve to swap in the real content. This loads
+ * only the panel module the user already had open — no auto-invoke beyond that.
  */
 export function renderPackPanelContent(panelId: string, params?: Record<string, unknown>): TemplateResult | unknown {
 	const panel = loadedPanels.get(panelId);
@@ -357,7 +363,12 @@ export function renderPackPanelContent(panelId: string, params?: Record<string, 
 			return renderHeader("error", null, html`<span class="font-mono">${panelId}</span> — panel failed to render`);
 		}
 	}
-	if (!panels.has(panelId)) return nothing;
+	const reg = panels.get(panelId);
+	if (!reg) return nothing;
+	// Restored (or otherwise not-yet-loaded) registered panel: kick off its lazy
+	// module load. `loadPanelModule` is generation-guarded and `inFlight`-deduped,
+	// so repeated render-time calls share one fetch and repaint on resolve.
+	void loadPanelModule(panelId, reg);
 	return html`
 		<div class="p-4 text-sm text-muted-foreground" data-pack-panel-loading=${panelId}>
 			Loading ${panelId}…

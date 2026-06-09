@@ -274,4 +274,44 @@ test.describe("Extension Host Phase 2 — artifacts-as-pack litmus (D1)", () => 
 			}, { timeout: 15_000 })
 			.toBe(0);
 	});
+
+	// Regression: a persisted side-panel tab is restored by panel-workspace WITHOUT
+	// going through openPackPanel, so on reload `loadedPanels` is empty even though
+	// the panel is registered. renderPackPanelContent must kick off the module load
+	// at render time (render-time lazy load) or the restored tab is stuck on
+	// "Loading…" forever. The other reload case (re-OPEN after reload + deep-link)
+	// is covered above; this proves reload-with-the-tab-ALREADY-open auto-reloads.
+	test("reload with the viewer panel tab already open → the tab auto-reloads its module (not stuck on Loading…)", async ({ page }) => {
+		await page.setViewportSize({ width: 1400, height: 900 });
+		await installArtifactsPack();
+
+		await openApp(page);
+		await createSessionViaUI(page);
+		const sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+		expect(sid, "a session must be selected").toBeTruthy();
+
+		// Drive one artifact turn → pill mounts → click it → the viewer panel opens.
+		await sendMessage(page, HTML_ARTIFACT.trigger);
+		await expect(page.locator(pillFor(HTML_ARTIFACT.id)).first()).toBeVisible({ timeout: 25_000 });
+		await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
+		await page.locator(pillFor(HTML_ARTIFACT.id)).first().click();
+		await expect(page.locator(tid("pack-panel-root"))).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(tid("artifact-viewer-content")).first()).toBeVisible({ timeout: 15_000 });
+
+		// ── Reload WHILE the viewer panel tab is still open. The tab is restored from
+		// persistence; renderPackPanelContent must auto-load the (registered but not-
+		// yet-loaded) panel module WITHOUT any further click, then rehydrate from the
+		// persisted store. Before the fix this tab stayed on "Loading…" forever. ──
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+
+		// The pack-panel workspace re-mounts the restored tab, and its content swaps
+		// from the loading placeholder to the real viewer with NO user gesture.
+		await expect(page.locator(tid("pack-panel-root")), "the restored pack-panel tab must re-mount on reload").toBeVisible({ timeout: 20_000 });
+		const restored = page.locator(tid("artifact-viewer-content")).first();
+		await expect(restored, "the restored tab must auto-load its module + rehydrate, not stay on Loading…").toBeVisible({ timeout: 20_000 });
+		await expect(restored).toHaveAttribute("data-artifact-id", HTML_ARTIFACT.id);
+		await expect(restored).toHaveAttribute("data-artifact-type", "html");
+		await expect(page.locator(`[data-pack-panel-loading="artifacts.viewer"]`), "the loading placeholder must not persist").toHaveCount(0);
+	});
 });
