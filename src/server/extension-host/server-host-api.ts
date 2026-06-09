@@ -66,6 +66,13 @@ export interface CreateServerHostApiOptions {
 	sessionId: string;
 	/** The verified tool_use id this action is acting on (bound identity). */
 	toolUseId?: string;
+	/** SERVER-DERIVED pack id (never caller-supplied) — the directory name under
+	 *  `market-packs/` of the winning contribution. Empty for a non-pack (builtin).
+	 *  Bound in closure; consumed by the scoped Phase-2 capabilities
+	 *  (store/session/callRoute) when they land. See pack-identity.ts. */
+	packId: string;
+	/** SERVER-DERIVED contributing tool/group key (`${groupDir}/${tool}`). */
+	contributionId: string;
 }
 
 function notImplemented(member: string): never {
@@ -79,8 +86,14 @@ function notImplemented(member: string): never {
  * is the action endpoint itself (which already authorizes + audits the call).
  */
 export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHostApi {
+	// The bound identity is held in closure: sessionId + toolUseId (Phase 1) plus
+	// the SERVER-DERIVED packId + contributionId (Slice A). The scoped Phase-2
+	// capabilities (store/session/callRoute) read these when they land; no flag
+	// flips in Slice A (identity is plumbing).
 	void opts.sessionId;
 	void opts.toolUseId;
+	void opts.packId;
+	void opts.contributionId;
 
 	const flags = { callRoute: false, session: false, store: false };
 	const capabilities: ServerHostCapabilities = {

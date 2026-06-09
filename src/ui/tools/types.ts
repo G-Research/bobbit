@@ -36,6 +36,14 @@ export interface ToolRenderContext {
 	 * it. Optional so existing renderers and test fixtures need no change.
 	 */
 	host?: HostApi;
+	/**
+	 * The tool name whose pack owns this renderer (Slice A — design
+	 * extension-host-phase2.md §2.3). The scoped Phase-2 client capabilities
+	 * (callRoute/store/session) name only this TOOL; the server maps tool → winning
+	 * pack to derive the trusted packId (the client never sends a packId). Built-in
+	 * renderers leave it undefined.
+	 */
+	packTool?: string;
 }
 
 export interface ToolRenderer<TParams = any, TDetails = any> {

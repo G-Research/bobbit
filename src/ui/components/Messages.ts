@@ -708,7 +708,8 @@ export class ToolMessage extends LitElement {
 				sessionId: sessionIdCtx,
 				goalId: goalIdCtx,
 				getAskResponseAnswers,
-				host: getHostApi(sessionIdCtx, this.toolCall.id),
+				packTool: toolName,
+				host: getHostApi(sessionIdCtx, this.toolCall.id, toolName),
 			},
 		);
 

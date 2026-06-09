@@ -43,6 +43,7 @@ import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/too
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { authorizeActionRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
+import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
@@ -5286,9 +5287,16 @@ async function handleApiRoute(
 		// endpoint is same-origin and built here, so there is no caller-supplied URL
 		// or Authorization header to sanitize. `ctx.host` carries only the bound
 		// identity (+ frozen Phase-2 stubs).
+		// Slice A: derive the pack identity SERVER-SIDE from the SAME session-project
+		// resolver the dispatcher loads the winning module from (no split-brain). The
+		// client never sends a packId — it names only a tool, and the server maps
+		// tool → winning pack (design extension-host-phase2.md §2.2).
+		const ident = resolvePackIdentityForTool(sessionToolManager, tool);
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
 			toolUseId,
+			packId: ident.packId,
+			contributionId: ident.contributionId,
 		});
 		const start = Date.now();
 		try {

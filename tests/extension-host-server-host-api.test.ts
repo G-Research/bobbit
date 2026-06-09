@@ -20,7 +20,7 @@ import { createServerHostApi } from "../src/server/extension-host/server-host-ap
 
 describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	it("capabilities reports the scoped Phase-2 caps as false (single source of truth)", () => {
-		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu" });
+		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
 		assert.equal(host.capabilities.callRoute, false);
 		assert.equal(host.capabilities.session, false);
 		assert.equal(host.capabilities.store, false);
@@ -29,19 +29,19 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	});
 
 	it("exposes frozen version + contractVersion", () => {
-		const host = createServerHostApi({ sessionId: "s" });
+		const host = createServerHostApi({ sessionId: "s", packId: "", contributionId: "g/t" });
 		assert.equal(typeof host.version, "number");
 		assert.equal(typeof host.contractVersion, "number");
 	});
 
 	it("does NOT expose a gateway member (escape hatch removed)", () => {
-		const host = createServerHostApi({ sessionId: "s" });
+		const host = createServerHostApi({ sessionId: "s", packId: "", contributionId: "g/t" });
 		assert.equal((host as Record<string, unknown>).gateway, undefined);
 	});
 });
 
 describe("createServerHostApi — Phase-2 namespaces are frozen-not-implemented", () => {
-	const host = createServerHostApi({ sessionId: "s", toolUseId: "tu" });
+	const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
 
 	it("store.* throws 'reserved for Phase 2'", () => {
 		assert.throws(() => host.store.get("k"), /reserved for Phase 2/);

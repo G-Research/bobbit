@@ -44,7 +44,17 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
  *  `createServerHostApi({ sessionId, toolUseId, ... })` contract (§3.2), where
  *  pack identity is SERVER-DERIVED from the resolved winning contribution —
  *  never passed by extension code. */
-export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
+export function getHostApi(
+	sessionId: string | undefined,
+	toolUseId: string | undefined,
+	packTool?: string,
+): HostApi {
+	// `packTool` (Slice A) is the tool name whose pack owns this renderer. It is
+	// held in closure for the scoped Phase-2 capabilities (callRoute/store/session)
+	// to send as `tool` so the server can derive the trusted packId (the client
+	// never sends a packId — design extension-host-phase2.md §2.3). No behavior
+	// change to Phase-1 invokeAction/requestRender; the Phase-2 stubs still throw.
+	void packTool;
 	const notImpl = (m: string): never => {
 		throw new Error(`host.${m} is reserved for Phase 2`);
 	};
