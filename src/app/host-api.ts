@@ -64,10 +64,7 @@ export function getHostApi(
 	// held in closure for the scoped Phase-2 capabilities (callRoute/store/session)
 	// to send as `tool` so the server can derive the trusted packId (the client
 	// never sends a packId — design extension-host-phase2.md §2.3). Slice B1 wires
-	// `store.*` through it; the remaining Phase-2 stubs (callRoute/session/ui) throw.
-	const notImpl = (m: string): never => {
-		throw new Error(`host.${m} is reserved for Phase 2`);
-	};
+	// `store.*` through it; with C1/C2 every Phase-2 capability is now live (no stubs).
 	// Slice B1: POST a store op to /api/ext/store/:op, sending the bound `packTool`
 	// as `tool` so the server derives the trusted packId (client never sends one).
 	const storeOp = async (op: "get" | "put" | "list", payload: Record<string, unknown>): Promise<unknown> => {

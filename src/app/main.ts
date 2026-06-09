@@ -94,18 +94,26 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 // E2E can assert the running UI reconciles (stale pack renderer removed, built-in
 // restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
 (window as any).__bobbitReconcilePackRenderers = async () => {
-	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
-		import("./api.js"),
-		import("./pack-renderers.js"),
-	]);
-	const pid = state.activeProjectId ?? undefined;
-	registerPackRenderers(await fetchTools(pid), pid);
-	// Slice B4 — re-drive pack-panel reconciliation the same way (browser E2E hook).
-	const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
-	await reconcilePackPanelsForProject(pid);
-	// Slice C1 — re-drive pack-entrypoint reconciliation the same way.
-	const { reconcilePackEntrypointsForProject } = await import("./pack-entrypoints.js");
-	await reconcilePackEntrypointsForProject(pid);
+	// Delegate to the REAL marketplace-mutation reconcile (renderers + panels +
+	// entrypoints), which FORCE re-registers from freshly fetched metadata —
+	// bypassing the per-registry dedupe guard so an install/uninstall tears down
+	// removed renderers/panels/entrypoints+routes WITHOUT a reload. The previous
+	// hook only force-registered renderers and used the DEDUPED panel/entrypoint
+	// reconcile, so an uninstall left a stale pack panel/route mounted (a latent
+	// test-hook bug surfaced by the D2 litmus uninstall-reconcile assertion).
+	const { reconcileRenderersForActiveSession } = await import("./marketplace-page.js");
+	await reconcileRenderersForActiveSession();
+};
+
+// E2E test hook: run a pack composer-slash/git-widget/command-palette launcher
+// entrypoint by id — the SAME `runLauncherEntrypoint` the MessageEditor slash menu
+// calls on a user click (Slice C1). Lets the pr-walkthrough-pack browser E2E
+// (tests/e2e/ui/pr-walkthrough-pack.spec.ts) trigger "entrypoint launches the
+// panel" deterministically without racing the composer's one-shot slash-skills
+// cache. Faithful: it exercises the real launcher→navigate→openPanel chain.
+(window as any).__bobbitRunPackLauncher = async (id: string): Promise<void> => {
+	const { runLauncherEntrypoint } = await import("./pack-entrypoints.js");
+	runLauncherEntrypoint(id);
 };
 
 function hasActiveProposalPanel(): boolean {
