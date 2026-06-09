@@ -100,6 +100,9 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 	]);
 	const pid = state.activeProjectId ?? undefined;
 	registerPackRenderers(await fetchTools(pid), pid);
+	// Slice B4 — re-drive pack-panel reconciliation the same way (browser E2E hook).
+	const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
+	await reconcilePackPanelsForProject(pid);
 };
 
 function hasActiveProposalPanel(): boolean {
@@ -546,7 +549,10 @@ async function initApp() {
 					// project (session-manager) so a reload / deep-link into a session
 					// whose project differs from the active/default resolves correctly.
 					await reconcilePackRenderersForProject(state.activeProjectId ?? undefined);
-				} catch { /* non-fatal — built-in renderers are unaffected */ }
+					// Slice B4 — same lifecycle for pack-contributed side panels.
+					const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
+					await reconcilePackPanelsForProject(state.activeProjectId ?? undefined);
+				} catch { /* non-fatal — built-in renderers/panels are unaffected */ }
 			})();
 
 			// Load saved preferences (palette, timestamps, AI gateway)

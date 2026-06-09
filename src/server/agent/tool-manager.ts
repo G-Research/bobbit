@@ -4,7 +4,7 @@ import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
-import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { parseContributions, computeRendererKind, type ToolContributions, type PanelContribution } from "./tool-contributions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -57,6 +57,9 @@ export interface ToolInfo {
 	actionNames?: string[];
 	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive wire field). */
 	storeIds?: string[];
+	/** Optional `panels:` the tool contributes (Slice B4, additive wire field). The
+	 *  `entry` path stays server-side; the client addresses panels by `id`. */
+	panels?: { id: string; title?: string }[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
@@ -66,10 +69,13 @@ export interface ToolInfo {
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
-function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds"> {
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds" | "panels"> {
 	const c = base.contributions;
 	return {
 		storeIds: c.stores?.map((s) => s.id),
+		// Slice B4 — expose declared panels (id + title only; the ESM `entry` path
+		// stays server-side, served by the bearer-only panel endpoint).
+		panels: c.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),
 		// Source the renderer from the PARSED/validated contribution — NOT the raw
 		// `base.renderer` — so an unsafe/dropped renderer path (e.g. `../evil.js`,
 		// rejected by parseContributions) yields rendererKind "builtin", never "pack".
@@ -638,6 +644,9 @@ export class ToolManager {
 		actionsModule?: string;
 		rendererKind?: "builtin" | "pack";
 		actionNames?: string[];
+		/** Slice B4 — typed `panels:` (with the ESM `entry` path) so the panel GET
+		 *  endpoint can resolve a panelId to its on-disk module. */
+		panels?: PanelContribution[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
@@ -654,6 +663,7 @@ export class ToolManager {
 			actionsModule: c.actions?.module,
 			rendererKind: computeRendererKind(base.baseDir, c.renderer),
 			actionNames: c.actions?.names,
+			panels: c.panels,
 		};
 	}
 

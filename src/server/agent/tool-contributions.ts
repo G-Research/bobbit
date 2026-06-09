@@ -21,8 +21,20 @@ export interface ToolContributions {
 	/** Slice B1 — advisory `stores:` declarations (the runtime backend is keyed by
 	 *  the server-derived packId, so this is a declaration/validation aid only). */
 	stores?: StoreContribution[];
+	/** Slice B4 — typed `panels:` declarations (pack-contributed side panels). Each
+	 *  `entry` is a pre-built ESM module path served by the bearer-only panel
+	 *  endpoint and lazy-imported by the client `pack-panels.ts` registry. */
+	panels?: PanelContribution[];
 	/** Phase-2 keys still parsed-for-shape only, retained verbatim, NOT acted on. */
 	reserved: ReservedContributions;
+}
+
+/** Slice B4 — a single `panels:` entry: a pack-contributed side panel. `entry` is
+ *  the pre-built ESM module path (relative to the tool's group dir, path-safe). */
+export interface PanelContribution {
+	id: string;
+	title?: string;
+	entry: string;
 }
 
 /** A single `stores:` entry — an advisory declaration that the tool uses a store. */
@@ -40,14 +52,15 @@ export interface ToolActionsContribution {
 
 /** Phase-2 contribution keys. Validated for *shape* only, then ignored. Never rejected. */
 export interface ReservedContributions {
-	panels?: unknown[];
 	entrypoints?: unknown[];
 	routes?: unknown[];
 }
 
 const ACTION_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const STORE_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const RESERVED_KEYS = ["panels", "entrypoints", "routes"] as const;
+// Slice B4 — panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
+const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const RESERVED_KEYS = ["entrypoints", "routes"] as const;
 
 /**
  * A path supplied in a tool YAML (`renderer`/`actions.module`) is safe IFF it is a
@@ -96,6 +109,12 @@ export function parseContributions(data: unknown, filePath: string): ToolContrib
 	if (obj.stores !== undefined) {
 		const parsed = parseStores(obj.stores, filePath);
 		if (parsed.length > 0) result.stores = parsed;
+	}
+
+	// ── panels (Slice B4 — typed; tolerant, never rejects) ──
+	if (obj.panels !== undefined) {
+		const parsed = parsePanels(obj.panels, filePath);
+		if (parsed.length > 0) result.panels = parsed;
 	}
 
 	// ── reserved Phase-2 keys: shape-validate (arrays), retain verbatim, never reject ──
@@ -179,6 +198,45 @@ export function parseStores(raw: unknown, filePath: string): StoreContribution[]
 		if (seen.has(id)) continue;
 		seen.add(id);
 		out.push({ id });
+	}
+	return out;
+}
+
+/**
+ * Parse the `panels:` contribution into typed `PanelContribution[]` (Slice B4).
+ * Each entry is an object `{ id, title?, entry }`; `entry` must be a path-safe
+ * relative ESM module path (`isSafeRelativePath` — reject traversal). Malformed
+ * entries are dropped with a warning — the block NEVER rejects the tool (mirrors
+ * `parseStores`). Duplicate ids keep the first occurrence.
+ */
+export function parsePanels(raw: unknown, filePath: string): PanelContribution[] {
+	if (!Array.isArray(raw)) {
+		console.warn(`[tool-contributions] 'panels' is not an array in ${filePath}; ignoring`);
+		return [];
+	}
+	const seen = new Set<string>();
+	const out: PanelContribution[] = [];
+	for (const entry of raw) {
+		if (!entry || typeof entry !== "object") {
+			console.warn(`[tool-contributions] Dropping invalid 'panels' entry in ${filePath}`);
+			continue;
+		}
+		const obj = entry as Record<string, unknown>;
+		const id = obj.id;
+		const entryPath = obj.entry;
+		if (typeof id !== "string" || !PANEL_ID_RE.test(id)) {
+			console.warn(`[tool-contributions] Dropping 'panels' entry with invalid id in ${filePath}`);
+			continue;
+		}
+		if (typeof entryPath !== "string" || !isSafeRelativePath(entryPath)) {
+			console.warn(`[tool-contributions] Dropping 'panels' entry '${id}' with unsafe/missing entry in ${filePath}`);
+			continue;
+		}
+		if (seen.has(id)) continue;
+		seen.add(id);
+		const panel: PanelContribution = { id, entry: entryPath };
+		if (typeof obj.title === "string" && obj.title.length > 0) panel.title = obj.title;
+		out.push(panel);
 	}
 	return out;
 }

@@ -1,8 +1,8 @@
 import type { ProposalType } from "./proposal-registry.js";
 
-export type PanelWorkspaceKind = "preview" | "proposal" | "review" | "inbox" | "walkthrough";
+export type PanelWorkspaceKind = "preview" | "proposal" | "review" | "inbox" | "walkthrough" | "pack";
 export type LegacyPanelWorkspaceKind = PanelWorkspaceKind | "chat";
-export type LegacyPanelTab = "chat" | "preview" | "review" | "inbox" | "walkthrough" | ProposalType;
+export type LegacyPanelTab = "chat" | "preview" | "review" | "inbox" | "walkthrough" | "pack" | ProposalType;
 
 export interface PanelWorkspaceTab {
 	id: string;
@@ -45,6 +45,17 @@ export interface PanelWorkspaceTab {
 			prNumber?: string;
 			prTitle?: string;
 			prBody?: string;
+			[key: string]: unknown;
+		}
+		| {
+			/** Slice B4 — a pack-contributed side panel (design extension-host-phase2.md §6).
+			 *  `panelId` keys the client pack-panel registry; `params` is the typed
+			 *  PanelTarget.params the panel rehydrates from (e.g. `{ artifactId }`). */
+			type: "pack";
+			panelId: string;
+			tool?: string;
+			params?: Record<string, unknown>;
+			sessionId?: string;
 			[key: string]: unknown;
 		};
 	state?: Record<string, unknown>;
@@ -131,6 +142,8 @@ const PROPOSAL_LABELS: Record<ProposalType, string> = {
 const PREVIEW_ENTRY_ID_RE = /^preview:entry:([^:]+)(?::v:(\d+))?$/;
 const PROPOSAL_ID_RE = /^proposal:([^:]+)(?::rev:(\d+))?$/;
 const WALKTHROUGH_ID_RE = /^walkthrough:([^:]+)$/;
+// Slice B4 — pack side-panel tab id scheme `pack:<encoded panelId>`.
+const PACK_PANEL_ID_RE = /^pack:(.+)$/;
 
 function isLegacyPreviewPanelTabId(id: string | null | undefined): boolean {
 	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || id === LIVE_PREVIEW_PANEL_TAB_ID;
@@ -215,13 +228,32 @@ function isWalkthroughPanelTabId(id: string): boolean {
 	return typeof decoded === "string" && decoded.length > 0;
 }
 
+/** Build the side-panel tab id for a pack panel (Slice B4). */
+export function packPanelTabId(panelId: string): string {
+	return `pack:${encodeURIComponent(panelId)}`;
+}
+
+/** Extract the panelId from a `pack:<id>` tab id, or undefined if not one. */
+export function packPanelIdFromTabId(id: string | null | undefined): string | undefined {
+	if (!id) return undefined;
+	const match = PACK_PANEL_ID_RE.exec(id);
+	if (!match) return undefined;
+	const decoded = decodeTabComponent(match[1]);
+	return decoded && decoded.length > 0 ? decoded : undefined;
+}
+
+function isPackPanelTabId(id: string): boolean {
+	return packPanelIdFromTabId(id) != null;
+}
+
 export function isSidePanelTabId(id: unknown): id is string {
 	if (typeof id !== "string" || !id) return false;
 	if (id === INBOX_PANEL_TAB_ID) return true;
 	if (isPreviewPanelTabId(id)) return true;
 	if (proposalTypeFromId(id)) return true;
 	if (isReviewPanelTabId(id)) return true;
-	return isWalkthroughPanelTabId(id);
+	if (isWalkthroughPanelTabId(id)) return true;
+	return isPackPanelTabId(id);
 }
 
 function panelTabKindFromId(id: string): PanelWorkspaceKind | undefined {
@@ -230,6 +262,7 @@ function panelTabKindFromId(id: string): PanelWorkspaceKind | undefined {
 	if (proposalTypeFromId(id)) return "proposal";
 	if (isReviewPanelTabId(id)) return "review";
 	if (isWalkthroughPanelTabId(id)) return "walkthrough";
+	if (isPackPanelTabId(id)) return "pack";
 	return undefined;
 }
 
@@ -690,6 +723,24 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 			legacyTab: "walkthrough",
 			source: { ...source, type: "walkthrough", changesetId, title } as PanelWorkspaceTab["source"],
 			state: { ...state, changesetId },
+		};
+	}
+	if (kind === "pack") {
+		const source = (rawTab.source || {}) as Record<string, unknown>;
+		const tabState = (rawTab.state || {}) as Record<string, unknown>;
+		const panelId = packPanelIdFromTabId(id)
+			|| (typeof source.panelId === "string" ? source.panelId : "")
+			|| (typeof tabState.panelId === "string" ? tabState.panelId : "");
+		const title = rawTab.title || panelId || "Panel";
+		return {
+			...rawTab,
+			id,
+			kind: "pack",
+			title,
+			label: rawTab.label || title,
+			legacyTab: "pack",
+			source: { ...source, type: "pack", panelId } as PanelWorkspaceTab["source"],
+			state: { ...tabState, panelId },
 		};
 	}
 	return {

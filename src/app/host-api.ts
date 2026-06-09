@@ -26,6 +26,7 @@ import {
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
+import { openPackPanel } from "./pack-panels.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -160,7 +161,11 @@ export function getHostApi(
 			subscribe: () => notImpl("session.subscribe"),
 		} as HostApi["session"],
 		ui: {
-			openPanel: () => notImpl("ui.openPanel"),
+			// Slice B4: open (or focus) a pack-contributed side panel via the client
+			// pack-panel registry (lazy Blob-URL import + mount). `flags.ui` stays FALSE
+			// until C1 wires navigate — the whole `ui` namespace flips live together
+			// (capability-signaling convention). `navigate` stays throwing until then.
+			openPanel: (target) => openPackPanel(target),
 			navigate: () => notImpl("ui.navigate"),
 		} as HostApi["ui"],
 		store: {

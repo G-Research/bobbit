@@ -154,12 +154,25 @@ export function activeSessionProjectId(): string | undefined {
  *  `registerPackRenderers` also tears down renderers no longer present — the
  *  uninstall reconciliation path (§4a). Best-effort; never throws. */
 export async function reconcileRenderersForActiveSession(): Promise<void> {
-	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+	const [{ fetchTools }, { registerPackRenderers }, { registerPackPanels }] = await Promise.all([
 		import("./api.js"),
 		import("./pack-renderers.js"),
+		import("./pack-panels.js"),
 	]);
 	const projectId = activeSessionProjectId();
-	registerPackRenderers(await fetchTools(projectId), projectId);
+	const tools = await fetchTools(projectId);
+	registerPackRenderers(tools, projectId);
+	// Slice B4 — same install/uninstall reconcile for pack-contributed panels. The
+	// dedupe guard would skip an unchanged project, so re-register directly from the
+	// freshly-fetched metadata (uninstall reconciliation drops removed panels).
+	const panelInfos = tools.flatMap((t) => {
+		const declared = (t as { panels?: Array<{ id?: unknown; title?: unknown }> }).panels;
+		if (!Array.isArray(declared)) return [];
+		return declared
+			.filter((p) => typeof p?.id === "string")
+			.map((p) => ({ panelId: p.id as string, tool: t.name, title: typeof p?.title === "string" ? p.title : undefined }));
+	});
+	registerPackPanels(panelInfos, projectId);
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {

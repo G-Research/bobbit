@@ -78,22 +78,30 @@ describe("parseContributions — path traversal rejection (degrades, never throw
 
 describe("parseContributions — Phase-2 reserved keys (accepted + ignored, never rejected)", () => {
 	it("retains valid array reserved keys verbatim and never throws", () => {
-		const panels = [{ id: "demo.sidebar", title: "Demo", entry: "panel.js" }];
 		const c = parseContributions(
-			{ name: "t", panels, entrypoints: [{ id: "e" }], routes: [{ path: "/x" }] },
+			{ name: "t", entrypoints: [{ id: "e" }], routes: [{ path: "/x" }] },
 			FP,
 		);
 		// Parsed-and-reserved: present, retained verbatim, NOT promoted to load-bearing fields.
-		assert.deepEqual(c.reserved.panels, panels);
 		assert.deepEqual(c.reserved.entrypoints, [{ id: "e" }]);
 		assert.deepEqual(c.reserved.routes, [{ path: "/x" }]);
 		assert.equal(c.renderer, undefined);
 		assert.equal(c.actions, undefined);
 	});
 
+	it("Slice B4 — `panels:` is GRADUATED to a typed field (no longer reserved)", () => {
+		const c = parseContributions(
+			{ name: "t", panels: [{ id: "demo.sidebar", title: "Demo", entry: "panel.js" }] },
+			FP,
+		);
+		assert.deepEqual(c.panels, [{ id: "demo.sidebar", title: "Demo", entry: "panel.js" }]);
+		// `panels` is no longer carried as a reserved key.
+		assert.equal((c.reserved as Record<string, unknown>).panels, undefined);
+	});
+
 	it("malformed reserved block (non-array) degrades — tool still parses, key dropped", () => {
-		const c = parseContributions({ name: "t", panels: { not: "an array" }, renderer: "R.js" }, FP);
-		assert.equal(c.reserved.panels, undefined);
+		const c = parseContributions({ name: "t", entrypoints: { not: "an array" }, renderer: "R.js" }, FP);
+		assert.equal(c.reserved.entrypoints, undefined);
 		// the rest of the manifest still parses
 		assert.equal(c.renderer, "R.js");
 	});

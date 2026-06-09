@@ -2076,6 +2076,11 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
+	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive). */
+	storeIds?: string[];
+	/** Optional `panels:` the tool contributes (Slice B4, additive). The ESM
+	 *  `entry` path stays server-side; the client addresses panels by `id`. */
+	panels?: { id: string; title?: string }[];
 	grantPolicy?: string;
 }
 

@@ -5219,6 +5219,52 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/tools/:tool/panel/:panelId — serve a PACK tool's pre-built ESM
+	// side-panel module bytes (Slice B4; design extension-host-phase2.md §6.2).
+	// Admin-bearer ONLY (enforced before handleApiRoute): serving the module bytes
+	// is a static-asset-equivalent, NOT a capability invocation, so there is
+	// deliberately NO allowedTools check here — EXACTLY like the renderer endpoint
+	// above (that gate is on the ACTION endpoint). The panel `entry` path is
+	// re-validated to stay within the tool's group dir (anti path-traversal).
+	const panelMatch = url.pathname.match(/^\/api\/tools\/([^/]+)\/panel\/([^/]+)$/);
+	if (panelMatch && req.method === "GET") {
+		const tool = decodeURIComponent(panelMatch[1]);
+		const panelId = decodeURIComponent(panelMatch[2]);
+		// Resolve through the PROJECT-scoped tool manager when a projectId is given
+		// (design §4b — same `?? toolManager` fallback): a pack installed at PROJECT
+		// scope, or one shadowing a same-named global tool, must serve the PROJECT
+		// winner — never the split-brain server-level one.
+		const panelProjectId = url.searchParams.get("projectId") || undefined;
+		const panelTm = resolveActionToolManager(
+			toolManager,
+			panelProjectId ? projectContextManager.getOrCreate(panelProjectId)?.toolManager : undefined,
+		);
+		const loc = panelTm.resolveToolLocation(tool);
+		const panel = loc?.panels?.find((p) => p.id === panelId);
+		if (!loc || !loc.baseDir || !panel) {
+			json({ error: "no such panel for this tool" }, 404);
+			return;
+		}
+		const groupAbs = path.join(loc.baseDir, loc.groupDir || "");
+		const fileAbs = path.resolve(groupAbs, panel.entry);
+		// Path-traversal re-validation: fileAbs must stay within the group dir.
+		const rel = path.relative(groupAbs, fileAbs);
+		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+			json({ error: "invalid panel path" }, 404);
+			return;
+		}
+		let source: string;
+		try {
+			source = fs.readFileSync(fileAbs, "utf-8");
+		} catch {
+			json({ error: "panel module not found" }, 404);
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "text/javascript", "Cache-Control": "no-cache" });
+		res.end(source);
+		return;
+	}
+
 	// POST /api/tools/:tool/actions/:action — invoke a pack tool's server action
 	// handler (design §4b / §5). The LLM can curl this directly, so the
 	// allowedTools guard here — NOT the agent layer — is the real gate (§5 i).
