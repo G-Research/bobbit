@@ -546,6 +546,63 @@ export class MockAgentCore {
 				toolId: "tu-artifact-img",
 			};
 		}
+		// D1 parity-hardening variants: the formerly-fallback types now render for
+		// REAL via the VENDORED libs bundled into the pack (hljs / pdfjs / docx-preview)
+		// + an html artifact whose script logs to console (capture parity).
+		if (text.includes("ARTIFACT_DEMO_CODE")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-code",
+					filename: "snippet.ts",
+					content: "const greeting: string = \"hi\";\nfunction add(a: number, b: number) { return a + b; }",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-code",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_CONSOLE")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-console",
+					filename: "logger.html",
+					content: "<h1>Console artifact</h1><script>console.log('ARTIFACT_LOG_LINE');console.error('ARTIFACT_ERR_LINE');<\/script>",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-console",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_PDF")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-pdf",
+					filename: "doc.pdf",
+					// A minimal one-page PDF (text "PDF Parity OK"), base64.
+					content: "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDEyMF0vUmVzb3VyY2VzPDwvRm9udDw8L0YxIDQgMCBSPj4+Pi9Db250ZW50cyA1IDAgUj4+ZW5kb2JqCjQgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iago1IDAgb2JqPDwvTGVuZ3RoIDQzPj5zdHJlYW0KQlQgL0YxIDIwIFRmIDIwIDYwIFRkIChQREYgUGFyaXR5IE9LKSBUaiBFVAplbmRzdHJlYW0gZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDUyIDAwMDAwIG4gCjAwMDAwMDAxMDEgMDAwMDAgbiAKMDAwMDAwMDIxMSAwMDAwMCBuIAowMDAwMDAwMjcyIDAwMDAwIG4gCnRyYWlsZXI8PC9TaXplIDYvUm9vdCAxIDAgUj4+CnN0YXJ0eHJlZgozNjEKJSVFT0Y=",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-pdf",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_DOCX")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-docx",
+					filename: "doc.docx",
+					// A minimal valid DOCX (one paragraph "DOCX Parity OK"), base64.
+					content: "UEsDBAoAAAAAAO49yVx5bjPXrQEAAK0BAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04IiBzdGFuZGFsb25lPSJ5ZXMiPz48VHlwZXMgeG1sbnM9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9wYWNrYWdlLzIwMDYvY29udGVudC10eXBlcyI+PERlZmF1bHQgRXh0ZW5zaW9uPSJyZWxzIiBDb250ZW50VHlwZT0iYXBwbGljYXRpb24vdm5kLm9wZW54bWxmb3JtYXRzLXBhY2thZ2UucmVsYXRpb25zaGlwcyt4bWwiLz48RGVmYXVsdCBFeHRlbnNpb249InhtbCIgQ29udGVudFR5cGU9ImFwcGxpY2F0aW9uL3htbCIvPjxPdmVycmlkZSBQYXJ0TmFtZT0iL3dvcmQvZG9jdW1lbnQueG1sIiBDb250ZW50VHlwZT0iYXBwbGljYXRpb24vdm5kLm9wZW54bWxmb3JtYXRzLW9mZmljZWRvY3VtZW50LndvcmRwcm9jZXNzaW5nbWwuZG9jdW1lbnQubWFpbit4bWwiLz48L1R5cGVzPlBLAwQKAAAAAADuPclcAAAAAAAAAAAAAAAABgAAAF9yZWxzL1BLAwQKAAAAAADuPclcm/036ikBAAApAQAACwAAAF9yZWxzLy5yZWxzPD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9InllcyI/PjxSZWxhdGlvbnNoaXBzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L3JlbGF0aW9uc2hpcHMiPjxSZWxhdGlvbnNoaXAgSWQ9InJJZDEiIFR5cGU9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9vZmZpY2VEb2N1bWVudC8yMDA2L3JlbGF0aW9uc2hpcHMvb2ZmaWNlRG9jdW1lbnQiIFRhcmdldD0id29yZC9kb2N1bWVudC54bWwiLz48L1JlbGF0aW9uc2hpcHM+UEsDBAoAAAAAAO49yVwAAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMECgAAAAAA7j3JXAh++GfXAAAA1wAAABEAAAB3b3JkL2RvY3VtZW50LnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04IiBzdGFuZGFsb25lPSJ5ZXMiPz48dzpkb2N1bWVudCB4bWxuczp3PSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvd29yZHByb2Nlc3NpbmdtbC8yMDA2L21haW4iPjx3OmJvZHk+PHc6cD48dzpyPjx3OnQ+RE9DWCBQYXJpdHkgT0s8L3c6dD48L3c6cj48L3c6cD48L3c6Ym9keT48L3c6ZG9jdW1lbnQ+UEsBAhQACgAAAAAA7j3JXHluM9etAQAArQEAABMAAAAAAAAAAAAAAAAAAAAAAFtDb250ZW50X1R5cGVzXS54bWxQSwECFAAKAAAAAADuPclcAAAAAAAAAAAAAAAABgAAAAAAAAAAABAAAADeAQAAX3JlbHMvUEsBAhQACgAAAAAA7j3JXJv9N+opAQAAKQEAAAsAAAAAAAAAAAAAAAAAAgIAAF9yZWxzLy5yZWxzUEsBAhQACgAAAAAA7j3JXAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAQAAAAVAMAAHdvcmQvUEsBAhQACgAAAAAA7j3JXAh++GfXAAAA1wAAABEAAAAAAAAAAAAAAAAAdwMAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAAFAAUAIAEAAH0EAAAAAA==",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-docx",
+			};
+		}
 
 		// Autonomous skill activation: drives the activate_skill tool path.
 		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).

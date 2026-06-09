@@ -256,6 +256,30 @@ Write against `capabilities` today and these become available additively — no 
 6. **Update** the pack (edit + re-sync + Update) → caches invalidate synchronously; the next call uses the new code.
 7. **Uninstall** → the renderer and actions disappear live (a subsequent action POST 404s); any displaced built-in is restored.
 
+## Bundling npm dependencies into a pack (vendoring)
+
+A renderer/panel module is loaded by the client via a **Blob-URL `import()`** and handed the host toolkit (`{ html, nothing, renderHeader }`) as a FACTORY parameter — it must NOT bare-import `lit`. But it CAN use other npm libraries (syntax highlighters, PDF/DOCX renderers, charting, …) as long as they are **bundled into the served module** ahead of time. "Bundling" is therefore an author-side BUILD convention, not a runtime loader feature:
+
+```
+market-packs/<pack>/src/*.ts        ← SOURCE: imports npm deps freely (never `lit`)
+        │  esbuild (scripts/build-market-packs.mjs)
+        ▼
+market-packs/<pack>/tools/<group>/<entry>.js   ← BUILT: self-contained ESM, committed
+```
+
+Run `npm run build:packs` (wired into `npm run build`, so CI/E2E always rebuild). The marketplace ships the **built** assets as-is, so commit the bundles.
+
+Two hard rules keep a bundle loadable by the Blob-URL loader:
+
+1. **Never bundle `lit`** — it is injected. `lit`/`lit/*` are marked `external`; pack source must not import them.
+2. **One self-contained file per entry — NO code splitting / dynamic chunks.** A Blob-URL module has no resolvable base for `import("./chunk.js")`, so every dep is inlined eagerly (`splitting: false`). Don't lazy-`import()` a bundled dep.
+
+**Web Workers (the pdfjs wrinkle).** A library that spins up a Web Worker can't resolve a sibling worker file from a `blob:` URL, and there is no pack-asset endpoint. Pre-bundle the worker SOURCE to a string (an esbuild virtual module) and create a Blob-URL `workerSrc` from it at runtime — see `market-packs/artifacts/src/binary-render.ts` + the `virtual:pdf-worker` plugin in `scripts/build-market-packs.mjs`.
+
+**Node-safety for unit tests.** Keep pure logic (no DOM-at-import deps) in a node-safe `helpers.ts` the unit suite can import under tsx; libraries that touch DOM globals at module-eval (pdfjs, docx-preview) belong in a browser-only module the bundle pulls in but node never imports. Assert those in the browser E2E.
+
+**Migration case study — artifacts pack.** `market-packs/artifacts/` is the built-in artifact viewer re-expressed as a pack at full behavioral parity: `highlight.js` for code highlighting, `pdfjs-dist` for real PDF page rendering, `docx-preview` for DOCX, and a postMessage console-capture shim — all vendored via this convention. HTML artifacts still render inside a `sandbox="allow-scripts"` iframe (the trust boundary is content-origin, not code). See `tests/artifacts-pack-viewer.test.ts` (node) + `tests/e2e/ui/artifacts-pack.spec.ts` (browser).
+
 ## Security checklist
 
 The Host API is the single security boundary. As an author, your obligations are:

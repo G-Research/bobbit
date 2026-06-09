@@ -67,6 +67,12 @@ const HTML_ARTIFACT = { id: "art-demo-1", trigger: "ARTIFACT_DEMO_TOOL please", 
 const MD_ARTIFACT = { id: "art-demo-md", trigger: "ARTIFACT_DEMO_MD please", filename: "notes.md", content: "# Hello Markdown\n\nSome **bold** and `code` text." };
 const SVG_ARTIFACT = { id: "art-demo-svg", trigger: "ARTIFACT_DEMO_SVG please", filename: "shape.svg" };
 const IMG_ARTIFACT = { id: "art-demo-img", trigger: "ARTIFACT_DEMO_IMG please", filename: "pixel.png" };
+// D1 parity-hardening: the formerly-fallback types now render for REAL via the
+// VENDORED libs bundled into the pack by `build:packs` (hljs / pdfjs / docx-preview).
+const CODE_ARTIFACT = { id: "art-demo-code", trigger: "ARTIFACT_DEMO_CODE please", filename: "snippet.ts" };
+const PDF_ARTIFACT = { id: "art-demo-pdf", trigger: "ARTIFACT_DEMO_PDF please", filename: "doc.pdf" };
+const DOCX_ARTIFACT = { id: "art-demo-docx", trigger: "ARTIFACT_DEMO_DOCX please", filename: "doc.docx" };
+const CONSOLE_ARTIFACT = { id: "art-demo-console", trigger: "ARTIFACT_DEMO_CONSOLE please", filename: "logger.html" };
 
 const tid = (id: string) => `[data-testid="${id}"]`;
 const pillFor = (artifactId: string) => `${tid("artifact-pill")}[data-artifact-id="${artifactId}"]`;
@@ -186,7 +192,9 @@ test.describe("Extension Host Phase 2 — artifacts-as-pack litmus (D1)", () => 
 		const iframe = page.locator(tid("artifact-viewer-iframe"));
 		await expect(iframe, "html artifacts render in a sandboxed iframe").toBeVisible({ timeout: 15_000 });
 		await expect(iframe, "the iframe sandbox must be preserved exactly as HtmlArtifact").toHaveAttribute("sandbox", "allow-scripts");
-		await expect(iframe).toHaveAttribute("srcdoc", HTML_ARTIFACT.content);
+		// srcdoc now carries a prepended console-capture shim; the verbatim content is
+		// still present (trust boundary is content-origin, not the injected capture).
+		await expect(iframe).toHaveAttribute("srcdoc", /Hello Artifact/);
 		expect(storePuts.length, "a store.put must fire on the pill click").toBeGreaterThan(0);
 		expect(storeGets.length, "the panel must read the store to rehydrate").toBeGreaterThan(0);
 
@@ -242,7 +250,7 @@ test.describe("Extension Host Phase 2 — artifacts-as-pack litmus (D1)", () => 
 		const deepViewer = page.locator(tid("artifact-viewer-content")).first();
 		await expect(deepViewer, "the deep-link route must open the viewer rehydrated from store").toBeVisible({ timeout: 15_000 });
 		await expect(deepViewer).toHaveAttribute("data-artifact-id", HTML_ARTIFACT.id);
-		await expect(page.locator(tid("artifact-viewer-iframe"))).toHaveAttribute("srcdoc", HTML_ARTIFACT.content);
+		await expect(page.locator(tid("artifact-viewer-iframe"))).toHaveAttribute("srcdoc", /Hello Artifact/);
 
 		// NOTE (infra gap, see task summary): a COLD reload directly on the `#/ext/...`
 		// hash currently restores no session (the ext route handler establishes no
@@ -273,6 +281,68 @@ test.describe("Extension Host Phase 2 — artifacts-as-pack litmus (D1)", () => 
 				return page.locator(`${tid("pack-panel-root")}[data-pack-panel-id="artifacts.viewer"]`).count();
 			}, { timeout: 15_000 })
 			.toBe(0);
+	});
+
+	// D1 parity hardening (the gap reviewer's flagged fallbacks → REAL rendering via
+	// VENDORED npm libs bundled into the pack by `build:packs`): code is highlighted
+	// by highlight.js, a PDF is rasterised by pdfjs-dist, a DOCX is rendered by
+	// docx-preview, and an HTML artifact's console output is captured — none of these
+	// are fallbacks any more. The bundle build runs before E2E (npm run build →
+	// build:packs), so the served ArtifactViewerPanel.js is fresh.
+	test("vendored-lib parity: code→hljs highlighting, pdf→pdfjs canvas, docx→docx-preview, html→console capture", async ({ page }) => {
+		await page.setViewportSize({ width: 1400, height: 900 });
+		await installArtifactsPack();
+		await openApp(page);
+		await createSessionViaUI(page);
+		const sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+		expect(sid, "a session must be selected").toBeTruthy();
+
+		for (const art of [CODE_ARTIFACT, PDF_ARTIFACT, DOCX_ARTIFACT, CONSOLE_ARTIFACT]) {
+			await sendMessage(page, art.trigger);
+			await expect(page.locator(pillFor(art.id)).first(), `the ${art.filename} pill must mount`).toBeVisible({ timeout: 25_000 });
+			await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
+		}
+
+		const viewer = page.locator(tid("artifact-viewer-content")).first();
+
+		// ── code → REAL highlight.js token spans (was a documented gap). ──
+		await page.locator(pillFor(CODE_ARTIFACT.id)).first().click();
+		await expect(page.locator(tid("pack-panel-root"))).toBeVisible({ timeout: 15_000 });
+		await expect(viewer).toHaveAttribute("data-artifact-id", CODE_ARTIFACT.id, { timeout: 15_000 });
+		await expect(viewer).toHaveAttribute("data-artifact-type", "text");
+		const code = page.locator(`${tid("artifact-viewer-source")} code.hljs`);
+		await expect(code, "code files render in an hljs <code> block").toBeVisible({ timeout: 15_000 });
+		await expect(code.locator("span.hljs-keyword, span[class^='hljs-']").first(), "hljs must emit token spans (REAL highlighting)").toBeVisible({ timeout: 15_000 });
+
+		// ── pdf → REAL pdfjs page canvases (was a native-embed fallback). ──
+		await page.locator(pillFor(PDF_ARTIFACT.id)).first().click();
+		await expect(viewer).toHaveAttribute("data-artifact-id", PDF_ARTIFACT.id, { timeout: 15_000 });
+		await expect(viewer).toHaveAttribute("data-artifact-type", "pdf");
+		await expect(page.locator(tid("artifact-viewer-pdf"))).toBeVisible({ timeout: 15_000 });
+		const pdfCanvas = page.locator(`${tid("artifact-viewer-pdf-pages")} canvas`).first();
+		await expect(pdfCanvas, "pdfjs must rasterise at least one page canvas").toBeVisible({ timeout: 20_000 });
+		// A rendered canvas has real pixel dimensions (proves pdfjs ran, not a stub).
+		await expect.poll(async () => pdfCanvas.evaluate((c: HTMLCanvasElement) => c.width), { timeout: 20_000 }).toBeGreaterThan(0);
+		await expect(page.locator(tid("artifact-viewer-binary-error")), "pdf must render without error").toHaveCount(0);
+
+		// ── docx → REAL docx-preview rendering (was a download fallback). ──
+		await page.locator(pillFor(DOCX_ARTIFACT.id)).first().click();
+		await expect(viewer).toHaveAttribute("data-artifact-id", DOCX_ARTIFACT.id, { timeout: 15_000 });
+		await expect(viewer).toHaveAttribute("data-artifact-type", "docx");
+		const docx = page.locator(tid("artifact-viewer-docx-rendered"));
+		await expect(docx, "docx-preview must render the document").toBeVisible({ timeout: 20_000 });
+		await expect(docx, "the rendered docx must contain the document text").toContainText("DOCX Parity OK", { timeout: 20_000 });
+		await expect(page.locator(tid("artifact-viewer-binary-error")), "docx must render without error").toHaveCount(0);
+
+		// ── html → REAL console capture (was a documented gap): the iframe's
+		// console.log/error are teed to the parent via a postMessage shim. ──
+		await page.locator(pillFor(CONSOLE_ARTIFACT.id)).first().click();
+		await expect(viewer).toHaveAttribute("data-artifact-id", CONSOLE_ARTIFACT.id, { timeout: 15_000 });
+		await expect(viewer).toHaveAttribute("data-artifact-type", "html");
+		const consolePanel = page.locator(tid("artifact-viewer-console"));
+		await expect(consolePanel, "the console panel must appear once the iframe logs").toBeVisible({ timeout: 20_000 });
+		await expect(consolePanel).toContainText("ARTIFACT_LOG_LINE", { timeout: 20_000 });
+		await expect(consolePanel.locator(`${tid("artifact-viewer-console-entry")}[data-log-type="error"]`)).toContainText("ARTIFACT_ERR_LINE", { timeout: 20_000 });
 	});
 
 	// Regression: a persisted side-panel tab is restored by panel-workspace WITHOUT
