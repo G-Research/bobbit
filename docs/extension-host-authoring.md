@@ -33,7 +33,6 @@ A tool pack can contribute several things beyond the tool itself, each declared 
 | **Pack store** | `stores:` | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
 | **Pack routes** | `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints:` | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
-| **Permissions** | `permissions:` | Gateway worker (enable switch) | un-gates `git`/`fs`/`net` for server modules |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events),
 available to any surface that holds a `host`.
@@ -103,7 +102,7 @@ actions:
 - **`actions.module:`** — path (same safety rules) to the actions module. Defaults to `actions.js` when `actions:` is present without an explicit module.
 - **`actions.names:`** — optional allowlist. When present, the endpoint rejects any `:action` not in the list **before loading the module** — author this to fail fast and shrink the attack surface.
 
-> **The Phase-2 keys are live.** A tool may also declare `panels:`, `entrypoints:`, `routes:`, `stores:`, and `permissions:` — each is parsed into a typed contribution, surfaced on `/api/tools`, and acted on (see the [Phase-2 surfaces](#phase-2-surfaces-panels-stores-routes-entrypoints-session) section below). Per-tool parsing stays tolerant: a malformed block degrades to "absent" with a `console.warn`, never a hard rejection. (On an older Phase-1 server these keys are simply ignored, so a forward-authored pack still installs cleanly.)
+> **The Phase-2 keys are live.** A tool may also declare `panels:`, `entrypoints:`, `routes:`, and `stores:` — each is parsed into a typed contribution, surfaced on `/api/tools`, and acted on (see the [Phase-2 surfaces](#phase-2-surfaces-panels-stores-routes-entrypoints-session) section below). Per-tool parsing stays tolerant: a malformed block degrades to "absent" with a `console.warn`, never a hard rejection. (On an older Phase-1 server these keys are simply ignored, so a forward-authored pack still installs cleanly.)
 
 ## Step 3 — the renderer module
 
@@ -232,7 +231,7 @@ The server-side `ctx.host` carries:
 
 There is deliberately **no** `ctx.host.callRoute` or `ctx.host.ui` server-side: a server handler reaches its own pack's route by calling the function directly, and a server module has no UI to drive — so these are CLIENT-only surfaces, intentionally absent (not unimplemented gaps). There is still **no `host.gateway.fetch`** and no raw passthrough. **Feature-detect with `ctx.host.capabilities.<name>` / `ctx.host.capabilities.has(name)`, never with member-presence checks.**
 
-A handler that genuinely needs raw `fs` / `child_process` / network must **declare it** via the manifest `permissions:` key (see *Server-module confinement* below) — server modules run in a confined worker, so they are *not* ambient-authority host code. Removing `gateway.fetch` keeps the *pack→server boundary* a typed, authorized contract with no raw transport to misdirect.
+A handler may use raw `fs` / `child_process` / network directly — server modules are trusted code with full ambient parity (see *Server-module confinement* below). Removing `gateway.fetch` keeps the *pack→server boundary* a typed, authorized contract with no raw transport to misdirect; it is not about restricting the pack's own ambient access.
 
 A renderer/panel reaching dynamic server data uses the client-side, pack-scoped, typed `host.callRoute(name, init)` — it reaches **only** the calling pack's OWN routes (the server derives `<pack>` from the proven `tool`, so an arbitrary gateway path is unaddressable), authorized through the same per-session guard. See the [routes section](#routes--the-packs-own-server-endpoints-hostcallroute).
 
@@ -240,42 +239,31 @@ A renderer/panel reaching dynamic server data uses the client-side, pack-scoped,
 
 Handlers run in a **confined `worker_threads` worker** (see *Server-module confinement* below), not the gateway process — so a runaway or crashing handler can be truly terminated without taking the gateway down. On top of the worker's resource/crash isolation, the dispatcher bounds blast radius: a **per-call timeout** (default 30s) that spans **both** the module load+evaluation *and* the handler execution — on timeout the worker is `terminate()`d and the caller gets 504, while the underlying permit is held until the work settles; a **global concurrency cap** (default 8 in-flight); a **per-session token-bucket rate limit**; **error isolation** (a throw or worker crash becomes a 500, never a process crash); and **audit logging** of every invocation. You do not configure these from the pack; design your handlers to be fast and side-effect-careful regardless.
 
-### Server-module confinement + declared permissions (Phase 2)
+### Server-module confinement (Phase 2)
 
-Pack server modules (`actions.mjs` / `routes.mjs`) no longer run with ambient host
-authority. As of Phase 2 (design [§9](design/extension-host-phase2.md)) every handler
-runs in a **confined worker**: the dangerous Node built-ins (`fs`, `child_process`,
-`net`/`http(s)`, `process`, `worker_threads`, …) are **deny-listed at import**, the
-outbound-network globals (`fetch`/`WebSocket`/…) are **stripped**, the ambient
-`process` is replaced by an **inert shim** (empty env, `cwd()=>"/"`), the module graph
-is **confined to the pack root**, and the worker is **terminated on timeout** with
-memory caps. The only capability a handler gets by default is the `ctx.host` proxy.
-**Default is deny-all** — a pack that declares nothing keeps exactly this confinement.
+Pack server modules (`actions.mjs` / `routes.mjs`) are **trusted code — the same tier as a
+tool or MCP server you installed** — and run with **full ambient parity**: normal `node:`
+built-ins (`fs`/`child_process`/`net`/`http`…), normal network globals (`fetch`/`WebSocket`),
+and the normal `process` with full env. There is **no `permissions` manifest key and no
+capability concept** — you `import("node:child_process")` / `node:fs` and call `fetch`
+exactly as a tool would.
 
-A *trusted* pack can OPT IN to a narrow set of host capabilities via a manifest
-`permissions:` array. The grant is resolved **server-side from the winning
-contribution** (never caller-supplied) and applied to the worker:
+As of Phase 2 (design [§9](design/extension-host-phase2.md)) every handler still runs in a
+**confined worker**, but purely for **resource + crash isolation**: the worker is
+**terminated on timeout** (the CPU control), bounded by **memory caps** (`resourceLimits`),
+and any **child process it spawns is SIGKILLed on terminate** so it cannot outlive the
+wall-time cap. Separately, the module graph's `import`/`require` resolution is **confined to
+the pack root** — but that is cheap import hygiene / loader-stability, **not** a security
+boundary (it is near-cosmetic now that `fs` is ambient: your code can read any file the
+gateway can).
 
-```yaml
-name: my_pack_tool
-actions: actions.mjs
-permissions: ["git", "fs"]   # subset of git | fs | net; absent/empty ⇒ deny-all
-```
-
-| value | grants | notes |
-|-------|--------|-------|
-| `git` | imports `node:child_process` so the pack can spawn the `git` binary | a spawned child is tracked and **killed if the handler times out** (it cannot outlive the wall-time cap); the binary resolves via `PATH` |
-| `fs`  | imports `node:fs` / `node:fs/promises` | reads/writes are NOT path-sandboxed — use `process.cwd()` (see below) to scope to the session dir |
-| `net` | keeps `fetch`/`WebSocket`/… and un-denies `node:net`/`node:http(s)` | outbound network egress |
-
-With `git`/`fs` granted the process shim exposes a **real `cwd()`** (the session
-working dir) plus a **minimal env containing only `PATH`** — never the gateway's full
-env or any token/secret. Because `process.chdir()` is unsupported in a worker, build
-paths / spawn options explicitly from `process.cwd()`:
+The worker's **`process.cwd()` returns the session working dir** (the server-derived session
+worktree) — a tool-parity convenience, since a tool runs rooted there and worker threads
+cannot `process.chdir()`. Build spawn options / paths from `process.cwd()`:
 
 ```js
-import { spawn } from "node:child_process";   // requires permissions: ["git"]
-import { join } from "node:path";              // node:path is never denied
+import { spawn } from "node:child_process";   // ambient — no declaration needed
+import { join } from "node:path";
 export const actions = {
   log: async (ctx) => new Promise((resolve, reject) => {
     const c = spawn("git", ["log", "-1", "--format=%H"], { cwd: process.cwd() });
@@ -285,8 +273,10 @@ export const actions = {
 };
 ```
 
-Ungranted capabilities stay denied/stripped exactly as in the deny-all default, so a
-pack only ever holds the capabilities its manifest declares.
+Relative spawns default their `cwd` to the session dir, and a leading bare-relative `fs`
+path is rebased onto it (so relative fs matches `process.cwd()`); both are conveniences, not
+restrictions. The only `ctx.host` capability is still the mediated Host-API proxy (the
+single ENFORCED cross-pack / cross-session / UI-driving boundary).
 
 ## Step 5 — the client→server call (Host API recap)
 
@@ -338,8 +328,8 @@ Phase 2 makes the rest of the contribution shape load-bearing. Everything below 
 through the **same** Host API your renderer already holds (`ctx.host`, or the `host`
 argument a panel/entrypoint is handed) and authorized through the **same** per-session guard
 — there is still no raw escape hatch. The four new manifest keys (`panels:`, `stores:`,
-`routes:`, `entrypoints:`) and the `permissions:` key are all declared on the **tool YAML**,
-alongside `renderer:`/`actions:`.
+`routes:`, `entrypoints:`) are all declared on the **tool YAML**, alongside
+`renderer:`/`actions:`.
 
 ### How pack identity is bound (you never supply it)
 
@@ -452,29 +442,27 @@ await host.callRoute("publish", { method: "POST", body: { jobId, payload } });
 
 - **Namespace by construction.** The client sends only the surface token; the server derives your `packId` and resolves the route **module** through a **pack-level `RouteRegistry`** — so a panel opened from tool *X* can reach a route declared on tool *Y* in the **same pack**. There is no `<pack>` URL segment to forge.
 - **One route name per pack.** Declaring the same route name on two tools in one pack is a hard rejection at registry build (the rare real-conflict failure). Cross-pack names never collide (the registry is keyed by `packId`).
-- **Server-side, route handlers run in the confined worker** (see *Server-module confinement* below) — so a route that needs `git`/`fs`/`net` must disclose it via `permissions:`.
+- **Server-side, route handlers run in the confined worker** (see *Server-module confinement* below) — trusted code with full ambient parity, so a route may use `git`/`fs`/network directly.
 
-#### Using a declared `permissions:` capability inside a route
+#### Using ambient OS access inside a route
 
-A route (or action) handler that needs ambient OS access **discloses** it in the tool YAML;
-the grant is resolved server-side from the winning contribution and applied to the worker
-(see the full `permissions:` table under *Server-module confinement*). Example: the
+A route (or action) handler may use ambient OS surfaces (`child_process`/`fs`/network)
+directly — server modules are trusted code, no declaration required. Example: the
 PR-walkthrough `bundle` route recomputes a real `git diff` live —
 
 ```yaml
-permissions: [git, fs]      # un-gates node:child_process + node:fs in this pack's worker
 routes:
   module: routes.mjs
   names: [bundle, publish]
 ```
 
 ```js
-// routes.mjs — requires permissions: ["git"]
-import { spawn } from "node:child_process";   // denied unless `git` is disclosed
+// routes.mjs — child_process is ambient, no declaration needed
+import { spawn } from "node:child_process";
 export const routes = {
   bundle: async (ctx, req) => {
-    // process.cwd() is the session working dir (chdir is unavailable in a worker);
-    // the git binary resolves via the PATH-only env the grant provides.
+    // process.cwd() is the session working dir (chdir is unavailable in a worker, so the
+    // bootstrap overrides process.cwd for tool parity); the git binary resolves via PATH.
     const diff = await new Promise((resolve, reject) => {
       const c = spawn("git", ["diff", req.query.baseSha, req.query.headSha], { cwd: process.cwd() });
       let out = ""; c.stdout.on("data", (d) => (out += d));
@@ -485,14 +473,13 @@ export const routes = {
 };
 ```
 
-`permissions:` is **disclosure + an enable switch, not a constrained runner**: disclosing
-`git` un-gates `child_process` *fully* (you may run **any** command, exactly like a tool),
-`fs` un-gates `node:fs` with **no** path containment, `net` restores outbound network. The
-worker still terminates the handler on timeout and SIGKILLs any spawned child, but those are
-**stability** guarantees, not a security boundary against your own trusted code. The worker
-has **no** model credentials / gateway token (PATH-only env) — so credentialed work (e.g.
-LLM synthesis) must happen agent-tool-side and be read back from the store, not done in the
-route. See the PR-walkthrough case study.
+Trusted pack server code runs **exactly like a tool** — `child_process`, `fs` (with no path
+containment), and outbound network are all ambient. The worker still terminates the handler
+on timeout and SIGKILLs any spawned child, but those are **stability** guarantees, not a
+security boundary against your own code. A pack *could* do its own credentialed work (it has
+full ambient env + network), but for PR-walkthrough the LLM card synthesis is kept
+agent-tool-side and read back from the store — a design choice, not a credential restriction.
+See the PR-walkthrough case study.
 
 ### `entrypoints:` — non-chat launchers + deep-link routes (`host.ui.navigate`)
 
@@ -601,8 +588,8 @@ iframe — the trust boundary is content-origin, not which library drew the pixe
 
 ### `market-packs/pr-walkthrough/` — the maximal case (all reserved keys)
 
-The PR-walkthrough viewer uses **every** contribution key plus session reads and a disclosed
-`git`/`fs` permission:
+The PR-walkthrough viewer uses **every** contribution key plus session reads and ambient
+`git`/`fs` in its route worker:
 
 | Built-in piece | Pack contribution |
 |---|---|
@@ -611,12 +598,12 @@ The PR-walkthrough viewer uses **every** contribution key plus session reads and
 | `walkthrough-store.ts` (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) | `stores:` → `host.store.*`, pack-scoped |
 | Deep-link + launchers (`#/walkthrough`, git-widget) | `entrypoints:` — composer-slash + git-widget-button + command-palette launchers **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) |
 | Bespoke transcript access to `submit_pr_walkthrough_yaml` | `host.session.readToolCall(toolUseId)` (own-session, via the adapter) |
-| Live `git diff` recompute | `permissions: [git, fs]` → the `bundle` route runs **real `git`** live in the C3 worker |
+| Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
 Two non-obvious decisions worth copying:
 
 1. **Pack-level route resolution is opener-independent.** The panel (one tool) calls `host.callRoute("bundle", …)`, but the `bundle` route is declared on the routes-bearing tool. Because the server resolves the route **module** through the pack-level `RouteRegistry` (keyed by `packId`), the panel-originated call reliably reaches it — you do not need the route and the opener on the same tool, only in the same pack.
-2. **The synthesis-credential split.** The worker has a PATH-only env and **no** model credentials, so LLM card synthesis cannot run inside the `bundle` route. The split: the `submit_pr_walkthrough_yaml` **agent tool** (with normal agent credentials) synthesizes the rich cards at submit time and the `publish` route persists them to `host.store` keyed by changeset id; the `bundle` route only *computes* the deterministic diff + fallback cards live (via the disclosed `git`/`fs`) and *reads* the stored LLM cards. So a credentialed capability stays agent-tool-side and the route is a live computer + store reader, never an in-worker model caller. (A future host-provided synthesis capability that runs in the parent — where credentials live — is a documented follow-up; see `docs/design/pr-walkthrough-pack-deletion.md`.)
+2. **The synthesis split (a design choice, not a credential boundary).** A pack *could* run its own inference (it has full ambient env + network, like any tool), but PR-walkthrough keeps LLM card synthesis agent-tool-side rather than re-deriving it in the route. The split: the `submit_pr_walkthrough_yaml` **agent tool** (with the agent's credentials + loop) synthesizes the rich cards at submit time and the `publish` route persists them to `host.store` keyed by changeset id; the `bundle` route only *computes* the deterministic diff + fallback cards live (via ambient `git`/`fs`) and *reads* the stored LLM cards. So the route is a live computer + store reader. (A future host-provided, gateway-mediated synthesis capability is a documented follow-up; see `docs/design/pr-walkthrough-pack-deletion.md`.)
 
 Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (install → launcher → panel renders from
 `callRoute` + store → `readToolCall` → deep-link → uninstall).
@@ -635,7 +622,7 @@ The Host API is the single security boundary. As an author, your obligations are
 - [ ] **Never build a URL or hash string** — `host.ui.openPanel` / `host.ui.navigate` take structured `{ panelId | route, params }` targets; the host maps them onto the router.
 - [ ] **No post / navigate / action on mount** — panels and entrypoints must act only from a real user gesture. `host.session.postMessage` is gesture-gated and will throw on mount.
 - [ ] **Never supply a pack id, `tool`, or token to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
-- [ ] **Disclose ambient OS access via `permissions:`** (`git`/`fs`/`net`) — and remember it un-gates the *full* capability; it is disclosure + an enable switch, not a constrained runner. Never expect model credentials / a gateway token inside a server module (PATH-only env).
+- [ ] **Server modules are trusted code with full ambient parity** — `child_process`/`fs`/network/`process.env` are all available directly (no declaration), exactly like a tool. The worker is resource/crash isolation only; design handlers to be fast and side-effect-careful, since a runaway is terminated on timeout.
 - [ ] **Panels follow the renderer rules** — theme tokens only, preserve iframe `sandbox`, set `isCustom` deliberately.
 - [ ] **Feature-detect via `host.capabilities`**, never member presence — the single source of truth for what a host implements.
 
@@ -651,7 +638,7 @@ The deeper model — the allowlist-bypass fix, `toolUseId` ownership verificatio
 - Server-side Host API (`ctx.host`): `src/server/extension-host/server-host-api.ts`
 - Pack identity + scoped authz: `pack-identity.ts`, `action-guard.ts`, `surface-binding.ts`
 - Internal→contract adapter: `src/server/extension-host/contract-adapter.ts`
-- Pack store + permissions + worker isolation: `pack-store.ts`, `permission-grants.ts`, `module-host-worker.ts`, `confinement-loader.ts`
+- Pack store + worker isolation: `pack-store.ts`, `module-host-worker.ts`, `module-host-bootstrap.ts`, `confinement-loader.ts`
 - Session write (permit + WS): `session-write.ts`, `session-write-permit.ts`, `src/app/session-write-bridge.ts`
 - Contribution-manifest parser: `src/server/agent/tool-contributions.ts`
 - Client registries: `src/app/pack-renderers.ts`, `pack-panels.ts`, `pack-entrypoints.ts`

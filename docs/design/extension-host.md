@@ -145,7 +145,7 @@ never rejects) exactly as in Phase 1.
 | `entrypoints:` | **IMPLEMENTED (P2)** | Non-chat launchers (composer slash-commands, git-widget buttons, command palette) **and** `kind:"route"` deep-link routes. Parsed by `parseEntrypoints`; launchers click → `host.ui.openPanel`/`navigate`; routes populate the client pack-route registry. |
 | `routes:` | **IMPLEMENTED (P2)** | The pack's OWN gateway endpoints, reached via `host.callRoute`. Parsed by `parseRoutes` → `{ module?; names? }`; dispatched by `RouteDispatcher` keyed off the server-resolved `packId` (see §3.2). |
 | `stores:` | **IMPLEMENTED (P2)** | Ownership-scoped server-side persistence behind `host.store.*`; keys namespaced by the server-resolved `packId` (cross-pack reads rejected). Parsed by `parseStores`. |
-| `permissions:` | **IMPLEMENTED (P2)** | Install-time **disclosure** of the ambient OS capabilities (`git`/`fs`/`net`) a pack's server modules use, and the switch that **enables** them in the C3 worker. Disclosure + enable, **not** an enforced privilege boundary (§3.4). |
+
 
 `toolRenderers` and `actions` from the goal's contribution-point list map to the
 per-tool `renderer:`/`actions:` keys (one tool = one renderer + one actions map). A
@@ -181,9 +181,6 @@ export interface ToolContributions {
 	routes?: RouteContribution;
 	/** `entrypoints:` (Slice C1) — launcher surfaces + deep-link client routes. */
 	entrypoints?: EntrypointContribution[];
-	/** `permissions:` (Slice C3) — opt-in host capabilities (`git`/`fs`/`net`) a
-	 *  pack's server modules may use; resolved server-side, never caller-supplied. */
-	permissions?: PackPermission[];
 	/** Forward-compat only: FUTURE unknown keys parsed-for-shape, retained
 	 *  verbatim, NOT acted on (the reserved-key list is currently EMPTY). */
 	reserved: ReservedContributions;
@@ -215,9 +212,9 @@ export interface ReservedContributions {
 - `actions.module`: optional string; same path-safety rules; defaults to `"actions.js"`
   when `actions:` is present without an explicit module.
 - `actions.names`: optional `string[]`; each must match `/^[a-z0-9][a-z0-9_-]*$/`.
-- `panels`/`entrypoints`/`routes`/`stores`/`permissions`: **Phase 2 parses each into a
-  typed contribution** (`parsePanels`/`parseEntrypoints`/`parseRoutes`/`parseStores`/
-  `parsePermissions` in `tool-contributions.ts`) and surfaces it on `ToolInfo`. Per-tool
+- `panels`/`entrypoints`/`routes`/`stores`: **Phase 2 parses each into a
+  typed contribution** (`parsePanels`/`parseEntrypoints`/`parseRoutes`/`parseStores`
+  in `tool-contributions.ts`) and surfaces it on `ToolInfo`. Per-tool
   parsing stays tolerant: a malformed block degrades to "absent" with a `console.warn`,
   never a hard rejection (mirrors Phase-1 `renderer`/`actions`). Path-bearing values
   (`panels[].entry`, `routes.module`) get the same `..`/absolute traversal guard as
@@ -673,33 +670,33 @@ at runtime is *untrusted*. The surfaces split accordingly:
   rendered in a `sandbox`-attributed iframe (theme tokens only, no auto-invoke/navigation on
   mount) — so a prompt-injected artifact cannot reach app globals even though the trusted
   panel framing it can.
-- **Pack SERVER modules** (`actions:` / `routes:`) are TRUSTED code and run in a
-  `worker_threads` worker (`src/server/extension-host/module-host-worker.ts`) for
-  **RESOURCE + CRASH isolation ONLY** — terminate-on-timeout (the CPU control: a runaway
-  `while(1)` is killed via `worker.terminate()`), memory caps via `resourceLimits`,
-  spawned-child SIGKILL on terminate, and module-import resolution contained to the pack
-  root (`confinement-loader.ts` + `path-guard.ts`). **This is a STABILITY boundary,
-  explicitly NOT a security sandbox against the pack's own code:** an in-worker
-  per-capability permission sandbox over trusted in-process code is false security (a native
-  `.node` addon or the shared process trivially defeats it), so Phase 2 neither claims nor
-  relies on one. The worker isolation is **unconditional in shipped builds** — there is no
-  config/env toggle that runs a pack server module in-process (such a path would defeat
-  terminate-on-timeout / crash containment), pinned by a config-invariant test.
+- **Pack SERVER modules** (`actions:` / `routes:`) are TRUSTED code — the same tier as a
+  tool or MCP server — and run with **FULL ambient parity**: normal `node:` built-ins
+  (`fs`/`child_process`/`net`/`http`…), normal network globals (`fetch`/`WebSocket`), and the
+  normal `process` with full env. They run in a `worker_threads` worker
+  (`src/server/extension-host/module-host-worker.ts`) purely for **RESOURCE + CRASH
+  isolation** — terminate-on-timeout (the CPU control: a runaway `while(1)` is killed via
+  `worker.terminate()`), memory caps via `resourceLimits`, and spawned-child SIGKILL on
+  terminate. There is **no in-worker capability gate**: gating ambient OS access for trusted
+  in-process code is false security (a native `.node` addon or the shared process trivially
+  defeats it), so the worker neither claims nor relies on one. Separately, the pack module
+  graph's `import`/`require` resolution is contained to the pack root
+  (`confinement-loader.ts` + `path-guard.ts`) — but this is **cheap import hygiene /
+  loader-stability, NOT a security boundary** (it is near-cosmetic now that `fs` is ambient:
+  a pack can read any file the gateway can). The worker isolation is **unconditional in
+  shipped builds** — there is no config/env toggle that runs a pack server module in-process
+  (such a path would defeat terminate-on-timeout / crash containment), pinned by a
+  config-invariant test.
 
-**`permissions:` is disclosure + an enable switch, not enforcement.** A tool's
-`permissions: ["git", "fs", "net"]` is **install-time DISCLOSURE** of which ambient OS
-capabilities the pack's trusted server code uses and the **switch that ENABLES** them in the
-worker. The default is OFF purely so the manifest discloses what the pack does — not because
-the worker could contain hostile pack code. Each disclosed capability un-gates the FULL
-ambient surface, with no further restriction on usage: `git` un-gates `node:child_process`
-(the pack may run **any** command, exactly like a tool — there is no git-binary-only or argv
-restriction), `fs` un-gates `node:fs`/`fs/promises` with **no** path containment, `net`
-restores outbound network. The one ENFORCED property is that the enabled set is
-**server-resolved** from the winning contribution via `resolveToolLocation` (logic in
-`permission-grants.ts`) — never caller-supplied, so a caller cannot self-escalate a
-permission its installed manifest does not declare. The Host API stays the single ENFORCED
-boundary for everything CROSS-pack, cross-session, or UI-driving (`store`/`session`/
-`callRoute`/`ui.*`); a pack's OWN ambient capability is not one of those boundaries.
+**There is no capability concept — trusted pack server code gets ambient parity.** A pack's
+server modules reach `node:child_process`, `node:fs`, outbound network, and `process.env`
+exactly as a tool or MCP server would; nothing is gated or disclosed via a manifest key. The
+only `workingDir`-driven adjustment is **tool parity**: the worker's `process.cwd()` returns
+the server-derived session working dir (worker threads cannot `chdir`, so `process.cwd` is
+overridden) — a convenience required by e.g. the pr-walkthrough pack's `git diff`, not a
+capability. The Host API stays the single ENFORCED boundary for everything CROSS-pack,
+cross-session, or UI-driving (`store`/`session`/`callRoute`/`ui.*`); a pack's OWN ambient
+capability is not one of those boundaries.
 
 **Model-A residual (the documented future hardening).** In the shared main UI realm a
 *deliberately malicious* pack could still mint its own surface token for any tool name it
@@ -1291,7 +1288,7 @@ never bundled.
 | Loading the changeset/diff bundle for the viewer | `host.callRoute("bundle", { query: { jobId } })` against the pack's own route — dynamic data without an escape hatch |
 | Persisted walkthrough store (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) | **`stores:`** → `host.store.*`, pack-scoped |
 | Reading the `submit_pr_walkthrough_yaml` tool call | `host.session.readToolCall(toolUseId)` (own-session, via the adapter) instead of bespoke transcript access |
-| Live `git diff` recompute for the changeset | the `bundle` route discloses `permissions: ["git", "fs"]` and runs **real `git`** LIVE in the C3 worker (resource-capped + killable) — covering PRs created after install |
+| Live `git diff` recompute for the changeset | the `bundle` route runs **real `git`** LIVE in the confined worker (`child_process`/`fs` are ambient; resource-capped + killable; `process.cwd()` is the session worktree) — covering PRs created after install |
 
 **Shipped** as `market-packs/pr-walkthrough/` — the maximal case using **all** reserved
 keys: `routes` + `stores` + `panels` + `entrypoints` + `host.session.readToolCall`. Every
