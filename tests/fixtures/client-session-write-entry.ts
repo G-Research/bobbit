@@ -4,8 +4,10 @@
 //   1. TRANSPORT (unforgeable): the SEND rides the trusted session WebSocket via the
 //      session-write-bridge poster — NOT a `fetch`. We register a fake poster (the
 //      real one is supplied by RemoteAgent over its private WS) and assert the post
-//      flows through it, carrying the bound `tool`/role/text/resumeTurn. `window.fetch`
-//      is stubbed only to PROVE no fetch is involved (no capturable secret surface).
+//      flows through it, carrying the bound `tool`/role/text/resumeTurn AND the
+//      `contentHash` (sha256 of role+text via SubtleCrypto) the poster uses to mint a
+//      server-minted, one-time, content-bound write permit. `window.fetch` is stubbed
+//      only to PROVE no fetch is involved (no capturable secret surface).
 //   2. REAL user activation (defense-in-depth): navigator.userActivation is mocked so
 //      the test can toggle a genuine activation on/off; postMessage throws SYNCHRONOUSLY
 //      with no activation (no mount-time posts).

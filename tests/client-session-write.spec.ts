@@ -24,6 +24,7 @@
  */
 import { test, expect } from "@playwright/test";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -90,6 +91,11 @@ test.describe("host.session.postMessage — trusted WS transport + activation ga
 		expect(res.posted.role).toBe("user");
 		expect(res.posted.text).toBe("hi");
 		expect(res.posted.resumeTurn).toBe(false);
+		// Content-bound write permit: the request carries sha256(role + "\n" + text)
+		// (SubtleCrypto), matching the server's Node createHash binding exactly — so the
+		// poster can mint a content-bound, one-time permit before posting.
+		const expectedHash = createHash("sha256").update("user\nhi", "utf8").digest("hex");
+		expect(res.posted.contentHash).toBe(expectedHash);
 		// Transport is the WS bridge, never a fetch (no capturable secret surface).
 		expect(res.fetches).toBe(0);
 	});

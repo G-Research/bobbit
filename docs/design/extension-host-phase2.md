@@ -413,6 +413,10 @@ GET  /api/ext/session/tool-call    ?tool&toolUseId               → ToolCallRec
    projectContextManager.getContextForSession(headerSessionId)?.sessionStore.get(headerSessionId)
    (the exact own-session read mcp-call uses, server.ts:11108) → agentSessionFile → sessionFileRead
 3. contract-adapter maps rows → envelope; slice by offset/limit; filter by pattern
+   (`pattern` is a LITERAL, case-insensitive SUBSTRING filter — NOT a regex: the
+   caller-controlled string is never compiled with `new RegExp(...)`, closing a
+   catastrophic-backtracking ReDoS vector; the frozen `pattern?: string` type is
+   contract-conformant either way — see `buildTranscriptEnvelope`)
 4. json(envelope)
 ```
 
@@ -774,7 +778,7 @@ Its **transport** is now the app's already-authenticated session **WebSocket**, 
   pure `handleSessionPost` (`src/server/extension-host/session-write.ts`) with the
   connection's **own server-authenticated `sessionId`** as the trusted target.
 
-**Server-side guard ordering (pack-scoped, trusted-session, audited):**
+**Server-side guard ordering (pack-scoped, trusted-session, permit-gated, audited):**
 
 ```
 1. authorizeScopedRequest({tool, sessionId(trusted), …}) → session resolves +
@@ -786,12 +790,59 @@ Its **transport** is now the app's already-authenticated session **WebSocket**, 
      body===header invariant holds trivially and cross-session posting is impossible.
 2. require role ∈ {user,system}; reject empty text
 3. SERVER-derive the packId from `tool`; reject a non-pack caller
-4. post into the TRUSTED bound session ONLY:
+3b. REQUIRE the server-minted, one-time, content-bound write permit (§C2.1b):
+    recompute contentHash = sha256(role + "\n" + text); consumeWritePermit(nonce,
+    {sessionId(trusted), packId(derived), tool, contentHash}); reject (NO post) if the
+    nonce is missing / unknown / expired / already-consumed / binding-mismatched.
+4. role-aware delivery into the TRUSTED bound session ONLY (cross-session impossible):
+   - "system" → framed as a system directive (<system-reminder>…</system-reminder>) so
+     it is NOT silently delivered as raw user text (formatSessionMessage)
+   - "user"   → delivered verbatim
+   then by resumeTurn:
    - resumeTurn !== false → sessionManager.enqueuePrompt(sessionId, text, {source:"extension"})
    - resumeTurn === false → sessionManager.deliverLiveSteer(sessionId, text, {source:"extension"})
 5. AUDIT every post/resume: {tool, packId, sessionId, role, resumeTurn, ms}  (mandatory — v1 §5 C2)
 6. reply ext_session_post_result {ok}
 ```
+
+### C2.1b Server-minted, one-time, content-bound write permit (closes same-realm replay)
+
+The trusted-WS transport (§C2.1) removed the *secret-exfiltration* vector but did **not**
+close the same-realm *forge/replay* vector: a same-realm pack can still monkey-patch
+`WebSocket.prototype.send` (or capture the live socket) and FORGE or REPLAY an
+`ext_session_post` frame — e.g. capture one legitimate gesture-driven post and resend it
+later with no gesture. This is closed by a server-minted permit
+(`src/server/extension-host/session-write-permit.ts`):
+
+- **Two trusted-WS round-trips.** After the client's *synchronous* transient-activation
+  assertion passes, `host.session.postMessage` computes `contentHash = sha256(role + "\n" +
+  text)` (SubtleCrypto) and the poster:
+  1. sends `ext_session_write_permit {tool, contentHash}`; the server derives the packId,
+     `mintWritePermit({sessionId(trusted), packId, tool, contentHash})` (short TTL ~5s), and
+     replies `ext_session_write_permit_result {nonce}`;
+  2. sends `ext_session_post {tool, role, text, resumeTurn, nonce}`; the server recomputes
+     `contentHash` from the posted role+text and `consumeWritePermit(nonce, binding)` —
+     single-use, all-bindings-must-match, not-expired.
+- **Net.** A captured post frame **replayed** = permit already consumed → rejected; a
+  **forged** post without a mint = no valid nonce → rejected; a **tampered** role/text =
+  hash mismatch → rejected; each agent-drive needs a **fresh mint** (fresh activation).
+- **Residual (accepted; the realm-isolation follow-up).** A pack forging the MINT itself
+  *during an unrelated genuine user gesture* is inherent to the same-realm model — pack code
+  shares the realm's transient-activation state and (absent realm isolation) could ride a
+  real gesture to mint+post. The permit removes the replay / forge-without-mint surface;
+  eliminating mint-forgery requires running pack UI in an isolated realm (the documented
+  follow-up below; the server-side authorization + audit remain the durable boundary).
+
+### C2.1c Role-aware delivery (honor `PostMessageInput.role`)
+
+The frozen contract `PostMessageInput { role: "user" | "system" }` requires BOTH roles to
+work, and a "system" message must NOT be silently delivered as raw user input. Bobbit's
+runtime feeds the model via two seams (a user prompt / a steer); there is no separate
+model-level system-role command. So `formatSessionMessage` injects a genuine SYSTEM message
+by framing the content in an explicit `<system-reminder>…</system-reminder>` envelope — the
+model unambiguously perceives it as an out-of-band system directive — while "user" is
+delivered verbatim. The framing applies to the delivered text only; the permit's contentHash
+and the audit record bind/record the ORIGINAL role+text.
 
 `postMessage` drives the agent, so the target is the **trusted, WS-authenticated** session
 (never a parameter) and every call is audited. Its security posture is: **trusted-WS
@@ -827,13 +878,16 @@ no owned `toolUseId` can still post when it holds a genuine user gesture.)
 UI logic — renderers (`renderer:`) and panels (`panels:`) — runs in the **main UI thread**
 (pack source is trusted; embedded untrusted content is iframe-`sandbox`ed; no auto-invoke /
 navigation on mount). A same-realm pack therefore CAN monkey-patch globals like
-`window.fetch`. The session-write hardening removes the concrete exfiltration surface that
-mattered: **driving the agent now goes over the trusted session WebSocket that pack code
-cannot access**, and no session secret rides any `fetch`. What remains explicitly OUT of
-Phase 2 scope is **FULL realm isolation** of pack UI logic (running renderers/panels in a
-separate iframe/worker realm so they cannot touch app globals at all). That is a documented
-future hardening, tracked beyond Phase 2; the server-side authorization + audit are the
-durable boundary regardless of client realm. (Server pack *modules* — actions/routes — ARE
+`window.fetch` **and `WebSocket.prototype.send`**. The session-write hardening removes the
+concrete surfaces that mattered: **driving the agent now goes over the trusted session
+WebSocket that pack code cannot access** (no session secret rides any `fetch`), AND every
+post must carry a **server-minted, one-time, content-bound write permit** (§C2.1b) so a
+captured/replayed/forged/tampered `ext_session_post` frame is rejected server-side. What
+remains explicitly OUT of Phase 2 scope is **FULL realm isolation** of pack UI logic
+(running renderers/panels in a separate iframe/worker realm so they cannot touch app globals
+at all) — which is what would close the last residual (a pack forging the permit MINT during
+a genuine user gesture). That is a documented future hardening, tracked beyond Phase 2; the
+server-side authorization + audit are the durable boundary regardless of client realm. (Server pack *modules* — actions/routes — ARE
 worker-isolated; see §9 C3. The open item is UI-thread isolation only.)
 
 ### C2.2 `subscribe` (live typed events)
@@ -846,7 +900,14 @@ internal wire. Scoped to the bound session.
 
 ### C2.3 Wiring
 
-- Client `host.session.postMessage` (trusted-WS transport, §C2.1) + `subscribe` bodies.
+- New module `src/server/extension-host/session-write-permit.ts`: `mintWritePermit` /
+  `consumeWritePermit` / `computeContentHash` (in-memory, per-gateway; short TTL; single-use).
+- New WS frames (`src/server/ws/protocol.ts`): `ext_session_write_permit` (+ `…_result`
+  carrying the nonce) for the mint; `ext_session_post` gains a required `nonce`.
+- `src/server/extension-host/session-write.ts`: `handleSessionPost` requires + consumes the
+  permit (§C2.1b) and applies role-aware delivery via `formatSessionMessage` (§C2.1c).
+- Client `host.session.postMessage` (trusted-WS transport, §C2.1; computes the contentHash,
+  mints then posts via `RemoteAgent`) + `subscribe` bodies.
   **Flip `flags.session = true`** (reads from B2 + writes here = full namespace live).
 - There is intentionally **no** `ServerHostApi.session.postMessage`: driving the agent is a
   client-gesture-originated, trusted-WS capability (Fix B). The server host's `session`
@@ -1202,11 +1263,11 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 |---|---|---|---|
 | A | `extension-host-pack-identity.test.ts` | packId derived from market-pack baseDir segment; non-pack → empty; caller `args`/`packId` cannot override server-derived id; cross-pack denial precondition; `authorizeScopedRequest` accepts a request with NO toolUseId but still enforces session-binding + allowedTools, and rejects body/header session mismatch | 2,4 |
 | B1 | `extension-host-pack-store.test.ts` | put/get/list round-trip; keys namespaced under `<packId>/`; a second pack cannot read first pack's key (cross-pack read rejected); key traversal (`../`) rejected; non-pack rejected; guard ordering via `authorizeScopedRequest` (allowedTools → identity; succeeds without toolUseId) | 2,4 |
-| B2 | `extension-host-contract-adapter.test.ts` | JSONL rows → `HostMessage`/`HostContentBlock`/`ToolCallRecord`; both tool_use shapes mapped; `CONTRACT_VERSION === HOST_CONTRACT_VERSION`; unknown block types tolerated; read scoped to own session (other session id has no parameter) | 2,4 |
+| B2 | `extension-host-contract-adapter.test.ts` | JSONL rows → `HostMessage`/`HostContentBlock`/`ToolCallRecord`; both tool_use shapes mapped; `CONTRACT_VERSION === HOST_CONTRACT_VERSION`; unknown block types tolerated; read scoped to own session (other session id has no parameter); **`pattern` is a LITERAL case-insensitive substring filter (regex metacharacters matched verbatim), and a pathological catastrophic-backtracking string is HARMLESS — no ReDoS, no throw** | 2,4 |
 | B3 | `extension-host-route-dispatcher.test.ts` | route resolution + precedence (pack shadows builtin); namespace-by-construction (`tool` → server-derived pack; dispatch hits ONLY that pack's route; no `<pack>` URL segment to forge); **pack-level registry: opener tool X calling a route DECLARED by a different tool Y in the SAME pack resolves + dispatches Y's module correctly** (proves pack-scoped, opener-independent); **duplicate route names across a pack are rejected at metadata/registry-build time**; unknown route name → 404; `authorizeScopedRequest` reuse (no toolUseId required); epoch/registry cache invalidation | 2,4 |
 | B4 | `pack-panels-reconcile.spec.ts` (`file://`) | panel loader registers/reconciles; reload survival (re-driven from metadata); uninstall reconcile (generation-guarded); override; theme-token + sandbox conventions present | 2,4 |
 | C1 | `pack-entrypoints.spec.ts` (`file://`) | entrypoint kinds register (incl. `kind:"route"`); `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount; **client route registry: an arbitrary THIRD-PARTY fixture pack (not artifacts/pr-walkthrough) registering `{kind:"route", routeId:"thirdparty.demo", target:{panelId:…}, paramKeys:[…]}` → `navigate({route:"thirdparty.demo",params})` serializes `#/ext/thirdparty.demo?…` and opens its panel**; **reload restoration: loading on `#/ext/<routeId>?params` → `getRouteFromHash` → `lookupPackRoute` → `openPackPanel` rehydrated from `store.get`**; **uninstall reconcile drops the route (`lookupPackRoute` returns undefined; deep-link no longer resolves)**; **duplicate `routeId` across packs rejected at registry build** | 1,2,4 |
-| C2 | `extension-host-session-write.test.ts` | postMessage authorized via **`authorizeScopedRequest`** against the header-bound session (NOT `authorizeActionRequest`); **postMessage SUCCEEDS from a panel/entrypoint context with NO `toolUseId` when a user gesture is active**; resumeTurn vs non-resume; every post audited; **cross-session post impossible (target = header-bound session, never a body param)**; body/header session mismatch rejected; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws synchronously), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post | 2,4 |
+| C2 | `extension-host-session-write.test.ts` + `extension-host-session-write-permit.test.ts` | postMessage authorized via **`authorizeScopedRequest`** against the header-bound session (NOT `authorizeActionRequest`); **postMessage SUCCEEDS from a panel/entrypoint context with NO `toolUseId` when a user gesture is active**; resumeTurn vs non-resume; every post audited; **cross-session post impossible (target = header-bound session, never a body param)**; body/header session mismatch rejected; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws synchronously), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post; **server-minted write permit: post REQUIRES a nonce, permit is single-use (replay rejected), content-bound (sha256(role+"\n"+text) over {sessionId,packId,tool}), mismatch/expiry/reuse rejected with NO post**; **role-aware delivery: "system" framed as `<system-reminder>` (NOT delivered as raw user text), "user" verbatim** | 2,4 |
 | C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; **a pack module CANNOT `require`/import `node:fs`/`node:child_process`/network built-ins** (deny-hook); **a pack module CANNOT read `process.env` secrets** (empty-env worker); crash isolated → error not process death; seam swap leaves callers unchanged | 3 |
 | C3 | `extension-host-isolation-config-invariant.test.ts` | **config-invariant: the shippable/packaged configuration CANNOT disable worker isolation** — no shipped config key/env toggles in-process execution; if a bypass flag/env is set under a packaged build (or CI) the gateway hard-fails at startup (refuses to boot), and the toggle is inert/unsettable in the shipped config (any dev-only affordance is honored only in explicit local-dev mode); the production seam ALWAYS routes through `ModuleHost.invoke` | 3,4 |
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |

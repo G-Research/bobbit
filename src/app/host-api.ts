@@ -46,6 +46,21 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
 	return { ...init, headers };
 }
 
+/** sha256 hex of `role + "\n" + text` — the content binding for a C2 session-write
+ *  permit. Computed with SubtleCrypto so the value matches the server's Node
+ *  `createHash("sha256")` exactly (same UTF-8 input, same hex encoding). Used by
+ *  `host.session.postMessage` to mint a content-bound, one-time write permit before
+ *  posting (design extension-host-phase2.md §8 C2.1 + session-write-permit.ts). */
+async function sessionWriteContentHash(role: string, text: string): Promise<string> {
+	const subtle = globalThis.crypto?.subtle;
+	if (!subtle) throw new Error("host.session.postMessage requires SubtleCrypto (secure context)");
+	const bytes = new TextEncoder().encode(`${role}\n${text}`);
+	const digest = await subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
 /** Build the Phase-1 client Host API bound to a given session AND the
  *  renderer's own toolUseId. `invokeAction` supplies BOTH to the endpoint
  *  internally, so packs never put identity fields in `args`. `capabilities` is
@@ -208,15 +223,23 @@ export function getHostApi(
 				// would be a rejected promise, not a loud synchronous failure on mount).
 				if (!consumeGesture()) throw new Error("postMessage requires a user gesture");
 				if (!packTool) throw new Error("host.session.postMessage requires a pack-served context");
-				// Drive over the trusted WS (no fetch, no secret). `sessionId` selects the
-				// bound RemoteAgent's poster; the server ignores it as a target.
-				return postSessionMessageOverWs({
-					sessionId,
-					tool: packTool,
-					role: msg.role,
-					text: msg.text,
-					resumeTurn: msg.resumeTurn,
-				});
+				// AFTER the transient-activation assertion: compute the content hash, then
+				// drive over the trusted WS (no fetch, no secret). The poster mints a
+				// server-minted, one-time, content-bound write permit (bound to this hash)
+				// and posts with the returned nonce — so a captured/replayed/tampered frame
+				// is rejected server-side (§8 C2.1 + session-write-permit.ts). `sessionId`
+				// selects the bound RemoteAgent's poster; the server ignores it as a target.
+				return (async () => {
+					const contentHash = await sessionWriteContentHash(msg.role, msg.text);
+					await postSessionMessageOverWs({
+						sessionId,
+						tool: packTool,
+						role: msg.role,
+						text: msg.text,
+						resumeTurn: msg.resumeTurn,
+						contentHash,
+					});
+				})();
 			},
 			// Slice C2: subscribe to live, TYPED session events bridged from the session
 			// WebSocket onto the frozen HostSessionEventMap (contract shapes via the

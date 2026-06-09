@@ -38,11 +38,34 @@
 // packId (reject a non-pack caller), and an AUDIT of every post/resume.
 
 import { authorizeScopedRequest, type ActionGuardSession } from "./action-guard.js";
+import { computeContentHash, type WritePermitBinding } from "./session-write-permit.js";
 
 /** Pack identity as resolved SERVER-SIDE from the winning contribution. */
 export interface SessionPostPackIdentity {
 	isPack: boolean;
 	packId: string;
+}
+
+/**
+ * Role-aware delivery shaping (design §8 C2.1 — "honor PostMessageInput.role").
+ *
+ * The frozen contract `PostMessageInput { role: "user" | "system" }` requires BOTH
+ * roles to work, and a "system" message must NOT be silently delivered as raw user
+ * input. Bobbit's runtime feeds the model via two seams (a user prompt / a steer);
+ * there is no separate model-level system-role command. So a genuine SYSTEM message
+ * is injected by framing the content in an explicit `<system-reminder>` envelope —
+ * the model unambiguously perceives it as an out-of-band system directive rather
+ * than user free-text — while a "user" message is delivered verbatim.
+ *
+ * The framing is applied to the DELIVERED text only; the permit's contentHash and
+ * the audit record bind/record the ORIGINAL role+text (what the client hashed).
+ */
+const SYSTEM_REMINDER_OPEN = "<system-reminder>";
+const SYSTEM_REMINDER_CLOSE = "</system-reminder>";
+
+export function formatSessionMessage(role: "user" | "system", text: string): string {
+	if (role === "system") return `${SYSTEM_REMINDER_OPEN}\n${text}\n${SYSTEM_REMINDER_CLOSE}`;
+	return text;
 }
 
 /** Audit record emitted for EVERY post/resume (design §8 C2.1 step 4). */
@@ -74,11 +97,25 @@ export interface SessionPostInput {
 	text: unknown;
 	/** Untrusted body.resumeTurn — defaults to true (resume the agent turn). */
 	resumeTurn?: unknown;
+	/**
+	 * Untrusted body.nonce — the SERVER-MINTED, one-time, content-bound write permit
+	 * (design §8 C2.1). REQUIRED: without it (or with an invalid/expired/replayed
+	 * one) the post is rejected. This closes the same-realm forge/replay vector the
+	 * WS-only move left open (see session-write-permit.ts).
+	 */
+	nonce?: unknown;
 	/** Resolve a session (live or persisted) by id; undefined when not found. Used
 	 *  to gate the pack's `tool` against the session's allowedTools. */
 	resolveSession: (id: string) => ActionGuardSession | undefined;
 	/** SERVER-derive the pack identity from the proven `tool` (never caller input). */
 	resolvePackIdentity: (tool: string) => SessionPostPackIdentity;
+	/**
+	 * Validate + single-use consume the write permit bound to {sessionId, packId,
+	 * tool, contentHash}. Returns true ONLY for a fresh, matching, unexpired permit.
+	 * Injected so the handler stays pure/unit-testable (WS handler wires the real
+	 * `consumeWritePermit`; tests supply a spy).
+	 */
+	consumePermit: (nonce: string, binding: WritePermitBinding) => boolean;
 	/**
 	 * Post into the TRUSTED bound session. `resume === true` resumes the agent turn
 	 * (enqueuePrompt path); `resume === false` delivers without resuming
@@ -135,13 +172,34 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 		return { ok: false, status: 403, error: "session messaging is available only to market-pack tools" };
 	}
 
+	// 3b. REQUIRE a server-minted, one-time, content-bound write permit. The
+	//     contentHash is recomputed HERE from the validated role+text and bound to
+	//     {sessionId, packId, tool} — so a replayed frame (permit already consumed),
+	//     a forged frame (no valid nonce), or a tampered role/text (hash mismatch)
+	//     are all rejected with NO post. (§8 C2.1 — session-write-permit.ts.)
+	if (typeof input.nonce !== "string" || input.nonce.length === 0) {
+		return { ok: false, status: 403, error: "session post requires a server-minted write permit" };
+	}
+	const contentHash = computeContentHash(role, text);
+	const permitOk = input.consumePermit(input.nonce, {
+		sessionId: guard.sessionId,
+		packId: ident.packId,
+		tool: input.tool,
+		contentHash,
+	});
+	if (!permitOk) {
+		return { ok: false, status: 403, error: "invalid, expired, or already-used write permit" };
+	}
+
 	// 4. Post into the TRUSTED bound session ONLY (never a caller param →
-	//    cross-session posting is impossible). resumeTurn defaults to true.
+	//    cross-session posting is impossible). resumeTurn defaults to true. Role-aware:
+	//    "system" is framed as a system directive (NOT delivered as raw user text).
 	const resume = input.resumeTurn !== false;
+	const deliveredText = formatSessionMessage(role, text);
 	const start = clock();
 	const base = { tool: input.tool, packId: ident.packId, sessionId: guard.sessionId, role, resumeTurn: resume };
 	try {
-		await input.post(guard.sessionId, text, { role, resume });
+		await input.post(guard.sessionId, deliveredText, { role, resume });
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		input.audit({ ...base, ms: clock() - start, outcome: "error", error: message });

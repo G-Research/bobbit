@@ -186,16 +186,24 @@ const MAX_LIMIT = 500;
  *  in the frozen TranscriptEnvelope. `total` counts the messages AFTER pattern
  *  filtering (the population being paged); `returned` counts the window. The
  *  pattern is matched against a flattened text projection of each message
- *  (text + tool names + serialized tool io). A bad regex throws (surfaced as a
- *  4xx by the endpoint). */
+ *  (text + tool names + serialized tool io).
+ *
+ *  SECURITY: `pattern` is treated as a LITERAL, case-insensitive SUBSTRING filter
+ *  (`.toLowerCase().includes(...)`) — NOT a regex. `ReadTranscriptOpts.pattern` is
+ *  caller-controlled (a pack passes it through `host.session.readTranscript`);
+ *  compiling it as `new RegExp(...)` was a catastrophic-backtracking (ReDoS) DoS
+ *  vector. The frozen contract type is just `pattern?: string` (never pinned to
+ *  regex semantics), so literal substring matching is contract-conformant and
+ *  pathological input (e.g. `(a+)+$`) is harmless — matched verbatim, never
+ *  executed as a pattern. */
 export function buildTranscriptEnvelope(
 	messages: HostMessage[],
 	opts?: ReadTranscriptOpts,
 ): TranscriptEnvelope {
 	let working = messages;
 	if (opts?.pattern && opts.pattern.length > 0) {
-		const regex = new RegExp(opts.pattern, "i");
-		working = messages.filter((m) => regex.test(flattenMessage(m)));
+		const needle = opts.pattern.toLowerCase();
+		working = messages.filter((m) => flattenMessage(m).toLowerCase().includes(needle));
 	}
 	const total = working.length;
 
