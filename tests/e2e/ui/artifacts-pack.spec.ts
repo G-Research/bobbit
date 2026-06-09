@@ -19,7 +19,9 @@
  *                  (the iframe sandbox is PRESERVED exactly as HtmlArtifact); a
  *                  Code toggle reveals the raw source.
  *        - markdown → rendered HTML (headings/bold/inline-code), not raw source.
- *        - svg   → the inlined <svg> element.
+ *        - svg   → a `sandbox=""` (no-script) iframe whose srcdoc carries the
+ *                  untrusted SVG — NEVER inlined into the main DOM (HIGH-finding
+ *                  fix: content-origin trust boundary, same as html artifacts).
  *        - image → an <img> whose src is the base64 data URL.
  *   4. Reload → the pack renderer still loads (registration re-driven from /api/tools).
  *      Re-opening a pill rehydrates the SAME content from the persisted store →
@@ -212,13 +214,22 @@ test.describe("Extension Host Phase 2 — artifacts-as-pack litmus (D1)", () => 
 		await expect(md.locator("strong"), "**bold** must render as <strong>").toHaveText("bold");
 		await expect(md.locator("code"), "`code` must render as <code>").toHaveText("code");
 
-		// ── Step 3c: svg — click the pill → viewer inlines the <svg>. ──
+		// ── Step 3c: svg — click the pill → viewer renders the untrusted SVG inside a
+		// SANDBOXED, no-script iframe (HIGH-finding fix), NOT inlined into the main
+		// DOM. The <svg>/<circle> live in the iframe's document (reached via
+		// frameLocator), and the iframe carries an empty `sandbox` (no allow-scripts)
+		// so a hostile SVG could never run in the parent realm or reach the Host API. ──
 		await page.locator(pillFor(SVG_ARTIFACT.id)).first().click();
 		await expect(viewer).toHaveAttribute("data-artifact-id", SVG_ARTIFACT.id, { timeout: 15_000 });
 		await expect(viewer).toHaveAttribute("data-artifact-type", "svg");
-		const svg = page.locator(`${tid("artifact-viewer-svg")} svg`);
-		await expect(svg, "svg artifacts render an inline <svg>").toBeVisible({ timeout: 15_000 });
-		await expect(page.locator(`${tid("artifact-viewer-svg")} svg circle`)).toHaveCount(1);
+		const svgIframe = page.locator(tid("artifact-viewer-svg"));
+		await expect(svgIframe, "svg artifacts render in a sandboxed iframe (not main-DOM innerHTML)").toBeVisible({ timeout: 15_000 });
+		await expect(svgIframe, "the svg iframe must be sandboxed with NO allow-scripts").toHaveAttribute("sandbox", "");
+		// The svg markup must NOT have been inlined into the main DOM — the viewer-svg
+		// host is the iframe itself, so there is no main-realm <svg> sibling.
+		await expect(page.locator(`${tid("artifact-viewer-body")} > svg`)).toHaveCount(0);
+		const svgFrame = page.frameLocator(tid("artifact-viewer-svg"));
+		await expect(svgFrame.locator("svg circle"), "the svg renders inside the sandboxed iframe document").toHaveCount(1, { timeout: 15_000 });
 
 		// ── Step 3d: image — click the pill → viewer renders an <img> from the base64. ──
 		await page.locator(pillFor(IMG_ARTIFACT.id)).first().click();

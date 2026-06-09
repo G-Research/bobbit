@@ -130,12 +130,39 @@ describe("artifacts pack viewer — per-type rendering (buildArtifactBody)", () 
 		assert.match(el.innerHTML, /<code[^>]*>code<\/code>/);
 	});
 
-	it("svg preview → inlined <svg> markup", () => {
+	it("svg preview → SANDBOXED, no-script iframe (not raw main-DOM innerHTML) — content-origin trust boundary", () => {
 		const content = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>';
 		const el = buildArtifactBody("svg", "shape.svg", content, makeFakeDoc(), "preview") as any;
-		assert.equal(el.tagName, "DIV");
-		assert.match(el.innerHTML, /<svg/);
-		assert.match(el.innerHTML, /<circle/);
+		// SECURITY: untrusted SVG renders in a sandboxed iframe, NOT inlined into the
+		// main DOM. The element is an <iframe> (not a <div> with innerHTML) and the
+		// svg lives in its srcdoc.
+		assert.equal(el.tagName, "IFRAME");
+		assert.equal(el.getAttribute("data-testid"), "artifact-viewer-svg");
+		// `sandbox=""` (empty) — NO allow-scripts: stricter than the html case. The
+		// frame is a unique opaque origin and cannot run scripts at all.
+		assert.equal(el.getAttribute("sandbox"), "");
+		assert.ok(!/allow-scripts/.test(el.getAttribute("sandbox") || ""), "svg iframe must NOT permit scripts");
+		// The svg markup is the iframe srcdoc — never assigned to a main-DOM innerHTML.
+		assert.match(el.srcdoc, /<svg/);
+		assert.match(el.srcdoc, /<circle/);
+		assert.equal(el._html, "", "no innerHTML must be set on the svg host element");
+	});
+
+	it("HOSTILE svg (<script>/onload/foreignObject) cannot execute in the parent realm — confined to a no-script sandboxed iframe", () => {
+		const hostile =
+			'<svg xmlns="http://www.w3.org/2000/svg" onload="window.__pwned=1">' +
+			'<script>window.__pwned=1</script>' +
+			'<foreignObject><body xmlns="http://www.w3.org/1999/xhtml"><img src=x onerror="window.__pwned=1"></body></foreignObject>' +
+			"</svg>";
+		const el = buildArtifactBody("svg", "evil.svg", hostile, makeFakeDoc(), "preview") as any;
+		// The hostile markup is NOT inserted into the main DOM via innerHTML — it is
+		// confined to the srcdoc of a sandboxed, no-script iframe, so neither the
+		// inline onload, the <script>, nor the foreignObject onerror can run in
+		// Bobbit's main UI origin (they'd need allow-scripts AND main-realm access).
+		assert.equal(el.tagName, "IFRAME");
+		assert.equal(el.getAttribute("sandbox"), "");
+		assert.equal(el._html, "", "hostile svg must never reach a main-DOM innerHTML sink");
+		assert.ok(el.srcdoc.includes("onload"), "the verbatim (inert) markup is preserved inside the sandbox");
 	});
 
 	it("image → <img> with a base64 data URL", () => {

@@ -287,6 +287,22 @@ export function consoleCaptureScript(artifactId: string): string {
 		`}catch(e){}})();</script>`;
 }
 
+/** Wrap untrusted SVG markup in a minimal HTML document for a no-script
+ *  sandboxed iframe so it fills the frame. The SVG is the iframe's document body
+ *  (unique opaque origin, scripts disabled) — it is NEVER inlined into the main
+ *  DOM. Sizing is inline CSS (Tailwind classes don't reach inside the frame);
+ *  background is transparent so the panel's theme shows through (theme tokens
+ *  only — no hardcoded colours). */
+function svgSrcdoc(svg: string): string {
+	return (
+		`<!doctype html><meta charset="utf-8">` +
+		`<style>html,body{margin:0;height:100%;}` +
+		`body{display:flex;align-items:center;justify-content:center;background:transparent;}` +
+		`svg{max-width:100%;max-height:100%;width:100%;height:100%;}</style>` +
+		String(svg || "")
+	);
+}
+
 interface DocLike {
 	createElement(tag: string): any;
 }
@@ -339,11 +355,24 @@ export function buildArtifactBody(
 			pre.textContent = c;
 			return pre;
 		}
-		const wrap = mk("div");
-		wrap.className = "h-full flex items-center justify-center p-4";
-		wrap.setAttribute("data-testid", "artifact-viewer-svg");
-		wrap.innerHTML = c.replace(/<svg(\s|>)/i, (_m: string, p1: string) => `<svg class="w-full h-full"${p1}`);
-		return wrap;
+		// SECURITY (was a HIGH finding): SVG is untrusted, LLM/user-controlled
+		// content. A crafted SVG can carry `<script>`, `on*` event-handler
+		// attributes, or `<foreignObject>` HTML that, if inlined into the MAIN DOM
+		// via innerHTML, executes in Bobbit's main UI origin — exposing session
+		// state + the Host APIs in that realm. So SVG renders in a sandboxed iframe
+		// — the SAME content-origin trust boundary HTML artifacts use (HtmlArtifact /
+		// SandboxedIframe) — but with NO `allow-scripts` (display needs no script),
+		// which is strictly STRONGER than the HTML case: scripts, inline event
+		// handlers, and foreignObject JS can never run, and the frame's unique opaque
+		// origin keeps it unable to reach the parent realm or the Host API. Untrusted
+		// markup never touches the main DOM.
+		const iframe = mk("iframe");
+		iframe.setAttribute("sandbox", "");
+		iframe.setAttribute("data-testid", "artifact-viewer-svg");
+		iframe.className = "w-full h-full border-0 bg-background";
+		iframe.style.minHeight = "240px";
+		iframe.srcdoc = svgSrcdoc(c);
+		return iframe;
 	}
 
 	if (type === "markdown") {
