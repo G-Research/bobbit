@@ -169,12 +169,18 @@ async function restoreExtRoute(routeId: string | undefined, params: Record<strin
 	if (!routeId) return;
 	try {
 		const { reconcilePackEntrypointsForProject, lookupPackRoute } = await import("./pack-entrypoints.js");
-		await reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined);
+		const { reconcilePackPanelsForProject, openPackPanel } = await import("./pack-panels.js");
+		// Reconcile BOTH registries before resolving: a cold-load `#/ext/<routeId>`
+		// must find its owning route (entrypoints) AND its target panel must be
+		// registered (panels) or openPackPanel no-ops against an unregistered panel.
+		await Promise.all([
+			reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined),
+			reconcilePackPanelsForProject(state.activeProjectId ?? undefined),
+		]);
 		const entry = lookupPackRoute(routeId);
 		if (!entry) return; // owning pack not installed for this project
 		const openParams: Record<string, unknown> = {};
 		if (params) for (const key of entry.paramKeys) if (key in params) openParams[key] = params[key];
-		const { openPackPanel } = await import("./pack-panels.js");
 		openPackPanel({ panelId: entry.targetPanelId, params: openParams });
 	} catch { /* non-fatal — a bad deep-link must never break boot */ }
 }

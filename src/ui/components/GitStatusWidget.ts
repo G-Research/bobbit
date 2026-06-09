@@ -1,6 +1,8 @@
 import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import './DiffBlock.js';
+import { listLauncherEntrypoints, runLauncherEntrypoint } from '../../app/pack-entrypoints.js';
+import { ensureCommandPalette, openCommandPalette } from './CommandPalette.js';
 
 @customElement('git-status-widget')
 export class GitStatusWidget extends LitElement {
@@ -170,6 +172,10 @@ export class GitStatusWidget extends LitElement {
         super.connectedCallback();
         document.addEventListener('click', this._onDocumentClick, true);
         document.addEventListener('keydown', this._onEscapeKeyDropdown, true);
+        // Slice C1 — ensure the shared command-palette overlay host exists wherever
+        // the session chrome renders, so pack `command-palette` launchers have a
+        // surface. Idempotent; never auto-opens (open is a user gesture).
+        try { ensureCommandPalette(); } catch { /* non-fatal */ }
     }
 
     disconnectedCallback() {
@@ -946,6 +952,52 @@ export class GitStatusWidget extends LitElement {
         `;
     }
 
+    /** Slice C1 — pack ENTRYPOINT launchers surfaced in the git-widget dropdown:
+     *  `git-widget-button` launchers render directly as buttons; if any
+     *  `command-palette` launchers are registered, a single "Command palette" entry
+     *  opens the shared palette overlay. Both consume the client pack-entrypoints
+     *  registry (`listLauncherEntrypoints` / `runLauncherEntrypoint`). NO auto-invoke
+     *  — a launcher fires only from a real click (the user gesture). Best-effort:
+     *  a registry read failure renders nothing and never breaks the dropdown. */
+    private _renderPackLaunchers() {
+        let gitButtons: Array<{ id: string; label: string }> = [];
+        let hasPaletteCommands = false;
+        try {
+            gitButtons = listLauncherEntrypoints('git-widget-button').map((l) => ({ id: l.id, label: l.label }));
+            hasPaletteCommands = listLauncherEntrypoints('command-palette').length > 0;
+        } catch { /* non-fatal */ }
+        if (gitButtons.length === 0 && !hasPaletteCommands) return nothing;
+        const btnStyle = 'font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500';
+        return html`
+            <div class="border-t border-border pt-2 mt-2" data-testid="git-widget-launchers">
+                <div class="text-muted-foreground mb-1 font-medium">Extensions</div>
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    ${gitButtons.map((b) => html`<button
+                        type="button"
+                        style=${btnStyle}
+                        data-testid="git-widget-launcher"
+                        data-entrypoint-id=${b.id}
+                        @click=${(e: MouseEvent) => { e.stopPropagation(); this._runPackLauncher(b.id); }}
+                    >${b.label}</button>`)}
+                    ${hasPaletteCommands ? html`<button
+                        type="button"
+                        style=${btnStyle}
+                        data-testid="git-widget-open-command-palette"
+                        @click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); openCommandPalette(); }}
+                    >Command palette\u2026</button>` : nothing}
+                </div>
+            </div>
+        `;
+    }
+
+    /** Run a pack launcher on a genuine user click (the click's transient activation
+     *  is the user gesture; no runWithUserGesture wrapper needed) and close the
+     *  dropdown. */
+    private _runPackLauncher(id: string): void {
+        this._closeDropdown();
+        try { runLauncherEntrypoint(id); } catch { /* non-fatal */ }
+    }
+
     private _renderDropdownContent() {
         const multiRepoSections = this._renderMultiRepoSections();
         // In multi-repo mode the per-repo sections are the source of truth
@@ -966,6 +1018,8 @@ export class GitStatusWidget extends LitElement {
             </div>
 
             ${this._renderPrSection()}
+
+            ${this._renderPackLaunchers()}
 
             ${multiRepoSections}
 
