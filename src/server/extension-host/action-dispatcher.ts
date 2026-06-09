@@ -21,6 +21,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { isPackPathWithinGroup } from "./path-guard.js";
 import { pathToFileURL } from "node:url";
 import type { ServerHostApi } from "./server-host-api.js";
 import { ModuleHost } from "./module-host-worker.js";
@@ -183,9 +184,9 @@ export class ActionDispatcher {
 		const moduleRel = loc.actionsModule ?? "actions.js";
 
 		const abs = path.resolve(dir, moduleRel);
-		// Path-traversal re-validation: abs must stay within `dir`.
-		const rel = path.relative(dir, abs);
-		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+		// Path-traversal + symlink re-validation: abs must stay within `dir` both
+		// lexically and after realpath resolution (rejects symlink escapes).
+		if (!isPackPathWithinGroup(dir, abs)) {
 			throw new ActionError(400, `unsafe actions module path for tool "${tool}"`);
 		}
 		return abs;

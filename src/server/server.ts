@@ -48,6 +48,7 @@ import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
+import { isPackPathWithinGroup } from "./extension-host/path-guard.js";
 import { handleSessionPost } from "./extension-host/session-write.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -5221,9 +5222,9 @@ async function handleApiRoute(
 		}
 		const groupAbs = path.join(loc.baseDir, loc.groupDir || "");
 		const fileAbs = path.resolve(groupAbs, loc.rendererFile);
-		// Path-traversal re-validation: fileAbs must stay within the group dir.
-		const rel = path.relative(groupAbs, fileAbs);
-		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+		// Path-traversal + symlink re-validation: fileAbs must stay within the group
+		// dir both lexically and after realpath resolution (rejects symlink escapes).
+		if (!isPackPathWithinGroup(groupAbs, fileAbs)) {
 			json({ error: "invalid renderer path" }, 404);
 			return;
 		}
@@ -5267,9 +5268,9 @@ async function handleApiRoute(
 		}
 		const groupAbs = path.join(loc.baseDir, loc.groupDir || "");
 		const fileAbs = path.resolve(groupAbs, panel.entry);
-		// Path-traversal re-validation: fileAbs must stay within the group dir.
-		const rel = path.relative(groupAbs, fileAbs);
-		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+		// Path-traversal + symlink re-validation: fileAbs must stay within the group
+		// dir both lexically and after realpath resolution (rejects symlink escapes).
+		if (!isPackPathWithinGroup(groupAbs, fileAbs)) {
 			json({ error: "invalid panel path" }, 404);
 			return;
 		}

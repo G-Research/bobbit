@@ -26,6 +26,7 @@ import { pathToFileURL } from "node:url";
 import { ActionError, type ActionHandlerCtx, type ActionDispatcherOptions } from "./action-dispatcher.js";
 import { ModuleHost } from "./module-host-worker.js";
 import { resolvePackIdentity } from "./pack-identity.js";
+import { isPackPathWithinGroup } from "./path-guard.js";
 
 /** The verified context handed to a route handler. Reuses the action ctx shape
  *  (design §5 B3.1: `RouteHandlerCtx = ActionHandlerCtx`). */
@@ -151,8 +152,9 @@ export class RouteDispatcher {
 		const moduleRel = loc.routesModule ?? "routes.js";
 
 		const abs = path.resolve(dir, moduleRel);
-		const rel = path.relative(dir, abs);
-		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+		// Path-traversal + symlink re-validation: abs must stay within `dir` both
+		// lexically and after realpath resolution (rejects symlink escapes).
+		if (!isPackPathWithinGroup(dir, abs)) {
 			throw new ActionError(400, `unsafe routes module path for tool "${tool}"`);
 		}
 		return abs;
