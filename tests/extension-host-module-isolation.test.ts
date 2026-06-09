@@ -83,6 +83,112 @@ describe("ModuleHost — confined execution (happy path + identity)", () => {
 	});
 });
 
+describe("ModuleHost — module eval runs in the worker (parent NEVER imports pack code)", () => {
+	it("a module whose TOP-LEVEL code spins forever (while(1)) is TERMINATED on timeout → 504", async () => {
+		// PROOF for Fix 1: the runaway is in MODULE EVALUATION (before any export), so
+		// it can only be bounded if the IMPORT happens in the terminate-able worker. If
+		// the parent imported pack code, this top-level while(1) would hang the
+		// privileged gateway process forever (no termination). A prompt 504 proves
+		// load+eval runs in the worker.
+		const mh = new ModuleHost({ timeoutMs: 400 });
+		try {
+			const url = writeModule(`while (true) { /* runaway top-level eval */ }\nexport const actions = { run: async () => "x" };`);
+			const t0 = Date.now();
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx())),
+				(e) => e instanceof ActionError && e.status === 504,
+			);
+			assert.ok(Date.now() - t0 < 5_000, "the worker running module eval should be terminated promptly");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	for (const builtin of ["node:fs", "node:child_process", "node:net", "node:http"]) {
+		it(`a module's TOP-LEVEL (static) import of ${builtin} is denied`, async () => {
+			// Static top-level imports are resolved as the pack module graph loads — so
+			// they are denied by the loader hook DURING the worker's import(), before any
+			// handler runs. This only works because the import happens in the worker.
+			const mh = new ModuleHost({ timeoutMs: 10_000 });
+			try {
+				const url = writeModule(`import * as x from ${JSON.stringify(builtin)};\nexport const actions = { run: async () => typeof x };`);
+				await assert.rejects(
+					() => mh.invoke(req(url, "run", bareCtx())),
+					(e) => e instanceof ActionError && /denied|confinement/i.test(e.message),
+				);
+			} finally {
+				mh.dispose();
+			}
+		});
+	}
+
+	it("a module with NO actions export resolves to a structured 500 (export-map validation moved into the worker)", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(`export const notActions = {};`);
+			await assert.rejects(
+				() => mh.invoke(req(url, "anything", bareCtx())),
+				(e) => e instanceof ActionError && e.status === 500,
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe("ModuleHost — ambient globals removed before pack code runs (Fix 2)", () => {
+	it("fetch / WebSocket / XMLHttpRequest / Request / Response / Headers are all undefined; process is an inert shim", async () => {
+		const SECRET = "tl-secret-" + Math.random().toString(36).slice(2);
+		process.env.BOBBIT_TEST_TL_SECRET = SECRET;
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { probe: async () => ({` +
+				` fetch: typeof fetch, ws: typeof WebSocket, xhr: typeof XMLHttpRequest,` +
+				` Request: typeof Request, Response: typeof Response, Headers: typeof Headers,` +
+				` env: process.env.BOBBIT_TEST_TL_SECRET ?? null, envKeys: Object.keys(process.env).length,` +
+				` binding: typeof process.binding, dlopen: typeof process.dlopen, argv: process.argv.length, cwd: process.cwd()` +
+				` }) };`,
+			);
+			const r = (await mh.invoke(req(url, "probe", bareCtx()))) as Record<string, unknown>;
+			for (const g of ["fetch", "ws", "xhr", "Request", "Response", "Headers", "binding", "dlopen"]) {
+				assert.equal(r[g], "undefined", `${g} must be removed/absent in the worker`);
+			}
+			assert.equal(r.env, null, "the host secret must NOT be readable via process.env");
+			assert.equal(r.envKeys, 0, "process.env must be empty");
+			assert.equal(r.argv, 0, "process.argv must not leak host args");
+			assert.equal(r.cwd, "/", "process.cwd() must not leak the host working dir");
+		} finally {
+			mh.dispose();
+			delete process.env.BOBBIT_TEST_TL_SECRET;
+		}
+	});
+
+	it("a module that calls fetch at TOP LEVEL fails (no outbound egress — the global is gone)", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(`await fetch("http://169.254.169.254/latest/meta-data/");\nexport const actions = { run: async () => "x" };`);
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx())),
+				(e) => e instanceof ActionError,
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("process.exit is an inert throwing stub (cannot kill the worker out from under the host)", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(`export const actions = { tryexit: async () => { try { process.exit(0); return "no-throw"; } catch (e) { return "caught:" + e.message; } } };`);
+			const r = await mh.invoke(req(url, "tryexit", bareCtx()));
+			assert.match(String(r), /^caught:.*denied/);
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
 describe("ModuleHost — CPU / wall-time termination (design §9: terminate-on-timeout IS the CPU control)", () => {
 	it("a while(1) CPU spin is TERMINATED on timeout → 504 (true cancellation, not a hung permit)", async () => {
 		const mh = new ModuleHost({ timeoutMs: 400 });

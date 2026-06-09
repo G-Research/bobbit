@@ -13,8 +13,11 @@
 //   2. Install the module-load DENY-HOOK (`confinement-loader.ts`) via
 //      `module.register`, so the pack module graph imported afterward cannot reach
 //      `node:fs`/`child_process`/network/`process`/`worker_threads`/etc.
-//   3. Harden the global `process` defensively (env is already empty; remove the
-//      native-binding escape vectors).
+//   3. Remove ambient web/process globals BEFORE any pack code runs: delete the
+//      outbound-network globals (`fetch`/`WebSocket`/`XMLHttpRequest`/`Request`/
+//      `Response`/`Headers`/…) and REPLACE the ambient `process` global with an
+//      inert shim (no env/exit/binding/argv/cwd). The host-API proxy over the
+//      parent MessagePort is then the ONLY capability pack code can reach.
 //   4. On an `invoke` message: dynamic-import the pack module at the SAME
 //      epoch-cache-busted URL the dispatcher built, build a `ctx.host` PROXY whose
 //      store/session calls are marshalled back to the parent over the MessagePort
@@ -79,26 +82,74 @@ register(new URL(`./confinement-loader${ext}`, import.meta.url).href, {
 	data: { denied: data.denied },
 });
 
-// ── (3) Defensive global hardening (env is already empty via `{ env: {} }`). ──
-hardenGlobals();
+// ── (3) Remove ambient web/process globals BEFORE any pack module is imported. ──
+removeAmbientGlobals();
 
-function hardenGlobals(): void {
-	try {
-		// Empty + freeze env so even if something repopulated it, pack code cannot
-		// read host secrets (the worker was started with `{ env: {} }`).
-		Object.freeze((process as { env: Record<string, string> }).env);
-	} catch {
-		/* best effort */
-	}
-	// Remove the native-binding / dynamic-link escape vectors from the process
-	// global (importing `node:process` is already denied by the loader; this closes
-	// the AMBIENT `process` global path).
-	for (const key of ["binding", "_linkedBinding", "dlopen", "kill", "abort", "exit"]) {
+/**
+ * Strip the ambient capabilities a `worker_threads.Worker` inherits that the
+ * module-load deny-hook does NOT cover (it denies `node:` IMPORTS, but these are
+ * reachable as GLOBALS without an import). After this runs, the ONLY capability
+ * pack code is handed is the host-API proxy over the parent MessagePort.
+ *
+ *   (a) Outbound-network globals — `fetch` (SSRF / arbitrary egress) plus the
+ *       WHATWG fetch types and the legacy `XMLHttpRequest`/`WebSocket`/
+ *       `EventSource` surfaces — are deleted.
+ *   (b) The ambient `process` global is REPLACED with an inert shim: empty frozen
+ *       env (no host secrets/metadata), no `exit`/`abort`/`kill`, no
+ *       `binding`/`dlopen` (native escape), no `argv`/`cwd`/`execPath` leaking
+ *       host data. `node:process` is already denied by the loader; this closes
+ *       the ambient-global path. Node internals + the loader thread keep their
+ *       OWN process reference (via the internal binding / require('process')), so
+ *       only PACK code on this thread sees the shim.
+ */
+function removeAmbientGlobals(): void {
+	const g = globalThis as unknown as Record<string, unknown>;
+	// (a) Delete every outbound-network global — pack code's only egress is the host proxy.
+	for (const key of ["fetch", "WebSocket", "XMLHttpRequest", "Request", "Response", "Headers", "EventSource", "sendBeacon", "navigator"]) {
 		try {
-			delete (process as unknown as Record<string, unknown>)[key];
+			delete g[key];
 		} catch {
 			/* best effort */
 		}
+	}
+	// (b) Replace the ambient `process` global with an inert shim.
+	const denied = (name: string) => () => {
+		throw new Error(`[confinement] process.${name} is denied to pack server modules (Extension Host §9 isolation)`);
+	};
+	const inert: Record<string, unknown> = {
+		env: Object.freeze({}),
+		argv: Object.freeze([]),
+		argv0: "",
+		execArgv: Object.freeze([]),
+		execPath: "",
+		platform: "",
+		arch: "",
+		version: "",
+		versions: Object.freeze({}),
+		pid: 0,
+		ppid: 0,
+		title: "",
+		cwd: () => "/",
+		nextTick: (cb: (...a: unknown[]) => void, ...args: unknown[]) => { queueMicrotask(() => cb(...args)); },
+		exit: denied("exit"),
+		abort: denied("abort"),
+		kill: denied("kill"),
+		// NOTE: `binding`/`_linkedBinding`/`dlopen` (native-module escape vectors) are
+		// intentionally ABSENT (undefined), not stubbed — there is no such member to call.
+		// Inert EventEmitter-ish surface so a defensive `process.on(...)` is a no-op,
+		// never a throw (returns the shim for chaining).
+		on: () => inert,
+		once: () => inert,
+		off: () => inert,
+		addListener: () => inert,
+		removeListener: () => inert,
+		emit: () => false,
+	};
+	Object.freeze(inert);
+	try {
+		Object.defineProperty(g, "process", { value: inert, writable: false, configurable: false, enumerable: false });
+	} catch {
+		try { g.process = inert; } catch { /* best effort */ }
 	}
 }
 
@@ -145,10 +196,17 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		// ── (4) Dynamic-import the pack module through the deny-hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
 		const group = mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind];
-		// Own-property + function check (mirrors the dispatcher's parent-side guard):
-		// never invoke an INHERITED member (`constructor`, `toString`, …) even if this
-		// worker is driven directly — defense-in-depth against a prototype-walk.
-		const fn = group && Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
+		// Export-map validation now lives HERE (moved off the parent so the parent never
+		// imports pack code): a module with no `actions`/`routes` export object is a 500,
+		// matching the status the dispatcher used to throw parent-side.
+		if (!group || typeof group !== "object") {
+			port!.postMessage({ kind: "result", ok: false, status: 500, error: `module has no '${msg.exportKind}' export` });
+			return;
+		}
+		// Own-property + function check (mirrors the former dispatcher parent-side guard):
+		// never invoke an INHERITED member (`constructor`, `toString`, …) — defense-in-depth
+		// against a prototype-walk. An unknown/own-non-function member is a 404.
+		const fn = Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
 		if (typeof fn !== "function") {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;

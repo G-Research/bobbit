@@ -40,6 +40,8 @@ export interface RouteRequest {
 }
 
 export type RouteHandler = (ctx: RouteHandlerCtx, req: RouteRequest) => Promise<unknown> | unknown;
+/** The export shape a pack routes module declares. Resolved + validated INSIDE
+ *  the worker (module-host-bootstrap) — the parent never constructs/imports it. */
 export type RoutesModule = { routes: Record<string, RouteHandler> };
 
 /** The resolved on-disk location of a tool's routes module. Mirrors the action
@@ -106,7 +108,9 @@ class TokenBucketLimiter {
  * pack's route module regardless of which surface issued the call (§5 B3.1).
  */
 export class RouteDispatcher {
-	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; module: RoutesModule; url: string }>();
+	/** Caches ONLY {path → {mtimeMs, epoch, url}} — NEVER a module object. The
+	 *  parent does no `import()`, so pack top-level code never runs here. */
+	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; url: string }>();
 	private readonly timeoutMs: number;
 	private readonly maxConcurrent: number;
 	private readonly limiter: TokenBucketLimiter | null;
@@ -154,44 +158,27 @@ export class RouteDispatcher {
 		return abs;
 	}
 
-	private static readonly MAX_INFLIGHT_RELOADS = 5;
+	/** Resolve the epoch-cache-busted import URL for a tool's routes module WITHOUT
+	 *  importing it (mirrors ActionDispatcher.resolveModuleUrl — the parent does NO
+	 *  `import()`; the worker imports + validates the `routes` export + member). */
+	private resolveModuleUrl(tool: string, resolver: RouteToolLocationResolver): { url: string } | null {
+		const abs = this.resolveModulePath(tool, resolver);
+		if (!abs) return null;
 
-	/** Load (or return cached) the routes module for a tool. Mirrors
-	 *  ActionDispatcher.loadModule's epoch-snapshot in-flight-race guard. */
-	private async loadModule(tool: string, resolver: RouteToolLocationResolver): Promise<{ module: RoutesModule; url: string } | null> {
-		for (let attempt = 0; ; attempt++) {
-			const abs = this.resolveModulePath(tool, resolver);
-			if (!abs) return null;
-
-			let stat: fs.Stats;
-			try {
-				stat = fs.statSync(abs);
-			} catch {
-				return null; // module file does not exist
-			}
-
-			const hit = this.cache.get(abs);
-			if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return { module: hit.module, url: hit.url };
-
-			const epochAtStart = this.epoch;
-			const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epochAtStart}`;
-			const imported = (await import(url)) as Partial<RoutesModule> & Record<string, unknown>;
-			const routes = imported.routes ?? (imported.default as RoutesModule | undefined)?.routes;
-			if (!routes || typeof routes !== "object") {
-				throw new ActionError(500, `routes module for tool "${tool}" has no 'routes' export`);
-			}
-			const module: RoutesModule = { routes: routes as Record<string, RouteHandler> };
-
-			if (this.epoch === epochAtStart) {
-				this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: epochAtStart, module, url });
-				return { module, url };
-			}
-
-			if (attempt >= RouteDispatcher.MAX_INFLIGHT_RELOADS) {
-				return { module, url };
-			}
-			// loop: re-resolve + reload against the advanced epoch.
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(abs);
+		} catch {
+			return null; // module file does not exist
 		}
+
+		const epoch = this.epoch;
+		const hit = this.cache.get(abs);
+		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === epoch) return { url: hit.url };
+
+		const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epoch}`;
+		this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch, url });
+		return { url };
 	}
 
 	/** Race `work` (combined module load+eval AND handler execution) against the
@@ -243,24 +230,21 @@ export class RouteDispatcher {
 		this.inFlight++;
 
 		// ONE combined per-call timeout spans BOTH the module load+eval AND the
-		// handler execution (closes the hung-top-level-await gap — see ActionDispatcher).
+		// handler execution; since the PARENT does NO `import()`, the timeout bounds
+		// module eval too (a top-level `while(1)` is killed by terminate — see
+		// ActionDispatcher).
 		const work = (async (): Promise<unknown> => {
-			const loaded = await this.loadModule(tool, resolver);
-			if (!loaded) throw new ActionError(404, `no routes module found for tool "${tool}"`);
-			const { module, url } = loaded;
-			// Own-property check: never resolve inherited members (constructor/toString).
-			if (!Object.prototype.hasOwnProperty.call(module.routes, name)) {
-				throw new ActionError(404, `unknown route "${name}" for tool "${tool}"`);
-			}
-			const handler = module.routes[name];
-			if (typeof handler !== "function") throw new ActionError(404, `unknown route "${name}" for tool "${tool}"`);
+			const resolved = this.resolveModuleUrl(tool, resolver);
+			if (!resolved) throw new ActionError(404, `no routes module found for tool "${tool}"`);
 
-			// SINGLE invocation seam (the ONLY place a route handler runs) — C3 runs it
-			// in a CONFINED worker (server-module isolation, design §9) instead of
-			// in-process; callers unchanged. The worker re-imports the SAME validated
-			// URL; isolation is unconditional (no in-process path).
+			// SINGLE invocation seam (the ONLY place pack code runs) — the PARENT does NO
+			// `import()`. The CONFINED worker (server-module isolation, design §9) imports
+			// the epoch-cache-busted URL, resolves `routes[member]` (own-function check),
+			// and either invokes it or returns a structured `{error, status}` mapped to the
+			// SAME ActionError statuses (500 "no 'routes' export" / 404 "unknown route").
+			// Isolation is unconditional (no in-process path).
 			return await this.moduleHost.invoke(
-				{ url, epoch: this.epoch, exportKind: "routes", member: name, ctx, arg: req },
+				{ url: resolved.url, epoch: this.epoch, exportKind: "routes", member: name, ctx, arg: req },
 				this.timeoutMs,
 			);
 		})();
