@@ -12,7 +12,7 @@
 // significant → other → audit, cards grouped under each phase), the active card
 // (summary, rationale, diff blocks with hunks/lines, suggested comments). ALL
 // dynamic data flows through the Host API — NEVER a raw fetch:
-//   - host.callRoute("bundle", { query:{ jobId, baseSha, headSha, repoDir } })
+//   - host.callRoute("bundle", { query:{ jobId, baseSha, headSha } })
 //     → the pack's OWN route module (re-expressing handlePrWalkthroughApiRoute),
 //     which RECOMPUTES the REAL changeset LIVE via git in the confined worker
 //     (design §D2.3 — declared git/fs) and READS any LLM-enhanced cards persisted
@@ -185,12 +185,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		render(params, host) {
 			const jobId = (params && params.jobId) || "job-litmus-1";
 			// Live-recompute coordinates (design §D2.3): a deep-link / launcher may
-			// carry the PR's base/head (+ optional repoDir) so the route recomputes a
-			// freshly-opened PR's changeset live. Absent, the route rehydrates them
-			// from the persisted job pointer.
+			// carry the PR's base/head so the route recomputes a freshly-opened PR's
+			// changeset live. Absent, the route rehydrates them from the persisted job
+			// pointer. The git repo root is ALWAYS the session worktree (server-derived
+			// in the route) — a caller can NOT supply it, so no `repoDir` is sent.
 			const baseSha = params && params.baseSha;
 			const headSha = params && params.headSha;
-			const repoDir = params && params.repoDir;
 			const entry = byJob.get(jobId);
 			const loading = loadingJobs.has(jobId);
 
@@ -221,7 +221,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					const query = { jobId };
 					if (baseSha) query.baseSha = baseSha;
 					if (headSha) query.headSha = headSha;
-					if (repoDir) query.repoDir = repoDir;
 					const bundle = await host.callRoute("bundle", { query });
 					const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
 					byJob.set(jobId, { bundle, toolCall, activeCardId: firstCard });

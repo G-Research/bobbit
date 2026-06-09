@@ -8,11 +8,22 @@
  * THE KEY CHANGE FROM THE PRIOR REVISION (design §D2.3): the bundle route now
  * RECOMPUTES the changeset LIVE via `git` in the confined worker (the pack declares
  * `permissions: ["git","fs"]`, so child_process/fs are un-denied and the worker gets
- * a minimal `{ PATH }` env). This test therefore drives a REAL git working dir — it
- * `git init`s a temp repo, makes two commits, and opens the pack viewer against that
- * base/head range. The pack's `bundle` route shells out to `git diff` IN THE WORKER
- * and returns a freshly-computed structural changeset (NOT a hand-seeded fixture),
- * proving the pack can review a PR created AFTER it was installed.
+ * a minimal `{ PATH }` env). This test therefore drives a REAL git working dir —
+ * but, crucially, the git repo root is the SESSION WORKTREE (server-derived from the
+ * bound session), NEVER a caller-supplied path. So the test `git init`s the SESSION's
+ * own working dir, makes two commits there, and opens the viewer against that
+ * base/head range; the pack's `bundle` route shells out to `git diff` IN THE WORKER
+ * against `process.cwd()` (the session worktree) and returns a freshly-computed
+ * structural changeset (NOT a hand-seeded fixture), proving the pack can review a PR
+ * created AFTER it was installed.
+ *
+ * SECURITY (HIGH path-traversal fix): the route does NOT accept a caller-controlled
+ * `repoDir` as the git cwd — a session scoped to this pack must not be able to point
+ * the route at ANOTHER local repo (disclosing other projects' diffs/metadata). This
+ * test ALSO sets up a SEPARATE "other" git repo with a secret-marked file and proves
+ * that a caller passing `repoDir` + that repo's SHAs gets NO other-repo data (the
+ * route ignores `repoDir`, runs in the session worktree where those SHAs don't
+ * exist, and fails closed).
  *
  * The SYNTHESIS CREDENTIAL SPLIT (design §D2.3): LLM-enhanced cards are NOT computed
  * in the credential-less worker. They are produced at agent-tool/submit time and
@@ -32,10 +43,12 @@
  *   3. ENTRYPOINT LAUNCH: the `pr-walkthrough.git-widget` git-widget-button launcher
  *      mounts the viewer panel — and NO callRoute POST fires before the user's Load
  *      click (control v1 §5 v: no auto-invoke).
- *   4. LIVE RECOMPUTE: a deep-link carrying baseSha/headSha/repoDir + Load issues
- *      host.callRoute("bundle", …); the route runs `git diff` LIVE in the worker and
- *      returns the REAL changeset; selecting the significant nav card reveals the
- *      real diff block computed from git (NOT a fixture).
+ *   4. LIVE RECOMPUTE: a deep-link carrying baseSha/headSha (NO repoDir) + Load
+ *      issues host.callRoute("bundle", …); the route runs `git diff` LIVE in the
+ *      worker against the SESSION WORKTREE and returns the REAL changeset; selecting
+ *      the significant nav card reveals the real diff block computed from git (NOT a
+ *      fixture). 4b: a caller-supplied `repoDir` pointing at another repo is ignored
+ *      (fails closed — no other-repo data disclosed).
  *   5. STORED CARDS + DEEP-LINK: publish LLM-enhanced cards via the pack's own
  *      `publish` route; a reload + Load serves the persisted cards (suggested comment
  *      renders) with a stable persistedAt across a second reload.
@@ -74,35 +87,72 @@ const SYNC_FILE = "src/sync/worker.ts";
 // The PR title rendered by the published (LLM-enhanced) stored cards.
 const PR_TITLE = "Add retry/backoff to the sync worker";
 
-/** A live temp git repo (created per run) whose base→head diff the pack route
- *  recomputes via real `git`. Tracked so afterEach removes it. */
+/** The SESSION WORKTREE (server-derived) — the ONLY git repo the route ever diffs.
+ *  We `git init` the bound session's own working dir and commit there; afterEach
+ *  does NOT remove it (the gateway harness owns + cleans the bobbitDir). */
 let repoDir: string | undefined;
 let baseSha = "";
 let headSha = "";
+
+/** A SEPARATE "other project" git repo with a secret-marked file. The route must
+ *  NEVER serve this repo's data even when a caller passes its path as `repoDir`.
+ *  Tracked so afterEach removes it (it is NOT inside the harness bobbitDir). */
+let outsideRepoDir: string | undefined;
+let outsideBaseSha = "";
+let outsideHeadSha = "";
+// A distinctive path/content that exists ONLY in the outside repo, so we can assert
+// it never leaks into a bundle response.
+const OUTSIDE_SECRET_FILE = "secret/other-repo-only.ts";
+const OUTSIDE_SECRET_MARKER = "TOP_SECRET_OTHER_REPO";
 
 function gitIn(dir: string, args: string[]): string {
 	return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
 }
 
-/** Create a temp git repo with two commits: base adds src/sync/worker.ts; head
- *  rewrites the return line to use withRetry(). The pack `bundle` route diffs
- *  base..head LIVE in the confined worker. */
-function setupGitRepo(): void {
-	repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "prw-pack-repo-"));
-	gitIn(repoDir, ["init", "-q"]);
-	gitIn(repoDir, ["config", "user.email", "bobbit-ai@bobbit.ai"]);
-	gitIn(repoDir, ["config", "user.name", "bobbit-ai"]);
-	gitIn(repoDir, ["config", "commit.gpgsign", "false"]);
-	const file = path.join(repoDir, SYNC_FILE);
+function gitConfig(dir: string): void {
+	gitIn(dir, ["config", "user.email", "bobbit-ai@bobbit.ai"]);
+	gitIn(dir, ["config", "user.name", "bobbit-ai"]);
+	gitIn(dir, ["config", "commit.gpgsign", "false"]);
+}
+
+/** `git init` the SESSION's own working dir (server-derived) and add two commits:
+ *  base adds src/sync/worker.ts; head rewrites the return line to use withRetry().
+ *  The pack `bundle` route diffs base..head LIVE in the confined worker against
+ *  `process.cwd()` (this exact dir) — never a caller-supplied path. We commit ONLY
+ *  the SYNC_FILE so the bobbitDir's harness state is left untracked. */
+function setupSessionGitRepo(dir: string): void {
+	repoDir = dir;
+	if (!fs.existsSync(path.join(dir, ".git"))) gitIn(dir, ["init", "-q"]);
+	gitConfig(dir);
+	const file = path.join(dir, SYNC_FILE);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, "export class SyncWorker {\n  async runOnce() {\n    return this.fetchBatch();\n  }\n}\n");
-	gitIn(repoDir, ["add", "."]);
-	gitIn(repoDir, ["commit", "-q", "-m", "base"]);
-	baseSha = gitIn(repoDir, ["rev-parse", "HEAD"]);
+	gitIn(dir, ["add", "--", SYNC_FILE]);
+	gitIn(dir, ["commit", "-q", "-m", "base"]);
+	baseSha = gitIn(dir, ["rev-parse", "HEAD"]);
 	fs.writeFileSync(file, "export class SyncWorker {\n  async runOnce() {\n    return this.withRetry(() => this.fetchBatch());\n  }\n}\n");
-	gitIn(repoDir, ["add", "."]);
-	gitIn(repoDir, ["commit", "-q", "-m", "head: retry/backoff"]);
-	headSha = gitIn(repoDir, ["rev-parse", "HEAD"]);
+	gitIn(dir, ["add", "--", SYNC_FILE]);
+	gitIn(dir, ["commit", "-q", "-m", "head: retry/backoff"]);
+	headSha = gitIn(dir, ["rev-parse", "HEAD"]);
+}
+
+/** A SEPARATE temp git repo (NOT the session worktree) holding a secret file. Its
+ *  base..head range is what an attacker would point `repoDir` at to exfiltrate
+ *  another project's diff. */
+function setupOutsideRepo(): void {
+	outsideRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), "prw-other-repo-"));
+	gitIn(outsideRepoDir, ["init", "-q"]);
+	gitConfig(outsideRepoDir);
+	const file = path.join(outsideRepoDir, OUTSIDE_SECRET_FILE);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `export const token = "${OUTSIDE_SECRET_MARKER}";\n`);
+	gitIn(outsideRepoDir, ["add", "."]);
+	gitIn(outsideRepoDir, ["commit", "-q", "-m", "other-base"]);
+	outsideBaseSha = gitIn(outsideRepoDir, ["rev-parse", "HEAD"]);
+	fs.writeFileSync(file, `export const token = "${OUTSIDE_SECRET_MARKER}";\nexport const extra = 1;\n`);
+	gitIn(outsideRepoDir, ["add", "."]);
+	gitIn(outsideRepoDir, ["commit", "-q", "-m", "other-head"]);
+	outsideHeadSha = gitIn(outsideRepoDir, ["rev-parse", "HEAD"]);
 }
 
 /** The changeset id the route computes for base..head (short(base)..short(head)) —
@@ -194,9 +244,11 @@ async function cleanup(): Promise<void> {
 			await apiFetch(`/api/marketplace/sources/${encodeURIComponent(s.id)}`, { method: "DELETE" }).catch(() => {});
 		}
 	} catch { /* ignore */ }
-	if (repoDir) {
-		try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch { /* ignore */ }
-		repoDir = undefined;
+	// Do NOT remove `repoDir` — it is the harness-owned session worktree (bobbitDir).
+	repoDir = undefined;
+	if (outsideRepoDir) {
+		try { fs.rmSync(outsideRepoDir, { recursive: true, force: true }); } catch { /* ignore */ }
+		outsideRepoDir = undefined;
 	}
 }
 
@@ -266,10 +318,11 @@ async function publishCards(sid: string): Promise<void> {
 	const res = await apiFetch("/api/ext/route/publish", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sid },
+		// NO repoDir — the git working dir is server-derived (the session worktree).
 		body: JSON.stringify({
 			sessionId: sid,
 			tool: TOOL,
-			init: { body: { jobId: JOB_ID, baseSha, headSha, repoDir, cards: llmCards() } },
+			init: { body: { jobId: JOB_ID, baseSha, headSha, cards: llmCards() } },
 		}),
 	});
 	const body = await res.text();
@@ -279,10 +332,24 @@ async function publishCards(sid: string): Promise<void> {
 	expect(parsed.changesetId, "publish must compute the same changeset id").toBe(changesetId());
 }
 
-/** Build the deep-link hash carrying the live-recompute coordinates. */
+/** Build the deep-link hash carrying the live-recompute coordinates. NO repoDir:
+ *  the git repo root is server-derived (the session worktree), not a deep-link
+ *  param a caller could redirect. */
 function liveDeepLink(): string {
-	const params = new URLSearchParams({ jobId: JOB_ID, baseSha, headSha, repoDir: repoDir! });
+	const params = new URLSearchParams({ jobId: JOB_ID, baseSha, headSha });
 	return `#/ext/${PACK}?${params.toString()}`;
+}
+
+/** Drive the pack's `bundle` route directly (same endpoint host.callRoute uses) with
+ *  an arbitrary query — used to PROVE a caller-supplied `repoDir` cannot exfiltrate
+ *  another repo's diff. Returns the raw response. */
+async function callBundleRoute(sid: string, query: Record<string, string>): Promise<{ status: number; text: string }> {
+	const res = await apiFetch("/api/ext/route/bundle", {
+		method: "POST",
+		headers: { "x-bobbit-session-id": sid },
+		body: JSON.stringify({ sessionId: sid, tool: TOOL, init: { query } }),
+	});
+	return { status: res.status, text: await res.text() };
 }
 
 test.afterEach(async () => {
@@ -291,7 +358,11 @@ test.afterEach(async () => {
 
 test.describe("Extension Host Phase 2 — D2 pr-walkthrough-as-pack (live git recompute)", () => {
 	test("install → launcher mounts panel → LIVE git recompute renders real diff → stored LLM cards persist across reload → uninstall", async ({ page, gateway }) => {
-		setupGitRepo();
+		// The OUTSIDE repo is created up front so the path-traversal probe (step 4b)
+		// has another project's diff to (fail to) point the route at. The SESSION's own
+		// git repo is initialised below, once the session (and thus its server-derived
+		// working dir) exists.
+		setupOutsideRepo();
 
 		// ── Step 1: install at server scope BEFORE opening the app so the cold-load
 		// reconcile sees the pack. ──
@@ -314,6 +385,14 @@ test.describe("Extension Host Phase 2 — D2 pr-walkthrough-as-pack (live git re
 		await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
 		await seedSubmitToolCall(gateway, sid!);
 
+		// ── Step 2b: initialise the SESSION WORKTREE as a git repo. The route diffs
+		// against the worker's `process.cwd()` (server-derived from this session), NOT a
+		// caller path — so the LIVE recompute MUST run against the session's own dir. ──
+		const ps = gateway.sessionManager?.getPersistedSession(sid!) as { cwd?: string; worktreePath?: string } | undefined;
+		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
+		expect(sessionWorktree, "the session must have a resolvable working dir").toBeTruthy();
+		setupSessionGitRepo(sessionWorktree!);
+
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
 
 		// ── Step 3: ENTRYPOINT LAUNCH — the git-widget-button launcher navigates to
@@ -325,9 +404,10 @@ test.describe("Extension Host Phase 2 — D2 pr-walkthrough-as-pack (live git re
 		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible();
 		expect(bundlePosts, "panel must NOT auto-invoke callRoute on mount").toHaveLength(0);
 
-		// ── Step 4: LIVE RECOMPUTE — navigate the deep-link with base/head/repoDir
-		// (a real "open this PR" link). Load → host.callRoute("bundle") → the route
-		// runs `git diff` LIVE in the confined worker and returns the REAL changeset. ──
+		// ── Step 4: LIVE RECOMPUTE — navigate the deep-link with base/head (NO repoDir:
+		// the git repo root is server-derived). Load → host.callRoute("bundle") → the
+		// route runs `git diff` LIVE in the confined worker against the session worktree
+		// and returns the REAL changeset. ──
 		await page.evaluate((h) => { window.location.hash = h; }, liveDeepLink());
 		await expect.poll(async () => (await page.evaluate(() => window.location.hash)).startsWith(`#/ext/${PACK}?`), { timeout: 10_000 }).toBe(true);
 		const load1 = page.locator('[data-testid="prw-load"]').first();
@@ -353,6 +433,28 @@ test.describe("Extension Host Phase 2 — D2 pr-walkthrough-as-pack (live git re
 		await expect(liveDiff).toBeVisible({ timeout: 10_000 });
 		await expect(liveDiff).toHaveAttribute("data-prw-file", SYNC_FILE);
 		await expect(liveDiff).toContainText("this.withRetry");
+
+		// ── Step 4b: PATH-TRAVERSAL PROBE (the HIGH finding) — a caller points `repoDir`
+		// at ANOTHER local repo (+ that repo's SHAs). The route MUST ignore `repoDir` and
+		// run in the session worktree, where those SHAs don't exist → it fails closed and
+		// NEVER discloses the other repo's secret file. ──
+		const attack = await callBundleRoute(sid!, {
+			jobId: JOB_ID,
+			baseSha: outsideBaseSha,
+			headSha: outsideHeadSha,
+			repoDir: outsideRepoDir!,
+		});
+		expect(attack.text, "the other repo's secret must NEVER leak through repoDir").not.toContain(OUTSIDE_SECRET_MARKER);
+		expect(attack.text, "the other repo's file path must NEVER leak through repoDir").not.toContain(OUTSIDE_SECRET_FILE);
+		// Fails closed: the outside SHAs are not resolvable in the session worktree, so
+		// the route errors rather than returning another project's changeset.
+		expect(attack.status, `repoDir traversal must NOT return other-repo data (got ${attack.status}: ${attack.text})`).not.toBe(200);
+
+		// Sanity: the SAME caller WITHOUT a repoDir, using the session worktree's real
+		// SHAs, still succeeds (the worktree, not the attacker's path, is the repo root).
+		const ok = await callBundleRoute(sid!, { jobId: JOB_ID, baseSha, headSha });
+		expect(ok.status, `session-worktree recompute must succeed: ${ok.text}`).toBe(200);
+		expect(ok.text).toContain(SYNC_FILE);
 
 		// ── Step 5: STORED LLM CARDS — publish the enhanced cards (submit-time seam)
 		// keyed by the computed changeset id, then RELOAD + Load → the route now serves

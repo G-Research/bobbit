@@ -20,6 +20,15 @@
 // changeset for the requested base/head, including PRs created AFTER the pack was
 // installed (a static seeded fixture could only replay PRs known at publish time).
 //
+// ── THE GIT WORKING DIR IS SERVER-DERIVED, NEVER CALLER-SUPPLIED (security) ──
+// The repo root is ALWAYS the worker's own `process.cwd()` — i.e. the bound
+// session's working dir, server-resolved from the persisted session. This module
+// does NOT accept a caller-controlled `repoDir` (from query, body, or store) as the
+// git cwd: a session scoped to this pack must not be able to point the route at
+// ANOTHER local repo the gateway can reach (that would disclose diffs/metadata from
+// other projects and bypass session-working-dir confinement). The caller chooses
+// WHICH base/head to diff; the SERVER chooses WHICH repo (the session worktree).
+//
 // ── THE SYNTHESIS CREDENTIAL SPLIT (design §D2.3 — CRITICAL) ──
 // LLM card synthesis needs MODEL CREDENTIALS. The confined worker has only a
 // minimal `{ PATH }` env and NO gateway token / model keys (by design §9 C3.2) —
@@ -62,29 +71,32 @@ export const routes = {
 	// LIVE changeset recompute + persisted-card read. Two modes:
 	//   • baseSha + headSha present → recompute the REAL changeset LIVE via `git`
 	//     (in the confined worker, declared git/fs) and serve it + any stored cards.
-	//   • only jobId → load the persisted job pointer (base/head/repoDir written by
+	//   • only jobId → load the persisted job pointer (base/head written by
 	//     `publish`) and recompute live from it (store-rehydration); else empty.
 	// NEVER a raw fetch — the panel reaches this only via host.callRoute.
+	//
+	// SECURITY (the git working dir is SERVER-DERIVED, never caller-supplied): the
+	// repo root is ALWAYS the worker's own cwd() — i.e. the bound session's working
+	// dir, server-resolved from the persisted session (server.ts routeWorkingDir).
+	// We do NOT accept a caller-controlled `repoDir` from query/body/store as the git
+	// cwd: an authenticated session scoped to this pack must not be able to point the
+	// route at ANOTHER local repo the gateway can reach (that would disclose diffs /
+	// metadata from other projects and bypass session-working-dir confinement). Any
+	// `repoDir` a caller sends is IGNORED in favour of the session worktree.
 	bundle: async (ctx, req) => {
 		const q = (req && req.query) || {};
 		const jobId = normalizeJobId(q.jobId);
 		let baseSha = strOf(q.baseSha);
 		let headSha = strOf(q.headSha);
-		// `repoDir` selects the git working dir. It defaults to the worker's REAL
-		// cwd() (the session working dir, server-resolved) — the canonical production
-		// path (design §D2.3). An explicit override mirrors the bespoke route's
-		// `body.cwd`; the trust boundary is the declared fs/git grant (the worker can
-		// already read any path), not the cwd selection.
-		let repoDir = strOf(q.repoDir);
 
-		// jobId-only: rehydrate base/head/repoDir from the persisted job pointer so a
-		// deep-link carrying only the jobId still recomputes the SAME changeset live.
+		// jobId-only: rehydrate base/head from the persisted job pointer so a deep-link
+		// carrying only the jobId still recomputes the SAME changeset live. The repo
+		// root is NOT rehydrated from the pointer — it is always the session worktree.
 		if ((!baseSha || !headSha)) {
 			const job = await ctx.host.store.get(jobKey(jobId));
 			if (job && typeof job === "object") {
 				baseSha = baseSha || strOf(job.baseSha);
 				headSha = headSha || strOf(job.headSha);
-				repoDir = repoDir || strOf(job.repoDir);
 			}
 		}
 
@@ -95,8 +107,10 @@ export const routes = {
 			return { found: false, jobId };
 		}
 
-		const cwd = repoDir || workerCwd();
-		const live = await resolveLocalChangeset(cwd, baseSha, headSha);
+		// ALWAYS the session worktree (the worker's server-resolved cwd) — never a
+		// caller path. A base/head that does not exist in the session worktree fails
+		// `git rev-parse --verify` below (no other-repo data is ever returned).
+		const live = await resolveLocalChangeset(workerCwd(), baseSha, headSha);
 
 		// Prefer LLM-enhanced cards persisted at submit time (keyed by changeset id);
 		// else the deterministic fallback cards computed in-worker above.
@@ -119,8 +133,9 @@ export const routes = {
 	// (with real git/fs/network + MODEL credentials) COMPUTES the LLM-enhanced cards
 	// and hands them here. We persist:
 	//   • the LLM cards keyed by the changeset id (read back by `bundle`), and
-	//   • a job pointer { changesetId, baseSha, headSha, repoDir } so a jobId-only
-	//     deep-link can recompute the same changeset live.
+	//   • a job pointer { changesetId, baseSha, headSha } so a jobId-only
+	//     deep-link can recompute the same changeset live (against the session
+	//     worktree — the repo root is never persisted/caller-supplied).
 	// `persistedAt` is stamped ONCE per changeset (a re-publish keeps the original
 	// stamp) so the bundle route returns a stable timestamp across reloads —
 	// the store-rehydration parity proof.
@@ -131,14 +146,15 @@ export const routes = {
 			|| (strOf(body.baseSha) && strOf(body.headSha) ? changesetIdForLocal(body.baseSha, body.headSha) : undefined)
 			|| jobId;
 
-		// Job pointer — lets a jobId-only deep-link rehydrate the base/head/repoDir.
+		// Job pointer — lets a jobId-only deep-link rehydrate the base/head. We do NOT
+		// persist a `repoDir`: the git working dir is always the session worktree
+		// (server-derived), never a stored/caller-supplied path.
 		const jobPointer = {
 			schemaVersion: STORE_SCHEMA_VERSION,
 			jobId,
 			changesetId,
 			baseSha: strOf(body.baseSha),
 			headSha: strOf(body.headSha),
-			repoDir: strOf(body.repoDir),
 		};
 		await ctx.host.store.put(jobKey(jobId), jobPointer);
 

@@ -86,6 +86,8 @@ entrypoints:
     routeId: pr-walkthrough
     target:
       panelId: pr-walkthrough.panel
-    # jobId rehydrates a persisted job pointer; baseSha/headSha/repoDir let a
-    # deep-link drive a LIVE recompute (design §D2.3) for a freshly-opened PR.
-    paramKeys: [jobId, baseSha, headSha, repoDir]
+    # jobId rehydrates a persisted job pointer; baseSha/headSha let a deep-link
+    # drive a LIVE recompute (design §D2.3) for a freshly-opened PR. The git repo
+    # root is SERVER-DERIVED (the session worktree), never a deep-link param — so
+    # no `repoDir` key (a caller must not be able to point the route at another repo).
+    paramKeys: [jobId, baseSha, headSha]
