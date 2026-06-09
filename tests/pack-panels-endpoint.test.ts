@@ -152,8 +152,10 @@ describe("GET /api/tools/:tool/panel/:panelId is bearer-only + path-traversal va
 		const block = panelEndpointBlock();
 		assert.match(block, /resolveActionToolManager/);
 		assert.match(block, /resolveToolLocation/);
-		assert.match(block, /path\.relative\(groupAbs, fileAbs\)/);
-		assert.match(block, /rel\.startsWith\("\.\."\)/);
+		// Anti-traversal + anti-symlink: the resolved file path is validated to stay
+		// within the tool's group dir via the shared `isPackPathWithinGroup` helper
+		// (lexical relative check + realpath comparison — see path-guard.ts).
+		assert.match(block, /isPackPathWithinGroup\(groupAbs, fileAbs\)/);
 		// Serves JS with no-cache, exactly like the renderer endpoint.
 		assert.match(block, /"Content-Type": "text\/javascript"/);
 	});
