@@ -1,16 +1,18 @@
 /**
- * Unit tests for the client-internal USER-ACTIVATION gate + trusted per-session
- * SECRET holder (src/app/gesture-context.ts) — design
- * docs/design/extension-host-phase2.md §8 C2.1 / Fix A.
+ * Unit tests for the client-internal USER-ACTIVATION gate (src/app/gesture-context.ts)
+ * — design docs/design/extension-host-phase2.md §8 C2.1.
  *
  * Pure module (no DOM), so it runs as a node:test. `navigator.userActivation` is
  * mocked on globalThis to exercise the active/inactive cases.
  *
- * Pins (Fix A):
+ * The session WRITE's UNFORGEABLE gate is now its TRANSPORT (the SEND rides the
+ * trusted session WebSocket — session-write-bridge.ts — not a fetch carrying a
+ * capturable secret), so this module no longer holds any per-session secret and
+ * exposes no secret getter. What it still provides is the defense-in-depth
+ * "no post on mount" check:
  *   - consumeGesture() is false at rest (a render/mount has no activation) and true
  *     only while navigator.userActivation.isActive (a genuine user gesture).
  *   - runWithUserGesture is a thin wrapper: returns the body's value, propagates throws.
- *   - the per-session secret round-trips, is per-session isolated, and clears.
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -18,9 +20,6 @@ import {
 	runWithUserGesture,
 	consumeGesture,
 	isGestureActive,
-	setSessionSecret,
-	getSessionSecret,
-	clearSessionSecret,
 } from "../src/app/gesture-context.ts";
 
 /** Install a mock `navigator.userActivation` for the active/inactive cases. */
@@ -60,34 +59,5 @@ describe("gesture-context — runWithUserGesture (thin wrapper)", () => {
 
 	it("propagates a thrown error", () => {
 		assert.throws(() => runWithUserGesture(() => { throw new Error("boom"); }), /boom/);
-	});
-});
-
-describe("gesture-context — trusted per-session secret (closure-held)", () => {
-	it("round-trips a secret for the bound session", () => {
-		setSessionSecret("sess-A", "secret-A");
-		assert.equal(getSessionSecret("sess-A"), "secret-A");
-	});
-
-	it("is isolated per session (another session never sees it)", () => {
-		setSessionSecret("sess-A", "secret-A");
-		assert.equal(getSessionSecret("sess-B"), undefined);
-		setSessionSecret("sess-B", "secret-B");
-		assert.equal(getSessionSecret("sess-A"), "secret-A");
-		assert.equal(getSessionSecret("sess-B"), "secret-B");
-	});
-
-	it("clears a secret (and an empty value clears too)", () => {
-		setSessionSecret("sess-A", "secret-A");
-		clearSessionSecret("sess-A");
-		assert.equal(getSessionSecret("sess-A"), undefined);
-		setSessionSecret("sess-A", "secret-A");
-		setSessionSecret("sess-A", undefined);
-		assert.equal(getSessionSecret("sess-A"), undefined);
-	});
-
-	it("ignores undefined session ids", () => {
-		setSessionSecret(undefined, "x");
-		assert.equal(getSessionSecret(undefined), undefined);
 	});
 });

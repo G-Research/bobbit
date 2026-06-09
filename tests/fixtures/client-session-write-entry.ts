@@ -1,25 +1,33 @@
 // Test entry — exercises the C2 client session WRITE (`host.session.postMessage`)
-// and its two unforgeable gates: a REAL user activation (navigator.userActivation)
-// + the trusted per-session SECRET attached as `x-bobbit-session-secret`
-// (src/app/host-api.ts + gesture-context.ts; design extension-host-phase2.md §8
-// C2.1 / Fix A). `window.fetch` is stubbed so we can assert WHETHER a POST fired
-// (and with what body/headers) without a live gateway.
-//
-// `navigator.userActivation` is mocked so the test can toggle a genuine activation
-// on/off (page.evaluate is not itself a user gesture). The trusted secret is
-// injected via `setSessionSecret` (the same module-closure trusted app code uses);
-// pack code cannot reach that closure.
+// and its two gates (src/app/host-api.ts + gesture-context.ts + session-write-bridge.ts;
+// design extension-host-phase2.md §8 C2.1):
+//   1. TRANSPORT (unforgeable): the SEND rides the trusted session WebSocket via the
+//      session-write-bridge poster — NOT a `fetch`. We register a fake poster (the
+//      real one is supplied by RemoteAgent over its private WS) and assert the post
+//      flows through it, carrying the bound `tool`/role/text/resumeTurn. `window.fetch`
+//      is stubbed only to PROVE no fetch is involved (no capturable secret surface).
+//   2. REAL user activation (defense-in-depth): navigator.userActivation is mocked so
+//      the test can toggle a genuine activation on/off; postMessage throws SYNCHRONOUSLY
+//      with no activation (no mount-time posts).
 import { getHostApi } from "../../src/app/host-api.js";
-import { runWithUserGesture, setSessionSecret } from "../../src/app/gesture-context.js";
+import { runWithUserGesture } from "../../src/app/gesture-context.js";
+import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "../../src/app/session-write-bridge.js";
 
 interface Captured { url: string; method: string; body: any; headers: Record<string, string> }
 const calls: Captured[] = [];
+const posted: SessionPostRequest[] = [];
 (window as any).__calls = (): Captured[] => calls;
+(window as any).__posted = (): SessionPostRequest[] => posted;
+
+// Fake trusted WS poster (RemoteAgent registers the real one). Records the request
+// and resolves like a server ack.
+const fakePoster = async (req: SessionPostRequest): Promise<void> => { posted.push(req); };
+
 (window as any).__reset = (): void => {
 	calls.length = 0;
+	posted.length = 0;
 	setActivation(false);
-	// Trusted app code holds the per-session secret in a gesture-context closure.
-	setSessionSecret("sess-1", "test-secret");
+	registerSessionPoster("sess-1", fakePoster);
 };
 
 // Mock navigator.userActivation so we control whether a genuine activation is
@@ -31,7 +39,7 @@ Object.defineProperty(navigator, "userActivation", {
 	get: () => ({ isActive: activation, hasBeenActive: activation }),
 });
 
-// Capture every fetch; return 200 JSON ok so postMessage resolves.
+// Capture every fetch — the session WRITE must NOT use one (no capturable secret).
 window.fetch = (async (input: any, init?: any): Promise<Response> => {
 	const url = typeof input === "string" ? input : (input?.url ?? String(input));
 	let body: any;
@@ -41,14 +49,10 @@ window.fetch = (async (input: any, init?: any): Promise<Response> => {
 	return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 }) as any;
 
-// Helper: the captured POST to /api/ext/session/message (if any).
-const messageCall = (): Captured | undefined => calls.find((c) => c.url.includes("/api/ext/session/message"));
-(window as any).__messageCall = messageCall;
-
 // A panel/entrypoint origin binds toolUseId:undefined — postMessage must still work.
 const host = (): any => getHostApi("sess-1", undefined, "sample_action");
 
-// No activation → must throw SYNCHRONOUSLY (mount-time post fails loudly), no POST.
+// No activation → must throw SYNCHRONOUSLY (mount-time post fails loudly), no send.
 (window as any).__postNoGesture = (): string | null => {
 	setActivation(false);
 	try {
@@ -60,28 +64,28 @@ const host = (): any => getHostApi("sess-1", undefined, "sample_action");
 	}
 };
 
-// With a genuine activation → the POST fires to the C2 endpoint with the bound tool
-// AND carries the trusted per-session secret header (Fix A).
-(window as any).__postWithGesture = async (): Promise<{ posted: boolean; body: any; secretHeader: string | undefined }> => {
+// With a genuine activation → the post flows through the trusted WS poster carrying
+// the bound tool/role/text/resumeTurn — and NO fetch is made.
+(window as any).__postWithGesture = async (): Promise<{ posted: SessionPostRequest | undefined; fetches: number }> => {
 	setActivation(true);
 	const h = host();
 	const p: Promise<void> = runWithUserGesture(() =>
 		h.session.postMessage({ role: "user", text: "hi", resumeTurn: false }));
 	await p;
-	const msg = messageCall();
-	const secretHeader = msg?.headers?.["x-bobbit-session-secret"];
-	return { posted: !!msg, body: msg?.body, secretHeader };
+	return { posted: posted[0], fetches: calls.length };
 };
 
-// Without the trusted secret in the closure, no header is attached (the server then
-// rejects). Proves the secret is sourced from trusted closure state, not the body.
-(window as any).__postWithoutSecret = async (): Promise<{ posted: boolean; secretHeader: string | undefined }> => {
+// With NO trusted WS poster registered, postMessage rejects (transport unavailable):
+// a raw same-realm context cannot drive the agent without the trusted WS.
+(window as any).__postNoTransport = async (): Promise<string | null> => {
 	setActivation(true);
-	setSessionSecret("sess-1", undefined); // pretend the trusted secret is absent
-	const h = host();
-	await h.session.postMessage({ role: "user", text: "hi" });
-	const msg = messageCall();
-	return { posted: !!msg, secretHeader: msg?.headers?.["x-bobbit-session-secret"] };
+	unregisterSessionPoster("sess-1");
+	try {
+		await host().session.postMessage({ role: "user", text: "hi" });
+		return null; // resolved → failure
+	} catch (e) {
+		return e instanceof Error ? e.message : String(e);
+	}
 };
 
 // subscribe returns an unsubscribe fn (no throw, no server round-trip).

@@ -1,46 +1,43 @@
 // src/server/extension-host/session-write.ts
 //
-// The PURE handler for the C2 session-WRITE endpoint
-// (POST /api/ext/session/message; design docs/design/extension-host-phase2.md §8
-// C2.1). Factored out of server.ts — exactly like `action-guard.ts` — so the
-// whole authorize → validate → post → audit sequence is unit-testable without a
-// live gateway: the endpoint supplies real resolvers/poster/auditor; tests supply
-// stubs.
+// The PURE handler for the C2 session-WRITE capability (`host.session.postMessage`;
+// design docs/design/extension-host-phase2.md §8 C2.1). Factored out of the WS
+// handler — exactly like `action-guard.ts` — so the whole authorize → validate →
+// post → audit sequence is unit-testable without a live gateway: the WS handler
+// supplies real resolvers/poster/auditor; tests supply stubs.
 //
 // `session.postMessage` DRIVES the agent, so it is the HIGHEST-RISK Host-API
-// addition. Its security posture (design §8 / §15):
-//   - authorizeScopedRequest (NOT authorizeActionRequest): header-canonical
-//     session + body===header + session resolves + pack's `tool` ∈ allowedTools.
-//     Driving a turn acts on NO specific prior tool call, so toolUseId-ownership
-//     is the wrong check and `toolUseId` is NOT required — this is what lets a
-//     panel/entrypoint (which binds toolUseId:undefined) post.
-//   - server-derived packId (reject a non-pack caller) — never caller-supplied.
-//   - the target session is ALWAYS the header-bound session, NEVER a body param,
-//     so cross-session posting is structurally impossible.
-//   - every post/resume is AUDITED ({tool, packId, sessionId, role, resumeTurn,
-//     ms}) — mandatory.
-// The client layers a MANDATORY real user-activation check on top
-// (navigator.userActivation, gesture-context.ts) AND attaches the unforgeable
-// per-session secret this handler verifies (below).
+// addition.
+//
+// ── TRANSPORT: the trusted session WebSocket, NOT a fetch. ──
+//
+// THREAT (resolved here): a pack renderer/panel runs in the MAIN UI realm. It
+// shares the app's ambient credentials (bearer token, cookies) and can monkey-
+// patch `window.fetch`. An earlier design carried an unforgeable per-session
+// `x-bobbit-session-secret` on a `fetch` to a `/api/ext/session/message` endpoint;
+// but a same-realm pack could monkey-patch `fetch`, CAPTURE that header during one
+// legitimate user-gesture post, then REPLAY it without a gesture — exfiltrating the
+// secret and driving the agent at will.
+//
+// RESOLUTION: the SEND now rides the app's already-authenticated session
+// WebSocket. The WS object is private to the client `RemoteAgent` — pack code has
+// no handle to it and cannot send on it (and cannot import the trusted client
+// transport module: pack renderers/panels are Blob-URL modules that cannot resolve
+// app modules; the `host` object is their only surface). So there is NO session
+// secret on any `fetch` for pack code to capture/replay, and no fetch path to the
+// post capability at all. The TARGET session is the WS connection's OWN
+// server-authenticated session — never a caller parameter — so cross-session
+// posting is structurally impossible. This handler therefore takes a TRUSTED,
+// server-authenticated `sessionId` (resolved by the WS handler from the
+// authenticated connection), not a header/body pair plus a secret.
+//
+// The client still layers a MANDATORY real user-activation check on top
+// (navigator.userActivation, gesture-context.ts) as defense-in-depth — no
+// mount-time posts. The server-side gates that remain unforgeable regardless of the
+// client are: the pack's `tool` ∈ the session's allowedTools, a SERVER-derived
+// packId (reject a non-pack caller), and an AUDIT of every post/resume.
 
 import { authorizeScopedRequest, type ActionGuardSession } from "./action-guard.js";
-
-// ── UNFORGEABLE per-session SECRET (design §8 C2.1 / Fix A). ──
-//
-// The client `navigator.userActivation` check (gesture-context.ts) blocks a post
-// on mount, but it is a CLIENT concept the server cannot see — and a same-realm
-// pack renderer/panel can `fetch('/api/ext/session/message', …)` directly during
-// its own button click (user-activation IS active then), so user-activation alone
-// does not stop a malicious pack raw-fetch. To make "only trusted UI may drive the
-// agent" UNFORGEABLE, this endpoint additionally REQUIRES the trusted-only
-// `x-bobbit-session-secret` header: the per-session capability secret
-// (SessionSecretStore) delivered to trusted UI over the authenticated app
-// connection and held in a client module closure that is never on `window`/the
-// `host` object. Pack code cannot obtain it (it shares ambient creds — bearer
-// token, cookies — but not trusted closure state), so a raw pack fetch carries no
-// valid secret and is rejected 403. The secret is NOT a v1 API parameter
-// (postMessage(msg) is unchanged); it is an internal request header the trusted
-// client attaches.
 
 /** Pack identity as resolved SERVER-SIDE from the winning contribution. */
 export interface SessionPostPackIdentity {
@@ -63,35 +60,31 @@ export interface SessionPostAudit {
 export interface SessionPostInput {
 	/** The pack's contributing tool name (proves pack ownership via allowedTools). */
 	tool: string;
-	/** Raw x-bobbit-session-id header value. */
-	headerSessionId: string | string[] | undefined;
-	/** Untrusted body.sessionId — accepted only to fail fast on a header mismatch. */
-	bodySessionId: unknown;
+	/**
+	 * The TRUSTED, server-authenticated bound session id. This is the WS
+	 * connection's OWN session, resolved server-side from the authenticated
+	 * connection — NEVER a caller-supplied header/body value. Because pack code
+	 * cannot send on the trusted WS, this id is not caller-influenced, and the post
+	 * always targets it, so cross-session posting is structurally impossible.
+	 */
+	sessionId: string;
 	/** Untrusted body.role — must be "user" | "system". */
 	role: unknown;
 	/** Untrusted body.text — must be a non-empty string. */
 	text: unknown;
 	/** Untrusted body.resumeTurn — defaults to true (resume the agent turn). */
 	resumeTurn?: unknown;
-	/** The trusted-only `x-bobbit-session-secret` header (Fix A). REQUIRED: the post
-	 *  is rejected (403) unless this resolves to the SAME header-bound session. Pack
-	 *  code cannot obtain it (held in trusted client closure state, not window/host),
-	 *  so a raw pack fetch is rejected. Not a v1 API param — an internal header. */
-	sessionSecret: unknown;
-	/** Resolve the AUTHENTIC session id that owns a capability secret (or undefined).
-	 *  Wired to `sessionManager.sessionSecretStore.resolveSessionIdBySecret` by the
-	 *  endpoint. A miss MUST deny — never "skip the check". */
-	resolveSecretSession: (secret: string) => string | undefined;
-	/** Resolve a session (live or persisted) by id; undefined when not found. */
+	/** Resolve a session (live or persisted) by id; undefined when not found. Used
+	 *  to gate the pack's `tool` against the session's allowedTools. */
 	resolveSession: (id: string) => ActionGuardSession | undefined;
 	/** SERVER-derive the pack identity from the proven `tool` (never caller input). */
 	resolvePackIdentity: (tool: string) => SessionPostPackIdentity;
 	/**
-	 * Post into the HEADER-BOUND session. `resume === true` resumes the agent turn
+	 * Post into the TRUSTED bound session. `resume === true` resumes the agent turn
 	 * (enqueuePrompt path); `resume === false` delivers without resuming
-	 * (deliverLiveSteer / non-resuming append). The target session id is supplied
-	 * by the handler (the verified header-bound session) — there is NO other-session
-	 * parameter, so cross-session posting is impossible.
+	 * (deliverLiveSteer / non-resuming append). The target session id is supplied by
+	 * the handler (the verified, server-authenticated session) — there is NO
+	 * other-session parameter, so cross-session posting is impossible.
 	 */
 	post: (sessionId: string, text: string, opts: { role: "user" | "system"; resume: boolean }) => Promise<void>;
 	/** Audit sink — invoked for EVERY post/resume (success AND failure). */
@@ -111,12 +104,16 @@ export type SessionPostResult =
 export async function handleSessionPost(input: SessionPostInput): Promise<SessionPostResult> {
 	const clock = input.now ?? Date.now;
 
-	// 1. Pack-scoped authorization (NO toolUseId-ownership — §2a). The header is the
-	//    single canonical identity; the body sessionId is accepted only to fail fast.
+	// 1. Pack-scoped authorization. The session is the TRUSTED, server-authenticated
+	//    WS-bound session, so the body===header invariant authorizeScopedRequest
+	//    enforces holds trivially (both are the same trusted id). What this still
+	//    gates is: the session resolves, and the pack's `tool` ∈ allowedTools. (No
+	//    toolUseId-ownership — driving a turn acts on no specific prior tool call,
+	//    and panels/entrypoints have no toolUseId. §2a / Fix B.)
 	const guard = authorizeScopedRequest({
 		tool: input.tool,
-		headerSessionId: input.headerSessionId,
-		bodySessionId: input.bodySessionId,
+		headerSessionId: input.sessionId,
+		bodySessionId: input.sessionId,
 		resolveSession: input.resolveSession,
 	});
 	if (!guard.ok) return guard;
@@ -138,20 +135,8 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 		return { ok: false, status: 403, error: "session messaging is available only to market-pack tools" };
 	}
 
-	// 3b. REQUIRE the trusted-only per-session secret (Fix A). It must resolve to the
-	//     SAME header-bound session. Trusted UI delivers it over the authenticated app
-	//     connection and holds it in a client closure unreachable from pack code, so a
-	//     same-realm pack raw-fetch of this endpoint carries no valid secret and is
-	//     rejected here — making "only trusted UI may drive the agent" unforgeable.
-	if (
-		typeof input.sessionSecret !== "string" ||
-		input.resolveSecretSession(input.sessionSecret) !== guard.sessionId
-	) {
-		return { ok: false, status: 403, error: "missing or invalid session secret" };
-	}
-
-	// 4. Post into the HEADER-BOUND session ONLY (never a body param → cross-session
-	//    posting is impossible). resumeTurn defaults to true.
+	// 4. Post into the TRUSTED bound session ONLY (never a caller param →
+	//    cross-session posting is impossible). resumeTurn defaults to true.
 	const resume = input.resumeTurn !== false;
 	const start = clock();
 	const base = { tool: input.tool, packId: ident.packId, sessionId: guard.sessionId, role, resumeTurn: resume };

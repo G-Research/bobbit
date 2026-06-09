@@ -26,6 +26,11 @@ import {
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { ToolManager } from "../agent/tool-manager.js";
+import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
+import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
+import { handleSessionPost } from "../extension-host/session-write.js";
+import type { ActionGuardSession } from "../extension-host/action-guard.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -231,6 +236,7 @@ export function handleWebSocketConnection(
 	skipAuth = false,
 	sandboxTokenStore?: SandboxTokenStore,
 	projectContextManager?: ProjectContextManager,
+	toolManager?: ToolManager,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -333,12 +339,11 @@ export function handleWebSocketConnection(
 			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
-			// Fix A (extension-host §8 C2.1): hand TRUSTED UI the per-session capability
-			// secret over the authenticated connection. `host.session.postMessage` attaches
-			// it as `x-bobbit-session-secret` (held in a client closure, never window/host),
-			// and the post endpoint REQUIRES it — so same-realm pack code, which cannot read
-			// the closure, cannot drive the agent via a raw fetch.
-			send(ws, { type: "auth_ok", extSessionSecret: sessionManager.sessionSecretStore.getOrCreateSecret(sessionId) });
+			// The C2 session WRITE (`host.session.postMessage`) is driven over THIS trusted,
+			// authenticated connection (see the `ext_session_post` command below) — pack code
+			// has no handle to the WS and cannot send on it, so no session secret needs to be
+			// delivered to (and capturable from) the client at all.
+			send(ws, { type: "auth_ok" });
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
@@ -1004,6 +1009,60 @@ export function handleWebSocketConnection(
 					}
 					if (diagEnabled) {
 						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes, replayed, sendMs: performance.now() - diagStart });
+					}
+					break;
+				}
+				case "ext_session_post": {
+					// C2 session WRITE (`host.session.postMessage`) — design
+					// extension-host-phase2.md §8 C2.1. Routed over THIS trusted WS instead of a
+					// fetch precisely so no capturable session secret rides a pack-monkey-
+					// patchable `fetch`, and so pack code (no WS handle) cannot send it. The
+					// TARGET session is ALWAYS this connection's OWN authenticated `sessionId`,
+					// never a frame field — cross-session posting is structurally impossible.
+					const postMsg = msg as Extract<ClientMessage, { type: "ext_session_post" }>;
+					const requestId = typeof postMsg.requestId === "string" ? postMsg.requestId : "";
+					const projectTm = session.projectId && projectContextManager
+						? projectContextManager.getOrCreate(session.projectId)?.toolManager
+						: undefined;
+					const extToolManager = toolManager
+						? resolveActionToolManager(toolManager, projectTm)
+						: projectTm;
+					const resolveSession = (id: string): ActionGuardSession | undefined => {
+						const live = sessionManager.getSession(id);
+						if (live) return { allowedTools: live.allowedTools };
+						const persisted = sessionManager.getPersistedSession(id);
+						if (persisted) return { allowedTools: persisted.allowedTools };
+						return undefined;
+					};
+					const result = await handleSessionPost({
+						tool: typeof postMsg.tool === "string" ? postMsg.tool : "",
+						// The TRUSTED, server-authenticated bound session of THIS connection.
+						sessionId,
+						role: postMsg.role,
+						text: postMsg.text,
+						resumeTurn: postMsg.resumeTurn,
+						resolveSession,
+						resolvePackIdentity: (tool) => extToolManager
+							? resolvePackIdentityForTool(extToolManager, tool)
+							: { isPack: false, packId: "" },
+						post: async (sid, text, opts) => {
+							if (opts.resume) {
+								await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
+							} else {
+								await sessionManager.deliverLiveSteer(sid, text, { source: "extension" });
+							}
+						},
+						audit: (rec) => {
+							const tail = rec.outcome === "error" ? `: ${rec.error}` : "";
+							console.log(
+								`[ext-session-message] tool=${rec.tool} packId=${rec.packId} session=${rec.sessionId} role=${rec.role} resumeTurn=${rec.resumeTurn} outcome=${rec.outcome} durationMs=${rec.ms}${tail}`,
+							);
+						},
+					});
+					if (result.ok) {
+						send(ws, { type: "ext_session_post_result", requestId, ok: true });
+					} else {
+						send(ws, { type: "ext_session_post_result", requestId, ok: false, error: result.error });
 					}
 					break;
 				}

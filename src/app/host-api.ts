@@ -31,13 +31,10 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 import { openPackPanel, setPanelHostFactory } from "./pack-panels.js";
-import { consumeGesture, getSessionSecret } from "./gesture-context.js";
+import { consumeGesture } from "./gesture-context.js";
+import { postSessionMessageOverWs } from "./session-write-bridge.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
-
-/** Header key for the trusted per-session capability secret (Fix A). The server
- *  REQUIRES it on /api/ext/session/message and resolves it back to the session. */
-const SESSION_SECRET_HEADER = "x-bobbit-session-secret";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -192,48 +189,34 @@ export function getHostApi(
 				if (!resp.ok) throw new Error(`session.readToolCall HTTP ${resp.status}`);
 				return resp.json();
 			},
-			// Slice C2 / Fix A: WRITE — post a user/system message into the BOUND session,
-			// optionally resuming the agent turn. Drives the agent, so it has TWO
-			// independent unforgeable gates:
-			//   1. REAL user activation — consumeGesture() reads navigator.userActivation
-			//      SYNCHRONOUSLY at the prologue (before any await) and THROWS when no
-			//      genuine user gesture is active, so a render/mount-time post fails loudly.
-			//      A pack cannot fabricate transient activation.
-			//   2. TRUSTED per-session secret — attached as `x-bobbit-session-secret` from
-			//      the gesture-context module closure (never on window/host, so pack code
-			//      cannot read it). The server REQUIRES it and resolves it to the session;
-			//      a raw same-realm pack fetch carries none and is rejected 403.
-			// The server also authorizes every post (authorizeScopedRequest: header-bound
-			// session, body===header, tool ∈ allowedTools, server-derived packId) and audits
-			// it; the target is ALWAYS the bound session (never a body param → cross-session
-			// posting is impossible).
+			// Slice C2: WRITE — post a user/system message into the BOUND session,
+			// optionally resuming the agent turn. Drives the agent, so it has two
+			// independent gates:
+			//   1. TRANSPORT (unforgeable): the SEND rides the app's authenticated session
+			//      WebSocket via `postSessionMessageOverWs` — NOT a `fetch`. There is no
+			//      session secret on any request for a same-realm pack to monkey-patch /
+			//      capture / replay, and pack code has no handle to the WS so it cannot send
+			//      on it. The server targets the WS connection's OWN authenticated session,
+			//      authorizes the pack's `tool` ∈ allowedTools, derives the packId, and
+			//      audits every post; cross-session posting is structurally impossible.
+			//   2. REAL user activation (defense-in-depth) — consumeGesture() reads
+			//      navigator.userActivation SYNCHRONOUSLY at the prologue (before any await)
+			//      and THROWS when no genuine user gesture is active, so a render/mount-time
+			//      post fails loudly. A pack cannot fabricate transient activation.
 			postMessage: (msg: PostMessageInput): Promise<void> => {
 				// SYNCHRONOUS activation check (NOT inside the async body — an async throw
 				// would be a rejected promise, not a loud synchronous failure on mount).
 				if (!consumeGesture()) throw new Error("postMessage requires a user gesture");
 				if (!packTool) throw new Error("host.session.postMessage requires a pack-served context");
-				return (async () => {
-					// Attach the trusted per-session secret (held in a gesture-context closure
-					// pack code cannot read). The server REQUIRES it; a raw pack fetch has none.
-					const secret = getSessionSecret(sessionId);
-					const init = withSession(
-						{
-							method: "POST",
-							body: JSON.stringify({
-								sessionId,
-								toolUseId,
-								tool: packTool,
-								role: msg.role,
-								text: msg.text,
-								resumeTurn: msg.resumeTurn,
-							}),
-						},
-						sessionId,
-					);
-					if (secret) (init.headers as Record<string, string>)[SESSION_SECRET_HEADER] = secret;
-					const resp = await gatewayFetch("/api/ext/session/message", init);
-					if (!resp.ok) throw new Error(`session.postMessage HTTP ${resp.status}`);
-				})();
+				// Drive over the trusted WS (no fetch, no secret). `sessionId` selects the
+				// bound RemoteAgent's poster; the server ignores it as a target.
+				return postSessionMessageOverWs({
+					sessionId,
+					tool: packTool,
+					role: msg.role,
+					text: msg.text,
+					resumeTurn: msg.resumeTurn,
+				});
 			},
 			// Slice C2: subscribe to live, TYPED session events bridged from the session
 			// WebSocket onto the frozen HostSessionEventMap (contract shapes via the
