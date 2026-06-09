@@ -37,6 +37,12 @@ export interface ActionHandlerCtx {
 	toolUseId: string;
 	/** The tool name (== :tool). */
 	tool: string;
+	/** Slice C3 (declared-permission model) — the session working directory,
+	 *  populated by the endpoint from the persisted session. When the winning
+	 *  contribution declares `git`/`fs`, the confined worker's process gets a REAL
+	 *  cwd() pointing here. Absent for sessions with no resolvable cwd (the worker
+	 *  then falls back to the inert cwd()). */
+	workingDir?: string;
 }
 
 export type ActionHandler = (ctx: ActionHandlerCtx, args: unknown) => Promise<unknown> | unknown;
@@ -58,7 +64,7 @@ export class ActionError extends Error {
  *  the winning tool's on-disk location + its `actions.module` independent of
  *  `provider:` (design §4b). */
 export interface ActionToolLocationResolver {
-	resolveToolLocation(tool: string): { baseDir: string; groupDir: string; actionsModule?: string } | undefined;
+	resolveToolLocation(tool: string): { baseDir: string; groupDir: string; actionsModule?: string; permissions?: string[] } | undefined;
 }
 
 /**
@@ -177,7 +183,7 @@ export class ActionDispatcher {
 	 * the group dir (design §5 ii). Returns null when the tool has no resolvable
 	 * on-disk location.
 	 */
-	private resolveModulePath(tool: string, resolver: ActionToolLocationResolver = this.toolManager): { abs: string; packRoot: string } | null {
+	private resolveModulePath(tool: string, resolver: ActionToolLocationResolver = this.toolManager): { abs: string; packRoot: string; permissions?: string[] } | null {
 		const loc = resolver.resolveToolLocation(tool);
 		if (!loc || !loc.baseDir) return null;
 		const dir = path.join(loc.baseDir, loc.groupDir || "");
@@ -190,8 +196,10 @@ export class ActionDispatcher {
 			throw new ActionError(400, `unsafe actions module path for tool "${tool}"`);
 		}
 		// `dir` is the validated pack root; forwarded into the confined worker so the
-		// pack module graph cannot import any `file:` OUTSIDE it (design §9).
-		return { abs, packRoot: dir };
+		// pack module graph cannot import any `file:` OUTSIDE it (design §9). The
+		// declared-permission grants (Slice C3) come from the SAME winning
+		// contribution — server-resolved, never caller-supplied.
+		return { abs, packRoot: dir, permissions: loc.permissions };
 	}
 
 	/**
@@ -212,10 +220,10 @@ export class ActionDispatcher {
 	 * is no in-flight import for an `invalidate()` to race (the epoch bump simply
 	 * changes the URL the next dispatch builds).
 	 */
-	private resolveModuleUrl(tool: string, resolver: ActionToolLocationResolver = this.toolManager): { url: string; packRoot: string } | null {
+	private resolveModuleUrl(tool: string, resolver: ActionToolLocationResolver = this.toolManager): { url: string; packRoot: string; permissions?: string[] } | null {
 		const resolved = this.resolveModulePath(tool, resolver);
 		if (!resolved) return null;
-		const { abs, packRoot } = resolved;
+		const { abs, packRoot, permissions } = resolved;
 
 		let stat: fs.Stats;
 		try {
@@ -226,13 +234,13 @@ export class ActionDispatcher {
 
 		const epoch = this.epoch;
 		const hit = this.cache.get(abs);
-		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === epoch) return { url: hit.url, packRoot };
+		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === epoch) return { url: hit.url, packRoot, permissions };
 
 		// Cache-bust by mtime + epoch so a changed (or post-invalidate) file yields a
 		// fresh URL the worker re-imports even under coarse mtime resolution.
 		const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epoch}`;
 		this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch, url });
-		return { url, packRoot };
+		return { url, packRoot, permissions };
 	}
 
 	/**
@@ -322,7 +330,7 @@ export class ActionDispatcher {
 			// ActionError statuses (500 "no 'actions' export" / 404 "unknown action").
 			// Isolation is unconditional (no in-process path).
 			return await this.moduleHost.invoke(
-				{ url: resolved.url, packRoot: resolved.packRoot, epoch: this.epoch, exportKind: "actions", member: action, ctx, arg: args },
+				{ url: resolved.url, packRoot: resolved.packRoot, epoch: this.epoch, exportKind: "actions", member: action, ctx, arg: args, permissions: resolved.permissions, workingDir: ctx.workingDir },
 				this.timeoutMs,
 			);
 		})();

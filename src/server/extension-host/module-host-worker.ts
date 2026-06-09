@@ -31,6 +31,7 @@
 
 import { Worker } from "node:worker_threads";
 import { ActionError, type ActionHandlerCtx } from "./action-dispatcher.js";
+import { deniedForGrants, needsRealProcess } from "./permission-grants.js";
 
 /** First-path-segment deny-list handed to the confinement loader (design §9). The
  *  pack module graph cannot import any built-in whose first segment is in this set
@@ -94,6 +95,15 @@ export interface InvokeRequest {
 	ctx: ActionHandlerCtx;
 	/** The handler argument (args for an action, RouteRequest for a route). */
 	arg: unknown;
+	/** Slice C3 (declared-permission model) — the SERVER-RESOLVED grant set
+	 *  (`git`/`fs`/`net`) for the winning contribution. Default empty ⇒ deny-all
+	 *  (the worker keeps every dangerous import denied + every ambient global
+	 *  stripped, exactly as before). Never caller-supplied. */
+	permissions?: readonly string[];
+	/** Slice C3 — the session working directory. When `git`/`fs` is granted the
+	 *  worker's process gets a REAL cwd() pointing here (relative reads + spawned
+	 *  git resolve under the session dir). Ignored when no fs/git grant. */
+	workingDir?: string;
 }
 
 /** Flag NAMES safe to forward to a `worker_threads.Worker` execArgv. Node rejects
@@ -162,8 +172,11 @@ export class ModuleHost {
 	private readonly defaultTimeoutMs: number;
 	private readonly maxOldGenerationSizeMb: number;
 	private readonly stackSizeMb: number;
-	/** Live workers, so `dispose()` can terminate any still-running on shutdown. */
-	private readonly live = new Set<Worker>();
+	/** Live workers → the OS child PIDs each spawned (declared-permission `git`).
+	 *  `dispose()` terminates any still-running worker AND kills its tracked
+	 *  children; the per-invoke terminate-on-timeout path does the same so a runaway
+	 *  spawned child cannot outlive the wall-time cap (design §9). */
+	private readonly live = new Map<Worker, Set<number>>();
 	private disposed = false;
 
 	constructor(opts: ModuleHostOptions = {}) {
@@ -206,10 +219,20 @@ export class ModuleHost {
 			},
 		};
 
+		// Slice C3 (declared-permission model): start from the full deny-list + empty
+		// env (deny-all), then RELAX per the server-resolved grant set. With no grants
+		// this is byte-identical to the prior behavior.
+		const grants = req.permissions ?? [];
+		const denied = deniedForGrants(DENIED_BUILTINS, grants);
+		// `git`/`fs` need the git binary to resolve + relative reads to work, so the
+		// worker's REAL env carries ONLY PATH (no gateway token / secret leaks). Every
+		// other case keeps the empty env. `net` alone needs no env (globals only).
+		const env = needsRealProcess(grants) ? { PATH: process.env.PATH ?? "" } : {};
+
 		const worker = new Worker(this.bootstrapUrl(), {
-			// Layer 1 — empty env: the worker holds no gateway token / secret.
-			env: {},
-			workerData: { denied: [...DENIED_BUILTINS], packRoot: req.packRoot },
+			// Layer 1 — minimal env: empty by default; only PATH when git/fs is granted.
+			env,
+			workerData: { denied, packRoot: req.packRoot, permissions: [...grants], workingDir: req.workingDir },
 			// Layer 3 — memory caps.
 			resourceLimits: {
 				maxOldGenerationSizeMb: this.maxOldGenerationSizeMb,
@@ -220,7 +243,8 @@ export class ModuleHost {
 			// unit runner; empty in production (no loaders).
 			execArgv: workerSafeExecArgv(process.execArgv),
 		});
-		this.live.add(worker);
+		const children = new Set<number>();
+		this.live.set(worker, children);
 
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
@@ -232,6 +256,10 @@ export class ModuleHost {
 				// Layer 3 — true terminate-on-timeout (and unconditional teardown so a
 				// completed worker never lingers). terminate() is fire-and-forget.
 				void worker.terminate();
+				// Slice C3: a child process spawned by a `git`-granted handler is a child
+				// of the MAIN gateway process — worker.terminate() does NOT reap it. Kill
+				// any still-running tracked child so a runaway git cannot outlive the cap.
+				killChildren(children);
 				fn();
 			};
 			// Layer 3 — wall-time termination IS the CPU-exhaustion control (a runaway
@@ -240,10 +268,18 @@ export class ModuleHost {
 				finish(() => reject(new ActionError(504, "pack server module timed out")));
 			}, limit);
 
-			worker.on("message", (msg: { kind?: string; ok?: boolean; value?: unknown; status?: number; error?: string; id?: number; path?: unknown; args?: unknown[] }) => {
+			worker.on("message", (msg: { kind?: string; ok?: boolean; value?: unknown; status?: number; error?: string; id?: number; path?: unknown; args?: unknown[]; pid?: number }) => {
 				if (msg?.kind === "result") {
 					if (msg.ok) finish(() => resolve(msg.value));
 					else finish(() => reject(new ActionError(typeof msg.status === "number" ? msg.status : 500, msg.error ?? "pack server module failed")));
+					return;
+				}
+				if (msg?.kind === "child-spawn") {
+					if (typeof msg.pid === "number") children.add(msg.pid);
+					return;
+				}
+				if (msg?.kind === "child-exit") {
+					if (typeof msg.pid === "number") children.delete(msg.pid);
 					return;
 				}
 				if (msg?.kind === "host-call") {
@@ -274,10 +310,29 @@ export class ModuleHost {
 		});
 	}
 
-	/** Terminate any live workers (gateway shutdown / test teardown). */
+	/** Terminate any live workers + kill their tracked children (gateway shutdown /
+	 *  test teardown) so no spawned git survives the host. */
 	dispose(): void {
 		this.disposed = true;
-		for (const w of this.live) void w.terminate();
+		for (const [w, children] of this.live) {
+			void w.terminate();
+			killChildren(children);
+		}
 		this.live.clear();
 	}
+}
+
+/** SIGKILL every still-running tracked child PID (best-effort; an already-exited
+ *  pid throws ESRCH which we swallow). This is the parent-side half of the
+ *  declared-permission `git` blast-radius control — spawned children are children
+ *  of the MAIN process, so worker.terminate() alone leaves them running. */
+function killChildren(children: Set<number>): void {
+	for (const pid of children) {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			/* already exited / not permitted — best effort */
+		}
+	}
+	children.clear();
 }

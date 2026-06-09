@@ -35,18 +35,32 @@
 // parent terminating this worker on timeout (design §9 — terminate-on-timeout IS
 // the CPU control).
 
-import { registerHooks } from "node:module";
+import { registerHooks, createRequire } from "node:module";
 import { parentPort, workerData } from "node:worker_threads";
 import { configure as configureConfinement, resolve as confinementResolve } from "./confinement-loader.js";
+import { keepNetworkGlobals, needsRealProcess, hasGrant } from "./permission-grants.js";
 
 interface BootstrapData {
-	/** First-path-segment deny-list forwarded to the confinement hook. */
+	/** First-path-segment deny-list forwarded to the confinement hook (already
+	 *  relaxed by the parent per the granted permission set). */
 	denied: string[];
 	/** The validated pack group root forwarded to the confinement hook so every
 	 *  resolved `file:` URL in the pack module graph stays realpath-contained within
 	 *  it (no `../`/absolute/symlink/node_modules escape outside the pack). */
 	packRoot?: string;
+	/** Slice C3 (declared-permission model) — the SERVER-RESOLVED grant set
+	 *  (`git`/`fs`/`net`). Empty ⇒ deny-all (today's confinement). */
+	permissions?: string[];
+	/** Slice C3 — the session working dir; the process shim's REAL cwd() when
+	 *  `git`/`fs` is granted (and the worker's actual cwd, so spawned git + relative
+	 *  reads resolve there). */
+	workingDir?: string;
 }
+
+// Capture the REAL `process` (Node-internal) BEFORE the pack-visible shim replaces
+// the global, so the bootstrap can read PATH for the minimal shim env even after
+// pack code only ever sees the inert/minimal shim.
+const realProcess = (globalThis as unknown as { process?: NodeJS.Process }).process;
 
 interface InvokeMessage {
 	kind: "invoke";
@@ -84,6 +98,14 @@ if (!port) {
 	throw new Error("module-host-bootstrap must run inside a worker thread");
 }
 const data = (workerData ?? { denied: [] }) as BootstrapData;
+const grants = Array.isArray(data.permissions) ? data.permissions : [];
+
+// NOTE: `process.chdir()` is unsupported inside a worker thread, so the worker's
+// REAL cwd stays at startup. The session working dir is instead surfaced through
+// the process SHIM's `cwd()` (set in removeAmbientGlobals) — a `git`/`fs`-granted
+// pack reads `process.cwd()` and passes it explicitly to `spawn(..., { cwd })` /
+// fs path joins. The git BINARY itself resolves via PATH in the worker's real env
+// (seeded by the parent), independent of cwd.
 
 // ── (2) Install the module-load deny+confine hook BEFORE any pack module is
 // imported. The hook + its shared `path-guard` dep are STATICALLY imported above
@@ -94,41 +116,73 @@ configureConfinement({ denied: data.denied, packRoot: data.packRoot });
 registerHooks({ resolve: confinementResolve });
 
 // ── (3) Remove ambient web/process globals BEFORE any pack module is imported. ──
-removeAmbientGlobals();
+// Slice C3: granted capabilities are skipped here (`net` keeps the network
+// globals; `git`/`fs` get a REAL cwd + minimal PATH env on the process shim).
+removeAmbientGlobals(grants, data.workingDir);
+
+// ── (3b) Slice C3: when `git` is granted, `child_process` is un-denied so the
+// pack can spawn the git binary. Spawned children are children of the MAIN
+// process (worker.terminate() does NOT reap them), so we WRAP the spawn surface
+// to report each child's pid (spawn + exit) to the parent over the MessagePort;
+// the parent kills any still-running child on terminate-on-timeout. Patch the CJS
+// builtin via createRequire BEFORE the pack imports it, so the ESM facade the pack
+// receives reflects the wrapped functions (Node creates the facade lazily from
+// the current CJS exports). createRequire is statically imported above (before the
+// hook), and `child_process` is un-denied under this grant, so this resolves.
+if (hasGrant(grants, "git")) {
+	try {
+		wrapChildProcessSpawnSurface();
+	} catch {
+		/* best effort — if wrapping fails the child-kill safety net is reduced, but
+		   the wall-time terminate still bounds the worker thread itself */
+	}
+}
 
 /**
  * Strip the ambient capabilities a `worker_threads.Worker` inherits that the
  * module-load deny-hook does NOT cover (it denies `node:` IMPORTS, but these are
  * reachable as GLOBALS without an import). After this runs, the ONLY capability
- * pack code is handed is the host-API proxy over the parent MessagePort.
+ * pack code is handed (with no grants) is the host-API proxy over the parent
+ * MessagePort.
  *
  *   (a) Outbound-network globals — `fetch` (SSRF / arbitrary egress) plus the
  *       WHATWG fetch types and the legacy `XMLHttpRequest`/`WebSocket`/
- *       `EventSource` surfaces — are deleted.
- *   (b) The ambient `process` global is REPLACED with an inert shim: empty frozen
- *       env (no host secrets/metadata), no `exit`/`abort`/`kill`, no
- *       `binding`/`dlopen` (native escape), no `argv`/`cwd`/`execPath` leaking
- *       host data. `node:process` is already denied by the loader; this closes
- *       the ambient-global path. Node internals + the loader thread keep their
- *       OWN process reference (via the internal binding / require('process')), so
- *       only PACK code on this thread sees the shim.
+ *       `EventSource` surfaces — are deleted, UNLESS `net` is granted (then they
+ *       are KEPT so the pack can make outbound requests).
+ *   (b) The ambient `process` global is REPLACED with a shim. With NO `git`/`fs`
+ *       grant it is fully inert: empty frozen env (no host secrets/metadata),
+ *       cwd()=>"/", no `exit`/`abort`/`kill`, no `binding`/`dlopen` (native
+ *       escape), no `argv`/`execPath` leaking host data. With `git`/`fs` granted
+ *       it gains a REAL cwd() (the session dir) + a MINIMAL env containing ONLY
+ *       PATH (so the git binary resolves) — still no host secrets/token. Node
+ *       internals + the loader thread keep their OWN process reference (via the
+ *       internal binding / require('process')), so only PACK code sees the shim.
  */
-function removeAmbientGlobals(): void {
+function removeAmbientGlobals(grants: readonly string[], workingDir?: string): void {
 	const g = globalThis as unknown as Record<string, unknown>;
-	// (a) Delete every outbound-network global — pack code's only egress is the host proxy.
-	for (const key of ["fetch", "WebSocket", "XMLHttpRequest", "Request", "Response", "Headers", "EventSource", "sendBeacon", "navigator"]) {
-		try {
-			delete g[key];
-		} catch {
-			/* best effort */
+	// (a) Delete every outbound-network global — UNLESS `net` is granted (keep them).
+	if (!keepNetworkGlobals(grants)) {
+		for (const key of ["fetch", "WebSocket", "XMLHttpRequest", "Request", "Response", "Headers", "EventSource", "sendBeacon", "navigator"]) {
+			try {
+				delete g[key];
+			} catch {
+				/* best effort */
+			}
 		}
 	}
-	// (b) Replace the ambient `process` global with an inert shim.
+	// (b) Replace the ambient `process` global with a shim (inert, or fs/git-aware).
 	const denied = (name: string) => () => {
 		throw new Error(`[confinement] process.${name} is denied to pack server modules (Extension Host §9 isolation)`);
 	};
+	const realCwd = needsRealProcess(grants) && typeof workingDir === "string" && workingDir.length > 0;
+	// Minimal env: ONLY PATH (read from the real process, which the parent seeded
+	// with just PATH) when git/fs is granted; otherwise empty — NEVER the host's full
+	// env / gateway token / secret.
+	const shimEnv = needsRealProcess(grants)
+		? Object.freeze({ PATH: realProcess?.env?.PATH ?? "" })
+		: Object.freeze({});
 	const inert: Record<string, unknown> = {
-		env: Object.freeze({}),
+		env: shimEnv,
 		argv: Object.freeze([]),
 		argv0: "",
 		execArgv: Object.freeze([]),
@@ -140,7 +194,7 @@ function removeAmbientGlobals(): void {
 		pid: 0,
 		ppid: 0,
 		title: "",
-		cwd: () => "/",
+		cwd: realCwd ? () => workingDir as string : () => "/",
 		nextTick: (cb: (...a: unknown[]) => void, ...args: unknown[]) => { queueMicrotask(() => cb(...args)); },
 		exit: denied("exit"),
 		abort: denied("abort"),
@@ -161,6 +215,45 @@ function removeAmbientGlobals(): void {
 		Object.defineProperty(g, "process", { value: inert, writable: false, configurable: false, enumerable: false });
 	} catch {
 		try { g.process = inert; } catch { /* best effort */ }
+	}
+}
+
+/**
+ * Slice C3 (declared-permission `git`) — wrap the async `child_process` spawn
+ * surface so every spawned child's pid is reported to the parent (spawn + exit)
+ * over the MessagePort. The parent kills any child still running when it
+ * terminates the worker on timeout, so a runaway git cannot outlive the wall-time
+ * cap (worker.terminate() reaps only the THREAD, not the spawned OS child).
+ *
+ * Patching the CJS builtin via `createRequire` BEFORE the pack imports it makes
+ * the pack's ESM facade (`import { spawn } from "node:child_process"`, default,
+ * and namespace forms) reflect the wrapped functions — Node builds the facade
+ * lazily from the current CJS exports. Only the ASYNC surface is wrapped; the
+ * synchronous `spawnSync`/`execSync` block the worker thread and are reaped by
+ * terminate directly.
+ */
+function wrapChildProcessSpawnSurface(): void {
+	const require = createRequire(import.meta.url);
+	const cp = require("node:child_process") as Record<string, unknown>;
+	const report = (child: unknown): void => {
+		const c = child as { pid?: number; once?: (e: string, cb: () => void) => void } | undefined;
+		const pid = c?.pid;
+		if (typeof pid !== "number") return;
+		try { port!.postMessage({ kind: "child-spawn", pid }); } catch { /* port gone */ }
+		try {
+			c?.once?.("exit", () => {
+				try { port!.postMessage({ kind: "child-exit", pid }); } catch { /* port gone */ }
+			});
+		} catch { /* not an emitter */ }
+	};
+	for (const name of ["spawn", "exec", "execFile", "fork"]) {
+		const orig = cp[name];
+		if (typeof orig !== "function") continue;
+		cp[name] = function (this: unknown, ...args: unknown[]): unknown {
+			const child = (orig as (...a: unknown[]) => unknown).apply(this, args);
+			report(child);
+			return child;
+		};
 	}
 }
 

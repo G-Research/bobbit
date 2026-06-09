@@ -5385,9 +5385,14 @@ async function handleApiRoute(
 			packStore: getPackStore(),
 			readOwnTranscript,
 		});
+		// Slice C3 (declared-permission model): the session working dir the confined
+		// worker uses as its REAL cwd when the winning contribution declares `git`/`fs`
+		// (prefer the worktree path; fall back to the recorded cwd).
+		const actionPs = sessionManager.getPersistedSession(guard.sessionId);
+		const actionWorkingDir = actionPs?.worktreePath ?? actionPs?.cwd;
 		const start = Date.now();
 		try {
-			const result = await dispatcher.dispatch(tool, action, { host, sessionId: guard.sessionId, toolUseId, tool }, args, sessionToolManager);
+			const result = await dispatcher.dispatch(tool, action, { host, sessionId: guard.sessionId, toolUseId, tool, workingDir: actionWorkingDir }, args, sessionToolManager);
 			console.log(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
 			json(result ?? null);
 		} catch (err) {
@@ -5646,10 +5651,12 @@ async function handleApiRoute(
 		});
 		const start = Date.now();
 		try {
+			const routePs = sessionManager.getPersistedSession(guard.sessionId);
+			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
 			const result = await routeDispatcher.dispatch(
 				resolved.declaringTool,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: resolved.declaringTool },
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: resolved.declaringTool, workingDir: routeWorkingDir },
 				{ method, query, body: init.body },
 				routeToolManager,
 			);

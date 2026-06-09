@@ -205,13 +205,61 @@ In Phase 1 the server-side `ctx.host` therefore carries only:
 
 The frozen Phase-2 namespaces `ctx.host.session.*` and `ctx.host.store.*` are present-but-throwing stubs — calling one throws a loud `host.<member> is reserved for Phase 2` rather than failing silently. **Feature-detect with `ctx.host.capabilities.<name>` / `ctx.host.capabilities.has(name)`, never with member-presence checks** (`if (ctx.host.store)` would wrongly succeed against the stub).
 
-A handler that genuinely needs raw `fs` / `process` / `exec` imports them directly — it already runs as trusted host code in the gateway process. The point of removing `gateway.fetch` is not to constrain trusted handler code, but to keep the *pack→server boundary* a typed, authorized contract with no raw transport to misdirect (see the security note below).
+A handler that genuinely needs raw `fs` / `child_process` / network must **declare it** via the manifest `permissions:` key (see *Server-module confinement* below) — Phase 2 runs server modules in a confined worker, so they are *not* ambient-authority host code anymore. The point of removing `gateway.fetch` is to keep the *pack→server boundary* a typed, authorized contract with no raw transport to misdirect (see the security note below).
 
 The durable forward path for reaching the gateway is the Phase-2, pack-scoped, typed `host.callRoute(name, init)` — frozen in [`src/shared/extension-host/host-api.ts`](../src/shared/extension-host/host-api.ts), not implemented in Phase 1. It reaches **only** the calling pack's OWN `/api/ext/<thisPack>/*` routes (it is impossible to address an arbitrary gateway path), authorized through the same per-session `allowedTools` guard as `invokeAction`. That is how a future pack will fetch its own dynamic server data without ever exposing a raw fetch.
 
 ### Blast-radius controls you get for free
 
 Handlers run in the long-lived gateway process, so Bobbit bounds the damage a buggy or hostile handler can do: a **per-call timeout** (default 30s) that spans **both** the module load+evaluation *and* the handler execution — it returns 504 to the caller while the underlying promise keeps its concurrency permit until it actually settles; a **global concurrency cap** (default 8 in-flight); a **per-session token-bucket rate limit**; **try/catch isolation** (a throw becomes a 500, never a process crash); and **audit logging** of every invocation. You do not configure these from the pack; design your handlers to be fast and side-effect-careful regardless.
+
+### Server-module confinement + declared permissions (Phase 2)
+
+Pack server modules (`actions.mjs` / `routes.mjs`) no longer run with ambient host
+authority. As of Phase 2 (design [§9](design/extension-host-phase2.md)) every handler
+runs in a **confined worker**: the dangerous Node built-ins (`fs`, `child_process`,
+`net`/`http(s)`, `process`, `worker_threads`, …) are **deny-listed at import**, the
+outbound-network globals (`fetch`/`WebSocket`/…) are **stripped**, the ambient
+`process` is replaced by an **inert shim** (empty env, `cwd()=>"/"`), the module graph
+is **confined to the pack root**, and the worker is **terminated on timeout** with
+memory caps. The only capability a handler gets by default is the `ctx.host` proxy.
+**Default is deny-all** — a pack that declares nothing keeps exactly this confinement.
+
+A *trusted* pack can OPT IN to a narrow set of host capabilities via a manifest
+`permissions:` array. The grant is resolved **server-side from the winning
+contribution** (never caller-supplied) and applied to the worker:
+
+```yaml
+name: my_pack_tool
+actions: actions.mjs
+permissions: ["git", "fs"]   # subset of git | fs | net; absent/empty ⇒ deny-all
+```
+
+| value | grants | notes |
+|-------|--------|-------|
+| `git` | imports `node:child_process` so the pack can spawn the `git` binary | a spawned child is tracked and **killed if the handler times out** (it cannot outlive the wall-time cap); the binary resolves via `PATH` |
+| `fs`  | imports `node:fs` / `node:fs/promises` | reads/writes are NOT path-sandboxed — use `process.cwd()` (see below) to scope to the session dir |
+| `net` | keeps `fetch`/`WebSocket`/… and un-denies `node:net`/`node:http(s)` | outbound network egress |
+
+With `git`/`fs` granted the process shim exposes a **real `cwd()`** (the session
+working dir) plus a **minimal env containing only `PATH`** — never the gateway's full
+env or any token/secret. Because `process.chdir()` is unsupported in a worker, build
+paths / spawn options explicitly from `process.cwd()`:
+
+```js
+import { spawn } from "node:child_process";   // requires permissions: ["git"]
+import { join } from "node:path";              // node:path is never denied
+export const actions = {
+  log: async (ctx) => new Promise((resolve, reject) => {
+    const c = spawn("git", ["log", "-1", "--format=%H"], { cwd: process.cwd() });
+    let out = ""; c.stdout.on("data", (d) => out += d);
+    c.on("error", reject); c.on("close", () => resolve(out.trim()));
+  }),
+};
+```
+
+Ungranted capabilities stay denied/stripped exactly as in the deny-all default, so a
+pack only ever holds the capabilities its manifest declares.
 
 ## Step 5 — the client→server call (Host API recap)
 
