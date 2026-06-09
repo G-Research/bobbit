@@ -77,9 +77,11 @@ export type ClientMessage =
 	 * content-bound nonce ONLY after its synchronous transient-activation assertion
 	 * passes. `contentHash` is sha256 hex of `role + "\n" + text` (SubtleCrypto). The
 	 * server binds the minted permit to {this connection's session, server-derived
-	 * packId, tool, contentHash} and replies `ext_session_write_permit_result`.
+	 * packId, tool, contentHash} and replies `ext_session_write_permit_result`. The
+	 * `surfaceToken` is the SERVER-MINTED surface binding token (the client never sends
+	 * a raw `tool`/`packId`); the server DERIVES {packId, tool} from it (surface-binding.ts).
 	 */
-	| { type: "ext_session_write_permit"; requestId: string; tool: string; contentHash: string }
+	| { type: "ext_session_write_permit"; requestId: string; surfaceToken: string; contentHash: string }
 	/**
 	 * C2 session WRITE (`host.session.postMessage`) — design extension-host-phase2.md
 	 * §8 C2.1. Routed over the TRUSTED WebSocket (NOT a fetch) so no capturable
@@ -89,9 +91,11 @@ export type ClientMessage =
 	 * cross-session posting is structurally impossible. `requestId` correlates the
 	 * async `ext_session_post_result` reply. `nonce` is the SERVER-MINTED, one-time,
 	 * content-bound write permit from the preceding mint — REQUIRED: a replayed or
-	 * forged frame fails permit consumption and is rejected with no post.
+	 * forged frame fails permit consumption and is rejected with no post. `surfaceToken`
+	 * is the SERVER-MINTED surface binding token the server DERIVES {packId, tool} from
+	 * (never a caller-supplied `tool`/`packId`; surface-binding.ts).
 	 */
-	| { type: "ext_session_post"; requestId: string; tool: string; role: "user" | "system"; text: string; resumeTurn?: boolean; nonce: string };
+	| { type: "ext_session_post"; requestId: string; surfaceToken: string; role: "user" | "system"; text: string; resumeTurn?: boolean; nonce: string };
 
 /**
  * Optional per-phase timing for a `get_messages` snapshot, attached only under

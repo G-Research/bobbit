@@ -33,18 +33,27 @@ interface Envelope {
 
 /**
  * Subscribe to a typed session event, scoped to `sessionId`. Returns an
- * unsubscribe fn. When `sessionId` is undefined the subscription matches every
- * session (used only in non-session contexts; the Host API always binds one).
+ * unsubscribe fn. A subscriber NEVER sees another session's events.
+ *
+ * SECURITY (own-session scoping): when `sessionId` is undefined the subscription
+ * is INERT — it delivers NOTHING. An unbound Host API has no legitimate own-session
+ * to observe, so wildcarding to EVERY session would leak cross-session activity to a
+ * pack that failed to bind a session. The Host API always binds the active session,
+ * so the legitimate own-session case still receives its own events; the unbound case
+ * (unit fixtures, mis-construction) is silently empty rather than a firehose.
  */
 export function subscribeHostSessionEvent<E extends HostSessionEventName>(
 	sessionId: string | undefined,
 	event: E,
 	cb: (payload: HostSessionEventMap[E]) => void,
 ): () => void {
+	// No bound session ⇒ no-op subscription (deliver nothing). Still returns a valid
+	// unsubscribe fn so callers need no special-casing.
+	if (!sessionId) return () => {};
 	const handler = (e: Event): void => {
 		const detail = (e as CustomEvent<Envelope>).detail;
 		if (!detail || detail.event !== event) return;
-		if (sessionId && detail.sessionId !== sessionId) return;
+		if (detail.sessionId !== sessionId) return;
 		cb(detail.payload as HostSessionEventMap[E]);
 	};
 	BUS.addEventListener(EVENT, handler);

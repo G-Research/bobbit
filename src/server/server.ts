@@ -49,6 +49,7 @@ import { normalizeGrants } from "./extension-host/permission-grants.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
+import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { isPackPathWithinGroup } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -5410,12 +5411,67 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/ext/surface-token — mint a SERVER-MINTED surface binding token for a
+	// pack surface (renderer / panel / entrypoint), called by the TRUSTED app loader
+	// the first time it constructs that surface's Host API (design extension-host-
+	// phase2.md §2.3 + §10). Authorize via authorizeScopedRequest (header-canonical
+	// session, body===header, session resolves, `tool` ∈ allowedTools), SERVER-derive
+	// the winning {packId, contributionId} from `tool`, reject a non-pack caller, and
+	// mint a token BOUND to {sessionId, packId, contributionId, tool}. The client holds
+	// the opaque token in the Host API closure and echoes it on every scoped call; the
+	// scoped endpoints DERIVE {packId, tool} from the validated token and ignore any
+	// caller-supplied tool/pack — closing the cross-pack identity hole the bare `tool`
+	// field left open. (A same-realm malicious pack can still mint its own token for an
+	// arbitrary tool name — the documented Model-A residual, marketplace.md threat model.)
+	if (url.pathname === "/api/ext/surface-token" && req.method === "POST") {
+		const body = (await readBody(req)) ?? {};
+		const tool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const mintHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const mintSessionProjectId = mintHeaderSid
+			? (sessionManager.getSession(mintHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(mintHeaderSid)?.projectId)
+			: undefined;
+		const mintToolManager = resolveActionToolManager(
+			toolManager,
+			mintSessionProjectId ? projectContextManager.getOrCreate(mintSessionProjectId)?.toolManager : undefined,
+		);
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		const guard = authorizeScopedRequest({
+			tool,
+			headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			resolveSession,
+		});
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		const ident = resolvePackIdentityForTool(mintToolManager, tool);
+		if (!ident.isPack || !ident.packId) {
+			json({ error: "surface tokens are available only to market-pack tools" }, 403);
+			return;
+		}
+		const token = mintSurfaceToken({ sessionId: guard.sessionId, packId: ident.packId, contributionId: ident.contributionId, tool });
+		console.log(`[ext-surface-token] tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=ok`);
+		json({ token });
+		return;
+	}
+
 	// POST /api/ext/store/:op — pack-namespaced KV persistence behind `host.store.*`
 	// (design extension-host-phase2.md §3 B1.2). Pack-scoped (NOT tool-call-scoped):
-	// authorize via authorizeScopedRequest (header-canonical session, body===header,
-	// session resolves, `tool` ∈ allowedTools — NO toolUseId-ownership, so a panel/
-	// entrypoint with no owned toolUseId can persist), then derive the packId
-	// SERVER-SIDE from the resolved winning contribution and reject a non-pack caller.
+	// the caller proves identity via a SERVER-MINTED surface token (NOT a caller-
+	// supplied `tool` — closing the cross-pack identity hole); the server DERIVES
+	// {packId, tool} from the validated token, then layers the per-session guard
+	// (header-canonical session, body===header, session resolves, derived tool ∈
+	// allowedTools — NO toolUseId-ownership, so a panel/entrypoint with no owned
+	// toolUseId can persist). Keys are namespaced by the derived packId.
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
@@ -5424,7 +5480,6 @@ async function handleApiRoute(
 			return;
 		}
 		const body = (await readBody(req)) ?? {};
-		const tool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const storeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
@@ -5444,7 +5499,16 @@ async function handleApiRoute(
 			if (persisted) return { allowedTools: persisted.allowedTools };
 			return undefined;
 		};
-		// 1. Pack-scoped authorization (NO toolUseId-ownership).
+		// 1. DERIVE {packId, tool} from the SERVER-MINTED surface token — never a
+		//    caller-supplied `tool`. Rejects a missing/invalid/wrong-session/stale token.
+		const surf = resolveSurfaceIdentity({ token: (body as { surfaceToken?: unknown }).surfaceToken, headerSessionId: storeHeaderSid, resolver: storeToolManager });
+		if (!surf.ok) {
+			json({ error: surf.error }, surf.status);
+			return;
+		}
+		const tool = surf.tool;
+		const ident = { packId: surf.packId };
+		// 2. Layer the per-session guard on the DERIVED tool (allowedTools + session).
 		const guard = authorizeScopedRequest({
 			tool,
 			headerSessionId,
@@ -5453,12 +5517,6 @@ async function handleApiRoute(
 		});
 		if (!guard.ok) {
 			json({ error: guard.error }, guard.status);
-			return;
-		}
-		// 2. SERVER-derive the pack identity; 3. reject a non-pack caller.
-		const ident = resolvePackIdentityForTool(storeToolManager, tool);
-		if (!ident.isPack || !ident.packId) {
-			json({ error: "store is available only to market-pack tools" }, 403);
 			return;
 		}
 		const key = (body as { key?: unknown }).key;
@@ -5501,8 +5559,8 @@ async function handleApiRoute(
 	const extSessionTranscript = url.pathname === "/api/ext/session/transcript";
 	const extSessionToolCall = url.pathname === "/api/ext/session/tool-call";
 	if ((extSessionTranscript || extSessionToolCall) && req.method === "GET") {
-		const extTool = url.searchParams.get("tool") ?? "";
 		const extHeaderSid = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const extCanonSid = Array.isArray(extHeaderSid) ? extHeaderSid[0] : extHeaderSid;
 		const extResolveSession = (id: string): ActionGuardSession | undefined => {
 			const live = sessionManager.getSession(id);
 			if (live) return { allowedTools: live.allowedTools };
@@ -5510,31 +5568,33 @@ async function handleApiRoute(
 			if (persisted) return { allowedTools: persisted.allowedTools };
 			return undefined;
 		};
+		// Resolve the SESSION's project-scoped tool manager up front (no split-brain),
+		// then DERIVE {packId, tool} from the SERVER-MINTED surface token (query param) —
+		// never a caller-supplied `tool`. authorizeScopedRequest only gates allowedTools
+		// (an UNRESTRICTED session has none), so identity MUST come from the validated
+		// token; a missing/invalid/wrong-session/stale token (or non-pack tool) is rejected
+		// BEFORE any transcript byte is read — session reads are pack-only + own-session.
+		const extSessionProjectId = extCanonSid
+			? (sessionManager.getSession(extCanonSid)?.projectId
+				?? sessionManager.getPersistedSession(extCanonSid)?.projectId)
+			: undefined;
+		const extToolManager = resolveActionToolManager(
+			toolManager,
+			extSessionProjectId ? projectContextManager.getOrCreate(extSessionProjectId)?.toolManager : undefined,
+		);
+		const surf = resolveSurfaceIdentity({ token: url.searchParams.get("surfaceToken"), headerSessionId: extCanonSid, resolver: extToolManager });
+		if (!surf.ok) {
+			json({ error: surf.error }, surf.status);
+			return;
+		}
 		const extGuard = authorizeScopedRequest({
-			tool: extTool,
+			tool: surf.tool,
 			headerSessionId: extHeaderSid,
 			bodySessionId: url.searchParams.get("sessionId"),
 			resolveSession: extResolveSession,
 		});
 		if (!extGuard.ok) {
 			json({ error: extGuard.error }, extGuard.status);
-			return;
-		}
-		// Fix 2: SERVER-derive + ENFORCE the pack identity BEFORE reading any transcript
-		// data — mirror the store/route/message endpoints. authorizeScopedRequest only
-		// gates on allowedTools (and an UNRESTRICTED session has none), so without this a
-		// missing/non-pack `tool` could slip through and read the transcript. Resolve the
-		// tool through the SESSION's project-scoped tool manager (no split-brain) and
-		// reject (403) a non-pack / missing-tool caller — session reads are pack-only.
-		const extSessionProjectId = sessionManager.getSession(extGuard.sessionId)?.projectId
-			?? sessionManager.getPersistedSession(extGuard.sessionId)?.projectId;
-		const extToolManager = resolveActionToolManager(
-			toolManager,
-			extSessionProjectId ? projectContextManager.getOrCreate(extSessionProjectId)?.toolManager : undefined,
-		);
-		const extIdent = resolvePackIdentityForTool(extToolManager, extTool);
-		if (!extIdent.isPack || !extIdent.packId) {
-			json({ error: "session reads are available only to market-pack tools" }, 403);
 			return;
 		}
 		// Read the HEADER-BOUND session's transcript ONLY (own-session by construction).
@@ -5581,7 +5641,6 @@ async function handleApiRoute(
 	if (routeMatch && req.method === "POST") {
 		const routeName = decodeURIComponent(routeMatch[1]);
 		const body = (await readBody(req)) ?? {};
-		const routeTool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
@@ -5601,8 +5660,19 @@ async function handleApiRoute(
 			if (persisted) return { allowedTools: persisted.allowedTools };
 			return undefined;
 		};
-		// 1. Pack-scoped authorization (header-canonical session, body===header,
-		//    session resolves, opener `tool` ∈ allowedTools — NO toolUseId-ownership).
+		// 1. DERIVE the trusted {packId, tool} from the SERVER-MINTED surface token —
+		//    never a caller-supplied `tool` (closing the cross-pack identity hole). The
+		//    derived tool is the OPENER (the surface's contributing tool); the route
+		//    MODULE is resolved opener-INDEPENDENTLY below via the pack-level registry.
+		const surf = resolveSurfaceIdentity({ token: (body as { surfaceToken?: unknown }).surfaceToken, headerSessionId: routeHeaderSid, resolver: routeToolManager });
+		if (!surf.ok) {
+			json({ error: surf.error }, surf.status);
+			return;
+		}
+		const routeTool = surf.tool;
+		const ident = { packId: surf.packId, contributionId: surf.contributionId };
+		// 2. Layer the per-session guard on the DERIVED opener tool (allowedTools +
+		//    session resolve, body===header — NO toolUseId-ownership).
 		const guard = authorizeScopedRequest({
 			tool: routeTool,
 			headerSessionId,
@@ -5611,12 +5681,6 @@ async function handleApiRoute(
 		});
 		if (!guard.ok) {
 			json({ error: guard.error }, guard.status);
-			return;
-		}
-		// 2. SERVER-derive the pack identity from the opener tool; 3. reject a non-pack caller.
-		const ident = resolvePackIdentityForTool(routeToolManager, routeTool);
-		if (!ident.isPack || !ident.packId) {
-			json({ error: "routes are available only to market-pack tools" }, 403);
 			return;
 		}
 		// 4. Resolve the route MODULE via the pack-level registry (opener-independent).

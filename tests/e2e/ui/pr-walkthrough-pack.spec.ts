@@ -306,22 +306,38 @@ async function seedSubmitToolCall(gateway: GatewayInfo, sid: string): Promise<vo
 		.toBeGreaterThanOrEqual(4);
 }
 
+/** Mint a SERVER-MINTED surface token for the pack tool — the same token the real
+ *  host API mints (in its closure) before any scoped call. Direct route callers must
+ *  now carry it: the server DERIVES {packId, tool} from the validated token and
+ *  IGNORES any body `tool`, so identity can no longer be forged by naming a tool. */
+async function mintSurfaceToken(sid: string): Promise<string> {
+	const res = await apiFetch("/api/ext/surface-token", {
+		method: "POST",
+		headers: { "x-bobbit-session-id": sid },
+		body: JSON.stringify({ sessionId: sid, tool: TOOL }),
+	});
+	const body = await res.text();
+	expect(res.status, `surface-token mint failed: ${body}`).toBe(200);
+	return JSON.parse(body).token as string;
+}
+
 /**
  * Persist LLM-enhanced cards through the pack's OWN `publish` route — the
  * submit-time persistence seam (the agent's synthesis work, NOT the worker). Drives
  * the SAME /api/ext/route/:name endpoint host.callRoute uses: header-canonical
- * session + body===header + tool=pr_walkthrough (the server derives the trusted
- * packId and pack-scopes the store). Keyed by the changeset id the LIVE recompute
- * computes, so `bundle` reads it back.
+ * session + body===header + a SERVER-MINTED surface token (the server derives the
+ * trusted packId from it and pack-scopes the store). Keyed by the changeset id the
+ * LIVE recompute computes, so `bundle` reads it back.
  */
 async function publishCards(sid: string): Promise<void> {
+	const surfaceToken = await mintSurfaceToken(sid);
 	const res = await apiFetch("/api/ext/route/publish", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sid },
 		// NO repoDir — the git working dir is server-derived (the session worktree).
 		body: JSON.stringify({
 			sessionId: sid,
-			tool: TOOL,
+			surfaceToken,
 			init: { body: { jobId: JOB_ID, baseSha, headSha, cards: llmCards() } },
 		}),
 	});
@@ -344,10 +360,11 @@ function liveDeepLink(): string {
  *  an arbitrary query — used to PROVE a caller-supplied `repoDir` cannot exfiltrate
  *  another repo's diff. Returns the raw response. */
 async function callBundleRoute(sid: string, query: Record<string, string>): Promise<{ status: number; text: string }> {
+	const surfaceToken = await mintSurfaceToken(sid);
 	const res = await apiFetch("/api/ext/route/bundle", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sid },
-		body: JSON.stringify({ sessionId: sid, tool: TOOL, init: { query } }),
+		body: JSON.stringify({ sessionId: sid, surfaceToken, init: { query } }),
 	});
 	return { status: res.status, text: await res.text() };
 }

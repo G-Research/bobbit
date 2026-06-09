@@ -41,13 +41,26 @@ Object.defineProperty(navigator, "userActivation", {
 	get: () => ({ isActive: activation, hasBeenActive: activation }),
 });
 
-// Capture every fetch — the session WRITE must NOT use one (no capturable secret).
+// The surface-token MINT is the only sanctioned fetch the post path makes (to learn
+// the server-minted identity token). The SEND itself must still ride the trusted WS
+// — never a fetch carrying a capturable secret. `isTokenMint` lets the spec assert
+// "the SEND is WS-only" without conflating it with the (secret-free) token mint.
+const TOKEN = "surface-token-xyz";
+const isTokenMint = (u: string): boolean => u.includes("/api/ext/surface-token");
+(window as any).__writeFetches = (): number => calls.filter((c) => !isTokenMint(c.url)).length;
+(window as any).__tokenMinted = (): boolean => calls.some((c) => isTokenMint(c.url));
+
+// Capture every fetch. The surface-token mint returns an opaque token; any OTHER
+// fetch on the SEND path would be a regression (the WRITE must NOT use one).
 window.fetch = (async (input: any, init?: any): Promise<Response> => {
 	const url = typeof input === "string" ? input : (input?.url ?? String(input));
 	let body: any;
 	try { body = init?.body ? JSON.parse(init.body) : undefined; } catch { body = init?.body; }
 	const headers = (init?.headers ?? {}) as Record<string, string>;
 	calls.push({ url, method: init?.method ?? "GET", body, headers });
+	if (isTokenMint(url)) {
+		return new Response(JSON.stringify({ token: TOKEN }), { status: 200, headers: { "Content-Type": "application/json" } });
+	}
 	return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 }) as any;
 
@@ -68,13 +81,13 @@ const host = (): any => getHostApi("sess-1", undefined, "sample_action");
 
 // With a genuine activation → the post flows through the trusted WS poster carrying
 // the bound tool/role/text/resumeTurn — and NO fetch is made.
-(window as any).__postWithGesture = async (): Promise<{ posted: SessionPostRequest | undefined; fetches: number }> => {
+(window as any).__postWithGesture = async (): Promise<{ posted: SessionPostRequest | undefined; writeFetches: number; tokenMinted: boolean }> => {
 	setActivation(true);
 	const h = host();
 	const p: Promise<void> = runWithUserGesture(() =>
 		h.session.postMessage({ role: "user", text: "hi", resumeTurn: false }));
 	await p;
-	return { posted: posted[0], fetches: calls.length };
+	return { posted: posted[0], writeFetches: (window as any).__writeFetches(), tokenMinted: (window as any).__tokenMinted() };
 };
 
 // With NO trusted WS poster registered, postMessage rejects (transport unavailable):

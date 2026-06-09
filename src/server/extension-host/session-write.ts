@@ -140,6 +140,26 @@ export type SessionPostResult =
  */
 export async function handleSessionPost(input: SessionPostInput): Promise<SessionPostResult> {
 	const clock = input.now ?? Date.now;
+	const start = clock();
+
+	// EVERY rejection path is audited (design §8 C2.1 step 4 — "audit every
+	// post/resume"). A rejection records whatever identity is known at that point
+	// (packId is "" before it is server-derived; role coerced to a valid union for
+	// the typed record) plus the rejection reason, so an attempted-but-denied write
+	// is never silent. Successful posts are audited at the end.
+	const reject = (status: number, error: string, ctx?: { packId?: string; role?: "user" | "system"; resumeTurn?: boolean }): SessionPostResult => {
+		input.audit({
+			tool: input.tool,
+			packId: ctx?.packId ?? "",
+			sessionId: typeof input.sessionId === "string" ? input.sessionId : "",
+			role: ctx?.role ?? (input.role === "system" ? "system" : "user"),
+			resumeTurn: ctx?.resumeTurn ?? (input.resumeTurn !== false),
+			ms: clock() - start,
+			outcome: "error",
+			error,
+		});
+		return { ok: false, status, error };
+	};
 
 	// 1. Pack-scoped authorization. The session is the TRUSTED, server-authenticated
 	//    WS-bound session, so the body===header invariant authorizeScopedRequest
@@ -153,15 +173,15 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 		bodySessionId: input.sessionId,
 		resolveSession: input.resolveSession,
 	});
-	if (!guard.ok) return guard;
+	if (!guard.ok) return reject(guard.status, guard.error);
 
 	// 2. Validate the message: role ∈ {user, system} + non-empty text.
 	if (input.role !== "user" && input.role !== "system") {
-		return { ok: false, status: 400, error: 'role must be "user" or "system"' };
+		return reject(400, 'role must be "user" or "system"');
 	}
 	const role: "user" | "system" = input.role;
 	if (typeof input.text !== "string" || input.text.trim().length === 0) {
-		return { ok: false, status: 400, error: "text must be a non-empty string" };
+		return reject(400, "text must be a non-empty string", { role });
 	}
 	const text = input.text;
 
@@ -169,7 +189,7 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	//    caller (session messaging is a pack-only capability).
 	const ident = input.resolvePackIdentity(input.tool);
 	if (!ident.isPack || !ident.packId) {
-		return { ok: false, status: 403, error: "session messaging is available only to market-pack tools" };
+		return reject(403, "session messaging is available only to market-pack tools", { role });
 	}
 
 	// 3b. REQUIRE a server-minted, one-time, content-bound write permit. The
@@ -178,7 +198,7 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	//     a forged frame (no valid nonce), or a tampered role/text (hash mismatch)
 	//     are all rejected with NO post. (§8 C2.1 — session-write-permit.ts.)
 	if (typeof input.nonce !== "string" || input.nonce.length === 0) {
-		return { ok: false, status: 403, error: "session post requires a server-minted write permit" };
+		return reject(403, "session post requires a server-minted write permit", { packId: ident.packId, role });
 	}
 	const contentHash = computeContentHash(role, text);
 	const permitOk = input.consumePermit(input.nonce, {
@@ -188,7 +208,7 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 		contentHash,
 	});
 	if (!permitOk) {
-		return { ok: false, status: 403, error: "invalid, expired, or already-used write permit" };
+		return reject(403, "invalid, expired, or already-used write permit", { packId: ident.packId, role });
 	}
 
 	// 4. Post into the TRUSTED bound session ONLY (never a caller param →
@@ -196,7 +216,6 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	//    "system" is framed as a system directive (NOT delivered as raw user text).
 	const resume = input.resumeTurn !== false;
 	const deliveredText = formatSessionMessage(role, text);
-	const start = clock();
 	const base = { tool: input.tool, packId: ident.packId, sessionId: guard.sessionId, role, resumeTurn: resume };
 	try {
 		await input.post(guard.sessionId, deliveredText, { role, resume });

@@ -1387,7 +1387,7 @@ export class RemoteAgent {
 				this.ws.send(JSON.stringify({
 					type: "ext_session_write_permit",
 					requestId,
-					tool: req.tool,
+					surfaceToken: req.surfaceToken,
 					contentHash: req.contentHash,
 				}));
 			} catch (e) {
@@ -1420,7 +1420,7 @@ export class RemoteAgent {
 				this.ws.send(JSON.stringify({
 					type: "ext_session_post",
 					requestId,
-					tool: req.tool,
+					surfaceToken: req.surfaceToken,
 					role: req.role,
 					text: req.text,
 					resumeTurn: req.resumeTurn,
