@@ -175,7 +175,12 @@ function writeContextWindowOverride(agentDir: string, modelId: string, providerI
 test.describe.configure({ mode: "serial" });
 
 test("compaction-pressure: auto-compaction triggers and agent recovers", async ({ page }) => {
-	test.setTimeout(360_000);
+	// Generous budget: each filler turn runs a real model against an 8k window and
+	// auto-compaction can fire mid-turn (roughly doubling the work). Tight per-turn
+	// caps produced false negatives ("not idle in 180000ms"); the correctness
+	// signals are the compaction card reaching complete/ok and the post-compact
+	// turn succeeding — not how many seconds the real model took.
+	test.setTimeout(600_000);
 
 	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
 	const port = await freePort();
@@ -273,7 +278,7 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 			const textarea = page.locator("textarea").first();
 			await textarea.fill(filler + `\n\nNumber ${i}: please acknowledge with the digit ${i}.`);
 			await textarea.press("Enter");
-			await pollIdle(gw, sessionId, 180_000);
+			await pollIdle(gw, sessionId, 300_000);
 		}
 
 		// One more — should force auto_compaction_*.
@@ -291,7 +296,7 @@ test("compaction-pressure: auto-compaction triggers and agent recovers", async (
 		// compaction failures surface via the assistant error path, not the
 		// card, so a missing verdict is itself a regression.
 		const card = page.locator("[data-testid='compaction-summary-card']").first();
-		await expect(card).toBeVisible({ timeout: 180_000 });
+		await expect(card).toBeVisible({ timeout: 300_000 });
 		await expect(card).toHaveAttribute("data-state", "complete");
 		await expect(card.locator("[data-test='verdict']")).toHaveAttribute("data-verdict", "ok");
 

@@ -40,8 +40,9 @@ npm run dev:harness
 Same two-process setup, but the gateway is wrapped in a **restart harness** (`src/server/harness.ts`). The harness:
 
 - Watches a sentinel file at `.bobbit/state/gateway-restart`
-- On signal: kills the server, waits for the port to free, runs `npm run build:server`, relaunches
+- On signal: kills the server, waits for the port to free, **self-heals `node_modules`** (see below), runs `npm run build:server`, relaunches
 - Auto-restarts on unexpected crashes
+- On every boot/restart it checks that each declared dependency is physically present in `node_modules` and, only if some are missing, runs a non-destructive `npm install` to restore them (a healthy tree is a no-op)
 - Sessions survive restarts (persisted to `.bobbit/state/sessions.json`)
 
 To trigger a restart:
@@ -70,6 +71,33 @@ When the gateway was launched by this harness, the Settings page also shows a to
 **Rule of thumb**: UI is hot. Server is compiled. If you touched anything under `src/server/`, you need a rebuild + restart.
 
 ---
+
+## `node_modules` gets wiped while the dev server is running
+
+**Symptom**: the app suddenly stops functioning and the gateway logs
+`ERR_MODULE_NOT_FOUND: Cannot find package '@earendil-works/pi-ai'` (or another
+core dependency) — even though `package.json` and `package-lock.json` still list
+it. Often appears right after running `npm audit fix --force`, `npm ci`, or
+`npm install --force`.
+
+**Cause**: a running dev stack (vite, the gateway) loads native `.node` addons
+into memory — e.g. `lightningcss.win32-x64-msvc.node`,
+`@mariozechner/clipboard-*`, `photon-node`. On Windows you cannot `unlink` a
+native module file while a process has it loaded. A *destructive* npm operation
+wipes and rewrites `node_modules`; it removes additive deps as planned, then
+aborts with `EPERM` the instant it tries to unlink the locked native binary —
+leaving `node_modules` half-wiped with core runtime packages missing.
+
+**Avoid**: never run `npm ci`, `npm install --force`, or `npm audit fix --force`
+while the dev stack (`npm run dev:harness` / vite) is up. Stop it first, run the
+destructive command, then restart.
+
+**Recover**: a plain `npm install` is *additive* — it does not pre-wipe, so it
+restores the missing packages around any locked file. The harness now does this
+automatically on every boot/restart (`ensureDeps()` in `src/server/harness.ts`,
+backed by the pure `missingDependencies()` helper in
+`src/server/harness-deps.ts`); if the install itself fails because a native file
+is still locked, stop vite/the gateway and run `npm install` by hand.
 
 ## For agents making changes
 

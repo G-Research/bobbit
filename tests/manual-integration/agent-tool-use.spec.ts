@@ -650,14 +650,25 @@ test.describe.serial("Agent tool use", () => {
 		// could be generating text without ever calling bash, which is the
 		// regression mode we want to detect HERE (loudly, before the pivot)
 		// rather than 90s later as an opaque "expected card, got 0".
-		const toolDeadline = Date.now() + 90_000;
+		// Eventual-state gate (NOT a wall-clock race): poll for the bash card, but
+		// the only hard regression is the session SETTLING (idle/error) without ever
+		// emitting it — i.e. the agent declined to call bash or used the wrong tool.
+		// While the agent is still streaming we keep waiting: first-tool-call latency
+		// on a loaded real model is not a correctness signal, and a fixed 90s cap
+		// produced false negatives (`status=streaming, cards=0`). A generous absolute
+		// ceiling (kept well under the 420s test budget so the later 240s interrupt
+		// still fits) guards against a true hang.
+		const toolCeiling = Date.now() + 150_000;
 		let sawBashCard = false;
-		while (Date.now() < toolDeadline) {
+		let settledWithoutCard = false;
+		while (Date.now() < toolCeiling) {
 			const found = await page.evaluate((tag: string) => {
 				return Array.from(document.querySelectorAll<HTMLElement>('div[data-tool-name="bash"]'))
 					.some(c => (c.textContent || "").includes(tag));
 			}, loopTag);
 			if (found) { sawBashCard = true; break; }
+			const st = (await getSession(gw, id)).status;
+			if (st === "idle" || st === "error") { settledWithoutCard = true; break; }
 			await new Promise(r => setTimeout(r, 500));
 		}
 		if (!sawBashCard) {
@@ -676,7 +687,12 @@ test.describe.serial("Agent tool use", () => {
 			console.log(`[tooluse-4] pre-interrupt: status=${s.status} loopTag=${loopTag} cards=${cards.length}`);
 			for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
 		}
-		expect(sawBashCard, "agent never invoked bash with the loop sentinel within 90s — prompt-following or tool-activation broken").toBe(true);
+		expect(
+			sawBashCard,
+			settledWithoutCard
+				? "session returned to idle/error without ever invoking bash with the loop sentinel — prompt-following or tool-activation broken"
+				: "agent still streaming but never emitted the bash loop-sentinel card within the 150s ceiling — model latency stall",
+		).toBe(true);
 
 		// Pivot via the stop-and-resend flow.
 		await interruptAndSend(page, gw, id,

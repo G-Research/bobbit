@@ -23,6 +23,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { restartSentinelPath } from "./harness-signal.js";
+import { missingDependencies } from "./harness-deps.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -70,6 +71,7 @@ const PORT = detectPort();
 const PORT_WAIT_TIMEOUT_MS = 10_000;
 const PORT_POLL_INTERVAL_MS = 250;
 const BUILD_TIMEOUT_MS = 30_000;
+const INSTALL_TIMEOUT_MS = 180_000;
 
 /**
  * Crash-loop guard.
@@ -204,6 +206,48 @@ async function waitForPortFree(port: number): Promise<void> {
 // Build
 // ---------------------------------------------------------------------------
 
+/**
+ * Non-destructive dependency self-heal — runs on every server (re)start.
+ *
+ * A destructive npm op (`npm ci`, `npm install --force`, `npm audit fix
+ * --force`) run while the dev stack is live can half-wipe `node_modules`: it
+ * removes additive deps, then aborts with EPERM when it can't unlink a native
+ * `.node` file the running stack holds open (e.g. lightningcss on Windows).
+ * That leaves core runtime packages (e.g. @earendil-works/pi-ai) missing and
+ * breaks the gateway. We cheaply detect that drift and repair it with a plain
+ * additive `npm install` (which never pre-wipes the tree). A healthy tree is a
+ * no-op, so the common restart path stays fast. See docs/dev-workflow.md.
+ */
+function ensureDeps(): void {
+	const missing = missingDependencies(PROJECT_ROOT);
+	if (missing.length === 0) return;
+
+	const preview = missing.slice(0, 8).join(", ");
+	const suffix = missing.length > 8 ? `, +${missing.length - 8} more` : "";
+	console.log(`[harness] ${missing.length} dependency(ies) missing from node_modules: ${preview}${suffix}`);
+	console.log("[harness] Self-healing with non-destructive `npm install`...");
+	try {
+		execSync("npm install", {
+			cwd: PROJECT_ROOT,
+			stdio: "inherit",
+			timeout: INSTALL_TIMEOUT_MS,
+			shell: true as unknown as string,
+		});
+		const stillMissing = missingDependencies(PROJECT_ROOT);
+		if (stillMissing.length > 0) {
+			console.error(
+				`[harness] ${stillMissing.length} dependency(ies) still missing after npm install. ` +
+				`Stop the dev stack (vite/gateway) and run \`npm install\` manually — a native file may be locked.`,
+			);
+		} else {
+			console.log("[harness] Dependencies restored.");
+		}
+	} catch (err) {
+		console.error("[harness] `npm install` self-heal failed:", err);
+		console.error("[harness] Stop the dev stack and run `npm install` manually.");
+	}
+}
+
 function buildServer(): void {
 	console.log("[harness] Building server...");
 	try {
@@ -252,7 +296,8 @@ async function restart(): Promise<void> {
 		console.log(`[harness] Waiting for port ${PORT} to be free...`);
 		await waitForPortFree(PORT);
 
-		// 3. Rebuild
+		// 3. Self-heal node_modules (cheap no-op when healthy), then rebuild
+		ensureDeps();
 		buildServer();
 
 		// 4. Relaunch
@@ -338,7 +383,8 @@ console.log(`[harness] Server port:  ${PORT}`);
 console.log(`[harness] Sentinel:     ${SENTINEL}`);
 console.log(`[harness] Trigger restart: npm run restart-server`);
 
-// Initial build + launch
+// Initial self-heal + build + launch
+ensureDeps();
 try {
 	buildServer();
 } catch {
