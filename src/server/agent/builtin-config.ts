@@ -90,18 +90,14 @@ function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePat
 		// additive contribution wire fields `contributionFields` (tool-manager.ts) does,
 		// or an INSTALLED pack's `stores:`/`panels:` never reach the client (panel
 		// registration + store declarations silently vanish). Mirror it exactly.
+		// Expose the additive contribution wire fields so an INSTALLED pack's
+		// stores/panels/routes/entrypoints reach the client through the config-cascade
+		// tool list (/api/tools resolves via configCascade.resolveTools / toolInfoFrom,
+		// not getAvailableTools) — mirroring tool-manager.ts::contributionFields.
 		storeIds: contributions.stores?.map((s) => s.id),
 		panels: contributions.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),
 		routeNames: contributions.routes?.names,
 		entrypoints: contributions.entrypoints,
-		// Slice B4 — expose declared panels (id + title only; the ESM `entry` path stays
-		// server-side, served by the bearer-only panel endpoint) so a market-pack panel
-		// reaches the client `pack-panels.ts` registry through the config-cascade tool
-		// list (the cascade path B4 missed — tool-manager.ts::contributionFields had it,
-		// but /api/tools resolves via configCascade.resolveTools, not getAvailableTools).
-		panels: contributions.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),
-		// Slice B1 — expose declared store ids (advisory), matching contributionFields.
-		storeIds: contributions.stores?.map((s) => s.id),
 		grantPolicy: data.grantPolicy,
 		params: Array.isArray(data.params)
 			? data.params.filter((p: unknown): p is string => typeof p === "string")

@@ -27,8 +27,6 @@ import { renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { fetchTools, type ToolInfo } from "./api.js";
 import { state, renderApp } from "./state.js";
-import { getHostApi } from "./host-api.js";
-import type { HostApi } from "../shared/extension-host/host-api.js";
 import {
 	packPanelTabId,
 	panelTabsForSession,
@@ -315,23 +313,6 @@ function mountPackPanelTab(panelId: string, reg: RegisteredPanel, params?: Recor
 /** Build the per-session Host API a panel render is handed (design extension-host-
  *  phase2 §2a.2 — panel host-context binding). A panel has no tool call, so it binds
  *  `{ sessionId, toolUseId: undefined, packTool }` from the OPENING context: the active
- *  session supplies `sessionId`; the registered DECLARING tool of the panel is the
- *  `packTool` the server resolves the trusted packId from on each scoped call. Returns
- *  `undefined` when there is no registered panel or no active session (non-DOM/unit) —
- *  the panel must tolerate that (it simply cannot reach scoped capabilities yet). */
-function hostForPanel(panelId: string): HostApi | undefined {
-	const reg = panels.get(panelId);
-	if (!reg) return undefined;
-	try {
-		const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
-		const sid = s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
-		if (!sid) return undefined;
-		return getHostApi(sid, undefined, reg.tool);
-	} catch {
-		return undefined;
-	}
-}
-
 /** Remove the side-panel tab of an uninstalled panel from every session that has
  *  it open (reconcile-on-uninstall). Best-effort + guarded. */
 function removePackPanelTab(panelId: string): void {
