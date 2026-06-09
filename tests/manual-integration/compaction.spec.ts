@@ -174,7 +174,7 @@ async function sendPrompt(page: Page, text: string) {
 test.describe.configure({ mode: "serial" });
 
 test("compaction — real LLM @real", async ({ page }) => {
-	test.setTimeout(360_000);
+	test.setTimeout(480_000);
 
 	const tmp = process.platform === "win32" ? (process.env.TEMP || "C:\\Temp") : "/tmp";
 	const port = await freePort();
@@ -245,9 +245,17 @@ test("compaction — real LLM @real", async ({ page }) => {
 		await pollIdle(gw, sessionId);
 		await pollIdle(gw, otherSessionId);
 
+		// Capture console errors WITH the failing resource URL so a failure is
+		// diagnosable (a bare "Failed to load resource: 404" is useless), and ignore
+		// benign 404s — favicon and sourcemaps — that are not app-level regressions.
+		// A 404 (or any error) for a real app resource still fails the assertion.
 		const consoleErrors: string[] = [];
+		const benignError = /favicon\.ico|\.map(\?|$)|sourcemap/i;
 		page.on("console", (m) => {
-			if (m.type() === "error") consoleErrors.push(m.text());
+			if (m.type() !== "error") return;
+			const url = m.location()?.url ?? "";
+			if (url && benignError.test(url)) return;
+			consoleErrors.push(url ? `${m.text()} :: ${url}` : m.text());
 		});
 
 		await page.goto(`${gw.base}/?token=${gw.token}#/session/${sessionId}`);
@@ -257,9 +265,9 @@ test("compaction — real LLM @real", async ({ page }) => {
 		const FILLER = "Please remember the following inert filler block exactly: "
 			+ "x".repeat(2000);
 		await sendPrompt(page, FILLER + "\n\nWhat does Bobbit do?");
-		await pollIdle(gw, sessionId, 120_000);
+		await pollIdle(gw, sessionId, 240_000);
 		await sendPrompt(page, FILLER + "\n\nSummarise your previous answer in one sentence.");
-		await pollIdle(gw, sessionId, 120_000);
+		await pollIdle(gw, sessionId, 240_000);
 
 		// Trigger /compact.
 		await sendPrompt(page, "/compact");
