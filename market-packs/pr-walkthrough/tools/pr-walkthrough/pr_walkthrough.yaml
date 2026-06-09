@@ -17,21 +17,34 @@ panels:
     title: PR Walkthrough
     entry: panel.js
 
+# ── permissions: (Slice C3 — declared-permission grant model, design §9 C3.4) —
+#    OPT IN to `git` + `fs` for THIS pack's confined server modules. Default-deny
+#    everywhere else; the grant is SERVER-resolved from this winning contribution
+#    (never caller-supplied). It un-denies node:child_process + node:fs in the C3
+#    worker so the `bundle` route runs REAL `git diff` LIVE against the session
+#    working dir, gives the worker a minimal `{ PATH }` env (no gateway token /
+#    secret) so the git binary resolves, and SIGKILLs any spawned git child on
+#    terminate-on-timeout. `net` is intentionally OMITTED — the GitHub-adapter /
+#    export path is out of scope for the viewer pack.
+permissions: [git, fs]
+
 # ── routes: (Slice B3) — re-expresses handlePrWalkthroughApiRoute under the
 #    pack's namespace. Reached via host.callRoute("bundle"|"publish"). Server
 #    derives the trusted packId from the calling tool and resolves the route
-#    MODULE via the pack-level RouteRegistry (opener-independent). Persisted state
-#    lives in host.store.* (re-expressing walkthrough-store.ts), pack-scoped.
-#    ARCHITECTURAL NOTE: `bundle` is READ-ONLY — it returns the persisted
-#    walkthrough-store payload. It CANNOT recompute the changeset live, because a
-#    pack route runs in the no-ambient-access C3 worker (no git/fs/network). The
-#    git/diff/synthesis is AGENT-TOOL work that persists via `publish` at submit
-#    time. See docs/design/pr-walkthrough-pack-deletion.md.
+#    MODULE via the pack-level RouteRegistry (opener-independent).
+#    LIVE RECOMPUTE (design §D2.3): with the declared git/fs grant, `bundle`
+#    recomputes the REAL changeset (git diff + diff parse + changeset assembly +
+#    deterministic fallback cards) LIVE in the confined worker — covering PRs
+#    created AFTER install — and READS any LLM-enhanced cards persisted at
+#    submit-time via `publish` (keyed by changeset id) from host.store.* (the
+#    synthesis credential split: no model creds in the worker). See
+#    docs/design/pr-walkthrough-pack-deletion.md.
 routes:
   module: routes.mjs
   names: [bundle, publish]
 
-# ── stores: (Slice B1) — pack-scoped persisted walkthrough/job/changeset state.
+# ── stores: (Slice B1) — pack-scoped persisted walkthrough/job/changeset state
+#    (job pointers keyed by jobId + LLM cards keyed by changeset id).
 #    Keys are namespaced by the SERVER-derived packId; cross-pack reads rejected.
 stores:
   - walkthroughs
@@ -73,4 +86,6 @@ entrypoints:
     routeId: pr-walkthrough
     target:
       panelId: pr-walkthrough.panel
-    paramKeys: [jobId]
+    # jobId rehydrates a persisted job pointer; baseSha/headSha/repoDir let a
+    # deep-link drive a LIVE recompute (design §D2.3) for a freshly-opened PR.
+    paramKeys: [jobId, baseSha, headSha, repoDir]
