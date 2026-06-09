@@ -1296,11 +1296,12 @@ dynamic behavior routes through a TYPED, scoped capability — `host.callRoute` 
 own routes, resolved by a pack-level `RouteRegistry` so a panel opened from one tool reaches
 a route declared on another tool in the SAME pack), `host.ui.*` (structured targets),
 `host.store.*` (pack-scoped), `host.session.readToolCall` — **with no raw `gateway.fetch`**.
-The **synthesis-credential split** (the one non-obvious decision): the worker has a
-PATH-only env and no model credentials, so LLM card synthesis stays AGENT-tool-side at submit
-time (persisted to the store keyed by changeset id), and the `bundle` route only *computes*
-the deterministic diff/fallback cards live + *reads* the stored LLM cards — it never calls
-the model. Parity holds without an escape hatch.
+The **synthesis split** (the one non-obvious decision): the worker has full ambient env /
+network parity (like a tool), so a pack *could* run its own inference — but keeping LLM card
+synthesis AGENT-tool-side at submit time (persisted to the store keyed by changeset id) is a
+DESIGN CHOICE that keeps the live `bundle` route deterministic, NOT a credential boundary.
+`bundle` only *computes* the deterministic diff/fallback cards live + *reads* the stored LLM
+cards. Parity holds without an escape hatch.
 
 > **Shape fixes applied during this exercise.** (1) The initial `HostUiApi` had only
 > `openPanel`; PR-walkthrough's deep-link/launcher need forced adding `navigate(target)` and
@@ -1323,8 +1324,8 @@ is **no `gateway.fetch`** to build; the allowlist-bypass fix + input validation 
 toolUseId verification + blast-radius controls (§5); the frozen v1 interfaces + manifest
 schema committed (§2/§3); this doc.
 
-**Built in Phase 2 (IMPLEMENTED):** `panels`, `stores`, `routes`, `entrypoints`,
-`permissions`; `host.callRoute`, `host.session.*` (reads + writes + subscribe),
+**Built in Phase 2 (IMPLEMENTED):** `panels`, `stores`, `routes`, `entrypoints`;
+`host.callRoute`, `host.session.*` (reads + writes + subscribe),
 `host.ui.*` (openPanel + navigate), `host.store.*`; the internal→contract adapter
 (`contract-adapter.ts`, §3.3); server-module RESOURCE + CRASH isolation in a
 `worker_threads` worker (`module-host-worker.ts`, §3.4). `host.capabilities` now reports all
