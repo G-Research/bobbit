@@ -8,17 +8,22 @@
 // (no gateway token / secret — set by the parent via `new Worker(..., { env: {} })`)
 // and whose memory is capped by `resourceLimits`. Its job, in order:
 //
-//   1. Import `worker_threads` + `module` + the confinement hook (and its shared
-//      `path-guard` dep) — done at the top, BEFORE the hook is installed, so the
-//      deny-list never blocks the confinement plumbing's own imports.
+//   1. Statically import `worker_threads` + `module` + the confinement hook
+//      (`confinement-loader.ts`, which now imports NO `node:fs`) + the pure
+//      `permission-grants` logic — so the static-import phase creates NO `node:fs`
+//      ESM facade. Then, in the `confinementReady` setup, APPLY the per-grant
+//      module wraps FIRST (constrained git runner / fs relative-path rebasing) so
+//      they are in place BEFORE the `node:fs` facade is created, and only AFTER
+//      that dynamically import the shared `path-guard` helper (which creates the
+//      now-wrapped facade) and inject it into the confinement loader.
 //   2. Install the module-load DENY+CONFINE hook (`confinement-loader.ts`) via the
 //      IN-THREAD `module.registerHooks({ resolve })`, so the pack module graph
 //      imported afterward cannot reach `node:fs`/`child_process`/network/`process`/
 //      `worker_threads`/etc., NOR `import`/`require` any `file:` OUTSIDE its own
 //      pack root (relative `../` walk, absolute path, symlink, or ancestor
 //      `node_modules`). In-thread (synchronous) hooks run in THIS worker thread, so
-//      the hook can call the shared `path-guard` helper directly — no separate
-//      hooks thread, no cross-thread marshalling, no `.ts`/`.js` resolution gap.
+//      the injected `path-guard` helper runs directly — no separate hooks thread,
+//      no cross-thread marshalling, no `.ts`/`.js` resolution gap.
 //   3. Remove ambient web/process globals BEFORE any pack code runs: delete the
 //      outbound-network globals (`fetch`/`WebSocket`/`XMLHttpRequest`/`Request`/
 //      `Response`/`Headers`/…) and REPLACE the ambient `process` global with an
@@ -101,42 +106,40 @@ const data = (workerData ?? { denied: [] }) as BootstrapData;
 const grants = Array.isArray(data.permissions) ? data.permissions : [];
 
 // NOTE: `process.chdir()` is unsupported inside a worker thread, so the worker's
-// REAL cwd stays at startup. The session working dir is instead surfaced through
-// the process SHIM's `cwd()` (set in removeAmbientGlobals) — a `git`/`fs`-granted
-// pack reads `process.cwd()` and passes it explicitly to `spawn(..., { cwd })` /
-// fs path joins. The git BINARY itself resolves via PATH in the worker's real env
-// (seeded by the parent), independent of cwd.
+// REAL cwd stays at startup. The session working dir is surfaced two ways: the
+// process SHIM's `cwd()` (set in removeAmbientGlobals) for any pack that reads it,
+// AND — crucially — the per-grant module wraps below default the spawn `cwd` and
+// rebase relative fs paths onto it, so real fs/git resolution actually honors the
+// session dir (the shim cwd() alone does NOT redirect libuv's real cwd). The git
+// BINARY itself resolves via PATH in the worker's real env (seeded by the parent),
+// independent of cwd.
 
-// ── (2) Install the module-load deny+confine hook BEFORE any pack module is
-// imported. The hook + its shared `path-guard` dep are STATICALLY imported above
-// (resolved by THIS worker thread's loader), so `configure` + `resolve` are
-// already loaded; `registerHooks` installs the synchronous in-thread hook so the
-// pack graph imported afterward is both deny-listed and pack-root-confined.
-configureConfinement({ denied: data.denied, packRoot: data.packRoot });
-registerHooks({ resolve: confinementResolve });
-
-// ── (3) Remove ambient web/process globals BEFORE any pack module is imported. ──
-// Slice C3: granted capabilities are skipped here (`net` keeps the network
-// globals; `git`/`fs` get a REAL cwd + minimal PATH env on the process shim).
-removeAmbientGlobals(grants, data.workingDir);
-
-// ── (3b) Slice C3: when `git` is granted, `child_process` is un-denied so the
-// pack can spawn the git binary. Spawned children are children of the MAIN
-// process (worker.terminate() does NOT reap them), so we WRAP the spawn surface
-// to report each child's pid (spawn + exit) to the parent over the MessagePort;
-// the parent kills any still-running child on terminate-on-timeout. Patch the CJS
-// builtin via createRequire BEFORE the pack imports it, so the ESM facade the pack
-// receives reflects the wrapped functions (Node creates the facade lazily from
-// the current CJS exports). createRequire is statically imported above (before the
-// hook), and `child_process` is un-denied under this grant, so this resolves.
-if (hasGrant(grants, "git")) {
-	try {
-		wrapChildProcessSpawnSurface();
-	} catch {
-		/* best effort — if wrapping fails the child-kill safety net is reduced, but
-		   the wall-time terminate still bounds the worker thread itself */
-	}
-}
+// ── Confinement setup (ORDER MATTERS). The pack module graph must not run until
+// this whole sequence completes; `confinementReady` gates `handleInvoke`.
+//
+//   (1) Apply the per-grant module wraps FIRST, BEFORE any `node:fs` ESM facade is
+//       created. A `git` grant means "run git", NOT "run any command" — so we
+//       expose a CONSTRAINED, TRACKED, ASYNC-ONLY git runner (only an async
+//       spawn/execFile of the `git` binary; sync child-process APIs + non-git
+//       commands rejected; cwd defaults to the session dir; children tracked +
+//       SIGKILLed on terminate). An `fs` grant rebases LEADING RELATIVE fs path
+//       arguments onto the session dir. Patching the CJS builtins via createRequire
+//       BEFORE the facade is built makes the pack's `node:fs`/`child_process`
+//       module objects reflect the wrapped functions. This is why `path-guard`
+//       (which imports `node:fs`) is loaded LATER, in step (2), not statically.
+//   (2) Load the shared `path-guard` helper (creating the now-wrapped `node:fs`
+//       facade) and INJECT it into the confinement loader, then install the
+//       module-load deny+confine hook so the pack graph is deny-listed +
+//       pack-root-confined.
+//   (3) Remove ambient web/process globals (`net` keeps the network globals;
+//       `git`/`fs` get a REAL cwd + minimal PATH env on the process shim).
+const confinementReady: Promise<void> = (async () => {
+	applyGrantedModuleWraps(grants, data.workingDir);
+	const { isPackPathWithinGroup } = await import("./path-guard.js");
+	configureConfinement({ denied: data.denied, packRoot: data.packRoot, isWithin: isPackPathWithinGroup });
+	registerHooks({ resolve: confinementResolve });
+	removeAmbientGlobals(grants, data.workingDir);
+})();
 
 /**
  * Strip the ambient capabilities a `worker_threads.Worker` inherits that the
@@ -219,20 +222,100 @@ function removeAmbientGlobals(grants: readonly string[], workingDir?: string): v
 }
 
 /**
- * Slice C3 (declared-permission `git`) — wrap the async `child_process` spawn
- * surface so every spawned child's pid is reported to the parent (spawn + exit)
- * over the MessagePort. The parent kills any child still running when it
- * terminates the worker on timeout, so a runaway git cannot outlive the wall-time
- * cap (worker.terminate() reaps only the THREAD, not the spawned OS child).
- *
- * Patching the CJS builtin via `createRequire` BEFORE the pack imports it makes
- * the pack's ESM facade (`import { spawn } from "node:child_process"`, default,
- * and namespace forms) reflect the wrapped functions — Node builds the facade
- * lazily from the current CJS exports. Only the ASYNC surface is wrapped; the
- * synchronous `spawnSync`/`execSync` block the worker thread and are reaped by
- * terminate directly.
+ * Slice C3 (declared-permission model) — apply the per-grant module wraps to the
+ * CJS built-ins BEFORE any pack module imports them, so the pack's module object
+ * reflects the wrapped functions. Each grant un-gates exactly one narrow, audited
+ * capability:
+ *   - `git` → a constrained, tracked, async-only git runner (`installGitRunner`).
+ *   - `fs`  → leading-relative fs path args rebased onto `workingDir`
+ *     (`installFsRebase`).
  */
-function wrapChildProcessSpawnSurface(): void {
+function applyGrantedModuleWraps(grants: readonly string[], workingDir?: string): void {
+	const dir = typeof workingDir === "string" && workingDir.length > 0 ? workingDir : undefined;
+	if (hasGrant(grants, "git")) {
+		try {
+			installGitRunner(dir);
+		} catch {
+			/* best effort — if wrapping fails the child-kill safety net is reduced, but
+			   the wall-time terminate still bounds the worker thread itself */
+		}
+	}
+	if (hasGrant(grants, "fs") && dir) {
+		try {
+			installFsRebase(dir);
+		} catch {
+			/* best effort — without rebasing, relative reads resolve against the
+			   worker's startup cwd (no security regression — fs is still pack-import
+			   contained and the env carries no secret) */
+		}
+	}
+}
+
+/** True iff `command` names the `git` binary (basename `git`/`git.exe`, any dir). */
+function isGitBinary(command: unknown): boolean {
+	if (typeof command !== "string" || command.length === 0) return false;
+	const base = (command.split(/[\\/]/).pop() ?? command).toLowerCase();
+	const noExe = base.endsWith(".exe") ? base.slice(0, -4) : base;
+	return noExe === "git";
+}
+
+/** Build a `{ cwd }`-defaulted argument list for a spawn/execFile call when the
+ *  caller passed no `cwd`. Handles the optional positional `options` object (which
+ *  may be absent, follow an `args` array, and precede a trailing callback for
+ *  `execFile`). Absolute/explicit `cwd` is left untouched. */
+function withDefaultCwd(args: unknown[], dir?: string): unknown[] {
+	if (!dir) return args;
+	let optsIdx = -1;
+	for (let i = 1; i < args.length; i++) {
+		const a = args[i];
+		if (a && typeof a === "object" && !Array.isArray(a)) { optsIdx = i; break; }
+	}
+	if (optsIdx >= 0) {
+		const opts = args[optsIdx] as Record<string, unknown>;
+		if (opts.cwd == null) {
+			const copy = args.slice();
+			copy[optsIdx] = { ...opts, cwd: dir };
+			return copy;
+		}
+		return args;
+	}
+	const out = args.slice();
+	if (out.length > 0 && typeof out[out.length - 1] === "function") {
+		out.splice(out.length - 1, 0, { cwd: dir });
+	} else {
+		out.push({ cwd: dir });
+	}
+	return out;
+}
+
+function denyChildProc(what: string): () => never {
+	return () => {
+		throw new Error(`[confinement] ${what} (Extension Host §9 isolation)`);
+	};
+}
+
+/**
+ * Slice C3 (declared-permission `git`) — expose a CONSTRAINED, TRACKED, ASYNC-ONLY
+ * git runner. The `git` grant un-denies `child_process`, but a `git` grant means
+ * "run git", NOT "run any command":
+ *   - EVERY synchronous child-process API (`spawnSync`/`execSync`/`execFileSync`/…)
+ *     is denied — a sync spawn blocks the worker thread and its OS child (a child
+ *     of the MAIN process) cannot be tracked or SIGKILLed on terminate, so it would
+ *     outlive the wall-time cap.
+ *   - `exec` (runs a SHELL — argv[0] is the shell, not git) and `fork` (spawns a
+ *     Node child) are denied — neither is "run git".
+ *   - the async binary spawners (`spawn`/`execFile`) are constrained to the `git`
+ *     binary, default their `cwd` to the session working dir, and report each
+ *     spawned child's pid (spawn + exit) to the parent so it SIGKILLs any survivor
+ *     on terminate-on-timeout (worker.terminate() reaps only the THREAD, not the
+ *     spawned OS child).
+ *
+ * Patching the CJS builtin via `createRequire` BEFORE the pack imports it makes the
+ * pack's module facade reflect the wrapped functions (Node builds the facade from
+ * the current CJS exports; the live default/namespace object reflects in-place
+ * mutation). `child_process` is un-denied under this grant, so this resolves.
+ */
+function installGitRunner(dir?: string): void {
 	const require = createRequire(import.meta.url);
 	const cp = require("node:child_process") as Record<string, unknown>;
 	const report = (child: unknown): void => {
@@ -246,15 +329,91 @@ function wrapChildProcessSpawnSurface(): void {
 			});
 		} catch { /* not an emitter */ }
 	};
-	for (const name of ["spawn", "exec", "execFile", "fork"]) {
+	// Deny EVERY synchronous child-process API (untrackable → could outlive the cap).
+	for (const key of Object.keys(cp)) {
+		if (key.endsWith("Sync") && typeof cp[key] === "function") {
+			cp[key] = denyChildProc(`${key} is denied — synchronous child-process APIs cannot be tracked/cancelled`);
+		}
+	}
+	// Deny the async non-git spawners: `exec` runs a shell, `fork` spawns Node.
+	for (const key of ["exec", "fork"]) {
+		if (typeof cp[key] === "function") {
+			cp[key] = denyChildProc(`child_process.${key} is not permitted by the 'git' grant — only the git binary may be spawned`);
+		}
+	}
+	// Constrain the async binary spawners to the `git` binary + default cwd + track.
+	for (const name of ["spawn", "execFile"]) {
 		const orig = cp[name];
 		if (typeof orig !== "function") continue;
 		cp[name] = function (this: unknown, ...args: unknown[]): unknown {
-			const child = (orig as (...a: unknown[]) => unknown).apply(this, args);
+			if (!isGitBinary(args[0])) {
+				throw new Error(`[confinement] the 'git' permission only permits spawning the git binary, not "${String(args[0])}" (Extension Host §9 isolation)`);
+			}
+			const child = (orig as (...a: unknown[]) => unknown).apply(this, withDefaultCwd(args, dir));
 			report(child);
 			return child;
 		};
 	}
+}
+
+/**
+ * Slice C3 (declared-permission `fs`) — wrap the `fs`/`fs/promises` modules so a
+ * LEADING RELATIVE path argument resolves under the session working dir. Worker
+ * threads cannot `process.chdir()`, so a real `fs.readFileSync("rel")` would
+ * otherwise resolve against the worker's STARTUP cwd, breaking the design's "real
+ * cwd for fs" contract. Absolute paths (and URL/Buffer args) pass through
+ * unchanged. The wrap is applied in-place on the CJS exports BEFORE the pack
+ * imports them, so the pack's `fs` module object reflects the rebasing.
+ *
+ * The method-name sets are built LOCALLY (not at module scope): this function is
+ * invoked from the `confinementReady` IIFE that runs DURING module evaluation, so
+ * a module-level `const` would still be in its temporal dead zone here.
+ */
+function installFsRebase(dir: string): void {
+	// Path-accepting fs/fs-promises methods whose FIRST argument is a path; the
+	// two-path ops (`rename`/`copyFile`/`cp`/`link`/`symlink`) rebase BOTH args.
+	// Both sync + async forms; only methods that exist on the module are wrapped.
+	const twoPathBases = ["copyFile", "cp", "link", "rename", "symlink"];
+	const singlePathBases = [
+		"access", "appendFile", "chmod", "chown", "lchmod", "lchown", "lutimes", "lstat",
+		"mkdir", "mkdtemp", "open", "opendir", "readdir", "readFile", "readlink", "realpath",
+		"rm", "rmdir", "stat", "statfs", "truncate", "unlink", "utimes", "writeFile", "exists",
+		"glob", "createReadStream", "createWriteStream", "watch", "watchFile", "unwatchFile", "openAsBlob",
+	];
+	const withSync = (bases: string[]): Set<string> => {
+		const s = new Set<string>();
+		for (const b of bases) { s.add(b); s.add(`${b}Sync`); }
+		return s;
+	};
+	const twoPathSet = withSync(twoPathBases);
+	const pathArgSet = new Set<string>([...withSync(singlePathBases), ...twoPathSet]);
+
+	const require = createRequire(import.meta.url);
+	const pathMod = require("node:path") as { isAbsolute: (p: string) => boolean; resolve: (...s: string[]) => string };
+	const rebase = (p: unknown): unknown => {
+		if (typeof p !== "string" || p.length === 0) return p;
+		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p)) return p; // a URL (file://, …) → leave as-is
+		if (pathMod.isAbsolute(p)) return p;
+		return pathMod.resolve(dir, p);
+	};
+	const wrap = (mod: Record<string, unknown>): void => {
+		for (const name of Object.keys(mod)) {
+			if (!pathArgSet.has(name)) continue;
+			const fn = mod[name];
+			if (typeof fn !== "function") continue;
+			const twoPath = twoPathSet.has(name);
+			const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+				if (args.length > 0) args[0] = rebase(args[0]);
+				if (twoPath && args.length > 1) args[1] = rebase(args[1]);
+				return (fn as (...a: unknown[]) => unknown).apply(this, args);
+			};
+			// Preserve function sub-properties (e.g. `fs.realpath.native`).
+			try { Object.assign(wrapped, fn); } catch { /* non-extensible — best effort */ }
+			mod[name] = wrapped;
+		}
+	};
+	wrap(require("node:fs") as Record<string, unknown>);
+	try { wrap(require("node:fs/promises") as Record<string, unknown>); } catch { /* always present on supported Node */ }
 }
 
 // ── Host-API proxy plumbing: marshal ctx.host.<ns>.<method>() to the parent. ──
@@ -287,10 +446,13 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			put: (key: string, value: unknown) => callHost(["store", "put"], [key, value]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},
+		// `session` is READ-ONLY for server modules: `postMessage` is intentionally
+		// ABSENT (the parent `ServerHostApi` omits it — server modules have no user
+		// gesture, so a proxied call would always throw). Authors get an accurate
+		// surface: `readTranscript`/`readToolCall` only.
 		session: {
 			readTranscript: (opts?: unknown) => callHost(["session", "readTranscript"], [opts]),
 			readToolCall: (toolUseId: string) => callHost(["session", "readToolCall"], [toolUseId]),
-			postMessage: (msg: unknown) => callHost(["session", "postMessage"], [msg]),
 		},
 	};
 }
@@ -330,7 +492,11 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 
 port.on("message", (msg: ParentMessage) => {
 	if (msg.kind === "invoke") {
-		void handleInvoke(msg);
+		// Wait for the confinement setup (module wraps + deny hook + global strip) to
+		// finish before importing any pack code. The MessagePort buffers messages
+		// until this listener runs; gating here ensures a fast parent `invoke` never
+		// races ahead of confinement.
+		void confinementReady.then(() => handleInvoke(msg));
 		return;
 	}
 	if (msg.kind === "host-reply") {

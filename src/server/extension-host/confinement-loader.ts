@@ -9,13 +9,16 @@
 // `module.registerHooks({ resolve })` BEFORE the pack server module (an
 // `actions`/`routes` module) is dynamic-imported. In-thread (synchronous) hooks
 // run in the SAME worker thread as the bootstrap — NOT a separate hooks thread —
-// which is deliberate: it lets the bootstrap import the SHARED `path-guard` helper
-// normally (resolved by the worker's own loader) and call it synchronously from
-// the hook, with no cross-thread marshalling and no module-customization-graph
-// `.ts`/`.js` resolution gap. The bootstrap imports `path-guard` (and its
-// `node:fs`/`node:path` deps) + `worker_threads`/`module` BEFORE installing the
-// hook, so the deny-list never blocks the confinement plumbing itself — only the
-// pack module graph loaded afterward.
+// which is deliberate: it lets the guard run synchronously from the hook with no
+// cross-thread marshalling and no module-customization-graph `.ts`/`.js`
+// resolution gap. The realpath-containment guard (`path-guard`) is INJECTED by the
+// bootstrap via `configure({ isWithin })` rather than imported here directly: the
+// bootstrap loads `path-guard` (and its `node:fs` dep) only AFTER it has applied
+// the per-grant module wraps, so the `node:fs` ESM facade is created AFTER the
+// `fs`-grant rebasing wrap is in place (importing it here would pre-build the
+// facade during the static-import phase and defeat the wrap). The bootstrap loads
+// the guard BEFORE installing the hook, so the deny-list never blocks the
+// confinement plumbing itself — only the pack module graph loaded afterward.
 //
 // The hook enforces TWO things on every resolution the pack module graph makes:
 //
@@ -43,7 +46,15 @@
 // unless denied + confined).
 
 import { fileURLToPath } from "node:url";
-import { isPackPathWithinGroup } from "./path-guard.js";
+
+/** The realpath-containment check, INJECTED by the bootstrap (it imports the
+ *  shared `path-guard` helper). The bootstrap injects it instead of this module
+ *  importing `path-guard` directly so that NO `node:fs` (path-guard's dependency)
+ *  ESM facade is created during the worker's static-import phase — that would
+ *  pre-build the `node:fs` facade BEFORE the bootstrap can wrap it for an `fs`
+ *  grant, breaking the relative-path rebasing. The bootstrap loads path-guard
+ *  AFTER applying the grant wraps and passes its `isPackPathWithinGroup` here. */
+type PackPathGuard = (groupAbs: string, fileAbs: string) => boolean;
 
 /** The configuration passed by the bootstrap before installing the hook. */
 export interface ConfinementConfig {
@@ -54,16 +65,22 @@ export interface ConfinementConfig {
 	 *  contained within it. Absent ⇒ no file-containment enforcement (defensive
 	 *  default; the production dispatchers ALWAYS supply it). */
 	packRoot?: string;
+	/** The realpath-containment check (the shared `path-guard` helper), injected by
+	 *  the bootstrap. REQUIRED whenever `packRoot` is set — a missing guard with a
+	 *  set root is treated as unsafe (every escaping import is rejected). */
+	isWithin?: PackPathGuard;
 }
 
 let deniedSegments = new Set<string>();
 let packRoot: string | undefined;
+let isWithin: PackPathGuard | undefined;
 
 /** Configure the hook BEFORE installing it (called by the bootstrap once, before
  *  any pack module is imported). */
 export function configure(config: ConfinementConfig): void {
 	deniedSegments = new Set(config?.denied ?? []);
 	packRoot = typeof config?.packRoot === "string" && config.packRoot.length > 0 ? config.packRoot : undefined;
+	isWithin = typeof config?.isWithin === "function" ? config.isWithin : undefined;
 }
 
 /** Normalize a specifier to its first path segment, stripping any `node:` prefix.
@@ -129,7 +146,13 @@ function enforceContainment(specifier: string, result: ResolveResult): ResolveRe
 	} catch {
 		throw new Error(`[confinement] could not resolve a file path for "${url}" (Extension Host §9 isolation)`);
 	}
-	if (!isPackPathWithinGroup(packRoot as string, fileAbs)) {
+	if (typeof isWithin !== "function") {
+		// A set pack root with no injected guard is unsafe — fail closed.
+		throw new Error(
+			`[confinement] no path-guard injected while a pack root "${packRoot}" is set; cannot prove containment for "${specifier}" (Extension Host §9 isolation)`,
+		);
+	}
+	if (!isWithin(packRoot as string, fileAbs)) {
 		throw new Error(
 			`[confinement] import of "${specifier}" resolves to "${fileAbs}" which escapes the pack root "${packRoot}" (Extension Host §9 isolation)`,
 		);

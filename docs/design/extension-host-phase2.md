@@ -1110,8 +1110,8 @@ grant un-gates exactly one thing:
 
 | Grant | `deniedForGrants` removes | Globals | Process shim | Why narrow |
 |---|---|---|---|---|
-| `git` | `child_process` | (unchanged) | REAL `cwd()` (session dir) + `{ PATH }` env | spawn the `git` binary only; children tracked + SIGKILLed on terminate (§C3.2) |
-| `fs`  | `fs` (covers `fs/promises`) | (unchanged) | REAL `cwd()` + `{ PATH }` env | relative reads resolve under the session dir; module-import containment (`packRoot`) STILL enforced |
+| `git` | `child_process` | (unchanged) | REAL `cwd()` (session dir) + `{ PATH }` env | a **tracked, async-only git runner** — ONLY an async `spawn`/`execFile` of the `git` binary (other commands/argv[0] rejected; sync `spawnSync`/`execSync`/`execFileSync` denied as untrackable); spawn `cwd` defaults to the session `workingDir`; children tracked + SIGKILLed on terminate (§C3.2). NOT general command execution. |
+| `fs`  | `fs` (covers `fs/promises`) | (unchanged) | REAL `cwd()` + `{ PATH }` env | the `fs`/`fs/promises` modules are wrapped so a **leading-relative path arg resolves under the session `workingDir`** (absolute paths pass through; two-path ops `rename`/`copyFile`/`link`/`symlink` rebase both args) — worker threads can't `chdir()`, so the shim `cwd()` alone won't redirect real fs resolution; module-import containment (`packRoot`) STILL enforced |
 | `net` | `net`/`http`/`https`/`http2`/`dns`/`tls`/`dgram` | KEEP `fetch`/`WebSocket`/… (`keepNetworkGlobals`) | (unchanged) | outbound network only |
 
 Module-import containment (`packRoot` realpath confinement, `path-guard.ts`),

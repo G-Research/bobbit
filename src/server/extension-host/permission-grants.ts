@@ -12,13 +12,22 @@
 // global stripped, an inert `process` shim (empty env, cwd()=>"/"). Each granted
 // capability is purely ADDITIVE and narrowly scoped:
 //
-//   - `git` → un-deny `child_process` (so the pack can spawn the `git` binary) and
-//     give the process shim a REAL cwd() (the session working dir) + a MINIMAL env
-//     containing only PATH (so the binary resolves). Spawned children are tracked
-//     + killed on terminate-on-timeout so a runaway git cannot outlive the cap.
-//   - `fs`  → un-deny `fs` (covers `fs`/`fs/promises` via first-segment) and give
-//     the process shim the same REAL cwd() + minimal PATH env (relative reads
-//     resolve under the session dir).
+//   - `git` → a CONSTRAINED, TRACKED, ASYNC-ONLY git runner (NOT general command
+//     execution). `child_process` is un-denied, but the worker wraps it so ONLY an
+//     async `spawn`/`execFile` of the `git` binary is permitted — any other
+//     command/argv[0] is rejected, and EVERY synchronous child-process API
+//     (`spawnSync`/`execSync`/`execFileSync`/…) is denied (they cannot be
+//     tracked/cancelled, so their OS child could outlive the terminate-on-timeout
+//     cap). The spawn `cwd` defaults to the session working dir; the process shim
+//     gets a MINIMAL env containing only PATH (so the binary resolves). Every
+//     spawned child is tracked + SIGKILLed on terminate-on-timeout so a runaway git
+//     cannot outlive the cap.
+//   - `fs`  → un-deny `fs` (covers `fs`/`fs/promises` via first-segment) AND wrap the
+//     `fs`/`fs/promises` modules so a LEADING RELATIVE path argument resolves under
+//     the session working dir (absolute paths pass through unchanged) — worker
+//     threads cannot `chdir()`, so the process-shim `cwd()` alone does NOT redirect
+//     real fs path resolution. The process shim also gets a REAL cwd() + minimal
+//     PATH env.
 //   - `net` → KEEP the outbound-network globals (`fetch`/`WebSocket`/…) instead of
 //     stripping them, and un-deny the network built-ins (`net`/`http`/`https`/…).
 //
