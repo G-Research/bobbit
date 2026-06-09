@@ -2076,6 +2076,9 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
+	/** Optional declared route names (from `routes.names`); the pack-level RouteRegistry
+	 *  indexes a pack's routes by these (Slice B3). */
+	routeNames?: string[];
 	grantPolicy?: string;
 }
 

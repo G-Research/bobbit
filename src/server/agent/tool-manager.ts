@@ -57,6 +57,9 @@ export interface ToolInfo {
 	actionNames?: string[];
 	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive wire field). */
 	storeIds?: string[];
+	/** Optional declared route names (from `routes.names`) the pack-level RouteRegistry
+	 *  indexes by (Slice B3, additive wire field). */
+	routeNames?: string[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
@@ -66,10 +69,11 @@ export interface ToolInfo {
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
-function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds"> {
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds" | "routeNames"> {
 	const c = base.contributions;
 	return {
 		storeIds: c.stores?.map((s) => s.id),
+		routeNames: c.routes?.names,
 		// Source the renderer from the PARSED/validated contribution — NOT the raw
 		// `base.renderer` — so an unsafe/dropped renderer path (e.g. `../evil.js`,
 		// rejected by parseContributions) yields rendererKind "builtin", never "pack".
@@ -638,6 +642,8 @@ export class ToolManager {
 		actionsModule?: string;
 		rendererKind?: "builtin" | "pack";
 		actionNames?: string[];
+		routesModule?: string;
+		routeNames?: string[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
@@ -654,6 +660,10 @@ export class ToolManager {
 			actionsModule: c.actions?.module,
 			rendererKind: computeRendererKind(base.baseDir, c.renderer),
 			actionNames: c.actions?.names,
+			// Slice B3: the routes module + declared names the RouteDispatcher loads
+			// and the RouteRegistry indexes by (default module "routes.js").
+			routesModule: c.routes?.module,
+			routeNames: c.routes?.names,
 		};
 	}
 

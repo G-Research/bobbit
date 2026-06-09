@@ -86,6 +86,7 @@ function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePat
 		rendererKind: computeRendererKind(baseDir, data.renderer),
 		hasActions: !!contributions.actions,
 		actionNames: contributions.actions?.names,
+		routeNames: contributions.routes?.names,
 		grantPolicy: data.grantPolicy,
 		params: Array.isArray(data.params)
 			? data.params.filter((p: unknown): p is string => typeof p === "string")

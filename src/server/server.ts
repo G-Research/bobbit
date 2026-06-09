@@ -41,6 +41,7 @@ import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
+import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
@@ -864,6 +865,11 @@ export function createGateway(config: GatewayConfig) {
 	// dispatcher lives for the gateway process lifetime; its module cache is
 	// dropped synchronously by invalidateResolverCaches() on pack mutations.
 	const actionDispatcher = new ActionDispatcher(toolManager);
+	// Slice B3: the route dispatcher (mirrors actionDispatcher) + the pack-level route
+	// registry. Both live for the gateway process lifetime; both caches are dropped by
+	// invalidateResolverCaches() on pack install/update/uninstall (rebuilds the index).
+	const routeDispatcher = new RouteDispatcher(toolManager);
+	const routeRegistry = new RouteRegistry(toolManager);
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
 	getPackStore();
@@ -1185,7 +1191,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2230,11 +2236,17 @@ async function handleApiRoute(
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
 	actionDispatcher?: ActionDispatcher,
+	routeDispatcherArg?: RouteDispatcher,
+	routeRegistryArg?: RouteRegistry,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
 	const dispatcher = actionDispatcher!;
+	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
+	// sole caller alongside actionDispatcher).
+	const routeDispatcher = routeDispatcherArg!;
+	const routeRegistry = routeRegistryArg!;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -2250,7 +2262,7 @@ async function handleApiRoute(
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
 	// installed/updated/removed market-pack tool roots are re-scanned (Windows
 	// coarse-mtime can otherwise serve a stale scan after a re-copy update).
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); };
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -5460,6 +5472,118 @@ async function handleApiRoute(
 			json(envelope);
 		} catch (err) {
 			json({ error: err instanceof Error ? err.message : String(err) }, 400);
+		}
+		return;
+	}
+
+	// POST /api/ext/route/:name — pack-scoped typed route call behind `host.callRoute`
+	// (design extension-host-phase2.md §5 B3.2). Pack-scoped (NOT tool-call-scoped):
+	// authorize via authorizeScopedRequest (NO toolUseId-ownership — a panel/entrypoint
+	// with no owned toolUseId may call routes), then derive the trusted packId SERVER-
+	// side from the opener `tool` and resolve the route MODULE via the pack-level
+	// RouteRegistry (opener-INDEPENDENT) so a route declared on tool Y is reachable from
+	// a surface opened by tool X in the SAME pack. There is NO `<pack>` URL segment to
+	// forge — the routed pack is derived from a tool the caller proves it owns.
+	const routeMatch = url.pathname.match(/^\/api\/ext\/route\/([^/]+)$/);
+	if (routeMatch && req.method === "POST") {
+		const routeName = decodeURIComponent(routeMatch[1]);
+		const body = (await readBody(req)) ?? {};
+		const routeTool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		// Resolve the tool through the SESSION's project-scoped tool manager (same
+		// no-split-brain resolution the action + store endpoints use).
+		const routeSessionProjectId = routeHeaderSid
+			? (sessionManager.getSession(routeHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(routeHeaderSid)?.projectId)
+			: undefined;
+		const routeToolManager = resolveActionToolManager(
+			toolManager,
+			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
+		);
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		// 1. Pack-scoped authorization (header-canonical session, body===header,
+		//    session resolves, opener `tool` ∈ allowedTools — NO toolUseId-ownership).
+		const guard = authorizeScopedRequest({
+			tool: routeTool,
+			headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			resolveSession,
+		});
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		// 2. SERVER-derive the pack identity from the opener tool; 3. reject a non-pack caller.
+		const ident = resolvePackIdentityForTool(routeToolManager, routeTool);
+		if (!ident.isPack || !ident.packId) {
+			json({ error: "routes are available only to market-pack tools" }, 403);
+			return;
+		}
+		// 4. Resolve the route MODULE via the pack-level registry (opener-independent).
+		let resolved: { declaringTool: string; modulePath: string } | undefined;
+		try {
+			resolved = routeRegistry.resolve(ident.packId, routeName, routeToolManager);
+		} catch (err) {
+			// Hard intra-pack duplicate-route conflict (the one registry-build rejection).
+			const status = err instanceof ActionError ? err.status : 500;
+			json({ error: err instanceof Error ? err.message : String(err) }, status);
+			return;
+		}
+		if (!resolved) {
+			json({ error: `pack "${ident.packId}" declares no route "${routeName}"` }, 404);
+			return;
+		}
+		// 5. Dispatch the registry's DECLARING-tool module with the packId-bound host
+		//    context (identity from ident, NOT the opener tool).
+		const toolUseId = typeof (body as { toolUseId?: unknown }).toolUseId === "string"
+			? (body as { toolUseId: string }).toolUseId
+			: undefined;
+		const init = ((body as { init?: unknown }).init ?? {}) as { method?: unknown; query?: unknown; body?: unknown };
+		const method = typeof init.method === "string" ? init.method : "GET";
+		let query: Record<string, string> | undefined;
+		if (init.query && typeof init.query === "object") {
+			query = {};
+			for (const [k, v] of Object.entries(init.query as Record<string, unknown>)) {
+				if (v !== undefined && v !== null) query[k] = String(v);
+			}
+		}
+		const readOwnTranscript = async (): Promise<string | null> => {
+			const ps = sessionManager.getPersistedSession(guard.sessionId);
+			if (!ps?.agentSessionFile) return null;
+			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+		};
+		const host = createServerHostApi({
+			sessionId: guard.sessionId,
+			toolUseId,
+			packId: ident.packId,
+			contributionId: ident.contributionId,
+			packStore: getPackStore(),
+			readOwnTranscript,
+		});
+		const start = Date.now();
+		try {
+			const result = await routeDispatcher.dispatch(
+				resolved.declaringTool,
+				routeName,
+				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: resolved.declaringTool },
+				{ method, query, body: init.body },
+				routeToolManager,
+			);
+			console.log(`[ext-route] name=${routeName} tool=${routeTool} declaringTool=${resolved.declaringTool} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
+			json(result ?? null);
+		} catch (err) {
+			const status = err instanceof ActionError ? err.status : 500;
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-route] name=${routeName} tool=${routeTool} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			json({ error: message }, status);
 		}
 		return;
 	}
