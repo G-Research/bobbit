@@ -123,7 +123,31 @@ async function seedSubmitToolCall(gateway: GatewayInfo, sid: string): Promise<vo
 			content: [{ type: "tool_result", tool_use_id: SUBMIT_TOOL_USE_ID, content: "published", is_error: false }],
 		},
 	});
-	fs.appendFileSync(file!, `\n${useLine}\n${resultLine}\n`);
+	const seedBlock = `\n${useLine}\n${resultLine}\n`;
+	// The LIVE agent OWNS this jsonl and rewrites it from its in-memory turn state
+	// until the "hello" turn's final flush lands. Under load that flush can arrive
+	// AFTER an external append and CLOBBER the seed — the tool_use vanishes, so
+	// host.session.readTranscript/readToolCall return an empty transcript and the
+	// panel renders "submit yaml: (none)" (a flaky failure misattributable to the
+	// session-read pack-identity hardening). A single append therefore races the
+	// agent. Instead, append then poll-verify the seed SURVIVES for several
+	// CONSECUTIVE reads (proving the agent's final write has already happened),
+	// re-appending whenever a rewrite clobbered it. This converges once the turn
+	// settles (no further prompt is sent before the panel read) without depending
+	// on the best-effort idle wait.
+	let stable = 0;
+	await expect
+		.poll(() => {
+			const cur = fs.readFileSync(file!, "utf8");
+			if (cur.includes(SUBMIT_TOOL_USE_ID)) {
+				stable += 1;
+			} else {
+				stable = 0;
+				fs.appendFileSync(file!, seedBlock);
+			}
+			return stable;
+		}, { timeout: 20_000, intervals: [150, 250, 400] })
+		.toBeGreaterThanOrEqual(4);
 }
 
 test.afterEach(async () => {
