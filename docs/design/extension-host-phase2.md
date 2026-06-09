@@ -64,19 +64,28 @@ produced by the agent/LLM at runtime is *untrusted*. The three surfaces split ac
   the untrusted *payload* (model output, transcript text, artifact HTML) is confined to the
   `sandbox`-attributed iframe — so a prompt-injected artifact cannot reach app globals even
   though the pack panel that frames it can.
-- **Pack SERVER modules (`actions:` / `routes:`) are TRUSTED but run LEAST-PRIVILEGE by
-  default.** They run in the C3 confined `worker_threads` worker (terminate-on-timeout,
-  memory caps, module-import containment) and start with NO ambient OS capability. A pack
-  may OPT IN to a narrow set (`git`/`fs`/`net`) via a manifest `permissions:` declaration
-  (§9 C3.4) — a *declared, audited, server-resolved, default-deny* capability grant, never
-  an ambient escape hatch.
+- **Pack SERVER modules (`actions:` / `routes:`) are TRUSTED code (same tier as a tool or
+  an MCP server the user installed) and are NOT sandboxed against themselves.** They run in
+  the C3 `worker_threads` worker for **RESOURCE + CRASH isolation ONLY** — terminate-on-
+  timeout, memory/CPU caps, spawned-child kill, and module-import resolution contained to
+  the pack root. That is a STABILITY boundary, explicitly **not** a security sandbox against
+  the pack's own code. A pack manifest's `permissions:` key (`git`/`fs`/`net`) is
+  **install-time DISCLOSURE** of which ambient OS capabilities the pack's trusted code uses
+  and the **switch that ENABLES** them — granting `git` un-gates `child_process` (the pack
+  may then run ANY command, exactly like a tool), `fs` un-gates the `fs` module (no path
+  containment), `net` restores network. Deny-by-default is the enable-switch / disclosure
+  default, NOT an enforced privilege boundary. An in-worker per-capability permission
+  sandbox over trusted in-process code is FALSE security — a native `.node` addon or the
+  shared process trivially defeats it — so Phase 2 neither claims nor relies on one.
 
-The Host API remains the single privileged boundary for everything CROSS-pack, cross-
+The Host API remains the single ENFORCED boundary for everything CROSS-pack, cross-
 session, or UI-driving (`store`/`session`/`callRoute`/`ui.*`) — those stay typed, scoped,
-server-authorized methods keyed off the server-resolved pack identity (§2/§2a). What the
-declared-permission model adds is a way for a pack's OWN server module to reach OS
-capabilities (git/fs/net) on ITS OWN behalf — bounded, declared, and killable — without
-punching a hole in the cross-pack Host-API boundary.
+server-authorized methods keyed off the server-resolved pack identity (§2/§2a). The boundaries
+that are ENFORCED are: server-resolved pack identity (never caller-supplied), pack-namespaced
+stores with cross-pack reads rejected, own-session-scoped reads, user-gesture +
+server-minted-permit session writes, and sandboxed-iframe rendering of untrusted/LLM content.
+A pack's OWN server code is trusted and is NOT one of those boundaries — `permissions:` is
+disclosure plus an enable switch, not enforcement.
 
 ---
 
@@ -955,12 +964,16 @@ internal wire. Scoped to the bound session.
 
 ---
 
-## 9. Slice C3 — server-module isolation (worker_threads)
+## 9. Slice C3 — server-module RESOURCE + CRASH isolation (worker_threads)
 
 **Deps:** the slices whose pack server modules it isolates — **actions (B-baseline) +
-routes (B3) ONLY**. **No flag** (hardening). Confinement is DEFAULT-DENY with a declared,
-audited `permissions:` opt-in (§C3.4 — `git`/`fs`/`net`), server-resolved, never
-caller-supplied. **Store-handler scope (deliberate
+routes (B3) ONLY**. **No flag** (stability hardening). The worker is a **RESOURCE + CRASH
+isolation boundary, NOT a security sandbox** against the pack's own trusted code:
+terminate-on-timeout, memory/CPU caps, spawned-child kill, and module-import resolution
+contained to the pack root. A pack manifest's `permissions:` key (`git`/`fs`/`net`) is
+install-time DISCLOSURE + the enable-switch for ambient OS capabilities (§C3.4),
+server-resolved and never caller-supplied — NOT an enforced privilege boundary.
+**Store-handler scope (deliberate
 interpretation):** the goal spec lists C3 as isolating "actions, routes, store handlers",
 but Phase 2 has **NO pack-supplied store-handler module** — stores are host-backed KV
 reached via `ctx.host.store.*`, so the spec's "store handlers" phrase has no pack-code
@@ -984,16 +997,19 @@ hangs the event loop). `worker_threads.Worker` supports `worker.terminate()` (tr
 terminate-on-timeout) and `resourceLimits` (`maxOldGenerationSizeMb`, `stackSizeMb`) for
 memory caps. **Choose `worker_threads`.** Note that `worker_threads` does NOT by itself
 confine `process`/env/fs/network/built-ins — a worker inherits the parent env and can
-`require('node:fs')` unless we explicitly deny it. C3.2 therefore adds a confinement
-bootstrap; "isolation" in this doc means *that bootstrap + minimal (default-empty) env +
-terminate/resource caps*, not the bare worker. (Declared `permissions:` additively relax
-the deny-list / env per §9 C3.4 — default-deny otherwise.)
+`require('node:fs')` unless we explicitly gate it. C3.2 therefore adds a bootstrap;
+"isolation" in this doc means *that bootstrap + minimal (PATH-only) env + terminate/resource
+caps + module-import containment*, not the bare worker. The bootstrap's built-in gating is
+the ENABLE-SWITCH mechanism for ambient capabilities (§9 C3.4) — OFF until disclosed via
+`permissions:` — **not** a security control against the pack's own trusted code (see the
+false-security note in C3.2).
 
 ### C3.2 New file: `src/server/extension-host/module-host-worker.ts`
 
 One-line responsibility: run a pack server module (`actions` or `routes` member) in a
-confined, terminate-able worker with resource caps, behind a request/response message
-protocol whose ONLY granted capability is the host-API proxy.
+terminate-able worker with resource caps + module-import containment, behind a
+request/response message protocol; the host-API proxy is the channel to authorized server
+state.
 
 ```ts
 export interface ModuleHostOptions { timeoutMs?: number; maxOldGenerationSizeMb?: number; stackSizeMb?: number; }
@@ -1005,29 +1021,36 @@ export interface InvokeRequest {
   member: string;
   ctx: ActionHandlerCtx;             // live host stays in the PARENT; only identity+flags cross
   arg: unknown;
-  permissions?: readonly string[];   // SERVER-RESOLVED grant set (git/fs/net); empty ⇒ deny-all
-  workingDir?: string;               // session cwd; the worker's REAL cwd() when git/fs granted
+  permissions?: readonly string[];   // SERVER-RESOLVED enabled set (git/fs/net); empty ⇒ none enabled
+  workingDir?: string;               // session cwd; surfaced as the worker's cwd() when git/fs enabled
 }
 export class ModuleHost {
   constructor(opts?: ModuleHostOptions);
-  /** Run member in a confined worker; terminate on timeout → ActionError(504). */
+  /** Run member in a terminate-able worker; terminate on timeout → ActionError(504). */
   invoke(req: InvokeRequest, timeoutMs?: number): Promise<unknown>;
   dispose(): void;                   // terminate live workers + SIGKILL their tracked child PIDs
 }
 ```
 
-**Confinement is DEFAULT-DENY + DECLARED-PERMISSION RELAXATION (the real model — not "a
-bare `worker_threads` is a sandbox"). With no `permissions:` grant the worker is fully
-confined exactly as below; each declared grant ADDITIVELY un-gates one narrow capability
-(§9 C3.4).**
+**The worker is a RESOURCE + CRASH isolation boundary, NOT a security sandbox against the
+pack's own trusted code.** The bootstrap below (minimal env, built-in gating, module-import
+containment to `packRoot`, ambient-global stripping, host-API proxy channel) is the
+**enable-switch + stability** mechanism: with no `permissions:` disclosed the ambient OS
+surface is OFF, and each disclosed capability flips ON the full ambient capability (§9
+C3.4). It is NOT relied on to contain a pack's own code — an in-worker per-capability
+permission sandbox over trusted in-process code is FALSE security (a native `.node` addon
+or the shared process trivially defeats it). What the worker DOES guarantee is STABILITY:
+terminate-on-timeout, memory/CPU caps via `resourceLimits`, spawned-child kill, and
+module-import resolution contained to the pack root.**
 
 - **Minimal env (default empty):** the worker starts with NO inherited environment —
   `new Worker(bootstrapUrl, { env, workerData, resourceLimits, execArgv })` where `env` is
   `{}` by default (`module-host-worker.ts` `ModuleHost.invoke`). The worker holds no
   gateway token and no secret (those live only in the parent process env). When `git`/`fs`
-  is granted, `env` carries ONLY `PATH` (`needsRealProcess(grants)` → `{ PATH:
-  process.env.PATH }`) so the `git` binary resolves and relative reads work — still never
-  the host's full env / token / secret.
+  is enabled, `env` carries ONLY `PATH` (`needsRealProcess(grants)` → `{ PATH:
+  process.env.PATH }`) so commands resolve and relative paths work — still never the host's
+  full env / token / secret (a token-stripped env is a stability/hygiene measure, not a
+  claimed boundary against trusted pack code).
 - **Module-load deny+confine hook (runs BEFORE the pack module):** the worker entry
   `module-host-bootstrap.ts` installs the in-thread `module.registerHooks({ resolve })`
   hook from `confinement-loader.ts` BEFORE importing pack code. It (a) DENIES the pack
@@ -1037,23 +1060,25 @@ confined exactly as below; each declared grant ADDITIVELY un-gates one narrow ca
   every resolved `file:` URL to the pack's own `packRoot` (no `../` walk, absolute path,
   symlink, or ancestor `node_modules` escape — `path-guard.ts`). The deny-list is computed
   per-grant by `deniedForGrants(DENIED_BUILTINS, grants)` (`permission-grants.ts`) — each
-  grant REMOVES its entries (e.g. `git` un-denies `child_process`). After installing the
+  enabled capability REMOVES its entries (e.g. `git` un-gates `child_process` entirely, so
+  the pack may run ANY command). This gating is the disclosure/enable switch, NOT a security
+  boundary against the pack. After installing the
   hook, the bootstrap dynamic-`import()`s the pack module (the SAME epoch-cache-busted URL
   the dispatcher builds, `action-dispatcher.ts`/`route-dispatcher.ts` `resolveModuleUrl`).
 - **Ambient-global stripping (default) / declared relaxation:** `removeAmbientGlobals`
   (`module-host-bootstrap.ts`) deletes the outbound-network globals (`fetch`/`WebSocket`/
   `XMLHttpRequest`/…) and REPLACES the ambient `process` with an inert FROZEN shim (empty
-  frozen env, `cwd()=>"/"`, no `exit`/`kill`/`binding`/`dlopen`). With `net` granted the
-  network globals are KEPT (`keepNetworkGlobals`); with `git`/`fs` granted the process shim
-  gains a REAL `cwd()` (the session `workingDir`) + a frozen `{ PATH }` env
-  (`needsRealProcess`). (`process.chdir()` is unsupported in a worker, so the session dir is
-  surfaced via the shim's `cwd()`, which a `git`/`fs` pack passes explicitly to
-  `spawn(…,{cwd})` / fs joins.)
-- **Host-API-proxy-only capability:** the ONLY ambient capability pack code is handed
-  (beyond any declared grant) is the `ctx.host` proxy over the parent `MessagePort`
-  (`buildHostProxy`). Host calls that touch server state (`store`/`session`) are marshalled
-  to the parent and authorized there against an allowlist
-  (`module-host-worker.ts` `PROXYABLE` / `invokeHostMethod`).
+  frozen env, `cwd()=>"/"`, no `exit`/`kill`/`binding`/`dlopen`) until a capability is
+  disclosed. With `net` enabled the network globals are KEPT (`keepNetworkGlobals`); with
+  `git`/`fs` enabled the process shim gains a `cwd()` (the session `workingDir`) + a frozen
+  `{ PATH }` env (`needsRealProcess`). (`process.chdir()` is unsupported in a worker, so the
+  session dir is surfaced via the shim's `cwd()` as a convenience.)
+- **Host-API proxy channel:** the CROSS-pack/cross-session capabilities (`store`/`session`)
+  are reached only via the `ctx.host` proxy over the parent `MessagePort` (`buildHostProxy`);
+  those calls are marshalled to the parent and AUTHORIZED there against an allowlist
+  (`module-host-worker.ts` `PROXYABLE` / `invokeHostMethod`) — this is one of the ENFORCED
+  boundaries (server-resolved pack identity, pack-namespaced stores, own-session reads),
+  unlike the ambient OS surface above which is trusted-code disclosure.
 - **Message protocol:** parent posts `{url, epoch, exportKind, member, ctx, arg}`; the
   bootstrap validates the `actions`/`routes` export + own-property member (export-map
   validation now lives in the WORKER so the parent never imports pack code), invokes
@@ -1073,75 +1098,72 @@ confined exactly as below; each declared grant ADDITIVELY un-gates one narrow ca
   the binding acceptance statement for the CPU-cap criterion (acceptance #3): wall-time
   termination IS the CPU-cap control — there is no claim of a CPU quota that
   `worker_threads` cannot deliver.
-- **Spawned-child reaping (declared `git`):** `worker.terminate()` reaps the THREAD but NOT
-  OS child processes a `git`-granted handler spawned (they are children of the MAIN gateway
+- **Spawned-child reaping (with `git` enabled):** `worker.terminate()` reaps the THREAD but
+  NOT OS child processes the handler spawned (they are children of the MAIN gateway
   process). `ModuleHost` tracks each child PID (reported as `child-spawn`/`child-exit`
-  frames; the worker wraps the async `child_process` spawn surface via `createRequire`
-  before the pack imports it) and on terminate-on-timeout / `dispose()` SIGKILLs any
-  still-running child (`killChildren`), so a runaway `git` cannot outlive the wall-time cap.
+  frames; the worker wraps the `child_process` spawn surface via `createRequire` before the
+  pack imports it) and on terminate-on-timeout / `dispose()` SIGKILLs any still-running
+  child (`killChildren`), so a runaway command cannot outlive the wall-time cap. This is a
+  STABILITY measure (a child outliving its worker would leak), not a restriction on WHAT the
+  pack may run — with `git` enabled `child_process` is fully un-gated, so the trusted pack
+  may spawn any command, exactly like a tool.
 
-### C3.4 Declared-permission grant model (REPLACES "no ambient access")
+### C3.4 `permissions:` — install-time DISCLOSURE + ambient-capability enable switch
 
-The earlier revision specified an ABSOLUTE no-ambient-access worker — a pack server module
-could reach nothing but the host-API proxy. The merged model is **least-privilege by
-default with a declared, audited opt-in**: the default is still deny-all (byte-identical to
-the absolute model for a pack that declares nothing), but a pack manifest MAY declare a
-narrow capability set that the still-confined, still-terminable worker grants.
+`permissions:` is **NOT** a least-privilege ENFORCEMENT boundary against the pack's own
+code. It is **install-time DISCLOSURE** of which ambient OS capabilities a pack's trusted
+server code uses, and the **switch that ENABLES** them. The default is OFF (a pack that
+discloses nothing reaches only the host-API proxy channel) purely so the manifest discloses
+what the pack does at install — NOT because the worker could contain hostile pack code (it
+cannot; an in-worker per-capability sandbox over trusted in-process code is FALSE security —
+a native `.node` addon or the shared process trivially defeats it, see §C3.2). A pack's
+server module is TRUSTED code, the same tier as a tool or an MCP server the user chose to
+install.
 
-**Manifest declaration (default-deny).** A tool/pack contributes
-`permissions: ["git", "fs", "net"]` (any subset). `parsePermissions`
-(`tool-contributions.ts`) parses it tolerantly into a typed `PackPermission[]` —
-unknown/non-string entries are dropped with a warning, NEVER rejecting the tool; absent or
-empty ⇒ deny-all. The recognized set is fixed (`PACK_PERMISSION_VALUES` in
-`permission-grants.ts`): `git`, `fs`, `net`.
+**Manifest declaration.** A tool/pack contributes `permissions: ["git", "fs", "net"]` (any
+subset). `parsePermissions` (`tool-contributions.ts`) parses it tolerantly into a typed
+`PackPermission[]` — unknown/non-string entries are dropped with a warning, NEVER rejecting
+the tool; absent or empty ⇒ nothing enabled. The recognized set is fixed
+(`PACK_PERMISSION_VALUES` in `permission-grants.ts`): `git`, `fs`, `net`.
 
-**Server-resolved grant (never caller-supplied).** The grant rides the SAME winning-
-contribution resolution as the module path: `resolveToolLocation(tool)` returns
-`{ baseDir, groupDir, …, permissions }`, and the dispatcher threads `loc.permissions` into
-`ModuleHost.invoke({ …, permissions, workingDir })` (`action-dispatcher.ts` /
-`route-dispatcher.ts` `resolveModulePath`/`dispatch`). The client never names a permission;
-identity AND grants are derived server-side from the resolved winning contribution (the §2
-keystone). A caller cannot escalate by claiming a permission its installed manifest does
-not declare.
+**Server-resolved (never caller-supplied) — the ONE enforced property here.** The enabled
+set rides the SAME winning-contribution resolution as the module path:
+`resolveToolLocation(tool)` returns `{ baseDir, groupDir, …, permissions }`, and the
+dispatcher threads `loc.permissions` into `ModuleHost.invoke({ …, permissions, workingDir })`
+(`action-dispatcher.ts` / `route-dispatcher.ts` `resolveModulePath`/`dispatch`). The client
+never names a permission; the enabled set is derived server-side from the resolved winning
+contribution (the §2 keystone). A caller cannot CLAIM a permission its installed manifest
+does not declare — but once the manifest declares it, the pack gets the FULL ambient
+capability, exactly as a tool would. (This is the only enforced part: you cannot
+self-escalate the manifest; you are NOT constrained in HOW you use a disclosed capability.)
 
-**Worker ungating (additive, narrow).** `permission-grants.ts` is PURE logic (no node
-imports) the worker bootstrap imports statically BEFORE the deny-hook is installed. Each
-grant un-gates exactly one thing:
+**What each enabled capability un-gates (FULL ambient — NOT a constrained runner).**
+`permission-grants.ts` is PURE logic (no node imports) the worker bootstrap imports
+statically BEFORE the gating hook is installed. Each enabled capability flips ON exactly
+one ambient surface, with no further restriction on usage:
 
-| Grant | `deniedForGrants` removes | Globals | Process shim | Why narrow |
+| Permission | `deniedForGrants` removes | Globals | Process shim | Effect (FULL, NOT constrained) |
 |---|---|---|---|---|
-| `git` | `child_process` | (unchanged) | REAL `cwd()` (session dir) + `{ PATH }` env | a **tracked, async-only git runner** — ONLY an async `spawn`/`execFile` of the `git` binary (other commands/argv[0] rejected; sync `spawnSync`/`execSync`/`execFileSync` denied as untrackable); spawn `cwd` defaults to the session `workingDir`; children tracked + SIGKILLed on terminate (§C3.2). NOT general command execution. |
-| `fs`  | `fs` (covers `fs/promises`) | (unchanged) | REAL `cwd()` + `{ PATH }` env | the `fs`/`fs/promises` modules are wrapped so a **leading-relative path arg resolves under the session `workingDir`** (absolute paths pass through; two-path ops `rename`/`copyFile`/`link`/`symlink` rebase both args) — worker threads can't `chdir()`, so the shim `cwd()` alone won't redirect real fs resolution; module-import containment (`packRoot`) STILL enforced |
-| `net` | `net`/`http`/`https`/`http2`/`dns`/`tls`/`dgram` | KEEP `fetch`/`WebSocket`/… (`keepNetworkGlobals`) | (unchanged) | outbound network only |
+| `git` | `child_process` | (unchanged) | `cwd()` (session dir) + `{ PATH }` env | `child_process` is fully un-gated: the trusted pack may run **ANY command** via `spawn`/`exec`/`execFile`/`spawnSync`/… — exactly like a tool with shell access. There is NO git-binary-only / argv / sync-vs-async restriction; `git` is merely the DISCLOSED intent. Spawned children are SIGKILLed on terminate as a stability measure (§C3.2). |
+| `fs`  | `fs` (covers `fs/promises`) | (unchanged) | `cwd()` + `{ PATH }` env | the `fs`/`fs/promises` modules are fully un-gated with **NO path containment** — the pack may read/write anywhere the gateway process can. (Module-IMPORT resolution stays contained to `packRoot`, but that is a loader/stability concern, NOT an fs-access boundary.) The session `workingDir` is surfaced as `cwd()` for convenience only. |
+| `net` | `net`/`http`/`https`/`http2`/`dns`/`tls`/`dgram` | KEEP `fetch`/`WebSocket`/… (`keepNetworkGlobals`) | (unchanged) | outbound network restored, fully. |
 
-Module-import containment (`packRoot` realpath confinement, `path-guard.ts`),
-terminate-on-timeout, memory `resourceLimits`, the empty/minimal env (PATH only — never a
-gateway token or secret), and the host-API-proxy allowlist ALL remain in force regardless
-of grants. `fs`/`git` reads resolve under the session `workingDir`, not anywhere on disk
-the worker pleases.
+The STABILITY guarantees stay in force regardless of which capabilities are enabled:
+terminate-on-timeout, memory/CPU `resourceLimits`, spawned-child kill on terminate, the
+minimal env (PATH only — never a gateway token or secret, a hygiene measure), and
+module-import resolution contained to `packRoot`. NONE of these is claimed as a security
+boundary against the pack's own trusted code.
 
-**Why this is NOT an escape hatch (the binding argument).** A declared permission is
-strictly SAFER than the bespoke built-in code paths Phase 2 replaces:
-
-- **Declared + audited:** the capability is visible in the manifest, resolved server-side,
-  and every grant / route call / store mutation / session post is audited. There is no
-  ambient capability a pack gets without declaring it.
-- **Default-deny:** a pack that declares nothing has exactly the absolute-confinement
-  worker. The dangerous default did not move.
-- **Capped + killable:** even a granted `git` runs inside the terminate-on-timeout +
-  memory-capped worker, and its spawned children are SIGKILLed on timeout. The bespoke
-  PR-walkthrough route runs `git` **in-process, uncapped, unkillable** (`routes.ts`
-  `execFile`); the declared-permission worker is a strict TIGHTENING of that status quo,
-  not a loosening.
-- **Trusted code tier:** pack server modules are installed-from-market trusted code (same
-  tier as a tool / MCP server with shell access). The grant lets that trusted code do its
-  job least-privilege; it does NOT widen the CROSS-pack Host-API boundary
-  (store/session/callRoute stay server-authorized and pack-scoped).
-
-So acceptance #4's "no privileged escape hatch" holds: cross-pack / cross-session /
-UI-driving capabilities remain typed, scoped, server-authorized Host-API methods; a pack's
-OWN ambient OS capability is a declared, default-deny, audited, resource-isolated,
-terminable grant — a *declared capability*, not an ambient hole.
+**Why this is correct, not an escape hatch (the binding argument).** Acceptance #4's "no
+privileged escape hatch" is about the ENFORCED boundaries — CROSS-pack, cross-session, and
+against agent/LLM-influenced content — and those are untouched: `store`/`session`/`callRoute`
+stay typed, scoped, server-authorized, pack-namespaced Host-API methods keyed off the
+server-resolved pack identity. A pack's OWN ambient OS capability is NOT one of those
+boundaries — it is trusted-tier code doing its job, disclosed in the manifest and audited.
+And the worker is a strict STABILITY improvement over the bespoke built-in it replaces (the
+PR-walkthrough route runs `git` **in-process, uncapped, unkillable** today — `routes.ts`
+`execFile`); the worker makes the same work resource-capped + killable. `permissions:` is
+disclosure plus an enable switch, not an enforced privilege boundary.
 
 ### C3.3 Migration onto the SINGLE invocation seam
 
@@ -1154,10 +1176,11 @@ same seam (stores have no pack module, so they are not on this seam).
 **Worker isolation is UNCONDITIONAL — there is no in-process production path (NON-NEGOTIABLE).**
 The seam ALWAYS routes through `ModuleHost.invoke`; there is **no config flag, env var, or
 runtime toggle that runs a pack server module in-process** in any shippable, packaged, or CI
-build. A second "in-process for debugging" path would be a production bypass of the C3
-isolation boundary (it would reintroduce ambient `process`/fs/network access on
-LLM-influenced code) and is therefore deleted, not gated — it directly violates acceptance
-#3/#4.
+build. A second "in-process for debugging" path would defeat the C3 RESOURCE + CRASH
+isolation boundary — a runaway handler could no longer be terminated on timeout, and an
+OOM / crash in pack code would take down the WHOLE gateway instead of a single worker — so
+it is deleted, not gated. (This is a STABILITY requirement, not a security claim against the
+pack's own trusted code.) It directly serves acceptance #3.
 
 If a local-dev debugging affordance is ever wanted, it is permitted ONLY under all three of
 these constraints (and the recommendation remains: do not add one):
@@ -1286,9 +1309,9 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
   `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts`. Opened via
   `host.ui.openPanel({ panelId, params: { jobId } })`.
 - `routes:` — re-express `handlePrWalkthroughApiRoute` (`src/server/pr-walkthrough/routes.ts`,
-  wired at `server.ts:2268`) as a pack `routes.js` module that declares
+  wired at `server.ts:2268`) as a pack `routes.js` module that discloses
   `permissions: ["git", "fs"]` (§9 C3.4) so it recomputes the diff/changeset LIVE in the
-  confined worker (§D2.3) and reads LLM-synthesized cards from `host.store`. The viewer
+  resource-isolated worker (§D2.3) and reads LLM-synthesized cards from `host.store`. The viewer
   loads its changeset/diff bundle via `host.callRoute("bundle", { query: { jobId } })` — which POSTs
   `/api/ext/route/bundle` with `tool=<pr-walkthrough tool>`; the server authorizes that
   tool, derives the pack, then resolves the `"bundle"` route via
@@ -1320,37 +1343,39 @@ Adapt PR-walkthrough tests + `tests/e2e/ui/extension-host.spec.ts` pattern. Stag
 of `src/ui/components/pr-walkthrough/`, `src/server/pr-walkthrough/routes.ts` bespoke
 dispatch, and `defaults/tools/pr-walkthrough/` once parity E2E is green.
 
-### D2.3 Live changeset recompute IS pack-expressible via declared permissions
+### D2.3 Live changeset recompute IS pack-expressible via the disclosed `git`/`fs` capabilities
 
 > **Reversal of the prior revision.** The earlier doc stated live changeset recompute was
-> NOT pack-expressible because the worker had zero ambient access. The declared-permission
-> model (§9 C3.4) reverses this: the pack's `routes.js` declares `permissions: ["git",
-> "fs"]`, so the `bundle`/`resolve` route runs `git` + diff parsing + changeset assembly
-> **LIVE in the confined worker** — exactly the work `routes.ts` does today via `execFile`,
-> now resource-capped + killable. This is what lets the pack review PRs created AFTER it was
-> installed (a static seeded bundle could only replay PRs known at publish time).
+> NOT pack-expressible because the worker had zero ambient access. The current model (§9
+> C3.4) reverses this: the pack's `routes.js` discloses `permissions: ["git", "fs"]`, which
+> ENABLES `child_process` + `fs` in the worker, so the `bundle`/`resolve` route runs `git` +
+> diff parsing + changeset assembly **LIVE in the resource-isolated worker** — exactly the
+> work `routes.ts` does today via `execFile`, now resource-capped + killable. The `git` here
+> is just trusted git: full `child_process`, not a constrained binary-only / cwd-confined
+> runner. This is what lets the pack review PRs created AFTER it was installed (a static
+> seeded bundle could only replay PRs known at publish time).
 
-**What the pack route COMPUTES live (declared `git`/`fs`, in the worker):**
+**What the pack route COMPUTES live (disclosed `git`/`fs`, in the worker):**
 
-- `git` diff / show / merge-base against the session working dir (the worker's REAL
-  `cwd()` under the `git` grant), producing the raw changeset (base/head SHAs, file list)
-  and the parsed `DiffBlock[]` (the deterministic diff-parse logic from `routes.ts`). The
-  `git` binary resolves via the worker's `{ PATH }` env; spawned children are SIGKILLed on
-  terminate-on-timeout (§9 C3.2/C3.4).
+- `git` diff / show / merge-base against the session working dir (surfaced as the worker's
+  `cwd()` when `git`/`fs` is enabled), producing the raw changeset (base/head SHAs, file
+  list) and the parsed `DiffBlock[]` (the deterministic diff-parse logic from `routes.ts`). The
+  `git` (and any command) resolves via the worker's `{ PATH }` env; spawned children are
+  SIGKILLed on terminate-on-timeout as a stability measure (§9 C3.2/C3.4).
 - The deterministic, NON-LLM card layout — `synthesizeFallbackCards` (`routes.ts`) needs no
   model credentials and runs in-worker, producing the structural changeset header / phase
   rail / diff blocks / suggested-comment skeleton.
 
 **The card-SYNTHESIS credential boundary (CRITICAL — resolve explicitly, do NOT guess).**
 LLM card synthesis (`synthesizeCardsForResolver` → `completeModelText` /
-`getAvailableModels`, `routes.ts`) needs MODEL CREDENTIALS. The confined worker has an
-empty/minimal env (PATH only) and **no gateway token / model credentials** — by design
-(§9 C3.2). The `net` grant would give outbound sockets but still NOT the gateway's model
+`getAvailableModels`, `routes.ts`) needs MODEL CREDENTIALS. The worker has a minimal env
+(PATH only) and **no gateway token / model credentials** — by design (a hygiene measure,
+§9 C3.2). The `net` capability would give outbound sockets but still NOT the gateway's model
 keys. **So LLM synthesis MUST NOT run in the pack route worker.** The implemented split:
 
 1. **LLM-enhanced cards are produced at AGENT-TOOL / submit time, persisted to the pack
    store.** The `submit_pr_walkthrough_yaml` agent tool (normal agent credentials, NOT the
-   confined worker) synthesizes the rich cards; the pack's `publish` route writes them to
+   worker) synthesizes the rich cards; the pack's `publish` route writes them to
    `host.store` keyed by changeset id (`changesetIdForLocal(base, head)`). The pack
    `bundle`/`resolve` route, when it computes a changeset id that HAS stored cards, READS
    them via `host.store.get(...)` and renders them — full parity for any PR a walkthrough
@@ -1369,7 +1394,7 @@ keys. **So LLM synthesis MUST NOT run in the pack route worker.** The implemente
 
 | Data | Where it comes from | Credentials? |
 |---|---|---|
-| base/head SHA, file list, `DiffBlock[]` | COMPUTED live in worker via declared `git`/`fs` | none (git binary via PATH) |
+| base/head SHA, file list, `DiffBlock[]` | COMPUTED live in worker via disclosed `git`/`fs` | none (commands resolve via PATH) |
 | structural fallback cards | COMPUTED live in worker (`synthesizeFallbackCards`) | none |
 | LLM-enhanced cards | READ from `host.store` (written by the submit-time agent tool) | model creds used at submit time, in the AGENT, never the worker |
 | GitHub review export | stays agent-tool / built-in (network + GitHub auth) | not in the worker |
@@ -1378,7 +1403,7 @@ So D2's `bundle` route is a LIVE git/diff computer for the diff + a STORE reader
 LLM cards — never an in-worker LLM caller. The D2 E2E
 (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) seeds a realistic persisted bundle through the
 pack's own `publish` route (proving the READ/render path) AND drives a live recompute over a
-real git working dir (proving the declared-`git` worker path), plus the maximal launcher
+real git working dir (proving the disclosed-`git` worker path), plus the maximal launcher
 surface (`git-widget-button`) and the `kind:"route"` deep-link.
 
 ---
@@ -1462,7 +1487,7 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 | B4 | `pack-panels-reconcile.spec.ts` (`file://`) | panel loader registers/reconciles; reload survival (re-driven from metadata); uninstall reconcile (generation-guarded); override; theme-token + sandbox conventions present | 2,4 |
 | C1 | `pack-entrypoints.spec.ts` (`file://`) | entrypoint kinds register (incl. `kind:"route"`); `navigate(RouteTarget)` maps to router view (no hash baked in pack); no auto-invoke on mount; **client route registry: an arbitrary THIRD-PARTY fixture pack (not artifacts/pr-walkthrough) registering `{kind:"route", routeId:"thirdparty.demo", target:{panelId:…}, paramKeys:[…]}` → `navigate({route:"thirdparty.demo",params})` serializes `#/ext/thirdparty.demo?…` and opens its panel**; **reload restoration: loading on `#/ext/<routeId>?params` → `getRouteFromHash` → `lookupPackRoute` → `openPackPanel` rehydrated from `store.get`**; **uninstall reconcile drops the route (`lookupPackRoute` returns undefined; deep-link no longer resolves)**; **duplicate `routeId` across packs rejected at registry build** | 1,2,4 |
 | C2 | `extension-host-session-write.test.ts` + `extension-host-session-write-permit.test.ts` | postMessage authorized via **`authorizeScopedRequest`** against the header-bound session (NOT `authorizeActionRequest`); **postMessage SUCCEEDS from a panel/entrypoint context with NO `toolUseId` when a user gesture is active**; resumeTurn vs non-resume; every post audited; **cross-session post impossible (target = header-bound session, never a body param)**; body/header session mismatch rejected; **gesture token: NO postMessage POST fires on panel/renderer mount (no active gesture → throws synchronously), and a post DOES succeed when invoked from a user-gesture handler** (`runWithUserGesture`) — mirrors the Phase-1 "no action POST before click" control assertion; gesture consumed+cleared after one post; **server-minted write permit: post REQUIRES a nonce, permit is single-use (replay rejected), content-bound (sha256(role+"\n"+text) over {sessionId,packId,tool}), mismatch/expiry/reuse rejected with NO post**; **role-aware delivery: "system" framed as `<system-reminder>` (NOT delivered as raw user text), "user" verbatim** | 2,4 |
-| C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; **with NO grant a pack module CANNOT `require`/import `node:fs`/`node:child_process`/network built-ins** (deny-hook) and **CANNOT read `process.env` secrets** (empty-env worker); **declared-permission grant: `permissions:["git"]` un-denies `child_process` (real `cwd()` + PATH-only env, no token) and a spawned child is SIGKILLed on terminate-on-timeout; `fs`/`net` un-gate only their own capability; an UNDECLARED capability stays denied (default-deny floor) — `deniedForGrants`/`normalizeGrants` (`permission-grants.ts`)**; crash isolated → error not process death; seam swap leaves callers unchanged | 3,4 |
+| C3 | `extension-host-module-isolation.test.ts` | a `while(1)` spin is terminated on timeout (terminate-on-timeout IS the CPU control); `resourceLimits` memory cap rejects oversized alloc; crash isolated → error not process death (CRASH isolation); spawned children SIGKILLed on terminate (no orphan outliving the worker); **enable-switch: with NOTHING disclosed a pack module CANNOT import `node:fs`/`node:child_process`/network built-ins** (gating hook OFF by default) and the env is PATH-only (no gateway token); **disclosing `permissions:["git"]` un-gates `child_process` FULLY (the pack may run ANY command — no binary/argv restriction — with `cwd()`=session dir + PATH-only env, no token); `fs` un-gates `fs` with NO path containment; `net` restores network; an UNDISCLOSED capability stays gated (the enable-switch default) — `deniedForGrants`/`normalizeGrants` (`permission-grants.ts`)**; these are DISCLOSURE + STABILITY assertions, not a claim that the worker contains trusted pack code; seam swap leaves callers unchanged | 3,4 |
 | C3 | `extension-host-isolation-config-invariant.test.ts` | **config-invariant: the shippable/packaged configuration CANNOT disable worker isolation** — no shipped config key/env toggles in-process execution; if a bypass flag/env is set under a packaged build (or CI) the gateway hard-fails at startup (refuses to boot), and the toggle is inert/unsettable in the shipped config (any dev-only affordance is honored only in explicit local-dev mode); the production seam ALWAYS routes through `ModuleHost.invoke` | 3,4 |
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |
 | — | `host-api-v1-frozen.test.ts` (extend/add) | `HOST_API_VERSION===1` unchanged; v1 types compile unchanged; capabilities flip per host | 2 |
@@ -1492,25 +1517,30 @@ are the acceptance proofs.
    `session.*` reads (B2) + writes (C2), `callRoute` (B3), `ui.*` openPanel (B4) +
    navigate (C1). Flags: `store`→B1, `callRoute`→B3, `ui`→C1, `session`→C2. Pinned by the
    v1-frozen compile test.
-3. **Pack server modules (actions + routes) run in worker isolation with
-   terminate-on-timeout + resource caps, least-privilege (default-deny ambient access).** →
-   **C3** (`module-host-worker.ts`,
-   `worker_threads` + minimal (default-empty) env + module-load deny-hook + host-API-proxy-only +
-   `terminate()` + `resourceLimits`), migrated onto the single `ActionDispatcher.dispatch`
-   seam. **Isolation is UNCONDITIONAL in shipped builds** — there is no config flag, env
-   var, or runtime toggle that runs a pack server module in-process in any
-   shippable/packaged/CI build (the "in-process for debugging" bypass is deleted, not gated;
-   §9). Any local-dev debugging affordance is honored ONLY in explicit local-dev mode,
-   hard-fails at startup in packaged builds/CI, and is impossible to enable in the shipped
-   configuration; pinned by the §13 config-invariant test. **Least-privilege by DEFAULT
-   (deny-all), with a declared, audited opt-in (§9 C3.4):** a pack that declares no
-   `permissions:` cannot import `node:fs`/`node:child_process`/network built-ins or read
-   `process.env` secrets — the deny-hook + empty env + ambient-global stripping are in
-   force. A pack MAY declare `permissions: ["git"|"fs"|"net"]` (server-resolved via
-   `resolveToolLocation`, never caller-supplied), which ADDITIVELY un-gates exactly that
-   capability inside the STILL-confined, STILL-terminable, memory-capped worker
-   (`packRoot` module-import containment + child-process kill-on-terminate preserved; env
-   stays PATH-only, never a token/secret). The default-deny floor has no shippable bypass.
+3. **Pack server modules (actions + routes) run in a worker for RESOURCE + CRASH isolation
+   (terminate-on-timeout, mem/CPU caps, import-containment to the pack root) — a STABILITY
+   boundary, explicitly NOT claimed as a security sandbox against trusted pack code.** →
+   **C3** (`module-host-worker.ts`, `worker_threads` + minimal (PATH-only) env + built-in
+   gating hook + host-API proxy channel + `terminate()` + `resourceLimits` + spawned-child
+   kill), migrated onto the single `ActionDispatcher.dispatch` seam. **Isolation is
+   UNCONDITIONAL in shipped builds** — there is no config flag, env var, or runtime toggle
+   that runs a pack server module in-process in any shippable/packaged/CI build (the
+   "in-process for debugging" bypass is deleted, not gated; §9) — because a second in-process
+   path would defeat terminate-on-timeout and let an OOM/crash take down the whole gateway
+   (a STABILITY requirement, not a security claim). Any local-dev debugging affordance is
+   honored ONLY in explicit local-dev mode, hard-fails at startup in packaged builds/CI, and
+   is impossible to enable in the shipped configuration; pinned by the §13 config-invariant
+   test. **`permissions:` is install-time DISCLOSURE + an enable switch, NOT enforcement
+   (§9 C3.4):** with nothing disclosed the worker's ambient OS surface is OFF (the manifest
+   discloses what the pack uses); disclosing `git` un-gates `child_process` FULLY (the
+   trusted pack may run ANY command, like a tool — no binary/argv restriction), `fs` un-gates
+   `fs` with NO path containment, `net` restores network. The enabled set is server-resolved
+   via `resolveToolLocation` (never caller-supplied — the one enforced property: no
+   self-escalating the manifest). An in-worker per-capability sandbox over trusted in-process
+   code would be FALSE security (a native `.node` addon / the shared process defeats it), so
+   it is neither claimed nor relied upon. The STABILITY guarantees (terminate-on-timeout,
+   memory/CPU `resourceLimits`, `packRoot` module-import containment, spawned-child
+   kill-on-terminate, PATH-only env) hold regardless of what is disclosed.
    **The "CPU caps" requirement is satisfied by
    terminate-on-timeout (wall-time termination)** — `worker_threads` has no per-core throttle,
    so a runaway CPU loop is bounded by killing the worker on timeout; **memory caps via
@@ -1528,15 +1558,17 @@ are the acceptance proofs.
    the pack derived from the proven `tool` (B3.2 — no forgeable URL segment); `store` keys
    pack-namespaced (B1.1); the client deep-link route is the server-independent
    `#/ext/<routeId>` registry surface (C1.1a, no privileged route), and no `gateway.fetch`
-   is reintroduced. **No in-process execution escape hatch:** worker isolation is unconditional
-   in shipped builds (no config can run pack server modules in-process — §9), so there is no
-   privileged path around the host-API boundary. **Ambient OS capability for a pack's OWN
-   server module (git/fs/net) is a DECLARED, audited, server-resolved, default-deny manifest
-   `permissions:` grant inside the resource-isolated terminable worker (§9 C3.4) — a
-   declared capability, not an ambient escape hatch; it does NOT widen the
-   cross-pack/cross-session/UI-driving Host-API boundary (those stay typed, scoped,
-   server-authorized methods).** Pinned by the cross-pack denial + namespace
-   unit tests, the declared-permission grant test (§13 C3), and the §13 C3 config-invariant test.
+   is reintroduced. The ENFORCED boundaries acceptance #4 is about are CROSS-pack,
+   cross-session, and against agent/LLM-influenced content — all untouched. **A pack's OWN
+   server code is TRUSTED (tool/MCP tier) and is NOT one of those boundaries:** its ambient
+   OS capability (git/fs/net) is gated only by an install-time `permissions:` DISCLOSURE +
+   enable switch (§9 C3.4), server-resolved (never caller-supplied), audited, and run inside
+   the resource/crash-isolated terminable worker — disclosure, NOT an enforced privilege
+   boundary, and NOT relied on to contain trusted pack code (an in-worker permission sandbox
+   would be false security). This does NOT widen the cross-pack/cross-session/UI-driving
+   Host-API boundary (those stay typed, scoped, server-authorized methods). Pinned by the
+   cross-pack denial + namespace unit tests, the `permissions:` enable-switch test (§13 C3),
+   and the §13 C3 config-invariant test.
 
 ---
 
@@ -1562,21 +1594,22 @@ are the acceptance proofs.
   `authorizeActionRequest` + toolUseId-ownership) — unchanged, so security is not weakened.
 - `panels`/`entrypoints` (B4/C1) run on the main UI thread over LLM-influenced data: iframe
   `sandbox` preserved, theme tokens only, no auto-invoke/navigation on mount.
-- Server-module isolation (C3, actions + routes only) bounds blast radius:
+- Server-module RESOURCE + CRASH isolation (C3, actions + routes only) bounds blast radius
+  as a STABILITY boundary — NOT a security sandbox against the pack's own trusted code:
   terminate-on-timeout (the CPU control, satisfying the "CPU caps" criterion), memory
-  `resourceLimits`, empty-env worker, and a module-load deny-hook. **Isolation is
-  UNCONDITIONAL in shipped builds** — no config can run a pack server module in-process
-  (the "in-process for debugging" bypass is deleted; any local-dev affordance hard-fails in
-  packaged builds/CI and is unsettable in the shipped config — §9, pinned by the §13
-  config-invariant test). **Least-privilege by DEFAULT (deny-all) with a declared, audited
-  opt-in (§9 C3.4):** a pack with no `permissions:` reaches nothing but the host-API proxy
-  channel; a pack MAY declare `permissions: ["git"|"fs"|"net"]` (server-resolved, never
-  caller-supplied) to ADDITIVELY un-gate that ONE capability inside the still-confined,
-  still-terminable, memory-capped worker (`packRoot` module-import containment + spawned-
-  child kill-on-terminate preserved; env stays PATH-only — never a gateway token/secret).
-  This is a *declared capability*, not an ambient hole, and does NOT widen the cross-pack
-  Host-API boundary. (No pack-supplied store-handler module exists, so the store path has no
-  pack code to isolate.)
+  `resourceLimits`, spawned-child kill, `packRoot` module-import containment, and a
+  PATH-only env. **Isolation is UNCONDITIONAL in shipped builds** — no config can run a pack
+  server module in-process (the "in-process for debugging" bypass is deleted; any local-dev
+  affordance hard-fails in packaged builds/CI and is unsettable in the shipped config — §9,
+  pinned by the §13 config-invariant test) because an in-process path would defeat
+  terminate-on-timeout / crash containment. **`permissions:` is install-time DISCLOSURE + an
+  enable switch, NOT enforcement (§9 C3.4):** with nothing disclosed the worker's ambient OS
+  surface is OFF; disclosing `git` un-gates `child_process` FULLY (any command, like a tool),
+  `fs` un-gates `fs` with NO path containment, `net` restores network — the enabled set
+  server-resolved (never caller-supplied). A pack's OWN server code is trusted; an in-worker
+  permission sandbox over it would be false security, so it is neither claimed nor relied on.
+  This does NOT widen the cross-pack Host-API boundary. (No pack-supplied store-handler
+  module exists, so the store path has no pack code to isolate.)
 
 ---
 
@@ -1590,21 +1623,26 @@ acceptance, not optional.
    stay **byte-identical** (frozen). Only the §3/§6 prose **status notes** change: as each
    capability lands, flip its "frozen, not implemented" note to "implemented" (a status
    edit, never a contract change). Add a short note on the internal→contract **adapter
-   layer** (B2.1) and the **server-module isolation model** (C3: empty/minimal-env worker +
-   deny-hook + host-API-proxy-only + terminate-on-timeout + the **declared-permission
-   grant model**, §9 C3.4: default-deny with a server-resolved `git`/`fs`/`net` opt-in).
-   This reconciles the
+   layer** (B2.1) and the **server-module RESOURCE + CRASH isolation model** (C3:
+   PATH-only-env worker + built-in gating + host-API proxy channel + terminate-on-timeout +
+   spawned-child kill — a STABILITY boundary, NOT a security sandbox against trusted pack
+   code; and the **`permissions:` model**, §9 C3.4: install-time DISCLOSURE + enable switch,
+   server-resolved `git`/`fs`/`net`, NOT enforcement — disclosing `git` un-gates
+   `child_process` fully, etc.). This reconciles the
    top-of-doc caveat: "do not change v1 signatures; §3/§6 status notes are flipped to
    'implemented' as capabilities land."
 2. **`docs/extension-host-authoring.md` — extend** with authoring guidance for
    `panels`/`stores`/`routes`/`entrypoints` + `host.session.*`, plus the **two migration
    case studies** (artifacts-as-pack D1, pr-walkthrough-as-pack D2).
 3. **`docs/marketplace.md` — threat model update** for `routes`/`stores`/`panels`/
-   `session`-write + the worker isolation model (terminate-on-timeout as the CPU control,
-   empty/minimal-env, deny-hook, host-API-proxy-only; the **declared-permission grant
-   model** — manifest `permissions:` default-deny, server-resolved, why it is a declared
-   capability not an escape hatch; the trust-by-code-ORIGIN model — §0a; vendored/bundled
-   pack deps — §D1.0; the `authorizeScopedRequest` vs `authorizeActionRequest` split).
+   `session`-write + the worker RESOURCE + CRASH isolation model (terminate-on-timeout as
+   the CPU control, PATH-only env, built-in gating, host-API proxy channel, spawned-child
+   kill — a STABILITY boundary, explicitly NOT a security sandbox against trusted pack code;
+   the **`permissions:` model** — manifest `permissions:` is install-time DISCLOSURE + the
+   enable switch for ambient capabilities, server-resolved, NOT an enforced privilege
+   boundary, and why an in-worker permission sandbox over trusted code is false security;
+   the trust-by-code-ORIGIN model — §0a; vendored/bundled pack deps — §D1.0; the
+   `authorizeScopedRequest` vs `authorizeActionRequest` split).
 
 Each deliverable maps to the workflow's documentation gate; the docs-writer signals it once
 the corresponding capabilities have merged.
