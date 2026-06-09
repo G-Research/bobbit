@@ -333,7 +333,12 @@ export function handleWebSocketConnection(
 			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
-			send(ws, { type: "auth_ok" });
+			// Fix A (extension-host §8 C2.1): hand TRUSTED UI the per-session capability
+			// secret over the authenticated connection. `host.session.postMessage` attaches
+			// it as `x-bobbit-session-secret` (held in a client closure, never window/host),
+			// and the post endpoint REQUIRES it — so same-realm pack code, which cannot read
+			// the closure, cannot drive the agent via a raw fetch.
+			send(ws, { type: "auth_ok", extSessionSecret: sessionManager.sessionSecretStore.getOrCreateSecret(sessionId) });
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the

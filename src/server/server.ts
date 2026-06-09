@@ -48,7 +48,7 @@ import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
-import { handleSessionPost, getGestureNonceStore } from "./extension-host/session-write.js";
+import { handleSessionPost } from "./extension-host/session-write.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
@@ -5285,24 +5285,10 @@ async function handleApiRoute(
 		return;
 	}
 
-	// Slice C2: build an own-session message poster for the server Host API
-	// (`ctx.host.session.postMessage`). Targets the HEADER-BOUND session ONLY (the
-	// caller-proven `sessionId`) — there is no other-session parameter, so a server
-	// module can only ever drive its own session. Every post/resume is audited.
-	const makeOwnMessagePoster = (sessionId: string, tool: string, packId: string) =>
-		async (msg: { role: "user" | "system"; text: string; resumeTurn?: boolean }): Promise<void> => {
-			const resume = msg.resumeTurn !== false;
-			const start = Date.now();
-			try {
-				if (resume) await sessionManager.enqueuePrompt(sessionId, msg.text, { source: "extension" });
-				else await sessionManager.deliverLiveSteer(sessionId, msg.text, { source: "extension" });
-				console.log(`[ext-session-message] tool=${tool} packId=${packId} session=${sessionId} role=${msg.role} resumeTurn=${resume} outcome=ok durationMs=${Date.now() - start} origin=server-host`);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				console.warn(`[ext-session-message] tool=${tool} packId=${packId} session=${sessionId} role=${msg.role} resumeTurn=${resume} outcome=error durationMs=${Date.now() - start} origin=server-host: ${message}`);
-				throw err;
-			}
-		};
+	// Fix B: there is NO server-side own-session message poster — driving the agent
+	// is a client-only, user-activation + session-secret gated capability. A server
+	// route/action handler has no user gesture, so the server Host API exposes no
+	// `session.postMessage` (see server-host-api.ts).
 
 	// POST /api/tools/:tool/actions/:action — invoke a pack tool's server action
 	// handler (design §4b / §5). The LLM can curl this directly, so the
@@ -5398,7 +5384,6 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
-			postOwnMessage: makeOwnMessagePoster(guard.sessionId, tool, ident.packId),
 		});
 		const start = Date.now();
 		try {
@@ -5658,7 +5643,6 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
-			postOwnMessage: makeOwnMessagePoster(guard.sessionId, resolved.declaringTool, ident.packId),
 		});
 		const start = Date.now();
 		try {
@@ -5677,39 +5661,6 @@ async function handleApiRoute(
 			console.warn(`[ext-route] name=${routeName} tool=${routeTool} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
-		return;
-	}
-
-	// POST /api/ext/session/gesture — mint a single-use, short-TTL user-gesture nonce
-	// for the header-bound session (Fix 5; design §8 C2.1). Pack code cannot forge the
-	// client gesture check, so /api/ext/session/message additionally requires a nonce
-	// minted ONLY here. Guarded by authorizeScopedRequest (header-canonical session,
-	// body===header, session resolves, `tool` ∈ allowedTools) so an unauthenticated /
-	// cross-session caller gets none. The nonce is bound to the verified header session,
-	// so it can only authorize a post into THAT session.
-	if (url.pathname === "/api/ext/session/gesture" && req.method === "POST") {
-		const body = (await readBody(req)) ?? {};
-		const gTool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
-		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
-		const resolveSession = (id: string): ActionGuardSession | undefined => {
-			const live = sessionManager.getSession(id);
-			if (live) return { allowedTools: live.allowedTools };
-			const persisted = sessionManager.getPersistedSession(id);
-			if (persisted) return { allowedTools: persisted.allowedTools };
-			return undefined;
-		};
-		const guard = authorizeScopedRequest({
-			tool: gTool,
-			headerSessionId,
-			bodySessionId: (body as { sessionId?: unknown }).sessionId,
-			resolveSession,
-		});
-		if (!guard.ok) {
-			json({ error: guard.error }, guard.status);
-			return;
-		}
-		const nonce = getGestureNonceStore().mint(guard.sessionId);
-		json({ nonce });
 		return;
 	}
 
@@ -5752,9 +5703,11 @@ async function handleApiRoute(
 			role: (body as { role?: unknown }).role,
 			text: (body as { text?: unknown }).text,
 			resumeTurn: (body as { resumeTurn?: unknown }).resumeTurn,
-			// Fix 5: REQUIRE + CONSUME a server-minted single-use user-gesture nonce.
-			gestureNonce: (body as { gestureNonce?: unknown }).gestureNonce,
-			consumeGesture: (sessionId, nonce) => getGestureNonceStore().consume(sessionId, nonce),
+			// Fix A: REQUIRE the trusted-only per-session secret header. It must resolve
+			// (via the SessionSecretStore) to the SAME header-bound session, else 403.
+			// Pack code cannot obtain it, so a raw pack fetch is rejected.
+			sessionSecret: req.headers["x-bobbit-session-secret"],
+			resolveSecretSession: (secret) => sessionManager.sessionSecretStore.resolveSessionIdBySecret(secret),
 			resolveSession,
 			resolvePackIdentity: (tool) => resolvePackIdentityForTool(msgToolManager, tool),
 			// Target the HEADER-BOUND session ONLY. resume → resume the agent turn;

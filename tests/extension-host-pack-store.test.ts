@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createPackStore } from "../src/server/extension-host/pack-store.ts";
+import { createPackStore, PackStoreQuotaError, DEFAULT_PACK_STORE_QUOTA } from "../src/server/extension-host/pack-store.ts";
 
 let rootDir: string;
 before(() => {
@@ -111,6 +111,49 @@ describe("createPackStore — key traversal is structurally impossible", () => {
 		}
 		// No file was created outside the packId dir (e.g. no etc/ sibling).
 		assert.ok(!fs.existsSync(path.join(rootDir, "ext-store", "etc")));
+	});
+});
+
+describe("createPackStore — per-pack quotas (Fix C)", () => {
+	it("rejects a single value larger than maxValueBytes (before writing)", async () => {
+		const store = createPackStore({ rootDir, quota: { maxValueBytes: 64 } });
+		const big = "x".repeat(200);
+		await assert.rejects(() => store.put("pack-q1", "k", big), PackStoreQuotaError);
+		await assert.rejects(() => store.put("pack-q1", "k", big), /too large/);
+		// Nothing was written — the key does not exist.
+		assert.equal(await store.get("pack-q1", "k"), null);
+		assert.deepEqual(await store.list("pack-q1"), []);
+	});
+
+	it("rejects a NEW key once maxKeys is reached (overwrites of existing keys still allowed)", async () => {
+		const store = createPackStore({ rootDir, quota: { maxKeys: 2 } });
+		await store.put("pack-q2", "a", 1);
+		await store.put("pack-q2", "b", 2);
+		// A third DISTINCT key is rejected.
+		await assert.rejects(() => store.put("pack-q2", "c", 3), /key limit/);
+		// Overwriting an EXISTING key is still fine (not a new key).
+		await store.put("pack-q2", "a", 99);
+		assert.equal(await store.get("pack-q2", "a"), 99);
+		assert.deepEqual(await store.list("pack-q2"), ["a", "b"]);
+	});
+
+	it("rejects a write that would exceed maxTotalBytes across the pack", async () => {
+		// Each ~50-byte value; cap the pack at ~120 bytes so the third write overflows.
+		const store = createPackStore({ rootDir, quota: { maxTotalBytes: 120, maxValueBytes: 1024 } });
+		const val = "y".repeat(40);
+		await store.put("pack-q3", "a", val);
+		await store.put("pack-q3", "b", val);
+		await assert.rejects(() => store.put("pack-q3", "c", val), /store full/);
+		// Overwriting an existing key with a SMALLER value is allowed (frees space).
+		await store.put("pack-q3", "a", "z");
+		assert.equal(await store.get("pack-q3", "a"), "z");
+	});
+
+	it("default quota allows ordinary UI-state writes", async () => {
+		assert.ok(DEFAULT_PACK_STORE_QUOTA.maxValueBytes >= 1024);
+		const store = createPackStore({ rootDir });
+		await store.put("pack-q4", "prefs", { theme: "dark", items: [1, 2, 3] });
+		assert.deepEqual(await store.get("pack-q4", "prefs"), { theme: "dark", items: [1, 2, 3] });
 	});
 });
 

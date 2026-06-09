@@ -1,96 +1,91 @@
 // src/app/gesture-context.ts
 //
-// Client-internal USER-GESTURE TOKEN for the durable v1 Host API
-// (design docs/design/extension-host-phase2.md §8 C2.1). This is NOT a v1
-// signature parameter — the frozen `host.session.postMessage(msg)` contract
-// cannot carry a gesture token (that would be a breaking change), so the
-// "no post on mount" guarantee is enforced by this transient module-scoped flag
-// instead of a reviewer convention.
+// Client-internal USER-ACTIVATION gate + trusted per-session SECRET holder for the
+// durable v1 Host API (design docs/design/extension-host-phase2.md §8 C2.1). This
+// is NOT a v1 signature parameter — the frozen `host.session.postMessage(msg)`
+// contract cannot carry a gesture token (that would be a breaking change).
 //
-// Genuine user-gesture handlers — entrypoint launchers (C1), git-widget /
-// command-palette button clicks, composer-slash invocation — wrap their handler
-// body in `runWithUserGesture(...)`. `host.session.postMessage` calls
-// `consumeGesture()` SYNCHRONOUSLY at its prologue (before any await): if no
-// gesture is active it throws so a render/mount-time post fails loudly; if one is
-// active it consumes+clears it (a gesture authorizes exactly ONE post — no
-// latching) and proceeds to the authorized, audited server POST.
+// THREAT (Fix A): a pack renderer/panel runs in the MAIN UI realm. It shares the
+// app's ambient credentials (bearer token in localStorage, cookies) so it CAN make
+// authenticated `fetch()` calls — including a raw `fetch('/api/ext/session/message')`
+// that would drive the agent, bypassing any client-only flag. The previous design
+// used a server-minted single-use nonce, but the nonce-minting endpoint was itself
+// callable by same-realm pack code, so the gate was forgeable.
 //
-// The server still independently authorizes every post (authorizeScopedRequest:
-// header-bound session, body===header, tool ∈ allowedTools, server-derived
-// packId, audit). This flag is client-side defense-in-depth, not the only gate.
+// RESOLUTION — two independent, unforgeable gates:
+//   1. REAL user activation. `consumeGesture()` reads `navigator.userActivation`:
+//      it is `isActive === true` ONLY during a genuine user-gesture call stack (a
+//      real button click — INCLUDING a pack panel's own button), and false on
+//      mount / after the gesture settles. `host.session.postMessage` throws
+//      synchronously when it is false, so a render/mount-time post fails loudly.
+//      This is a browser-enforced signal a pack cannot fake (a programmatic call
+//      with no transient activation is never "active").
+//   2. TRUSTED per-session secret. The server REQUIRES the `x-bobbit-session-secret`
+//      header on the post endpoint (SessionSecretStore — see session-write.ts /
+//      server.ts). The secret is delivered to TRUSTED UI over the authenticated app
+//      connection and held HERE in a module closure (`sessionSecrets`) — never on
+//      `window` or the `host` object — so same-realm pack code cannot read it. A raw
+//      pack fetch therefore carries no secret and is rejected 403 server-side.
 //
-// Fix 5 — SERVER-VALIDATED single-use gesture NONCE. The flag above is bypassable
-// by a same-realm pack `fetch('/api/ext/session/message', …)`. To make the gate
-// UNFORGEABLE, a genuine gesture additionally fetches a server-minted single-use
-// nonce (POST /api/ext/session/gesture) which `host.session.postMessage` attaches
-// and the server consumes. The nonce is held in this MODULE CLOSURE
-// (`pendingNonce`) — never on `window` or the `host` object — so pack code cannot
-// read it. The minter is injected by trusted app code (host-api.ts) via
-// `setGestureNonceMinter`; tests inject a stub.
+// `runWithUserGesture` is kept as a thin wrapper (it no longer sets a flag — the
+// real gate is `navigator.userActivation`) so existing genuine-gesture call sites
+// and tests keep compiling; the synchronous activation check is what matters.
 
-let activeGesture = false;
+/** Per-session capability secret, delivered to TRUSTED app code over the
+ *  authenticated connection (the same SessionSecretStore the children extension
+ *  resolves against) and held in this MODULE CLOSURE — never on `window`/`host`,
+ *  so same-realm pack code cannot read it. `host.session.postMessage` attaches it
+ *  as `x-bobbit-session-secret`; the server resolves it back to the session. */
+const sessionSecrets = new Map<string, string>();
 
-/** Trusted minter for a server gesture nonce. Injected by host-api.ts; held in a
- *  module closure (never exposed to pack code). Returns null when unavailable. */
-let nonceMinter: (() => Promise<string | null>) | null = null;
+/** Record the trusted per-session secret. Called ONLY by trusted app/connection
+ *  code (e.g. on the authenticated WS handshake). Never exposed on `window`/`host`. */
+export function setSessionSecret(sessionId: string | undefined, secret: string | undefined): void {
+	if (!sessionId) return;
+	if (typeof secret === "string" && secret.length > 0) sessionSecrets.set(sessionId, secret);
+	else sessionSecrets.delete(sessionId);
+}
 
-/** The nonce promise for the CURRENT gesture, kicked off inside runWithUserGesture
- *  and awaited+cleared by takeGestureNonce(). Module-private — pack code cannot read it. */
-let pendingNonce: Promise<string | null> | null = null;
+/** Read the trusted per-session secret for the bound session (or undefined).
+ *  Module-private to trusted app code — pack code cannot reach this closure. */
+export function getSessionSecret(sessionId: string | undefined): string | undefined {
+	if (!sessionId) return undefined;
+	return sessionSecrets.get(sessionId);
+}
 
-/** Register the trusted server gesture-nonce minter (POSTs /api/ext/session/gesture).
- *  Called only by trusted app code; never exposed on `window`/`host`. */
-export function setGestureNonceMinter(fn: (() => Promise<string | null>) | null): void {
-	nonceMinter = fn;
+/** Drop a session's secret (call on disconnect / session removal). */
+export function clearSessionSecret(sessionId: string | undefined): void {
+	if (sessionId) sessionSecrets.delete(sessionId);
 }
 
 /**
- * Await + CLEAR the current gesture's server nonce (single-use, one post per
- * gesture). Returns null when no gesture nonce is pending or the mint failed.
- * `host.session.postMessage` calls this in its async body and attaches the result.
- */
-export async function takeGestureNonce(): Promise<string | null> {
-	const p = pendingNonce;
-	pendingNonce = null;
-	if (!p) return null;
-	try { return await p; } catch { return null; }
-}
-
-/**
- * Run `fn` with the user-gesture flag set for the SYNCHRONOUS duration of the
- * call. Restores the prior value afterward (nesting-safe). Any synchronous
- * `host.session.postMessage` issued from within `fn` will see an active gesture
- * and consume it; a post issued asynchronously AFTER `fn` returns will NOT (the
- * flag has been restored), which is exactly the "no auto-post on mount / after
- * the gesture settles" guarantee.
+ * Thin wrapper kept for genuine user-gesture call sites and tests. The real
+ * "no post on mount" gate is `navigator.userActivation` (read in
+ * {@link consumeGesture}), NOT a flag set here — a pack cannot fabricate transient
+ * activation, so wrapping is unnecessary for security. Retained so existing
+ * handlers (entrypoint launchers, git-widget / command-palette clicks, composer
+ * slash invocation) and tests keep compiling without churn.
  */
 export function runWithUserGesture<T>(fn: () => T): T {
-	const prev = activeGesture;
-	activeGesture = true;
-	// Kick off a fresh server-minted single-use nonce for THIS gesture and hold the
-	// promise in the module closure (pack code cannot reach it). The async
-	// postMessage body awaits it via takeGestureNonce(); it outlives the synchronous
-	// gesture window on purpose, and expires server-side (TTL) if never consumed.
-	pendingNonce = nonceMinter ? nonceMinter().catch(() => null) : Promise.resolve(null);
-	try {
-		return fn();
-	} finally {
-		activeGesture = prev;
-	}
+	return fn();
 }
 
 /**
- * Read-and-clear the gesture flag. Returns true exactly once per active gesture
- * (consuming it), false otherwise. `host.session.postMessage` calls this at its
- * synchronous prologue and throws when it returns false.
+ * Return true when a GENUINE user activation is currently active
+ * (`navigator.userActivation.isActive`). True only inside a real user-gesture call
+ * stack (a button click — including a pack panel's own button); false on mount /
+ * programmatic calls. `host.session.postMessage` calls this at its synchronous
+ * prologue and throws when it returns false.
+ *
+ * `navigator.userActivation` is unavailable in non-DOM/unit contexts; there we
+ * return false so a post never fires without an explicit (mocked) activation.
  */
 export function consumeGesture(): boolean {
-	if (!activeGesture) return false;
-	activeGesture = false;
-	return true;
+	const nav = typeof navigator !== "undefined" ? (navigator as Navigator & { userActivation?: { isActive?: boolean } }) : undefined;
+	return nav?.userActivation?.isActive === true;
 }
 
-/** Non-consuming probe of the gesture flag (diagnostics/tests). */
+/** Non-consuming probe of the current activation state (diagnostics/tests). */
 export function isGestureActive(): boolean {
-	return activeGesture;
+	return consumeGesture();
 }
