@@ -41,7 +41,9 @@
  *  session-write-permit.ts + design extension-host-phase2.md §8 C2.1. */
 export interface SessionPostRequest {
 	sessionId: string | undefined;
-	tool: string;
+	/** The SERVER-MINTED surface binding token (NOT a raw `tool`/`packId`). The WS
+	 *  handler DERIVES the trusted {packId, tool} from it (surface-binding.ts). */
+	surfaceToken: string;
 	role: "user" | "system";
 	text: string;
 	resumeTurn?: boolean;

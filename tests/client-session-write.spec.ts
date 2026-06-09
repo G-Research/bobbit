@@ -82,12 +82,15 @@ test.describe("host.session.postMessage — trusted WS transport + activation ga
 		expect(calls.length).toBe(0);
 	});
 
-	test("with a genuine activation the post rides the trusted WS poster — and NO fetch", async ({ page }) => {
+	test("with a genuine activation the post rides the trusted WS poster carrying the surface token — and NO session-write fetch", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate(() => (window as any).__reset());
 		const res = await page.evaluate(() => (window as any).__postWithGesture());
 		expect(res.posted).toBeTruthy();
-		expect(res.posted.tool).toBe("sample_action");
+		// Identity now rides the SERVER-MINTED surface token (NOT a caller-supplied
+		// `tool`): the post carries the opaque token the host minted, never a tool name.
+		expect(res.posted.surfaceToken).toBe("surface-token-xyz");
+		expect(res.posted.tool).toBeUndefined();
 		expect(res.posted.role).toBe("user");
 		expect(res.posted.text).toBe("hi");
 		expect(res.posted.resumeTurn).toBe(false);
@@ -96,17 +99,20 @@ test.describe("host.session.postMessage — trusted WS transport + activation ga
 		// poster can mint a content-bound, one-time permit before posting.
 		const expectedHash = createHash("sha256").update("user\nhi", "utf8").digest("hex");
 		expect(res.posted.contentHash).toBe(expectedHash);
-		// Transport is the WS bridge, never a fetch (no capturable secret surface).
-		expect(res.fetches).toBe(0);
+		// The token mint is the only sanctioned fetch; the SEND rides the WS bridge —
+		// there is NO session-write fetch (no capturable secret surface).
+		expect(res.tokenMinted).toBe(true);
+		expect(res.writeFetches).toBe(0);
 	});
 
-	test("with no trusted WS transport registered, the post rejects (no fetch fallback)", async ({ page }) => {
+	test("with no trusted WS transport registered, the post rejects (no fetch fallback for the SEND)", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate(() => (window as any).__reset());
 		const msg = await page.evaluate(() => (window as any).__postNoTransport());
 		expect(msg).toContain("transport unavailable");
-		const calls = await page.evaluate(() => (window as any).__calls());
-		expect(calls.length).toBe(0);
+		// The token mint may have run, but the SEND never falls back to a fetch.
+		const writeFetches = await page.evaluate(() => (window as any).__writeFetches());
+		expect(writeFetches).toBe(0);
 	});
 
 	test("subscribe returns an unsubscribe fn (no throw, no round-trip)", async ({ page }) => {

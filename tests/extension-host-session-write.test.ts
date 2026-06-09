@@ -138,24 +138,30 @@ describe("handleSessionPost — role-aware delivery (honor PostMessageInput.role
 });
 
 describe("handleSessionPost — server-minted, one-time, content-bound write permit", () => {
-	it("requires a nonce: a missing/empty permit → 403 (NO post, NO audit)", async () => {
+	it("requires a nonce: a missing/empty permit → 403 (NO post, but AUDITED)", async () => {
 		for (const nonce of [undefined, "", 42 as unknown]) {
 			const { input, h } = makeInput({ nonce });
 			const r = await handleSessionPost(input);
 			assert.equal((r as { status: number }).status, 403);
 			assert.match((r as { error: string }).error, /permit/i);
 			assert.equal(h.posts.length, 0);
-			assert.equal(h.audits.length, 0);
+			// Fix #3: a rejected write is AUDITED (every rejection path emits the sink).
+			assert.equal(h.audits.length, 1);
+			assert.equal(h.audits[0].outcome, "error");
+			assert.match(h.audits[0].error ?? "", /permit/i);
+			assert.equal(h.audits[0].packId, "my-pack");
 		}
 	});
 
-	it("rejects when the permit fails to consume (replayed / forged / expired) → 403, NO post", async () => {
+	it("rejects when the permit fails to consume (replayed / forged / expired) → 403, NO post, AUDITED", async () => {
 		const { input, h } = makeInput({ consumePermit: () => false });
 		const r = await handleSessionPost(input);
 		assert.equal((r as { status: number }).status, 403);
 		assert.match((r as { error: string }).error, /invalid, expired, or already-used/);
 		assert.equal(h.posts.length, 0);
-		assert.equal(h.audits.length, 0);
+		assert.equal(h.audits.length, 1);
+		assert.equal(h.audits[0].outcome, "error");
+		assert.match(h.audits[0].error ?? "", /invalid, expired, or already-used/);
 	});
 
 	it("is CONTENT-BOUND: consumePermit receives {nonce, sessionId, packId, tool, contentHash(role,text)}", async () => {
@@ -226,40 +232,52 @@ describe("handleSessionPost — every post is audited", () => {
 });
 
 describe("handleSessionPost — authorization + validation rejections", () => {
-	it("unresolvable session → 403 (and NO post, NO audit)", async () => {
+	it("unresolvable session → 403 (NO post, but AUDITED)", async () => {
 		const { input, h } = makeInput({ resolveSession: () => undefined });
 		const r = await handleSessionPost(input);
 		assert.equal((r as { status: number }).status, 403);
 		assert.equal(h.posts.length, 0);
-		assert.equal(h.audits.length, 0);
+		// Fix #3: even an authorization failure is audited.
+		assert.equal(h.audits.length, 1);
+		assert.equal(h.audits[0].outcome, "error");
 	});
 
-	it(":tool ∉ allowedTools → 403", async () => {
-		const { input } = makeInput({ resolveSession: () => ({ allowedTools: ["something_else"] }) });
+	it(":tool ∉ allowedTools → 403 (AUDITED)", async () => {
+		const { input, h } = makeInput({ resolveSession: () => ({ allowedTools: ["something_else"] }) });
 		const r = await handleSessionPost(input);
 		assert.equal((r as { status: number }).status, 403);
+		assert.equal(h.audits.length, 1);
+		assert.equal(h.audits[0].outcome, "error");
+		assert.equal(h.audits[0].tool, "sample_action");
 	});
 
-	it("invalid role → 400", async () => {
-		const { input } = makeInput({ role: "assistant" });
+	it("invalid role → 400 (AUDITED)", async () => {
+		const { input, h } = makeInput({ role: "assistant" });
 		const r = await handleSessionPost(input);
 		assert.equal((r as { status: number }).status, 400);
+		assert.equal(h.audits.length, 1);
+		assert.equal(h.audits[0].outcome, "error");
 	});
 
-	it("empty / whitespace-only text → 400", async () => {
+	it("empty / whitespace-only text → 400 (AUDITED)", async () => {
 		for (const text of ["", "   ", 42 as unknown]) {
-			const { input } = makeInput({ text });
+			const { input, h } = makeInput({ text });
 			const r = await handleSessionPost(input);
 			assert.equal((r as { status: number }).status, 400);
+			assert.equal(h.audits.length, 1);
+			assert.equal(h.audits[0].outcome, "error");
 		}
 	});
 
-	it("non-pack caller → 403 (session messaging is pack-only)", async () => {
+	it("non-pack caller → 403 (session messaging is pack-only, AUDITED)", async () => {
 		const { input, h } = makeInput({ resolvePackIdentity: () => ({ isPack: false, packId: "" }) });
 		const r = await handleSessionPost(input);
 		assert.equal((r as { status: number }).status, 403);
 		assert.match((r as { error: string }).error, /market-pack/);
 		assert.equal(h.posts.length, 0);
+		assert.equal(h.audits.length, 1);
+		assert.equal(h.audits[0].outcome, "error");
+		assert.match(h.audits[0].error ?? "", /market-pack/);
 	});
 });
 

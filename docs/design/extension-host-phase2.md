@@ -260,6 +260,43 @@ Already structured for this: both hosts build `capabilities` from a `flags` obje
 later slice flips exactly one boolean in that literal — the single line a serialized edit
 touches.
 
+### A.5 Hardening — SERVER-MINTED surface binding token (the identity is not a request field)
+
+A.3 threaded the contributing `tool` into the client Host API closure so a *well-behaved*
+pack cannot override its own identity. But on the wire that identity was still a plain
+`tool` field on every scoped request (`store`/`session`/`route` body or query; the WS
+`ext_session_*` frames). Nothing stopped a caller from **naming another pack's tool** on a
+raw request and acting AS that pack (cross-pack identity confusion — acceptance #4).
+
+**Fix (`src/server/extension-host/surface-binding.ts`):** the identity rides a SERVER-MINTED
+opaque token, never a caller-supplied `tool`.
+
+- When the trusted app first constructs a surface's Host API it calls
+  `POST /api/ext/surface-token` with the surface's `tool`. The server authorizes it
+  (`authorizeScopedRequest`), resolves the winning contribution via the SAME
+  `resolvePackIdentityForTool` resolution that is the pack identity, and mints an opaque,
+  HMAC-signed token bound to `{sessionId, packId, contributionId, tool}`
+  (`mintSurfaceToken`). The client holds it in the Host API **closure** (pack module code
+  never sees or sets it) and echoes it on every scoped call as `surfaceToken`.
+- Every scoped endpoint + the WS write mint/post call `resolveSurfaceIdentity(...)` — the
+  single chokepoint that validates the signature + soft TTL, asserts the token's bound
+  session equals the header-canonical (WS-authenticated) session, **re-resolves** the pack
+  identity for the token's `tool` (rejecting a token gone stale after an uninstall /
+  precedence change), and asserts the re-resolved `packId` still matches. The endpoints then
+  use the DERIVED `{packId, tool}` and IGNORE any caller-supplied tool/pack. The existing
+  per-session guard (`allowedTools`, session resolve, body===header) is layered on top.
+- The client (`host-api.ts`) mints the token lazily + memoized; a 403 (e.g. an expired token
+  on a long-lived tab) drops the memo and re-mints + retries once, so a stale token
+  self-heals without surfacing to the pack.
+
+**Residual (Model A, same-realm):** in the shared main UI realm a deliberately malicious
+pack can still mint its own token for any tool name it knows, or read another surface's
+token out of a shared closure / monkey-patch `fetch`. TRUE cross-pack isolation needs
+per-pack realm isolation, which Model A de-scopes for UI. The token closes the **accidental
++ non-pack-reachable** path and makes the Host API the only *sanctioned* identity path; it is
+**not** claimed as a defense against a same-realm adversary — exactly parallel to the
+session-write same-realm mint-forgery residual (§8 C2.1). Documented in `docs/marketplace.md`.
+
 ---
 
 ## 2a. Scoped-request authorization + panel/entrypoint host context
