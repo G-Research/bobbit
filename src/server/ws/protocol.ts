@@ -72,15 +72,26 @@ export type ClientMessage =
 	| { type: "resume"; fromSeq: number }
 	| { type: "status_resync" }
 	/**
+	 * C2 session-WRITE permit MINT (`host.session.postMessage` step 1) — design
+	 * extension-host-phase2.md §8 C2.1. The client requests a server-minted, one-time,
+	 * content-bound nonce ONLY after its synchronous transient-activation assertion
+	 * passes. `contentHash` is sha256 hex of `role + "\n" + text` (SubtleCrypto). The
+	 * server binds the minted permit to {this connection's session, server-derived
+	 * packId, tool, contentHash} and replies `ext_session_write_permit_result`.
+	 */
+	| { type: "ext_session_write_permit"; requestId: string; tool: string; contentHash: string }
+	/**
 	 * C2 session WRITE (`host.session.postMessage`) — design extension-host-phase2.md
 	 * §8 C2.1. Routed over the TRUSTED WebSocket (NOT a fetch) so no capturable
 	 * session secret ever rides a `fetch` pack code can monkey-patch, and pack code
 	 * — which has no handle to the WS — cannot send it. The TARGET session is ALWAYS
 	 * this connection's OWN authenticated session (never a frame field), so
 	 * cross-session posting is structurally impossible. `requestId` correlates the
-	 * async `ext_session_post_result` reply.
+	 * async `ext_session_post_result` reply. `nonce` is the SERVER-MINTED, one-time,
+	 * content-bound write permit from the preceding mint — REQUIRED: a replayed or
+	 * forged frame fails permit consumption and is rejected with no post.
 	 */
-	| { type: "ext_session_post"; requestId: string; tool: string; role: "user" | "system"; text: string; resumeTurn?: boolean };
+	| { type: "ext_session_post"; requestId: string; tool: string; role: "user" | "system"; text: string; resumeTurn?: boolean; nonce: string };
 
 /**
  * Optional per-phase timing for a `get_messages` snapshot, attached only under
@@ -101,6 +112,10 @@ export interface SnapshotServerTiming {
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
 	| { type: "auth_ok" }
+	/** Async reply to an `ext_session_write_permit` mint (C2 session write, step 1).
+	 *  On success carries the opaque one-time `nonce` to attach to `ext_session_post`;
+	 *  on failure carries the server-side reason. */
+	| { type: "ext_session_write_permit_result"; requestId: string; ok: boolean; nonce?: string; error?: string }
 	/** Async ack for an `ext_session_post` (C2 session write). `ok:false` carries the
 	 *  server-side authorization/validation error to surface to the pack. */
 	| { type: "ext_session_post_result"; requestId: string; ok: boolean; error?: string }

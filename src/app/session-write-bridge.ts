@@ -10,25 +10,42 @@
 // that header during one legitimate user-gesture post, then REPLAY it without a
 // gesture — exfiltrating the secret.
 //
-// RESOLUTION: the SEND rides the app's already-authenticated session WebSocket. The
-// `RemoteAgent` owns the WS (a private field) and registers its WS-bound poster
-// HERE on connect; `host.session.postMessage` calls `postSessionMessageOverWs`,
-// which forwards to the registered poster. There is NO session secret on any
-// `fetch`, and pack code cannot reach this transport: pack renderers/panels are
-// Blob-URL modules that cannot import app modules (the `host` object is their only
-// surface), and they have no handle to the WS, so they cannot register a poster or
-// send on the socket. The server targets the WS connection's OWN authenticated
-// session, so cross-session posting is structurally impossible.
+// RESOLUTION (transport): the SEND rides the app's already-authenticated session
+// WebSocket. The `RemoteAgent` owns the WS (a private field) and registers its
+// WS-bound poster HERE on connect; `host.session.postMessage` calls
+// `postSessionMessageOverWs`, which forwards to the registered poster. There is NO
+// session secret on any `fetch`, and pack code cannot reach this transport: pack
+// renderers/panels are Blob-URL modules that cannot import app modules (the `host`
+// object is their only surface). The server targets the WS connection's OWN
+// authenticated session, so cross-session posting is structurally impossible.
+//
+// SAME-REALM REPLAY (the residual the WS-only move did NOT close): a same-realm pack
+// can still monkey-patch `WebSocket.prototype.send` / capture the socket and FORGE
+// or REPLAY an `ext_session_post` frame. CLOSED by a SERVER-MINTED, one-time,
+// content-bound write permit: the poster first mints a nonce (bound to
+// {session, packId, tool, contentHash}) over the trusted WS, then sends the post
+// carrying it. A replayed post → permit already consumed → rejected; a forged post
+// without a mint → no valid nonce → rejected (server-side, session-write-permit.ts).
+// The remaining residual (forging the MINT during a genuine gesture) is the
+// documented realm-isolation follow-up.
 
 /** A session-write request as handed to the trusted WS poster. `sessionId` selects
  *  the bound RemoteAgent's poster; the SERVER ignores it as a target and always
- *  posts into the WS connection's own authenticated session. */
+ *  posts into the WS connection's own authenticated session.
+ *
+ *  `contentHash` is sha256 hex of `role + "\n" + text`, computed by `host-api.ts`
+ *  (SubtleCrypto). The poster first mints a server-minted, one-time, content-bound
+ *  write permit (`ext_session_write_permit`, binding this hash) and then sends the
+ *  post carrying the returned nonce — so a captured/replayed post frame is rejected
+ *  (permit already consumed) and a tampered role/text fails the hash binding. See
+ *  session-write-permit.ts + design extension-host-phase2.md §8 C2.1. */
 export interface SessionPostRequest {
 	sessionId: string | undefined;
 	tool: string;
 	role: "user" | "system";
 	text: string;
 	resumeTurn?: boolean;
+	contentHash: string;
 }
 
 /** A WS-bound poster: resolves when the server acks the post, rejects on error. */

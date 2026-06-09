@@ -198,7 +198,30 @@ describe("buildTranscriptEnvelope", () => {
 		assert.equal(env.messages[0].id, "e3");
 	});
 
-	it("throws on an invalid regex pattern", () => {
-		assert.throws(() => buildTranscriptEnvelope(messages, { pattern: "(" }));
+	it("pattern is a LITERAL, case-insensitive SUBSTRING filter (not a regex)", () => {
+		// Case-insensitive substring match.
+		assert.equal(buildTranscriptEnvelope(messages, { pattern: "GAMMA" }).total, 1);
+		assert.equal(buildTranscriptEnvelope(messages, { pattern: "amm" }).total, 1);
+		// A regex metacharacter is matched VERBATIM, not interpreted: `.` matches a
+		// literal dot, so it finds nothing here (whereas a regex `.` would match all).
+		assert.equal(buildTranscriptEnvelope(messages, { pattern: "." }).total, 0);
+		assert.equal(buildTranscriptEnvelope(messages, { pattern: "a.p" }).total, 0);
+	});
+
+	it("pathological input is HARMLESS — no ReDoS (treated as a literal substring)", () => {
+		// A classic catastrophic-backtracking pattern: as a regex over a long string
+		// this hangs; as a literal substring it returns instantly with no match.
+		const evil = "(a+)+$";
+		const longText = "a".repeat(50_000);
+		const big = transcriptToHostMessages(
+			line({ type: "message", id: "e1", message: { role: "user", content: [{ type: "text", text: longText }] } }),
+		);
+		const start = Date.now();
+		const env = buildTranscriptEnvelope(big, { pattern: evil });
+		assert.equal(env.total, 0); // literal "(a+)+$" is not a substring of "aaaa…"
+		assert.ok(Date.now() - start < 1_000, "literal substring filter must not backtrack");
+		// An invalid-regex string is NOT thrown — it is just a literal needle.
+		assert.doesNotThrow(() => buildTranscriptEnvelope(messages, { pattern: "(" }));
+		assert.equal(buildTranscriptEnvelope(messages, { pattern: "(" }).total, 0);
 	});
 });

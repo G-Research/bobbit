@@ -30,6 +30,7 @@ import type { ToolManager } from "../agent/tool-manager.js";
 import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
 import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
+import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 
 /**
@@ -1012,6 +1013,35 @@ export function handleWebSocketConnection(
 					}
 					break;
 				}
+				case "ext_session_write_permit": {
+					// C2 session-WRITE permit MINT (design extension-host-phase2.md §8 C2.1).
+					// Mints a server-minted, one-time, content-bound nonce over THIS trusted,
+					// authenticated WS. The binding's sessionId is ALWAYS this connection's OWN
+					// authenticated session; the packId is SERVER-derived from `tool` (never a
+					// frame field). The client requests this only after its synchronous
+					// transient-activation assertion passes; the matching `ext_session_post`
+					// must then carry the returned nonce. See session-write-permit.ts.
+					const mintMsg = msg as Extract<ClientMessage, { type: "ext_session_write_permit" }>;
+					const requestId = typeof mintMsg.requestId === "string" ? mintMsg.requestId : "";
+					const tool = typeof mintMsg.tool === "string" ? mintMsg.tool : "";
+					const contentHash = typeof mintMsg.contentHash === "string" ? mintMsg.contentHash : "";
+					const projectTm = session.projectId && projectContextManager
+						? projectContextManager.getOrCreate(session.projectId)?.toolManager
+						: undefined;
+					const extToolManager = toolManager
+						? resolveActionToolManager(toolManager, projectTm)
+						: projectTm;
+					const ident = extToolManager
+						? resolvePackIdentityForTool(extToolManager, tool)
+						: { isPack: false, packId: "" };
+					if (!tool || !contentHash || !ident.isPack || !ident.packId) {
+						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: "session messaging is available only to market-pack tools" });
+						break;
+					}
+					const nonce = mintWritePermit({ sessionId, packId: ident.packId, tool, contentHash });
+					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
+					break;
+				}
 				case "ext_session_post": {
 					// C2 session WRITE (`host.session.postMessage`) — design
 					// extension-host-phase2.md §8 C2.1. Routed over THIS trusted WS instead of a
@@ -1019,6 +1049,9 @@ export function handleWebSocketConnection(
 					// patchable `fetch`, and so pack code (no WS handle) cannot send it. The
 					// TARGET session is ALWAYS this connection's OWN authenticated `sessionId`,
 					// never a frame field — cross-session posting is structurally impossible.
+					// REQUIRES the server-minted, one-time, content-bound `nonce` from the
+					// preceding `ext_session_write_permit` mint: a replayed/forged/tampered
+					// frame fails permit consumption and is rejected with NO post.
 					const postMsg = msg as Extract<ClientMessage, { type: "ext_session_post" }>;
 					const requestId = typeof postMsg.requestId === "string" ? postMsg.requestId : "";
 					const projectTm = session.projectId && projectContextManager
@@ -1041,11 +1074,16 @@ export function handleWebSocketConnection(
 						role: postMsg.role,
 						text: postMsg.text,
 						resumeTurn: postMsg.resumeTurn,
+						nonce: postMsg.nonce,
 						resolveSession,
 						resolvePackIdentity: (tool) => extToolManager
 							? resolvePackIdentityForTool(extToolManager, tool)
 							: { isPack: false, packId: "" },
+						consumePermit: (nonce, binding) => consumeWritePermit(nonce, binding),
 						post: async (sid, text, opts) => {
+							// Role-aware delivery (text is already system-framed by the handler
+							// for role "system"). "user"/"system" share the user/steer transport;
+							// resumeTurn !== false resumes the turn, === false delivers without.
 							if (opts.resume) {
 								await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
 							} else {

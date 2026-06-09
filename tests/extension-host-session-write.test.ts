@@ -25,9 +25,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
 	handleSessionPost,
+	formatSessionMessage,
 	type SessionPostInput,
 	type SessionPostAudit,
 } from "../src/server/extension-host/session-write.ts";
+import { computeContentHash, type WritePermitBinding } from "../src/server/extension-host/session-write-permit.ts";
 import type { ActionGuardSession } from "../src/server/extension-host/action-guard.ts";
 
 const SID = "sess-1";
@@ -35,19 +37,27 @@ const SID = "sess-1";
 interface Harness {
 	posts: Array<{ sessionId: string; text: string; role: string; resume: boolean }>;
 	audits: SessionPostAudit[];
+	/** Bindings passed to consumePermit (content-bound permit assertions). */
+	permitCalls: Array<{ nonce: string; binding: WritePermitBinding }>;
 }
 
 function makeInput(over: Partial<SessionPostInput> = {}): { input: SessionPostInput; h: Harness } {
-	const h: Harness = { posts: [], audits: [] };
+	const h: Harness = { posts: [], audits: [], permitCalls: [] };
 	const input: SessionPostInput = {
 		tool: "sample_action",
 		// The TRUSTED, server-authenticated WS-bound session (not caller-supplied).
 		sessionId: SID,
 		role: "user",
 		text: "hello agent",
+		// A valid server-minted nonce is required; the default spy accepts it once.
+		nonce: "permit-nonce-1",
 		resolveSession: (id: string): ActionGuardSession | undefined =>
 			id === SID ? { allowedTools: ["sample_action"] } : undefined,
 		resolvePackIdentity: () => ({ isPack: true, packId: "my-pack" }),
+		consumePermit: (nonce, binding) => {
+			h.permitCalls.push({ nonce, binding });
+			return true;
+		},
 		post: async (sessionId, text, opts) => { h.posts.push({ sessionId, text, ...opts }); },
 		audit: (rec) => { h.audits.push(rec); },
 		now: (() => { let t = 1000; return () => (t += 5); })(),
@@ -96,6 +106,94 @@ describe("handleSessionPost — happy path (scoped guard, no toolUseId)", () => 
 		const r = await handleSessionPost(input);
 		assert.equal(r.ok, true);
 		assert.equal(h.posts[0].role, "system");
+	});
+});
+
+describe("handleSessionPost — role-aware delivery (honor PostMessageInput.role)", () => {
+	it('"user" is delivered VERBATIM (no framing)', async () => {
+		const { input, h } = makeInput({ role: "user", text: "do the thing" });
+		await handleSessionPost(input);
+		assert.equal(h.posts[0].text, "do the thing");
+	});
+
+	it('"system" is delivered as a genuine system directive (framed, NOT raw user text)', async () => {
+		const { input, h } = makeInput({ role: "system", text: "context update" });
+		const r = await handleSessionPost(input);
+		assert.equal(r.ok, true);
+		assert.equal(h.posts[0].role, "system");
+		// The delivered text is system-framed — it is NOT the raw text (which would
+		// be silently delivering "system" as "user").
+		assert.notEqual(h.posts[0].text, "context update");
+		assert.match(h.posts[0].text, /^<system-reminder>\n/);
+		assert.match(h.posts[0].text, /\n<\/system-reminder>$/);
+		assert.ok(h.posts[0].text.includes("context update"));
+		// The audited role is the ORIGINAL role.
+		assert.equal(h.audits[0].role, "system");
+	});
+
+	it("formatSessionMessage is the single source of the role framing", () => {
+		assert.equal(formatSessionMessage("user", "hi"), "hi");
+		assert.equal(formatSessionMessage("system", "hi"), "<system-reminder>\nhi\n</system-reminder>");
+	});
+});
+
+describe("handleSessionPost — server-minted, one-time, content-bound write permit", () => {
+	it("requires a nonce: a missing/empty permit → 403 (NO post, NO audit)", async () => {
+		for (const nonce of [undefined, "", 42 as unknown]) {
+			const { input, h } = makeInput({ nonce });
+			const r = await handleSessionPost(input);
+			assert.equal((r as { status: number }).status, 403);
+			assert.match((r as { error: string }).error, /permit/i);
+			assert.equal(h.posts.length, 0);
+			assert.equal(h.audits.length, 0);
+		}
+	});
+
+	it("rejects when the permit fails to consume (replayed / forged / expired) → 403, NO post", async () => {
+		const { input, h } = makeInput({ consumePermit: () => false });
+		const r = await handleSessionPost(input);
+		assert.equal((r as { status: number }).status, 403);
+		assert.match((r as { error: string }).error, /invalid, expired, or already-used/);
+		assert.equal(h.posts.length, 0);
+		assert.equal(h.audits.length, 0);
+	});
+
+	it("is CONTENT-BOUND: consumePermit receives {nonce, sessionId, packId, tool, contentHash(role,text)}", async () => {
+		const { input, h } = makeInput({ role: "user", text: "hello agent", nonce: "permit-nonce-1" });
+		await handleSessionPost(input);
+		assert.equal(h.permitCalls.length, 1);
+		const { nonce, binding } = h.permitCalls[0];
+		assert.equal(nonce, "permit-nonce-1");
+		assert.deepEqual(binding, {
+			sessionId: SID,
+			packId: "my-pack",
+			tool: "sample_action",
+			// Recomputed from the ORIGINAL role+text (not the system-framed delivery text).
+			contentHash: computeContentHash("user", "hello agent"),
+		});
+	});
+
+	it("SINGLE-USE: a real consumeWritePermit accepts the first post and rejects a replay", async () => {
+		// Drive two posts through the SAME real permit store: the first mints+consumes,
+		// the replay (same nonce) is dead.
+		const { mintWritePermit, consumeWritePermit, _resetWritePermits } =
+			await import("../src/server/extension-host/session-write-permit.ts");
+		_resetWritePermits();
+		const contentHash = computeContentHash("user", "hello agent");
+		const nonce = mintWritePermit({ sessionId: SID, packId: "my-pack", tool: "sample_action", contentHash });
+		const consumePermit = (n: string, b: WritePermitBinding) => consumeWritePermit(n, b);
+
+		const { input: i1, h: h1 } = makeInput({ nonce, consumePermit });
+		const r1 = await handleSessionPost(i1);
+		assert.equal(r1.ok, true);
+		assert.equal(h1.posts.length, 1);
+
+		// Replay the captured frame: same nonce, already consumed → rejected.
+		const { input: i2, h: h2 } = makeInput({ nonce, consumePermit });
+		const r2 = await handleSessionPost(i2);
+		assert.equal((r2 as { status: number }).status, 403);
+		assert.equal(h2.posts.length, 0);
+		_resetWritePermits();
 	});
 });
 

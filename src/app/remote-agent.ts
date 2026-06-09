@@ -224,6 +224,9 @@ export class RemoteAgent {
 	// correlation id sent on the `ext_session_post` frame and settled by the matching
 	// `ext_session_post_result`. See `_postExtSession` / session-write-bridge.ts.
 	private _pendingExtPosts = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
+	// In-flight C2 write-permit MINT requests, keyed by the correlation id on the
+	// `ext_session_write_permit` frame, settled by `ext_session_write_permit_result`.
+	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
 	private _gatewayUrl = "";
@@ -1349,11 +1352,55 @@ export class RemoteAgent {
 	 * Drive the C2 session WRITE (`host.session.postMessage`) over THIS agent's
 	 * trusted, authenticated WebSocket (registered with session-write-bridge.ts on
 	 * auth_ok). The send rides the WS — NOT a `fetch` — so no capturable secret is
-	 * involved; pack code has no handle to the WS. Correlates the async
-	 * `ext_session_post_result` ack by a generated `requestId`. The server ignores
-	 * `req.sessionId` as a target and posts into its OWN authenticated session.
+	 * involved; pack code has no handle to the WS. The server ignores `req.sessionId`
+	 * as a target and posts into its OWN authenticated session.
+	 *
+	 * TWO trusted-WS round-trips (design §8 C2.1): first MINT a server-minted,
+	 * one-time, content-bound write permit (bound to `req.contentHash`), then send the
+	 * post carrying the returned nonce. A captured/replayed post frame is rejected
+	 * (permit already consumed); a forged post without a mint has no valid nonce.
 	 */
-	private _postExtSession(req: SessionPostRequest): Promise<void> {
+	private async _postExtSession(req: SessionPostRequest): Promise<void> {
+		const nonce = await this._mintExtWritePermit(req);
+		return this._sendExtSessionPost(req, nonce);
+	}
+
+	/** Step 1: mint a content-bound write permit over the trusted WS. Resolves with
+	 *  the opaque nonce; rejects on server error / timeout / not-connected. */
+	private _mintExtWritePermit(req: SessionPostRequest): Promise<string> {
+		return new Promise<string>((resolve, reject) => {
+			if (this.ws?.readyState !== WebSocket.OPEN) {
+				reject(new Error("host.session.postMessage: WebSocket not connected"));
+				return;
+			}
+			const requestId = `extperm_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => {
+				if (this._pendingExtPermits.delete(requestId)) {
+					reject(new Error("host.session.postMessage: timed out awaiting write permit"));
+				}
+			}, 30_000);
+			this._pendingExtPermits.set(requestId, {
+				resolve: (nonce: string) => { clearTimeout(timer); resolve(nonce); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
+			try {
+				this.ws.send(JSON.stringify({
+					type: "ext_session_write_permit",
+					requestId,
+					tool: req.tool,
+					contentHash: req.contentHash,
+				}));
+			} catch (e) {
+				this._pendingExtPermits.delete(requestId);
+				clearTimeout(timer);
+				reject(e instanceof Error ? e : new Error(String(e)));
+			}
+		});
+	}
+
+	/** Step 2: send the post carrying the minted nonce. Correlates the async
+	 *  `ext_session_post_result` ack by a generated `requestId`. */
+	private _sendExtSessionPost(req: SessionPostRequest, nonce: string): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
 			if (this.ws?.readyState !== WebSocket.OPEN) {
 				reject(new Error("host.session.postMessage: WebSocket not connected"));
@@ -1377,6 +1424,7 @@ export class RemoteAgent {
 					role: req.role,
 					text: req.text,
 					resumeTurn: req.resumeTurn,
+					nonce,
 				}));
 			} catch (e) {
 				this._pendingExtPosts.delete(requestId);
@@ -1386,11 +1434,12 @@ export class RemoteAgent {
 		});
 	}
 
-	/** Reject and clear every in-flight session post (call on disconnect/teardown). */
+	/** Reject and clear every in-flight session post + permit mint (call on
+	 *  disconnect/teardown). */
 	private _rejectPendingExtPosts(reason: string): void {
-		if (this._pendingExtPosts.size === 0) return;
-		const pending = [...this._pendingExtPosts.values()];
+		const pending = [...this._pendingExtPosts.values(), ...this._pendingExtPermits.values()];
 		this._pendingExtPosts.clear();
+		this._pendingExtPermits.clear();
 		for (const p of pending) p.reject(new Error(`host.session.postMessage: ${reason}`));
 	}
 
@@ -1443,6 +1492,17 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "ext_session_write_permit_result": {
+				// Async reply to a C2 write-permit MINT (step 1). Settle the correlated
+				// promise with the opaque nonce (resolve) or the server-side error (reject).
+				const pendingPermit = this._pendingExtPermits.get(msg.requestId);
+				if (pendingPermit) {
+					this._pendingExtPermits.delete(msg.requestId);
+					if (msg.ok && typeof msg.nonce === "string" && msg.nonce) pendingPermit.resolve(msg.nonce);
+					else pendingPermit.reject(new Error(typeof msg.error === "string" && msg.error ? msg.error : "host.session.postMessage: write permit denied"));
+				}
+				break;
+			}
 			case "ext_session_post_result": {
 				// Async ack for a C2 session WRITE (`host.session.postMessage`). Settle the
 				// correlated promise (resolve on ok, reject with the server-side error).
