@@ -197,6 +197,21 @@ describe("ModuleHost — ambient parity (trusted pack = tool/MCP tier; acceptanc
 			mh.dispose();
 		}
 	});
+
+	it("ctx.workingDir is surfaced on the handler ctx (the workingDir contract)", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const wd = fs.realpathSync(tmp);
+			// The handler ctx must carry workingDir (threaded from req.ctx.workingDir),
+			// not just the process.cwd() override — a pack may read ctx.workingDir directly.
+			const ctx: ActionHandlerCtx = { ...bareCtx(), workingDir: wd };
+			const url = writeModule(`export const actions = { wd: async (ctx) => ctx.workingDir };`);
+			const r = await mh.invoke(req(url, "wd", ctx, {}, tmp, wd));
+			assert.equal(r, wd, "ctx.workingDir must reach the reconstructed handler ctx");
+		} finally {
+			mh.dispose();
+		}
+	});
 });
 
 describe("ModuleHost — CPU / wall-time termination (design §9: terminate-on-timeout IS the CPU control)", () => {

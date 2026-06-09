@@ -102,8 +102,8 @@ export function resolve(specifier: string, context: ResolveContext, nextResolve:
  * Reject any resolution whose `file:` URL escapes the validated pack root. Runs
  * AFTER the chain has resolved the specifier to a concrete URL (so it sees the
  * real target of a `../` walk / absolute path / symlink / `node_modules`
- * traversal, not the lexical specifier). Non-`file:` URLs (`node:` built-ins that
- * survived the deny-list, `data:` URLs) keep their current handling — they reach
+ * traversal, not the lexical specifier). Non-`file:` URLs (ambient `node:` built-ins,
+ * `data:` URLs) keep their current handling — they reach
  * no host file. Uses the SHARED path-guard helper (lexical + realpath containment)
  * so the check matches the HTTP entry-serving endpoints exactly.
  */

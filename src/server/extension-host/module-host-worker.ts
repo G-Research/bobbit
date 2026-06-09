@@ -185,6 +185,7 @@ export class ModuleHost {
 			sessionId: req.ctx?.sessionId,
 			toolUseId: req.ctx?.toolUseId,
 			tool: req.ctx?.tool,
+			workingDir: req.ctx?.workingDir,
 			hostVersion: (host as { version?: number } | undefined)?.version,
 			hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
 			capabilities: {

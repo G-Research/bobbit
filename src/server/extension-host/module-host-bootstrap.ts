@@ -121,6 +121,7 @@ interface SerializableCtx {
 	sessionId: string;
 	toolUseId?: string;
 	tool: string;
+	workingDir?: string;
 	hostVersion?: number;
 	hostContractVersion?: number;
 	capabilities: { callRoute: boolean; session: boolean; store: boolean };
@@ -443,7 +444,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 
 async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
-		// ── (4) Dynamic-import the pack module through the deny-hook. ──
+		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
 		const group = mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind];
 		// Export-map validation now lives HERE (moved off the parent so the parent never
@@ -466,6 +467,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 			sessionId: msg.ctx.sessionId,
 			toolUseId: msg.ctx.toolUseId,
 			tool: msg.ctx.tool,
+			workingDir: msg.ctx.workingDir,
 		};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
@@ -476,7 +478,8 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 
 port.on("message", (msg: ParentMessage) => {
 	if (msg.kind === "invoke") {
-		// Wait for the confinement setup (module wraps + deny hook + global strip) to
+		// Wait for the confinement setup (session-dir wraps + containment hook +
+		// process.cwd override) to
 		// finish before importing any pack code. The MessagePort buffers messages
 		// until this listener runs; gating here ensures a fast parent `invoke` never
 		// races ahead of confinement.
