@@ -15,6 +15,10 @@
  *     survives, and the NEXT invocation still works.
  *   - Host-API proxy: the ONLY capability handed to pack code is the host proxy,
  *     whose store/session calls are marshalled to (and authorized in) the parent.
+ *   - File-resolution confinement: a pack module may import a SIBLING within its
+ *     own pack root, but a `../` walk / absolute `file:` URL / symlink escaping
+ *     the pack root is REJECTED (every resolved `file:` URL must be realpath-
+ *     contained within the validated pack root forwarded into `workerData`).
  *
  * Fixtures are `.mjs` ESM modules under a temp dir (the worker dynamic-imports
  * them by file:// URL, exactly as the dispatcher builds it).
@@ -46,8 +50,29 @@ const bareCtx = (): ActionHandlerCtx => ({
 	tool: "demo_tool",
 });
 
-function req(url: string, member: string, ctx: ActionHandlerCtx, arg: unknown = {}): InvokeRequest {
-	return { url, epoch: 0, exportKind: "actions", member, ctx, arg };
+function req(url: string, member: string, ctx: ActionHandlerCtx, arg: unknown = {}, packRoot: string = tmp): InvokeRequest {
+	return { url, packRoot, epoch: 0, exportKind: "actions", member, ctx, arg };
+}
+
+/** Write `body` to `dir/name` (creating `dir`), returning its file:// URL — for
+ *  the file-confinement tests that need a specific pack root + siblings. */
+function writeInDir(dir: string, name: string, body: string): string {
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, name);
+	fs.writeFileSync(file, body);
+	return pathToFileURL(file).href;
+}
+
+/** Create a symlink, returning false (so the test can skip) when the platform
+ *  forbids it (e.g. Windows without the create-symlink privilege). */
+function trySymlink(target: string, linkPath: string): boolean {
+	try {
+		fs.symlinkSync(target, linkPath);
+		return true;
+	} catch (err: any) {
+		if (err && (err.code === "EPERM" || err.code === "EACCES" || err.code === "ENOSYS")) return false;
+		throw err;
+	}
 }
 
 before(() => {
@@ -254,6 +279,97 @@ describe("ModuleHost — module-load deny-hook (no ambient fs/network/exec)", ()
 	it("the deny-list covers every dangerous built-in named in design §9", () => {
 		for (const b of ["fs", "child_process", "net", "http", "https", "worker_threads", "process", "module"]) {
 			assert.ok(DENIED_BUILTINS.includes(b), `expected ${b} to be denied`);
+		}
+	});
+});
+
+describe("ModuleHost — file-resolution confinement (pack module graph is confined to its pack root)", () => {
+	let caseSeq = 0;
+	const packDir = (): string => path.join(tmp, `pack-${caseSeq++}`);
+
+	it("a pack module importing a SIBLING within its pack root resolves", async () => {
+		const dir = packDir();
+		writeInDir(dir, "helper.mjs", `export const v = 42;`);
+		const url = writeInDir(dir, "entry.mjs", `import { v } from "./helper.mjs";\nexport const actions = { run: async () => v };`);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			assert.equal(await mh.invoke(req(url, "run", bareCtx(), {}, dir)), 42);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a STATIC import of `../outside.mjs` (relative walk out of the pack root) is REJECTED", async () => {
+		const dir = packDir();
+		// The escape target lives in `tmp`, OUTSIDE the pack root `dir`.
+		fs.writeFileSync(path.join(tmp, `outside-rel-${caseSeq}.mjs`), `export const x = "stolen";`);
+		const url = writeInDir(dir, "entry.mjs", `import { x } from "../outside-rel-${caseSeq}.mjs";\nexport const actions = { run: async () => x };`);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, dir)),
+				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a DYNAMIC import of an absolute `file:` URL outside the pack root is REJECTED", async () => {
+		const dir = packDir();
+		const secret = path.join(tmp, `abs-secret-${caseSeq}.mjs`);
+		fs.writeFileSync(secret, `export const s = "abs-stolen";`);
+		const secretUrl = pathToFileURL(secret).href;
+		const url = writeInDir(
+			dir,
+			"entry.mjs",
+			`export const actions = { run: async () => { await import(${JSON.stringify(secretUrl)}); return "leaked"; } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, dir)),
+				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a symlink that is lexically inside the pack root but RESOLVES outside is REJECTED", async (t) => {
+		const dir = packDir();
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `sym-secret-${caseSeq}.mjs`);
+		fs.writeFileSync(secret, `export const s = "sym-stolen";`);
+		// A pack entry lexically inside `dir` that symlinks to the out-of-pack secret.
+		const link = path.join(dir, "link.mjs");
+		if (!trySymlink(secret, link)) {
+			t.skip("symlink creation not permitted on this platform");
+			return;
+		}
+		const url = writeInDir(dir, "entry.mjs", `import { s } from "./link.mjs";\nexport const actions = { run: async () => s };`);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, dir)),
+				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("built-ins remain denied with a pack root set (deny-list fires BEFORE containment)", async () => {
+		const dir = packDir();
+		const url = writeInDir(dir, "entry.mjs", `import * as fs from "node:fs";\nexport const actions = { run: async () => typeof fs };`);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, dir)),
+				(e) => e instanceof ActionError && /denied|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
 		}
 	});
 });

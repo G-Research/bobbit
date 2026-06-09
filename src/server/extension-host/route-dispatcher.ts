@@ -145,7 +145,7 @@ export class RouteDispatcher {
 
 	/** Resolve the absolute on-disk path of a tool's routes module (default
 	 *  "routes.js"), re-validating it stays within the group dir. */
-	private resolveModulePath(tool: string, resolver: RouteToolLocationResolver): string | null {
+	private resolveModulePath(tool: string, resolver: RouteToolLocationResolver): { abs: string; packRoot: string } | null {
 		const loc = resolver.resolveToolLocation(tool);
 		if (!loc || !loc.baseDir) return null;
 		const dir = path.join(loc.baseDir, loc.groupDir || "");
@@ -157,15 +157,18 @@ export class RouteDispatcher {
 		if (!isPackPathWithinGroup(dir, abs)) {
 			throw new ActionError(400, `unsafe routes module path for tool "${tool}"`);
 		}
-		return abs;
+		// `dir` is the validated pack root; forwarded into the confined worker so the
+		// pack module graph cannot import any `file:` OUTSIDE it (design §9).
+		return { abs, packRoot: dir };
 	}
 
 	/** Resolve the epoch-cache-busted import URL for a tool's routes module WITHOUT
 	 *  importing it (mirrors ActionDispatcher.resolveModuleUrl — the parent does NO
 	 *  `import()`; the worker imports + validates the `routes` export + member). */
-	private resolveModuleUrl(tool: string, resolver: RouteToolLocationResolver): { url: string } | null {
-		const abs = this.resolveModulePath(tool, resolver);
-		if (!abs) return null;
+	private resolveModuleUrl(tool: string, resolver: RouteToolLocationResolver): { url: string; packRoot: string } | null {
+		const resolved = this.resolveModulePath(tool, resolver);
+		if (!resolved) return null;
+		const { abs, packRoot } = resolved;
 
 		let stat: fs.Stats;
 		try {
@@ -176,11 +179,11 @@ export class RouteDispatcher {
 
 		const epoch = this.epoch;
 		const hit = this.cache.get(abs);
-		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === epoch) return { url: hit.url };
+		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === epoch) return { url: hit.url, packRoot };
 
 		const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epoch}`;
 		this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch, url });
-		return { url };
+		return { url, packRoot };
 	}
 
 	/** Race `work` (combined module load+eval AND handler execution) against the
@@ -246,7 +249,7 @@ export class RouteDispatcher {
 			// SAME ActionError statuses (500 "no 'routes' export" / 404 "unknown route").
 			// Isolation is unconditional (no in-process path).
 			return await this.moduleHost.invoke(
-				{ url: resolved.url, epoch: this.epoch, exportKind: "routes", member: name, ctx, arg: req },
+				{ url: resolved.url, packRoot: resolved.packRoot, epoch: this.epoch, exportKind: "routes", member: name, ctx, arg: req },
 				this.timeoutMs,
 			);
 		})();

@@ -8,11 +8,17 @@
 // (no gateway token / secret — set by the parent via `new Worker(..., { env: {} })`)
 // and whose memory is capped by `resourceLimits`. Its job, in order:
 //
-//   1. Import `worker_threads` + `module` (the confinement plumbing) — done at the
-//      top, BEFORE the deny-hook is installed, so the deny-list never blocks it.
-//   2. Install the module-load DENY-HOOK (`confinement-loader.ts`) via
-//      `module.register`, so the pack module graph imported afterward cannot reach
-//      `node:fs`/`child_process`/network/`process`/`worker_threads`/etc.
+//   1. Import `worker_threads` + `module` + the confinement hook (and its shared
+//      `path-guard` dep) — done at the top, BEFORE the hook is installed, so the
+//      deny-list never blocks the confinement plumbing's own imports.
+//   2. Install the module-load DENY+CONFINE hook (`confinement-loader.ts`) via the
+//      IN-THREAD `module.registerHooks({ resolve })`, so the pack module graph
+//      imported afterward cannot reach `node:fs`/`child_process`/network/`process`/
+//      `worker_threads`/etc., NOR `import`/`require` any `file:` OUTSIDE its own
+//      pack root (relative `../` walk, absolute path, symlink, or ancestor
+//      `node_modules`). In-thread (synchronous) hooks run in THIS worker thread, so
+//      the hook can call the shared `path-guard` helper directly — no separate
+//      hooks thread, no cross-thread marshalling, no `.ts`/`.js` resolution gap.
 //   3. Remove ambient web/process globals BEFORE any pack code runs: delete the
 //      outbound-network globals (`fetch`/`WebSocket`/`XMLHttpRequest`/`Request`/
 //      `Response`/`Headers`/…) and REPLACE the ambient `process` global with an
@@ -29,12 +35,17 @@
 // parent terminating this worker on timeout (design §9 — terminate-on-timeout IS
 // the CPU control).
 
-import { register } from "node:module";
+import { registerHooks } from "node:module";
 import { parentPort, workerData } from "node:worker_threads";
+import { configure as configureConfinement, resolve as confinementResolve } from "./confinement-loader.js";
 
 interface BootstrapData {
-	/** First-path-segment deny-list forwarded to the confinement loader. */
+	/** First-path-segment deny-list forwarded to the confinement hook. */
 	denied: string[];
+	/** The validated pack group root forwarded to the confinement hook so every
+	 *  resolved `file:` URL in the pack module graph stays realpath-contained within
+	 *  it (no `../`/absolute/symlink/node_modules escape outside the pack). */
+	packRoot?: string;
 }
 
 interface InvokeMessage {
@@ -74,13 +85,13 @@ if (!port) {
 }
 const data = (workerData ?? { denied: [] }) as BootstrapData;
 
-// ── (2) Install the module-load deny-hook BEFORE any pack module is imported. ──
-// Resolve the loader sibling with the SAME extension as THIS module so it works
-// both compiled (`.js` in dist) and under the tsx unit runner (`.ts`).
-const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
-register(new URL(`./confinement-loader${ext}`, import.meta.url).href, {
-	data: { denied: data.denied },
-});
+// ── (2) Install the module-load deny+confine hook BEFORE any pack module is
+// imported. The hook + its shared `path-guard` dep are STATICALLY imported above
+// (resolved by THIS worker thread's loader), so `configure` + `resolve` are
+// already loaded; `registerHooks` installs the synchronous in-thread hook so the
+// pack graph imported afterward is both deny-listed and pack-root-confined.
+configureConfinement({ denied: data.denied, packRoot: data.packRoot });
+registerHooks({ resolve: confinementResolve });
 
 // ── (3) Remove ambient web/process globals BEFORE any pack module is imported. ──
 removeAmbientGlobals();

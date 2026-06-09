@@ -74,6 +74,14 @@ export interface InvokeRequest {
 	 *  worker dynamic-imports THIS exact URL (design §9 — same URL the dispatcher
 	 *  builds). */
 	url: string;
+	/** The validated pack group root (the dispatcher's `groupDir`) the entry module
+	 *  was loaded from. Forwarded into the worker's confinement loader so EVERY
+	 *  resolved `file:` URL in the pack module graph must stay realpath-contained
+	 *  within it — a pack module cannot `import`/`require` a file OUTSIDE its own
+	 *  pack root (relative `../` walk, absolute path, symlink, or ancestor
+	 *  `node_modules`), closing the last ambient-fs gap left by the built-in
+	 *  deny-list (design §9 — no ambient access except the Host API). */
+	packRoot: string;
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
@@ -201,7 +209,7 @@ export class ModuleHost {
 		const worker = new Worker(this.bootstrapUrl(), {
 			// Layer 1 — empty env: the worker holds no gateway token / secret.
 			env: {},
-			workerData: { denied: [...DENIED_BUILTINS] },
+			workerData: { denied: [...DENIED_BUILTINS], packRoot: req.packRoot },
 			// Layer 3 — memory caps.
 			resourceLimits: {
 				maxOldGenerationSizeMb: this.maxOldGenerationSizeMb,
