@@ -24,6 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ActionError, type ActionHandlerCtx, type ActionDispatcherOptions } from "./action-dispatcher.js";
+import { ModuleHost } from "./module-host-worker.js";
 import { resolvePackIdentity } from "./pack-identity.js";
 
 /** The verified context handed to a route handler. Reuses the action ctx shape
@@ -105,10 +106,14 @@ class TokenBucketLimiter {
  * pack's route module regardless of which surface issued the call (§5 B3.1).
  */
 export class RouteDispatcher {
-	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; module: RoutesModule }>();
+	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; module: RoutesModule; url: string }>();
 	private readonly timeoutMs: number;
 	private readonly maxConcurrent: number;
 	private readonly limiter: TokenBucketLimiter | null;
+	/** Slice C3 — the SINGLE invocation seam runs every route handler through this
+	 *  confined worker host (server-module isolation, design §9). Always present so
+	 *  there is NO in-process path. */
+	private readonly moduleHost: ModuleHost;
 	private inFlight = 0;
 	/** Bumped on invalidate() so a post-invalidate import is always fresh even
 	 *  under coarse (Windows) mtime resolution. */
@@ -122,6 +127,9 @@ export class RouteDispatcher {
 		this.maxConcurrent = opts.maxConcurrent ?? 8;
 		const rate = opts.rate === undefined ? { capacity: 60, refillPerSec: 30 } : opts.rate;
 		this.limiter = rate ? new TokenBucketLimiter(rate.capacity, rate.refillPerSec) : null;
+		// Slice C3: isolation is UNCONDITIONAL — share the threaded ModuleHost (or
+		// self-construct one) so route handlers always run confined (no in-process path).
+		this.moduleHost = opts.moduleHost ?? new ModuleHost({ timeoutMs: this.timeoutMs });
 	}
 
 	/** Drop cached modules + force a fresh import on next load. */
@@ -150,7 +158,7 @@ export class RouteDispatcher {
 
 	/** Load (or return cached) the routes module for a tool. Mirrors
 	 *  ActionDispatcher.loadModule's epoch-snapshot in-flight-race guard. */
-	private async loadModule(tool: string, resolver: RouteToolLocationResolver): Promise<RoutesModule | null> {
+	private async loadModule(tool: string, resolver: RouteToolLocationResolver): Promise<{ module: RoutesModule; url: string } | null> {
 		for (let attempt = 0; ; attempt++) {
 			const abs = this.resolveModulePath(tool, resolver);
 			if (!abs) return null;
@@ -163,7 +171,7 @@ export class RouteDispatcher {
 			}
 
 			const hit = this.cache.get(abs);
-			if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return hit.module;
+			if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return { module: hit.module, url: hit.url };
 
 			const epochAtStart = this.epoch;
 			const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epochAtStart}`;
@@ -175,12 +183,12 @@ export class RouteDispatcher {
 			const module: RoutesModule = { routes: routes as Record<string, RouteHandler> };
 
 			if (this.epoch === epochAtStart) {
-				this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: epochAtStart, module });
-				return module;
+				this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: epochAtStart, module, url });
+				return { module, url };
 			}
 
 			if (attempt >= RouteDispatcher.MAX_INFLIGHT_RELOADS) {
-				return module;
+				return { module, url };
 			}
 			// loop: re-resolve + reload against the advanced epoch.
 		}
@@ -237,8 +245,9 @@ export class RouteDispatcher {
 		// ONE combined per-call timeout spans BOTH the module load+eval AND the
 		// handler execution (closes the hung-top-level-await gap — see ActionDispatcher).
 		const work = (async (): Promise<unknown> => {
-			const module = await this.loadModule(tool, resolver);
-			if (!module) throw new ActionError(404, `no routes module found for tool "${tool}"`);
+			const loaded = await this.loadModule(tool, resolver);
+			if (!loaded) throw new ActionError(404, `no routes module found for tool "${tool}"`);
+			const { module, url } = loaded;
 			// Own-property check: never resolve inherited members (constructor/toString).
 			if (!Object.prototype.hasOwnProperty.call(module.routes, name)) {
 				throw new ActionError(404, `unknown route "${name}" for tool "${tool}"`);
@@ -246,9 +255,14 @@ export class RouteDispatcher {
 			const handler = module.routes[name];
 			if (typeof handler !== "function") throw new ActionError(404, `unknown route "${name}" for tool "${tool}"`);
 
-			// SINGLE invocation seam (the ONLY place a route handler runs) — C3 swaps
-			// the execution strategy (worker/vm) here without touching callers.
-			return await handler(ctx, req);
+			// SINGLE invocation seam (the ONLY place a route handler runs) — C3 runs it
+			// in a CONFINED worker (server-module isolation, design §9) instead of
+			// in-process; callers unchanged. The worker re-imports the SAME validated
+			// URL; isolation is unconditional (no in-process path).
+			return await this.moduleHost.invoke(
+				{ url, epoch: this.epoch, exportKind: "routes", member: name, ctx, arg: req },
+				this.timeoutMs,
+			);
 		})();
 
 		// Release the permit EXACTLY ONCE when `work` ACTUALLY settles (not when the

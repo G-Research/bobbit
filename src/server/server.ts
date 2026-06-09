@@ -42,6 +42,7 @@ import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
+import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
@@ -864,11 +865,17 @@ export function createGateway(config: GatewayConfig) {
 	// Extension host (design docs/design/extension-host.md §4b): the action
 	// dispatcher lives for the gateway process lifetime; its module cache is
 	// dropped synchronously by invalidateResolverCaches() on pack mutations.
-	const actionDispatcher = new ActionDispatcher(toolManager);
+	// Slice C3: ONE shared confined worker host (server-module isolation, design §9)
+	// threaded into BOTH dispatchers — every pack action/route handler runs through
+	// `ModuleHost.invoke` in a terminate-able worker with empty env + a module-load
+	// deny-hook + memory caps. Isolation is UNCONDITIONAL: there is no config flag or
+	// env var that runs a pack server module in-process (no in-process seam exists).
+	const moduleHost = new ModuleHost();
+	const actionDispatcher = new ActionDispatcher(toolManager, { moduleHost });
 	// Slice B3: the route dispatcher (mirrors actionDispatcher) + the pack-level route
 	// registry. Both live for the gateway process lifetime; both caches are dropped by
 	// invalidateResolverCaches() on pack install/update/uninstall (rebuilds the index).
-	const routeDispatcher = new RouteDispatcher(toolManager);
+	const routeDispatcher = new RouteDispatcher(toolManager, { moduleHost });
 	const routeRegistry = new RouteRegistry(toolManager);
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
 	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
