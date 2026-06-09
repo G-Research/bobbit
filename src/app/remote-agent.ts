@@ -38,6 +38,7 @@ import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } fro
 import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
+import { setSessionSecret, clearSessionSecret } from "./gesture-context.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -724,6 +725,14 @@ export class RemoteAgent {
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
+						// Fix A (extension-host §8 C2.1): stash the trusted per-session
+						// secret the gateway hands TRUSTED UI on the authenticated WS into a
+						// gesture-context module closure (NEVER on window/state/host), so
+						// `host.session.postMessage` can attach it while same-realm pack code
+						// cannot read it.
+						if (typeof msg.extSessionSecret === "string") {
+							setSessionSecret(this._sessionId, msg.extSessionSecret);
+						}
 						// Splits the ws-open→snapshot window into handshake vs. the
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
@@ -848,6 +857,9 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
+		// Drop the trusted per-session secret so a torn-down session leaves no stale
+		// capability in the client closure (re-delivered on the next auth_ok).
+		clearSessionSecret(this._sessionId);
 		this._setConnectionStatus("disconnected");
 	}
 

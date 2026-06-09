@@ -90,7 +90,7 @@ export interface SnapshotServerTiming {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok" }
+	| { type: "auth_ok"; extSessionSecret?: string }
 	| { type: "auth_failed" }
 	| { type: "state"; data: unknown }
 	| { type: "messages"; data: unknown[]; serverTiming?: SnapshotServerTiming }

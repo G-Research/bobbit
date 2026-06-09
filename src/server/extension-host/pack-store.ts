@@ -27,6 +27,33 @@ export interface PackStore {
 	list(packId: string, prefix?: string): Promise<string[]>;
 }
 
+/** Per-pack persistence quotas (Fix C). Enforced in `put` with a clear rejection
+ *  BEFORE any write, so a pack cannot exhaust gateway disk. Defaults are generous
+ *  for legitimate UI state but bound a runaway/malicious pack. */
+export interface PackStoreQuota {
+	/** Max serialized bytes for a SINGLE value's on-disk envelope. */
+	maxValueBytes: number;
+	/** Max number of distinct keys a pack may hold. */
+	maxKeys: number;
+	/** Max cumulative on-disk bytes across ALL of a pack's keys. */
+	maxTotalBytes: number;
+}
+
+export const DEFAULT_PACK_STORE_QUOTA: PackStoreQuota = {
+	maxValueBytes: 256 * 1024, // 256 KiB per value
+	maxKeys: 1000,
+	maxTotalBytes: 5 * 1024 * 1024, // 5 MiB per pack
+};
+
+/** Thrown when a `put` would exceed a {@link PackStoreQuota}. The endpoint maps it
+ *  to a 4xx with `.message` so the pack sees a clear reason. */
+export class PackStoreQuotaError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PackStoreQuotaError";
+	}
+}
+
 /** Serialized on-disk envelope. `v` is a forward-compat version tag. */
 interface StoreEnvelope<T = unknown> {
 	v: 1;
@@ -86,8 +113,9 @@ function assertKey(key: string): void {
  * Create a file-backed pack store. `rootDir` defaults to `bobbitStateDir()`; all
  * keys for a pack live under `<rootDir>/ext-store/<packId>/`.
  */
-export function createPackStore(opts?: { rootDir?: string }): PackStore {
+export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackStoreQuota> }): PackStore {
 	const baseDir = () => path.join(opts?.rootDir ?? bobbitStateDir(), "ext-store");
+	const quota: PackStoreQuota = { ...DEFAULT_PACK_STORE_QUOTA, ...opts?.quota };
 
 	/** Resolve + re-validate the absolute file path for (packId, key). */
 	const resolveFile = (packId: string, key: string): { dir: string; file: string } => {
@@ -122,9 +150,63 @@ export function createPackStore(opts?: { rootDir?: string }): PackStore {
 
 		async put<T = unknown>(packId: string, key: string, value: T): Promise<void> {
 			const { dir, file } = resolveFile(packId, key);
-			await fs.promises.mkdir(dir, { recursive: true });
 			const env: StoreEnvelope<T> = { v: 1, value };
-			await fs.promises.writeFile(file, JSON.stringify(env), "utf8");
+			const serialized = JSON.stringify(env);
+			const newBytes = Buffer.byteLength(serialized, "utf8");
+
+			// QUOTA 1 — reject an oversized single value BEFORE writing anything.
+			if (newBytes > quota.maxValueBytes) {
+				throw new PackStoreQuotaError(
+					`store value too large: ${newBytes} bytes exceeds the ${quota.maxValueBytes}-byte per-value limit`,
+				);
+			}
+
+			// Tally the pack's current keys + cumulative bytes (the file being
+			// overwritten is excluded from both the key count and the byte total).
+			let existingKeyCount = 0;
+			let existingTotalBytes = 0;
+			let overwriteBytes = 0;
+			let keyExists = false;
+			let names: string[] = [];
+			try {
+				names = await fs.promises.readdir(dir);
+			} catch {
+				names = []; // no dir yet
+			}
+			for (const name of names) {
+				if (!name.endsWith(".json")) continue;
+				existingKeyCount++;
+				let size = 0;
+				try {
+					size = (await fs.promises.stat(path.join(dir, name))).size;
+				} catch {
+					size = 0;
+				}
+				existingTotalBytes += size;
+				if (path.join(dir, name) === file) {
+					keyExists = true;
+					overwriteBytes = size;
+				}
+			}
+
+			// QUOTA 2 — reject a NEW key that would exceed the per-pack key count.
+			if (!keyExists && existingKeyCount >= quota.maxKeys) {
+				throw new PackStoreQuotaError(
+					`store key limit reached: ${existingKeyCount} keys at the ${quota.maxKeys}-key per-pack limit`,
+				);
+			}
+
+			// QUOTA 3 — reject a write that would exceed the per-pack cumulative bytes
+			// (subtract the overwritten key's old size; add the new value's size).
+			const projectedTotal = existingTotalBytes - overwriteBytes + newBytes;
+			if (projectedTotal > quota.maxTotalBytes) {
+				throw new PackStoreQuotaError(
+					`store full: ${projectedTotal} bytes would exceed the ${quota.maxTotalBytes}-byte per-pack limit`,
+				);
+			}
+
+			await fs.promises.mkdir(dir, { recursive: true });
+			await fs.promises.writeFile(file, serialized, "utf8");
 		},
 
 		async list(packId: string, prefix?: string): Promise<string[]> {

@@ -22,7 +22,7 @@
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
-import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord, PostMessageInput } from "../../shared/extension-host/host-api.js";
+import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
@@ -32,13 +32,17 @@ export interface ServerHostStoreApi {
 	list(prefix?: string): Promise<string[]>;
 }
 
-/** Mirrors HostSessionApi server-side. Slice B2 implements the own-session READS
- *  (`readTranscript`/`readToolCall`) through the contract adapter; Slice C2 wires
- *  the WRITE (`postMessage`) — bound to the own (header) session, never another. */
+/** Mirrors HostSessionApi server-side, but READ-ONLY. Slice B2 implements the
+ *  own-session READS (`readTranscript`/`readToolCall`) through the contract adapter.
+ *
+ *  `postMessage` is deliberately ABSENT (Fix B): driving the agent is a CLIENT-ONLY
+ *  capability, gated by a real user activation + the trusted per-session secret
+ *  (src/app/host-api.ts + gesture-context.ts). A server route/action handler has no
+ *  user gesture and could auto-drive the agent on a panel-triggered route call, so
+ *  the server host MUST NOT expose a way to post. */
 export interface ServerHostSessionApi {
 	readTranscript(opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope>;
 	readToolCall(toolUseId: string): Promise<ToolCallRecord | null>;
-	postMessage(msg: PostMessageInput): Promise<void>;
 }
 
 /** Readonly capability map — the SINGLE SOURCE OF TRUTH for what is IMPLEMENTED on the
@@ -95,12 +99,6 @@ export interface CreateServerHostApiOptions {
 	 *  Own-session by construction — there is no parameter for another session. When
 	 *  absent (non-gateway context), the session reads throw a clear error. */
 	readOwnTranscript?: () => Promise<string | null>;
-	/** Slice C2 — post a user/system message into the BOUND (own) session, optionally
-	 *  resuming the agent turn. Injected by the gateway (which authorizes + audits the
-	 *  post against the header-bound session). Own-session by construction — there is
-	 *  no parameter for another session. When absent (non-gateway context),
-	 *  `session.postMessage` throws a clear error. */
-	postOwnMessage?: (msg: PostMessageInput) => Promise<void>;
 }
 
 /**
@@ -127,10 +125,6 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		}
 		return readOwnTranscript;
 	};
-
-	// Slice C2: own-session message poster (header-bound session, supplied by the
-	// gateway which authorizes + audits the post). postMessage below delegates to it.
-	const postOwnMessage = opts.postOwnMessage;
 
 	// Slice B1: `store` is IMPLEMENTED — flip the flag. It delegates to the
 	// process-singleton PackStore, scoped to the SERVER-DERIVED closure packId
@@ -168,19 +162,9 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			const jsonl = await requireReader("readToolCall")();
 			return transcriptToToolCall(jsonl, toolUseId);
 		},
-		// Slice C2: WRITE into the BOUND (own) session via the gateway-injected poster
-		// (which authorizes + audits the post). Own-session by construction — there is
-		// no parameter for another session, so cross-session posting is impossible.
-		postMessage: async (msg) => {
-			if (!postOwnMessage) throw new Error("host.session.postMessage requires a gateway message poster");
-			if (msg.role !== "user" && msg.role !== "system") {
-				throw new Error('host.session.postMessage: role must be "user" or "system"');
-			}
-			if (typeof msg.text !== "string" || msg.text.trim().length === 0) {
-				throw new Error("host.session.postMessage: text must be a non-empty string");
-			}
-			await postOwnMessage(msg);
-		},
+		// `postMessage` is intentionally NOT implemented on the server host (Fix B):
+		// driving the agent is a client-only, user-activation + session-secret gated
+		// capability. A server handler has no user gesture, so it must not be able to post.
 	};
 
 	return { version: HOST_API_VERSION, contractVersion: HOST_CONTRACT_VERSION, capabilities, store, session };

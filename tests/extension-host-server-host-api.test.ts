@@ -6,8 +6,10 @@
  * Durable v1 contract: there is NO `gateway.fetch` / raw passthrough (the action
  * endpoint is the only sanctioned pack→server path; removing the hatch also
  * deleted the Host-header trusted-base-URL token-leak surface). The server host
- * exposes the bound identity + `capabilities`. `session` (reads B2 + write C2) and
- * `store` (B1) are implemented; `callRoute`/`ui` are CLIENT-ONLY surfaces and are
+ * exposes the bound identity + `capabilities`. `session` (READ-ONLY: B2 reads) and
+ * `store` (B1) are implemented; `session.postMessage` is intentionally ABSENT on the
+ * server host (Fix B) — driving the agent is a client-only, user-activation +
+ * session-secret gated capability. `callRoute`/`ui` are CLIENT-ONLY surfaces and are
  * intentionally NOT server-host capability members (Fix 3) — a server handler calls
  * its routes directly and has no UI, so their absence is by design, not a gap.
  *
@@ -23,7 +25,7 @@ import { createServerHostApi } from "../src/server/extension-host/server-host-ap
 describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	it("capabilities reports the server-host caps (session + store) — callRoute/ui are client-only", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
-		// Slice C2: session flips true (reads from B2 + write here = full namespace).
+		// session is READ-ONLY on the server host (B2 reads); the namespace flag is true.
 		assert.equal(host.capabilities.session, true);
 		// Slice B1: store is implemented — the flag flips true.
 		assert.equal(host.capabilities.store, true);
@@ -50,28 +52,13 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	});
 });
 
-describe("createServerHostApi — Slice C2 own-session WRITE (postMessage)", () => {
-	it("delegates a valid post to the gateway-injected poster (bound session)", async () => {
-		const posts: Array<{ role: string; text: string; resumeTurn?: boolean }> = [];
-		const host = createServerHostApi({
-			sessionId: "s", toolUseId: "tu", packId: "p", contributionId: "g/t",
-			postOwnMessage: async (m) => { posts.push(m); },
-		});
-		await host.session.postMessage({ role: "user", text: "hi", resumeTurn: false });
-		assert.deepEqual(posts, [{ role: "user", text: "hi", resumeTurn: false }]);
-	});
-
-	it("rejects an invalid role / empty text before posting", async () => {
-		const host = createServerHostApi({
-			sessionId: "s", packId: "p", contributionId: "g/t", postOwnMessage: async () => {},
-		});
-		await assert.rejects(() => host.session.postMessage({ role: "assistant" as never, text: "x" }), /role must be/);
-		await assert.rejects(() => host.session.postMessage({ role: "user", text: "   " }), /non-empty/);
-	});
-
-	it("throws a clear error when no gateway message poster is bound", async () => {
-		const host = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
-		await assert.rejects(() => host.session.postMessage({ role: "user", text: "x" }), /gateway message poster/);
+describe("createServerHostApi — Fix B: NO server-side session.postMessage", () => {
+	it("the server host session API does NOT expose postMessage (driving the agent is client-only)", () => {
+		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "p", contributionId: "g/t" });
+		// Reads remain; the write capability is intentionally absent on the server host.
+		assert.equal(typeof (host.session as Record<string, unknown>).readTranscript, "function");
+		assert.equal(typeof (host.session as Record<string, unknown>).readToolCall, "function");
+		assert.equal((host.session as Record<string, unknown>).postMessage, undefined);
 	});
 });
 

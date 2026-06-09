@@ -31,9 +31,13 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 import { openPackPanel, setPanelHostFactory } from "./pack-panels.js";
-import { consumeGesture, takeGestureNonce, setGestureNonceMinter } from "./gesture-context.js";
+import { consumeGesture, getSessionSecret } from "./gesture-context.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
+
+/** Header key for the trusted per-session capability secret (Fix A). The server
+ *  REQUIRES it on /api/ext/session/message and resolves it back to the session. */
+const SESSION_SECRET_HEADER = "x-bobbit-session-secret";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -43,27 +47,6 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
 	const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
 	if (sessionId) headers["x-bobbit-session-id"] = sessionId;
 	return { ...init, headers };
-}
-
-/** Fix 5: mint a server gesture nonce for the bound (session, pack tool). Called
- *  ONLY from inside `runWithUserGesture` (via the registered minter), so a nonce
- *  exists only for a genuine user gesture. The result is held in a gesture-context
- *  module closure that pack code cannot read; pack code that raw-fetches
- *  /api/ext/session/message has no way to obtain one. The nonce is session-bound
- *  server-side, so any allowedTools-permitted pack tool suffices to mint it. */
-async function mintGestureNonce(sessionId: string | undefined, packTool: string | undefined): Promise<string | null> {
-	if (!sessionId || !packTool) return null;
-	try {
-		const resp = await gatewayFetch(
-			"/api/ext/session/gesture",
-			withSession({ method: "POST", body: JSON.stringify({ sessionId, tool: packTool }) }, sessionId),
-		);
-		if (!resp.ok) return null;
-		const data = (await resp.json()) as { nonce?: unknown };
-		return typeof data.nonce === "string" ? data.nonce : null;
-	} catch {
-		return null;
-	}
 }
 
 /** Build the Phase-1 client Host API bound to a given session AND the
@@ -94,11 +77,6 @@ export function getHostApi(
 	// to send as `tool` so the server can derive the trusted packId (the client
 	// never sends a packId — design extension-host-phase2.md §2.3). Every Phase-2
 	// capability now has a real body (B1/B2/B3/B4/C1/C2), so no `notImpl` stub remains.
-	// Fix 5: bind the trusted gesture-nonce minter to THIS host's (session, packTool)
-	// so a genuine user gesture mints a session-bound nonce for postMessage. Only a
-	// pack-served host (packTool present) registers it; the minter is held in a
-	// gesture-context closure, never on `window`/`host` (pack code cannot read it).
-	if (packTool) setGestureNonceMinter(() => mintGestureNonce(sessionId, packTool));
 	// Slice B1: POST a store op to /api/ext/store/:op, sending the bound `packTool`
 	// as `tool` so the server derives the trusted packId (client never sends one).
 	const storeOp = async (op: "get" | "put" | "list", payload: Record<string, unknown>): Promise<unknown> => {
@@ -214,43 +192,46 @@ export function getHostApi(
 				if (!resp.ok) throw new Error(`session.readToolCall HTTP ${resp.status}`);
 				return resp.json();
 			},
-			// Slice C2: WRITE — post a user/system message into the BOUND session,
-			// optionally resuming the agent turn. Drives the agent, so it is gated by a
-			// MANDATORY client user-gesture token (gesture-context.ts): consumeGesture()
-			// is read SYNCHRONOUSLY at the prologue (before any await) and THROWS when no
-			// genuine user gesture is active, so a render/mount-time post fails loudly.
-			// The server independently authorizes every post (authorizeScopedRequest:
-			// header-bound session, body===header, tool ∈ allowedTools, server-derived
-			// packId) and audits it; the target is ALWAYS the bound session (never a body
-			// param → cross-session posting is impossible).
+			// Slice C2 / Fix A: WRITE — post a user/system message into the BOUND session,
+			// optionally resuming the agent turn. Drives the agent, so it has TWO
+			// independent unforgeable gates:
+			//   1. REAL user activation — consumeGesture() reads navigator.userActivation
+			//      SYNCHRONOUSLY at the prologue (before any await) and THROWS when no
+			//      genuine user gesture is active, so a render/mount-time post fails loudly.
+			//      A pack cannot fabricate transient activation.
+			//   2. TRUSTED per-session secret — attached as `x-bobbit-session-secret` from
+			//      the gesture-context module closure (never on window/host, so pack code
+			//      cannot read it). The server REQUIRES it and resolves it to the session;
+			//      a raw same-realm pack fetch carries none and is rejected 403.
+			// The server also authorizes every post (authorizeScopedRequest: header-bound
+			// session, body===header, tool ∈ allowedTools, server-derived packId) and audits
+			// it; the target is ALWAYS the bound session (never a body param → cross-session
+			// posting is impossible).
 			postMessage: (msg: PostMessageInput): Promise<void> => {
-				// SYNCHRONOUS gesture check (NOT inside the async body — an async throw
+				// SYNCHRONOUS activation check (NOT inside the async body — an async throw
 				// would be a rejected promise, not a loud synchronous failure on mount).
 				if (!consumeGesture()) throw new Error("postMessage requires a user gesture");
 				if (!packTool) throw new Error("host.session.postMessage requires a pack-served context");
 				return (async () => {
-					// Fix 5: attach the server-minted single-use gesture nonce (minted inside
-					// runWithUserGesture, held in a gesture-context closure). The server
-					// REQUIRES + CONSUMES it; a raw pack fetch has no way to obtain one.
-					const gestureNonce = await takeGestureNonce();
-					const resp = await gatewayFetch(
-						"/api/ext/session/message",
-						withSession(
-							{
-								method: "POST",
-								body: JSON.stringify({
-									sessionId,
-									toolUseId,
-									tool: packTool,
-									role: msg.role,
-									text: msg.text,
-									resumeTurn: msg.resumeTurn,
-									gestureNonce,
-								}),
-							},
-							sessionId,
-						),
+					// Attach the trusted per-session secret (held in a gesture-context closure
+					// pack code cannot read). The server REQUIRES it; a raw pack fetch has none.
+					const secret = getSessionSecret(sessionId);
+					const init = withSession(
+						{
+							method: "POST",
+							body: JSON.stringify({
+								sessionId,
+								toolUseId,
+								tool: packTool,
+								role: msg.role,
+								text: msg.text,
+								resumeTurn: msg.resumeTurn,
+							}),
+						},
+						sessionId,
 					);
+					if (secret) (init.headers as Record<string, string>)[SESSION_SECRET_HEADER] = secret;
+					const resp = await gatewayFetch("/api/ext/session/message", init);
 					if (!resp.ok) throw new Error(`session.postMessage HTTP ${resp.status}`);
 				})();
 			},
