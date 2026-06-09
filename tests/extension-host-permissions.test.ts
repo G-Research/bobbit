@@ -390,7 +390,11 @@ describe("permission grant — terminate-on-timeout kills a spawned child (blast
 		} as unknown as ActionHandlerCtx["host"];
 		const ctx: ActionHandlerCtx = { host, sessionId: "s", toolUseId: "t", tool: "demo_tool" };
 
-		const mh = new ModuleHost({ timeoutMs: 800 });
+		// Generous wall-cap (the handler hangs forever, so the 504 still fires exactly
+		// at the cap): worker startup + git spawn + the `store.put("pid")` MessagePort
+		// round-trip must reliably complete BEFORE the cap even under a loaded full-suite
+		// run. 800ms raced on CI; 3s is a ~10x margin over the normal <300ms path.
+		const mh = new ModuleHost({ timeoutMs: 3000 });
 		try {
 			const url = writeModule(
 				`import { spawn } from "node:child_process";\n` +
