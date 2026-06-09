@@ -6,9 +6,10 @@
  * entrypoints (launcher + kind:"route" deep-link) + host.session.readToolCall.
  *
  * THE KEY CHANGE FROM THE PRIOR REVISION (design §D2.3): the bundle route now
- * RECOMPUTES the changeset LIVE via `git` in the confined worker (the pack declares
- * `permissions: ["git","fs"]`, so child_process/fs are un-denied and the worker gets
- * a minimal `{ PATH }` env). This test therefore drives a REAL git working dir —
+ * RECOMPUTES the changeset LIVE via `git` in the confined worker (pack server code is
+ * the trusted tool/MCP tier, so node:child_process/node:fs are ambient and
+ * `process.cwd()` is the server-derived session worktree). This test therefore drives
+ * a REAL git working dir —
  * but, crucially, the git repo root is the SESSION WORKTREE (server-derived from the
  * bound session), NEVER a caller-supplied path. So the test `git init`s the SESSION's
  * own working dir, makes two commits there, and opens the viewer against that

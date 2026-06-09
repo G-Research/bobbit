@@ -45,7 +45,6 @@ import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatche
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError } from "./extension-host/pack-store.js";
-import { normalizeGrants } from "./extension-host/permission-grants.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
@@ -5387,25 +5386,19 @@ async function handleApiRoute(
 			packStore: getPackStore(),
 			readOwnTranscript,
 		});
-		// Slice C3 (declared-permission model): the session working dir the confined
-		// worker uses as its REAL cwd when the winning contribution declares `git`/`fs`
-		// (prefer the worktree path; fall back to the recorded cwd).
+		// The session working dir the confined worker uses as its process.cwd() (tool
+		// parity — prefer the worktree path; fall back to the recorded cwd).
 		const actionPs = sessionManager.getPersistedSession(guard.sessionId);
 		const actionWorkingDir = actionPs?.worktreePath ?? actionPs?.cwd;
-		// Audit the EFFECTIVE server-resolved capability grant for this invocation
-		// (design §9 — "audit every capability grant"). Same winning-contribution
-		// resolution the dispatcher threads into the worker.
-		const actionGrants = normalizeGrants(sessionToolManager.resolveToolLocation(tool)?.permissions);
-		const actionPerms = actionGrants.length ? `permissions=[${actionGrants.join(",")}]` : "permissions=none";
 		const start = Date.now();
 		try {
 			const result = await dispatcher.dispatch(tool, action, { host, sessionId: guard.sessionId, toolUseId, tool, workingDir: actionWorkingDir }, args, sessionToolManager);
-			console.log(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} ${actionPerms} outcome=ok durationMs=${Date.now() - start}`);
+			console.log(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
 			json(result ?? null);
 		} catch (err) {
 			const status = err instanceof ActionError ? err.status : 500;
 			const message = err instanceof Error ? err.message : String(err);
-			console.warn(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} ${actionPerms} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			console.warn(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
 		return;
@@ -5725,14 +5718,10 @@ async function handleApiRoute(
 			packStore: getPackStore(),
 			readOwnTranscript,
 		});
-		// Audit the EFFECTIVE server-resolved capability grant the worker runs the
-		// route module under (design §9 — "audit every capability grant"). The grant
-		// comes from the route's DECLARING-tool contribution (what actually executes),
-		// not the opener tool.
-		const routeGrants = normalizeGrants(routeToolManager.resolveToolLocation(resolved.declaringTool)?.permissions);
-		const routePerms = routeGrants.length ? `permissions=[${routeGrants.join(",")}]` : "permissions=none";
 		const start = Date.now();
 		try {
+			// The session working dir the confined worker uses as its process.cwd()
+			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
 			const routePs = sessionManager.getPersistedSession(guard.sessionId);
 			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
 			const result = await routeDispatcher.dispatch(
@@ -5742,12 +5731,12 @@ async function handleApiRoute(
 				{ method, query, body: init.body },
 				routeToolManager,
 			);
-			console.log(`[ext-route] name=${routeName} tool=${routeTool} declaringTool=${resolved.declaringTool} packId=${ident.packId} session=${guard.sessionId} ${routePerms} outcome=ok durationMs=${Date.now() - start}`);
+			console.log(`[ext-route] name=${routeName} tool=${routeTool} declaringTool=${resolved.declaringTool} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
 			json(result ?? null);
 		} catch (err) {
 			const status = err instanceof ActionError ? err.status : 500;
 			const message = err instanceof Error ? err.message : String(err);
-			console.warn(`[ext-route] name=${routeName} tool=${routeTool} declaringTool=${resolved.declaringTool} packId=${ident.packId} session=${guard.sessionId} ${routePerms} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
+			console.warn(`[ext-route] name=${routeName} tool=${routeTool} declaringTool=${resolved.declaringTool} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
 		return;

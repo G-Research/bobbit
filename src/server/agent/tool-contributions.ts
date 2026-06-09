@@ -13,10 +13,6 @@
 // (the tool still loads with no renderer/actions; a console.warn is emitted) —
 // never fatal, mirroring the per-tool try/catch in tool-manager.ts::scanToolsDir.
 
-import { PACK_PERMISSION_VALUES, type PackPermission } from "../extension-host/permission-grants.js";
-
-export type { PackPermission };
-
 /** Phase-1 load-bearing contributions parsed from a tool YAML. */
 export interface ToolContributions {
 	/** Renderer ESM module path, relative to the tool's group dir. Phase-1 load-bearing
@@ -37,12 +33,6 @@ export interface ToolContributions {
 	/** Slice C1 — typed `entrypoints:` declarations (launcher surfaces + deep-link
 	 *  client routes), consumed by the client `pack-entrypoints.ts` registry. */
 	entrypoints?: EntrypointContribution[];
-	/** Slice C3 (declared-permission model) — the OPT-IN host capabilities a pack's
-	 *  server modules may use (`git`/`fs`/`net`). Default empty ⇒ deny-all (the
-	 *  confined worker keeps every dangerous import denied + every ambient global
-	 *  stripped). The grant is resolved server-side from the winning contribution
-	 *  and threaded into the worker; it is NEVER caller-supplied. */
-	permissions?: PackPermission[];
 	/** Forward-compat: FUTURE unknown contribution keys parsed-for-shape only,
 	 *  retained verbatim, NOT acted on (RESERVED_KEYS is currently empty). */
 	reserved: ReservedContributions;
@@ -182,12 +172,6 @@ export function parseContributions(data: unknown, filePath: string): ToolContrib
 	if (obj.routes !== undefined) {
 		const parsed = parseRoutes(obj.routes, filePath);
 		if (parsed) result.routes = parsed;
-	}
-
-	// ── permissions (Slice C3 — declared-permission grants; tolerant, never rejects) ──
-	if (obj.permissions !== undefined) {
-		const parsed = parsePermissions(obj.permissions, filePath);
-		if (parsed.length > 0) result.permissions = parsed;
 	}
 
 	// ── entrypoints (Slice C1 — typed; tolerant per-tool, never rejects — a
@@ -450,43 +434,6 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 			if (params) target.params = params;
 			out.push({ id, kind: kind as EntrypointContribution["kind"], label, target });
 		}
-	}
-	return out;
-}
-
-/**
- * Parse the `permissions:` contribution (Slice C3 — declared-permission model)
- * into a typed `PackPermission[]`. Accepts a string array; entries are lowercased
- * and constrained to the recognized grant subset (`git`/`fs`/`net`). Unknown
- * entries are dropped with a warning — the block NEVER rejects the tool (mirrors
- * `parseStores`). Absent/empty ⇒ deny-all (the confined worker's default).
- *
- * Allowed values:
- *   - `git` — spawn the `git` binary (un-denies `child_process`; real cwd + PATH).
- *   - `fs`  — read/write within the session working dir (un-denies `fs`).
- *   - `net` — outbound network (keeps `fetch`/`WebSocket`; un-denies `net`/`http(s)`).
- */
-export function parsePermissions(raw: unknown, filePath: string): PackPermission[] {
-	if (!Array.isArray(raw)) {
-		console.warn(`[tool-contributions] 'permissions' is not an array in ${filePath}; ignoring`);
-		return [];
-	}
-	const allowed = new Set<string>(PACK_PERMISSION_VALUES);
-	const seen = new Set<string>();
-	const out: PackPermission[] = [];
-	for (const entry of raw) {
-		if (typeof entry !== "string") {
-			console.warn(`[tool-contributions] Dropping non-string 'permissions' entry in ${filePath}`);
-			continue;
-		}
-		const lower = entry.toLowerCase();
-		if (!allowed.has(lower)) {
-			console.warn(`[tool-contributions] Dropping unknown 'permissions' value "${entry}" in ${filePath} (allowed: ${[...allowed].join(", ")})`);
-			continue;
-		}
-		if (seen.has(lower)) continue;
-		seen.add(lower);
-		out.push(lower as PackPermission);
 	}
 	return out;
 }

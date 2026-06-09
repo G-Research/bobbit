@@ -1,18 +1,23 @@
 /**
- * Config-invariant test for Slice C3 — server-module worker isolation
- * (design docs/design/extension-host-phase2.md §9 / C3.3).
+ * Config-invariant test for server-module worker isolation.
  *
- * THE INVARIANT (acceptance #3/#4): isolation is UNCONDITIONAL. There is NO config
+ * Pack server code is TRUSTED (the tool/MCP tier): there is NO capability sandbox.
+ * Isolation = resource/crash isolation (terminate-on-timeout, mem/stack caps,
+ * spawned-child SIGKILL) + module-import containment (pack-root hygiene). Both run in
+ * an UNCONDITIONAL worker.
+ *
+ * THE INVARIANT (acceptance #3/#4): the worker is UNCONDITIONAL. There is NO config
  * flag, env var, or runtime toggle that runs a pack server module in-process in any
  * shippable / packaged / CI build. The dispatchers' SINGLE invocation seam ALWAYS
- * routes through `ModuleHost.invoke` (a confined worker); there is no in-process
- * fallback to gate, so the shipped configuration can never disable isolation.
+ * routes through `ModuleHost.invoke` (a worker); there is no in-process fallback to
+ * gate, so the shipped configuration can never disable the resource/crash isolation
+ * or the module-import containment.
  *
  * This test pins that there is no bypass:
  *   - A dispatcher constructed WITHOUT an injected ModuleHost still isolates (it
  *     self-constructs one — there is no in-process path).
- *   - A pack module's `node:fs` import is denied, AND stays denied even with every
- *     plausible "disable isolation" env var set → no env toggles isolation off.
+ *   - A pack-root `../` escape import is REJECTED, AND stays rejected even with every
+ *     plausible "disable isolation" env var set → no env toggles containment off.
  *   - A `while(1)` runaway is terminated regardless of env → the worker is always
  *     in the loop.
  *   - `ActionDispatcherOptions` exposes no in-process / bypass switch (structural).
@@ -45,6 +50,17 @@ function writeTool(baseDir: string, groupDir: string, actionsJs: string): void {
 	fs.writeFileSync(path.join(dir, "actions.mjs"), actionsJs);
 }
 
+/** Write a tool whose actions module statically imports a file OUTSIDE its pack
+ *  root (a `../` escape one level above the group dir) — rejected by module-import
+ *  containment regardless of config (layer-3 hygiene). */
+function writeEscapingTool(baseDir: string, groupDir: string): void {
+	const dir = path.join(baseDir, groupDir);
+	fs.mkdirSync(dir, { recursive: true });
+	// The escape target lives in baseDir (the parent of the pack-root group dir).
+	fs.writeFileSync(path.join(baseDir, "escape.mjs"), `export const x = "stolen";`);
+	writeTool(baseDir, groupDir, `import { x } from "../escape.mjs";\nexport const actions = { evil: async () => x };`);
+}
+
 const ctx = (): ActionHandlerCtx => ({ host: {} as ActionHandlerCtx["host"], sessionId: "s", toolUseId: "t", tool: "iso_tool" });
 
 /** Plausible bypass knobs an attacker / mis-config might try. NONE may disable isolation. */
@@ -66,29 +82,30 @@ after(() => {
 
 describe("C3 config-invariant — isolation cannot be disabled by config", () => {
 	it("a dispatcher constructed WITHOUT an injected ModuleHost still isolates (no in-process path)", async () => {
-		// No moduleHost option → the dispatcher self-constructs one. A node:fs import
-		// from pack code is still DENIED, proving the seam routes through the worker
-		// even when nothing was injected (there is no in-process fallback).
+		// No moduleHost option → the dispatcher self-constructs one. A pack-root `../`
+		// escape import is still REJECTED by module-import containment, proving the
+		// seam routes through the worker even when nothing was injected (there is no
+		// in-process fallback). node:fs itself is ambient now (trusted tier).
 		const base = path.join(tmp, "default-host");
-		writeTool(base, "demo", `export const actions = { evil: async () => { await import("node:fs"); return "leaked"; } };`);
+		writeEscapingTool(base, "demo");
 		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 10_000 });
 		await assert.rejects(
 			() => d.dispatch("iso_tool", "evil", ctx(), {}),
-			(e) => e instanceof ActionError && /denied|confinement/i.test(e.message),
+			(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
 		);
 	});
 
-	it("NO env var disables isolation — node:fs stays denied with every bypass knob set", async () => {
+	it("NO env var disables isolation — a pack-root `../` escape import stays rejected with every bypass knob set", async () => {
 		const base = path.join(tmp, "env-bypass");
-		writeTool(base, "demo", `export const actions = { evil: async () => { await import("node:fs"); return "leaked"; } };`);
+		writeEscapingTool(base, "demo");
 		const saved = new Map<string, string | undefined>();
 		for (const k of BYPASS_ENV_KEYS) { saved.set(k, process.env[k]); process.env[k] = k === "NODE_ENV" ? "development" : "1"; }
 		try {
 			const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 10_000 });
 			await assert.rejects(
 				() => d.dispatch("iso_tool", "evil", ctx(), {}),
-				(e) => e instanceof ActionError && /denied|confinement/i.test(e.message),
-				"isolation MUST remain active regardless of any bypass env var",
+				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
+				"module-import containment MUST remain active regardless of any bypass env var",
 			);
 		} finally {
 			for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
