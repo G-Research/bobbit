@@ -4,13 +4,13 @@ Status: **STAGED, not executed.** The bespoke built-in PR-walkthrough remains in
 place and all its existing tests stay green. This document records the exact paths
 a parity-proven deletion PR would remove once the pack has shipped and burned in.
 
-**SUPERSEDED (Phase-2 §C3.4 + §D2.3):** the earlier revision of this doc claimed
+**SUPERSEDED (Phase-2 §C3.4 + §D2.3):** the earliest revision of this doc claimed
 live changeset recompute was NOT pack-expressible because the confined worker had
-zero ambient access. The **declared-permission grant model** (`permissions: ["git",
-"fs"]`, server-resolved, default-deny, audited, resource-capped, killable) reverses
-that: the pack `bundle` route now recomputes the REAL changeset LIVE in the worker.
-The remaining carve-outs (GitHub export + LLM-synthesis credentials) are documented
-precisely below — they are credential/scope boundaries, not a recompute limitation.
+zero ambient access. That is reversed: pack server code is trusted (tool/MCP tier),
+so `node:child_process`/`node:fs` are AMBIENT (no declaration needed) and the pack
+`bundle` route recomputes the REAL changeset LIVE in the resource-isolated worker.
+The remaining carve-out (GitHub export) is a scope boundary; the LLM-synthesis split
+is a pack DESIGN CHOICE (keep `bundle` deterministic), not a credential limitation.
 
 ## What proves parity
 
@@ -24,7 +24,7 @@ ONLY public contributions + the durable Host API:
 | Surface | Bespoke origin | Pack re-expression |
 |---|---|---|
 | Viewer panel | `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` | `panels:` → `panel.js` (lazy ESM, host lit toolkit) — changeset header, phase **nav rail**, diff blocks, suggested comments |
-| Changeset/diff bundle endpoint | `src/server/pr-walkthrough/routes.ts` (`handlePrWalkthroughApiRoute`) | `routes:` → `routes.mjs` (`bundle` LIVE git recompute + `publish` persist), reached via `host.callRoute`, declaring `permissions: ["git","fs"]` |
+| Changeset/diff bundle endpoint | `src/server/pr-walkthrough/routes.ts` (`handlePrWalkthroughApiRoute`) | `routes:` → `routes.mjs` (`bundle` LIVE git recompute + `publish` persist), reached via `host.callRoute`, using ambient `child_process`/`fs` |
 | Persisted job/changeset state | `src/server/pr-walkthrough/walkthrough-store.ts` | `stores:` → `host.store.*` (pack-namespaced) |
 | Launcher + SPA deep-link | composer/git-widget launch + the `"walkthrough"` `RouteView` in `src/app/routing.ts` (its union entry + `getRouteFromHash` case) | `entrypoints:` (composer-slash + **git-widget-button** + command-palette launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
 | Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
@@ -52,25 +52,25 @@ pack `bundle` route (`market-packs/pr-walkthrough/.../routes.mjs`) re-expresses 
 `parseUnifiedDiff`/`applyNameStatus`/`parseShortstat`/`synthesizeFallbackCards`
 logic — and runs it **LIVE in the confined C3 worker**.
 
-This is possible because the pack manifest declares `permissions: ["git", "fs"]`
-(Phase-2 §9 C3.4 — the **declared-permission grant model**, which REPLACED the
-prior "no ambient access" worker). The grant is server-resolved from the winning
-contribution (never caller-supplied), default-deny otherwise; it un-denies
-`node:child_process` + `node:fs`, gives the worker a REAL `cwd()` (the session
-working dir) + a minimal `{ PATH }` env (NO gateway token / model credentials), and
-SIGKILLs any spawned `git` child on terminate-on-timeout. Net effect: a pack route
-recomputes a walkthrough for a PR **created AFTER install** — strictly SAFER than
-the bespoke route (which runs git in-process, uncapped, with the full host env).
+This is possible because pack server code is trusted (tool/MCP tier, Phase-2 §9
+C3.4): `node:child_process` + `node:fs` are AMBIENT with no declaration, and the
+worker's `process.cwd()` is the server-derived session working dir (the bootstrap
+overrides `process.cwd` for tool parity, since worker threads can't `chdir`). Any
+spawned `git` child is SIGKILLed on terminate-on-timeout (resource isolation). Net
+effect: a pack route recomputes a walkthrough for a PR **created AFTER install** —
+and the worker is strictly SAFER than the bespoke route (which runs git in-process,
+uncapped and unkillable).
 
-**The synthesis credential split (the real boundary — §D2.3):** the confined worker
-has no model credentials by design, so **LLM card synthesis MUST NOT run in the
-route**. The split:
+**The synthesis split (a pack DESIGN CHOICE, not a credential boundary — §D2.3):** a
+trusted pack has full ambient env/network and *could* run its own inference, but
+keeping `bundle` deterministic means **LLM card synthesis is kept agent-tool-side**
+rather than re-derived in the route. The split:
 
 | Data | Where it comes from | Credentials? |
 |---|---|---|
-| base/head SHA, file list, `DiffBlock[]` | COMPUTED live in the worker via declared `git`/`fs` | none (git binary via PATH) |
+| base/head SHA, file list, `DiffBlock[]` | COMPUTED live in the worker via ambient `git`/`fs` | none (git binary via PATH) |
 | structural fallback cards | COMPUTED live in the worker (`synthesizeFallbackCards`) | none |
-| LLM-enhanced cards | READ from `host.store` (written by the submit-time agent tool, keyed by changeset id) | model creds used at submit time, in the AGENT, never the worker |
+| LLM-enhanced cards | READ from `host.store` (written by the submit-time agent tool, keyed by changeset id) | model creds used at submit time, in the AGENT (a design choice — `bundle` stays deterministic) |
 | GitHub review export | stays agent-tool / built-in (network + GitHub auth) | not in the worker |
 
 So `routes.mjs::bundle` is a LIVE git/diff computer for the changeset + a STORE
@@ -80,20 +80,20 @@ deterministic in-worker fallback walkthrough — a correct non-LLM result), and
 changeset id + a job pointer; `persistedAt` stamped once → stable across reloads,
 the store-rehydration parity proof).
 
-**What stays agent-tool/built-in (credential/scope carve-outs, NOT a recompute
+**What stays agent-tool/built-in (design-choice / scope carve-outs, NOT a recompute
 limitation):**
 
-- **LLM card synthesis** — needs model credentials, which the worker deliberately
-  lacks. Produced at submit time and read from the store (above). A future
-  **host-provided synthesis route** (`completeModelText` run IN THE PARENT behind
-  the same authorized proxy as `store`/`session`) would let the pack request
-  richer LIVE LLM cards without credentials entering the worker; documented as the
-  follow-up, NOT required for D2 parity (the submit-time path covers every authored
-  walkthrough, and the live route always returns a correct structural walkthrough).
+- **LLM card synthesis** — a trusted pack could run its own inference (it has full
+  ambient env/network), but PR-walkthrough keeps synthesis agent-tool-side at submit
+  time so the live `bundle` route stays deterministic (read from the store, above).
+  A future **host-provided synthesis route** (`completeModelText` run IN THE PARENT
+  behind the same authorized proxy as `store`/`session`, with gateway-mediated model
+  selection) is documented as the follow-up, NOT required for D2 parity (the
+  submit-time path covers every authored walkthrough, and the live route always
+  returns a correct structural walkthrough).
 - **GitHub review export/submit** (`/export/preview`, `/export/submit`) and GitHub
-  PR resolution — need the github-adapter (network + GitHub credentials). The pack
-  declares `git`/`fs` only (NOT `net`); this surface is out of scope for the viewer
-  pack and stays agent-tool/built-in.
+  PR resolution — need the github-adapter (network + GitHub credentials). This
+  surface is out of scope for the viewer pack and stays agent-tool/built-in.
 
 ## Files the deletion PR removes (once parity is signed off in production)
 
@@ -128,14 +128,14 @@ PR-walkthrough QA pass on the pack is green:
 
 Supporting server modules split by capability. The **structural** changeset/diff
 logic (`git-changeset.ts`, `diff-parser.ts`) is now RE-EXPRESSED LIVE in the pack
-`routes.mjs` (declared `git`/`fs`), so the `bundle` route no longer depends on the
-bespoke route to compute a changeset. The modules that need **network + GitHub +
-model credentials** (`github-adapter.ts`, `card-synthesis.ts`, `export-mapper.ts`)
+`routes.mjs` (ambient `child_process`/`fs`), so the `bundle` route no longer depends
+on the bespoke route to compute a changeset. The modules that do **network + GitHub
++ model-backed** work (`github-adapter.ts`, `card-synthesis.ts`, `export-mapper.ts`)
 and the agent lifecycle (`walkthrough-agent-manager.ts`,
 `walkthrough-analysis-bundle.ts`, `walkthrough-yaml-schema.ts`) stay **agent-tool
-work** (the `submit_pr_walkthrough_yaml` pipeline): the worker has no model creds
-(§D2.3 split), so LLM synthesis + GitHub export remain agent-side, persisted to the
-pack store via `publish` and read back by `bundle`.
+work** (the `submit_pr_walkthrough_yaml` pipeline): keeping LLM synthesis + GitHub
+export agent-side is a design choice (§D2.3 split), persisted to the pack store via
+`publish` and read back by `bundle`.
 
 ## Out of scope for the D2 litmus (do NOT delete yet)
 
@@ -146,9 +146,9 @@ re-implement, and the deletion PR must NOT prematurely remove:
 - The **agent-driving tools** `submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle`
   / `readonly_bash` and their `WalkthroughAgentManager` lifecycle (launch, sandbox
   scope, GitHub adapter, model-backed card synthesis). The git/fs work the live
-  recompute needs is now done IN the pack worker (declared `git`/`fs`); what stays
-  agent-side is the **network + model-credential** work (GitHub PR resolution +
-  export, LLM card synthesis) — the worker has neither by design (§D2.3). The litmus
+  recompute needs is now done IN the pack worker (ambient `child_process`/`fs`); what
+  stays agent-side is the **network + model-backed** work (GitHub PR resolution +
+  export, LLM card synthesis) — a pack design choice, not a worker limitation (§D2.3). The litmus
   pack computes the structural changeset LIVE and reads LLM cards the agent persisted
   via `publish`, plus the submit tool call read-only.
 - The standalone `/walkthrough` deep-link page until the `ext` route fully replaces it

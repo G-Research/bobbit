@@ -1,24 +1,22 @@
 // Pack SERVER route module — Extension Host Phase-2 D2 litmus (the maximal pack).
 //
 // ESM (`export const routes`), loaded by the gateway RouteRegistry/RouteDispatcher
-// and EXECUTED inside the C3 worker. This pack declares `permissions: ["git","fs"]`
-// (pr_walkthrough.yaml), so — per the DECLARED-PERMISSION grant model (design
-// docs/design/extension-host-phase2.md §9 C3.4) — the worker un-denies
-// `node:child_process` + `node:fs`, gives `process` a REAL cwd() (the session
-// working dir) + a minimal `{ PATH }` env (so the `git` binary resolves), and
-// SIGKILLs any spawned `git` child on terminate-on-timeout. The grant is
-// server-resolved from the winning contribution, never caller-supplied; absent it,
-// this module would still load but the git import would be denied.
+// and EXECUTED inside the confined worker. Pack server code is TRUSTED (the tool/MCP
+// tier), so `node:child_process` + `node:fs` are ambient, `process.cwd()` is the
+// SERVER-derived session working dir (worker threads can't `chdir`, so the bootstrap
+// overrides `process.cwd` for tool parity), and any spawned `git` child is SIGKILLed
+// on terminate-on-timeout (resource isolation). The git working dir is server-derived
+// from the bound session, never caller-supplied.
 //
 // ── LIVE CHANGESET RECOMPUTE (design §D2.3 — the reversal of the prior revision) ──
 // The bespoke route `src/server/pr-walkthrough/routes.ts` COMPUTES the changeset
 // bundle at request time: it shells out to `git` (execFile), parses the unified
-// diff, assembles the changeset header, and runs LLM card synthesis. With declared
-// `git`/`fs` this pack route re-expresses the STRUCTURAL part of that LIVE in the
-// confined worker — the SAME `git diff`/`--name-status`/`--shortstat` + diff parse +
-// `synthesizeFallbackCards` logic — so `bundle` returns a REAL, freshly-computed
-// changeset for the requested base/head, including PRs created AFTER the pack was
-// installed (a static seeded fixture could only replay PRs known at publish time).
+// diff, assembles the changeset header, and runs LLM card synthesis. This pack route
+// re-expresses the STRUCTURAL part of that LIVE in the confined worker — the SAME
+// `git diff`/`--name-status`/`--shortstat` + diff parse + `synthesizeFallbackCards`
+// logic — so `bundle` returns a REAL, freshly-computed changeset for the requested
+// base/head, including PRs created AFTER the pack was installed (a static seeded
+// fixture could only replay PRs known at publish time).
 //
 // ── THE GIT WORKING DIR IS SERVER-DERIVED, NEVER CALLER-SUPPLIED (security) ──
 // The repo root is ALWAYS the worker's own `process.cwd()` — i.e. the bound
@@ -29,13 +27,13 @@
 // other projects and bypass session-working-dir confinement). The caller chooses
 // WHICH base/head to diff; the SERVER chooses WHICH repo (the session worktree).
 //
-// ── THE SYNTHESIS CREDENTIAL SPLIT (design §D2.3 — CRITICAL) ──
-// LLM card synthesis needs MODEL CREDENTIALS. The confined worker has only a
-// minimal `{ PATH }` env and NO gateway token / model keys (by design §9 C3.2) —
-// even the `net` grant would not hand it the gateway's model credentials. So LLM
-// synthesis MUST NOT run in this route. The split:
+// ── THE SYNTHESIS SPLIT (design §D2.3) ──
+// LLM card synthesis needs MODEL CREDENTIALS + an agent loop. Rather than re-derive
+// that inference inside this route, this pack keeps synthesis at agent-tool/submit
+// time (where the agent already has its model creds) and has the route serve the
+// persisted result. So LLM synthesis does NOT run in this route. The split:
 //   • The STRUCTURAL changeset + deterministic fallback cards are COMPUTED LIVE
-//     here (git, no creds).
+//     here (git).
 //   • LLM-ENHANCED cards are produced at AGENT-TOOL/submit time
 //     (`submit_pr_walkthrough_yaml`, normal agent creds, NOT this worker) and
 //     PERSISTED via the `publish` route to `host.store`, keyed by the changeset id.
@@ -178,9 +176,9 @@ export const routes = {
 	},
 };
 
-// ── The worker's REAL cwd() (the session working dir under the git/fs grant). The
-//    inert/minimal process shim returns "/" when no fs/git is granted; with the
-//    grant it returns the session dir. Guarded so a denied-grant load never throws. ──
+// ── The worker's process.cwd() — the server-derived session working dir (the
+//    bootstrap overrides process.cwd for tool parity, since worker threads can't
+//    chdir). Guarded so a load in an unusual environment never throws. ──
 function workerCwd() {
 	try {
 		return typeof process !== "undefined" && typeof process.cwd === "function" ? process.cwd() : ".";

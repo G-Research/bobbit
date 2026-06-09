@@ -661,10 +661,6 @@ export class ToolManager {
 		/** Slice B3 — routes module + declared names for the RouteDispatcher/RouteRegistry. */
 		routesModule?: string;
 		routeNames?: string[];
-		/** Slice C3 — the declared-permission grants (`git`/`fs`/`net`) the confined
-		 *  worker applies for this pack's server modules. Server-resolved, never
-		 *  caller-supplied. Absent ⇒ deny-all. */
-		permissions?: string[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
@@ -686,8 +682,6 @@ export class ToolManager {
 			// and the RouteRegistry indexes by (default module "routes.js").
 			routesModule: c.routes?.module,
 			routeNames: c.routes?.names,
-			// Slice C3: the declared-permission grants threaded into the confined worker.
-			permissions: c.permissions,
 		};
 	}
 

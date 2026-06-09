@@ -1,10 +1,26 @@
 // src/server/extension-host/module-host-worker.ts
 //
-// Slice C3 — server-module isolation (Extension Host Phase 2, design
-// docs/design/extension-host-phase2.md §9). Runs a pack server module member (an
-// `actions`/`routes` handler) in a confined, terminate-able `worker_threads`
-// Worker with resource caps, behind a request/response message protocol whose
-// ONLY granted capability is the host-API proxy.
+// Server-module RESOURCE + CRASH isolation. Runs a pack server module member (an
+// `actions`/`routes` handler) in a terminate-able `worker_threads` Worker with
+// resource caps, behind a request/response message protocol whose only proxied
+// capability back to the parent is the host-API proxy.
+//
+// Pack SERVER code is TRUSTED — the same tier as a tool or MCP server the user
+// chose to install — so it runs with FULL ambient parity: normal `node:` built-ins,
+// normal network globals, the normal `process` (full env). There is NO capability
+// sandbox; a per-capability sandbox over trusted in-process code is false security
+// (a native `.node` addon or the shared process trivially defeats it). The ONLY
+// isolation kept is the kind that is genuine:
+//
+//   - **Resource/crash isolation:** terminate-on-timeout (also the CPU control —
+//     worker_threads has no per-core throttle), `resourceLimits` memory/stack caps,
+//     and SIGKILL of any spawned OS child on terminate. The parent races a timer; on
+//     timeout it calls `worker.terminate()` (true cancellation) + kills tracked
+//     children and rejects 504.
+//   - **Module-import containment** (in `module-host-bootstrap.ts` /
+//     `confinement-loader.ts`): the pack module graph can only resolve `file:` URLs
+//     within the pack root. This is cheap loader/stability hygiene, NOT a security
+//     boundary (fs is ambient now).
 //
 // This is the execution strategy the dispatchers' SINGLE invocation seam swaps
 // onto (action-dispatcher.ts / route-dispatcher.ts): `ModuleHost.invoke(...)`
@@ -13,52 +29,14 @@
 // concurrency cap, permit-held-until-the-work-settles, bounded reload retry); the
 // worker adds what Phase 1 could not — TRUE termination of a runaway handler.
 //
-// **Confinement (design §9 — three layers, not "a bare worker is a sandbox"):**
-//   1. Empty env: `new Worker(..., { env: {} })` — the worker holds NO gateway
-//      token / secret (those live only in the parent process env).
-//   2. Module-load deny-hook: the bootstrap (`module-host-bootstrap.ts`) installs
-//      `confinement-loader.ts` BEFORE importing pack code, denying fs/network/
-//      child_process/process/worker_threads/etc. to the pack module graph.
-//   3. Terminate-on-timeout (also the CPU control — worker_threads has no per-core
-//      throttle) + `resourceLimits` memory caps. The parent races a timer; on
-//      timeout it calls `worker.terminate()` (true cancellation) and rejects 504.
-//
 // **Isolation is UNCONDITIONAL.** There is NO config flag, env var, or runtime
 // toggle that runs a pack server module in-process in any shippable/packaged/CI
-// build (design §9). The dispatchers ALWAYS route their seam through
-// `ModuleHost.invoke`; there is no in-process fallback to gate, so the shipped
-// configuration can never disable isolation.
+// build. The dispatchers ALWAYS route their seam through `ModuleHost.invoke`; there
+// is no in-process fallback to gate, so the shipped configuration can never disable
+// the resource/crash isolation.
 
 import { Worker } from "node:worker_threads";
 import { ActionError, type ActionHandlerCtx } from "./action-dispatcher.js";
-import { deniedForGrants, needsRealProcess } from "./permission-grants.js";
-
-/** First-path-segment deny-list handed to the confinement loader (design §9). The
- *  pack module graph cannot import any built-in whose first segment is in this set
- *  (so `node:fs/promises` and `node:http2` are denied via `fs` / `http2`). The
- *  bootstrap imports its OWN `worker_threads`/`module` plumbing BEFORE registering
- *  the hook, so these denials never block the confinement machinery itself. */
-export const DENIED_BUILTINS: readonly string[] = [
-	"fs",
-	"child_process",
-	"net",
-	"http",
-	"https",
-	"http2",
-	"dns",
-	"tls",
-	"dgram",
-	"cluster",
-	"worker_threads",
-	"module",
-	"process",
-	"inspector",
-	"v8",
-	"vm",
-	"repl",
-	"sea",
-	"trace_events",
-];
 
 export interface ModuleHostOptions {
 	/** Default per-invoke wall-time before terminate-on-timeout (ms). A per-call
@@ -72,16 +50,14 @@ export interface ModuleHostOptions {
 
 export interface InvokeRequest {
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated; the
-	 *  worker dynamic-imports THIS exact URL (design §9 — same URL the dispatcher
-	 *  builds). */
+	 *  worker dynamic-imports THIS exact URL (same URL the dispatcher builds). */
 	url: string;
 	/** The validated pack group root (the dispatcher's `groupDir`) the entry module
-	 *  was loaded from. Forwarded into the worker's confinement loader so EVERY
-	 *  resolved `file:` URL in the pack module graph must stay realpath-contained
-	 *  within it — a pack module cannot `import`/`require` a file OUTSIDE its own
-	 *  pack root (relative `../` walk, absolute path, symlink, or ancestor
-	 *  `node_modules`), closing the last ambient-fs gap left by the built-in
-	 *  deny-list (design §9 — no ambient access except the Host API). */
+	 *  was loaded from. Forwarded into the worker's module-import containment loader
+	 *  so EVERY resolved `file:` URL in the pack module graph must stay realpath-
+	 *  contained within it — a pack module cannot `import`/`require` a file OUTSIDE
+	 *  its own pack root (relative `../` walk, absolute path, symlink, or ancestor
+	 *  `node_modules`). This is loader/stability hygiene, not a security boundary. */
 	packRoot: string;
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
@@ -95,14 +71,10 @@ export interface InvokeRequest {
 	ctx: ActionHandlerCtx;
 	/** The handler argument (args for an action, RouteRequest for a route). */
 	arg: unknown;
-	/** Slice C3 (declared-permission model) — the SERVER-RESOLVED grant set
-	 *  (`git`/`fs`/`net`) for the winning contribution. Default empty ⇒ deny-all
-	 *  (the worker keeps every dangerous import denied + every ambient global
-	 *  stripped, exactly as before). Never caller-supplied. */
-	permissions?: readonly string[];
-	/** Slice C3 — the session working directory. When `git`/`fs` is granted the
-	 *  worker's process gets a REAL cwd() pointing here (relative reads + spawned
-	 *  git resolve under the session dir). Ignored when no fs/git grant. */
+	/** The session working directory — the worker's `process.cwd()` for tool parity
+	 *  (a tool/MCP server runs rooted at the session worktree; worker threads can't
+	 *  `chdir`, so the bootstrap overrides `process.cwd` to this). Relative spawns +
+	 *  bare-relative fs paths resolve under it. Absent ⇒ the worker's real cwd. */
 	workingDir?: string;
 }
 
@@ -175,10 +147,10 @@ export class ModuleHost {
 	private readonly defaultTimeoutMs: number;
 	private readonly maxOldGenerationSizeMb: number;
 	private readonly stackSizeMb: number;
-	/** Live workers → the OS child PIDs each spawned (declared-permission `git`).
-	 *  `dispose()` terminates any still-running worker AND kills its tracked
-	 *  children; the per-invoke terminate-on-timeout path does the same so a runaway
-	 *  spawned child cannot outlive the wall-time cap (design §9). */
+	/** Live workers → the OS child PIDs each spawned. `dispose()` terminates any
+	 *  still-running worker AND kills its tracked children; the per-invoke
+	 *  terminate-on-timeout path does the same so a runaway spawned child cannot
+	 *  outlive the wall-time cap. */
 	private readonly live = new Map<Worker, Set<number>>();
 	private disposed = false;
 
@@ -213,6 +185,7 @@ export class ModuleHost {
 			sessionId: req.ctx?.sessionId,
 			toolUseId: req.ctx?.toolUseId,
 			tool: req.ctx?.tool,
+			workingDir: req.ctx?.workingDir,
 			hostVersion: (host as { version?: number } | undefined)?.version,
 			hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
 			capabilities: {
@@ -222,27 +195,18 @@ export class ModuleHost {
 			},
 		};
 
-		// Slice C3 (declared-permission model): start from the full deny-list + empty
-		// env (deny-all), then RELAX per the server-resolved grant set. With no grants
-		// this is byte-identical to the prior behavior.
-		const grants = req.permissions ?? [];
-		const denied = deniedForGrants(DENIED_BUILTINS, grants);
-		// `git`/`fs` need the git binary to resolve + relative reads to work, so the
-		// worker's REAL env carries ONLY PATH (no gateway token / secret leaks). Every
-		// other case keeps the empty env. `net` alone needs no env (globals only).
-		const env = needsRealProcess(grants) ? { PATH: process.env.PATH ?? "" } : {};
-
 		const worker = new Worker(this.bootstrapUrl(), {
-			// Layer 1 — minimal env: empty by default; only PATH when git/fs is granted.
-			env,
+			// No `env` option: the worker inherits a full copy of the gateway env
+			// (full-env parity — trusted pack code is the tool/MCP tier).
+			//
 			// `wallCapMs` lets the bootstrap bound a SYNCHRONOUS child's injected
 			// `timeout` BELOW this cap: a blocking sync call (`spawnSync`/`execSync`/
 			// `execFileSync`) cannot report its pid to the kill-set (the worker thread is
 			// frozen for the call's whole duration), so Node's own timeout must SIGKILL
 			// the child before this terminate-on-timeout reaps the (blocked) thread —
 			// otherwise the OS child (a child of the MAIN process) orphans past the cap.
-			workerData: { denied, packRoot: req.packRoot, permissions: [...grants], workingDir: req.workingDir, wallCapMs: limit },
-			// Layer 3 — memory caps.
+			workerData: { packRoot: req.packRoot, workingDir: req.workingDir, wallCapMs: limit },
+			// Memory caps.
 			resourceLimits: {
 				maxOldGenerationSizeMb: this.maxOldGenerationSizeMb,
 				stackSizeMb: this.stackSizeMb,
@@ -262,16 +226,16 @@ export class ModuleHost {
 				settled = true;
 				clearTimeout(timer);
 				this.live.delete(worker);
-				// Layer 3 — true terminate-on-timeout (and unconditional teardown so a
-				// completed worker never lingers). terminate() is fire-and-forget.
+				// True terminate-on-timeout (and unconditional teardown so a completed
+				// worker never lingers). terminate() is fire-and-forget.
 				void worker.terminate();
-				// Slice C3: a child process spawned by a `git`-granted handler is a child
-				// of the MAIN gateway process — worker.terminate() does NOT reap it. Kill
-				// any still-running tracked child so a runaway git cannot outlive the cap.
+				// A child process spawned by a handler is a child of the MAIN gateway
+				// process — worker.terminate() does NOT reap it. Kill any still-running
+				// tracked child so a runaway spawn cannot outlive the cap.
 				killChildren(children);
 				fn();
 			};
-			// Layer 3 — wall-time termination IS the CPU-exhaustion control (a runaway
+			// Wall-time termination IS the CPU-exhaustion control (a runaway
 			// while(1) is KILLED here; worker_threads has no per-core throttle).
 			const timer = setTimeout(() => {
 				finish(() => reject(new ActionError(504, "pack server module timed out")));
@@ -320,7 +284,7 @@ export class ModuleHost {
 	}
 
 	/** Terminate any live workers + kill their tracked children (gateway shutdown /
-	 *  test teardown) so no spawned git survives the host. */
+	 *  test teardown) so no spawned child survives the host. */
 	dispose(): void {
 		this.disposed = true;
 		for (const [w, children] of this.live) {
@@ -333,8 +297,8 @@ export class ModuleHost {
 
 /** SIGKILL every still-running tracked child PID (best-effort; an already-exited
  *  pid throws ESRCH which we swallow). This is the parent-side half of the
- *  declared-permission `git` blast-radius control — spawned children are children
- *  of the MAIN process, so worker.terminate() alone leaves them running. */
+ *  spawned-child blast-radius control — spawned children are children of the MAIN
+ *  process, so worker.terminate() alone leaves them running. */
 function killChildren(children: Set<number>): void {
 	for (const pid of children) {
 		try {

@@ -17,27 +17,19 @@ panels:
     title: PR Walkthrough
     entry: panel.js
 
-# ── permissions: (Slice C3 — declared-permission grant model, design §9 C3.4) —
-#    OPT IN to `git` + `fs` for THIS pack's confined server modules. Default-deny
-#    everywhere else; the grant is SERVER-resolved from this winning contribution
-#    (never caller-supplied). It un-denies node:child_process + node:fs in the C3
-#    worker so the `bundle` route runs REAL `git diff` LIVE against the session
-#    working dir, gives the worker a minimal `{ PATH }` env (no gateway token /
-#    secret) so the git binary resolves, and SIGKILLs any spawned git child on
-#    terminate-on-timeout. `net` is intentionally OMITTED — the GitHub-adapter /
-#    export path is out of scope for the viewer pack.
-permissions: [git, fs]
-
 # ── routes: (Slice B3) — re-expresses handlePrWalkthroughApiRoute under the
 #    pack's namespace. Reached via host.callRoute("bundle"|"publish"). Server
 #    derives the trusted packId from the calling tool and resolves the route
 #    MODULE via the pack-level RouteRegistry (opener-independent).
-#    LIVE RECOMPUTE (design §D2.3): with the declared git/fs grant, `bundle`
+#    LIVE RECOMPUTE (design §D2.3): node:child_process + node:fs are ambient in the
+#    confined worker (trusted tool/MCP tier), so `bundle` runs REAL `git diff` LIVE
+#    against the session working dir — `process.cwd()` is the SERVER-derived session
+#    worktree, and any spawned git child is SIGKILLed on terminate-on-timeout. It
 #    recomputes the REAL changeset (git diff + diff parse + changeset assembly +
-#    deterministic fallback cards) LIVE in the confined worker — covering PRs
-#    created AFTER install — and READS any LLM-enhanced cards persisted at
-#    submit-time via `publish` (keyed by changeset id) from host.store.* (the
-#    synthesis credential split: no model creds in the worker). See
+#    deterministic fallback cards) LIVE — covering PRs created AFTER install — and
+#    READS any LLM-enhanced cards persisted at submit-time via `publish` (keyed by
+#    changeset id) from host.store.* (the synthesis credential split: model
+#    inference happens at submit time, not in the worker). See
 #    docs/design/pr-walkthrough-pack-deletion.md.
 routes:
   module: routes.mjs
