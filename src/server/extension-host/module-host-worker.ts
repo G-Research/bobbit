@@ -139,7 +139,10 @@ function workerSafeExecArgv(argv: readonly string[]): string[] {
  *  access on the live host object (no `constructor`, no prototype walk). */
 const PROXYABLE: Record<string, Set<string>> = {
 	store: new Set(["get", "put", "list"]),
-	session: new Set(["readTranscript", "readToolCall", "postMessage"]),
+	// `session` is READ-ONLY for server modules. `postMessage` is intentionally
+	// EXCLUDED: the parent `ServerHostApi` omits it (server modules have no user
+	// gesture), so proxying it would always throw — authors get reads only.
+	session: new Set(["readTranscript", "readToolCall"]),
 };
 
 /** Invoke a proxied host method on the PARENT's live host, enforcing the

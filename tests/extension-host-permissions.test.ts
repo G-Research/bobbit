@@ -12,14 +12,19 @@
  * Pinned invariants:
  *   - `git` grant un-denies `child_process` so the pack can spawn the git binary;
  *     a pack declaring NOTHING cannot import child_process (denied).
- *   - `fs` grant un-denies `node:fs` + reads resolve relative to the session cwd;
- *     without the grant the import is denied.
+ *   - The `git` grant is a CONSTRAINED, async-only git RUNNER, not general command
+ *     execution: an async spawn of the `git` binary works with a bare-relative cwd
+ *     resolving to the session workingDir; `spawnSync`/`execSync` are DENIED; and
+ *     spawning a non-git command is rejected.
+ *   - `fs` grant un-denies `node:fs` + a BARE RELATIVE fs path resolves under the
+ *     session workingDir; without the grant the import is denied.
  *   - `net` grant restores `fetch`; without it `fetch` is stripped.
  *   - The granted worker's env carries ONLY PATH — no gateway token / secret.
  *   - Pack-root import containment is STILL enforced under a grant (a `../` walk
  *     out of the pack is rejected even with `fs`/`git` granted).
  *   - terminate-on-timeout KILLS a child spawned by a `git`-granted handler (a
  *     runaway git cannot outlive the wall-time cap).
+ *   - A server module's `ctx.host.session` is READ-ONLY (no `postMessage`).
  *   - The grant is threaded end-to-end through ActionDispatcher from the resolved
  *     contribution.
  */
@@ -180,6 +185,68 @@ describe("permission grant — git", () => {
 			mh.dispose();
 		}
 	});
+
+	it("an async git spawn with NO cwd defaults to the session workingDir (bare-relative resolution)", async () => {
+		// `git hash-object <relative-file>` resolves the path against the process cwd
+		// and works OUTSIDE a repo. The handler passes a BARE relative filename with
+		// no `cwd` option → the runner must default cwd to `workingDir`, so git finds
+		// the file written there (NOT in the worker's startup cwd).
+		const dir = path.join(tmp, `git-cwd-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "marker.txt"), "hello-relative\n");
+		const mh = new ModuleHost({ timeoutMs: 15_000 });
+		try {
+			const url = writeModule(
+				`import { spawn } from "node:child_process";\n` +
+				`export const actions = { hash: async () => new Promise((resolve, reject) => {\n` +
+				`  const c = spawn("git", ["hash-object", "marker.txt"]); /* no cwd → defaults to workingDir */\n` +
+				`  let out = ""; c.stdout.on("data", (d) => { out += d; });\n` +
+				`  c.on("error", reject);\n` +
+				`  c.on("close", (code) => resolve({ code, out: out.trim() }));\n` +
+				`}) };`,
+			);
+			const r = (await mh.invoke(req(url, "hash", bareCtx(), {}, { permissions: ["git"], workingDir: dir }))) as { code: number; out: string };
+			assert.equal(r.code, 0, "git hash-object should resolve the bare-relative file under workingDir (exit 0)");
+			assert.match(r.out, /^[0-9a-f]{40}$/, "git should print the blob SHA of the file under workingDir");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("synchronous child-process APIs (spawnSync/execSync) are DENIED even with `git`", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			for (const api of ["spawnSync", "execSync"]) {
+				const url = writeModule(
+					`import * as cp from "node:child_process";\n` +
+					`export const actions = { run: async () => cp.${api}("git", ["--version"]) };`,
+				);
+				await assert.rejects(
+					() => mh.invoke(req(url, "run", bareCtx(), {}, { permissions: ["git"], workingDir: tmp })),
+					(e) => e instanceof ActionError && /denied|confinement|synchronous/i.test(e.message),
+					`${api} must be denied under the git grant`,
+				);
+			}
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("spawning a NON-git command is rejected (the git grant is not general exec)", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`import { spawn } from "node:child_process";\n` +
+				`export const actions = { evil: async () => spawn(${JSON.stringify(process.execPath)}, ["-e", "1"]) };`,
+			);
+			await assert.rejects(
+				() => mh.invoke(req(url, "evil", bareCtx(), {}, { permissions: ["git"], workingDir: tmp })),
+				(e) => e instanceof ActionError && /git binary|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
 });
 
 describe("permission grant — fs", () => {
@@ -202,6 +269,29 @@ describe("permission grant — fs", () => {
 		try {
 			const r = await mh.invoke(req(url, "readit", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir }));
 			assert.equal(r, "hello-from-cwd");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a BARE relative `fs.readFileSync(\"data.txt\")` reads from the session workingDir (not the startup cwd)", async () => {
+		const dir = path.join(tmp, `fs-bare-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "data.txt"), "bare-relative-from-workingdir");
+		// The handler passes a BARE relative path (no process.cwd() join). Worker
+		// threads cannot chdir(), so without the fs-rebase wrap this would resolve
+		// against the worker's STARTUP cwd and fail; the grant rebases it onto
+		// workingDir. Default-import form so the wrap reflects across module facades.
+		fs.writeFileSync(
+			path.join(dir, "entry.mjs"),
+			`import fs from "node:fs";\n` +
+			`export const actions = { readit: async () => fs.readFileSync("data.txt", "utf8") };`,
+		);
+		const url = pathToFileURL(path.join(dir, "entry.mjs")).href;
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const r = await mh.invoke(req(url, "readit", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir }));
+			assert.equal(r, "bare-relative-from-workingdir");
 		} finally {
 			mh.dispose();
 		}
@@ -281,10 +371,11 @@ describe("permission grant — pack-root containment STILL enforced under a gran
 
 describe("permission grant — terminate-on-timeout kills a spawned child (blast-radius)", () => {
 	it("a child spawned by a `git`-granted handler is KILLED when the worker times out", async () => {
-		// The handler spawns a long-lived child, reports its pid to the parent via the
-		// host store, then hangs → the wall-time cap fires, the worker is terminated,
-		// and the parent must KILL the still-running tracked child (it is a child of
-		// the MAIN process, which worker.terminate() does NOT reap).
+		// The handler spawns a long-lived GIT child (`git hash-object --stdin` blocks
+		// reading stdin forever), reports its pid to the parent via the host store,
+		// then hangs → the wall-time cap fires, the worker is terminated, and the
+		// parent must KILL the still-running tracked child (it is a child of the MAIN
+		// process, which worker.terminate() does NOT reap).
 		let recordedPid: number | undefined;
 		const host = {
 			version: 1,
@@ -295,7 +386,7 @@ describe("permission grant — terminate-on-timeout kills a spawned child (blast
 				get: async () => null,
 				list: async () => [],
 			},
-			session: { readTranscript: async () => ({}), readToolCall: async () => null, postMessage: async () => {} },
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
 		} as unknown as ActionHandlerCtx["host"];
 		const ctx: ActionHandlerCtx = { host, sessionId: "s", toolUseId: "t", tool: "demo_tool" };
 
@@ -303,14 +394,14 @@ describe("permission grant — terminate-on-timeout kills a spawned child (blast
 		try {
 			const url = writeModule(
 				`import { spawn } from "node:child_process";\n` +
-				`export const actions = { spawnHang: async (ctx, arg) => {\n` +
-				`  const c = spawn(arg.node, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });\n` +
+				`export const actions = { spawnHang: async (ctx) => {\n` +
+				`  const c = spawn("git", ["hash-object", "--stdin"]); /* blocks reading stdin */\n` +
 				`  await ctx.host.store.put("pid", c.pid);\n` +
 				`  await new Promise(() => {}); /* hang → timeout */\n` +
 				`} };`,
 			);
 			await assert.rejects(
-				() => mh.invoke(req(url, "spawnHang", ctx, { node: process.execPath }, { permissions: ["git"], workingDir: tmp })),
+				() => mh.invoke(req(url, "spawnHang", ctx, {}, { permissions: ["git"], workingDir: tmp })),
 				(e) => e instanceof ActionError && e.status === 504,
 			);
 			assert.equal(typeof recordedPid, "number", "the handler reported the spawned child's pid before hanging");
@@ -322,6 +413,27 @@ describe("permission grant — terminate-on-timeout kills a spawned child (blast
 				if (alive) await new Promise((r) => setTimeout(r, 50));
 			}
 			assert.equal(alive, false, `the spawned child (pid ${pid}) must be killed when the worker is terminated`);
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe("server-module host surface — session is READ-ONLY (no postMessage)", () => {
+	it("ctx.host.session exposes readTranscript/readToolCall but NOT postMessage", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { probe: async (ctx) => ({\n` +
+				`  readTranscript: typeof ctx.host.session.readTranscript,\n` +
+				`  readToolCall: typeof ctx.host.session.readToolCall,\n` +
+				`  postMessage: typeof ctx.host.session.postMessage,\n` +
+				`}) };`,
+			);
+			const r = (await mh.invoke(req(url, "probe", bareCtx()))) as Record<string, string>;
+			assert.equal(r.readTranscript, "function", "reads stay available");
+			assert.equal(r.readToolCall, "function", "reads stay available");
+			assert.equal(r.postMessage, "undefined", "postMessage must be ABSENT from a server module's session surface");
 		} finally {
 			mh.dispose();
 		}
