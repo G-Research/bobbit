@@ -1,33 +1,35 @@
 // src/server/extension-host/permission-grants.ts
 //
-// Slice C3 (extension) — the DECLARED-PERMISSION grant model for confined pack
-// server modules (Extension Host Phase 2, design docs/design/extension-host-phase2.md
-// §9). A pack manifest may OPT IN to a small set of otherwise-denied host
-// capabilities via `permissions: ["git", "fs", "net"]`. The grant is resolved
-// SERVER-SIDE from the winning contribution (never caller-supplied), threaded into
-// the worker's `workerData`, and applied by the worker bootstrap.
+// Slice C3 (extension) — the DECLARED-PERMISSION model for pack server modules
+// (Extension Host Phase 2, design docs/design/extension-host-phase2.md §9 / C3.4).
+// Pack server code is TRUSTED (tool/MCP tier). `permissions:` is install-time
+// DISCLOSURE of which ambient OS capabilities the pack uses + the switch that
+// ENABLES them — NOT an enforced privilege boundary against the pack's own code.
+// A pack manifest opts in via `permissions: ["git", "fs", "net"]`. The enabled set
+// is resolved SERVER-SIDE from the winning contribution (never caller-supplied —
+// the one enforced property here: you cannot self-escalate the manifest), threaded
+// into the worker's `workerData`, and applied by the worker bootstrap.
 //
-// **Default is DENY-ALL.** A pack that declares nothing gets exactly today's
-// confinement: every dangerous built-in import denied, every outbound-network
-// global stripped, an inert `process` shim (empty env, cwd()=>"/"). Each granted
-// capability is purely ADDITIVE and narrowly scoped:
+// **Default is DENY-ALL (the disclosure baseline, not a security claim).** A pack
+// that declares nothing gets the deny-all default: every dangerous built-in import
+// denied, every outbound-network global stripped, an inert `process` shim (empty
+// env, cwd()=>"/"). Each enabled capability flips ON the FULL ambient surface, with
+// no further restriction on usage:
 //
-//   - `git` → a CONSTRAINED, TRACKED, ASYNC-ONLY git runner (NOT general command
-//     execution). `child_process` is un-denied, but the worker wraps it so ONLY an
-//     async `spawn`/`execFile` of the `git` binary is permitted — any other
-//     command/argv[0] is rejected, and EVERY synchronous child-process API
-//     (`spawnSync`/`execSync`/`execFileSync`/…) is denied (they cannot be
-//     tracked/cancelled, so their OS child could outlive the terminate-on-timeout
-//     cap). The spawn `cwd` defaults to the session working dir; the process shim
-//     gets a MINIMAL env containing only PATH (so the binary resolves). Every
-//     spawned child is tracked + SIGKILLed on terminate-on-timeout so a runaway git
-//     cannot outlive the cap.
-//   - `fs`  → un-deny `fs` (covers `fs`/`fs/promises` via first-segment) AND wrap the
-//     `fs`/`fs/promises` modules so a LEADING RELATIVE path argument resolves under
-//     the session working dir (absolute paths pass through unchanged) — worker
-//     threads cannot `chdir()`, so the process-shim `cwd()` alone does NOT redirect
-//     real fs path resolution. The process shim also gets a REAL cwd() + minimal
-//     PATH env.
+//   - `git` → un-deny `child_process` FULLY: the trusted pack may run ANY command
+//     (sync or async), exactly like a tool. The worker adds CONVENIENCE + STABILITY
+//     only — async spawns default their `cwd` to the session working dir when
+//     unspecified, and every async child is tracked + SIGKILLed on
+//     terminate-on-timeout so it cannot outlive the cap. NO binary/argv restriction,
+//     NO sync denial, NO cwd containment. The process shim gets a `cwd()` + a
+//     minimal env containing only PATH (a hygiene measure — never a token/secret).
+//   - `fs`  → un-deny `fs` (covers `fs`/`fs/promises` via first-segment) FULLY with
+//     NO path containment: the trusted pack may read/write anywhere the gateway
+//     process can. The worker adds CONVENIENCE only — a LEADING bare-relative path
+//     argument is rebased onto the session working dir (workers cannot `chdir()`, so
+//     the shim `cwd()` alone does not redirect libuv's real cwd). Absolute / Buffer /
+//     URL paths pass through unchanged. The process shim also gets a `cwd()` +
+//     minimal PATH env.
 //   - `net` → KEEP the outbound-network globals (`fetch`/`WebSocket`/…) instead of
 //     stripping them, and un-deny the network built-ins (`net`/`http`/`https`/…).
 //
