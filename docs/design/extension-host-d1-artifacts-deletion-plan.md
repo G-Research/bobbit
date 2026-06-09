@@ -4,9 +4,12 @@
 gated on the gaps below (acceptance #1 allows "deletion PR demonstrably ready").
 This doc is that ready-to-execute plan.
 
-Source of truth: `docs/design/extension-host-phase2.md` §10 (Slice D1). Litmus
-artifact: `tests/fixtures/market-sources/artifacts-src/artifacts/` +
-`tests/e2e/ui/artifacts-pack.spec.ts`.
+Source of truth: `docs/design/extension-host-phase2.md` §10 (Slice D1). The
+litmus pack now ships as a first-class installable market pack at the repo-root
+design-specified location `market-packs/artifacts/` (pack.yaml +
+`tools/artifact_demo/...`), NOT as a test fixture. Parity is proven by
+`tests/e2e/ui/artifacts-pack.spec.ts`, which registers `market-packs/` as a
+local-dir marketplace source and installs the `artifacts` pack.
 
 ## 1. What the litmus already proves (in CI, green)
 
@@ -40,8 +43,11 @@ not just the litmus's text payload), the bespoke built-in paths are removed:
 - Any built-in renderer-registry registration of the `artifacts` tool renderer
   and the bespoke `/api/preview/artifacts/:id/restore` route + its callers.
 - The built-in `artifacts` tool YAML/provider is replaced by the shipped market
-  pack (the litmus fixture is the template; a shipped pack lives under
-  `defaults/.../market-packs/artifacts/` per §10 D1.1).
+  pack now living at the repo root: `market-packs/artifacts/` (`pack.yaml` +
+  `tools/artifact_demo/{artifact_demo.yaml,ArtifactRenderer.js,ArtifactViewerPanel.js}`).
+  This is the same directory the litmus E2E installs from — the deletion PR
+  removes the bespoke built-in paths above and lets this shipped pack own the
+  surface.
 
 **Before deleting:** port the existing artifact unit tests
 (`rg "artifacts" tests/`) to drive the pack renderer/panel instead of the

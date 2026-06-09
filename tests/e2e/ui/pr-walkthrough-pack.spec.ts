@@ -43,10 +43,12 @@ import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 // run can never leak a half-installed server-scope pack into a retry.
 test.describe.configure({ mode: "serial" });
 
-// Absolute path to the local-dir marketplace SOURCE (its `pr-walkthrough/` subdir
-// is the pack — a dir is a pack iff it has pack.yaml).
+// Absolute path to the repo-root `market-packs/` local-dir marketplace SOURCE
+// (its `pr-walkthrough/` subdir is the pack — a dir is a pack iff it has
+// pack.yaml). The litmus packs ship here as first-class installable packs, not
+// test fixtures.
 const SOURCE_DIR = fileURLToPath(
-	new URL("../../fixtures/market-sources/pr-walkthrough-src", import.meta.url),
+	new URL("../../../market-packs", import.meta.url),
 );
 
 const PACK = "pr-walkthrough";

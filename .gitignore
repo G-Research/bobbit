@@ -20,6 +20,9 @@ tests/e2e/screenshots/
 *-report.html
 nul
 .pi/
+# Stray tsx transpile cache emitted when TMPDIR resolves to the literal string
+# "undefined" (e.g. a shell with an unset/garbled temp env). Never commit it.
+/undefined/
 # .bobbit/config/ holds team-shared overrides (roles, tools, workflows) and SHOULD be committed.
 # Per-machine runtime state lives in .bobbit/state/ and .bobbit/tmp/, both excluded below
 # (state/ also via .bobbit/.gitignore for redundancy).
