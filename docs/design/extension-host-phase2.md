@@ -1158,10 +1158,9 @@ Nothing else about `process` is changed (full env, real `argv`/`execPath`/`exit`
 | sync `child_process` spawners | same default-cwd plus an injected `timeout`/`killSignal` clamped below the wall-cap | a blocking sync child can't report its pid (thread frozen), so Node must SIGKILL it before terminate reaps the thread |
 | `fs` / `fs/promises` path methods | a leading bare-relative string path is rebased onto `workingDir`; absolute / Buffer / URL paths pass through unchanged; nothing is rejected | libuv's real cwd stays the gateway's even after the `process.cwd` override, so relative fs must match `process.cwd()` |
 
-**No model credentials are special-cased.** A trusted pack could do its own inference exactly
-as a tool can (it has full env + network); the Host API simply does not add a `host.model.*`
-method, because pack-side inference is out of scope for the durable v1 contract — not because
-the worker is credential-less.
+**No `host.model.*` yet.** A trusted pack has full ambient env + network and could do its own
+inference exactly as a tool can; the Host API simply does not add a typed `host.model.*`
+method, because gateway-mediated inference is out of scope for the durable v1 contract.
 
 **Why this is correct, not an escape hatch (the binding argument).** Acceptance #4's "no
 privileged escape hatch" is about the ENFORCED boundaries — CROSS-pack, cross-session, and

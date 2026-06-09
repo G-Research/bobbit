@@ -34,7 +34,7 @@ opens a file-picker menu, mirroring the slash-skill menu:
 
 - The query is the path fragment after `@` (no whitespace, no further `@`).
 - The menu lists files under the session's worktree, ranked so basename matches
-  (exact > prefix > substring) sort ahead of path-only matches, then by shorter
+  (exact > prefix > substring) sort ahead of full-path matches, then by shorter
   path, then lexicographically.
 - Keyboard: ↑/↓ move the selection, Enter/Tab select, Escape dismisses; mouse
   hover/click also select.

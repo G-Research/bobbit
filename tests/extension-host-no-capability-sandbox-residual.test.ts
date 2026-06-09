@@ -139,6 +139,7 @@ describe("extension-host — no residual capability-sandbox references (acceptan
 		const docs = [
 			path.join(REPO_ROOT, "docs", "design", "extension-host.md"),
 			path.join(REPO_ROOT, "docs", "design", "extension-host-phase2.md"),
+			path.join(REPO_ROOT, "docs", "design", "pr-walkthrough-pack-deletion.md"),
 			path.join(REPO_ROOT, "docs", "marketplace.md"),
 			path.join(REPO_ROOT, "docs", "extension-host-authoring.md"),
 		];
