@@ -190,11 +190,13 @@ Remove the whole file: `PACK_PERMISSION_VALUES`, `PackPermission`, `GRANT_DENIED
 
 ### 4.3 `server.ts`
 - Remove `import { normalizeGrants } from "./extension-host/permission-grants.js"`.
-- In the action endpoint (~L5390-5399): delete `actionGrants` + `actionPerms`; remove
-  `${actionPerms}` from the `[ext-action]` `console.log`. **Keep `actionWorkingDir`** and
-  its threading into `dispatcher.dispatch(... workingDir: actionWorkingDir ...)`.
-- In the route endpoint (~L5728-5733): delete `routeGrants` + `routePerms`; remove
-  `${routePerms}` from the `[ext-route]` `console.log`. **Keep `routeWorkingDir`**.
+- In the `/api/ext/action` endpoint handler (the `[ext-action]` audit block): delete the
+  `actionGrants`/`actionPerms` locals and remove the `${actionPerms}` field from the
+  `[ext-action]` `console.log`. **Keep the `actionWorkingDir` resolution** and its threading
+  into `dispatcher.dispatch(... workingDir: actionWorkingDir ...)`.
+- In the `/api/ext/route/:name` endpoint handler (the `[ext-route]` audit block): delete the
+  `routeGrants`/`routePerms` locals and remove the `${routePerms}` field from the
+  `[ext-route]` `console.log`. **Keep the `routeWorkingDir` resolution**.
 - Leave all unrelated `grant`/`permission` code untouched (tool grant-policy
   `resolveGrantPolicy`, `tool-grant-request`, `viewerPermission`, `permission_denied` JSON,
   storage permission, OAuth grants).
