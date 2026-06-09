@@ -4,8 +4,9 @@
  * contribution-point manifest parser (design docs/design/extension-host.md §2.2/§2.3).
  *
  * Pinned invariants:
- *   - Reserved Phase-2 keys (panels/entrypoints) are accepted + ignored, NEVER rejected;
- *     stores (B1) + routes (B3) are graduated to typed, load-bearing contributions.
+ *   - Every Phase-2 key has graduated to a typed contribution: stores (B1), routes (B3),
+ *     panels (B4), entrypoints (C1). RESERVED_KEYS is now empty, but a FUTURE unknown key
+ *     is still accepted + retained verbatim + NEVER rejected by the fallback machinery.
  *   - `..` / absolute renderer + actions.module paths degrade gracefully (parsed away, no throw).
  *   - actions.names validation (/^[a-z0-9][a-z0-9_-]*$/) drops bad entries.
  *   - A malformed contributions block degrades (tool still loads with no renderer/actions).
@@ -17,6 +18,7 @@ import {
 	parseContributions,
 	parseStores,
 	parseRoutes,
+	parseEntrypoints,
 	computeRendererKind,
 	isMarketPackBaseDir,
 } from "../src/server/agent/tool-contributions.ts";
@@ -78,16 +80,14 @@ describe("parseContributions — path traversal rejection (degrades, never throw
 	});
 });
 
-describe("parseContributions — Phase-2 reserved keys (accepted + ignored, never rejected)", () => {
-	it("retains valid array reserved keys verbatim and never throws", () => {
-		const c = parseContributions(
-			// `panels` (B4) and `routes` (B3) have graduated to typed fields; `entrypoints`
-			// is the sole remaining reserved key.
-			{ name: "t", entrypoints: [{ id: "e" }] },
-			FP,
-		);
-		// Parsed-and-reserved: present, retained verbatim, NOT promoted to load-bearing fields.
-		assert.deepEqual(c.reserved.entrypoints, [{ id: "e" }]);
+describe("parseContributions — forward-compat fallback for FUTURE unknown keys (accepted + retained, never rejected)", () => {
+	it("retains a future unknown array contribution key verbatim and never throws", () => {
+		// RESERVED_KEYS is empty now that every Phase-2 key graduated, but the fallback
+		// machinery stays generic: a future key re-added to RESERVED_KEYS would be
+		// shape-validated (array) + retained verbatim here. With none configured, an
+		// unknown key is simply ignored (not promoted, not retained) — and never throws.
+		const c = parseContributions({ name: "t", futureThing: [{ id: "e" }] }, FP);
+		assert.equal((c.reserved as Record<string, unknown>).futureThing, undefined);
 		assert.equal(c.renderer, undefined);
 		assert.equal(c.actions, undefined);
 	});
@@ -102,9 +102,22 @@ describe("parseContributions — Phase-2 reserved keys (accepted + ignored, neve
 		assert.equal((c.reserved as Record<string, unknown>).panels, undefined);
 	});
 
-	it("malformed reserved block (non-array) degrades — tool still parses, key dropped", () => {
+	it("Slice C1 — `entrypoints:` is GRADUATED to a typed field (no longer reserved)", () => {
+		const c = parseContributions(
+			{ name: "t", entrypoints: [{ id: "open", kind: "composer-slash", label: "Open", target: { panelId: "demo.viewer" } }] },
+			FP,
+		);
+		assert.deepEqual(c.entrypoints, [
+			{ id: "open", kind: "composer-slash", label: "Open", target: { panelId: "demo.viewer" } },
+		]);
+		// `entrypoints` is no longer carried as a reserved key.
+		assert.equal((c.reserved as Record<string, unknown>).entrypoints, undefined);
+	});
+
+	it("malformed entrypoints block (non-array) degrades — tool still parses, key dropped", () => {
 		const c = parseContributions({ name: "t", entrypoints: { not: "an array" }, renderer: "R.js" }, FP);
-		assert.equal(c.reserved.entrypoints, undefined);
+		assert.equal(c.entrypoints, undefined);
+		assert.equal((c.reserved as Record<string, unknown>).entrypoints, undefined);
 		// the rest of the manifest still parses
 		assert.equal(c.renderer, "R.js");
 	});
@@ -176,6 +189,66 @@ describe("parseRoutes (Slice B3 — `routes:` graduated to typed, load-bearing, 
 		assert.deepEqual(c.routes, { module: "api.js", names: ["bundle"] });
 		// graduated off `reserved` — routes is no longer a reserved key
 		assert.equal((c.reserved as Record<string, unknown>).routes, undefined);
+	});
+});
+
+describe("parseEntrypoints (Slice C1 — `entrypoints:` graduated to typed, tolerant, never rejects per-tool)", () => {
+	it("parses launcher kinds with a label + structured target", () => {
+		assert.deepEqual(
+			parseEntrypoints(
+				[{ id: "slash", kind: "composer-slash", label: "Open", target: { panelId: "demo.viewer" } }],
+				FP,
+			),
+			[{ id: "slash", kind: "composer-slash", label: "Open", target: { panelId: "demo.viewer" } }],
+		);
+		// route-target launcher
+		assert.deepEqual(
+			parseEntrypoints([{ id: "go", kind: "command-palette", label: "Go", target: { route: "demo.route" } }], FP),
+			[{ id: "go", kind: "command-palette", label: "Go", target: { route: "demo.route" } }],
+		);
+	});
+
+	it("parses a `route` kind with routeId + target.panelId + paramKeys", () => {
+		assert.deepEqual(
+			parseEntrypoints(
+				[{ id: "r", kind: "route", routeId: "demo.deep", target: { panelId: "demo.viewer" }, paramKeys: ["itemId", "tab"] }],
+				FP,
+			),
+			[{ id: "r", kind: "route", routeId: "demo.deep", target: { panelId: "demo.viewer" }, paramKeys: ["itemId", "tab"] }],
+		);
+	});
+
+	it("drops invalid entries (bad kind, missing label, missing routeId/panelId, bad id) — never rejects", () => {
+		assert.deepEqual(parseEntrypoints([{ id: "x", kind: "bogus", label: "X", target: { panelId: "p" } }], FP), []);
+		assert.deepEqual(parseEntrypoints([{ id: "x", kind: "composer-slash", target: { panelId: "p" } }], FP), []); // no label
+		assert.deepEqual(parseEntrypoints([{ id: "x", kind: "composer-slash", label: "X" }], FP), []); // no target
+		assert.deepEqual(parseEntrypoints([{ id: "r", kind: "route", target: { panelId: "p" }, paramKeys: [] }], FP), []); // no routeId
+		assert.deepEqual(parseEntrypoints([{ id: "r", kind: "route", routeId: "d", target: {}, paramKeys: [] }], FP), []); // no panelId
+		assert.deepEqual(parseEntrypoints([{ id: "1 bad", kind: "composer-slash", label: "X", target: { panelId: "p" } }], FP), []); // bad id
+		assert.deepEqual(parseEntrypoints("not-an-array", FP), []);
+	});
+
+	it("non-string paramKeys are filtered; missing paramKeys defaults to []", () => {
+		assert.deepEqual(
+			parseEntrypoints([{ id: "r", kind: "route", routeId: "d", target: { panelId: "p" }, paramKeys: ["ok", 42, null] }], FP)[0].paramKeys,
+			["ok"],
+		);
+		assert.deepEqual(
+			parseEntrypoints([{ id: "r", kind: "route", routeId: "d", target: { panelId: "p" } }], FP)[0].paramKeys,
+			[],
+		);
+	});
+
+	it("duplicate ids keep the first occurrence", () => {
+		const out = parseEntrypoints(
+			[
+				{ id: "dup", kind: "composer-slash", label: "First", target: { panelId: "a" } },
+				{ id: "dup", kind: "composer-slash", label: "Second", target: { panelId: "b" } },
+			],
+			FP,
+		);
+		assert.equal(out.length, 1);
+		assert.equal(out[0].label, "First");
 	});
 });
 

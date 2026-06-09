@@ -4,7 +4,7 @@ import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
-import { parseContributions, computeRendererKind, type ToolContributions, type PanelContribution } from "./tool-contributions.js";
+import { parseContributions, computeRendererKind, type ToolContributions, type PanelContribution, type EntrypointContribution } from "./tool-contributions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -63,6 +63,10 @@ export interface ToolInfo {
 	/** Optional declared route names (from `routes.names`) the pack-level RouteRegistry
 	 *  indexes by (Slice B3, additive wire field). */
 	routeNames?: string[];
+	/** Optional typed `entrypoints:` the tool contributes (Slice C1, additive wire
+	 *  field). Consumed by the client `pack-entrypoints.ts` registry (launchers +
+	 *  deep-link routes). */
+	entrypoints?: EntrypointContribution[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
@@ -72,10 +76,12 @@ export interface ToolInfo {
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
-function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds" | "panels" | "routeNames"> {
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds" | "panels" | "routeNames" | "entrypoints"> {
 	const c = base.contributions;
 	return {
 		storeIds: c.stores?.map((s) => s.id),
+		// Slice C1 — expose the typed entrypoints for the client registry.
+		entrypoints: c.entrypoints,
 		// Slice B4 — expose declared panels (id + title only; the ESM `entry` path
 		// stays server-side, served by the bearer-only panel endpoint).
 		panels: c.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),

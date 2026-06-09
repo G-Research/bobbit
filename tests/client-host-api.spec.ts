@@ -5,11 +5,11 @@
  * Pins:
  *   - `host.capabilities` is the SINGLE SOURCE OF TRUTH: invokeAction +
  *     requestRender are true; `store` (B1) + `callRoute` (B3) are implemented +
- *     true; `session`/`ui` stay false until their namespaces flip live;
- *     `has(name)` mirrors the flags.
+ *     true; `ui` (B4 openPanel + C1 navigate) is implemented + true; `session`
+ *     stays false until C2 adds writes; `has(name)` mirrors the flags.
  *   - `version`/`contractVersion` are the frozen consts.
  *   - There is NO `gateway` member (escape hatch removed in v1).
- *   - The still-frozen Phase-2 stubs (session writes / ui) throw "reserved for Phase 2".
+ *   - The still-frozen Phase-2 stubs (session WRITES) throw "reserved for Phase 2".
  *
  * Pattern mirrors pack-renderers-reconcile.spec.ts: esbuild bundles the entry
  * once, a file:// fixture loads it, and we drive the helpers via window globals.
@@ -68,10 +68,11 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(caps.requestRender).toBe(true);
 		expect(caps.hasInvokeAction).toBe(true);
 
-		// Phase-2 — store (B1) + callRoute (B3) implemented; session/ui still frozen.
+		// Phase-2 — store (B1) + callRoute (B3) + ui (B4 openPanel + C1 navigate)
+		// implemented; session still frozen until C2 adds writes.
 		expect(caps.callRoute).toBe(true);
 		expect(caps.session).toBe(false);
-		expect(caps.ui).toBe(false);
+		expect(caps.ui).toBe(true);
 		expect(caps.store).toBe(true);
 		expect(caps.hasCallRoute).toBe(true);
 		expect(caps.hasUnknown).toBe(false);
@@ -80,18 +81,17 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(caps.hasGatewayMember).toBe(false);
 	});
 
-	test("every Phase-2 stub throws 'reserved for Phase 2'", async ({ page }) => {
+	test("every still-frozen Phase-2 stub throws 'reserved for Phase 2'", async ({ page }) => {
 		await gotoAndWait(page);
-		// Slices B1/B2/B3 implemented store.* / session.read* / callRoute respectively
-		// (they are NO LONGER "reserved for Phase 2" throwing stubs — store/callRoute
-		// instead require a pack-served renderer context, and the `session` capability
-		// flag stays false until C2 adds writes — capability-signaling convention). The
-		// remaining members below are still frozen-not-implemented and must throw.
+		// Slices B1/B2/B3/B4/C1 implemented store.* / session.read* / callRoute / ui.*
+		// respectively (NO LONGER "reserved for Phase 2" throwing stubs — store/callRoute
+		// require a pack-served renderer context; ui.openPanel/ui.navigate no-op for an
+		// unregistered panel/route; the `session` capability flag stays false until C2
+		// adds writes — capability-signaling convention). The session WRITE members below
+		// are the only ones still frozen-not-implemented and must throw.
 		const stubs = [
 			"session.postMessage",
 			"session.subscribe",
-			"ui.openPanel",
-			"ui.navigate",
 		];
 		for (const which of stubs) {
 			const msg = await page.evaluate((w) => (window as any).__callStub(w), which);

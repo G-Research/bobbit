@@ -2084,6 +2084,16 @@ export interface ToolInfo {
 	/** Optional declared route names (from `routes.names`); the pack-level RouteRegistry
 	 *  indexes a pack's routes by these (Slice B3). */
 	routeNames?: string[];
+	/** Optional typed `entrypoints:` the tool contributes (Slice C1); consumed by the
+	 *  client `pack-entrypoints.ts` registry (launcher surfaces + deep-link routes). */
+	entrypoints?: Array<{
+		id: string;
+		kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+		label?: string;
+		routeId?: string;
+		target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+		paramKeys?: string[];
+	}>;
 	grantPolicy?: string;
 }
 

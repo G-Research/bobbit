@@ -87,6 +87,7 @@ function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePat
 		hasActions: !!contributions.actions,
 		actionNames: contributions.actions?.names,
 		routeNames: contributions.routes?.names,
+		entrypoints: contributions.entrypoints,
 		grantPolicy: data.grantPolicy,
 		params: Array.isArray(data.params)
 			? data.params.filter((p: unknown): p is string => typeof p === "string")

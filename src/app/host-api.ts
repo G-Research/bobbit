@@ -28,6 +28,7 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 import { openPackPanel } from "./pack-panels.js";
+import { navigateToTarget } from "./pack-entrypoints.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -84,7 +85,9 @@ export function getHostApi(
 		requestRender: true,
 		callRoute: true,
 		session: false,
-		ui: false,
+		// Slice C1: the `ui` namespace flips live here — openPanel (B4) + navigate (C1)
+		// are now both implemented (capability-signaling convention, design §0).
+		ui: true,
 		store: true,
 	};
 	return {
@@ -179,11 +182,15 @@ export function getHostApi(
 		} as HostApi["session"],
 		ui: {
 			// Slice B4: open (or focus) a pack-contributed side panel via the client
-			// pack-panel registry (lazy Blob-URL import + mount). `flags.ui` stays FALSE
-			// until C1 wires navigate — the whole `ui` namespace flips live together
-			// (capability-signaling convention). `navigate` stays throwing until then.
+			// pack-panel registry (lazy Blob-URL import + mount).
 			openPanel: (target) => openPackPanel(target),
-			navigate: () => notImpl("ui.navigate"),
+			// Slice C1: navigate the SPA to a pack-contributed deep-link route by
+			// STRUCTURED target. `navigateToTarget` resolves `target.route` through the
+			// client pack-route registry, filters params to the route's declared
+			// paramKeys, and serializes `#/ext/<routeId>?<params>` via the router — the
+			// pack never builds a URL (v1 §3 structured addressing). Unknown route =
+			// no-op (e.g. owning pack uninstalled).
+			navigate: (target) => navigateToTarget(target),
 		} as HostApi["ui"],
 		store: {
 			get: async (key: string) => (await storeOp("get", { key })) as never,
