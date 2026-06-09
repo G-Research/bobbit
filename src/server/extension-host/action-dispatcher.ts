@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ServerHostApi } from "./server-host-api.js";
+import { ModuleHost } from "./module-host-worker.js";
 
 /** The verified context handed to an action handler (design §4b). */
 export interface ActionHandlerCtx {
@@ -78,6 +79,14 @@ export interface ActionDispatcherOptions {
 	 * Default { capacity: 60, refillPerSec: 30 }.
 	 */
 	rate?: { capacity: number; refillPerSec: number } | null;
+	/**
+	 * Slice C3 — the SHARED confined worker host the SINGLE invocation seam runs
+	 * the handler through (server-module isolation, design §9). server.ts threads
+	 * ONE instance into both the action + route dispatchers. When omitted, the
+	 * dispatcher constructs its OWN `ModuleHost` so isolation is UNCONDITIONAL —
+	 * there is no in-process execution path to gate (no shippable bypass).
+	 */
+	moduleHost?: ModuleHost;
 }
 
 /** A simple per-session token-bucket rate limiter (design §5 iv). */
@@ -118,10 +127,14 @@ class TokenBucketLimiter {
  * dropped synchronously by `invalidate()` inside `invalidateResolverCaches()`.
  */
 export class ActionDispatcher {
-	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; module: ActionsModule }>();
+	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; module: ActionsModule; url: string }>();
 	private readonly timeoutMs: number;
 	private readonly maxConcurrent: number;
 	private readonly limiter: TokenBucketLimiter | null;
+	/** Slice C3 — the SINGLE invocation seam runs every handler through this confined
+	 *  worker host (server-module isolation, design §9). Always present (injected by
+	 *  server.ts, else self-constructed) so there is NO in-process path. */
+	private readonly moduleHost: ModuleHost;
 	private inFlight = 0;
 	/** Bumped on invalidate() so a post-invalidate import is always fresh even
 	 *  when coarse (Windows) mtime resolution would otherwise serve a stale module. */
@@ -135,6 +148,9 @@ export class ActionDispatcher {
 		this.maxConcurrent = opts.maxConcurrent ?? 8;
 		const rate = opts.rate === undefined ? { capacity: 60, refillPerSec: 30 } : opts.rate;
 		this.limiter = rate ? new TokenBucketLimiter(rate.capacity, rate.refillPerSec) : null;
+		// Slice C3: isolation is UNCONDITIONAL — fall back to a self-constructed
+		// ModuleHost (no in-process path exists) when one is not threaded in.
+		this.moduleHost = opts.moduleHost ?? new ModuleHost({ timeoutMs: this.timeoutMs });
 	}
 
 	/** Drop cached modules + force a fresh import on next load. Called from
@@ -172,8 +188,10 @@ export class ActionDispatcher {
 	 *  cannot spin loadModule forever. */
 	private static readonly MAX_INFLIGHT_RELOADS = 5;
 
-	/** Load (or return cached) the winning actions module for a tool. */
-	private async loadModule(tool: string, resolver: ActionToolLocationResolver = this.toolManager): Promise<ActionsModule | null> {
+	/** Load (or return cached) the winning actions module for a tool, plus the
+	 *  epoch-cache-busted import URL (the confined worker re-imports the SAME URL —
+	 *  design §9). */
+	private async loadModule(tool: string, resolver: ActionToolLocationResolver = this.toolManager): Promise<{ module: ActionsModule; url: string } | null> {
 		// Bounded retry loop: an invalidate() that races an in-flight import must
 		// NEVER cause the just-imported (potentially stale) module to be cached
 		// under the now-advanced epoch. We re-resolve + reload with the fresh epoch
@@ -190,7 +208,7 @@ export class ActionDispatcher {
 			}
 
 			const hit = this.cache.get(abs);
-			if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return hit.module;
+			if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === this.epoch) return { module: hit.module, url: hit.url };
 
 			// Snapshot the epoch BEFORE building the URL / awaiting the import. The
 			// cache-bust query is derived from THIS snapshot (not a late read of
@@ -210,8 +228,8 @@ export class ActionDispatcher {
 
 			if (this.epoch === epochAtStart) {
 				// No invalidate() raced us: safe to cache under the epoch we imported for.
-				this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: epochAtStart, module });
-				return module;
+				this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch: epochAtStart, module, url });
+				return { module, url };
 			}
 
 			// invalidate() ran while this import was in flight (cache cleared + epoch
@@ -223,7 +241,7 @@ export class ActionDispatcher {
 				// import WITHOUT caching it, so the NEXT dispatch reloads cleanly
 				// against the then-current epoch. The invariant (never cache under a
 				// mismatched epoch) is preserved.
-				return module;
+				return { module, url };
 			}
 			// loop: re-resolve + reload against the advanced epoch.
 		}
@@ -237,13 +255,15 @@ export class ActionDispatcher {
 	 * caller gets a 504 immediately even though `work` keeps executing in the
 	 * background (caller-facing latency is bounded by `timeoutMs`).
 	 *
-	 * NOTE on cancellation: this does NOT terminate timed-out `work` — it runs to
-	 * completion (or forever). True cancellation/termination of a runaway module
-	 * import or handler requires the Phase-2 worker/vm isolation seam (an explicit
-	 * Phase-1 non-goal). Phase 1 bounds blast radius by PERMIT-HOLDING (see
-	 * `dispatch`): the concurrency permit is released only when `work` actually
-	 * settles, so a hung import OR a hung handler keeps occupying its slot until it
-	 * does.
+	 * NOTE on cancellation: this race itself does NOT terminate the PARENT-side
+	 * module load (a hung top-level `await` in `loadModule` runs to completion or
+	 * forever — the permit stays held until it settles). HANDLER execution, however,
+	 * IS truly terminated as of Slice C3: the seam runs the handler in a confined
+	 * worker that `ModuleHost.invoke` TERMINATES on timeout (design §9), so a runaway
+	 * handler's `work` SETTLES (it no longer hangs forever) and its permit is
+	 * released. The blast-radius invariant is unchanged — the permit is released
+	 * exactly once when `work` settles (see `dispatch`); C3 simply guarantees the
+	 * handler portion of `work` always settles via termination.
 	 */
 	private runWithTimeout(work: Promise<unknown>, timeoutMs: number): Promise<unknown> {
 		return new Promise<unknown>((resolve, reject) => {
@@ -306,8 +326,9 @@ export class ActionDispatcher {
 		// it never returned a 504 and held its permit indefinitely. Now a stalled
 		// import/eval yields a prompt 504 just like a stalled handler.
 		const work = (async (): Promise<unknown> => {
-			const module = await this.loadModule(tool, resolver);
-			if (!module) throw new ActionError(404, `no actions module found for tool "${tool}"`);
+			const loaded = await this.loadModule(tool, resolver);
+			if (!loaded) throw new ActionError(404, `no actions module found for tool "${tool}"`);
+			const { module, url } = loaded;
 			// Own-property check: never resolve inherited members (e.g. `constructor`,
 			// `toString`) when no `actions.names` allowlist gated the action name. The
 			// handler must be an OWN, enumerable-or-not property of the actions object
@@ -318,10 +339,15 @@ export class ActionDispatcher {
 			const handler = module.actions[action];
 			if (typeof handler !== "function") throw new ActionError(404, `unknown action "${action}" for tool "${tool}"`);
 
-			// SINGLE invocation seam (design §5 iv): the ONLY place a handler is
-			// invoked, so the execution strategy (worker/vm) can be swapped here
-			// without touching callers.
-			return await handler(ctx, args);
+			// SINGLE invocation seam (design §5 iv / §9): the ONLY place a handler is
+			// invoked. Slice C3 runs it in a CONFINED worker (server-module isolation)
+			// instead of in-process — callers unchanged. The worker re-imports the SAME
+			// epoch-cache-busted URL the parent validated, so the validated member is
+			// the one executed; isolation is unconditional (no in-process path).
+			return await this.moduleHost.invoke(
+				{ url, epoch: this.epoch, exportKind: "actions", member: action, ctx, arg: args },
+				this.timeoutMs,
+			);
 		})();
 
 		// BLAST-RADIUS CORRECTNESS: the permit must bound the actual underlying

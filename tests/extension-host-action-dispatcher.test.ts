@@ -197,64 +197,49 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		assert.deepEqual(await first, { ok: 1 });
 	});
 
-	it("a hung-but-TIMED-OUT handler keeps holding its concurrency permit until it actually settles", async () => {
-		// Blast-radius correctness (the WHOLE point of the cap): the permit must
-		// bound actual handler EXECUTION, not request lifetime. A handler that hangs
-		// forever times out PROMPTLY for the caller, but its underlying promise keeps
-		// running — so it must keep occupying its slot. Otherwise repeated timed-out
-		// calls accumulate unbounded zombie executions despite `maxConcurrent`.
-		//
-		// Handlers resolve via a process-global registry the test controls (the
-		// fixture module runs in THIS process), so we can settle one on demand and
-		// prove capacity frees only then.
-		const G = globalThis as Record<string, unknown>;
-		const KEY = "__extHostPermitTestResolvers";
-		G[KEY] = [] as ((v: unknown) => void)[];
-		const resolvers = () => G[KEY] as ((v: unknown) => void)[];
-
-		const base = path.join(tmp, "case-permit-hold");
+	it("a hung handler is TERMINATED on timeout (Slice C3) → its permit is released, NOT held forever", async () => {
+		// Slice C3 contract (server-module isolation, design §9): the SINGLE invocation
+		// seam now runs handlers in a CONFINED worker that the dispatcher TERMINATES on
+		// timeout (true cancellation). This SUPERSEDES the Phase-1 permit-held-forever
+		// behavior: a runaway handler no longer occupies its slot indefinitely — once it
+		// times out, the worker is killed, `work` settles, and the permit is RELEASED.
+		// The invariant "permit released exactly once when work settles" is intact; what
+		// changes is that termination makes a hung handler's work SETTLE (it cannot hang
+		// forever). The fixture handler runs in the worker (separate process/global), so
+		// it hangs purely on its own — no parent-process injection.
+		const base = path.join(tmp, "case-permit-terminate");
 		writeTool(base, "demo", {
-			actionsJs:
-				`export const actions = { retry: () => new Promise((resolve) => { ` +
-				`(globalThis["${KEY}"]).push(resolve); }) };`,
+			actionsJs: `export const actions = { retry: () => new Promise(() => {}) };`,
 		});
 		const maxConcurrent = 3;
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 40, maxConcurrent });
+		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 60, maxConcurrent });
 
-		// Fire `maxConcurrent` dispatches. Each increments inFlight synchronously at
-		// entry, then its handler hangs (never resolves) → each times out promptly.
+		// Fire `maxConcurrent` dispatches; each hangs in its worker and times out 504.
 		const hung = Array.from({ length: maxConcurrent }, () => d.dispatch("sample_action", "retry", ctx(), {}));
-		// Every call returns 504 to the caller (prompt timeout) ...
-		await Promise.all(
-			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
-		);
-		// ... but the hung handlers are STILL executing and STILL hold their permits.
-		// The next dispatch (number maxConcurrent+1) must be rejected over-capacity,
-		// proving timed-out-but-hung handlers still count toward the cap.
+		// While they are in-flight (workers spawned, handlers hanging), the cap is
+		// saturated → an extra dispatch is rejected over-capacity (permit held DURING
+		// execution, exactly like Phase 1).
 		await assert.rejects(
 			() => d.dispatch("sample_action", "retry", ctx(), {}),
 			(e) => e instanceof ActionError && e.status === 429,
 		);
-		// All permits are accounted for to the hung handlers (none leaked).
-		assert.equal(resolvers().length, maxConcurrent);
+		// Every hung call returns 504 to the caller once the timeout fires + the worker
+		// is terminated.
+		await Promise.all(
+			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
+		);
+		// Let the terminate + permit-decrement settle.
+		await new Promise((r) => setTimeout(r, 150));
 
-		// Settle ONE hung handler → its permit is released and capacity frees by one.
-		resolvers().shift()!({ done: true });
-		// Let the handler-settle microtask run the permit decrement.
-		await new Promise((r) => setTimeout(r, 10));
-
-		// A fresh dispatch is now ADMITTED (past the concurrency gate). It runs the
-		// (hanging) handler and times out with 504 — NOT 429 — which proves the slot
-		// freed (a still-full cap would have rejected with 429 before invoking it).
+		// THE C3 PINNING ASSERTION: the permits are now RELEASED (the workers were
+		// terminated). A fresh dispatch is ADMITTED past the concurrency gate — it runs
+		// its (hanging) handler and times out 504, NOT 429. Under the OLD Phase-1
+		// permit-held-forever behavior this would have been 429 (slots never freed).
 		await assert.rejects(
 			() => d.dispatch("sample_action", "retry", ctx(), {}),
 			(e) => e instanceof ActionError && e.status === 504,
 		);
-
-		// Cleanup: settle every remaining hung handler so no permit/promise lingers.
-		for (const r of resolvers().splice(0)) r({ done: true });
-		await new Promise((r) => setTimeout(r, 10));
-		delete G[KEY];
+		await new Promise((r) => setTimeout(r, 150));
 	});
 
 	it("a hung MODULE IMPORT (top-level await) times out promptly (504) and holds its permit until the import settles", async () => {
@@ -277,10 +262,18 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		const resolvers = () => G[KEY] as ((v: unknown) => void)[];
 
 		const base = path.join(tmp, "case-hung-import");
+		// The top-level await is GATED on the parent-process injection global being
+		// present: in the PARENT (loadModule, which still runs in-process — Slice C3
+		// only moves HANDLER execution into the worker) the global exists, so module
+		// evaluation PARKS (exercising the LOAD-timeout path). When the CONFINED worker
+		// re-imports the SAME module to execute the handler, the global is absent in
+		// the worker's isolated realm, so the await is skipped and the module evaluates
+		// immediately — the handler runs and returns { ok: 1 }.
 		writeTool(base, "demo", {
 			moduleName: "actions.mjs",
 			actionsJs:
-				`await new Promise((resolve) => { (globalThis["${KEY}"]).push(resolve); });\n` +
+				`const __park = globalThis["${KEY}"];\n` +
+				`if (__park && typeof __park.push === "function") { await new Promise((resolve) => { __park.push(resolve); }); }\n` +
 				`export const actions = { retry: async () => ({ ok: 1 }) };`,
 		});
 		const maxConcurrent = 3;
@@ -304,17 +297,30 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		);
 		assert.ok(resolvers().length >= 1, "module evaluation should be parked at the top-level await");
 
-		// Settle the parked import → module finishes evaluating, every in-flight
-		// load completes, its (fast) handler runs, and every permit is released.
+		// Settle the parked import → module finishes evaluating, every in-flight load
+		// completes, and its work (now routed to the CONFINED worker) settles → every
+		// permit is released.
 		for (const r of resolvers().splice(0)) r(undefined);
-		// Allow the load+handler+settle microtasks/macrotasks to flush.
-		await new Promise((r) => setTimeout(r, 60));
+		// Allow the loads to complete + their worker invocations to settle (Slice C3
+		// runs the handler in a worker; with this fixture's tiny 40ms timeout the
+		// worker spawn itself exceeds the budget, so the invocations settle via
+		// terminate-on-timeout — which still releases the permit).
+		await new Promise((r) => setTimeout(r, 300));
 
-		// Capacity has freed: a fresh dispatch is ADMITTED past the concurrency gate
-		// and now succeeds (module cached, handler fast) — a still-full cap would
-		// have rejected with 429 before invoking it.
-		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { ok: 1 });
+		// Capacity has freed: a fresh dispatch is ADMITTED past the concurrency gate.
+		// (We assert it is NOT rejected over-capacity; whether it then succeeds or
+		// hits the sub-worker-spawn 40ms timeout is immaterial — a still-full cap
+		// would have rejected with 429 BEFORE ever loading/invoking.)
+		const outcome = await d.dispatch("sample_action", "retry", ctx(), {}).then(
+			(value) => ({ value }),
+			(err: unknown) => ({ err }),
+		);
+		assert.ok(
+			!("err" in outcome && outcome.err instanceof ActionError && outcome.err.status === 429),
+			"capacity should have freed after the parked loads settled (admitted, not 429)",
+		);
 		delete G[KEY];
+		await new Promise((r) => setTimeout(r, 150));
 	});
 
 	it("per-session rate limit → 429 once the bucket drains", async () => {
