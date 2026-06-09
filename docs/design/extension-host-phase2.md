@@ -1064,6 +1064,29 @@ Adapt PR-walkthrough tests + `tests/e2e/ui/extension-host.spec.ts` pattern. Stag
 of `src/ui/components/pr-walkthrough/`, `src/server/pr-walkthrough/routes.ts` bespoke
 dispatch, and `defaults/tools/pr-walkthrough/` once parity E2E is green.
 
+### D2.3 Architectural constraint — live recompute is NOT pack-expressible (load-bearing)
+
+**The bespoke `bundle`/`resolve` route COMPUTES the changeset at request time** — it shells
+out to `git` (`execFile`), reads `fs`, hits the github-adapter over the network, and runs LLM
+card synthesis. A pack **route runs in the C3 no-ambient-access worker** (no
+`child_process`/`fs`/`net` — mandatory acceptance #3/#4), so it **cannot recompute a
+walkthrough live**. This is the security model working as intended, not a pack defect.
+
+The durable split (full detail + the proposed follow-up host capability in
+`docs/design/pr-walkthrough-pack-deletion.md`): the git/diff/synthesis is **agent-tool work**
+(`readonly_bash` / `submit_pr_walkthrough_yaml`, normal agent permissions, NOT the confined
+worker) that **produces + persists** the bundle at submit time; the pack `publish` route
+writes it to `host.store` (pack-scoped) and the pack `bundle` route is a **pure reader**
+(`host.store.get`, no git). The viewer renders the stored bundle with parity (changeset
+header, phase nav rail, diff blocks, suggested comments). The one built-in behaviour that
+therefore stays agent-tool/built-in is **live changeset recompute on demand** (and GitHub
+review export); closing that without weakening the worker requires a future host-provided,
+capability-gated git/changeset surface (e.g. `host.git.changeset(...)` computed in the parent
+and exposed via the same authorized proxy as `store`/`session`). The D2 E2E
+(`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) seeds a realistic persisted bundle through the
+pack's own `publish` route and proves the READ/render path, and drives the maximal launcher
+surface (`git-widget-button`) in addition to the `kind:"route"` deep-link.
+
 ---
 
 ## 12. Wave / ownership plan

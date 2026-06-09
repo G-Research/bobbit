@@ -7,9 +7,15 @@
 // (getHostApi(sessionId, undefined, packTool); design extension-host-phase2 §2a.2).
 //
 // Re-expresses src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts as a pack
-// viewer. ALL dynamic data flows through the Host API — NEVER a raw fetch:
+// viewer with PARITY on the load-bearing surfaces — the changeset header (PR
+// title, sha range, files/+/- stats), the phase NAV RAIL (orientation → design →
+// significant → other → audit, cards grouped under each phase), the active card
+// (summary, rationale, diff blocks with hunks/lines, suggested comments). ALL
+// dynamic data flows through the Host API — NEVER a raw fetch:
 //   - host.callRoute("bundle", { query:{ jobId } })  → the pack's OWN route module
-//     (re-expressing the bespoke changeset/diff bundle endpoint, store-backed).
+//     (re-expressing handlePrWalkthroughApiRoute), which READS the REAL persisted
+//     walkthrough-store bundle (changeset + cards + diff blocks + suggested
+//     comments) — never a synthetic fixture, never a live git recompute.
 //   - host.session.readToolCall(toolUseId)            → reads the
 //     submit_pr_walkthrough_yaml tool call (own-session) instead of bespoke
 //     transcript access.
@@ -19,18 +25,29 @@
 // content is structured data rendered via the escaping lit toolkit (no raw-HTML /
 // unsafeHTML injection surface — the iframe-sandbox convention is preserved).
 
+// Phase ordering + labels mirror PrWalkthroughPanel.ts PHASES so the nav rail
+// groups the cards exactly as the bespoke walkthrough does.
+const PHASES = [
+	{ id: "orientation", label: "Orientation" },
+	{ id: "design", label: "Key design choices" },
+	{ id: "significant", label: "Significant changes" },
+	{ id: "other", label: "Other + omissions" },
+	{ id: "audit", label: "Audit" },
+];
+
 export default function createPanel({ html, nothing, renderHeader }) {
 	// Keep the toolkit's header helper referenced (contract clarity) even though
 	// this panel draws a compact header of its own.
 	void renderHeader;
 
-	// jobId → { bundle?, toolCall?, error? }. Module-level so it survives panel
-	// re-mounts within a page session (a deep-link re-open paints instantly); a full
-	// reload clears it, so the next Load re-reads the SAME persisted store record.
+	// jobId → { bundle?, toolCall?, error?, activeCardId? }. Module-level so it
+	// survives panel re-mounts within a page session (a deep-link re-open paints
+	// instantly); a full reload clears it, so the next Load re-reads the SAME
+	// persisted store record.
 	const byJob = new Map();
 	const loadingJobs = new Set();
 
-	const lineStyle = (kind) =>
+	const lineClass = (kind) =>
 		kind === "add"
 			? "background:color-mix(in oklch, var(--positive) 16%, transparent);color:var(--foreground);"
 			: kind === "del"
@@ -38,44 +55,112 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				: "color:var(--muted-foreground);";
 	const linePrefix = (kind) => (kind === "add" ? "+" : kind === "del" ? "-" : " ");
 
+	const cardsOf = (entry) => (entry && entry.bundle && Array.isArray(entry.bundle.cards)) ? entry.bundle.cards : [];
+
+	const activeCard = (entry) => {
+		const cards = cardsOf(entry);
+		if (cards.length === 0) return undefined;
+		const found = cards.find((c) => c.id === entry.activeCardId);
+		return found || cards[0];
+	};
+
 	const renderDiffBlock = (block) => html`
-		<div class="mt-2 rounded border border-border overflow-hidden" data-testid="prw-diffblock" data-prw-file=${block.filePath}>
-			<div class="px-2 py-1 text-xs font-mono bg-muted/40 text-foreground border-b border-border">
-				${block.status ?? "modified"} ${block.filePath}
+		<div class="mt-3 rounded border border-border overflow-hidden" data-testid="prw-diffblock" data-prw-file=${block.filePath}>
+			<div class="px-2 py-1 text-xs font-mono bg-muted/40 text-foreground border-b border-border flex items-center justify-between gap-2">
+				<span>${block.status ?? "modified"} ${block.filePath}</span>
+				${block.oldPath && block.oldPath !== block.filePath
+					? html`<span class="text-muted-foreground">(was ${block.oldPath})</span>`
+					: nothing}
 			</div>
 			${(block.hunks ?? []).map(
 				(hunk) => html`
-					<div class="px-2 py-0.5 text-xs font-mono text-muted-foreground">${hunk.header}</div>
+					<div class="px-2 py-0.5 text-xs font-mono" style="color:var(--muted-foreground);background:color-mix(in oklch, var(--info) 10%, transparent);">${hunk.header}</div>
 					${(hunk.lines ?? []).map(
-						(ln) => html`<div class="px-2 font-mono text-xs whitespace-pre" style=${lineStyle(ln.kind)}>${linePrefix(ln.kind)}${ln.text}</div>`,
+						(ln) => html`<div class="px-2 font-mono text-xs whitespace-pre" style=${lineClass(ln.kind)}>${linePrefix(ln.kind)}${ln.text}</div>`,
 					)}
 				`,
 			)}
 		</div>
 	`;
 
-	const renderCard = (card) => html`
-		<div class="mt-3 rounded border border-border bg-card p-2" data-testid="prw-card" data-prw-card=${card.id}>
-			<div class="text-sm font-medium text-foreground">${card.title}</div>
-			<div class="text-xs text-muted-foreground mt-0.5">${card.summary}</div>
-			${(card.diffBlocks ?? []).map(renderDiffBlock)}
+	const renderSuggestedComment = (sc) => html`
+		<div class="mt-2 rounded border-l-2 p-2 text-xs"
+			style="border-color:var(--warning);background:color-mix(in oklch, var(--warning) 7%, transparent);"
+			data-testid="prw-suggested-comment" data-prw-comment=${sc.id}>
+			<div class="font-mono text-[10px] text-muted-foreground">${sc.diffBlockId}${sc.lineId ? ` · ${sc.lineId}` : ""}</div>
+			<div class="text-foreground mt-0.5">${sc.body}</div>
 		</div>
 	`;
 
-	const renderBundle = (entry) => {
+	const renderCardBody = (card) => html`
+		<div data-testid="prw-card" data-prw-card=${card.id}>
+			<div class="text-[10px] font-semibold uppercase tracking-wide" style="color:var(--chart-1)">${card.phaseId}</div>
+			<div class="text-base font-semibold text-foreground mt-1">${card.title}</div>
+			${card.summary ? html`<div class="text-xs text-muted-foreground mt-1 leading-relaxed">${card.summary}</div>` : nothing}
+			${card.rationale ? html`<div class="text-xs text-muted-foreground mt-1 leading-relaxed">${card.rationale}</div>` : nothing}
+			${Array.isArray(card.checklist) && card.checklist.length
+				? html`<ul class="mt-2 pl-4 text-xs text-muted-foreground list-disc">${card.checklist.map((c) => html`<li>${c}</li>`)}</ul>`
+				: nothing}
+			${(card.diffBlocks ?? []).map(renderDiffBlock)}
+			${Array.isArray(card.suggestedComments) && card.suggestedComments.length
+				? html`<div class="mt-2"><div class="text-[10px] uppercase tracking-wide text-muted-foreground">Suggested comments</div>${card.suggestedComments.map(renderSuggestedComment)}</div>`
+				: nothing}
+		</div>
+	`;
+
+	const renderNavRail = (entry, host, jobId) => {
+		const cards = cardsOf(entry);
+		const active = activeCard(entry);
+		return html`
+			<div class="w-44 flex-none border-r border-border pr-2 overflow-auto" data-testid="prw-navrail">
+				${PHASES.map((phase) => {
+					const phaseCards = cards.filter((c) => c.phaseId === phase.id);
+					if (phaseCards.length === 0) return nothing;
+					return html`
+						<div class="mt-2 first:mt-0">
+							<div class="text-[10px] uppercase tracking-wide text-muted-foreground px-1">${phase.label}</div>
+							${phaseCards.map((card) => {
+								const isActive = active && active.id === card.id;
+								const onSelect = () => {
+									const cur = byJob.get(jobId) || entry;
+									byJob.set(jobId, { ...cur, activeCardId: card.id });
+									if (host && host.requestRender) host.requestRender();
+								};
+								return html`<button
+									class="block w-full text-left text-xs px-2 py-1 mt-0.5 rounded ${isActive ? "text-foreground" : "text-muted-foreground"} hover:bg-muted/50"
+									style=${isActive ? "background:color-mix(in oklch, var(--primary) 12%, transparent);" : ""}
+									data-testid="prw-nav-card" data-prw-nav=${card.id}
+									@click=${onSelect}
+								>${card.navLabel ?? card.title}</button>`;
+							})}
+						</div>
+					`;
+				})}
+			</div>
+		`;
+	};
+
+	const renderBundle = (entry, host, jobId) => {
 		const b = entry.bundle;
-		const cs = b.changeset ?? {};
+		if (b && b.found === false) {
+			return html`<div class="mt-3 text-xs text-muted-foreground" data-testid="prw-empty">
+				No walkthrough has been submitted for <span class="font-mono">${jobId}</span> yet. Run a PR walkthrough so the agent submits and persists one.
+			</div>`;
+		}
+		const cs = (b && b.changeset) || {};
+		const active = activeCard(entry);
 		const yaml = entry.toolCall && entry.toolCall.input && typeof entry.toolCall.input.yaml === "string"
 			? entry.toolCall.input.yaml
 			: undefined;
 		return html`
-			<div data-testid="prw-bundle">
-				<div class="text-sm font-semibold text-foreground" data-testid="prw-title">${cs.title ?? "Walkthrough"}</div>
-				<div class="text-xs text-muted-foreground">
-					${cs.baseSha}…${cs.headSha}
+			<div class="mt-2" data-testid="prw-bundle">
+				<div class="text-sm font-semibold text-foreground" data-testid="prw-title">${cs.prTitle ?? cs.title ?? "Walkthrough"}</div>
+				<div class="text-xs text-muted-foreground mt-0.5">
+					<span class="font-mono">${(cs.baseSha ?? "").slice(0, 7)}…${(cs.headSha ?? "").slice(0, 7)}</span>
 					· ${cs.filesChanged ?? 0} file(s)
 					· <span style="color:var(--positive)">+${cs.additions ?? 0}</span>
 					· <span style="color:var(--negative)">-${cs.deletions ?? 0}</span>
+					${cs.provider ? html`· <span class="font-mono">${cs.provider}</span>` : nothing}
 				</div>
 				<div class="text-[10px] text-muted-foreground mt-1">
 					persisted: <span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span>
@@ -83,7 +168,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="text-[10px] text-muted-foreground" data-testid="prw-toolcall">
 					submit yaml: ${yaml ? yaml.slice(0, 80) : "(none)"}
 				</div>
-				${(b.cards ?? []).map(renderCard)}
+				<div class="flex gap-3 mt-3">
+					${renderNavRail(entry, host, jobId)}
+					<div class="flex-1 min-w-0 overflow-auto">
+						${active ? renderCardBody(active) : html`<div class="text-xs text-muted-foreground" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}
+					</div>
+				</div>
 			</div>
 		`;
 	};
@@ -117,9 +207,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 							if (submitId) toolCall = await host.session.readToolCall(submitId);
 						} catch { /* enrichment is non-fatal */ }
 					}
-					// Dynamic data via the pack's OWN route — NEVER a raw fetch.
+					// Dynamic data via the pack's OWN route — NEVER a raw fetch. The route
+					// READS the persisted bundle (it does not recompute via git).
 					const bundle = await host.callRoute("bundle", { query: { jobId } });
-					byJob.set(jobId, { bundle, toolCall });
+					const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
+					byJob.set(jobId, { bundle, toolCall, activeCardId: firstCard });
 				} catch (e) {
 					byJob.set(jobId, { error: e && e.message ? e.message : String(e) });
 				} finally {
@@ -147,7 +239,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					${entry && entry.error
 						? html`<div class="mt-2 text-xs" style="color:var(--negative)" data-testid="prw-error">${entry.error}</div>`
 						: nothing}
-					${entry && entry.bundle ? renderBundle(entry) : nothing}
+					${entry && entry.bundle ? renderBundle(entry, host, jobId) : nothing}
 				</div>
 			`;
 		},
