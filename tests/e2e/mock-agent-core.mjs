@@ -501,6 +501,52 @@ export class MockAgentCore {
 			};
 		}
 
+		// Multi-type variants of the artifacts litmus (tests/e2e/ui/artifacts-pack.spec.ts):
+		// each emits an `artifact_demo` tool call with a DISTINCT artifactId/filename/content
+		// so the strengthened E2E can exercise the viewer's per-type rendering (markdown,
+		// svg, image) end-to-end alongside the html-with-sandbox case above. Stable
+		// artifactIds + toolIds so the browser E2E can address each pill deterministically.
+		if (text.includes("ARTIFACT_DEMO_MD")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-md",
+					filename: "notes.md",
+					content: "# Hello Markdown\n\nSome **bold** and `code` text.",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-md",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_SVG")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-svg",
+					filename: "shape.svg",
+					content: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="red"/></svg>',
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-svg",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_IMG")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-img",
+					filename: "pixel.png",
+					// 1x1 transparent PNG.
+					content: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-img",
+			};
+		}
+
 		// Autonomous skill activation: drives the activate_skill tool path.
 		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).
 		const activateMatch = text.match(/please\s+activate_skill\s+([\w-]+)(?:\s+([\s\S]*))?$/i);

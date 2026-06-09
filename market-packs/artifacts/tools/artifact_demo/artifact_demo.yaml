@@ -11,7 +11,9 @@ summary: Demo artifact tool — inline pill + viewer panel + pack store + deep-l
 #                 (the inline pill; re-expresses ArtifactPill.ts + the artifacts
 #                 tool renderer). MUST be `.js` so it is served as a PACK renderer.
 #  - panels:      the `artifacts.viewer` side panel (re-expresses ArtifactElement
-#                 + the per-type artifact components). Opened via
+#                 + the per-type artifact components: it dispatches by artifact
+#                 TYPE to real html-in-a-sandboxed-iframe / markdown / svg / image
+#                 / pdf / text rendering). Opened via
 #                 host.ui.openPanel({ panelId: "artifacts.viewer", params }).
 #  - stores:      replaces persistPreviewArtifact/restorePreviewArtifact — the
 #                 payload is persisted via host.store.put(artifactId, payload) and
