@@ -146,8 +146,12 @@ let realRealpathSync: ((p: string) => string) | undefined;
 const confinementReady: Promise<void> = (async () => {
 	captureRealFs();
 	applyGrantedModuleWraps(grants, data.workingDir);
-	const { isPackPathWithinGroup } = await import("./path-guard.js");
-	sessionContainment = isPackPathWithinGroup;
+	const { isPackPathWithinGroup, isPackPathWithinGroupStrict } = await import("./path-guard.js");
+	// fs/git ops use the WRITE/CREATE-SAFE strict variant (resolves a symlinked
+	// ancestor even when the leaf does not exist — closes the ENOENT-through-symlink
+	// bypass). Module-import containment keeps the lenient ENOENT-tolerant helper
+	// (existing-file resolution; its other callers rely on the ENOENT-true contract).
+	sessionContainment = isPackPathWithinGroupStrict;
 	configureConfinement({ denied: data.denied, packRoot: data.packRoot, isWithin: isPackPathWithinGroup });
 	registerHooks({ resolve: confinementResolve });
 	removeAmbientGlobals(grants, data.workingDir);
@@ -280,10 +284,12 @@ function captureRealFs(): void {
 }
 
 /** Slice C3 — true iff `target` (an ABSOLUTE path) is the session working dir
- *  ITSELF or realpath-contained beneath it. Reuses the shared `path-guard` helper
- *  for containment (no fork) and adds the working-dir-ROOT equality allowance the
- *  helper omits by design (it rejects `group === target`, yet the working dir
- *  itself is a legitimate `cwd` / `readdir` target). */
+ *  ITSELF or realpath-contained beneath it. Reuses the WRITE/CREATE-SAFE strict
+ *  `path-guard` helper (`isPackPathWithinGroupStrict` — resolves a symlinked
+ *  ancestor even when the leaf does not yet exist, so a create-through-symlink is
+ *  rejected) and adds the working-dir-ROOT equality allowance the helper omits by
+ *  design (it rejects `group === target`, yet the working dir itself is a
+ *  legitimate `cwd` / `readdir` target). */
 function withinSession(workingDir: string, target: string): boolean {
 	if (sessionContainment?.(workingDir, target)) return true;
 	if (!realRealpathSync) return false;
@@ -461,19 +467,52 @@ function installFsRebase(dir: string): void {
 
 	const require = createRequire(import.meta.url);
 	const pathMod = require("node:path") as { isAbsolute: (p: string) => boolean; resolve: (...s: string[]) => string };
-	// Resolve a string path arg to an ABSOLUTE path under `dir` (leading-relative
-	// rebased onto the session dir; absolute kept) and, when `check`, REJECT any
-	// path that escapes the session working dir (`../` walk, absolute-outside, or
-	// symlink escape — all caught by the realpath-resolving containment helper).
-	// `realpath`/`realpathSync` are rebased but NOT containment-checked: they merely
-	// RESOLVE a path (the actual read/write goes through a checked method), AND the
-	// shared `path-guard` helper reuses this same wrapped fs to realpath the
-	// (out-of-tree) PACK ROOT — throwing there would break module containment and
-	// recurse through `withinSession`.
+	const urlMod = require("node:url") as { fileURLToPath: (u: unknown) => string };
+
+	// Normalize ANY Node `PathLike` (string, Buffer, or `file:` URL object) to a
+	// decoded string path; returns `undefined` for a non-path argument (an fd
+	// number, an options object, a callback) which must pass through UNTOUCHED.
+	// THROWS on a non-`file:` URL scheme — a pack must not address other protocols.
+	// Validating ONLY string paths (the prior behavior) was a bypass: a `Buffer`
+	// path or a `new URL("file:///etc/passwd")` skipped containment entirely and
+	// reached the real fs method unchecked.
+	const normalizeToPath = (p: unknown): string | undefined => {
+		if (typeof p === "string") return p.length === 0 ? undefined : p;
+		if (Buffer.isBuffer(p)) {
+			const s = (p as Buffer).toString("utf8");
+			return s.length === 0 ? undefined : s;
+		}
+		const isUrlLike =
+			p instanceof URL ||
+			(p !== null && typeof p === "object" &&
+				typeof (p as { href?: unknown }).href === "string" &&
+				typeof (p as { protocol?: unknown }).protocol === "string");
+		if (isUrlLike) {
+			const proto = String((p as URL).protocol).toLowerCase();
+			if (proto !== "file:") {
+				throw new Error(`[confinement] the 'fs' grant rejects the non-file URL scheme "${proto}" (Extension Host §9 isolation)`);
+			}
+			return urlMod.fileURLToPath(p as URL);
+		}
+		return undefined; // fd / options / callback → not a path-like argument
+	};
+
+	// Resolve a path arg to an ABSOLUTE path under `dir` (leading-relative rebased
+	// onto the session dir; absolute kept) and, when `check`, REJECT any path that
+	// escapes the session working dir (`../` walk, absolute-outside, symlink escape,
+	// OR a not-yet-existent leaf reached THROUGH a symlinked ancestor — all caught
+	// by the write/create-safe `withinSession` → strict containment helper). The
+	// NORMALIZED string is what we hand the real fs method, so a Buffer / file-URL
+	// arg is validated AND rewritten to the contained absolute path.
+	// `realpath`/`realpathSync` are normalized + rebased but NOT containment-checked:
+	// they merely RESOLVE a path (the actual read/write goes through a checked
+	// method), AND the shared `path-guard` helper reuses this same wrapped fs to
+	// realpath the (out-of-tree) PACK ROOT — throwing there would break module
+	// containment and recurse through `withinSession`.
 	const confine = (p: unknown, check: boolean): unknown => {
-		if (typeof p !== "string" || p.length === 0) return p;
-		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p)) return p; // a URL (file://, …) → leave as-is
-		const abs = pathMod.isAbsolute(p) ? p : pathMod.resolve(dir, p);
+		const str = normalizeToPath(p); // throws on a non-file: URL scheme
+		if (str === undefined) return p; // fd / options / callback → leave untouched
+		const abs = pathMod.isAbsolute(str) ? str : pathMod.resolve(dir, str);
 		// Gate the containment THROW on the path-guard helper being loaded: it is set
 		// at the END of `confinementReady`, and PACK code runs only AFTER that. The
 		// few fs calls made WHILE it is unset are the host's own setup machinery (the
@@ -482,9 +521,21 @@ function installFsRebase(dir: string): void {
 		// set, every pack fs call is checked (and the loader's own reads of the pack
 		// source / cache resolve as in-bounds or ENOENT-tolerated, so they pass).
 		if (check && sessionContainment && !withinSession(dir, abs)) {
-			throw new Error(`[confinement] the 'fs' grant restricts paths to the session working directory; "${p}" escapes it (Extension Host §9 isolation)`);
+			throw new Error(`[confinement] the 'fs' grant restricts paths to the session working directory; "${str}" escapes it (Extension Host §9 isolation)`);
 		}
 		return abs;
+	};
+	// `glob`/`globSync` ALSO honor an `options.cwd` that resolves the pattern — an
+	// unchecked `cwd` would leak directory LISTINGS outside the working dir (the
+	// pattern arg alone is not the whole story). Containment-check + rebase any
+	// supplied `cwd` (mirrors the `git` runner's `applyGitCwd`).
+	const confineGlobCwd = (args: unknown[]): void => {
+		for (let i = 1; i < args.length; i++) {
+			const a = args[i];
+			if (a && typeof a === "object" && !Array.isArray(a) && typeof a === "object" && "cwd" in (a as Record<string, unknown>) && (a as Record<string, unknown>).cwd !== undefined) {
+				args[i] = { ...(a as Record<string, unknown>), cwd: confine((a as Record<string, unknown>).cwd, true) };
+			}
+		}
 	};
 	const wrap = (mod: Record<string, unknown>): void => {
 		for (const name of Object.keys(mod)) {
@@ -492,10 +543,16 @@ function installFsRebase(dir: string): void {
 			const fn = mod[name];
 			if (typeof fn !== "function") continue;
 			const twoPath = twoPathSet.has(name);
+			const globLike = name === "glob" || name === "globSync";
+			// `realpath`/`realpathSync` only RESOLVE (do not disclose content) and the
+			// shared path-guard helper reuses this same wrap to realpath the
+			// out-of-tree PACK ROOT — so they are NOT containment-checked (their copied
+			// `.native` sub-fn is consistently resolve-only too).
 			const check = name !== "realpath" && name !== "realpathSync";
 			const wrapped = function (this: unknown, ...args: unknown[]): unknown {
 				if (args.length > 0) args[0] = confine(args[0], check);
 				if (twoPath && args.length > 1) args[1] = confine(args[1], check);
+				if (globLike) confineGlobCwd(args);
 				return (fn as (...a: unknown[]) => unknown).apply(this, args);
 			};
 			// Preserve function sub-properties (e.g. `fs.realpath.native`).

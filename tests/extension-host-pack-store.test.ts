@@ -173,6 +173,63 @@ describe("createPackStore — per-pack quotas (Fix C)", () => {
 	});
 });
 
+describe("createPackStore — concurrent put does NOT exceed quota (per-pack mutex)", () => {
+	it("parallel NEW-key puts never exceed maxKeys", async () => {
+		const store = createPackStore({ rootDir, quota: { maxKeys: 5, maxValueBytes: 1024, maxTotalBytes: 1024 * 1024 } });
+		const pack = "pack-conc-keys";
+		const results = await Promise.allSettled(
+			Array.from({ length: 25 }, (_, i) => store.put(pack, `k${i}`, i)),
+		);
+		const ok = results.filter((r) => r.status === "fulfilled").length;
+		const keys = await store.list(pack);
+		assert.ok(keys.length <= 5, `key count ${keys.length} must not exceed maxKeys=5 under concurrency`);
+		assert.equal(ok, keys.length, "exactly the fulfilled puts should be persisted (no over-admission)");
+	});
+
+	it("parallel puts never exceed maxTotalBytes", async () => {
+		const val = "z".repeat(80); // ~95-byte envelope each
+		const store = createPackStore({ rootDir, quota: { maxKeys: 1000, maxValueBytes: 1024, maxTotalBytes: 400 } });
+		const pack = "pack-conc-bytes";
+		await Promise.allSettled(Array.from({ length: 25 }, (_, i) => store.put(pack, `k${i}`, val)));
+		const dir = path.join(rootDir, "ext-store", pack);
+		let total = 0;
+		for (const name of fs.readdirSync(dir)) {
+			if (!name.endsWith(".json")) continue;
+			total += fs.statSync(path.join(dir, name)).size;
+		}
+		assert.ok(total <= 400, `cumulative bytes ${total} must not exceed maxTotalBytes=400 under concurrency`);
+	});
+});
+
+describe("createPackStore — atomic writes + corrupt-file quarantine", () => {
+	it("leaves no temp files behind and keeps the value intact across overwrite", async () => {
+		const store = createPackStore({ rootDir });
+		const pack = "pack-atomic";
+		await store.put(pack, "k", { a: 1 });
+		await store.put(pack, "k", { a: 2 });
+		assert.deepEqual(await store.get(pack, "k"), { a: 2 });
+		const dir = path.join(rootDir, "ext-store", pack);
+		const names = fs.readdirSync(dir);
+		assert.equal(names.filter((n) => n.endsWith(".json")).length, 1, "exactly one .json key file");
+		assert.equal(names.filter((n) => n.endsWith(".tmp")).length, 0, "no temp files left behind after an atomic write");
+	});
+
+	it("quarantines a corrupt file on get (moves it aside, returns null, list ignores it)", async () => {
+		const store = createPackStore({ rootDir });
+		const pack = "pack-corrupt";
+		const dir = path.join(rootDir, "ext-store", pack);
+		fs.mkdirSync(dir, { recursive: true });
+		// encodeKey("bad") leaves alnum verbatim → "bad.json".
+		const file = path.join(dir, "bad.json");
+		fs.writeFileSync(file, "{ truncated json");
+		assert.equal(await store.get(pack, "bad"), null, "corrupt JSON reads as null");
+		assert.ok(!fs.existsSync(file), "the corrupt file is moved aside (quarantined), not left in place");
+		const quarantined = fs.readdirSync(dir).filter((n) => n.includes(".corrupt-"));
+		assert.equal(quarantined.length, 1, "a single quarantined copy exists for inspection");
+		assert.deepEqual(await store.list(pack), [], "the quarantined file is not a .json key → list ignores it");
+	});
+});
+
 describe("createPackStore — non-pack / invalid identity is rejected", () => {
 	it("empty packId (a non-pack caller) is rejected on every op", async () => {
 		const store = createPackStore({ rootDir });

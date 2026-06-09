@@ -19,6 +19,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
 export interface PackStore {
@@ -143,12 +144,42 @@ function assertKey(key: string): void {
 }
 
 /**
+ * Per-pack async mutex — serializes the read-tally-then-write critical section of
+ * `put` so concurrent puts to the SAME pack cannot RACE the quota check (each
+ * reads the pre-write key-count/byte-total, all pass, then all write → the pack
+ * collectively blows past `maxKeys`/`maxTotalBytes`). Each new section chains
+ * after the prior one settles (success OR failure); the map entry is dropped once
+ * the chain drains so the table never grows unbounded.
+ */
+function makePackMutex() {
+	const tails = new Map<string, Promise<unknown>>();
+	return function withPackLock<T>(packId: string, fn: () => Promise<T>): Promise<T> {
+		const prev = (tails.get(packId) ?? Promise.resolve()).then(
+			() => {},
+			() => {},
+		);
+		const run = prev.then(fn);
+		const settled = run.then(
+			() => {},
+			() => {},
+		);
+		tails.set(packId, settled);
+		void settled.then(() => {
+			if (tails.get(packId) === settled) tails.delete(packId);
+		});
+		return run;
+	};
+}
+
+/**
  * Create a file-backed pack store. `rootDir` defaults to `bobbitStateDir()`; all
  * keys for a pack live under `<rootDir>/ext-store/<packId>/`.
  */
 export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackStoreQuota> }): PackStore {
 	const baseDir = () => path.join(opts?.rootDir ?? bobbitStateDir(), "ext-store");
 	const quota: PackStoreQuota = { ...DEFAULT_PACK_STORE_QUOTA, ...opts?.quota };
+	// One mutex per store instance — serializes each pack's `put` critical section.
+	const withPackLock = makePackMutex();
 
 	/** Resolve + re-validate the absolute file path for (packId, key). */
 	const resolveFile = (packId: string, key: string): { dir: string; file: string } => {
@@ -163,6 +194,19 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 		return { dir, file };
 	};
 
+	/** Move a parse-failed file aside (so it is not re-read and is recoverable for
+	 *  inspection) and LOG it, rather than silently treating corruption as "absent".
+	 *  The quarantined name does NOT end in `.json`, so `list`/`put` tallies skip it. */
+	const quarantineCorrupt = async (file: string, reason: string): Promise<void> => {
+		const dest = `${file}.corrupt-${Date.now()}`;
+		try {
+			await fs.promises.rename(file, dest);
+			console.warn(`[pack-store] quarantined corrupt store file (${reason}): ${file} -> ${dest}`);
+		} catch (err) {
+			console.warn(`[pack-store] failed to quarantine corrupt store file ${file} (${reason}): ${(err as Error).message}`);
+		}
+	};
+
 	return {
 		async get<T = unknown>(packId: string, key: string): Promise<T | null> {
 			const { file } = resolveFile(packId, key);
@@ -172,13 +216,20 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 			} catch {
 				return null; // missing file
 			}
+			let env: StoreEnvelope<T>;
 			try {
-				const env = JSON.parse(raw) as StoreEnvelope<T>;
-				if (!env || typeof env !== "object" || !("value" in env)) return null;
-				return env.value;
+				env = JSON.parse(raw) as StoreEnvelope<T>;
 			} catch {
-				return null; // corrupt/parse failure
+				// Corrupt JSON — quarantine + log instead of masquerading as "absent"
+				// (a truncated/garbage file should be surfaced, not silently dropped).
+				await quarantineCorrupt(file, "invalid JSON");
+				return null;
 			}
+			// A well-formed JSON value that is not our envelope shape is treated as a
+			// miss WITHOUT quarantine (forward-compat: a future envelope version must
+			// not be destroyed by an older reader).
+			if (!env || typeof env !== "object" || !("value" in env)) return null;
+			return env.value;
 		},
 
 		async put<T = unknown>(packId: string, key: string, value: T): Promise<void> {
@@ -187,59 +238,82 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 			const serialized = JSON.stringify(env);
 			const newBytes = Buffer.byteLength(serialized, "utf8");
 
-			// QUOTA 1 — reject an oversized single value BEFORE writing anything.
+			// QUOTA 1 — reject an oversized single value BEFORE writing anything (no
+			// disk touched, no lock needed: a single value's size is self-contained).
 			if (newBytes > quota.maxValueBytes) {
 				throw new PackStoreQuotaError(
 					`store value too large: ${newBytes} bytes exceeds the ${quota.maxValueBytes}-byte per-value limit`,
 				);
 			}
 
-			// Tally the pack's current keys + cumulative bytes (the file being
-			// overwritten is excluded from both the key count and the byte total).
-			let existingKeyCount = 0;
-			let existingTotalBytes = 0;
-			let overwriteBytes = 0;
-			let keyExists = false;
-			let names: string[] = [];
-			try {
-				names = await fs.promises.readdir(dir);
-			} catch {
-				names = []; // no dir yet
-			}
-			for (const name of names) {
-				if (!name.endsWith(".json")) continue;
-				existingKeyCount++;
-				let size = 0;
+			// SERIALIZE the tally→quota→write critical section PER PACK: without it,
+			// concurrent puts each read the pre-write key-count/byte-total, all pass
+			// the check, then all write — collectively exceeding maxKeys/maxTotalBytes.
+			await withPackLock(packId, async () => {
+				// Tally the pack's current keys + cumulative bytes (the file being
+				// overwritten is excluded from both the key count and the byte total).
+				let existingKeyCount = 0;
+				let existingTotalBytes = 0;
+				let overwriteBytes = 0;
+				let keyExists = false;
+				let names: string[] = [];
 				try {
-					size = (await fs.promises.stat(path.join(dir, name))).size;
+					names = await fs.promises.readdir(dir);
 				} catch {
-					size = 0;
+					names = []; // no dir yet
 				}
-				existingTotalBytes += size;
-				if (path.join(dir, name) === file) {
-					keyExists = true;
-					overwriteBytes = size;
+				for (const name of names) {
+					if (!name.endsWith(".json")) continue;
+					existingKeyCount++;
+					let size = 0;
+					try {
+						size = (await fs.promises.stat(path.join(dir, name))).size;
+					} catch {
+						size = 0;
+					}
+					existingTotalBytes += size;
+					if (path.join(dir, name) === file) {
+						keyExists = true;
+						overwriteBytes = size;
+					}
 				}
-			}
 
-			// QUOTA 2 — reject a NEW key that would exceed the per-pack key count.
-			if (!keyExists && existingKeyCount >= quota.maxKeys) {
-				throw new PackStoreQuotaError(
-					`store key limit reached: ${existingKeyCount} keys at the ${quota.maxKeys}-key per-pack limit`,
-				);
-			}
+				// QUOTA 2 — reject a NEW key that would exceed the per-pack key count.
+				if (!keyExists && existingKeyCount >= quota.maxKeys) {
+					throw new PackStoreQuotaError(
+						`store key limit reached: ${existingKeyCount} keys at the ${quota.maxKeys}-key per-pack limit`,
+					);
+				}
 
-			// QUOTA 3 — reject a write that would exceed the per-pack cumulative bytes
-			// (subtract the overwritten key's old size; add the new value's size).
-			const projectedTotal = existingTotalBytes - overwriteBytes + newBytes;
-			if (projectedTotal > quota.maxTotalBytes) {
-				throw new PackStoreQuotaError(
-					`store full: ${projectedTotal} bytes would exceed the ${quota.maxTotalBytes}-byte per-pack limit`,
-				);
-			}
+				// QUOTA 3 — reject a write that would exceed the per-pack cumulative
+				// bytes (subtract the overwritten key's old size; add the new size).
+				const projectedTotal = existingTotalBytes - overwriteBytes + newBytes;
+				if (projectedTotal > quota.maxTotalBytes) {
+					throw new PackStoreQuotaError(
+						`store full: ${projectedTotal} bytes would exceed the ${quota.maxTotalBytes}-byte per-pack limit`,
+					);
+				}
 
-			await fs.promises.mkdir(dir, { recursive: true });
-			await fs.promises.writeFile(file, serialized, "utf8");
+				await fs.promises.mkdir(dir, { recursive: true });
+				// ATOMIC replace: write to a unique temp file, fsync it, then rename
+				// over the target. An interrupted write therefore lands on the TEMP
+				// file (cleaned up), never truncating/corrupting the existing key.
+				const tmpFile = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+				const handle = await fs.promises.open(tmpFile, "w");
+				try {
+					await handle.writeFile(serialized, "utf8");
+					await handle.sync(); // flush to disk before the rename swaps it in
+				} finally {
+					await handle.close();
+				}
+				try {
+					await fs.promises.rename(tmpFile, file);
+				} catch (err) {
+					// Rename failed — do not leave the temp behind.
+					await fs.promises.rm(tmpFile, { force: true }).catch(() => {});
+					throw err;
+				}
+			});
 		},
 
 		async list(packId: string, prefix?: string): Promise<string[]> {

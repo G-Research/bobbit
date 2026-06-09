@@ -455,6 +455,239 @@ describe("permission grant — git/fs confined to the session working dir (defen
 	});
 });
 
+describe("permission grant — fs PathLike normalization + symlinked-ancestor confinement", () => {
+	it("rejects a file: URL that resolves OUTSIDE the working dir", async () => {
+		const dir = path.join(tmp, `fs-url-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `url-secret-${seq}.txt`);
+		fs.writeFileSync(secret, "url-secret");
+		const fileUrl = pathToFileURL(secret).href;
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync(new URL(${JSON.stringify(fileUrl)}), "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("rejects a Buffer path that resolves OUTSIDE the working dir", async () => {
+		const dir = path.join(tmp, `fs-buf-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `buf-secret-${seq}.txt`);
+		fs.writeFileSync(secret, "buf-secret");
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync(Buffer.from(${JSON.stringify(secret)}), "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("rejects a non-file: URL scheme outright", async () => {
+		const dir = path.join(tmp, `fs-nonfile-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync(new URL("http://evil.example/x"), "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /non-file|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("rejects a CREATE through a symlinked ancestor (ENOENT leaf must NOT pass)", async () => {
+		const dir = path.join(tmp, `fs-screate-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const outsideDir = path.join(tmp, `screate-out-${seq}`);
+		fs.mkdirSync(outsideDir, { recursive: true });
+		try {
+			fs.symlinkSync(outsideDir, path.join(dir, "linkdir"), "dir");
+		} catch {
+			return; // symlink creation unavailable (e.g. unprivileged Windows) → skip
+		}
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { write: async () => { fs.writeFileSync("linkdir/created.txt", "x"); return "wrote"; } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "write", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+			assert.ok(!fs.existsSync(path.join(outsideDir, "created.txt")), "no file should have been created outside");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("rejects a READ through a symlinked ancestor", async () => {
+		const dir = path.join(tmp, `fs-sread-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const outsideDir = path.join(tmp, `sread-out-${seq}`);
+		fs.mkdirSync(outsideDir, { recursive: true });
+		fs.writeFileSync(path.join(outsideDir, "secret.txt"), "deep-secret");
+		try {
+			fs.symlinkSync(outsideDir, path.join(dir, "linkdir"), "dir");
+		} catch {
+			return; // skip where symlinks are unavailable
+		}
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync("linkdir/secret.txt", "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("checks BOTH path args of rename (out-of-bounds destination rejected)", async () => {
+		const dir = path.join(tmp, `fs-rename-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "ok.txt"), "ok");
+		const outside = path.join(tmp, `rename-out-${seq}.txt`);
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { mv: async () => { fs.renameSync("ok.txt", ${JSON.stringify(outside)}); return "moved"; } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "mv", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+			assert.ok(!fs.existsSync(outside), "rename must not reach an out-of-bounds destination");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("checks BOTH path args of copyFile (out-of-bounds source rejected)", async () => {
+		const dir = path.join(tmp, `fs-copy-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `copy-src-${seq}.txt`);
+		fs.writeFileSync(secret, "copy-secret");
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { cp: async () => { fs.copyFileSync(${JSON.stringify(secret)}, "dest.txt"); return "copied"; } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "cp", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+			assert.ok(!fs.existsSync(path.join(dir, "dest.txt")), "no out-of-bounds source should have been copied in");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("checks BOTH path args of symlink (out-of-bounds target rejected)", async () => {
+		const dir = path.join(tmp, `fs-symtgt-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const outside = path.join(tmp, `symtgt-out-${seq}.txt`);
+		fs.writeFileSync(outside, "outside");
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { ln: async () => { fs.symlinkSync(${JSON.stringify(outside)}, "link.txt"); return "linked"; } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "ln", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("rejects an out-of-bounds glob `cwd` option (directory-listing leak)", async () => {
+		const dir = path.join(tmp, `fs-glob-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const outsideDir = path.join(tmp, `glob-out-${seq}`);
+		fs.mkdirSync(outsideDir, { recursive: true });
+		fs.writeFileSync(path.join(outsideDir, "leaked.txt"), "x");
+		// Skip on Node builds without fs.globSync.
+		if (typeof (fs as unknown as { globSync?: unknown }).globSync !== "function") return;
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { ls: async () => { if (typeof fs.globSync !== "function") throw new Error("[confinement] no glob"); return fs.globSync("*", { cwd: ${JSON.stringify(outsideDir)} }); } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "ls", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("in-bounds string, Buffer, AND file: URL reads still work", async () => {
+		const dir = path.join(tmp, `fs-inbounds-pathlike-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "data.txt"), "pathlike-ok");
+		const abs = path.join(dir, "data.txt");
+		const fileUrl = pathToFileURL(abs).href;
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => ({\n` +
+			`  str: fs.readFileSync("data.txt", "utf8"),\n` +
+			`  buf: fs.readFileSync(Buffer.from(${JSON.stringify(abs)}), "utf8"),\n` +
+			`  url: fs.readFileSync(new URL(${JSON.stringify(fileUrl)}), "utf8"),\n` +
+			`}) };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const r = (await mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir }))) as Record<string, string>;
+			assert.equal(r.str, "pathlike-ok", "bare-relative string read works");
+			assert.equal(r.buf, "pathlike-ok", "in-bounds Buffer path read works");
+			assert.equal(r.url, "pathlike-ok", "in-bounds file: URL read works");
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
 describe("permission grant — net", () => {
 	it("a `net` grant restores the `fetch` global (stripped by default)", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
