@@ -48,7 +48,7 @@ import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
-import { handleSessionPost } from "./extension-host/session-write.js";
+import { handleSessionPost, getGestureNonceStore } from "./extension-host/session-write.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
@@ -5518,6 +5518,23 @@ async function handleApiRoute(
 			json({ error: extGuard.error }, extGuard.status);
 			return;
 		}
+		// Fix 2: SERVER-derive + ENFORCE the pack identity BEFORE reading any transcript
+		// data — mirror the store/route/message endpoints. authorizeScopedRequest only
+		// gates on allowedTools (and an UNRESTRICTED session has none), so without this a
+		// missing/non-pack `tool` could slip through and read the transcript. Resolve the
+		// tool through the SESSION's project-scoped tool manager (no split-brain) and
+		// reject (403) a non-pack / missing-tool caller — session reads are pack-only.
+		const extSessionProjectId = sessionManager.getSession(extGuard.sessionId)?.projectId
+			?? sessionManager.getPersistedSession(extGuard.sessionId)?.projectId;
+		const extToolManager = resolveActionToolManager(
+			toolManager,
+			extSessionProjectId ? projectContextManager.getOrCreate(extSessionProjectId)?.toolManager : undefined,
+		);
+		const extIdent = resolvePackIdentityForTool(extToolManager, extTool);
+		if (!extIdent.isPack || !extIdent.packId) {
+			json({ error: "session reads are available only to market-pack tools" }, 403);
+			return;
+		}
 		// Read the HEADER-BOUND session's transcript ONLY (own-session by construction).
 		const extPs = sessionManager.getPersistedSession(extGuard.sessionId);
 		let extJsonl: string | null = null;
@@ -5663,6 +5680,39 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/ext/session/gesture — mint a single-use, short-TTL user-gesture nonce
+	// for the header-bound session (Fix 5; design §8 C2.1). Pack code cannot forge the
+	// client gesture check, so /api/ext/session/message additionally requires a nonce
+	// minted ONLY here. Guarded by authorizeScopedRequest (header-canonical session,
+	// body===header, session resolves, `tool` ∈ allowedTools) so an unauthenticated /
+	// cross-session caller gets none. The nonce is bound to the verified header session,
+	// so it can only authorize a post into THAT session.
+	if (url.pathname === "/api/ext/session/gesture" && req.method === "POST") {
+		const body = (await readBody(req)) ?? {};
+		const gTool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		const guard = authorizeScopedRequest({
+			tool: gTool,
+			headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			resolveSession,
+		});
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		const nonce = getGestureNonceStore().mint(guard.sessionId);
+		json({ nonce });
+		return;
+	}
+
 	// POST /api/ext/session/message — Slice C2 session WRITE behind
 	// `host.session.postMessage` (design extension-host-phase2.md §8 C2.1). Drives
 	// the agent, so it is the HIGHEST-RISK Host-API addition: pack-scoped (NOT
@@ -5702,6 +5752,9 @@ async function handleApiRoute(
 			role: (body as { role?: unknown }).role,
 			text: (body as { text?: unknown }).text,
 			resumeTurn: (body as { resumeTurn?: unknown }).resumeTurn,
+			// Fix 5: REQUIRE + CONSUME a server-minted single-use user-gesture nonce.
+			gestureNonce: (body as { gestureNonce?: unknown }).gestureNonce,
+			consumeGesture: (sessionId, nonce) => getGestureNonceStore().consume(sessionId, nonce),
 			resolveSession,
 			resolvePackIdentity: (tool) => resolvePackIdentityForTool(msgToolManager, tool),
 			// Target the HEADER-BOUND session ONLY. resume → resume the agent turn;

@@ -7,8 +7,11 @@
  *   - NO POST fires on mount / without a gesture — postMessage throws SYNCHRONOUSLY
  *     ("postMessage requires a user gesture") so a render-time post fails loudly.
  *   - INSIDE runWithUserGesture the POST fires to /api/ext/session/message carrying
- *     the bound `tool` (so the server derives the trusted packId) — usable from a
- *     panel/entrypoint origin with NO toolUseId.
+ *     the bound `tool` (so the server derives the trusted packId) AND a server-minted
+ *     single-use gesture nonce (Fix 5) — usable from a panel/entrypoint origin with
+ *     NO toolUseId.
+ *   - the nonce is fetched from /api/ext/session/gesture inside the gesture (held in
+ *     a gesture-context closure, never exposed to pack code).
  *   - one gesture authorizes exactly one post (no latching).
  *   - subscribe returns an unsubscribe fn (no throw, no server round-trip).
  *
@@ -81,10 +84,14 @@ test.describe("host.session.postMessage — user-gesture gate (extension-host-ph
 		expect(res.body.resumeTurn).toBe(false);
 		// Panel/entrypoint origin: no toolUseId is bound.
 		expect(res.body.toolUseId).toBeUndefined();
+		// Fix 5: the message carries the server-minted single-use gesture nonce, fetched
+		// from /api/ext/session/gesture inside the gesture.
+		expect(res.gestureFired).toBe(true);
+		expect(res.body.gestureNonce).toBe("test-nonce");
 		const calls = await page.evaluate(() => (window as any).__calls());
-		expect(calls.length).toBe(1);
-		expect(calls[0].url).toContain("/api/ext/session/message");
-		expect(calls[0].method).toBe("POST");
+		const msg = calls.find((c: any) => c.url.includes("/api/ext/session/message"));
+		expect(msg).toBeTruthy();
+		expect(msg.method).toBe("POST");
 	});
 
 	test("one gesture authorizes exactly one post (the second throws)", async ({ page }) => {

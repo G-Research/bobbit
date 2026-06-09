@@ -31,7 +31,7 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 import { openPackPanel, setPanelHostFactory } from "./pack-panels.js";
-import { consumeGesture } from "./gesture-context.js";
+import { consumeGesture, takeGestureNonce, setGestureNonceMinter } from "./gesture-context.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
 
@@ -43,6 +43,27 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
 	const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
 	if (sessionId) headers["x-bobbit-session-id"] = sessionId;
 	return { ...init, headers };
+}
+
+/** Fix 5: mint a server gesture nonce for the bound (session, pack tool). Called
+ *  ONLY from inside `runWithUserGesture` (via the registered minter), so a nonce
+ *  exists only for a genuine user gesture. The result is held in a gesture-context
+ *  module closure that pack code cannot read; pack code that raw-fetches
+ *  /api/ext/session/message has no way to obtain one. The nonce is session-bound
+ *  server-side, so any allowedTools-permitted pack tool suffices to mint it. */
+async function mintGestureNonce(sessionId: string | undefined, packTool: string | undefined): Promise<string | null> {
+	if (!sessionId || !packTool) return null;
+	try {
+		const resp = await gatewayFetch(
+			"/api/ext/session/gesture",
+			withSession({ method: "POST", body: JSON.stringify({ sessionId, tool: packTool }) }, sessionId),
+		);
+		if (!resp.ok) return null;
+		const data = (await resp.json()) as { nonce?: unknown };
+		return typeof data.nonce === "string" ? data.nonce : null;
+	} catch {
+		return null;
+	}
 }
 
 /** Build the Phase-1 client Host API bound to a given session AND the
@@ -73,6 +94,11 @@ export function getHostApi(
 	// to send as `tool` so the server can derive the trusted packId (the client
 	// never sends a packId — design extension-host-phase2.md §2.3). Every Phase-2
 	// capability now has a real body (B1/B2/B3/B4/C1/C2), so no `notImpl` stub remains.
+	// Fix 5: bind the trusted gesture-nonce minter to THIS host's (session, packTool)
+	// so a genuine user gesture mints a session-bound nonce for postMessage. Only a
+	// pack-served host (packTool present) registers it; the minter is held in a
+	// gesture-context closure, never on `window`/`host` (pack code cannot read it).
+	if (packTool) setGestureNonceMinter(() => mintGestureNonce(sessionId, packTool));
 	// Slice B1: POST a store op to /api/ext/store/:op, sending the bound `packTool`
 	// as `tool` so the server derives the trusted packId (client never sends one).
 	const storeOp = async (op: "get" | "put" | "list", payload: Record<string, unknown>): Promise<unknown> => {
@@ -203,6 +229,10 @@ export function getHostApi(
 				if (!consumeGesture()) throw new Error("postMessage requires a user gesture");
 				if (!packTool) throw new Error("host.session.postMessage requires a pack-served context");
 				return (async () => {
+					// Fix 5: attach the server-minted single-use gesture nonce (minted inside
+					// runWithUserGesture, held in a gesture-context closure). The server
+					// REQUIRES + CONSUMES it; a raw pack fetch has no way to obtain one.
+					const gestureNonce = await takeGestureNonce();
 					const resp = await gatewayFetch(
 						"/api/ext/session/message",
 						withSession(
@@ -215,6 +245,7 @@ export function getHostApi(
 									role: msg.role,
 									text: msg.text,
 									resumeTurn: msg.resumeTurn,
+									gestureNonce,
 								}),
 							},
 							sessionId,
