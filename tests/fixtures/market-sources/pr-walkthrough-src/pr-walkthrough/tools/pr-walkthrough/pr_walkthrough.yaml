@@ -1,0 +1,53 @@
+name: pr_walkthrough
+description: >-
+  PR Walkthrough viewer (Extension Host Phase-2 maximal litmus). Re-expresses the
+  bespoke src/ui/components/pr-walkthrough/ + src/server/pr-walkthrough/routes.ts
+  feature using ONLY public contribution points + the durable Host API.
+group: PR Walkthrough
+summary: Open the PR walkthrough viewer panel for a job.
+
+# ── panels: (Slice B4) — the viewer side panel, a pre-built ESM module served by
+#    the bearer-only panel endpoint and lazy-imported by the client pack-panels
+#    registry. Opened via host.ui.openPanel({ panelId, params:{ jobId } }). The
+#    panel loads its changeset/diff bundle ONLY via host.callRoute (never a raw
+#    fetch) and reads the submit_pr_walkthrough_yaml tool call via
+#    host.session.readToolCall.
+panels:
+  - id: pr-walkthrough.panel
+    title: PR Walkthrough
+    entry: panel.js
+
+# ── routes: (Slice B3) — re-expresses handlePrWalkthroughApiRoute under the
+#    pack's namespace. Reached via host.callRoute("bundle"|"publish"). Server
+#    derives the trusted packId from the calling tool and resolves the route
+#    MODULE via the pack-level RouteRegistry (opener-independent). Persisted state
+#    lives in host.store.* (re-expressing walkthrough-store.ts), pack-scoped.
+routes:
+  module: routes.mjs
+  names: [bundle, publish]
+
+# ── stores: (Slice B1) — pack-scoped persisted walkthrough/job/changeset state.
+#    Keys are namespaced by the SERVER-derived packId; cross-pack reads rejected.
+stores:
+  - walkthroughs
+
+# ── entrypoints: (Slice C1) — TWO contributions:
+#    1. a composer-slash LAUNCHER whose selection (the user gesture) navigates to
+#       the deep-link route (no auto-invoke on mount);
+#    2. a kind:"route" DEEP-LINK registering routeId:"pr-walkthrough" → the viewer
+#       panel, so #/ext/pr-walkthrough?jobId=… resolves through the client pack
+#       route registry and reopens the panel rehydrated from host.store.*.
+entrypoints:
+  - id: pr-walkthrough.open
+    kind: composer-slash
+    label: PR Walkthrough
+    target:
+      route: pr-walkthrough
+      params:
+        jobId: job-litmus-1
+  - id: pr-walkthrough.route
+    kind: route
+    routeId: pr-walkthrough
+    target:
+      panelId: pr-walkthrough.panel
+    paramKeys: [jobId]

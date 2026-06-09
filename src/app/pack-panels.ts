@@ -27,6 +27,8 @@ import { renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { fetchTools, type ToolInfo } from "./api.js";
 import { state, renderApp } from "./state.js";
+import { getHostApi } from "./host-api.js";
+import type { HostApi } from "../shared/extension-host/host-api.js";
 import {
 	packPanelTabId,
 	panelTabsForSession,
@@ -47,6 +49,11 @@ const HOST_TOOLKIT = { html, nothing, renderHeader };
  *  v1 §5 v). Conventions enforced by review: theme tokens only, iframe `sandbox`
  *  preserved. */
 export interface PackPanel {
+	/** PURE projection of the typed `PanelTarget.params` onto a lit value. The second
+	 *  arg is the per-session Host API (scoped capabilities — callRoute / store / session)
+	 *  bound `getHostApi(sessionId, undefined, packTool)` per the panel host-context
+	 *  binding (design §2a.2). It is `undefined` in a non-DOM/unit context or when no
+	 *  session is active; a panel MUST tolerate that and MUST NOT auto-invoke on mount. */
 	render(params?: Record<string, unknown>, host?: HostApi): TemplateResult | unknown;
 }
 
@@ -302,6 +309,26 @@ function mountPackPanelTab(panelId: string, reg: RegisteredPanel, params?: Recor
 		try { renderApp(); } catch { /* non-DOM */ }
 	} catch {
 		/* no app state (unit fixtures) — the registry/load path still ran */
+	}
+}
+
+/** Build the per-session Host API a panel render is handed (design extension-host-
+ *  phase2 §2a.2 — panel host-context binding). A panel has no tool call, so it binds
+ *  `{ sessionId, toolUseId: undefined, packTool }` from the OPENING context: the active
+ *  session supplies `sessionId`; the registered DECLARING tool of the panel is the
+ *  `packTool` the server resolves the trusted packId from on each scoped call. Returns
+ *  `undefined` when there is no registered panel or no active session (non-DOM/unit) —
+ *  the panel must tolerate that (it simply cannot reach scoped capabilities yet). */
+function hostForPanel(panelId: string): HostApi | undefined {
+	const reg = panels.get(panelId);
+	if (!reg) return undefined;
+	try {
+		const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
+		const sid = s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
+		if (!sid) return undefined;
+		return getHostApi(sid, undefined, reg.tool);
+	} catch {
+		return undefined;
 	}
 }
 

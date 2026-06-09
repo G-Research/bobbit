@@ -94,29 +94,22 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 // E2E can assert the running UI reconciles (stale pack renderer removed, built-in
 // restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
 (window as any).__bobbitReconcilePackRenderers = async () => {
-	const [{ fetchTools }, { registerPackRenderers }, { registerPackPanels }, { registerPackEntrypoints, entrypointInfosFromTools }] = await Promise.all([
-		import("./api.js"),
-		import("./pack-renderers.js"),
-		import("./pack-panels.js"),
-		import("./pack-entrypoints.js"),
-	]);
-	const pid = state.activeProjectId ?? undefined;
-	const tools = await fetchTools(pid);
-	registerPackRenderers(tools, pid);
-	// Slice B4/C1 — FORCE-register panels + entrypoints from the fresh metadata,
-	// mirroring the marketplace mutation path (marketplace-page.ts). The dedupe-guarded
-	// reconcile*ForProject helpers would SKIP an unchanged project, so an uninstall (same
-	// projectId) would not drop the removed panel/route — force-registering is what makes
-	// uninstall reconciliation observable in the live UI without a reload.
-	const panelInfos = tools.flatMap((t) => {
-		const declared = (t as { panels?: Array<{ id?: unknown; title?: unknown }> }).panels;
-		if (!Array.isArray(declared)) return [];
-		return declared
-			.filter((p) => typeof p?.id === "string")
-			.map((p) => ({ panelId: p.id as string, tool: t.name, title: typeof p?.title === "string" ? p.title : undefined }));
-	});
-	registerPackPanels(panelInfos, pid);
-	registerPackEntrypoints(entrypointInfosFromTools(tools), pid);
+	// Delegate to the REAL marketplace-mutation reconcile (renderers + panels +
+	// entrypoints), which FORCE re-registers from freshly fetched metadata —
+	// bypassing the per-registry dedupe guard so an install/uninstall tears down
+	// removed renderers/panels/entrypoints+routes WITHOUT a reload.
+	const { reconcileRenderersForActiveSession } = await import("./marketplace-page.js");
+	await reconcileRenderersForActiveSession();
+};
+
+// E2E test hook: run a pack composer-slash/git-widget/command-palette launcher
+// entrypoint by id — the SAME `runLauncherEntrypoint` the MessageEditor slash menu
+// calls on a user click (Slice C1). Lets the pr-walkthrough-pack browser E2E
+// trigger "entrypoint launches the panel" deterministically. Faithful: it
+// exercises the real launcher→navigate→openPanel chain.
+(window as any).__bobbitRunPackLauncher = async (id: string): Promise<void> => {
+	const { runLauncherEntrypoint } = await import("./pack-entrypoints.js");
+	runLauncherEntrypoint(id);
 };
 
 function hasActiveProposalPanel(): boolean {
