@@ -25,6 +25,9 @@ export interface ToolContributions {
 	 *  `entry` is a pre-built ESM module path served by the bearer-only panel
 	 *  endpoint and lazy-imported by the client `pack-panels.ts` registry. */
 	panels?: PanelContribution[];
+	/** Slice B3 — server routes module + the declared route-name allowlist the
+	 *  pack-level RouteRegistry indexes by (graduated from `reserved`). */
+	routes?: RouteContribution;
 	/** Phase-2 keys still parsed-for-shape only, retained verbatim, NOT acted on. */
 	reserved: ReservedContributions;
 }
@@ -50,17 +53,30 @@ export interface ToolActionsContribution {
 	names?: string[];
 }
 
+/** A `routes:` contribution (Slice B3) — a pack tool's server routes module +
+ *  the declared route names. Mirrors {@link ToolActionsContribution}; the
+ *  pack-level RouteRegistry indexes a pack's routes by these declared `names`. */
+export interface RouteContribution {
+	/** Module path relative to the group dir. Default "routes.js". */
+	module?: string;
+	/** Declared route names. The RouteRegistry maps each → this declaring tool,
+	 *  so a route is reachable via `host.callRoute(name)` only when named here. */
+	names?: string[];
+}
+
 /** Phase-2 contribution keys. Validated for *shape* only, then ignored. Never rejected. */
 export interface ReservedContributions {
 	entrypoints?: unknown[];
-	routes?: unknown[];
 }
 
 const ACTION_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const STORE_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 // Slice B4 — panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const RESERVED_KEYS = ["entrypoints", "routes"] as const;
+// Both `panels` (B4) and `routes` (B3) have graduated from reserved-shape-only to
+// typed parsers; `stores` graduated in B1. `entrypoints` remains reserved (C1).
+const RESERVED_KEYS = ["entrypoints"] as const;
 
 /**
  * A path supplied in a tool YAML (`renderer`/`actions.module`) is safe IFF it is a
@@ -117,6 +133,14 @@ export function parseContributions(data: unknown, filePath: string): ToolContrib
 		if (parsed.length > 0) result.panels = parsed;
 	}
 
+	// ── routes (Slice B3 — load-bearing; tolerant per-tool, never rejects here —
+	//    intra-pack duplicate route names are the ONE hard conflict, rejected later
+	//    at RouteRegistry-build time, which alone can see other tools in the pack) ──
+	if (obj.routes !== undefined) {
+		const parsed = parseRoutes(obj.routes, filePath);
+		if (parsed) result.routes = parsed;
+	}
+
 	// ── reserved Phase-2 keys: shape-validate (arrays), retain verbatim, never reject ──
 	for (const key of RESERVED_KEYS) {
 		if (obj[key] === undefined) continue;
@@ -168,6 +192,57 @@ function parseActions(raw: unknown, filePath: string): ToolActionsContribution |
 			if (names.length > 0) out.names = names;
 		} else {
 			console.warn(`[tool-contributions] 'actions.names' is not an array in ${filePath}; ignoring`);
+		}
+	}
+
+	return out;
+}
+
+/**
+ * Parse the `routes:` contribution (Slice B3) into a typed {@link RouteContribution}.
+ * Mirrors {@link parseActions}: accepts the `routes: true` / `routes: routes.js`
+ * shorthand and the canonical `{ module, names }` object; same `isSafeRelativePath`
+ * path-safety on `module`. Per-tool parsing is TOLERANT (malformed degrades to
+ * "no routes" with a warning, never rejects the tool); the ONE hard conflict
+ * — two tools in a pack declaring the same route name — can only be seen at
+ * RouteRegistry-build time, where it is rejected (route-dispatcher.ts).
+ */
+export function parseRoutes(raw: unknown, filePath: string): RouteContribution | undefined {
+	if (raw === true) return { module: "routes.js" };
+	if (typeof raw === "string") {
+		if (isSafeRelativePath(raw)) return { module: raw };
+		console.warn(`[tool-contributions] Ignoring unsafe 'routes' module path in ${filePath}`);
+		return undefined;
+	}
+	if (!raw || typeof raw !== "object") {
+		console.warn(`[tool-contributions] Malformed 'routes' block in ${filePath}; ignoring`);
+		return undefined;
+	}
+
+	const obj = raw as Record<string, unknown>;
+	const out: RouteContribution = {};
+
+	if (obj.module !== undefined) {
+		if (typeof obj.module === "string" && isSafeRelativePath(obj.module)) {
+			out.module = obj.module;
+		} else {
+			console.warn(`[tool-contributions] Ignoring unsafe/invalid 'routes.module' in ${filePath}`);
+		}
+	}
+	// Default module when routes: is present without an explicit (valid) module.
+	if (out.module === undefined) out.module = "routes.js";
+
+	if (obj.names !== undefined) {
+		if (Array.isArray(obj.names)) {
+			const names = obj.names.filter(
+				(n): n is string => typeof n === "string" && ROUTE_NAME_RE.test(n),
+			);
+			if (names.length !== obj.names.length) {
+				console.warn(`[tool-contributions] Dropped invalid 'routes.names' entries in ${filePath}`);
+			}
+			if (names.length > 0) out.names = names;
+		} else {
+			console.warn(`[tool-contributions] 'routes.names' is not an array in ${filePath}; ignoring`);
 		}
 	}
 

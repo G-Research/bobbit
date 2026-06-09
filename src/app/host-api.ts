@@ -19,6 +19,7 @@ import {
 	HOST_API_VERSION,
 	HOST_CONTRACT_VERSION,
 	type HostApi,
+	type HostRouteInit,
 	type ReadTranscriptOpts,
 	type TranscriptEnvelope,
 	type ToolCallRecord,
@@ -81,7 +82,7 @@ export function getHostApi(
 	const flags = {
 		invokeAction: true,
 		requestRender: true,
-		callRoute: false,
+		callRoute: true,
 		session: false,
 		ui: false,
 		store: true,
@@ -122,8 +123,24 @@ export function getHostApi(
 			if (!resp.ok) throw new Error(`invokeAction ${tool}/${action} HTTP ${resp.status}`);
 			return resp.json();
 		},
-		// ── Phase 2 (frozen, not implemented) ──
-		callRoute: () => notImpl("callRoute"),
+		// ── Phase 2 ──
+		// Slice B3: POST to /api/ext/route/:name, sending the bound `packTool` as
+		// `tool` so the server authorizes the caller + derives the trusted packId (the
+		// client never knows/sends a packId). The server then resolves the route MODULE
+		// via the pack-level RouteRegistry (opener-independent) and dispatches it. The
+		// route is addressed by `name` within the pack's namespace — never a raw URL.
+		async callRoute<TResult = unknown>(name: string, init?: HostRouteInit): Promise<TResult> {
+			if (!packTool) throw new Error("host.callRoute requires a pack-served renderer context");
+			const resp = await gatewayFetch(
+				`/api/ext/route/${encodeURIComponent(name)}`,
+				withSession(
+					{ method: "POST", body: JSON.stringify({ sessionId, toolUseId, tool: packTool, init }) },
+					sessionId,
+				),
+			);
+			if (!resp.ok) throw new Error(`callRoute ${name} HTTP ${resp.status}`);
+			return resp.json() as Promise<TResult>;
+		},
 		session: {
 			// Slice B2: own-session READS over the namespaced /api/ext endpoints. The
 			// server scopes the read to the HEADER-BOUND session (own-session by

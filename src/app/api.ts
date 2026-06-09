@@ -2081,6 +2081,9 @@ export interface ToolInfo {
 	/** Optional `panels:` the tool contributes (Slice B4, additive). The ESM
 	 *  `entry` path stays server-side; the client addresses panels by `id`. */
 	panels?: { id: string; title?: string }[];
+	/** Optional declared route names (from `routes.names`); the pack-level RouteRegistry
+	 *  indexes a pack's routes by these (Slice B3). */
+	routeNames?: string[];
 	grantPolicy?: string;
 }
 

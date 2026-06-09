@@ -4,7 +4,8 @@
  * contribution-point manifest parser (design docs/design/extension-host.md §2.2/§2.3).
  *
  * Pinned invariants:
- *   - Phase-2 keys (panels/entrypoints/routes/stores) are accepted + ignored, NEVER rejected.
+ *   - Reserved Phase-2 keys (panels/entrypoints) are accepted + ignored, NEVER rejected;
+ *     stores (B1) + routes (B3) are graduated to typed, load-bearing contributions.
  *   - `..` / absolute renderer + actions.module paths degrade gracefully (parsed away, no throw).
  *   - actions.names validation (/^[a-z0-9][a-z0-9_-]*$/) drops bad entries.
  *   - A malformed contributions block degrades (tool still loads with no renderer/actions).
@@ -15,6 +16,7 @@ import assert from "node:assert/strict";
 import {
 	parseContributions,
 	parseStores,
+	parseRoutes,
 	computeRendererKind,
 	isMarketPackBaseDir,
 } from "../src/server/agent/tool-contributions.ts";
@@ -79,12 +81,13 @@ describe("parseContributions — path traversal rejection (degrades, never throw
 describe("parseContributions — Phase-2 reserved keys (accepted + ignored, never rejected)", () => {
 	it("retains valid array reserved keys verbatim and never throws", () => {
 		const c = parseContributions(
-			{ name: "t", entrypoints: [{ id: "e" }], routes: [{ path: "/x" }] },
+			// `panels` (B4) and `routes` (B3) have graduated to typed fields; `entrypoints`
+			// is the sole remaining reserved key.
+			{ name: "t", entrypoints: [{ id: "e" }] },
 			FP,
 		);
 		// Parsed-and-reserved: present, retained verbatim, NOT promoted to load-bearing fields.
 		assert.deepEqual(c.reserved.entrypoints, [{ id: "e" }]);
-		assert.deepEqual(c.reserved.routes, [{ path: "/x" }]);
 		assert.equal(c.renderer, undefined);
 		assert.equal(c.actions, undefined);
 	});
@@ -139,6 +142,40 @@ describe("parseStores (Slice B1 — `stores:` graduated to typed, advisory, neve
 		assert.deepEqual(c.stores, [{ id: "prefs" }, { id: "cache" }]);
 		// graduated off `reserved` — stores is no longer a reserved key
 		assert.equal((c.reserved as Record<string, unknown>).stores, undefined);
+	});
+});
+
+describe("parseRoutes (Slice B3 — `routes:` graduated to typed, load-bearing, never rejects per-tool)", () => {
+	it("accepts the `true` and bare-string shorthands", () => {
+		assert.deepEqual(parseRoutes(true, FP), { module: "routes.js" });
+		assert.deepEqual(parseRoutes("api.js", FP), { module: "api.js" });
+	});
+
+	it("accepts the canonical { module, names } object and defaults the module", () => {
+		assert.deepEqual(parseRoutes({ module: "api.js", names: ["bundle", "meta"] }, FP), { module: "api.js", names: ["bundle", "meta"] });
+		assert.deepEqual(parseRoutes({ names: ["bundle"] }, FP), { module: "routes.js", names: ["bundle"] });
+	});
+
+	it("drops an unsafe module path (degrades to undefined, never throws)", () => {
+		assert.equal(parseRoutes("../evil.js", FP), undefined);
+		// unsafe object module degrades to the default module, dropping the bad path
+		assert.deepEqual(parseRoutes({ module: "../evil.js", names: ["bundle"] }, FP), { module: "routes.js", names: ["bundle"] });
+	});
+
+	it("drops invalid route names, keeps valid ones", () => {
+		assert.deepEqual(parseRoutes({ names: ["ok-1", "BAD", "also/bad", "good_2"] }, FP), { module: "routes.js", names: ["ok-1", "good_2"] });
+	});
+
+	it("a malformed routes block degrades (never rejects)", () => {
+		assert.equal(parseRoutes(42, FP), undefined);
+		assert.equal(parseRoutes(null, FP), undefined);
+	});
+
+	it("parseContributions surfaces typed routes + graduates off `reserved`", () => {
+		const c = parseContributions({ name: "t", routes: { module: "api.js", names: ["bundle"] } }, FP);
+		assert.deepEqual(c.routes, { module: "api.js", names: ["bundle"] });
+		// graduated off `reserved` — routes is no longer a reserved key
+		assert.equal((c.reserved as Record<string, unknown>).routes, undefined);
 	});
 });
 
