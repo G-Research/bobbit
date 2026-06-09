@@ -34,7 +34,7 @@ import {
 	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
-import type { PanelTarget } from "../shared/extension-host/host-api.js";
+import type { HostApi, PanelTarget } from "../shared/extension-host/host-api.js";
 
 /** Host toolkit handed to a pack panel's factory — keeps the pack on the app's
  *  single `lit` instance and standard `renderHeader()` shape (same toolkit
@@ -47,7 +47,30 @@ const HOST_TOOLKIT = { html, nothing, renderHeader };
  *  v1 §5 v). Conventions enforced by review: theme tokens only, iframe `sandbox`
  *  preserved. */
 export interface PackPanel {
-	render(params?: Record<string, unknown>): TemplateResult | unknown;
+	render(params?: Record<string, unknown>, host?: HostApi): TemplateResult | unknown;
+}
+
+/** A host-API factory the app wires once (host-api.ts self-registers it), so a
+ *  pack panel's `render(params, host)` can reach the scoped Phase-2 capabilities
+ *  (`store`/`callRoute`/`session`) bound to the ACTIVE session + the panel's own
+ *  pack tool — design §2a.2 ("the panel host API is built
+ *  `getHostApi(sessionId, undefined, packTool)`"). Kept as an injected factory
+ *  rather than a direct `getHostApi` import so `pack-panels.ts` stays free of a
+ *  `host-api.ts` import cycle (host-api already imports `openPackPanel`). When the
+ *  factory is unset (e.g. unit fixtures that never load host-api) panels render
+ *  with `host === undefined` exactly as before. */
+let panelHostFactory: ((sessionId: string | undefined, packTool: string | undefined) => HostApi) | undefined;
+export function setPanelHostFactory(
+	fn: (sessionId: string | undefined, packTool: string | undefined) => HostApi,
+): void {
+	panelHostFactory = fn;
+}
+
+/** The session a freshly-built panel host should bind to (the active session —
+ *  the store guard authorizes against the header-bound session, design §2a). */
+function currentSessionIdForPanel(): string | undefined {
+	const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
+	return s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
 }
 
 /** Module factory shape — invoked with {@link HOST_TOOLKIT}, returns a PackPanel
@@ -311,7 +334,15 @@ export function renderPackPanelContent(panelId: string, params?: Record<string, 
 	const panel = loadedPanels.get(panelId);
 	if (panel) {
 		try {
-			return panel.render(params);
+			// Build a session-bound host for this pack tool (design §2a.2) so the
+			// panel can rehydrate from `host.store.*` etc. `getHostApi` is supplied via
+			// the injected factory (host-api self-registers) to avoid an import cycle;
+			// when unset (unit fixtures) the panel renders with host === undefined.
+			const reg = panels.get(panelId);
+			const host = panelHostFactory && reg
+				? panelHostFactory(currentSessionIdForPanel(), reg.tool)
+				: undefined;
+			return panel.render(params, host);
 		} catch (err) {
 			// eslint-disable-next-line no-console
 			console.error(`[pack-panels] render failed for "${panelId}":`, err);

@@ -482,6 +482,25 @@ export class MockAgentCore {
 			return { tool: "sample_action", input: {}, output: "sample action tool executed", toolId: "tu-sample-1" };
 		}
 
+		// Extension-host Phase-2 litmus (tests/e2e/ui/artifacts-pack.spec.ts): emit an
+		// `artifact_demo` tool call carrying a stable artifactId + filename + content in
+		// its INPUT so the artifacts pack's PACK renderer mounts the inline pill and the
+		// renderer can persist the payload to the pack store on a user click. Stable
+		// toolId so the browser E2E can satisfy any toolUseId-ownership checks.
+		if (text.includes("ARTIFACT_DEMO_TOOL")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-1",
+					filename: "hello.html",
+					content: "<h1>Hello Artifact</h1>",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-1",
+			};
+		}
+
 		// Autonomous skill activation: drives the activate_skill tool path.
 		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).
 		const activateMatch = text.match(/please\s+activate_skill\s+([\w-]+)(?:\s+([\s\S]*))?$/i);

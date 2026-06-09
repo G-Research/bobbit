@@ -30,7 +30,7 @@ import {
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
-import { openPackPanel } from "./pack-panels.js";
+import { openPackPanel, setPanelHostFactory } from "./pack-panels.js";
 import { consumeGesture } from "./gesture-context.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
@@ -55,6 +55,14 @@ function withSession(init: RequestInit | undefined, sessionId: string | undefine
  *  `createServerHostApi({ sessionId, toolUseId, ... })` contract (§3.2), where
  *  pack identity is SERVER-DERIVED from the resolved winning contribution —
  *  never passed by extension code. */
+// Slice D1 (design §2a.2): give pack PANELS a host API bound to the active session
+// + the panel's own pack tool, so `panel.render(params, host)` can reach the
+// scoped capabilities (`store`/`callRoute`/`session`). A panel originates no tool
+// call, so `toolUseId` is undefined (authorizeScopedRequest needs none). Registered
+// from host-api (which already imports pack-panels) so pack-panels stays free of a
+// reverse import cycle.
+setPanelHostFactory((sessionId, packTool) => getHostApi(sessionId, undefined, packTool));
+
 export function getHostApi(
 	sessionId: string | undefined,
 	toolUseId: string | undefined,
@@ -63,11 +71,8 @@ export function getHostApi(
 	// `packTool` (Slice A) is the tool name whose pack owns this renderer. It is
 	// held in closure for the scoped Phase-2 capabilities (callRoute/store/session)
 	// to send as `tool` so the server can derive the trusted packId (the client
-	// never sends a packId — design extension-host-phase2.md §2.3). Slice B1 wires
-	// `store.*` through it; the remaining Phase-2 stubs (callRoute/session/ui) throw.
-	const notImpl = (m: string): never => {
-		throw new Error(`host.${m} is reserved for Phase 2`);
-	};
+	// never sends a packId — design extension-host-phase2.md §2.3). Every Phase-2
+	// capability now has a real body (B1/B2/B3/B4/C1/C2), so no `notImpl` stub remains.
 	// Slice B1: POST a store op to /api/ext/store/:op, sending the bound `packTool`
 	// as `tool` so the server derives the trusted packId (client never sends one).
 	const storeOp = async (op: "get" | "put" | "list", payload: Record<string, unknown>): Promise<unknown> => {

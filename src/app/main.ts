@@ -94,18 +94,29 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 // E2E can assert the running UI reconciles (stale pack renderer removed, built-in
 // restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
 (window as any).__bobbitReconcilePackRenderers = async () => {
-	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
+	const [{ fetchTools }, { registerPackRenderers }, { registerPackPanels }, { registerPackEntrypoints, entrypointInfosFromTools }] = await Promise.all([
 		import("./api.js"),
 		import("./pack-renderers.js"),
+		import("./pack-panels.js"),
+		import("./pack-entrypoints.js"),
 	]);
 	const pid = state.activeProjectId ?? undefined;
-	registerPackRenderers(await fetchTools(pid), pid);
-	// Slice B4 — re-drive pack-panel reconciliation the same way (browser E2E hook).
-	const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
-	await reconcilePackPanelsForProject(pid);
-	// Slice C1 — re-drive pack-entrypoint reconciliation the same way.
-	const { reconcilePackEntrypointsForProject } = await import("./pack-entrypoints.js");
-	await reconcilePackEntrypointsForProject(pid);
+	const tools = await fetchTools(pid);
+	registerPackRenderers(tools, pid);
+	// Slice B4/C1 — FORCE-register panels + entrypoints from the fresh metadata,
+	// mirroring the marketplace mutation path (marketplace-page.ts). The dedupe-guarded
+	// reconcile*ForProject helpers would SKIP an unchanged project, so an uninstall (same
+	// projectId) would not drop the removed panel/route — force-registering is what makes
+	// uninstall reconciliation observable in the live UI without a reload.
+	const panelInfos = tools.flatMap((t) => {
+		const declared = (t as { panels?: Array<{ id?: unknown; title?: unknown }> }).panels;
+		if (!Array.isArray(declared)) return [];
+		return declared
+			.filter((p) => typeof p?.id === "string")
+			.map((p) => ({ panelId: p.id as string, tool: t.name, title: typeof p?.title === "string" ? p.title : undefined }));
+	});
+	registerPackPanels(panelInfos, pid);
+	registerPackEntrypoints(entrypointInfosFromTools(tools), pid);
 };
 
 function hasActiveProposalPanel(): boolean {
