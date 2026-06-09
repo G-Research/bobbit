@@ -4,16 +4,21 @@
  * docs/design/extension-host-phase2.md §8 C2.1.
  *
  * `host.session.postMessage` DRIVES the agent, so it is the highest-risk Host-API
- * addition. These pins prove the server-side controls:
+ * addition. Its SEND now rides the TRUSTED session WebSocket (NOT a fetch carrying a
+ * capturable secret), so the handler takes a TRUSTED, server-authenticated
+ * `sessionId` (resolved by the WS handler from the authenticated connection) rather
+ * than a header/body pair plus a per-session secret. These pins prove the remaining
+ * server-side controls:
  *   - authorized via authorizeScopedRequest (NOT authorizeActionRequest): a
  *     panel/entrypoint with NO toolUseId is accepted (the input carries no
  *     toolUseId field at all).
+ *   - the pack's `tool` ∈ the session's allowedTools (else 403).
  *   - role ∈ {user, system} + non-empty text required.
  *   - pack-only: a non-pack caller is rejected (server-derived packId).
  *   - resumeTurn !== false resumes the agent turn; resumeTurn === false delivers
  *     without resuming.
- *   - the target session is ALWAYS the header-bound session — there is NO body
- *     param for another session, so cross-session posting is impossible.
+ *   - the target session is ALWAYS the TRUSTED bound session — there is NO param
+ *     for another session, so cross-session posting is impossible.
  *   - EVERY post/resume is audited (success AND failure).
  */
 import { describe, it } from "node:test";
@@ -36,17 +41,13 @@ function makeInput(over: Partial<SessionPostInput> = {}): { input: SessionPostIn
 	const h: Harness = { posts: [], audits: [] };
 	const input: SessionPostInput = {
 		tool: "sample_action",
-		headerSessionId: SID,
-		bodySessionId: SID,
+		// The TRUSTED, server-authenticated WS-bound session (not caller-supplied).
+		sessionId: SID,
 		role: "user",
 		text: "hello agent",
 		resolveSession: (id: string): ActionGuardSession | undefined =>
 			id === SID ? { allowedTools: ["sample_action"] } : undefined,
 		resolvePackIdentity: () => ({ isPack: true, packId: "my-pack" }),
-		// Fix A: a valid trusted per-session secret by default. Tests that exercise the
-		// secret path override `sessionSecret` / `resolveSecretSession`.
-		sessionSecret: "good-secret",
-		resolveSecretSession: (secret: string) => (secret === "good-secret" ? SID : undefined),
 		post: async (sessionId, text, opts) => { h.posts.push({ sessionId, text, ...opts }); },
 		audit: (rec) => { h.audits.push(rec); },
 		now: (() => { let t = 1000; return () => (t += 5); })(),
@@ -56,7 +57,7 @@ function makeInput(over: Partial<SessionPostInput> = {}): { input: SessionPostIn
 }
 
 describe("handleSessionPost — happy path (scoped guard, no toolUseId)", () => {
-	it("posts into the HEADER-BOUND session and resumes by default", async () => {
+	it("posts into the TRUSTED bound session and resumes by default", async () => {
 		const { input, h } = makeInput();
 		const r = await handleSessionPost(input);
 		assert.deepEqual(r, { ok: true });
@@ -127,19 +128,12 @@ describe("handleSessionPost — every post is audited", () => {
 });
 
 describe("handleSessionPost — authorization + validation rejections", () => {
-	it("missing x-bobbit-session-id header → 403 (and NO post, NO audit)", async () => {
-		const { input, h } = makeInput({ headerSessionId: undefined });
+	it("unresolvable session → 403 (and NO post, NO audit)", async () => {
+		const { input, h } = makeInput({ resolveSession: () => undefined });
 		const r = await handleSessionPost(input);
 		assert.equal((r as { status: number }).status, 403);
 		assert.equal(h.posts.length, 0);
 		assert.equal(h.audits.length, 0);
-	});
-
-	it("body.sessionId mismatching the header → 403 (cross-session attempt blocked)", async () => {
-		const { input, h } = makeInput({ bodySessionId: "other-session" });
-		const r = await handleSessionPost(input);
-		assert.equal((r as { status: number }).status, 403);
-		assert.equal(h.posts.length, 0);
 	});
 
 	it(":tool ∉ allowedTools → 403", async () => {
@@ -171,54 +165,16 @@ describe("handleSessionPost — authorization + validation rejections", () => {
 	});
 });
 
-describe("handleSessionPost — trusted per-session secret (Fix A)", () => {
-	it("missing session secret → 403 (and NO post)", async () => {
-		const { input, h } = makeInput({ sessionSecret: undefined });
-		const r = await handleSessionPost(input);
-		assert.equal((r as { status: number }).status, 403);
-		assert.match((r as { error: string }).error, /session secret/);
-		assert.equal(h.posts.length, 0);
-	});
-
-	it("non-string session secret → 403", async () => {
-		const { input } = makeInput({ sessionSecret: 12345 });
-		const r = await handleSessionPost(input);
-		assert.equal((r as { status: number }).status, 403);
-	});
-
-	it("secret that does not resolve → 403 (raw pack fetch with no secret rejected)", async () => {
-		const { input, h } = makeInput({ resolveSecretSession: () => undefined });
-		const r = await handleSessionPost(input);
-		assert.equal((r as { status: number }).status, 403);
-		assert.equal(h.posts.length, 0);
-	});
-
-	it("secret resolving to ANOTHER session → 403 (must match the header-bound session)", async () => {
-		const { input, h } = makeInput({ resolveSecretSession: () => "some-other-session" });
-		const r = await handleSessionPost(input);
-		assert.equal((r as { status: number }).status, 403);
-		assert.equal(h.posts.length, 0);
-	});
-
-	it("a secret resolving to the bound session succeeds and is audited", async () => {
-		const { input, h } = makeInput();
-		const r = await handleSessionPost(input);
-		assert.equal(r.ok, true);
-		assert.equal(h.posts.length, 1);
-		assert.equal(h.audits.length, 1);
-		assert.equal(h.audits[0].outcome, "ok");
-		assert.equal(h.audits[0].packId, "my-pack");
-	});
-});
-
 describe("handleSessionPost — cross-session posting is structurally impossible", () => {
-	it("targets ONLY the header-bound session even if the body names another", async () => {
-		// The body sessionId mismatch is rejected first; but even a matching body
-		// never feeds the target — the poster is always called with guard.sessionId.
+	it("targets ONLY the TRUSTED bound session", async () => {
+		// The poster is always called with the trusted bound sessionId; there is no
+		// input field that could redirect the post to another session.
 		const { input, h } = makeInput();
 		await handleSessionPost(input);
 		assert.equal(h.posts[0].sessionId, SID);
-		// There is no input field that could redirect the post to another session.
 		assert.equal(Object.prototype.hasOwnProperty.call(input, "targetSessionId"), false);
+		// No header/body/secret transport remains: the trusted WS supplies the session.
+		assert.equal(Object.prototype.hasOwnProperty.call(input, "headerSessionId"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(input, "sessionSecret"), false);
 	});
 });

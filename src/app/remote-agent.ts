@@ -38,7 +38,7 @@ import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } fro
 import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
-import { setSessionSecret, clearSessionSecret } from "./gesture-context.js";
+import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -220,6 +220,10 @@ export interface QueuedMessage {
 
 export class RemoteAgent {
 	private ws: WebSocket | null = null;
+	// In-flight C2 session-WRITE (`host.session.postMessage`) requests, keyed by the
+	// correlation id sent on the `ext_session_post` frame and settled by the matching
+	// `ext_session_post_result`. See `_postExtSession` / session-write-bridge.ts.
+	private _pendingExtPosts = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
 	private _gatewayUrl = "";
@@ -725,14 +729,12 @@ export class RemoteAgent {
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
-						// Fix A (extension-host §8 C2.1): stash the trusted per-session
-						// secret the gateway hands TRUSTED UI on the authenticated WS into a
-						// gesture-context module closure (NEVER on window/state/host), so
-						// `host.session.postMessage` can attach it while same-realm pack code
-						// cannot read it.
-						if (typeof msg.extSessionSecret === "string") {
-							setSessionSecret(this._sessionId, msg.extSessionSecret);
-						}
+						// Register the trusted WS poster for `host.session.postMessage` (C2 session
+						// WRITE, extension-host-phase2.md §8 C2.1). The poster closes over THIS
+						// agent's private WS; pack code has no handle to it and cannot import this
+						// transport, so it cannot drive the agent. No session secret is delivered
+						// to (or capturable from) the client at all — the trusted WS IS the gate.
+						registerSessionPoster(this._sessionId, (req) => this._postExtSession(req));
 						// Splits the ws-open→snapshot window into handshake vs. the
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
@@ -857,9 +859,10 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
-		// Drop the trusted per-session secret so a torn-down session leaves no stale
-		// capability in the client closure (re-delivered on the next auth_ok).
-		clearSessionSecret(this._sessionId);
+		// Drop the trusted WS poster + reject any in-flight session posts so a torn-down
+		// session leaves no stale transport (re-registered on the next auth_ok).
+		unregisterSessionPoster(this._sessionId);
+		this._rejectPendingExtPosts("session disconnected");
 		this._setConnectionStatus("disconnected");
 	}
 
@@ -1342,6 +1345,55 @@ export class RemoteAgent {
 
 	// ── Internal ─────────────────────────────────────────────────────
 
+	/**
+	 * Drive the C2 session WRITE (`host.session.postMessage`) over THIS agent's
+	 * trusted, authenticated WebSocket (registered with session-write-bridge.ts on
+	 * auth_ok). The send rides the WS — NOT a `fetch` — so no capturable secret is
+	 * involved; pack code has no handle to the WS. Correlates the async
+	 * `ext_session_post_result` ack by a generated `requestId`. The server ignores
+	 * `req.sessionId` as a target and posts into its OWN authenticated session.
+	 */
+	private _postExtSession(req: SessionPostRequest): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			if (this.ws?.readyState !== WebSocket.OPEN) {
+				reject(new Error("host.session.postMessage: WebSocket not connected"));
+				return;
+			}
+			const requestId = `extpost_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => {
+				if (this._pendingExtPosts.delete(requestId)) {
+					reject(new Error("host.session.postMessage: timed out awaiting server ack"));
+				}
+			}, 30_000);
+			this._pendingExtPosts.set(requestId, {
+				resolve: () => { clearTimeout(timer); resolve(); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
+			try {
+				this.ws.send(JSON.stringify({
+					type: "ext_session_post",
+					requestId,
+					tool: req.tool,
+					role: req.role,
+					text: req.text,
+					resumeTurn: req.resumeTurn,
+				}));
+			} catch (e) {
+				this._pendingExtPosts.delete(requestId);
+				clearTimeout(timer);
+				reject(e instanceof Error ? e : new Error(String(e)));
+			}
+		});
+	}
+
+	/** Reject and clear every in-flight session post (call on disconnect/teardown). */
+	private _rejectPendingExtPosts(reason: string): void {
+		if (this._pendingExtPosts.size === 0) return;
+		const pending = [...this._pendingExtPosts.values()];
+		this._pendingExtPosts.clear();
+		for (const p of pending) p.reject(new Error(`host.session.postMessage: ${reason}`));
+	}
+
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
@@ -1391,6 +1443,17 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "ext_session_post_result": {
+				// Async ack for a C2 session WRITE (`host.session.postMessage`). Settle the
+				// correlated promise (resolve on ok, reject with the server-side error).
+				const pending = this._pendingExtPosts.get(msg.requestId);
+				if (pending) {
+					this._pendingExtPosts.delete(msg.requestId);
+					if (msg.ok) pending.resolve();
+					else pending.reject(new Error(typeof msg.error === "string" && msg.error ? msg.error : "host.session.postMessage failed"));
+				}
+				break;
+			}
 			case "state":
 				// Canonical-status path (new server). When the server splices
 				// `status` + `statusVersion` into the snapshot, prime our tracker

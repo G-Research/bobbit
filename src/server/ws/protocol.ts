@@ -70,7 +70,17 @@ export type ClientMessage =
 	| { type: "reorder_queue"; messageIds: string[] }
 	| { type: "restart_agent" }
 	| { type: "resume"; fromSeq: number }
-	| { type: "status_resync" };
+	| { type: "status_resync" }
+	/**
+	 * C2 session WRITE (`host.session.postMessage`) — design extension-host-phase2.md
+	 * §8 C2.1. Routed over the TRUSTED WebSocket (NOT a fetch) so no capturable
+	 * session secret ever rides a `fetch` pack code can monkey-patch, and pack code
+	 * — which has no handle to the WS — cannot send it. The TARGET session is ALWAYS
+	 * this connection's OWN authenticated session (never a frame field), so
+	 * cross-session posting is structurally impossible. `requestId` correlates the
+	 * async `ext_session_post_result` reply.
+	 */
+	| { type: "ext_session_post"; requestId: string; tool: string; role: "user" | "system"; text: string; resumeTurn?: boolean };
 
 /**
  * Optional per-phase timing for a `get_messages` snapshot, attached only under
@@ -90,7 +100,10 @@ export interface SnapshotServerTiming {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok"; extSessionSecret?: string }
+	| { type: "auth_ok" }
+	/** Async ack for an `ext_session_post` (C2 session write). `ok:false` carries the
+	 *  server-side authorization/validation error to surface to the pack. */
+	| { type: "ext_session_post_result"; requestId: string; ok: boolean; error?: string }
 	| { type: "auth_failed" }
 	| { type: "state"; data: unknown }
 	| { type: "messages"; data: unknown[]; serverTiming?: SnapshotServerTiming }

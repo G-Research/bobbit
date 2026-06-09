@@ -746,63 +746,95 @@ other tools/packs — the conflict is only visible at registry build.)
 
 **Deps:** B2 (reads). **Flag:** `session` flips `true` here. **Highest-risk slice.**
 
-### C2.1 Endpoint: `POST /api/ext/session/message` (server.ts)
+### C2.1 Transport: the TRUSTED session WebSocket (NOT a fetch)
 
-Body `{ sessionId, toolUseId?, tool, role: "user"|"system", text, resumeTurn? }`
-(`toolUseId` is OPTIONAL — a panel/entrypoint origin has none).
+> **Revision (session-write hardening).** Earlier revisions of this slice shipped
+> `host.session.postMessage` as `POST /api/ext/session/message` carrying an unforgeable
+> per-session `x-bobbit-session-secret` header (delivered to trusted UI over the WS, held
+> in a client closure). That surface was **vulnerable**: a same-realm pack can
+> monkey-patch `window.fetch`, CAPTURE the secret header during one legitimate
+> user-gesture post, then REPLAY it without a gesture — exfiltrating the secret. The HTTP
+> endpoint + the per-session secret + the exported secret getter have been **removed**.
+> The session WRITE now rides the app's already-authenticated session WebSocket; the
+> sections below describe the implemented design.
 
-**Guard ordering (pack-scoped + user-gesture, header-bound, audited):**
+`host.session.postMessage` DRIVES the agent, so it is the highest-risk Host-API addition.
+Its **transport** is now the app's already-authenticated session **WebSocket**, not a
+`fetch`:
+
+- Client: `host.session.postMessage(msg)` → `postSessionMessageOverWs(...)`
+  (`src/app/session-write-bridge.ts`) → the per-session `RemoteAgent`'s WS-bound poster,
+  which sends an `ext_session_post` frame and awaits a correlated `ext_session_post_result`
+  ack (`src/app/remote-agent.ts`). The WS object is a **private field of `RemoteAgent`** —
+  pack code has **no handle to it and cannot send on it**, and pack renderers/panels are
+  Blob-URL modules that **cannot import** `session-write-bridge.ts` (the `host` object is
+  their only surface). So there is **no session secret on any `fetch`** for a pack to
+  monkey-patch/capture/replay, and **no fetch path** to the capability at all.
+- Server: the WS handler (`src/server/ws/handler.ts`, `case "ext_session_post"`) runs the
+  pure `handleSessionPost` (`src/server/extension-host/session-write.ts`) with the
+  connection's **own server-authenticated `sessionId`** as the trusted target.
+
+**Server-side guard ordering (pack-scoped, trusted-session, audited):**
 
 ```
-1. authorizeScopedRequest({...})  → header-canonical session + body===header + session
-   resolves + the pack's `tool` ∈ allowedTools + server-derived packId  (§2a)
+1. authorizeScopedRequest({tool, sessionId(trusted), …}) → session resolves +
+   the pack's `tool` ∈ allowedTools  (§2a)
    — NOT authorizeActionRequest: driving an agent turn does not act on a specific prior
      tool call, so toolUseId-ownership is the WRONG check and toolUseId is NOT required.
      This lets a panel/entrypoint (which binds toolUseId:undefined) call postMessage.
+   — The session is the WS connection's OWN authenticated id (never a frame field), so the
+     body===header invariant holds trivially and cross-session posting is impossible.
 2. require role ∈ {user,system}; reject empty text
-3. post into the HEADER-BOUND session ONLY:
-   - resumeTurn !== false → sessionManager.enqueuePrompt(headerSessionId, text, {source:"extension"})
-     (session-manager.ts:1802)
-   - resumeTurn === false → deliver without resuming the agent turn
-     (sessionManager.deliverLiveSteer, session-manager.ts:1967, or a non-resuming append)
-4. AUDIT every post/resume: {tool, packId, sessionId, role, resumeTurn, ms}  (mandatory — v1 §5 C2)
-5. json({ok:true})
+3. SERVER-derive the packId from `tool`; reject a non-pack caller
+4. post into the TRUSTED bound session ONLY:
+   - resumeTurn !== false → sessionManager.enqueuePrompt(sessionId, text, {source:"extension"})
+   - resumeTurn === false → sessionManager.deliverLiveSteer(sessionId, text, {source:"extension"})
+5. AUDIT every post/resume: {tool, packId, sessionId, role, resumeTurn, ms}  (mandatory — v1 §5 C2)
+6. reply ext_session_post_result {ok}
 ```
 
-`postMessage` drives the agent, so the session is the **header-bound** session (never a
-parameter) and every call is audited. Its security posture is: **allowedTools-gated +
-header-bound session + MANDATORY client user-gesture token (§below) + audited** — secure
-without the inapplicable toolUseId-ownership requirement. (Cross-session posting is
-impossible because the target session is the header-bound session, never a body parameter.)
-The full action guard WITH toolUseId-ownership is unchanged for `invokeAction` (the only
-tool-call-scoped capability).
+`postMessage` drives the agent, so the target is the **trusted, WS-authenticated** session
+(never a parameter) and every call is audited. Its security posture is: **trusted-WS
+transport (no capturable secret, pack cannot send) + allowedTools-gated + server-derived
+packId + audited + client user-activation defense-in-depth (§below)** — secure without the
+inapplicable toolUseId-ownership requirement. The full action guard WITH toolUseId-ownership
+is unchanged for `invokeAction` (the only tool-call-scoped capability).
 
-**User-gesture enforcement is a concrete client-internal gesture token — not a convention.**
-"Reviewers reject render-time posts" is not an enforceable data flow, so the client host
-adds a transient **gesture context flag**:
+**Client user-activation is defense-in-depth ("no post on mount"), not the transport gate.**
+The unforgeable gate is the transport (pack code cannot reach the trusted WS); on top of it
+the client adds a browser-enforced activation check:
 
-- A small client-internal module (e.g. `src/app/gesture-context.ts`, single-owner of C2 on
-  the client) exposes `runWithUserGesture(fn)` / an `activeGesture` flag. The flag is set
-  ONLY by genuine user-gesture handlers — entrypoint launchers (C1), git-widget/command-
-  palette button clicks, composer-slash invocation — which wrap their handler body in
-  `runWithUserGesture(...)`.
-- `host.session.postMessage` **consumes and clears** the flag: on call it reads
-  `activeGesture`, and if absent **throws synchronously** (`"postMessage requires a user
-  gesture"`) so a render/mount-time post fails loudly; if present it clears the flag (a
-  gesture authorizes exactly one post, no latching) and proceeds to the POST. The flag is
-  client-internal state, NOT a method parameter — so the frozen v1 `postMessage` signature
-  is **unchanged**.
-- The frozen v1 contract cannot carry a gesture token in the signature (that would be a v1
-  break), so enforcement is necessarily this client-internal gesture context PLUS UI
-  call-site review — but the token is the load-bearing mechanism; review is secondary.
+- `src/app/gesture-context.ts` exposes `consumeGesture()`, which reads
+  `navigator.userActivation.isActive` — `true` ONLY during a genuine user-gesture call
+  stack (a real button click, including a pack panel's own button), `false` on mount /
+  programmatic calls.
+- `host.session.postMessage` calls `consumeGesture()` **synchronously** at its prologue
+  (before any `await`) and **throws** `"postMessage requires a user gesture"` when it is
+  false, so a render/mount-time post fails loudly. This is browser-enforced state a pack
+  cannot fabricate; it is NOT a method parameter, so the frozen v1 `postMessage` signature
+  is **unchanged**. (`runWithUserGesture(fn)` is retained as a thin no-op wrapper for
+  existing call sites; the activation read is the load-bearing check.)
+- The module holds **no per-session secret and exports no secret getter** — that
+  exfiltration surface is gone.
 
-This mirrors `invokeAction`'s "no auto-invoke on mount" property (v1 §5 v), but makes it a
-checked precondition rather than a reviewer expectation. The server still independently
-authorizes every post (`authorizeScopedRequest`: header-bound session, body===header,
-`tool` ∈ allowedTools, server-derived packId, audit) — the gesture token is a client-side
-defense-in-depth, not the only gate. (The server uses `authorizeScopedRequest`, not
-`authorizeActionRequest`, precisely so a panel/entrypoint with no owned `toolUseId` can
-still post when it holds a genuine user gesture.)
+This mirrors `invokeAction`'s "no auto-invoke on mount" property (v1 §5 v) as a checked
+precondition. The server still independently authorizes + audits every post; the activation
+check is client-side defense-in-depth, not the only gate. (The server uses
+`authorizeScopedRequest`, not `authorizeActionRequest`, precisely so a panel/entrypoint with
+no owned `toolUseId` can still post when it holds a genuine user gesture.)
+
+**Threat-model boundary (accepted Phase-2 scope).** Per the goal's accepted model, pack
+UI logic — renderers (`renderer:`) and panels (`panels:`) — runs in the **main UI thread**
+(pack source is trusted; embedded untrusted content is iframe-`sandbox`ed; no auto-invoke /
+navigation on mount). A same-realm pack therefore CAN monkey-patch globals like
+`window.fetch`. The session-write hardening removes the concrete exfiltration surface that
+mattered: **driving the agent now goes over the trusted session WebSocket that pack code
+cannot access**, and no session secret rides any `fetch`. What remains explicitly OUT of
+Phase 2 scope is **FULL realm isolation** of pack UI logic (running renderers/panels in a
+separate iframe/worker realm so they cannot touch app globals at all). That is a documented
+future hardening, tracked beyond Phase 2; the server-side authorization + audit are the
+durable boundary regardless of client realm. (Server pack *modules* — actions/routes — ARE
+worker-isolated; see §9 C3. The open item is UI-thread isolation only.)
 
 ### C2.2 `subscribe` (live typed events)
 
@@ -814,9 +846,16 @@ internal wire. Scoped to the bound session.
 
 ### C2.3 Wiring
 
-- Server host `ServerHostApi.session.postMessage` body (bound session); client
-  `host.session.postMessage`/`subscribe` bodies. **Flip `flags.session = true`** on both
-  hosts (reads from B2 + writes here = full namespace live).
+- Client `host.session.postMessage` (trusted-WS transport, §C2.1) + `subscribe` bodies.
+  **Flip `flags.session = true`** (reads from B2 + writes here = full namespace live).
+- There is intentionally **no** `ServerHostApi.session.postMessage`: driving the agent is a
+  client-gesture-originated, trusted-WS capability (Fix B). The server host's `session`
+  namespace exposes reads only.
+- Transport plumbing: `ext_session_post` / `ext_session_post_result` WS frames
+  (`src/server/ws/protocol.ts`); server handler in `src/server/ws/handler.ts`; the pure
+  authorize/validate/post/audit core in `src/server/extension-host/session-write.ts`;
+  client poster + registry in `src/app/session-write-bridge.ts` (registered by
+  `RemoteAgent` on auth_ok).
 
 ---
 
