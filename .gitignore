@@ -72,6 +72,7 @@ tests/fixtures/preview-renderer-bundle.css
 tests/fixtures/api-error-forwarding-bundle.css
 tests/fixtures/pack-renderers-reconcile-bundle.css
 tests/fixtures/pack-panels-reconcile-bundle.css
+tests/fixtures/pack-entrypoints-reconcile-bundle.css
 tests/fixtures/client-host-api-bundle.css
 tests/fixtures/marketplace-active-project-bundle.css
 tests/fixtures/spurious-idle-unread-bundle.css

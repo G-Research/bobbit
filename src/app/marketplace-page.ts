@@ -154,10 +154,11 @@ export function activeSessionProjectId(): string | undefined {
  *  `registerPackRenderers` also tears down renderers no longer present — the
  *  uninstall reconciliation path (§4a). Best-effort; never throws. */
 export async function reconcileRenderersForActiveSession(): Promise<void> {
-	const [{ fetchTools }, { registerPackRenderers }, { registerPackPanels }] = await Promise.all([
+	const [{ fetchTools }, { registerPackRenderers }, { registerPackPanels }, { registerPackEntrypoints, entrypointInfosFromTools }] = await Promise.all([
 		import("./api.js"),
 		import("./pack-renderers.js"),
 		import("./pack-panels.js"),
+		import("./pack-entrypoints.js"),
 	]);
 	const projectId = activeSessionProjectId();
 	const tools = await fetchTools(projectId);
@@ -173,6 +174,11 @@ export async function reconcileRenderersForActiveSession(): Promise<void> {
 			.map((p) => ({ panelId: p.id as string, tool: t.name, title: typeof p?.title === "string" ? p.title : undefined }));
 	});
 	registerPackPanels(panelInfos, projectId);
+	// Slice C1 — same install/uninstall reconcile for pack-contributed entrypoints +
+	// deep-link routes (force re-register from the freshly fetched metadata; the
+	// dedupe guard would skip an unchanged project; uninstall reconcile drops removed
+	// entrypoints/routes so a stale deep-link no longer resolves).
+	registerPackEntrypoints(entrypointInfosFromTools(tools), projectId);
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {

@@ -103,6 +103,9 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 	// Slice B4 — re-drive pack-panel reconciliation the same way (browser E2E hook).
 	const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
 	await reconcilePackPanelsForProject(pid);
+	// Slice C1 — re-drive pack-entrypoint reconciliation the same way.
+	const { reconcilePackEntrypointsForProject } = await import("./pack-entrypoints.js");
+	await reconcilePackEntrypointsForProject(pid);
 };
 
 function hasActiveProposalPanel(): boolean {
@@ -150,6 +153,28 @@ async function waitForGateway(url: string, token: string): Promise<void> {
 // HASH CHANGE HANDLER (browser back/forward)
 // ============================================================================
 
+/**
+ * Slice C1 — restore a `#/ext/<routeId>?<params>` pack deep-link (extension-host-
+ * phase2 §7 C1.2a): ensure pack entrypoints are reconciled for the active project
+ * (so a cold-load deep-link resolves even if the boot reconcile is still in flight),
+ * look the routeId up in the client pack-route registry, and open the target panel
+ * with the parsed params (the panel rehydrates its content from host.store). A
+ * routeId with no registered owner (e.g. the pack was uninstalled) is ignored.
+ */
+async function restoreExtRoute(routeId: string | undefined, params: Record<string, string> | undefined): Promise<void> {
+	if (!routeId) return;
+	try {
+		const { reconcilePackEntrypointsForProject, lookupPackRoute } = await import("./pack-entrypoints.js");
+		await reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined);
+		const entry = lookupPackRoute(routeId);
+		if (!entry) return; // owning pack not installed for this project
+		const openParams: Record<string, unknown> = {};
+		if (params) for (const key of entry.paramKeys) if (key in params) openParams[key] = params[key];
+		const { openPackPanel } = await import("./pack-panels.js");
+		openPackPanel({ panelId: entry.targetPanelId, params: openParams });
+	} catch { /* non-fatal — a bad deep-link must never break boot */ }
+}
+
 let handlingHashChange = false;
 let pendingHashChange = false;
 
@@ -183,7 +208,14 @@ async function handleHashChange(): Promise<void> {
 			flushAndTeardownDraft();
 		}
 
-		if (route.view === "goal" && route.goalId) {
+		if (route.view === "ext") {
+			// Slice C1 — pack deep-link. Open the target panel as an overlay on the
+			// CURRENT view (do NOT tear down the session/goal context); the panel mounts
+			// into the side-panel workspace of the active session.
+			if (state.appView !== "authenticated") state.appView = "authenticated";
+			await restoreExtRoute(route.extRouteId, route.extParams);
+			renderApp();
+		} else if (route.view === "goal" && route.goalId) {
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -552,6 +584,9 @@ async function initApp() {
 					// Slice B4 — same lifecycle for pack-contributed side panels.
 					const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
 					await reconcilePackPanelsForProject(state.activeProjectId ?? undefined);
+					// Slice C1 — same lifecycle for pack-contributed entrypoints + deep-link routes.
+					const { reconcilePackEntrypointsForProject } = await import("./pack-entrypoints.js");
+					await reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined);
 				} catch { /* non-fatal — built-in renderers/panels are unaffected */ }
 			})();
 
@@ -605,6 +640,12 @@ async function initApp() {
 				state.appView = "authenticated";
 				renderApp();
 				await refreshSessions();
+			} else if (route.view === "ext") {
+				// Slice C1 — cold-load pack deep-link restoration.
+				state.appView = "authenticated";
+				renderApp();
+				await refreshSessions();
+				await restoreExtRoute(route.extRouteId, route.extParams);
 			} else if (route.view === "roles") {
 				const { loadRolePageData } = await import("./role-manager-page.js");
 				loadRolePageData();
