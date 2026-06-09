@@ -37,6 +37,7 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
+import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -1622,6 +1623,12 @@ export class RemoteAgent {
 				// reader; it's now derived from canonical status.
 				this._isAborting = msg.status === "aborting";
 
+				// Slice C2: bridge the canonical status transition onto the typed Host
+				// session event bus for `host.session.subscribe` (scoped to this session).
+				if (this._sessionId) {
+					try { publishClientStatus(this._sessionId, msg.status); } catch { /* non-fatal */ }
+				}
+
 				this._maybeReplayGrant(msg.status);
 				this.onStatusChange?.(msg.status);
 				break;
@@ -2457,6 +2464,13 @@ export class RemoteAgent {
 						}
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
+
+						// Slice C2: bridge the live message onto the typed Host session
+						// event bus for `host.session.subscribe` (contract shapes, scoped
+						// to this session). Best-effort — never blocks the live path.
+						if (this._sessionId) {
+							try { publishClientMessage(this._sessionId, msg); } catch { /* non-fatal */ }
+						}
 
 						// Check for review tool results (review_open/review_close JSON).
 						// `isLive: true` distinguishes a fresh agent emission from a snapshot

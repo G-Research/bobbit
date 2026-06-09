@@ -15,7 +15,7 @@
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
-import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
+import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord, PostMessageInput } from "../../shared/extension-host/host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
@@ -26,12 +26,12 @@ export interface ServerHostStoreApi {
 }
 
 /** Mirrors HostSessionApi server-side. Slice B2 implements the own-session READS
- *  (`readTranscript`/`readToolCall`) through the contract adapter; `postMessage`
- *  stays frozen-not-implemented until C2. */
+ *  (`readTranscript`/`readToolCall`) through the contract adapter; Slice C2 wires
+ *  the WRITE (`postMessage`) — bound to the own (header) session, never another. */
 export interface ServerHostSessionApi {
 	readTranscript(opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope>;
 	readToolCall(toolUseId: string): Promise<ToolCallRecord | null>;
-	postMessage(msg: unknown): Promise<void>;
+	postMessage(msg: PostMessageInput): Promise<void>;
 }
 
 /** Readonly capability map — the SINGLE SOURCE OF TRUTH for what is IMPLEMENTED on the
@@ -86,10 +86,12 @@ export interface CreateServerHostApiOptions {
 	 *  Own-session by construction — there is no parameter for another session. When
 	 *  absent (non-gateway context), the session reads throw a clear error. */
 	readOwnTranscript?: () => Promise<string | null>;
-}
-
-function notImplemented(member: string): never {
-	throw new Error(`host.${member} is reserved for Phase 2`);
+	/** Slice C2 — post a user/system message into the BOUND (own) session, optionally
+	 *  resuming the agent turn. Injected by the gateway (which authorizes + audits the
+	 *  post against the header-bound session). Own-session by construction — there is
+	 *  no parameter for another session. When absent (non-gateway context),
+	 *  `session.postMessage` throws a clear error. */
+	postOwnMessage?: (msg: PostMessageInput) => Promise<void>;
 }
 
 /**
@@ -117,11 +119,15 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		return readOwnTranscript;
 	};
 
+	// Slice C2: own-session message poster (header-bound session, supplied by the
+	// gateway which authorizes + audits the post). postMessage below delegates to it.
+	const postOwnMessage = opts.postOwnMessage;
+
 	// Slice B1: `store` is IMPLEMENTED — flip the flag. It delegates to the
 	// process-singleton PackStore, scoped to the SERVER-DERIVED closure packId
 	// (never caller-supplied), so a handler can only ever touch its own pack's keys.
-	// `session` stays FALSE until C2 (the namespace flips live as a whole).
-	const flags = { callRoute: false, session: false, store: true };
+	// Slice C2: `session` flips TRUE (reads from B2 + write here = full namespace live).
+	const flags = { callRoute: false, session: true, store: true };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -152,7 +158,19 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			const jsonl = await requireReader("readToolCall")();
 			return transcriptToToolCall(jsonl, toolUseId);
 		},
-		postMessage: () => notImplemented("session.postMessage"),
+		// Slice C2: WRITE into the BOUND (own) session via the gateway-injected poster
+		// (which authorizes + audits the post). Own-session by construction — there is
+		// no parameter for another session, so cross-session posting is impossible.
+		postMessage: async (msg) => {
+			if (!postOwnMessage) throw new Error("host.session.postMessage requires a gateway message poster");
+			if (msg.role !== "user" && msg.role !== "system") {
+				throw new Error('host.session.postMessage: role must be "user" or "system"');
+			}
+			if (typeof msg.text !== "string" || msg.text.trim().length === 0) {
+				throw new Error("host.session.postMessage: text must be a non-empty string");
+			}
+			await postOwnMessage(msg);
+		},
 	};
 
 	return { version: HOST_API_VERSION, contractVersion: HOST_CONTRACT_VERSION, capabilities, store, session };

@@ -24,7 +24,8 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	it("capabilities reports the scoped Phase-2 caps (store implemented in B1)", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
 		assert.equal(host.capabilities.callRoute, false);
-		assert.equal(host.capabilities.session, false);
+		// Slice C2: session flips true (reads from B2 + write here = full namespace).
+		assert.equal(host.capabilities.session, true);
 		// Slice B1: store is implemented — the flag flips true.
 		assert.equal(host.capabilities.store, true);
 		assert.equal(host.capabilities.has("store"), true);
@@ -44,13 +45,28 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	});
 });
 
-describe("createServerHostApi — Phase-2 namespaces are frozen-not-implemented", () => {
-	const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "", contributionId: "g/t" });
+describe("createServerHostApi — Slice C2 own-session WRITE (postMessage)", () => {
+	it("delegates a valid post to the gateway-injected poster (bound session)", async () => {
+		const posts: Array<{ role: string; text: string; resumeTurn?: boolean }> = [];
+		const host = createServerHostApi({
+			sessionId: "s", toolUseId: "tu", packId: "p", contributionId: "g/t",
+			postOwnMessage: async (m) => { posts.push(m); },
+		});
+		await host.session.postMessage({ role: "user", text: "hi", resumeTurn: false });
+		assert.deepEqual(posts, [{ role: "user", text: "hi", resumeTurn: false }]);
+	});
 
-	// store reads/writes (B1) and session READS (B2) are implemented — see their own
-	// describe blocks below; only the session WRITE stays frozen until C2.
-	it("session.postMessage throws 'reserved for Phase 2' (write lands in C2)", () => {
-		assert.throws(() => host.session.postMessage({}), /reserved for Phase 2/);
+	it("rejects an invalid role / empty text before posting", async () => {
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "g/t", postOwnMessage: async () => {},
+		});
+		await assert.rejects(() => host.session.postMessage({ role: "assistant" as never, text: "x" }), /role must be/);
+		await assert.rejects(() => host.session.postMessage({ role: "user", text: "   " }), /non-empty/);
+	});
+
+	it("throws a clear error when no gateway message poster is bound", async () => {
+		const host = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
+		await assert.rejects(() => host.session.postMessage({ role: "user", text: "x" }), /gateway message poster/);
 	});
 });
 

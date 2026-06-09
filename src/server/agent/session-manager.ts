@@ -177,7 +177,10 @@ export type PromptSource =
 	| "task-notification"
 	| "verification"
 	| "system"
-	| "agent";
+	| "agent"
+	// Extension Host C2: a pack's `host.session.postMessage` drove this prompt
+	// (gesture-gated, allowedTools-scoped, audited — see session-write.ts).
+	| "extension";
 
 export interface SessionInfo {
 	id: string;

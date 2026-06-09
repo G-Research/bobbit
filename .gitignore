@@ -42,6 +42,7 @@ binaries/binaries-*/bin/rg.exe
 # Generated esbuild bundles for file:// Playwright fixtures.
 # Specs rebuild these on demand via tests/fixtures/build-bundle.ts or local beforeAll hooks.
 tests/fixtures/*-bundle.js
+tests/fixtures/client-session-write-bundle.css
 
 # Heavy on-demand component-test bundle (Messages.ts pulls the app graph, ~9MB).
 # Built by tests/user-message-image-render.spec.ts::beforeAll when missing/stale.

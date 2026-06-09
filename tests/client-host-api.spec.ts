@@ -9,7 +9,7 @@
  *     `has(name)` mirrors the flags.
  *   - `version`/`contractVersion` are the frozen consts.
  *   - There is NO `gateway` member (escape hatch removed in v1).
- *   - The still-frozen Phase-2 stubs (session writes / ui) throw "reserved for Phase 2".
+ *   - The still-frozen Phase-2 stub (ui.navigate, until C1) throws "reserved for Phase 2".
  *
  * Pattern mirrors pack-renderers-reconcile.spec.ts: esbuild bundles the entry
  * once, a file:// fixture loads it, and we drive the helpers via window globals.
@@ -68,9 +68,10 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		expect(caps.requestRender).toBe(true);
 		expect(caps.hasInvokeAction).toBe(true);
 
-		// Phase-2 — store (B1) + callRoute (B3) implemented; session/ui still frozen.
+		// Phase-2 — store (B1) + callRoute (B3) + session (B2 reads + C2 writes)
+		// implemented; ui still frozen until C1.
 		expect(caps.callRoute).toBe(true);
-		expect(caps.session).toBe(false);
+		expect(caps.session).toBe(true);
 		expect(caps.ui).toBe(false);
 		expect(caps.store).toBe(true);
 		expect(caps.hasCallRoute).toBe(true);
@@ -88,9 +89,6 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		// flag stays false until C2 adds writes — capability-signaling convention). The
 		// remaining members below are still frozen-not-implemented and must throw.
 		const stubs = [
-			"session.postMessage",
-			"session.subscribe",
-			"ui.openPanel",
 			"ui.navigate",
 		];
 		for (const which of stubs) {

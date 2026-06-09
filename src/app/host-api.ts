@@ -23,11 +23,16 @@ import {
 	type ReadTranscriptOpts,
 	type TranscriptEnvelope,
 	type ToolCallRecord,
+	type PostMessageInput,
+	type HostSessionEventName,
+	type HostSessionEventMap,
 } from "../shared/extension-host/host-api.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
 import { requestToolRender } from "../ui/tools/renderer-registry.js";
 import { openPackPanel } from "./pack-panels.js";
+import { consumeGesture } from "./gesture-context.js";
+import { subscribeHostSessionEvent } from "./session-event-bus.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -83,7 +88,7 @@ export function getHostApi(
 		invokeAction: true,
 		requestRender: true,
 		callRoute: true,
-		session: false,
+		session: true,
 		ui: false,
 		store: true,
 	};
@@ -174,8 +179,49 @@ export function getHostApi(
 				if (!resp.ok) throw new Error(`session.readToolCall HTTP ${resp.status}`);
 				return resp.json();
 			},
-			postMessage: () => notImpl("session.postMessage"),
-			subscribe: () => notImpl("session.subscribe"),
+			// Slice C2: WRITE — post a user/system message into the BOUND session,
+			// optionally resuming the agent turn. Drives the agent, so it is gated by a
+			// MANDATORY client user-gesture token (gesture-context.ts): consumeGesture()
+			// is read SYNCHRONOUSLY at the prologue (before any await) and THROWS when no
+			// genuine user gesture is active, so a render/mount-time post fails loudly.
+			// The server independently authorizes every post (authorizeScopedRequest:
+			// header-bound session, body===header, tool ∈ allowedTools, server-derived
+			// packId) and audits it; the target is ALWAYS the bound session (never a body
+			// param → cross-session posting is impossible).
+			postMessage: (msg: PostMessageInput): Promise<void> => {
+				// SYNCHRONOUS gesture check (NOT inside the async body — an async throw
+				// would be a rejected promise, not a loud synchronous failure on mount).
+				if (!consumeGesture()) throw new Error("postMessage requires a user gesture");
+				if (!packTool) throw new Error("host.session.postMessage requires a pack-served context");
+				return (async () => {
+					const resp = await gatewayFetch(
+						"/api/ext/session/message",
+						withSession(
+							{
+								method: "POST",
+								body: JSON.stringify({
+									sessionId,
+									toolUseId,
+									tool: packTool,
+									role: msg.role,
+									text: msg.text,
+									resumeTurn: msg.resumeTurn,
+								}),
+							},
+							sessionId,
+						),
+					);
+					if (!resp.ok) throw new Error(`session.postMessage HTTP ${resp.status}`);
+				})();
+			},
+			// Slice C2: subscribe to live, TYPED session events bridged from the session
+			// WebSocket onto the frozen HostSessionEventMap (contract shapes via the
+			// client internal→contract mapper). Scoped to the BOUND session; returns an
+			// unsubscribe fn. No server round-trip — the per-session RemoteAgent feeds the bus.
+			subscribe: <E extends HostSessionEventName>(
+				event: E,
+				cb: (payload: HostSessionEventMap[E]) => void,
+			): (() => void) => subscribeHostSessionEvent(sessionId, event, cb),
 		} as HostApi["session"],
 		ui: {
 			// Slice B4: open (or focus) a pack-contributed side panel via the client

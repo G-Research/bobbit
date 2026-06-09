@@ -47,6 +47,7 @@ import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
+import { handleSessionPost } from "./extension-host/session-write.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
@@ -5277,6 +5278,25 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Slice C2: build an own-session message poster for the server Host API
+	// (`ctx.host.session.postMessage`). Targets the HEADER-BOUND session ONLY (the
+	// caller-proven `sessionId`) — there is no other-session parameter, so a server
+	// module can only ever drive its own session. Every post/resume is audited.
+	const makeOwnMessagePoster = (sessionId: string, tool: string, packId: string) =>
+		async (msg: { role: "user" | "system"; text: string; resumeTurn?: boolean }): Promise<void> => {
+			const resume = msg.resumeTurn !== false;
+			const start = Date.now();
+			try {
+				if (resume) await sessionManager.enqueuePrompt(sessionId, msg.text, { source: "extension" });
+				else await sessionManager.deliverLiveSteer(sessionId, msg.text, { source: "extension" });
+				console.log(`[ext-session-message] tool=${tool} packId=${packId} session=${sessionId} role=${msg.role} resumeTurn=${resume} outcome=ok durationMs=${Date.now() - start} origin=server-host`);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				console.warn(`[ext-session-message] tool=${tool} packId=${packId} session=${sessionId} role=${msg.role} resumeTurn=${resume} outcome=error durationMs=${Date.now() - start} origin=server-host: ${message}`);
+				throw err;
+			}
+		};
+
 	// POST /api/tools/:tool/actions/:action — invoke a pack tool's server action
 	// handler (design §4b / §5). The LLM can curl this directly, so the
 	// allowedTools guard here — NOT the agent layer — is the real gate (§5 i).
@@ -5371,6 +5391,7 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
+			postOwnMessage: makeOwnMessagePoster(guard.sessionId, tool, ident.packId),
 		});
 		const start = Date.now();
 		try {
@@ -5613,6 +5634,7 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
+			postOwnMessage: makeOwnMessagePoster(guard.sessionId, resolved.declaringTool, ident.packId),
 		});
 		const start = Date.now();
 		try {
@@ -5631,6 +5653,71 @@ async function handleApiRoute(
 			console.warn(`[ext-route] name=${routeName} tool=${routeTool} packId=${ident.packId} session=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
 		}
+		return;
+	}
+
+	// POST /api/ext/session/message — Slice C2 session WRITE behind
+	// `host.session.postMessage` (design extension-host-phase2.md §8 C2.1). Drives
+	// the agent, so it is the HIGHEST-RISK Host-API addition: pack-scoped (NOT
+	// tool-call-scoped) authorization via authorizeScopedRequest (NO toolUseId-
+	// ownership — a panel/entrypoint with no owned toolUseId may post when it holds
+	// a real client user gesture), role ∈ {user,system} + non-empty text, the target
+	// is ALWAYS the header-bound session (never a body param → cross-session posting
+	// is impossible), the packId is SERVER-derived from the proven `tool`, and EVERY
+	// post/resume is audited. resumeTurn !== false resumes the agent turn
+	// (enqueuePrompt); resumeTurn === false delivers without resuming (deliverLiveSteer).
+	if (url.pathname === "/api/ext/session/message" && req.method === "POST") {
+		const body = (await readBody(req)) ?? {};
+		const msgTool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const msgHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		// Resolve the tool through the SESSION's project-scoped tool manager (same
+		// no-split-brain resolution the action/store/route endpoints use).
+		const msgSessionProjectId = msgHeaderSid
+			? (sessionManager.getSession(msgHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(msgHeaderSid)?.projectId)
+			: undefined;
+		const msgToolManager = resolveActionToolManager(
+			toolManager,
+			msgSessionProjectId ? projectContextManager.getOrCreate(msgSessionProjectId)?.toolManager : undefined,
+		);
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		const result = await handleSessionPost({
+			tool: msgTool,
+			headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			role: (body as { role?: unknown }).role,
+			text: (body as { text?: unknown }).text,
+			resumeTurn: (body as { resumeTurn?: unknown }).resumeTurn,
+			resolveSession,
+			resolvePackIdentity: (tool) => resolvePackIdentityForTool(msgToolManager, tool),
+			// Target the HEADER-BOUND session ONLY. resume → resume the agent turn;
+			// non-resume → deliver without resuming.
+			post: async (sessionId, text, opts) => {
+				if (opts.resume) {
+					await sessionManager.enqueuePrompt(sessionId, text, { source: "extension" });
+				} else {
+					await sessionManager.deliverLiveSteer(sessionId, text, { source: "extension" });
+				}
+			},
+			audit: (rec) => {
+				const tail = rec.outcome === "error" ? `: ${rec.error}` : "";
+				console.log(
+					`[ext-session-message] tool=${rec.tool} packId=${rec.packId} session=${rec.sessionId} role=${rec.role} resumeTurn=${rec.resumeTurn} outcome=${rec.outcome} durationMs=${rec.ms}${tail}`,
+				);
+			},
+		});
+		if (!result.ok) {
+			json({ error: result.error }, result.status);
+			return;
+		}
+		json({ ok: true });
 		return;
 	}
 
