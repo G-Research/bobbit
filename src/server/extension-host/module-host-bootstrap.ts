@@ -105,6 +105,16 @@ if (!port) {
 const data = (workerData ?? { denied: [] }) as BootstrapData;
 const grants = Array.isArray(data.permissions) ? data.permissions : [];
 
+// Slice C3 (defense-in-depth — confine git/fs to the session working dir). The
+// shared pack-path containment helper (`path-guard`) is loaded in `confinementReady`
+// step (2); the per-grant module wraps applied in step (1) consult it — plus the
+// REAL (unwrapped) `realpathSync` captured BEFORE the fs-rebase wrap — only when the
+// pack actually calls fs/git, by which time `confinementReady` (and thus the
+// path-guard import) has completed. Capturing the unwrapped `realpathSync` keeps the
+// containment check from recursing through the pack-facing fs wrap.
+let sessionContainment: ((groupAbs: string, fileAbs: string) => boolean) | undefined;
+let realRealpathSync: ((p: string) => string) | undefined;
+
 // NOTE: `process.chdir()` is unsupported inside a worker thread, so the worker's
 // REAL cwd stays at startup. The session working dir is surfaced two ways: the
 // process SHIM's `cwd()` (set in removeAmbientGlobals) for any pack that reads it,
@@ -134,8 +144,10 @@ const grants = Array.isArray(data.permissions) ? data.permissions : [];
 //   (3) Remove ambient web/process globals (`net` keeps the network globals;
 //       `git`/`fs` get a REAL cwd + minimal PATH env on the process shim).
 const confinementReady: Promise<void> = (async () => {
+	captureRealFs();
 	applyGrantedModuleWraps(grants, data.workingDir);
 	const { isPackPathWithinGroup } = await import("./path-guard.js");
+	sessionContainment = isPackPathWithinGroup;
 	configureConfinement({ denied: data.denied, packRoot: data.packRoot, isWithin: isPackPathWithinGroup });
 	registerHooks({ resolve: confinementResolve });
 	removeAmbientGlobals(grants, data.workingDir);
@@ -251,6 +263,37 @@ function applyGrantedModuleWraps(grants: readonly string[], workingDir?: string)
 	}
 }
 
+/** Capture the REAL (unwrapped) `node:fs.realpathSync` BEFORE `installFsRebase`
+ *  wraps it, so the session-containment equality check (which must resolve
+ *  symlinks) never recurses through the pack-facing fs wrap. */
+function captureRealFs(): void {
+	try {
+		const require = createRequire(import.meta.url);
+		const fsMod = require("node:fs") as { realpathSync: (p: string) => string };
+		const orig = fsMod.realpathSync;
+		realRealpathSync = (p: string) => orig.call(fsMod, p);
+	} catch {
+		/* best effort — without it `withinSession` falls back to the path-guard helper
+		   alone (still rejects out-of-tree paths; only the working-dir-ROOT equality
+		   allowance is lost) */
+	}
+}
+
+/** Slice C3 — true iff `target` (an ABSOLUTE path) is the session working dir
+ *  ITSELF or realpath-contained beneath it. Reuses the shared `path-guard` helper
+ *  for containment (no fork) and adds the working-dir-ROOT equality allowance the
+ *  helper omits by design (it rejects `group === target`, yet the working dir
+ *  itself is a legitimate `cwd` / `readdir` target). */
+function withinSession(workingDir: string, target: string): boolean {
+	if (sessionContainment?.(workingDir, target)) return true;
+	if (!realRealpathSync) return false;
+	try {
+		return realRealpathSync(workingDir) === realRealpathSync(target);
+	} catch {
+		return false;
+	}
+}
+
 /** True iff `command` names the `git` binary (basename `git`/`git.exe`, any dir). */
 function isGitBinary(command: unknown): boolean {
 	if (typeof command !== "string" || command.length === 0) return false;
@@ -259,33 +302,61 @@ function isGitBinary(command: unknown): boolean {
 	return noExe === "git";
 }
 
-/** Build a `{ cwd }`-defaulted argument list for a spawn/execFile call when the
- *  caller passed no `cwd`. Handles the optional positional `options` object (which
- *  may be absent, follow an `args` array, and precede a trailing callback for
- *  `execFile`). Absolute/explicit `cwd` is left untouched. */
-function withDefaultCwd(args: unknown[], dir?: string): unknown[] {
+/** Build the spawn/execFile argument list with a SESSION-CONFINED `cwd`. A `git`
+ *  grant means "run git in the session working dir", so the effective cwd — whether
+ *  DEFAULTED (none supplied) or EXPLICIT — must realpath-resolve to the working dir
+ *  or beneath it; an escape (out-of-tree `cwd`, `../` walk, symlink) THROWS. Only
+ *  the `cwd` ARGUMENT is constrained: git's own internal file access (worktree
+ *  `.git` links legitimately point outside the working dir) is the OS child's
+ *  concern, not subject to this JS wrapper. Handles the optional positional
+ *  `options` object (absent, after an `args` array, before a trailing `execFile`
+ *  callback). */
+function applyGitCwd(args: unknown[], dir?: string): unknown[] {
 	if (!dir) return args;
 	let optsIdx = -1;
 	for (let i = 1; i < args.length; i++) {
 		const a = args[i];
 		if (a && typeof a === "object" && !Array.isArray(a)) { optsIdx = i; break; }
 	}
+	const explicit = optsIdx >= 0 ? (args[optsIdx] as Record<string, unknown>).cwd : undefined;
+	const cwd = confineCwd(explicit, dir); // throws on escape
 	if (optsIdx >= 0) {
-		const opts = args[optsIdx] as Record<string, unknown>;
-		if (opts.cwd == null) {
-			const copy = args.slice();
-			copy[optsIdx] = { ...opts, cwd: dir };
-			return copy;
-		}
-		return args;
+		const copy = args.slice();
+		copy[optsIdx] = { ...(args[optsIdx] as Record<string, unknown>), cwd };
+		return copy;
 	}
 	const out = args.slice();
 	if (out.length > 0 && typeof out[out.length - 1] === "function") {
-		out.splice(out.length - 1, 0, { cwd: dir });
+		out.splice(out.length - 1, 0, { cwd });
 	} else {
-		out.push({ cwd: dir });
+		out.push({ cwd });
 	}
 	return out;
+}
+
+/** Resolve a git spawn's effective `cwd` (explicit string/URL or defaulted to the
+ *  session dir) to an absolute path UNDER `dir`, throwing if it escapes. */
+function confineCwd(explicit: unknown, dir: string): string {
+	const require = createRequire(import.meta.url);
+	const pathMod = require("node:path") as { isAbsolute: (p: string) => boolean; resolve: (...s: string[]) => string };
+	let cwd: string;
+	if (typeof explicit === "string" && explicit.length > 0) {
+		cwd = pathMod.isAbsolute(explicit) ? explicit : pathMod.resolve(dir, explicit);
+	} else if (explicit && typeof explicit === "object") {
+		// `spawn`/`execFile` accept a URL cwd — convert it to a path before checking.
+		try {
+			const { fileURLToPath } = require("node:url") as { fileURLToPath: (u: unknown) => string };
+			cwd = fileURLToPath(explicit);
+		} catch {
+			throw new Error("[confinement] the 'git' grant could not validate the supplied cwd (Extension Host §9 isolation)");
+		}
+	} else {
+		cwd = dir; // no cwd supplied → default to the session working dir
+	}
+	if (!withinSession(dir, cwd)) {
+		throw new Error(`[confinement] the 'git' grant restricts the spawn cwd to the session working directory; "${String(explicit ?? cwd)}" escapes it (Extension Host §9 isolation)`);
+	}
+	return cwd;
 }
 
 function denyChildProc(what: string): () => never {
@@ -349,7 +420,7 @@ function installGitRunner(dir?: string): void {
 			if (!isGitBinary(args[0])) {
 				throw new Error(`[confinement] the 'git' permission only permits spawning the git binary, not "${String(args[0])}" (Extension Host §9 isolation)`);
 			}
-			const child = (orig as (...a: unknown[]) => unknown).apply(this, withDefaultCwd(args, dir));
+			const child = (orig as (...a: unknown[]) => unknown).apply(this, applyGitCwd(args, dir));
 			report(child);
 			return child;
 		};
@@ -390,11 +461,30 @@ function installFsRebase(dir: string): void {
 
 	const require = createRequire(import.meta.url);
 	const pathMod = require("node:path") as { isAbsolute: (p: string) => boolean; resolve: (...s: string[]) => string };
-	const rebase = (p: unknown): unknown => {
+	// Resolve a string path arg to an ABSOLUTE path under `dir` (leading-relative
+	// rebased onto the session dir; absolute kept) and, when `check`, REJECT any
+	// path that escapes the session working dir (`../` walk, absolute-outside, or
+	// symlink escape — all caught by the realpath-resolving containment helper).
+	// `realpath`/`realpathSync` are rebased but NOT containment-checked: they merely
+	// RESOLVE a path (the actual read/write goes through a checked method), AND the
+	// shared `path-guard` helper reuses this same wrapped fs to realpath the
+	// (out-of-tree) PACK ROOT — throwing there would break module containment and
+	// recurse through `withinSession`.
+	const confine = (p: unknown, check: boolean): unknown => {
 		if (typeof p !== "string" || p.length === 0) return p;
 		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p)) return p; // a URL (file://, …) → leave as-is
-		if (pathMod.isAbsolute(p)) return p;
-		return pathMod.resolve(dir, p);
+		const abs = pathMod.isAbsolute(p) ? p : pathMod.resolve(dir, p);
+		// Gate the containment THROW on the path-guard helper being loaded: it is set
+		// at the END of `confinementReady`, and PACK code runs only AFTER that. The
+		// few fs calls made WHILE it is unset are the host's own setup machinery (the
+		// `path-guard` dynamic import — and, under the tsx unit loader, its transpile
+		// cache reads) — never pack code — so they must not be confined. Once it is
+		// set, every pack fs call is checked (and the loader's own reads of the pack
+		// source / cache resolve as in-bounds or ENOENT-tolerated, so they pass).
+		if (check && sessionContainment && !withinSession(dir, abs)) {
+			throw new Error(`[confinement] the 'fs' grant restricts paths to the session working directory; "${p}" escapes it (Extension Host §9 isolation)`);
+		}
+		return abs;
 	};
 	const wrap = (mod: Record<string, unknown>): void => {
 		for (const name of Object.keys(mod)) {
@@ -402,9 +492,10 @@ function installFsRebase(dir: string): void {
 			const fn = mod[name];
 			if (typeof fn !== "function") continue;
 			const twoPath = twoPathSet.has(name);
+			const check = name !== "realpath" && name !== "realpathSync";
 			const wrapped = function (this: unknown, ...args: unknown[]): unknown {
-				if (args.length > 0) args[0] = rebase(args[0]);
-				if (twoPath && args.length > 1) args[1] = rebase(args[1]);
+				if (args.length > 0) args[0] = confine(args[0], check);
+				if (twoPath && args.length > 1) args[1] = confine(args[1], check);
 				return (fn as (...a: unknown[]) => unknown).apply(this, args);
 			};
 			// Preserve function sub-properties (e.g. `fs.realpath.native`).

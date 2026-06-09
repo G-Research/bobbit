@@ -54,6 +54,39 @@ export class PackStoreQuotaError extends Error {
 	}
 }
 
+/** Thrown when a store op exceeds its wall-time bound (design §3 B1.2 — bound the
+ *  blast radius of a stuck/slow store backend so it cannot hold a request open
+ *  indefinitely). The endpoint maps it to a 5xx. */
+export class PackStoreTimeoutError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PackStoreTimeoutError";
+	}
+}
+
+/** Default per-op wall-time for `host.store.*` (design §3 B1.2). */
+export const DEFAULT_STORE_OP_TIMEOUT_MS = 10_000;
+
+/**
+ * Race a store op against a wall-time bound, rejecting with {@link
+ * PackStoreTimeoutError} on expiry (consistent with the dispatcher's
+ * terminate-on-timeout pattern). A hung backend therefore cannot hold the
+ * `/api/ext/store/:op` request open outside the blast-radius control the design
+ * (B1.2) specifies. The timer is `unref`'d so it never keeps the process alive.
+ */
+export function withStoreTimeout<T>(op: Promise<T>, ms: number = DEFAULT_STORE_OP_TIMEOUT_MS, label = "store op"): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+			reject(new PackStoreTimeoutError(`${label} timed out after ${ms}ms`));
+		}, ms);
+		(timer as { unref?: () => void }).unref?.();
+		op.then(
+			(v) => { clearTimeout(timer); resolve(v); },
+			(e) => { clearTimeout(timer); reject(e); },
+		);
+	});
+}
+
 /** Serialized on-disk envelope. `v` is a forward-compat version tag. */
 interface StoreEnvelope<T = unknown> {
 	v: 1;
