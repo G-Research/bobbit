@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
 	parseContributions,
+	parseStores,
 	computeRendererKind,
 	isMarketPackBaseDir,
 } from "../src/server/agent/tool-contributions.ts";
@@ -79,14 +80,13 @@ describe("parseContributions — Phase-2 reserved keys (accepted + ignored, neve
 	it("retains valid array reserved keys verbatim and never throws", () => {
 		const panels = [{ id: "demo.sidebar", title: "Demo", entry: "panel.js" }];
 		const c = parseContributions(
-			{ name: "t", panels, entrypoints: [{ id: "e" }], routes: [{ path: "/x" }], stores: [{ ns: "s" }] },
+			{ name: "t", panels, entrypoints: [{ id: "e" }], routes: [{ path: "/x" }] },
 			FP,
 		);
 		// Parsed-and-reserved: present, retained verbatim, NOT promoted to load-bearing fields.
 		assert.deepEqual(c.reserved.panels, panels);
 		assert.deepEqual(c.reserved.entrypoints, [{ id: "e" }]);
 		assert.deepEqual(c.reserved.routes, [{ path: "/x" }]);
-		assert.deepEqual(c.reserved.stores, [{ ns: "s" }]);
 		assert.equal(c.renderer, undefined);
 		assert.equal(c.actions, undefined);
 	});
@@ -107,6 +107,30 @@ describe("parseContributions — fully malformed input degrades", () => {
 			assert.equal(c.actions, undefined);
 			assert.deepEqual(c.reserved, {});
 		}
+	});
+});
+
+describe("parseStores (Slice B1 — `stores:` graduated to typed, advisory, never rejects)", () => {
+	it("accepts bare-string and {id} entries, dedupes", () => {
+		assert.deepEqual(parseStores(["prefs", { id: "cache" }, "prefs"], FP), [
+			{ id: "prefs" },
+			{ id: "cache" },
+		]);
+	});
+
+	it("drops invalid entries (bad id / missing id / wrong shape), never throws", () => {
+		assert.deepEqual(parseStores([{ ns: "s" }, "bad/slash", 42, { id: "ok-1" }], FP), [{ id: "ok-1" }]);
+	});
+
+	it("a non-array stores block degrades to [] (never rejects)", () => {
+		assert.deepEqual(parseStores({ not: "array" }, FP), []);
+	});
+
+	it("parseContributions surfaces typed stores on the contribution", () => {
+		const c = parseContributions({ name: "t", stores: ["prefs", { id: "cache" }] }, FP);
+		assert.deepEqual(c.stores, [{ id: "prefs" }, { id: "cache" }]);
+		// graduated off `reserved` — stores is no longer a reserved key
+		assert.equal((c.reserved as Record<string, unknown>).stores, undefined);
 	});
 });
 

@@ -55,6 +55,8 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
+	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive wire field). */
+	storeIds?: string[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
@@ -64,9 +66,10 @@ export interface ToolInfo {
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
-function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames"> {
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds"> {
 	const c = base.contributions;
 	return {
+		storeIds: c.stores?.map((s) => s.id),
 		// Source the renderer from the PARSED/validated contribution — NOT the raw
 		// `base.renderer` — so an unsafe/dropped renderer path (e.g. `../evil.js`,
 		// rejected by parseContributions) yields rendererKind "builtin", never "pack".

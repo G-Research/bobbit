@@ -14,8 +14,9 @@
 // need raw `fs`/`process`/`exec` import them directly.
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
+import type { PackStore } from "./pack-store.js";
 
-/** PHASE 2 — frozen, not implemented. Mirrors HostStoreApi server-side. */
+/** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	put<T = unknown>(key: string, value: T): Promise<void>;
@@ -37,7 +38,7 @@ export interface ServerHostCapabilities {
 	readonly callRoute: boolean;
 	/** Phase-2 — transcript/message/event surface. False on a Phase-1 host. */
 	readonly session: boolean;
-	/** Phase-2 — ownership-scoped persistence. False on a Phase-1 host. */
+	/** Ownership-scoped persistence (Slice B1). True once the store backend is wired. */
 	readonly store: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
@@ -55,7 +56,7 @@ export interface ServerHostApi {
 	readonly contractVersion: number;
 	/** The SINGLE SOURCE OF TRUTH for which capabilities are implemented on this host. */
 	readonly capabilities: ServerHostCapabilities;
-	/** Ownership-scoped persistence. PHASE 2 (frozen, not implemented). */
+	/** Ownership-scoped persistence (Slice B1) — scoped to the server-derived packId. */
 	readonly store: ServerHostStoreApi;
 	/** Transcript + message capabilities. PHASE 2 (frozen, not implemented). */
 	readonly session: ServerHostSessionApi;
@@ -73,6 +74,9 @@ export interface CreateServerHostApiOptions {
 	packId: string;
 	/** SERVER-DERIVED contributing tool/group key (`${groupDir}/${tool}`). */
 	contributionId: string;
+	/** Slice B1 — the process-singleton pack store. When present, `ctx.host.store`
+	 *  delegates to it scoped to the closure `packId`. */
+	packStore?: PackStore;
 }
 
 function notImplemented(member: string): never {
@@ -92,19 +96,27 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// flips in Slice A (identity is plumbing).
 	void opts.sessionId;
 	void opts.toolUseId;
-	void opts.packId;
 	void opts.contributionId;
 
-	const flags = { callRoute: false, session: false, store: false };
+	// Slice B1: `store` is IMPLEMENTED — flip the flag. It delegates to the
+	// process-singleton PackStore, scoped to the SERVER-DERIVED closure packId
+	// (never caller-supplied), so a handler can only ever touch its own pack's keys.
+	const flags = { callRoute: false, session: false, store: true };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 	};
 
+	const packId = opts.packId;
+	const packStore = opts.packStore;
+	const requireStore = (): PackStore => {
+		if (!packStore) throw new Error("host.store backend unavailable");
+		return packStore;
+	};
 	const store: ServerHostStoreApi = {
-		get: () => notImplemented("store.get"),
-		put: () => notImplemented("store.put"),
-		list: () => notImplemented("store.list"),
+		get: (key) => requireStore().get(packId, key),
+		put: (key, value) => requireStore().put(packId, key, value),
+		list: (prefix) => requireStore().list(packId, prefix),
 	};
 
 	const session: ServerHostSessionApi = {

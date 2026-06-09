@@ -41,7 +41,8 @@ import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
-import { authorizeActionRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
+import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
+import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
@@ -862,6 +863,9 @@ export function createGateway(config: GatewayConfig) {
 	// dispatcher lives for the gateway process lifetime; its module cache is
 	// dropped synchronously by invalidateResolverCaches() on pack mutations.
 	const actionDispatcher = new ActionDispatcher(toolManager);
+	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
+	// persistence behind `host.store.*` + the /api/ext/store/:op endpoint).
+	getPackStore();
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
@@ -5297,6 +5301,7 @@ async function handleApiRoute(
 			toolUseId,
 			packId: ident.packId,
 			contributionId: ident.contributionId,
+			packStore: getPackStore(),
 		});
 		const start = Date.now();
 		try {
@@ -5308,6 +5313,81 @@ async function handleApiRoute(
 			const message = err instanceof Error ? err.message : String(err);
 			console.warn(`[ext-action] tool=${tool} action=${action} session=${guard.sessionId} toolUseId=${toolUseId} caller=${guard.sessionId} outcome=error(${status}) durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, status);
+		}
+		return;
+	}
+
+	// POST /api/ext/store/:op — pack-namespaced KV persistence behind `host.store.*`
+	// (design extension-host-phase2.md §3 B1.2). Pack-scoped (NOT tool-call-scoped):
+	// authorize via authorizeScopedRequest (header-canonical session, body===header,
+	// session resolves, `tool` ∈ allowedTools — NO toolUseId-ownership, so a panel/
+	// entrypoint with no owned toolUseId can persist), then derive the packId
+	// SERVER-SIDE from the resolved winning contribution and reject a non-pack caller.
+	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
+	if (storeMatch && req.method === "POST") {
+		const op = decodeURIComponent(storeMatch[1]);
+		if (op !== "get" && op !== "put" && op !== "list") {
+			json({ error: `Unknown store op "${op}"` }, 404);
+			return;
+		}
+		const body = (await readBody(req)) ?? {};
+		const tool = typeof (body as { tool?: unknown }).tool === "string" ? (body as { tool: string }).tool : "";
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const storeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		// Resolve the tool through the SESSION's project-scoped tool manager (same
+		// no-split-brain resolution the action endpoint uses).
+		const storeSessionProjectId = storeHeaderSid
+			? (sessionManager.getSession(storeHeaderSid)?.projectId
+				?? sessionManager.getPersistedSession(storeHeaderSid)?.projectId)
+			: undefined;
+		const storeToolManager = resolveActionToolManager(
+			toolManager,
+			storeSessionProjectId ? projectContextManager.getOrCreate(storeSessionProjectId)?.toolManager : undefined,
+		);
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		// 1. Pack-scoped authorization (NO toolUseId-ownership).
+		const guard = authorizeScopedRequest({
+			tool,
+			headerSessionId,
+			bodySessionId: (body as { sessionId?: unknown }).sessionId,
+			resolveSession,
+		});
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		// 2. SERVER-derive the pack identity; 3. reject a non-pack caller.
+		const ident = resolvePackIdentityForTool(storeToolManager, tool);
+		if (!ident.isPack || !ident.packId) {
+			json({ error: "store is available only to market-pack tools" }, 403);
+			return;
+		}
+		const key = (body as { key?: unknown }).key;
+		const prefix = (body as { prefix?: unknown }).prefix;
+		const start = Date.now();
+		try {
+			const packStore = getPackStore();
+			let result: unknown;
+			if (op === "get") {
+				result = await packStore.get(ident.packId, key as string);
+			} else if (op === "put") {
+				await packStore.put(ident.packId, key as string, (body as { value?: unknown }).value);
+				result = { ok: true };
+			} else {
+				result = await packStore.list(ident.packId, typeof prefix === "string" ? prefix : undefined);
+			}
+			console.log(`[ext-store] op=${op} tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=ok durationMs=${Date.now() - start}`);
+			json(result ?? null);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.warn(`[ext-store] op=${op} tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=error durationMs=${Date.now() - start}: ${message}`);
+			json({ error: message }, 400);
 		}
 		return;
 	}

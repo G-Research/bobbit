@@ -52,11 +52,24 @@ export function getHostApi(
 	// `packTool` (Slice A) is the tool name whose pack owns this renderer. It is
 	// held in closure for the scoped Phase-2 capabilities (callRoute/store/session)
 	// to send as `tool` so the server can derive the trusted packId (the client
-	// never sends a packId — design extension-host-phase2.md §2.3). No behavior
-	// change to Phase-1 invokeAction/requestRender; the Phase-2 stubs still throw.
-	void packTool;
+	// never sends a packId — design extension-host-phase2.md §2.3). Slice B1 wires
+	// `store.*` through it; the remaining Phase-2 stubs (callRoute/session/ui) throw.
 	const notImpl = (m: string): never => {
 		throw new Error(`host.${m} is reserved for Phase 2`);
+	};
+	// Slice B1: POST a store op to /api/ext/store/:op, sending the bound `packTool`
+	// as `tool` so the server derives the trusted packId (client never sends one).
+	const storeOp = async (op: "get" | "put" | "list", payload: Record<string, unknown>): Promise<unknown> => {
+		if (!packTool) throw new Error("host.store requires a pack-served renderer context");
+		const resp = await gatewayFetch(
+			`/api/ext/store/${op}`,
+			withSession(
+				{ method: "POST", body: JSON.stringify({ sessionId, toolUseId, tool: packTool, ...payload }) },
+				sessionId,
+			),
+		);
+		if (!resp.ok) throw new Error(`store.${op} HTTP ${resp.status}`);
+		return resp.json();
 	};
 	// Phase-1 host: only invokeAction + requestRender are implemented. `capabilities`
 	// is the single source of truth; the throwing stubs below exist only for type
@@ -67,7 +80,7 @@ export function getHostApi(
 		callRoute: false,
 		session: false,
 		ui: false,
-		store: false,
+		store: true,
 	};
 	return {
 		version: HOST_API_VERSION,
@@ -118,9 +131,11 @@ export function getHostApi(
 			navigate: () => notImpl("ui.navigate"),
 		} as HostApi["ui"],
 		store: {
-			get: () => notImpl("store.get"),
-			put: () => notImpl("store.put"),
-			list: () => notImpl("store.list"),
+			get: async (key: string) => (await storeOp("get", { key })) as never,
+			put: async (key: string, value: unknown) => {
+				await storeOp("put", { key, value });
+			},
+			list: async (prefix?: string) => (await storeOp("list", { prefix })) as string[],
 		} as HostApi["store"],
 	};
 }

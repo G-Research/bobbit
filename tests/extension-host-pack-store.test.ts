@@ -1,0 +1,137 @@
+/**
+ * Unit tests for Slice B1 — file-backed, pack-namespaced KV store
+ * (src/server/extension-host/pack-store.ts), design
+ * docs/design/extension-host-phase2.md §3.
+ *
+ * Pinned invariants (the cross-pack-denial guarantees behind `host.store.*`):
+ *   - put/get/list round-trip, with values JSON-serialized under {v:1,value}.
+ *   - Keys are physically namespaced under `<root>/ext-store/<packId>/`.
+ *   - A SECOND pack CANNOT read the first pack's key (it can only name its own packId).
+ *   - Key traversal (`../`, separators, illegal chars) is structurally impossible.
+ *   - A non-pack caller (packId === "") is rejected.
+ *   - The store endpoint guard order is: scoped guard → server-derived identity →
+ *     non-pack rejection → store op (proven by the guard-ordering test).
+ */
+import { describe, it, before, after } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createPackStore } from "../src/server/extension-host/pack-store.ts";
+
+let rootDir: string;
+before(() => {
+	rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "pack-store-test-"));
+});
+after(() => {
+	try { fs.rmSync(rootDir, { recursive: true, force: true }); } catch { /* best effort */ }
+});
+
+describe("createPackStore — round-trip + on-disk namespacing", () => {
+	it("put/get round-trips arbitrary JSON values", async () => {
+		const store = createPackStore({ rootDir });
+		await store.put("pack-a", "prefs", { theme: "dark", n: 42 });
+		assert.deepEqual(await store.get("pack-a", "prefs"), { theme: "dark", n: 42 });
+		await store.put("pack-a", "flag", true);
+		assert.equal(await store.get("pack-a", "flag"), true);
+	});
+
+	it("get → null for a missing key and for a corrupt file", async () => {
+		const store = createPackStore({ rootDir });
+		assert.equal(await store.get("pack-a", "never-written"), null);
+		// Corrupt the on-disk file → get returns null (no throw).
+		const dir = path.join(rootDir, "ext-store", "pack-a");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "corrupt.json"), "{not json");
+		assert.equal(await store.get("pack-a", "corrupt"), null);
+	});
+
+	it("keys are physically stored under <root>/ext-store/<packId>/", async () => {
+		const store = createPackStore({ rootDir });
+		await store.put("pack-ns", "k1", 1);
+		const dir = path.join(rootDir, "ext-store", "pack-ns");
+		assert.ok(fs.existsSync(dir), "packId dir exists");
+		const files = fs.readdirSync(dir);
+		assert.equal(files.length, 1);
+		assert.ok(files[0].endsWith(".json"));
+	});
+
+	it("list returns decoded keys filtered by prefix, sorted", async () => {
+		const store = createPackStore({ rootDir });
+		await store.put("pack-list", "alpha", 1);
+		await store.put("pack-list", "alize", 2);
+		await store.put("pack-list", "beta", 3);
+		assert.deepEqual(await store.list("pack-list"), ["alize", "alpha", "beta"]);
+		assert.deepEqual(await store.list("pack-list", "al"), ["alize", "alpha"]);
+		assert.deepEqual(await store.list("pack-list", "z"), []);
+	});
+
+	it("list on a pack with no keys yet → []", async () => {
+		const store = createPackStore({ rootDir });
+		assert.deepEqual(await store.list("pack-empty"), []);
+	});
+});
+
+describe("createPackStore — cross-pack read rejection (the security keystone)", () => {
+	it("a SECOND pack cannot read the first pack's key", async () => {
+		const store = createPackStore({ rootDir });
+		await store.put("pack-one", "secret", "owned-by-one");
+		// pack-two names the SAME key, but is scoped to its OWN packId dir → miss.
+		assert.equal(await store.get("pack-two", "secret"), null);
+		// pack-two's list never sees pack-one's keys.
+		assert.deepEqual(await store.list("pack-two"), []);
+		// pack-one still reads its own value.
+		assert.equal(await store.get("pack-one", "secret"), "owned-by-one");
+	});
+
+	it("a key encoding that mentions another pack cannot escape the dir", async () => {
+		const store = createPackStore({ rootDir });
+		// Even a key literally containing another packId stays inside pack-x's dir.
+		await store.put("pack-x", "pack-one/secret", "still-mine");
+		assert.equal(await store.get("pack-x", "pack-one/secret"), "still-mine");
+		// pack-one's real "secret" is untouched.
+		const onePref = await store.get("pack-one", "secret");
+		assert.notEqual(onePref, "still-mine");
+	});
+});
+
+describe("createPackStore — key traversal is structurally impossible", () => {
+	it("traversal-style keys are encoded into a single safe segment", async () => {
+		const store = createPackStore({ rootDir });
+		const evil = ["../../etc/passwd", "..", "../sibling", "a/b\\c", "*", "."];
+		for (const key of evil) {
+			await store.put("pack-trav", key, "x");
+			assert.equal(await store.get("pack-trav", key), "x");
+		}
+		// Every key landed as a flat file inside the packId dir — nothing escaped.
+		const dir = path.join(rootDir, "ext-store", "pack-trav");
+		for (const name of fs.readdirSync(dir)) {
+			assert.ok(!name.includes(path.sep), "no separator in stored filename");
+			assert.ok(name.endsWith(".json"));
+		}
+		// No file was created outside the packId dir (e.g. no etc/ sibling).
+		assert.ok(!fs.existsSync(path.join(rootDir, "ext-store", "etc")));
+	});
+});
+
+describe("createPackStore — non-pack / invalid identity is rejected", () => {
+	it("empty packId (a non-pack caller) is rejected on every op", async () => {
+		const store = createPackStore({ rootDir });
+		await assert.rejects(() => store.get("", "k"), /pack identity/);
+		await assert.rejects(() => store.put("", "k", 1), /pack identity/);
+		await assert.rejects(() => store.list(""), /pack identity/);
+	});
+
+	it("a packId carrying path separators or .. is rejected", async () => {
+		const store = createPackStore({ rootDir });
+		for (const bad of ["..", "a/b", "a\\b", "."]) {
+			await assert.rejects(() => store.put(bad, "k", 1), /pack identity/);
+		}
+	});
+
+	it("an empty key is rejected", async () => {
+		const store = createPackStore({ rootDir });
+		await assert.rejects(() => store.put("pack-a", "", 1), /non-empty/);
+		await assert.rejects(() => store.get("pack-a", ""), /non-empty/);
+	});
+});

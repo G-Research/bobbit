@@ -18,8 +18,16 @@ export interface ToolContributions {
 	renderer?: string;
 	/** Server actions module + optional declared action allowlist. */
 	actions?: ToolActionsContribution;
-	/** Phase-2 keys: parsed for shape, retained verbatim, NOT acted on. */
+	/** Slice B1 — advisory `stores:` declarations (the runtime backend is keyed by
+	 *  the server-derived packId, so this is a declaration/validation aid only). */
+	stores?: StoreContribution[];
+	/** Phase-2 keys still parsed-for-shape only, retained verbatim, NOT acted on. */
 	reserved: ReservedContributions;
+}
+
+/** A single `stores:` entry — an advisory declaration that the tool uses a store. */
+export interface StoreContribution {
+	id: string;
 }
 
 export interface ToolActionsContribution {
@@ -35,11 +43,11 @@ export interface ReservedContributions {
 	panels?: unknown[];
 	entrypoints?: unknown[];
 	routes?: unknown[];
-	stores?: unknown[];
 }
 
 const ACTION_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
-const RESERVED_KEYS = ["panels", "entrypoints", "routes", "stores"] as const;
+const STORE_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const RESERVED_KEYS = ["panels", "entrypoints", "routes"] as const;
 
 /**
  * A path supplied in a tool YAML (`renderer`/`actions.module`) is safe IFF it is a
@@ -82,6 +90,12 @@ export function parseContributions(data: unknown, filePath: string): ToolContrib
 	if (obj.actions !== undefined) {
 		const parsed = parseActions(obj.actions, filePath);
 		if (parsed) result.actions = parsed;
+	}
+
+	// ── stores (Slice B1 — advisory; tolerant, never rejects) ──
+	if (obj.stores !== undefined) {
+		const parsed = parseStores(obj.stores, filePath);
+		if (parsed.length > 0) result.stores = parsed;
 	}
 
 	// ── reserved Phase-2 keys: shape-validate (arrays), retain verbatim, never reject ──
@@ -138,6 +152,34 @@ function parseActions(raw: unknown, filePath: string): ToolActionsContribution |
 		}
 	}
 
+	return out;
+}
+
+/**
+ * Parse the `stores:` contribution into typed `StoreContribution[]`. Each entry is
+ * either a bare string id (`stores: ["prefs"]`) or an object `{ id }`. Malformed
+ * entries are dropped with a warning — the block NEVER rejects the tool (the runtime
+ * backend is keyed by the server-derived packId, so this declaration is advisory).
+ */
+export function parseStores(raw: unknown, filePath: string): StoreContribution[] {
+	if (!Array.isArray(raw)) {
+		console.warn(`[tool-contributions] 'stores' is not an array in ${filePath}; ignoring`);
+		return [];
+	}
+	const seen = new Set<string>();
+	const out: StoreContribution[] = [];
+	for (const entry of raw) {
+		let id: unknown;
+		if (typeof entry === "string") id = entry;
+		else if (entry && typeof entry === "object") id = (entry as Record<string, unknown>).id;
+		if (typeof id !== "string" || !STORE_ID_RE.test(id)) {
+			console.warn(`[tool-contributions] Dropping invalid 'stores' entry in ${filePath}`);
+			continue;
+		}
+		if (seen.has(id)) continue;
+		seen.add(id);
+		out.push({ id });
+	}
 	return out;
 }
 
