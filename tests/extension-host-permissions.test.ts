@@ -48,6 +48,14 @@ function writeModule(body: string): string {
 	return pathToFileURL(file).href;
 }
 
+/** Write an entry module INSIDE `dir` (so it satisfies pack-root containment) and
+ *  return its file URL — for tests that set `packRoot`/`workingDir` to `dir`. */
+function writeModuleIn(dir: string, body: string): string {
+	const file = path.join(dir, "entry.mjs");
+	fs.writeFileSync(file, body);
+	return pathToFileURL(file).href;
+}
+
 const bareCtx = (): ActionHandlerCtx => ({
 	host: {} as ActionHandlerCtx["host"],
 	sessionId: "sess-1",
@@ -305,6 +313,142 @@ describe("permission grant — fs", () => {
 				() => mh.invoke(req(url, "readit", bareCtx())),
 				(e) => e instanceof ActionError && /denied|confinement/i.test(e.message),
 			);
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe("permission grant — git/fs confined to the session working dir (defense-in-depth)", () => {
+	it("git: an EXPLICIT out-of-tree cwd is rejected (only the cwd arg is constrained)", async () => {
+		const dir = path.join(tmp, `git-confine-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const outside = os.tmpdir(); // an ANCESTOR of `dir` → outside the working dir
+		const url = writeModuleIn(
+			dir,
+			`import { spawn } from "node:child_process";\n` +
+			`export const actions = { run: async () => { spawn("git", ["--version"], { cwd: ${JSON.stringify(outside)} }); return "ok"; } };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, { packRoot: dir, permissions: ["git"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("git: an in-bounds explicit cwd (a subdir of the working dir) is allowed", async () => {
+		const dir = path.join(tmp, `git-confine-ok-${seq++}`);
+		fs.mkdirSync(path.join(dir, "sub"), { recursive: true });
+		const url = writeModuleIn(
+			dir,
+			`import { spawn } from "node:child_process";\n` +
+			`export const actions = { run: async () => new Promise((resolve, reject) => {\n` +
+			`  const c = spawn("git", ["--version"], { cwd: "sub" }); /* relative → resolves under workingDir */\n` +
+			`  let out = ""; c.stdout.on("data", (d) => { out += d; });\n` +
+			`  c.on("error", reject);\n` +
+			`  c.on("close", (code) => resolve({ code, out: out.trim() }));\n` +
+			`}) };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 15_000 });
+		try {
+			const r = (await mh.invoke(req(url, "run", bareCtx(), {}, { packRoot: dir, permissions: ["git"], workingDir: dir }))) as { code: number };
+			assert.equal(r.code, 0, "an in-bounds subdir cwd should be permitted (git exits 0)");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("fs: an ABSOLUTE path outside the working dir is rejected", async () => {
+		const dir = path.join(tmp, `fs-confine-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `outside-secret-${seq}.txt`);
+		fs.writeFileSync(secret, "top-secret");
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync(${JSON.stringify(secret)}, "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("fs: a `../` walk out of the working dir is rejected", async () => {
+		const dir = path.join(tmp, `fs-walk-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `walk-secret-${seq}.txt`);
+		fs.writeFileSync(secret, "walked-secret");
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync("../walk-secret-${seq}.txt", "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("fs: a symlink inside the working dir pointing OUTSIDE is rejected (realpath escape)", async () => {
+		const dir = path.join(tmp, `fs-symlink-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const secret = path.join(tmp, `link-target-${seq}.txt`);
+		fs.writeFileSync(secret, "linked-secret");
+		const link = path.join(dir, "escape.txt");
+		try {
+			fs.symlinkSync(secret, link);
+		} catch {
+			return; // symlink creation unavailable (e.g. unprivileged Windows) → skip
+		}
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => fs.readFileSync("escape.txt", "utf8") };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir })),
+				(e) => e instanceof ActionError && /working directory|escapes|confinement/i.test(e.message),
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("fs: in-bounds RELATIVE and ABSOLUTE reads still work", async () => {
+		const dir = path.join(tmp, `fs-inbounds-${seq++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "ok.txt"), "in-bounds");
+		const abs = path.join(dir, "ok.txt");
+		const url = writeModuleIn(
+			dir,
+			`import fs from "node:fs";\n` +
+			`export const actions = { read: async () => ({\n` +
+			`  rel: fs.readFileSync("ok.txt", "utf8"),\n` +
+			`  abs: fs.readFileSync(${JSON.stringify(abs)}, "utf8"),\n` +
+			`}) };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const r = (await mh.invoke(req(url, "read", bareCtx(), {}, { packRoot: dir, permissions: ["fs"], workingDir: dir }))) as { rel: string; abs: string };
+			assert.equal(r.rel, "in-bounds", "a bare-relative in-bounds read works");
+			assert.equal(r.abs, "in-bounds", "an absolute in-bounds read works");
 		} finally {
 			mh.dispose();
 		}

@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createPackStore, PackStoreQuotaError, DEFAULT_PACK_STORE_QUOTA } from "../src/server/extension-host/pack-store.ts";
+import { createPackStore, PackStoreQuotaError, DEFAULT_PACK_STORE_QUOTA, withStoreTimeout, PackStoreTimeoutError } from "../src/server/extension-host/pack-store.ts";
 
 let rootDir: string;
 before(() => {
@@ -25,6 +25,22 @@ before(() => {
 });
 after(() => {
 	try { fs.rmSync(rootDir, { recursive: true, force: true }); } catch { /* best effort */ }
+});
+
+describe("withStoreTimeout — bound a stuck store backend (design §3 B1.2)", () => {
+	it("rejects a HUNG store op with PackStoreTimeoutError after the wall-time", async () => {
+		const hung = new Promise<never>(() => { /* never settles */ });
+		await assert.rejects(
+			() => withStoreTimeout(hung, 25, "store get"),
+			(e) => e instanceof PackStoreTimeoutError && /store get timed out after 25ms/.test((e as Error).message),
+		);
+	});
+
+	it("resolves a fast op normally (no spurious timeout) and propagates rejections verbatim", async () => {
+		assert.equal(await withStoreTimeout(Promise.resolve(42), 1000), 42);
+		const boom = new Error("backend exploded");
+		await assert.rejects(() => withStoreTimeout(Promise.reject(boom), 1000), (e) => e === boom);
+	});
 });
 
 describe("createPackStore — round-trip + on-disk namespacing", () => {
