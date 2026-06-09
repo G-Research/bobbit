@@ -17,17 +17,30 @@ export interface ActionGuardSession {
 	allowedTools?: string[];
 }
 
-export interface ActionGuardInput {
+/**
+ * Inputs for the SHARED authorization CORE (design §4b steps 1–4): the
+ * header-canonical identity, the body-vs-header fail-fast, the session resolve,
+ * and the allowedTools gate. Both `authorizeActionRequest` (action endpoint) and
+ * `authorizeScopedRequest` (Phase-2 pack-scoped capabilities: store, session
+ * reads, callRoute, postMessage) authorize through this same core, keyed off the
+ * server-resolved contributing `tool`. Crucially it carries NO toolUseId — the
+ * scoped capabilities act on no specific prior tool call, and panels/entrypoints
+ * have no toolUseId, so ownership is an action-only concern layered on top.
+ */
+export interface ScopedGuardInput {
 	tool: string;
-	action: string;
 	/** Raw x-bobbit-session-id header value (string | string[] | undefined). */
 	headerSessionId: string | string[] | undefined;
 	/** Untrusted body.sessionId — accepted only to fail fast on mismatch. */
 	bodySessionId: unknown;
-	/** Untrusted body.toolUseId. */
-	toolUseId: unknown;
 	/** Resolve a session (live or persisted) by id; undefined when not found. */
 	resolveSession: (id: string) => ActionGuardSession | undefined;
+}
+
+export interface ActionGuardInput extends ScopedGuardInput {
+	action: string;
+	/** Untrusted body.toolUseId. */
+	toolUseId: unknown;
 	/** Declared action-name allowlist (from actions.names), if any. */
 	actionNames?: string[];
 	/**
@@ -46,11 +59,15 @@ function firstHeader(v: string | string[] | undefined): string | undefined {
 }
 
 /**
- * Run the full guard sequence. Returns `{ ok: true, sessionId }` on success
- * (the verified, header-bound session id) or `{ ok: false, status, error }`
- * with the exact HTTP status the endpoint should surface.
+ * The SHARED authorization core (design §4b steps 1–4). Returns
+ * `{ ok: true, sessionId }` with the verified, header-bound session id, or
+ * `{ ok: false, status, error }` with the exact HTTP status to surface.
+ *
+ * Ordering is load-bearing: the header is the single canonical identity; the
+ * body is accepted ONLY to fail fast on a mismatch, and every downstream check
+ * uses the header-bound session.
  */
-export async function authorizeActionRequest(input: ActionGuardInput): Promise<ActionGuardResult> {
+export function authorizeScopedRequest(input: ScopedGuardInput): ActionGuardResult {
 	// 1. Require the canonical x-bobbit-session-id header.
 	const headerSessionId = firstHeader(input.headerSessionId);
 	if (!headerSessionId) {
@@ -77,6 +94,21 @@ export async function authorizeActionRequest(input: ActionGuardInput): Promise<A
 			return { ok: false, status: 403, error: `Tool "${input.tool}" is not allowed for this session` };
 		}
 	}
+
+	return { ok: true, sessionId: headerSessionId };
+}
+
+/**
+ * Run the full guard sequence. Returns `{ ok: true, sessionId }` on success
+ * (the verified, header-bound session id) or `{ ok: false, status, error }`
+ * with the exact HTTP status the endpoint should surface.
+ */
+export async function authorizeActionRequest(input: ActionGuardInput): Promise<ActionGuardResult> {
+	// 1–4. Shared core: header-canonical identity, body===header, session
+	//       resolve, and the allowedTools gate.
+	const core = authorizeScopedRequest(input);
+	if (!core.ok) return core;
+	const headerSessionId = core.sessionId;
 
 	// 5. If the tool declares an action allowlist, reject unknown actions early.
 	if (input.actionNames && input.actionNames.length > 0) {

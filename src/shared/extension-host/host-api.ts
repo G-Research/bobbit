@@ -221,6 +221,10 @@ export interface ToolCallRecord {
 	isError: boolean;
 }
 
+/** Options for `host.session.readTranscript`. `pattern` is a LITERAL,
+ *  case-insensitive SUBSTRING filter over each message's flattened text — NOT a
+ *  regular expression (treating caller input as a regex is a ReDoS vector; see
+ *  server/extension-host/contract-adapter.ts::buildTranscriptEnvelope). */
 export interface ReadTranscriptOpts { offset?: number; limit?: number; pattern?: string; }
 export interface TranscriptEnvelope { total: number; returned: number; messages: HostMessage[]; }
 export interface PostMessageInput { role: "user" | "system"; text: string; resumeTurn?: boolean; }

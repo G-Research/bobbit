@@ -1,0 +1,12 @@
+name: artifacts
+description: >-
+  Extension Host Phase-2 litmus pack (Slice D1) — the artifacts built-in
+  re-expressed as an installable market pack using renderer (inline pill) +
+  panels (artifacts.viewer) + stores (persist/restore by id) + a kind:"route"
+  deep-link entrypoint (routeId:"artifacts"). Proves the renderer→store→panel
+  and navigate→route→panel→store chains with behavioral parity.
+version: 1.0.0
+contents:
+  roles: []
+  tools: [artifact_demo]
+  skills: []

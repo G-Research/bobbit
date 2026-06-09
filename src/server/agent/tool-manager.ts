@@ -4,7 +4,7 @@ import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
-import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
+import { parseContributions, computeRendererKind, type ToolContributions, type PanelContribution, type EntrypointContribution } from "./tool-contributions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +55,18 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
+	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive wire field). */
+	storeIds?: string[];
+	/** Optional `panels:` the tool contributes (Slice B4, additive wire field). The
+	 *  `entry` path stays server-side; the client addresses panels by `id`. */
+	panels?: { id: string; title?: string }[];
+	/** Optional declared route names (from `routes.names`) the pack-level RouteRegistry
+	 *  indexes by (Slice B3, additive wire field). */
+	routeNames?: string[];
+	/** Optional typed `entrypoints:` the tool contributes (Slice C1, additive wire
+	 *  field). Consumed by the client `pack-entrypoints.ts` registry (launchers +
+	 *  deep-link routes). */
+	entrypoints?: EntrypointContribution[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
@@ -64,9 +76,17 @@ export interface ToolInfo {
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
-function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames"> {
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds" | "panels" | "routeNames" | "entrypoints"> {
 	const c = base.contributions;
 	return {
+		storeIds: c.stores?.map((s) => s.id),
+		// Slice C1 — expose the typed entrypoints for the client registry.
+		entrypoints: c.entrypoints,
+		// Slice B4 — expose declared panels (id + title only; the ESM `entry` path
+		// stays server-side, served by the bearer-only panel endpoint).
+		panels: c.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),
+		// Slice B3 — expose declared route names for the pack-level RouteRegistry.
+		routeNames: c.routes?.names,
 		// Source the renderer from the PARSED/validated contribution — NOT the raw
 		// `base.renderer` — so an unsafe/dropped renderer path (e.g. `../evil.js`,
 		// rejected by parseContributions) yields rendererKind "builtin", never "pack".
@@ -635,6 +655,16 @@ export class ToolManager {
 		actionsModule?: string;
 		rendererKind?: "builtin" | "pack";
 		actionNames?: string[];
+		/** Slice B4 — typed `panels:` (with the ESM `entry` path) so the panel GET
+		 *  endpoint can resolve a panelId to its on-disk module. */
+		panels?: PanelContribution[];
+		/** Slice B3 — routes module + declared names for the RouteDispatcher/RouteRegistry. */
+		routesModule?: string;
+		routeNames?: string[];
+		/** Slice C3 — the declared-permission grants (`git`/`fs`/`net`) the confined
+		 *  worker applies for this pack's server modules. Server-resolved, never
+		 *  caller-supplied. Absent ⇒ deny-all. */
+		permissions?: string[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
@@ -651,6 +681,13 @@ export class ToolManager {
 			actionsModule: c.actions?.module,
 			rendererKind: computeRendererKind(base.baseDir, c.renderer),
 			actionNames: c.actions?.names,
+			panels: c.panels,
+			// Slice B3: the routes module + declared names the RouteDispatcher loads
+			// and the RouteRegistry indexes by (default module "routes.js").
+			routesModule: c.routes?.module,
+			routeNames: c.routes?.names,
+			// Slice C3: the declared-permission grants threaded into the confined worker.
+			permissions: c.permissions,
 		};
 	}
 

@@ -197,124 +197,101 @@ describe("ActionDispatcher — error isolation + blast-radius", () => {
 		assert.deepEqual(await first, { ok: 1 });
 	});
 
-	it("a hung-but-TIMED-OUT handler keeps holding its concurrency permit until it actually settles", async () => {
-		// Blast-radius correctness (the WHOLE point of the cap): the permit must
-		// bound actual handler EXECUTION, not request lifetime. A handler that hangs
-		// forever times out PROMPTLY for the caller, but its underlying promise keeps
-		// running — so it must keep occupying its slot. Otherwise repeated timed-out
-		// calls accumulate unbounded zombie executions despite `maxConcurrent`.
-		//
-		// Handlers resolve via a process-global registry the test controls (the
-		// fixture module runs in THIS process), so we can settle one on demand and
-		// prove capacity frees only then.
-		const G = globalThis as Record<string, unknown>;
-		const KEY = "__extHostPermitTestResolvers";
-		G[KEY] = [] as ((v: unknown) => void)[];
-		const resolvers = () => G[KEY] as ((v: unknown) => void)[];
-
-		const base = path.join(tmp, "case-permit-hold");
+	it("a hung handler is TERMINATED on timeout (Slice C3) → its permit is released, NOT held forever", async () => {
+		// Slice C3 contract (server-module isolation, design §9): the SINGLE invocation
+		// seam now runs handlers in a CONFINED worker that the dispatcher TERMINATES on
+		// timeout (true cancellation). This SUPERSEDES the Phase-1 permit-held-forever
+		// behavior: a runaway handler no longer occupies its slot indefinitely — once it
+		// times out, the worker is killed, `work` settles, and the permit is RELEASED.
+		// The invariant "permit released exactly once when work settles" is intact; what
+		// changes is that termination makes a hung handler's work SETTLE (it cannot hang
+		// forever). The fixture handler runs in the worker (separate process/global), so
+		// it hangs purely on its own — no parent-process injection.
+		const base = path.join(tmp, "case-permit-terminate");
 		writeTool(base, "demo", {
-			actionsJs:
-				`export const actions = { retry: () => new Promise((resolve) => { ` +
-				`(globalThis["${KEY}"]).push(resolve); }) };`,
+			actionsJs: `export const actions = { retry: () => new Promise(() => {}) };`,
 		});
 		const maxConcurrent = 3;
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 40, maxConcurrent });
+		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 60, maxConcurrent });
 
-		// Fire `maxConcurrent` dispatches. Each increments inFlight synchronously at
-		// entry, then its handler hangs (never resolves) → each times out promptly.
+		// Fire `maxConcurrent` dispatches; each hangs in its worker and times out 504.
 		const hung = Array.from({ length: maxConcurrent }, () => d.dispatch("sample_action", "retry", ctx(), {}));
-		// Every call returns 504 to the caller (prompt timeout) ...
-		await Promise.all(
-			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
-		);
-		// ... but the hung handlers are STILL executing and STILL hold their permits.
-		// The next dispatch (number maxConcurrent+1) must be rejected over-capacity,
-		// proving timed-out-but-hung handlers still count toward the cap.
+		// While they are in-flight (workers spawned, handlers hanging), the cap is
+		// saturated → an extra dispatch is rejected over-capacity (permit held DURING
+		// execution, exactly like Phase 1).
 		await assert.rejects(
 			() => d.dispatch("sample_action", "retry", ctx(), {}),
 			(e) => e instanceof ActionError && e.status === 429,
 		);
-		// All permits are accounted for to the hung handlers (none leaked).
-		assert.equal(resolvers().length, maxConcurrent);
+		// Every hung call returns 504 to the caller once the timeout fires + the worker
+		// is terminated.
+		await Promise.all(
+			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
+		);
+		// Let the terminate + permit-decrement settle.
+		await new Promise((r) => setTimeout(r, 150));
 
-		// Settle ONE hung handler → its permit is released and capacity frees by one.
-		resolvers().shift()!({ done: true });
-		// Let the handler-settle microtask run the permit decrement.
-		await new Promise((r) => setTimeout(r, 10));
-
-		// A fresh dispatch is now ADMITTED (past the concurrency gate). It runs the
-		// (hanging) handler and times out with 504 — NOT 429 — which proves the slot
-		// freed (a still-full cap would have rejected with 429 before invoking it).
+		// THE C3 PINNING ASSERTION: the permits are now RELEASED (the workers were
+		// terminated). A fresh dispatch is ADMITTED past the concurrency gate — it runs
+		// its (hanging) handler and times out 504, NOT 429. Under the OLD Phase-1
+		// permit-held-forever behavior this would have been 429 (slots never freed).
 		await assert.rejects(
 			() => d.dispatch("sample_action", "retry", ctx(), {}),
 			(e) => e instanceof ActionError && e.status === 504,
 		);
-
-		// Cleanup: settle every remaining hung handler so no permit/promise lingers.
-		for (const r of resolvers().splice(0)) r({ done: true });
-		await new Promise((r) => setTimeout(r, 10));
-		delete G[KEY];
+		await new Promise((r) => setTimeout(r, 150));
 	});
 
-	it("a hung MODULE IMPORT (top-level await) times out promptly (504) and holds its permit until the import settles", async () => {
-		// GAP COVERAGE: the per-call timeout must bound MODULE LOAD + EVALUATION,
-		// not just handler execution. Before the fix, dispatch() did an UNBOUNDED
-		// `await loadModule(...)` and only THEN wrapped the handler in the timeout —
-		// so a pack actions module with a hanging top-level `await` (or a stalled
-		// dynamic import) left dispatch() awaiting forever, never returning a 504 and
-		// holding its permit indefinitely. The existing timeout tests only hang
-		// INSIDE the handler (after import succeeds), so this load path was uncovered.
-		//
-		// The fixture's `.mjs` parks MODULE EVALUATION at a top-level await the test
-		// controls via a process-global resolver — so the dynamic import() never
-		// settles, exercising the LOAD path (not the handler). All dispatches share
-		// the same URL, so Node evaluates the module once (one parked resolver) while
-		// every in-flight import() awaits that single evaluation.
-		const G = globalThis as Record<string, unknown>;
-		const KEY = "__extHostHungImportResolvers";
-		G[KEY] = [] as ((v: unknown) => void)[];
-		const resolvers = () => G[KEY] as ((v: unknown) => void)[];
-
-		const base = path.join(tmp, "case-hung-import");
+	it("a hung MODULE EVAL (top-level await that never settles) is TERMINATED in the worker on timeout → 504, permit released", async () => {
+		// GAP COVERAGE + Fix-1 PROOF: the per-call timeout must bound MODULE LOAD +
+		// EVALUATION, not just handler execution — AND that load+eval now happens in the
+		// CONFINED WORKER, never the parent. The fixture parks MODULE EVALUATION at a
+		// top-level `await` that never resolves (no parent-process cooperation), so the
+		// worker's dynamic import() never settles. If module eval ran in the parent it
+		// would hang the parent forever (no termination); because it runs in the worker,
+		// the parent's terminate-on-timeout KILLS it and yields a prompt 504. This is the
+		// behavioral signature that pack top-level code executes only in the worker.
+		const base = path.join(tmp, "case-hung-eval");
 		writeTool(base, "demo", {
 			moduleName: "actions.mjs",
 			actionsJs:
-				`await new Promise((resolve) => { (globalThis["${KEY}"]).push(resolve); });\n` +
+				`await new Promise(() => {});\n` + // top-level await that NEVER resolves → module eval hangs
 				`export const actions = { retry: async () => ({ ok: 1 }) };`,
 		});
 		const maxConcurrent = 3;
-		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "actions.mjs" }), { rate: null, timeoutMs: 40, maxConcurrent });
+		// Timeout generously larger than worker spawn so it is the MODULE-EVAL hang
+		// (not spawn latency) the terminate bounds.
+		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "actions.mjs" }), { rate: null, timeoutMs: 800, maxConcurrent });
 
-		// Fire maxConcurrent dispatches. Each increments inFlight synchronously at
-		// entry, then parks at the hanging import (LOAD) → each times out promptly
-		// with 504 instead of hanging dispatch() forever.
+		// Fire maxConcurrent dispatches. Each spawns a worker whose import hangs at the
+		// top-level await; none can complete, so all are terminated on timeout → 504.
 		const hung = Array.from({ length: maxConcurrent }, () => d.dispatch("sample_action", "retry", ctx(), {}));
-		await Promise.all(
-			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
-		);
 
-		// The cap is saturated by the still-LOADING modules → the next dispatch is
-		// rejected over-capacity (429), proving a hung LOAD counts toward the cap
-		// exactly like a hung handler (permit held, not leaked early, no unbounded
-		// await). At least one resolver is parked (one shared module evaluation).
+		// While they are in-flight (workers spawned, module eval hung), the cap is
+		// saturated → an extra dispatch is rejected over-capacity (429), proving a hung
+		// LOAD/EVAL counts toward the cap exactly like a hung handler (permit held).
 		await assert.rejects(
 			() => d.dispatch("sample_action", "retry", ctx(), {}),
 			(e) => e instanceof ActionError && e.status === 429,
 		);
-		assert.ok(resolvers().length >= 1, "module evaluation should be parked at the top-level await");
 
-		// Settle the parked import → module finishes evaluating, every in-flight
-		// load completes, its (fast) handler runs, and every permit is released.
-		for (const r of resolvers().splice(0)) r(undefined);
-		// Allow the load+handler+settle microtasks/macrotasks to flush.
-		await new Promise((r) => setTimeout(r, 60));
+		// Every hung eval is TERMINATED on timeout → 504 to the caller (true cancellation
+		// of pack top-level code running in the worker).
+		await Promise.all(
+			hung.map((p) => assert.rejects(() => p, (e) => e instanceof ActionError && e.status === 504)),
+		);
+		// Let the terminate + permit-decrement settle.
+		await new Promise((r) => setTimeout(r, 200));
 
-		// Capacity has freed: a fresh dispatch is ADMITTED past the concurrency gate
-		// and now succeeds (module cached, handler fast) — a still-full cap would
-		// have rejected with 429 before invoking it.
-		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { ok: 1 });
-		delete G[KEY];
+		// The permits are now RELEASED (the workers were terminated): a fresh dispatch is
+		// ADMITTED past the concurrency gate — it spawns its own worker, hangs in eval,
+		// and times out 504, NOT 429. A still-full cap would have rejected 429 BEFORE
+		// ever spawning.
+		await assert.rejects(
+			() => d.dispatch("sample_action", "retry", ctx(), {}),
+			(e) => e instanceof ActionError && e.status === 504,
+		);
+		await new Promise((r) => setTimeout(r, 200));
 	});
 
 	it("per-session rate limit → 429 once the bucket drains", async () => {
@@ -381,50 +358,35 @@ describe("ActionDispatcher — cache + invalidation", () => {
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { v: 2 });
 	});
 
-	it("an invalidate() during an in-flight import never caches the STALE module under the fresh epoch", async () => {
-		// Regression for the TOCTOU race (analog of the client renderer race): if
-		// invalidate() runs WHILE loadModule's `await import(url)` is in flight, a
-		// late read of this.epoch would cache the just-imported (stale) module as if
-		// it belonged to the FRESH epoch — and under coarse mtime resolution the next
-		// dispatch would then serve it. The epoch-snapshot guard must re-load with
-		// the advanced epoch instead, so the stale handler is never served.
-		const base = path.join(tmp, "case-inflight-race");
+	it("invalidate() serves fresh source even under an IDENTICAL (coarse) mtime — the epoch re-busts the worker import URL", async () => {
+		// The parent caches ONLY {path, mtimeMs, epoch} + a derived URL — NEVER a module
+		// object (pack code never runs in the parent). So the classic stale-module-cache
+		// TOCTOU cannot exist here; what MUST still hold is that after a rewrite +
+		// invalidate() under an IDENTICAL coarse mtime (where mtime alone cannot
+		// distinguish old from new), the next dispatch hands the WORKER a fresh
+		// cache-busted URL (epoch bumped), so it re-imports v2, never v1.
+		const base = path.join(tmp, "case-coarse-mtime");
 		const modPath = path.join(base, "demo", "actions.mjs");
-		// v1 pauses at a top-level await so its SOURCE is committed (read + parsed)
-		// before we rewrite the file — the in-flight import stays v1 while we mutate
-		// the on-disk file underneath it.
 		writeTool(base, "demo", {
 			moduleName: "actions.mjs",
-			actionsJs: `await new Promise((r) => setTimeout(r, 200));\nexport const actions = { retry: async () => ({ v: 1 }) };`,
+			actionsJs: `export const actions = { retry: async () => ({ v: 1 }) };`,
 		});
-		// Pin a clean whole-second mtime so utimesSync round-trips EXACTLY (no
-		// sub-second truncation): we then force the SAME mtime on v2, making the
-		// epoch guard the ONLY thing that can distinguish stale from fresh — i.e.
-		// the coarse-mtime case the epoch exists for. Without the guard the cache
-		// hit (same mtime + same post-invalidate epoch) would serve stale v1.
+		// Pin a clean whole-second mtime that round-trips EXACTLY, then force the SAME
+		// mtime on v2 — making the epoch the ONLY thing that can distinguish stale from
+		// fresh (the coarse-mtime case the epoch exists for).
 		const fixed = new Date(Math.floor((Date.now() - 60_000) / 1000) * 1000);
 		fs.utimesSync(modPath, fixed, fixed);
 
 		const d = new ActionDispatcher(resolver(base, "demo", { actionsModule: "actions.mjs" }), { rate: null });
+		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { v: 1 });
 
-		// Start a dispatch; its import pauses at v1's top-level await (epoch 0).
-		const inflight = d.dispatch("sample_action", "retry", ctx(), {});
-		// Let the loader read + begin evaluating v1 (now parked at the TLA) BEFORE
-		// we mutate the file, so the in-flight import is committed to v1.
-		await new Promise((r) => setTimeout(r, 60));
-		// Rewrite the handler to v2, force the SAME mtime, then invalidate WHILE the
-		// v1 import is still in flight (cache cleared + epoch bumped to 1).
+		// Rewrite to v2, force the SAME mtime, then invalidate (cache cleared + epoch
+		// bumped). Without the epoch component the URL would be byte-identical (same
+		// mtime) and the worker could serve a Node-module-cached v1.
 		fs.writeFileSync(modPath, `export const actions = { retry: async () => ({ v: 2 }) };`);
 		fs.utimesSync(modPath, fixed, fixed);
 		d.invalidate();
 
-		// Let the in-flight v1 import resolve. With the guard it observes the fresh
-		// epoch and re-loads v2 (never caching stale v1); we don't assert its return
-		// value (the contract only promises it is not stale-cached).
-		await inflight;
-
-		// The pinning assertion: the NEXT dispatch must serve v2. Without the guard,
-		// stale v1 was cached under epoch 1 and (same mtime) is served here → v1.
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), {}), { v: 2 });
 	});
 });

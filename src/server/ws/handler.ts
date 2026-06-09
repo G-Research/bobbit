@@ -26,6 +26,13 @@ import {
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { ToolManager } from "../agent/tool-manager.js";
+import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
+import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
+import { resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
+import { handleSessionPost } from "../extension-host/session-write.js";
+import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
+import type { ActionGuardSession } from "../extension-host/action-guard.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -231,6 +238,7 @@ export function handleWebSocketConnection(
 	skipAuth = false,
 	sandboxTokenStore?: SandboxTokenStore,
 	projectContextManager?: ProjectContextManager,
+	toolManager?: ToolManager,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -333,6 +341,10 @@ export function handleWebSocketConnection(
 			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
+			// The C2 session WRITE (`host.session.postMessage`) is driven over THIS trusted,
+			// authenticated connection (see the `ext_session_post` command below) — pack code
+			// has no handle to the WS and cannot send on it, so no session secret needs to be
+			// delivered to (and capturable from) the client at all.
 			send(ws, { type: "auth_ok" });
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
@@ -999,6 +1011,109 @@ export function handleWebSocketConnection(
 					}
 					if (diagEnabled) {
 						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes, replayed, sendMs: performance.now() - diagStart });
+					}
+					break;
+				}
+				case "ext_session_write_permit": {
+					// C2 session-WRITE permit MINT (design extension-host-phase2.md §8 C2.1).
+					// Mints a server-minted, one-time, content-bound nonce over THIS trusted,
+					// authenticated WS. The binding's sessionId is ALWAYS this connection's OWN
+					// authenticated session; the packId is SERVER-derived from `tool` (never a
+					// frame field). The client requests this only after its synchronous
+					// transient-activation assertion passes; the matching `ext_session_post`
+					// must then carry the returned nonce. See session-write-permit.ts.
+					const mintMsg = msg as Extract<ClientMessage, { type: "ext_session_write_permit" }>;
+					const requestId = typeof mintMsg.requestId === "string" ? mintMsg.requestId : "";
+					const contentHash = typeof mintMsg.contentHash === "string" ? mintMsg.contentHash : "";
+					const projectTm = session.projectId && projectContextManager
+						? projectContextManager.getOrCreate(session.projectId)?.toolManager
+						: undefined;
+					const extToolManager = toolManager
+						? resolveActionToolManager(toolManager, projectTm)
+						: projectTm;
+					// DERIVE {packId, tool} from the SERVER-MINTED surface token (never a
+					// caller-supplied `tool`). The token's bound session must equal THIS
+					// connection's authenticated session (cross-session token use rejected).
+					const surf = extToolManager
+						? resolveSurfaceIdentity({ token: mintMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager })
+						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack tools" } as const);
+					if (!surf.ok || !contentHash) {
+						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: surf.ok ? "missing content hash" : surf.error });
+						break;
+					}
+					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool, contentHash });
+					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
+					break;
+				}
+				case "ext_session_post": {
+					// C2 session WRITE (`host.session.postMessage`) — design
+					// extension-host-phase2.md §8 C2.1. Routed over THIS trusted WS instead of a
+					// fetch precisely so no capturable session secret rides a pack-monkey-
+					// patchable `fetch`, and so pack code (no WS handle) cannot send it. The
+					// TARGET session is ALWAYS this connection's OWN authenticated `sessionId`,
+					// never a frame field — cross-session posting is structurally impossible.
+					// REQUIRES the server-minted, one-time, content-bound `nonce` from the
+					// preceding `ext_session_write_permit` mint: a replayed/forged/tampered
+					// frame fails permit consumption and is rejected with NO post.
+					const postMsg = msg as Extract<ClientMessage, { type: "ext_session_post" }>;
+					const requestId = typeof postMsg.requestId === "string" ? postMsg.requestId : "";
+					const projectTm = session.projectId && projectContextManager
+						? projectContextManager.getOrCreate(session.projectId)?.toolManager
+						: undefined;
+					const extToolManager = toolManager
+						? resolveActionToolManager(toolManager, projectTm)
+						: projectTm;
+					const resolveSession = (id: string): ActionGuardSession | undefined => {
+						const live = sessionManager.getSession(id);
+						if (live) return { allowedTools: live.allowedTools };
+						const persisted = sessionManager.getPersistedSession(id);
+						if (persisted) return { allowedTools: persisted.allowedTools };
+						return undefined;
+					};
+					// DERIVE the trusted `tool` from the SERVER-MINTED surface token (never a
+					// caller-supplied `tool`), session-bound to THIS connection. A
+					// missing/invalid/wrong-session token is rejected with NO post.
+					const surf = extToolManager
+						? resolveSurfaceIdentity({ token: postMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager })
+						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack tools" } as const);
+					if (!surf.ok) {
+						send(ws, { type: "ext_session_post_result", requestId, ok: false, error: surf.error });
+						break;
+					}
+					const result = await handleSessionPost({
+						tool: surf.tool,
+						// The TRUSTED, server-authenticated bound session of THIS connection.
+						sessionId,
+						role: postMsg.role,
+						text: postMsg.text,
+						resumeTurn: postMsg.resumeTurn,
+						nonce: postMsg.nonce,
+						resolveSession,
+						resolvePackIdentity: (tool) => extToolManager
+							? resolvePackIdentityForTool(extToolManager, tool)
+							: { isPack: false, packId: "" },
+						consumePermit: (nonce, binding) => consumeWritePermit(nonce, binding),
+						post: async (sid, text, opts) => {
+							// Role-aware delivery (text is already system-framed by the handler
+							// for role "system"). "user"/"system" share the user/steer transport;
+							// resumeTurn !== false resumes the turn, === false delivers without.
+							if (opts.resume) {
+								await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
+							} else {
+								await sessionManager.deliverLiveSteer(sid, text, { source: "extension" });
+							}
+						},
+						audit: (rec) => {
+							const tail = rec.outcome === "error" ? `: ${rec.error}` : "";
+							console.log(
+								`[ext-session-message] tool=${rec.tool} packId=${rec.packId} session=${rec.sessionId} role=${rec.role} resumeTurn=${rec.resumeTurn} outcome=${rec.outcome} durationMs=${rec.ms}${tail}`,
+							);
+						},
+					});
+					if (result.ok) {
+						send(ws, { type: "ext_session_post_result", requestId, ok: true });
+					} else {
+						send(ws, { type: "ext_session_post_result", requestId, ok: false, error: result.error });
 					}
 					break;
 				}

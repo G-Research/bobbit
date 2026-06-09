@@ -1,9 +1,16 @@
 # Bobbit Extension Host — Durable v1 Contract
 
-**Status:** design (v1, durable). Phase 1 builds the inner slice; the whole VS Code-shaped
-contribution model + Host API is committed here as a **durable v1 contract** — TypeScript
-interfaces and a validated manifest schema — so Phase 2 is **purely additive** and never
-re-opens a v1 shape.
+**Status:** design (v1, durable) — **Phase 2 IMPLEMENTED**. Phase 1 built the inner slice
+(renderers + actions); Phase 2 made the rest of the reserved shape REAL, **purely
+additively** — no v1 signature changed, `HOST_API_VERSION` is still `1`, and every
+capability flipped its `host.capabilities` flag `false → true` as it landed. The whole VS
+Code-shaped contribution model + Host API was committed here as a **durable v1 contract** —
+TypeScript interfaces and a validated manifest schema — so Phase 2 never had to re-open a
+v1 shape. The §3/§6 prose **status notes** below are flipped to "IMPLEMENTED" accordingly
+(a status edit, never a contract change); the v1 interfaces in
+`src/shared/extension-host/host-api.ts` are byte-identical to Phase 1. The Phase-2 build
+plan a coder executed lives in [extension-host-phase2.md](extension-host-phase2.md); this
+doc remains the contract + the *why*.
 
 This is the authoritative design for the *Extension Host* goal. It is the source of
 truth a coder implements Phase 1 from with no further architectural decisions. It also
@@ -124,18 +131,21 @@ that gates tool calls at the agent layer. §5 closes both.
 ### 2.1 Where it lives
 
 Contributions are declared in the **tool YAML** (`tools/<group>/<tool>.yaml`) — the same
-files `ToolManager` already scans. Two keys are Phase-1 **load-bearing**; the rest are
-**parsed-and-reserved** (accepted, validated for shape, then ignored — never rejected),
-so a Phase-2 pack authored today installs and resolves cleanly on a Phase-1 server.
+files `ToolManager` already scans. Phase 1 made `renderer:`/`actions:` load-bearing and
+parsed the rest as **shape-only-and-reserved**; **Phase 2 made every reserved key
+load-bearing** — `tool-contributions.ts` now parses each into a typed contribution and
+surfaces it on `/api/tools`. Per-tool parsing stays tolerant (a malformed block degrades,
+never rejects) exactly as in Phase 1.
 
-| Key | Phase | Meaning |
+| Key | Status | Meaning |
 |---|---|---|
-| `renderer:` | **1 (load-bearing)** | Already exists. Repurposed: for **pack** tools it is the on-disk path (relative to the tool's group dir) of a pre-built ESM renderer module. For builtins it stays display-only metadata. |
-| `actions:` | **1 (load-bearing)** | Relative path to the server actions module (default `actions.js`) **and/or** an inline allowlist of action names. |
-| `panels:` | 2 (reserved) | Persistent side-panel component contributions (artifacts / PR-walkthrough viewer). |
-| `entrypoints:` | 2 (reserved) | Non-chat launchers (composer slash-commands, git-widget buttons, command palette). |
-| `routes:` | 2 (reserved) | Namespaced `/api/ext/<pack>/*` gateway endpoints. |
-| `stores:` | 2 (reserved) | Ownership-scoped server-side persistence. |
+| `renderer:` | **load-bearing (P1)** | For **pack** tools it is the on-disk path (relative to the tool's group dir) of a pre-built ESM renderer module. For builtins it stays display-only metadata. |
+| `actions:` | **load-bearing (P1)** | Relative path to the server actions module (default `actions.js`) **and/or** an inline allowlist of action names. |
+| `panels:` | **IMPLEMENTED (P2)** | Persistent side-panel component contributions (artifacts / PR-walkthrough viewer). Parsed by `parsePanels` → `{ id; title?; entry }[]`; served bearer-only by `GET /api/tools/:tool/panel/:panelId`; mounted via `host.ui.openPanel`. |
+| `entrypoints:` | **IMPLEMENTED (P2)** | Non-chat launchers (composer slash-commands, git-widget buttons, command palette) **and** `kind:"route"` deep-link routes. Parsed by `parseEntrypoints`; launchers click → `host.ui.openPanel`/`navigate`; routes populate the client pack-route registry. |
+| `routes:` | **IMPLEMENTED (P2)** | The pack's OWN gateway endpoints, reached via `host.callRoute`. Parsed by `parseRoutes` → `{ module?; names? }`; dispatched by `RouteDispatcher` keyed off the server-resolved `packId` (see §3.2). |
+| `stores:` | **IMPLEMENTED (P2)** | Ownership-scoped server-side persistence behind `host.store.*`; keys namespaced by the server-resolved `packId` (cross-pack reads rejected). Parsed by `parseStores`. |
+| `permissions:` | **IMPLEMENTED (P2)** | Install-time **disclosure** of the ambient OS capabilities (`git`/`fs`/`net`) a pack's server modules use, and the switch that **enables** them in the C3 worker. Disclosure + enable, **not** an enforced privilege boundary (§3.4). |
 
 `toolRenderers` and `actions` from the goal's contribution-point list map to the
 per-tool `renderer:`/`actions:` keys (one tool = one renderer + one actions map). A
@@ -151,14 +161,31 @@ Parsed by a new `parseContributions(data, filePath)` in
 ```ts
 // src/server/agent/tool-contributions.ts (NEW)
 
-/** Phase-1 load-bearing contributions parsed from a tool YAML. */
+/** Contributions parsed from a tool YAML. Phase 1 keys (`renderer`/`actions`)
+ *  and every Phase-2 key are now load-bearing — each is parsed into a typed
+ *  contribution and acted on. */
 export interface ToolContributions {
-	/** Renderer ESM module path, relative to the tool's group dir. Phase-1 load-bearing
+	/** Renderer ESM module path, relative to the tool's group dir. Load-bearing
 	 *  for PACK tools only; for builtins this is display-only metadata (a src/ path). */
 	renderer?: string;
 	/** Server actions module + optional declared action allowlist. */
 	actions?: ToolActionsContribution;
-	/** Phase-2 keys: parsed for shape, retained verbatim, NOT acted on. */
+	/** `stores:` (Slice B1) — declared pack stores; the runtime backend is keyed
+	 *  by the server-derived packId, so this is a declaration/validation aid. */
+	stores?: StoreContribution[];
+	/** `panels:` (Slice B4) — pack-contributed side panels; each `entry` is a
+	 *  pre-built ESM module served bearer-only and lazy-imported by the client. */
+	panels?: PanelContribution[];
+	/** `routes:` (Slice B3) — server routes module + the declared route-name
+	 *  allowlist the pack-level RouteRegistry indexes by. */
+	routes?: RouteContribution;
+	/** `entrypoints:` (Slice C1) — launcher surfaces + deep-link client routes. */
+	entrypoints?: EntrypointContribution[];
+	/** `permissions:` (Slice C3) — opt-in host capabilities (`git`/`fs`/`net`) a
+	 *  pack's server modules may use; resolved server-side, never caller-supplied. */
+	permissions?: PackPermission[];
+	/** Forward-compat only: FUTURE unknown keys parsed-for-shape, retained
+	 *  verbatim, NOT acted on (the reserved-key list is currently EMPTY). */
 	reserved: ReservedContributions;
 }
 
@@ -170,12 +197,12 @@ export interface ToolActionsContribution {
 	names?: string[];
 }
 
-/** Phase-2 contribution keys. Validated for *shape* only, then ignored. Never rejected. */
+/** FUTURE-contract contribution keys (none currently — every Phase-2 key has
+ *  graduated to a typed parser). Validated for *shape* only, retained verbatim,
+ *  then ignored. Never rejected. The fallback machinery is retained so a future
+ *  unknown key gets the same treatment without re-deriving it. */
 export interface ReservedContributions {
-	panels?: unknown[];
-	entrypoints?: unknown[];
-	routes?: unknown[];
-	stores?: unknown[];
+	[key: string]: unknown[] | undefined;
 }
 ```
 
@@ -188,8 +215,16 @@ export interface ReservedContributions {
 - `actions.module`: optional string; same path-safety rules; defaults to `"actions.js"`
   when `actions:` is present without an explicit module.
 - `actions.names`: optional `string[]`; each must match `/^[a-z0-9][a-z0-9_-]*$/`.
-- `panels`/`entrypoints`/`routes`/`stores`: if present must be arrays (else a parse
-  *warning*, not a hard error); contents are retained verbatim and otherwise ignored.
+- `panels`/`entrypoints`/`routes`/`stores`/`permissions`: **Phase 2 parses each into a
+  typed contribution** (`parsePanels`/`parseEntrypoints`/`parseRoutes`/`parseStores`/
+  `parsePermissions` in `tool-contributions.ts`) and surfaces it on `ToolInfo`. Per-tool
+  parsing stays tolerant: a malformed block degrades to "absent" with a `console.warn`,
+  never a hard rejection (mirrors Phase-1 `renderer`/`actions`). Path-bearing values
+  (`panels[].entry`, `routes.module`) get the same `..`/absolute traversal guard as
+  `renderer`/`actions.module`. The **two** real-conflict rejections happen later, at
+  pack-level **registry build**, not per-tool parse: a pack declaring the same `routes:`
+  name on two tools (§B3), or two packs/tools declaring the same `entrypoints:` `routeId`
+  (§C1) — each names the conflict and is the rare case a pack IS rejected.
 - **Unknown top-level keys are ignored** (forward-compat), matching `pack.yaml`'s rule.
 - A malformed contributions block degrades gracefully: the tool still loads with no
   renderer/actions, and a `console.warn` is emitted — never fatal (mirrors the existing
@@ -233,16 +268,41 @@ actionNames?: string[];        // NEW — optional declared allowlist (from acti
 market-pack root **and** `renderer` ends in `.js`; otherwise `"builtin"`. This is the
 single signal the client bootstrap keys off (§4a).
 
+**Phase-2 additive wire fields.** Activating the reserved keys added more (purely
+additive) optional `ToolInfo`/`/api/tools` fields, each populated from its typed
+contribution: `panels?: { id; title? }[]`, `entrypoints?: EntrypointContribution[]`,
+`routeNames?: string[]`, and `storeIds?: string[]`. The client `pack-panels.ts` /
+`pack-entrypoints.ts` registries are re-driven from these on every `/api/tools` fetch
+(reload-safe, reconcile-on-uninstall), exactly as `pack-renderers.ts` is re-driven from
+`rendererKind`. Being additive preserves the `buildPackList` byte-identical invariant.
+
 ---
 
-## 3. Frozen Host API (durable v1 contract)
+## 3. Frozen Host API (durable v1 contract) — now fully IMPLEMENTED
 
-Committed as interfaces in a new shared module `src/shared/extension-host/host-api.ts`
-(importable by both `src/ui` and `src/server`). **Phase 1 implements only `invokeAction`
-and the client-only `requestRender`.** Everything else is frozen-not-implemented: the
-interfaces are real and doc-commented so Phase-2 implementations are purely additive (add
-the method body + wire the capability through the same authorization path — no signature
-churn).
+Committed as interfaces in a shared module `src/shared/extension-host/host-api.ts`
+(importable by both `src/ui` and `src/server`). Phase 1 implemented only `invokeAction`
+and the client-only `requestRender`; **Phase 2 implemented every remaining member to its
+exact v1 signature** — `callRoute`, `session.{readTranscript,readToolCall,postMessage,
+subscribe}`, `ui.{openPanel,navigate}`, `store.{get,put,list}`. The additive-only promise
+held: the interfaces below are byte-identical, `HOST_API_VERSION` is still `1`, and a
+client `host.capabilities` now reports **all flags `true`** (`src/app/host-api.ts`). The
+inline `PHASE 2` notes in the interface block below now read **IMPLEMENTED**; the
+per-method status is summarized here:
+
+| Member | Status | Where the body lives |
+|---|---|---|
+| `invokeAction` / `requestRender` | P1 | `src/app/host-api.ts`, `action-dispatcher.ts` |
+| `callRoute` | **P2 implemented** | client `host-api.ts` → `POST /api/ext/route/:name`; server `route-dispatcher.ts` + `RouteRegistry` |
+| `session.readTranscript` / `readToolCall` | **P2 implemented** | client GETs `/api/ext/session/*`; server `contract-adapter.ts` (own-session) |
+| `session.postMessage` | **P2 implemented** | client mints a permit + posts over the session WebSocket (`session-write-bridge.ts`); server `session-write.ts` + `session-write-permit.ts` |
+| `session.subscribe` | **P2 implemented** | client `session-event-bus.ts` bridged onto `HostSessionEventMap` via the adapter |
+| `ui.openPanel` | **P2 implemented** | client `pack-panels.ts` (lazy Blob-URL panel module) |
+| `ui.navigate` | **P2 implemented** | client `pack-entrypoints.ts` → `#/ext/<routeId>` router view |
+| `store.get/put/list` | **P2 implemented** | client → `POST /api/ext/store/:op`; server `pack-store.ts` (pack-namespaced) |
+
+The interfaces below are the literal spec the implementation executed to; they remain the
+durable contract.
 
 **This is the contract Bobbit serves, not a window into Bobbit.** Every member is a typed,
 named, capability-scoped method. There is **no `gateway.fetch`** and no other raw
@@ -260,8 +320,9 @@ must compile as written.
 /** Bumped only on a BREAKING change to any member below. Additive-only after v1: adding a
  *  new method/namespace does NOT bump this. Renderers feature-detect AVAILABILITY via
  *  `host.capabilities` (the single source of truth for what is IMPLEMENTED on this host) —
- *  NOT via member-presence checks, because reserved Phase-2 namespaces are present-but-
- *  throwing stubs (see HostCapabilities). `host.version` only identifies the contract
+ *  NOT via member-presence checks: `capabilities` is authoritative, and a namespace can
+ *  be present on the object yet gated off on a given host (see HostCapabilities).
+ *  `host.version` only identifies the contract
  *  revision; it never implies a member is implemented. */
 export const HOST_API_VERSION = 1 as const;
 
@@ -291,13 +352,13 @@ export interface HostApi {
 	/**
 	 * The SINGLE SOURCE OF TRUTH for which capabilities are actually IMPLEMENTED on this
 	 * host. Authors MUST feature-detect via `host.capabilities.<name>` (or
-	 * `host.capabilities.has(name)`), NOT via member-presence checks: reserved Phase-2
-	 * namespaces (`callRoute`/`session`/`ui`/`store`) are present-but-throwing stubs for
-	 * type stability, so `if (host.callRoute)` / `if (host.store)` would WRONGLY succeed.
-	 * On a Phase-1 host this reads `{ invokeAction: true, requestRender: true,
-	 * callRoute: false, session: false, ui: false, store: false }`. A Phase-2 host that
-	 * implements a capability flips its flag to `true` (purely additive — no signature or
-	 * version churn). */
+	 * `host.capabilities.has(name)`), NOT via member-presence checks: every namespace
+	 * (`callRoute`/`session`/`ui`/`store`) is ALWAYS present on the object for type
+	 * stability, so `if (host.callRoute)` / `if (host.store)` would succeed even on a host
+	 * that has the capability gated off. On a current host every flag is
+	 * `true`: `{ invokeAction: true, requestRender: true,
+	 * callRoute: true, session: true, ui: true, store: true }`. The flags exist so a host
+	 * can additively gate a capability on/off without signature or version churn. */
 	readonly capabilities: HostCapabilities;
 
 	/**
@@ -322,7 +383,7 @@ export interface HostApi {
 	 * are supplied to the endpoint internally. `args` is therefore PURE action-domain
 	 * input — it is whitelisted/validated by the handler and never carries identity
 	 * fields like toolUseId. The bound toolUseId is always the renderer's OWN tool
-	 * call; acting on a different tool call is out of Phase-1 scope.
+	 * call; acting on a different tool call is not in scope (the host is bound to it).
 	 * Resolves with the handler's JSON result; rejects on guard/handler failure.
 	 */
 	invokeAction<TArgs = unknown, TResult = unknown>(
@@ -333,7 +394,7 @@ export interface HostApi {
 
 	/**
 	 * Call one of the CONTRIBUTING PACK'S OWN typed routes (the durable replacement for a
-	 * raw gateway fetch). PHASE 2 (frozen, not implemented). `name` resolves ONLY within
+	 * raw gateway fetch). PHASE 2 (IMPLEMENTED). `name` resolves ONLY within
 	 * the calling pack's `/api/ext/<thisPack>/*` namespace — it is impossible to address
 	 * an arbitrary gateway path. Authorized through the same per-session `allowedTools`
 	 * guard as `invokeAction` (§5). This is how a pack's renderer/panel fetches its OWN
@@ -341,23 +402,24 @@ export interface HostApi {
 	 */
 	callRoute<TResult = unknown>(name: string, init?: HostRouteInit): Promise<TResult>;
 
-	/** Transcript + message capabilities. PHASE 2 (frozen, not implemented). */
+	/** Transcript + message capabilities. PHASE 2 (IMPLEMENTED). */
 	readonly session: HostSessionApi;
 
-	/** UI surface capabilities. PHASE 2 (frozen, not implemented). */
+	/** UI surface capabilities. PHASE 2 (IMPLEMENTED). */
 	readonly ui: HostUiApi;
 
-	/** Ownership-scoped persistence. PHASE 2 (frozen, not implemented). */
+	/** Ownership-scoped persistence. PHASE 2 (IMPLEMENTED). */
 	readonly store: HostStoreApi;
 }
 
 /**
  * Readonly capability map — the SINGLE SOURCE OF TRUTH for availability (`host.capabilities`).
  * Each named capability flag is `true` only when that capability is IMPLEMENTED on the
- * running host. Reserved Phase-2 namespaces are present-but-throwing on the HostApi for
- * type stability, so member-presence checks are unreliable; this map is authoritative.
- * Additive-only: a Phase-2 host flips a flag from `false` to `true` (no version bump). The
- * `has(name)` helper is a string-keyed convenience over the same flags. */
+ * running host. Every namespace is ALWAYS present on the HostApi for type stability
+ * (even when a host gates the capability off), so member-presence checks are unreliable;
+ * this map is authoritative. Additive-only: a host flips a flag from `false` to `true`
+ * (no version bump). On a current host every flag is `true`. The `has(name)` helper is a
+ * string-keyed convenience over the same flags. */
 export interface HostCapabilities {
 	/** Phase-1 — always true on any v1 host. */
 	readonly invokeAction: boolean;
@@ -375,7 +437,7 @@ export interface HostCapabilities {
 	has(name: string): boolean;
 }
 
-/** PHASE 2 — frozen, not implemented. Typed request to a pack's OWN contributed route.
+/** PHASE 2 — IMPLEMENTED. Typed request to a pack's OWN contributed route.
  *  No `path`/URL field exists by design: the route is addressed by its declared `name`
  *  within the pack's namespace, never by a gateway-relative path. */
 export interface HostRouteInit {
@@ -387,7 +449,7 @@ export interface HostRouteInit {
 	query?: Record<string, string | number | boolean>;
 }
 
-/** PHASE 2 — frozen, not implemented. Read/post the current session's transcript.
+/** PHASE 2 — IMPLEMENTED. Read/post the current session's transcript.
  *  All shapes returned/accepted here are Host-API-OWNED contract types (below), produced
  *  by the internal→contract adapter — never Bobbit's internal wire format. */
 export interface HostSessionApi {
@@ -405,7 +467,7 @@ export interface HostSessionApi {
 	): () => void;
 }
 
-/** PHASE 2 — frozen, not implemented. Drive non-chat UI surfaces. Targets are STRUCTURED
+/** PHASE 2 — IMPLEMENTED. Drive non-chat UI surfaces. Targets are STRUCTURED
  *  typed objects, never hash strings — so the contract never bakes in today's router. */
 export interface HostUiApi {
 	/** Open (or focus) a contributed panel, handing it typed params. */
@@ -415,9 +477,9 @@ export interface HostUiApi {
 	navigate(target: RouteTarget): void;
 }
 
-/** PHASE 2 — frozen, not implemented. Ownership-scoped server persistence.
+/** PHASE 2 — IMPLEMENTED. Ownership-scoped server persistence.
  *  Keys are namespaced to the contributing pack server-side; one pack cannot read
- *  another pack's store. Maps onto the reserved `stores:` contribution. */
+ *  another pack's store. Maps onto the `stores:` contribution. */
 export interface HostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	put<T = unknown>(key: string, value: T): Promise<void>;
@@ -556,6 +618,99 @@ secure**: because the pack segment is never client-influenced, no Phase-2 implem
 widen it without re-opening the contract — and the LLM (which can forge `args`/`sessionId`/
 `toolUseId`) has no field through which to impersonate another pack.
 
+**Phase-2 hardening — the server-minted surface-binding token (implemented).** §3.2's
+"identity is a host-derived closure field" was the client-trust half; the wire half needed
+hardening. Threading the contributing `tool` through the client closure stops a
+*well-behaved* pack from naming another pack, but on the wire that identity was still a
+plain `tool` field a raw request could set to *another* pack's tool. Phase 2 closes this
+with `src/server/extension-host/surface-binding.ts`: when the trusted app first constructs a
+surface's Host API it calls `POST /api/ext/surface-token` with the surface's `tool`; the
+server authorizes it, resolves the winning contribution (the same resolution that *is* the
+pack identity), and mints an opaque **HMAC-signed token bound to
+`{sessionId, packId, contributionId, tool}`**. The client holds the token in the Host API
+**closure** (pack module code never sees it) and echoes it on every scoped call; each scoped
+endpoint re-validates the signature + TTL, re-resolves the identity (rejecting a token gone
+stale after an uninstall/precedence change), and uses the **derived** `{packId, tool}`,
+ignoring any caller-supplied value. See the Model-A residual in §3.4 and `marketplace.md`.
+
+### 3.3 Internal→contract adapter layer (`contract-adapter.ts`)
+
+The Host-API-owned data shapes (`HostMessage`, `HostContentBlock`, `ToolCallRecord`, the
+typed `HostSessionEventMap` payloads) are deliberately **not** mirrors of Bobbit's internal
+transcript wire format. The decoupling layer that maps one onto the other is
+`src/server/extension-host/contract-adapter.ts`, implemented in Phase 2:
+
+- `transcriptToHostMessages(jsonl)` parses a session's transcript JSONL rows into
+  `HostMessage[]`, and `transcriptToToolCall(jsonl, toolUseId)` extracts a single
+  `ToolCallRecord`. The mapping **generalizes the row-walk already proven in
+  `action-guard.ts::transcriptHasToolUse`** — it tolerates both the Anthropic
+  (`{type:"tool_use", id, name}`) and the pi-coding-agent (`{toolCallId, toolName}`) row
+  shapes, emitting contract blocks instead of a boolean.
+- It re-exports `CONTRACT_VERSION === HOST_CONTRACT_VERSION`, so a pack can feature-detect
+  contract-shape additions independently of `HOST_API_VERSION`.
+
+**Why a separate layer.** This is the seam that lets Bobbit refactor its internal
+session/message representation freely without breaking any installed pack — packs only ever
+see the versioned contract shapes. Both `host.session.readTranscript`/`readToolCall`
+(server-side) and `host.session.subscribe` (the client event bridge maps live WS events
+through the same contract shapes) route through this adapter. A practical hardening rides
+here too: the `pattern` filter on `readTranscript` is a **literal, case-insensitive
+substring** match, never compiled with `new RegExp(...)`, so a caller-controlled pattern
+cannot trigger catastrophic-backtracking ReDoS — the frozen `pattern?: string` type is
+satisfied either way.
+
+### 3.4 Isolation model (Model A) — code ORIGIN is the boundary
+
+Phase 2's security posture rests on one distinction: **the trust boundary is code ORIGIN,
+not the thread the code runs on.** A pack installed from the market is *trusted* — the same
+tier as a tool or an MCP server the user chose to install; content produced by the agent/LLM
+at runtime is *untrusted*. The surfaces split accordingly:
+
+- **Pack UI code** (renderers, panels, entrypoints) is TRUSTED and runs in the **main UI
+  thread**; it may touch app globals (it shares the realm). Its blast radius is bounded by
+  the Host API being its only privileged surface.
+- **Agent/LLM-influenced CONTENT** (model output, transcript text, artifact HTML) is ALWAYS
+  rendered in a `sandbox`-attributed iframe (theme tokens only, no auto-invoke/navigation on
+  mount) — so a prompt-injected artifact cannot reach app globals even though the trusted
+  panel framing it can.
+- **Pack SERVER modules** (`actions:` / `routes:`) are TRUSTED code and run in a
+  `worker_threads` worker (`src/server/extension-host/module-host-worker.ts`) for
+  **RESOURCE + CRASH isolation ONLY** — terminate-on-timeout (the CPU control: a runaway
+  `while(1)` is killed via `worker.terminate()`), memory caps via `resourceLimits`,
+  spawned-child SIGKILL on terminate, and module-import resolution contained to the pack
+  root (`confinement-loader.ts` + `path-guard.ts`). **This is a STABILITY boundary,
+  explicitly NOT a security sandbox against the pack's own code:** an in-worker
+  per-capability permission sandbox over trusted in-process code is false security (a native
+  `.node` addon or the shared process trivially defeats it), so Phase 2 neither claims nor
+  relies on one. The worker isolation is **unconditional in shipped builds** — there is no
+  config/env toggle that runs a pack server module in-process (such a path would defeat
+  terminate-on-timeout / crash containment), pinned by a config-invariant test.
+
+**`permissions:` is disclosure + an enable switch, not enforcement.** A tool's
+`permissions: ["git", "fs", "net"]` is **install-time DISCLOSURE** of which ambient OS
+capabilities the pack's trusted server code uses and the **switch that ENABLES** them in the
+worker. The default is OFF purely so the manifest discloses what the pack does — not because
+the worker could contain hostile pack code. Each disclosed capability un-gates the FULL
+ambient surface, with no further restriction on usage: `git` un-gates `node:child_process`
+(the pack may run **any** command, exactly like a tool — there is no git-binary-only or argv
+restriction), `fs` un-gates `node:fs`/`fs/promises` with **no** path containment, `net`
+restores outbound network. The one ENFORCED property is that the enabled set is
+**server-resolved** from the winning contribution via `resolveToolLocation` (logic in
+`permission-grants.ts`) — never caller-supplied, so a caller cannot self-escalate a
+permission its installed manifest does not declare. The Host API stays the single ENFORCED
+boundary for everything CROSS-pack, cross-session, or UI-driving (`store`/`session`/
+`callRoute`/`ui.*`); a pack's OWN ambient capability is not one of those boundaries.
+
+**Model-A residual (the documented future hardening).** In the shared main UI realm a
+*deliberately malicious* pack could still mint its own surface token for any tool name it
+knows, read another surface's token out of a shared closure, or monkey-patch `fetch` /
+`WebSocket.prototype.send`. The surface-binding token (§3.2) and the session-write permit
+(§5) close the *accidental* and *non-pack-reachable* paths and make the Host API the only
+*sanctioned* identity path — they are NOT claimed as a defense against a same-realm
+adversary. TRUE cross-pack UI isolation needs **per-pack realm isolation** (running pack UI
+in a separate iframe/worker realm), which Model A de-scopes; the server-side authorization +
+audit are the durable boundary regardless of client realm.
+
 ---
 
 ## 4. Phase-1 build plan
@@ -621,8 +776,9 @@ widen it without re-opening the contract — and the LLM (which can forge `args`
   Renderers that mount their own `LitElement` use its native reactivity instead and ignore
   `requestRender`. The tool-call
   `result` passed to `render()` is **unchanged** by an action — actions do NOT rewrite the
-  transcript or the persisted tool result in Phase 1 (handlers that genuinely need to
-  resume the agent turn or post a message use the frozen-for-Phase-2 `host.session.*`). The
+  transcript or the persisted tool result (renderers that genuinely need to resume the
+  agent turn or post a message use the separate, user-gesture-gated `host.session.*`
+  capability — implemented in Phase 2). The
   E2E (§8.2) asserts the renderer's OWN DOM updates (the `pack-result` element reflects the
   handler's returned value) after the click.
 
@@ -910,7 +1066,7 @@ unchanged on resolve — otherwise it re-loads under the advanced epoch (bounded
 `invalidate()` racing an in-flight import can never cache a stale module under the fresh epoch.
 
 **Endpoint** `POST /api/tools/:tool/actions/:action` in `server.ts::handleApiRoute`,
-modeled on `/api/internal/mcp-call` (server.ts:10930). Body `{ sessionId, toolUseId, args }`.
+modeled on the `/api/internal/mcp-call` handler. Body `{ sessionId, toolUseId, args }`.
 Flow (full guard sequence in §5):
 
 ```
@@ -931,9 +1087,9 @@ Flow (full guard sequence in §5):
 # action can never authorize with one session and inspect/act on another's transcript.
 ```
 
-**Cache invalidation (synchronous).** `invalidateResolverCaches()` (server.ts:2238)
-already runs on install/update/uninstall (server.ts:5522/5537/5552) and pack-order PUT
-(5591). Add `actionDispatcher.invalidate()` to it:
+**Cache invalidation (synchronous).** `invalidateResolverCaches()` in `server.ts`
+already runs on install/update/uninstall and on the pack-order PUT. Add
+`actionDispatcher.invalidate()` to it:
 
 ```ts
 const invalidateResolverCaches = (): void => {
@@ -959,22 +1115,22 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";   // existing top-down re-render entry point
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostApi } from "../shared/extension-host/host-api.js";
 
-/** Build the Phase-1 client Host API bound to a given session AND the renderer's own
+/** Build the client Host API bound to a given session AND the renderer's own
  *  toolUseId. invokeAction supplies BOTH to the endpoint internally, so packs never put
- *  identity fields in `args`. Phase-2 namespaces throw a clear "not implemented in
- *  Phase 1" error so misuse is loud, not silent — and `capabilities` reports them as
- *  `false` so authors feature-detect correctly instead of relying on member presence.
- *  There is NO gateway member — invokeAction is the only pack→server path.
+ *  identity fields in `args`. Every Phase-2 namespace is now IMPLEMENTED, so
+ *  `capabilities` reports them all `true`; authors still feature-detect via
+ *  `capabilities.has(name)` rather than member presence. There is NO gateway member
+ *  — invokeAction is the only pack→server action path; the scoped capabilities
+ *  (`callRoute`/`store`/`session`) ride server-minted surface tokens (§3.2).
  *
  *  This is the CLIENT-side construction; the server analogue is the internal
  *  `createHostApi({ sessionId, toolUseId, packId, contributionId })` contract (§3.2),
  *  where packId/contributionId are SERVER-DERIVED from the resolved winning contribution
  *  — never passed by extension code. */
 export function getHostApi(sessionId: string | undefined, toolUseId: string | undefined): HostApi {
-	const notImpl = (m: string) => { throw new Error(`host.${m} is reserved for Phase 2`); };
-	// Phase-1 host: only invokeAction + requestRender are implemented. `capabilities` is
-	// the single source of truth; the throwing stubs below exist only for type stability.
-	const flags = { invokeAction: true, requestRender: true, callRoute: false, session: false, ui: false, store: false };
+	// Every capability is implemented. `capabilities` is the single source of truth;
+	// authors feature-detect with `capabilities.has(name)`, never member presence.
+	const flags = { invokeAction: true, requestRender: true, callRoute: true, session: true, ui: true, store: true };
 	return {
 		version: HOST_API_VERSION,
 		contractVersion: HOST_CONTRACT_VERSION,
@@ -996,28 +1152,34 @@ export function getHostApi(sessionId: string | undefined, toolUseId: string | un
 			if (!resp.ok) throw new Error(`invokeAction ${tool}/${action} HTTP ${resp.status}`);
 			return resp.json();
 		},
-		callRoute: () => notImpl("callRoute"),
-		session: { readTranscript: () => notImpl("session.readTranscript"), /* …all Phase-2… */ } as any,
-		ui: { openPanel: () => notImpl("ui.openPanel"), navigate: () => notImpl("ui.navigate") },
-		store: { get: () => notImpl("store.get"), put: () => notImpl("store.put"), list: () => notImpl("store.list") },
+		// Scoped capabilities ride a server-minted surface token (§3.2); the server
+		// derives {packId, tool} from it and ignores any caller-supplied identity.
+		callRoute: async (name, init) => { /* POST /api/ext/route/:name with the surface token */ },
+		session: { /* readTranscript/readToolCall (own-session); postMessage (WS permit + gesture); subscribe (event bus) */ } as HostApi["session"],
+		ui: { openPanel: (target) => openPackPanel(target), navigate: (target) => navigateToTarget(target) },
+		store: { /* get/put/list — pack-namespaced */ } as HostApi["store"],
 	};
 }
 ```
 
-`withSession(init, sid)` adds the `x-bobbit-session-id` header (same propagation
-`extension.ts` uses, server reads at server.ts:9030/10953). `gatewayFetch` supplies the
-bearer for the ONE endpoint the client Host API calls in Phase 1
-(`POST /api/tools/:tool/actions/:action`). `Messages.ts`/`ToolGroup.ts` set
-`ctx.host = getHostApi(sessionIdCtx, toolUseIdCtx)` — the bound `toolUseId` is the
-renderer's own tool call (acting on a different tool call is out of Phase-1 scope).
+> The capability bodies above are elided for brevity — see `src/app/host-api.ts` for
+> the full implementation (scoped `fetch` over the surface token, the WS
+> session-write permit, and the live event-bus subscription).
 
-**The `ServerHostApi` (handler `ctx.host`)** is the server-side analogue. **Phase 1 exposes
-no members** (handlers receive `{ host, sessionId, toolUseId, tool }` and use the verified
-identity fields; the durable convention is that any future server capability handlers need
-— store access, pack-scoped route helpers, the internal→contract adapter — is added to
-`ServerHostApi` as a typed method, never as raw `process`/`fs`/`exec`). Frozen
-`ServerHostApi` mirrors the Phase-2 `HostApi.store`/`session` surface server-side; nothing
-in it is a raw passthrough.
+`withSession(init, sid)` adds the `x-bobbit-session-id` header (same propagation
+`extension.ts` uses; the server reads it in `handleApiRoute` and the mcp-call guard).
+`gatewayFetch` supplies the bearer for the action endpoint
+(`POST /api/tools/:tool/actions/:action`); the scoped capabilities use the namespaced
+`/api/ext/*` endpoints with their surface token. `Messages.ts`/`ToolGroup.ts` set
+`ctx.host = getHostApi(sessionIdCtx, toolUseIdCtx)` — the bound `toolUseId` is the
+renderer's own tool call.
+
+**The `ServerHostApi` (handler `ctx.host`)** is the server-side analogue. It exposes the
+verified identity fields plus the implemented `store` (pack-namespaced) and `session`
+read surface (`readTranscript`/`readToolCall`, own-session, via the internal→contract
+adapter); `session.postMessage` is intentionally omitted server-side (server modules have
+no user gesture). Every capability is a typed method, never raw `process`/`fs`/`exec`;
+nothing in it is a raw passthrough.
 
 ---
 
@@ -1030,12 +1192,12 @@ in exactly one place.
 
 | # | Control | Mechanism | Acceptance-blocking? |
 |---|---|---|---|
-| i | **Allowlist-bypass fix** | The **action** endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈ the calling session's `allowedTools`, via the **same guard** as `/api/internal/mcp-call` (server.ts:10953–10976): require `x-bobbit-session-id`, resolve the session (live or persisted), reject if `:tool` not in `allowedTools`. The LLM can curl the endpoint, so this guard — not the agent layer's `allowedTools` — is the real gate. The **renderer** endpoint (`GET /api/tools/:tool/renderer`) is EXEMPT from the allowedTools check: it serves trusted pack module bytes (a static-asset-equivalent, not a capability invocation), so it needs only the admin bearer (see §5.1). The reserved Phase-2 `routes:`/`stores:` inherit the action endpoint's allowedTools-gated rule by design. | **Yes — unit** |
+| i | **Allowlist-bypass fix** | The **action** endpoint (`POST /api/tools/:tool/actions/:action`) requires `:tool` ∈ the calling session's `allowedTools`, via the **same guard** as the `/api/internal/mcp-call` handler: require `x-bobbit-session-id`, resolve the session (live or persisted), reject if `:tool` not in `allowedTools`. The LLM can curl the endpoint, so this guard — not the agent layer's `allowedTools` — is the real gate. The **renderer** endpoint (`GET /api/tools/:tool/renderer`) is EXEMPT from the allowedTools check: it serves trusted pack module bytes (a static-asset-equivalent, not a capability invocation), so it needs only the admin bearer (see §5.1). The reserved Phase-2 `routes:`/`stores:` inherit the action endpoint's allowedTools-gated rule by design. | **Yes — unit** |
 | ii | **Input validation / no traversal** | `:tool`/`:action` matched against resolved tool + `actions.names`; `module`/`renderer` paths re-validated to stay within `baseDir/groupDir` (no `..`, no abs); `args` passed to the handler as opaque JSON — never `eval`/`exec`/`require`-d; `sessionId`/`toolUseId` treated as untrusted strings, never used to build filesystem/session paths beyond a store `get`. | **Yes — unit** |
 | iii | **toolUseId existence + ownership (anti-replay/forgery)** | Resolve the **header-bound** session's transcript via `projectContextManager.getContextForSession(headerSessionId)?.sessionStore.get(headerSessionId)` and scan its messages for a `tool_use`/`toolCall` block whose `id === toolUseId` **and** whose tool name `=== :tool`. Reject (409) if absent — blocks replays and forged ids referencing another tool. | **Yes — unit** |
 | iii-b | **Single-sourced session identity** | The `x-bobbit-session-id` HEADER is the canonical identity. The request body's `sessionId` is accepted only to fail fast on a mismatch — `body.sessionId === headerSessionId` is required (403 otherwise) BEFORE any allowedTools/toolUseId check; every downstream check uses the header-bound session. Prevents authorizing with one session and inspecting/acting on another's transcript. | **Yes — unit** |
-| iii-c | **Action-result propagation (no privileged mutation)** | An action's result flows back ONLY as the `invokeAction` promise's JSON; the renderer applies it to **its own local state** (module-level Map / `LitElement` `@state`) and re-renders via `ctx.host.requestRender()` or native reactivity (§4a). Phase-1 handlers do NOT rewrite the transcript or persisted tool result — so a pack action cannot silently mutate session history. Turn-resume/message-post is frozen-for-Phase-2 (`host.session.*`). | **Yes — E2E** |
-| iv | **Blast radius** | Handlers run in the long-lived gateway process. ALL FOUR controls are REQUIRED: per-call **timeout** (`Promise.race`, default 30s) — scoped to span BOTH module load+evaluation (the dynamic `import()` / top-level eval) AND handler execution, so a hanging top-level `await` or stalled import yields a prompt 504 rather than an unbounded `await loadModule(...)`; global **concurrency cap** (semaphore, default 8 in-flight); **try/catch isolation** so a thrown/handler-crash becomes a 500, never takes down the process; endpoint **rate-limit** (token bucket per session). A **seam** is left to run `actions.js` in a worker/`vm` later: the dispatcher only ever calls `module.actions[action](ctx, args)`, so swapping the execution strategy is local to `ActionDispatcher.dispatch`. | **Yes — unit (all four: timeout, concurrency cap, isolation, rate-limit)** |
+| iii-c | **Action-result propagation (no privileged mutation)** | An action's result flows back ONLY as the `invokeAction` promise's JSON; the renderer applies it to **its own local state** (module-level Map / `LitElement` `@state`) and re-renders via `ctx.host.requestRender()` or native reactivity (§4a). Action handlers do NOT rewrite the transcript or persisted tool result — so a pack action cannot silently mutate session history. Turn-resume/message-post is the separate, user-gesture-gated `host.session.*` capability (§3.2 / Slice C2). | **Yes — E2E** |
+| iv | **Blast radius** | Pack server modules (actions + routes) run in a confined `worker_threads` **worker**, NOT the gateway process — the parent only resolves + validates the module path and never imports pack code. The worker is **terminate-on-timeout** (true cancellation of a runaway handler — also the CPU-exhaustion control, since `worker_threads` has no per-core throttle), with **memory/stack caps**, **spawned-child SIGKILL**, **empty env** (no gateway token/secret), and **module-import containment to the pack root**. On top of it the dispatcher keeps its controls: per-call **timeout** (default 30s) spanning BOTH module load+eval AND handler execution; global **concurrency cap** (semaphore, default 8 in-flight, permit held until the work settles); **error isolation** so a throw or worker crash becomes a 500, never process death; per-session **rate-limit** (token bucket). This is Model A — **stability/resource/crash isolation, NOT a security sandbox against trusted pack code** (§3.4 / [phase-2 design §9](extension-host-phase2.md)); isolation is unconditional (no in-process fallback to gate). | **Yes — unit (worker terminate-on-timeout + resource caps; dispatcher timeout, concurrency cap, isolation, rate-limit)** |
 | v | **UI thread** | Renderers run on the main thread over LLM-influenced data. Preserve existing iframe `sandbox` attributes (artifacts/preview unchanged). Pack renderers **must NOT auto-invoke actions on render** — `invokeAction` is only called from a user gesture (click). The litmus sample's Retry button enforces this; reviewers reject render-time invocation. | **Yes — E2E asserts no call before click** |
 | vi | **Audit** | Every action invocation logs `{ tool, action, sessionId, toolUseId, caller, outcome, durationMs }` via the existing logger. | recommended |
 
@@ -1087,28 +1249,36 @@ introduces; there is no raw escape hatch to reason around.
 
 ---
 
-## 6. Migration sketch — artifacts & PR-walkthrough onto the v1 shape
+## 6. Migration — artifacts & PR-walkthrough as shipped packs
 
-Goal: prove both collapse onto the v1 contribution points + Host API with **zero** changes
-to v1 shapes — and crucially, **without any raw `gateway.fetch`**. Where something didn't
-map, the fix was applied to the frozen shape above (noted inline), per the litmus rule.
-The key durability result: PR-walkthrough's dynamic data, which an earlier draft reached
-via `host.gateway.fetch`, maps cleanly onto the pack's OWN typed `routes:` via
-`host.callRoute` — so removing the escape hatch costs no behavioral parity.
+Originally a *sketch* proving both built-ins collapse onto the v1 shape with **zero**
+changes to v1 types and **no** raw `gateway.fetch`. **Phase 2 realized it:** both now ship
+as installable market packs under `market-packs/` (the acceptance litmus), each at
+behavioral parity with the built-in it replaces. The "reserved primitive" column below is
+now the *live* primitive. The two case studies — including the concrete pack layouts,
+bundling/vendoring, and the live-git/store-rehydration split — are documented for authors in
+[../extension-host-authoring.md](../extension-host-authoring.md); the tables below stay as
+the contract-level mapping. The key durability result held: PR-walkthrough's dynamic data,
+which an earlier draft reached via `host.gateway.fetch`, maps cleanly onto the pack's OWN
+typed `routes:` via `host.callRoute` — removing the escape hatch cost no parity.
 
 ### 6.1 `artifacts` (`src/ui/tools/artifacts/`, `preview/artifacts.ts`)
 
 | Existing behavior | Frozen primitive |
 |---|---|
-| `artifacts-tool-renderer.ts` renders an inline pill + opens the artifact viewer | `renderer:` (Phase-1) for the inline pill; **`panels:`** (reserved) for the viewer surface |
+| `artifacts-tool-renderer.ts` renders an inline pill + opens the artifact viewer | `renderer:` (P1) for the inline pill; **`panels:`** (live) for the viewer surface |
 | `ArtifactPill` "open" click mounts `ArtifactElement` in a panel | `host.ui.openPanel({ panelId: "artifacts.viewer", params: { artifactId } })` (structured target) |
-| `persistPreviewArtifact` / `restorePreviewArtifact` server-side (server.ts:9890/9991) | **`stores:`** (reserved) → `host.store.put/get(artifactId)`; ownership-scoped to the artifacts pack |
-| Restore-by-id across reload (`POST /api/preview/artifacts/:id/restore`) | `host.store.get` + `host.ui.openPanel({ panelId, params })` — no bespoke route, no raw fetch |
+| `persistPreviewArtifact` / `restorePreviewArtifact` server-side | **`stores:`** (live) → `host.store.put/get(artifactId)`; ownership-scoped to the artifacts pack |
+| Restore-by-id across reload (the old bespoke restore route) | `host.store.get` + `host.ui.openPanel({ panelId, params })` — no bespoke route, no raw fetch |
+| Deep-link a viewer by id (parity acceptance) | an `entrypoints:` `kind:"route"` (`routeId:"artifacts"`) + `host.ui.navigate({ route, params:{ artifactId } })` → `#/ext/artifacts?artifactId=…` → store-rehydrated panel |
 
-Maps cleanly. Artifacts need `toolRenderers` + `panels` + `stores` — all frozen. **No
-Phase-1 shape change required.** The Blob-URL renderer-delivery decision (§4a) is exactly
-how the artifact viewer panel module would also be delivered in Phase 2 (panels reuse the
-serve+lazy-import mechanism keyed off `panels[].entry`).
+**Shipped** as `market-packs/artifacts/` — `renderer:` + `panels:` + `stores:` + a
+`kind:"route"` deep-link entrypoint. The Blob-URL renderer-delivery decision (§4a) is
+exactly how the `artifacts.viewer` panel module is delivered (panels reuse the
+serve+lazy-import mechanism keyed off `panels[].entry`). Heavyweight deps (`highlight.js`,
+`pdfjs-dist`, `docx-preview`) are **vendored** — esbuild-bundled into the served module at
+publish time, not installed (`npm run build:packs`); the host toolkit stays factory-injected,
+never bundled.
 
 ### 6.2 PR-walkthrough (`src/ui/components/pr-walkthrough/`, `defaults/tools/pr-walkthrough/`, `server/pr-walkthrough/routes.ts`)
 
@@ -1116,19 +1286,24 @@ serve+lazy-import mechanism keyed off `panels[].entry`).
 |---|---|
 | `submit.yaml` / `read_pr_walkthrough_bundle.yaml` / `readonly_bash.yaml` tools | tool YAMLs + `renderer:` for any inline tool blocks |
 | `PrWalkthroughPanel.ts` full-surface viewer | **`panels:`** → `host.ui.openPanel({ panelId: "pr-walkthrough.panel", params: { jobId } })` |
-| Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (git-widget button / command palette) + `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (structured — the host maps it to the router's URL scheme; the pack never builds a hash string) |
-| `handlePrWalkthroughApiRoute` bespoke endpoints (server.ts:2259) | **`routes:`** → the pack's OWN `/api/ext/pr-walkthrough/*` namespace, reached via the typed, pack-scoped `host.callRoute(name, init)` — **never** a raw gateway fetch |
+| Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (composer-slash / git-widget button / command palette launchers + a `kind:"route"` deep-link) + `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (structured — the host maps it to `#/ext/pr-walkthrough?jobId=…`; the pack never builds a hash string) |
+| `handlePrWalkthroughApiRoute` bespoke endpoints | **`routes:`** → the pack's OWN namespace, reached via the typed, pack-scoped `host.callRoute(name, init)` — **never** a raw gateway fetch |
 | Loading the changeset/diff bundle for the viewer | `host.callRoute("bundle", { query: { jobId } })` against the pack's own route — dynamic data without an escape hatch |
-| Persisted walkthrough store (`STORE_SCHEMA_VERSION`, job/changeset state) | **`stores:`** → `host.store.*`, pack-scoped |
-| `submit_pr_walkthrough_yaml` writing results back | `host.invokeAction("submit_pr_walkthrough", "publish", …)` (Phase-1 actions shape) **or** a `routes:` POST via `host.callRoute` — both typed + frozen |
+| Persisted walkthrough store (`WALKTHROUGH_STORE_SCHEMA_VERSION`, job/changeset state) | **`stores:`** → `host.store.*`, pack-scoped |
+| Reading the `submit_pr_walkthrough_yaml` tool call | `host.session.readToolCall(toolUseId)` (own-session, via the adapter) instead of bespoke transcript access |
+| Live `git diff` recompute for the changeset | the `bundle` route discloses `permissions: ["git", "fs"]` and runs **real `git`** LIVE in the C3 worker (resource-capped + killable) — covering PRs created after install |
 
-PR-walkthrough is the maximal case: `routes` + `stores` + `panels` + `entrypoints`. All
-four are reserved keys in §2; every dynamic behavior routes through a TYPED, scoped
-capability — `host.callRoute` (the pack's own routes), `host.ui.*` (structured targets),
-`host.store.*` (pack-scoped), `host.invokeAction` — all frozen in §3, **with no raw
-`gateway.fetch`**. Parity holds without the escape hatch: the viewer's dynamic data comes
-from its OWN pack routes via `callRoute`, not from arbitrary gateway paths. **No v1 shape
-change required.**
+**Shipped** as `market-packs/pr-walkthrough/` — the maximal case using **all** reserved
+keys: `routes` + `stores` + `panels` + `entrypoints` + `host.session.readToolCall`. Every
+dynamic behavior routes through a TYPED, scoped capability — `host.callRoute` (the pack's
+own routes, resolved by a pack-level `RouteRegistry` so a panel opened from one tool reaches
+a route declared on another tool in the SAME pack), `host.ui.*` (structured targets),
+`host.store.*` (pack-scoped), `host.session.readToolCall` — **with no raw `gateway.fetch`**.
+The **synthesis-credential split** (the one non-obvious decision): the worker has a
+PATH-only env and no model credentials, so LLM card synthesis stays AGENT-tool-side at submit
+time (persisted to the store keyed by changeset id), and the `bundle` route only *computes*
+the deterministic diff/fallback cards live + *reads* the stored LLM cards — it never calls
+the model. Parity holds without an escape hatch.
 
 > **Shape fixes applied during this exercise.** (1) The initial `HostUiApi` had only
 > `openPanel`; PR-walkthrough's deep-link/launcher need forced adding `navigate(target)` and
@@ -1151,19 +1326,24 @@ is **no `gateway.fetch`** to build; the allowlist-bypass fix + input validation 
 toolUseId verification + blast-radius controls (§5); the frozen v1 interfaces + manifest
 schema committed (§2/§3); this doc.
 
-**Frozen, NOT built (Phase 2+):** `panels`, `stores`, `routes`, `entrypoints`;
-`host.callRoute` (the pack-scoped route capability), `host.session.*` / `host.ui.*` /
-`host.store.*`; the internal→contract adapter (`src/server/extension-host/contract-adapter.ts`);
-server-module worker/vm isolation. MCP + AGENTS remain non-installable (unchanged from
-marketplace MVP). Phase-2 keys are parsed-and-reserved today so packs authored against the
-full shape install cleanly now.
+**Built in Phase 2 (IMPLEMENTED):** `panels`, `stores`, `routes`, `entrypoints`,
+`permissions`; `host.callRoute`, `host.session.*` (reads + writes + subscribe),
+`host.ui.*` (openPanel + navigate), `host.store.*`; the internal→contract adapter
+(`contract-adapter.ts`, §3.3); server-module RESOURCE + CRASH isolation in a
+`worker_threads` worker (`module-host-worker.ts`, §3.4). `host.capabilities` now reports all
+flags `true` and `HOST_API_VERSION` is still `1` (additive-only — proven by the v1 type
+compiling unchanged). The two litmus built-ins (artifacts, PR-walkthrough) ship as packs
+under `market-packs/`. See [extension-host-phase2.md](extension-host-phase2.md) for the
+build plan and slice DAG. MCP + AGENTS remain non-installable (unchanged from marketplace
+MVP).
 
 **Durability invariant (governs all post-v1 change).** v1 is **additive-only**: a Phase-2
 capability adds a method body + wires it through the one `allowedTools`-gated guard — no v1
 signature changes, no `HOST_API_VERSION` bump, and the implementing host flips the matching
 `host.capabilities` flag from `false` to `true`. Packs feature-detect AVAILABILITY via
 `host.capabilities.<name>` / `host.capabilities.has(name)` (the single source of truth —
-NOT member-presence checks, since reserved namespaces are present-but-throwing stubs), and
+NOT member-presence checks, since every namespace is always present on the object even
+when a host gates the capability off), and
 read `host.version` / `host.contractVersion` only to identify the contract revision.
 Deprecation policy: a member may be
 marked `@deprecated` (kept working) for at least one MAJOR `HOST_API_VERSION` before

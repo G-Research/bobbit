@@ -2076,6 +2076,24 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
+	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive). */
+	storeIds?: string[];
+	/** Optional `panels:` the tool contributes (Slice B4, additive). The ESM
+	 *  `entry` path stays server-side; the client addresses panels by `id`. */
+	panels?: { id: string; title?: string }[];
+	/** Optional declared route names (from `routes.names`); the pack-level RouteRegistry
+	 *  indexes a pack's routes by these (Slice B3). */
+	routeNames?: string[];
+	/** Optional typed `entrypoints:` the tool contributes (Slice C1); consumed by the
+	 *  client `pack-entrypoints.ts` registry (launcher surfaces + deep-link routes). */
+	entrypoints?: Array<{
+		id: string;
+		kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+		label?: string;
+		routeId?: string;
+		target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+		paramKeys?: string[];
+	}>;
 	grantPolicy?: string;
 }
 

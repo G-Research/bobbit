@@ -37,6 +37,8 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
+import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
+import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -218,6 +220,13 @@ export interface QueuedMessage {
 
 export class RemoteAgent {
 	private ws: WebSocket | null = null;
+	// In-flight C2 session-WRITE (`host.session.postMessage`) requests, keyed by the
+	// correlation id sent on the `ext_session_post` frame and settled by the matching
+	// `ext_session_post_result`. See `_postExtSession` / session-write-bridge.ts.
+	private _pendingExtPosts = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
+	// In-flight C2 write-permit MINT requests, keyed by the correlation id on the
+	// `ext_session_write_permit` frame, settled by `ext_session_write_permit_result`.
+	private _pendingExtPermits = new Map<string, { resolve: (nonce: string) => void; reject: (e: Error) => void }>();
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
 	private _gatewayUrl = "";
@@ -723,6 +732,12 @@ export class RemoteAgent {
 				if (!settled) {
 					if (msg.type === "auth_ok") {
 						settled = true;
+						// Register the trusted WS poster for `host.session.postMessage` (C2 session
+						// WRITE, extension-host-phase2.md §8 C2.1). The poster closes over THIS
+						// agent's private WS; pack code has no handle to it and cannot import this
+						// transport, so it cannot drive the agent. No session secret is delivered
+						// to (or capturable from) the client at all — the trusted WS IS the gate.
+						registerSessionPoster(this._sessionId, (req) => this._postExtSession(req));
 						// Splits the ws-open→snapshot window into handshake vs. the
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
@@ -847,6 +862,10 @@ export class RemoteAgent {
 		}
 		this.ws?.close();
 		this.ws = null;
+		// Drop the trusted WS poster + reject any in-flight session posts so a torn-down
+		// session leaves no stale transport (re-registered on the next auth_ok).
+		unregisterSessionPoster(this._sessionId);
+		this._rejectPendingExtPosts("session disconnected");
 		this._setConnectionStatus("disconnected");
 	}
 
@@ -1329,6 +1348,101 @@ export class RemoteAgent {
 
 	// ── Internal ─────────────────────────────────────────────────────
 
+	/**
+	 * Drive the C2 session WRITE (`host.session.postMessage`) over THIS agent's
+	 * trusted, authenticated WebSocket (registered with session-write-bridge.ts on
+	 * auth_ok). The send rides the WS — NOT a `fetch` — so no capturable secret is
+	 * involved; pack code has no handle to the WS. The server ignores `req.sessionId`
+	 * as a target and posts into its OWN authenticated session.
+	 *
+	 * TWO trusted-WS round-trips (design §8 C2.1): first MINT a server-minted,
+	 * one-time, content-bound write permit (bound to `req.contentHash`), then send the
+	 * post carrying the returned nonce. A captured/replayed post frame is rejected
+	 * (permit already consumed); a forged post without a mint has no valid nonce.
+	 */
+	private async _postExtSession(req: SessionPostRequest): Promise<void> {
+		const nonce = await this._mintExtWritePermit(req);
+		return this._sendExtSessionPost(req, nonce);
+	}
+
+	/** Step 1: mint a content-bound write permit over the trusted WS. Resolves with
+	 *  the opaque nonce; rejects on server error / timeout / not-connected. */
+	private _mintExtWritePermit(req: SessionPostRequest): Promise<string> {
+		return new Promise<string>((resolve, reject) => {
+			if (this.ws?.readyState !== WebSocket.OPEN) {
+				reject(new Error("host.session.postMessage: WebSocket not connected"));
+				return;
+			}
+			const requestId = `extperm_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => {
+				if (this._pendingExtPermits.delete(requestId)) {
+					reject(new Error("host.session.postMessage: timed out awaiting write permit"));
+				}
+			}, 30_000);
+			this._pendingExtPermits.set(requestId, {
+				resolve: (nonce: string) => { clearTimeout(timer); resolve(nonce); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
+			try {
+				this.ws.send(JSON.stringify({
+					type: "ext_session_write_permit",
+					requestId,
+					surfaceToken: req.surfaceToken,
+					contentHash: req.contentHash,
+				}));
+			} catch (e) {
+				this._pendingExtPermits.delete(requestId);
+				clearTimeout(timer);
+				reject(e instanceof Error ? e : new Error(String(e)));
+			}
+		});
+	}
+
+	/** Step 2: send the post carrying the minted nonce. Correlates the async
+	 *  `ext_session_post_result` ack by a generated `requestId`. */
+	private _sendExtSessionPost(req: SessionPostRequest, nonce: string): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			if (this.ws?.readyState !== WebSocket.OPEN) {
+				reject(new Error("host.session.postMessage: WebSocket not connected"));
+				return;
+			}
+			const requestId = `extpost_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const timer = setTimeout(() => {
+				if (this._pendingExtPosts.delete(requestId)) {
+					reject(new Error("host.session.postMessage: timed out awaiting server ack"));
+				}
+			}, 30_000);
+			this._pendingExtPosts.set(requestId, {
+				resolve: () => { clearTimeout(timer); resolve(); },
+				reject: (e) => { clearTimeout(timer); reject(e); },
+			});
+			try {
+				this.ws.send(JSON.stringify({
+					type: "ext_session_post",
+					requestId,
+					surfaceToken: req.surfaceToken,
+					role: req.role,
+					text: req.text,
+					resumeTurn: req.resumeTurn,
+					nonce,
+				}));
+			} catch (e) {
+				this._pendingExtPosts.delete(requestId);
+				clearTimeout(timer);
+				reject(e instanceof Error ? e : new Error(String(e)));
+			}
+		});
+	}
+
+	/** Reject and clear every in-flight session post + permit mint (call on
+	 *  disconnect/teardown). */
+	private _rejectPendingExtPosts(reason: string): void {
+		const pending = [...this._pendingExtPosts.values(), ...this._pendingExtPermits.values()];
+		this._pendingExtPosts.clear();
+		this._pendingExtPermits.clear();
+		for (const p of pending) p.reject(new Error(`host.session.postMessage: ${reason}`));
+	}
+
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
@@ -1378,6 +1492,28 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "ext_session_write_permit_result": {
+				// Async reply to a C2 write-permit MINT (step 1). Settle the correlated
+				// promise with the opaque nonce (resolve) or the server-side error (reject).
+				const pendingPermit = this._pendingExtPermits.get(msg.requestId);
+				if (pendingPermit) {
+					this._pendingExtPermits.delete(msg.requestId);
+					if (msg.ok && typeof msg.nonce === "string" && msg.nonce) pendingPermit.resolve(msg.nonce);
+					else pendingPermit.reject(new Error(typeof msg.error === "string" && msg.error ? msg.error : "host.session.postMessage: write permit denied"));
+				}
+				break;
+			}
+			case "ext_session_post_result": {
+				// Async ack for a C2 session WRITE (`host.session.postMessage`). Settle the
+				// correlated promise (resolve on ok, reject with the server-side error).
+				const pending = this._pendingExtPosts.get(msg.requestId);
+				if (pending) {
+					this._pendingExtPosts.delete(msg.requestId);
+					if (msg.ok) pending.resolve();
+					else pending.reject(new Error(typeof msg.error === "string" && msg.error ? msg.error : "host.session.postMessage failed"));
+				}
+				break;
+			}
 			case "state":
 				// Canonical-status path (new server). When the server splices
 				// `status` + `statusVersion` into the snapshot, prime our tracker
@@ -1621,6 +1757,12 @@ export class RemoteAgent {
 				// `_isAborting` mirror is kept for the existing `get isAborting()`
 				// reader; it's now derived from canonical status.
 				this._isAborting = msg.status === "aborting";
+
+				// Slice C2: bridge the canonical status transition onto the typed Host
+				// session event bus for `host.session.subscribe` (scoped to this session).
+				if (this._sessionId) {
+					try { publishClientStatus(this._sessionId, msg.status); } catch { /* non-fatal */ }
+				}
 
 				this._maybeReplayGrant(msg.status);
 				this.onStatusChange?.(msg.status);
@@ -2457,6 +2599,13 @@ export class RemoteAgent {
 						}
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
+
+						// Slice C2: bridge the live message onto the typed Host session
+						// event bus for `host.session.subscribe` (contract shapes, scoped
+						// to this session). Best-effort — never blocks the live path.
+						if (this._sessionId) {
+							try { publishClientMessage(this._sessionId, msg); } catch { /* non-fatal */ }
+						}
 
 						// Check for review tool results (review_open/review_close JSON).
 						// `isLive: true` distinguishes a fresh agent emission from a snapshot

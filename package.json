@@ -16,7 +16,8 @@
   "scripts": {
     "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs",
     "build:ui": "vite build",
-    "build": "npm run build:server && npm run build:ui",
+    "build:packs": "node scripts/build-market-packs.mjs",
+    "build": "npm run build:packs && npm run build:server && npm run build:ui",
     "dev": "concurrently -n gw,ui -c blue,green \"node dist/server/cli.js --cwd . --no-ui\" \"vite\"",
     "dev:harness": "npm run build:server && concurrently -n harness,ui -c yellow,green \"node dist/server/harness.js -- --cwd . --no-ui\" \"vite\"",
     "dev:nord": "npm run build:server && node scripts/dev-nord.mjs",
@@ -70,6 +71,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
+    "esbuild": "^0.27.7",
+    "highlight.js": "^11.11.1",
     "@tailwindcss/vite": "^4.1.17",
     "@types/node": "^22.0.0",
     "@types/sortablejs": "^1.15.9",

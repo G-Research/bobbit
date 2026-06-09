@@ -98,8 +98,10 @@ import {
 	walkthroughChangesetIdFromPanelTabId,
 	walkthroughPanelTabId,
 	setPanelTabsForSession,
+	packPanelIdFromTabId,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import { renderPackPanelContent } from "./pack-panels.js";
 import type { OpenPrWalkthroughInput } from "./pr-walkthrough.js";
 import { restorePrWalkthroughJobForSession, restorePrWalkthroughPanel, upsertPrWalkthroughJobPanel } from "./pr-walkthrough.js";
 import { ensurePrWalkthroughPanel } from "./pr-walkthrough-lazy.js";
@@ -2320,6 +2322,27 @@ export function doRenderApp(): void {
 		};
 	};
 
+	// Slice B4 — content of a pack-contributed side panel. The lazy module load is
+	// kicked off by openPackPanel; this is a PURE projection of the tab's typed
+	// params onto the loaded panel's render() (or a loading placeholder). No
+	// auto-invoke on mount (design extension-host-phase2.md §6).
+	const packPanelContent = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "pack") return "";
+		const source = (tab.source || {}) as Record<string, unknown>;
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const panelId = packPanelIdFromTabId(tab.id)
+			|| (typeof source.panelId === "string" ? source.panelId : "")
+			|| (typeof tabState.panelId === "string" ? tabState.panelId : "");
+		if (!panelId) return "";
+		const params = (source.params as Record<string, unknown> | undefined)
+			|| (tabState.params as Record<string, unknown> | undefined);
+		return html`
+			<div class="flex-1 min-h-0 overflow-auto" data-testid="pack-panel-root" data-panel-tab-id=${tab.id} data-pack-panel-id=${panelId}>
+				${renderPackPanelContent(panelId, params)}
+			</div>
+		`;
+	};
+
 	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind !== "walkthrough") return "";
 		void ensurePrWalkthroughPanel();
@@ -2406,6 +2429,7 @@ export function doRenderApp(): void {
 			return proposalPanelContent(tab);
 		}
 		if (tab.kind === "walkthrough") return walkthroughPanelContent(tab);
+		if (tab.kind === "pack") return packPanelContent(tab);
 		return "";
 	};
 

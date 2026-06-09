@@ -20,6 +20,9 @@ tests/e2e/screenshots/
 *-report.html
 nul
 .pi/
+# Stray tsx transpile cache emitted when TMPDIR resolves to the literal string
+# "undefined" (e.g. a shell with an unset/garbled temp env). Never commit it.
+/undefined/
 # .bobbit/config/ holds team-shared overrides (roles, tools, workflows) and SHOULD be committed.
 # Per-machine runtime state lives in .bobbit/state/ and .bobbit/tmp/, both excluded below
 # (state/ also via .bobbit/.gitignore for redundancy).
@@ -42,6 +45,7 @@ binaries/binaries-*/bin/rg.exe
 # Generated esbuild bundles for file:// Playwright fixtures.
 # Specs rebuild these on demand via tests/fixtures/build-bundle.ts or local beforeAll hooks.
 tests/fixtures/*-bundle.js
+tests/fixtures/client-session-write-bundle.css
 
 # Heavy on-demand component-test bundle (Messages.ts pulls the app graph, ~9MB).
 # Built by tests/user-message-image-render.spec.ts::beforeAll when missing/stale.
@@ -70,6 +74,9 @@ tests/fixtures/settings-models-tab-bundle.css
 tests/fixtures/preview-renderer-bundle.css
 tests/fixtures/api-error-forwarding-bundle.css
 tests/fixtures/pack-renderers-reconcile-bundle.css
+tests/fixtures/pack-panels-reconcile-bundle.css
+tests/fixtures/pack-entrypoints-reconcile-bundle.css
+tests/fixtures/command-palette-bundle.css
 tests/fixtures/client-host-api-bundle.css
 tests/fixtures/marketplace-active-project-bundle.css
 tests/fixtures/spurious-idle-unread-bundle.css

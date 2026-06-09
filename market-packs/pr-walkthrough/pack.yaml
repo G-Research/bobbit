@@ -1,0 +1,12 @@
+name: pr-walkthrough
+description: >-
+  Extension Host Phase-2 MAXIMAL litmus pack — the PR-walkthrough feature
+  re-expressed as an installable market pack using ALL reserved contribution
+  keys: panels + routes + stores + entrypoints (launcher + kind:"route"
+  deep-link) + host.session.readToolCall. Proves a third-party pack can build
+  this whole surface from public contributions + the Host API alone.
+version: 1.0.0
+contents:
+  roles: []
+  tools: [pr-walkthrough]
+  skills: []

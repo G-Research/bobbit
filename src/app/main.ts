@@ -94,12 +94,22 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 // E2E can assert the running UI reconciles (stale pack renderer removed, built-in
 // restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
 (window as any).__bobbitReconcilePackRenderers = async () => {
-	const [{ fetchTools }, { registerPackRenderers }] = await Promise.all([
-		import("./api.js"),
-		import("./pack-renderers.js"),
-	]);
-	const pid = state.activeProjectId ?? undefined;
-	registerPackRenderers(await fetchTools(pid), pid);
+	// Delegate to the REAL marketplace-mutation reconcile (renderers + panels +
+	// entrypoints), which FORCE re-registers from freshly fetched metadata —
+	// bypassing the per-registry dedupe guard so an install/uninstall tears down
+	// removed renderers/panels/entrypoints+routes WITHOUT a reload.
+	const { reconcileRenderersForActiveSession } = await import("./marketplace-page.js");
+	await reconcileRenderersForActiveSession();
+};
+
+// E2E test hook: run a pack composer-slash/git-widget/command-palette launcher
+// entrypoint by id — the SAME `runLauncherEntrypoint` the MessageEditor slash menu
+// calls on a user click (Slice C1). Lets the pr-walkthrough-pack browser E2E
+// trigger "entrypoint launches the panel" deterministically. Faithful: it
+// exercises the real launcher→navigate→openPanel chain.
+(window as any).__bobbitRunPackLauncher = async (id: string): Promise<void> => {
+	const { runLauncherEntrypoint } = await import("./pack-entrypoints.js");
+	runLauncherEntrypoint(id);
 };
 
 function hasActiveProposalPanel(): boolean {
@@ -147,6 +157,34 @@ async function waitForGateway(url: string, token: string): Promise<void> {
 // HASH CHANGE HANDLER (browser back/forward)
 // ============================================================================
 
+/**
+ * Slice C1 — restore a `#/ext/<routeId>?<params>` pack deep-link (extension-host-
+ * phase2 §7 C1.2a): ensure pack entrypoints are reconciled for the active project
+ * (so a cold-load deep-link resolves even if the boot reconcile is still in flight),
+ * look the routeId up in the client pack-route registry, and open the target panel
+ * with the parsed params (the panel rehydrates its content from host.store). A
+ * routeId with no registered owner (e.g. the pack was uninstalled) is ignored.
+ */
+async function restoreExtRoute(routeId: string | undefined, params: Record<string, string> | undefined): Promise<void> {
+	if (!routeId) return;
+	try {
+		const { reconcilePackEntrypointsForProject, lookupPackRoute } = await import("./pack-entrypoints.js");
+		const { reconcilePackPanelsForProject, openPackPanel } = await import("./pack-panels.js");
+		// Reconcile BOTH registries before resolving: a cold-load `#/ext/<routeId>`
+		// must find its owning route (entrypoints) AND its target panel must be
+		// registered (panels) or openPackPanel no-ops against an unregistered panel.
+		await Promise.all([
+			reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined),
+			reconcilePackPanelsForProject(state.activeProjectId ?? undefined),
+		]);
+		const entry = lookupPackRoute(routeId);
+		if (!entry) return; // owning pack not installed for this project
+		const openParams: Record<string, unknown> = {};
+		if (params) for (const key of entry.paramKeys) if (key in params) openParams[key] = params[key];
+		openPackPanel({ panelId: entry.targetPanelId, params: openParams });
+	} catch { /* non-fatal — a bad deep-link must never break boot */ }
+}
+
 let handlingHashChange = false;
 let pendingHashChange = false;
 
@@ -180,7 +218,14 @@ async function handleHashChange(): Promise<void> {
 			flushAndTeardownDraft();
 		}
 
-		if (route.view === "goal" && route.goalId) {
+		if (route.view === "ext") {
+			// Slice C1 — pack deep-link. Open the target panel as an overlay on the
+			// CURRENT view (do NOT tear down the session/goal context); the panel mounts
+			// into the side-panel workspace of the active session.
+			if (state.appView !== "authenticated") state.appView = "authenticated";
+			await restoreExtRoute(route.extRouteId, route.extParams);
+			renderApp();
+		} else if (route.view === "goal" && route.goalId) {
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -546,7 +591,13 @@ async function initApp() {
 					// project (session-manager) so a reload / deep-link into a session
 					// whose project differs from the active/default resolves correctly.
 					await reconcilePackRenderersForProject(state.activeProjectId ?? undefined);
-				} catch { /* non-fatal — built-in renderers are unaffected */ }
+					// Slice B4 — same lifecycle for pack-contributed side panels.
+					const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
+					await reconcilePackPanelsForProject(state.activeProjectId ?? undefined);
+					// Slice C1 — same lifecycle for pack-contributed entrypoints + deep-link routes.
+					const { reconcilePackEntrypointsForProject } = await import("./pack-entrypoints.js");
+					await reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined);
+				} catch { /* non-fatal — built-in renderers/panels are unaffected */ }
 			})();
 
 			// Load saved preferences (palette, timestamps, AI gateway)
@@ -599,6 +650,12 @@ async function initApp() {
 				state.appView = "authenticated";
 				renderApp();
 				await refreshSessions();
+			} else if (route.view === "ext") {
+				// Slice C1 — cold-load pack deep-link restoration.
+				state.appView = "authenticated";
+				renderApp();
+				await refreshSessions();
+				await restoreExtRoute(route.extRouteId, route.extParams);
 			} else if (route.view === "roles") {
 				const { loadRolePageData } = await import("./role-manager-page.js");
 				loadRolePageData();
