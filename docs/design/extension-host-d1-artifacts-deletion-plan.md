@@ -1,8 +1,9 @@
 # D1 — artifacts-as-pack: built-in deletion plan
 
-**Status:** parity *fixture* + E2E landed; deletion is a **separate, staged PR**
-gated on the gaps below (acceptance #1 allows "deletion PR demonstrably ready").
-This doc is that ready-to-execute plan.
+**Status:** full per-type parity + E2E landed; deletion is a **separate, staged PR**
+that is now demonstrably ready (acceptance #1 allows "deletion PR demonstrably
+ready"). The only residual is a tracked, non-blocking cold-`#/ext` deep-link infra
+gap (§3). This doc is that ready-to-execute plan.
 
 Source of truth: `docs/design/extension-host-phase2.md` §10 (Slice D1). The
 litmus pack now ships as a first-class installable market pack at the repo-root
@@ -27,8 +28,8 @@ API, and asserts behavioral parity for the load-bearing surfaces:
 
 ## 2. Files to delete in the staged deletion PR
 
-Once the §3 gaps close and the pack reaches **full** parity (all artifact TYPES,
-not just the litmus's text payload), the bespoke built-in paths are removed:
+The pack has reached **full** parity (all artifact TYPES, not just a text payload
+— see §3). The staged deletion PR removes the bespoke built-in paths:
 
 - `src/ui/tools/artifacts/` — the whole directory:
   `ArtifactPill.ts`, `artifacts-tool-renderer.ts`, `ArtifactElement.ts`,
@@ -55,31 +56,34 @@ built-in classes, and keep them green alongside the built-in until the cutover
 commit (parity-proven). The built-in's own tests stay green in THIS PR — nothing
 is deleted here.
 
-## 3. Gaps that MUST close before the deletion PR (full parity)
+## 3. Parity status (achieved) + the one tracked residual
 
-The litmus deliberately re-expresses a **single text payload** to prove the
-chain. Full parity (and the deletion) additionally requires:
+Full behavioral parity has **shipped**: the pack is no longer a single-text-payload
+litmus. The shipped `market-packs/artifacts/` viewer ports every per-type component
+and the existing tests prove it — see `tests/e2e/ui/artifacts-pack.spec.ts` (per-type
+E2E) and `tests/artifacts-pack-viewer.test.ts` (node).
 
-1. **All artifact types.** The pack viewer renders `payload.content` as text. The
-   built-in renders HTML (sandboxed iframe), Markdown, SVG, PDF, DOCX, images,
-   console logs. The shipped pack panel must port the per-type components,
-   preserving the **iframe `sandbox`** for HTML (theme-tokens-only; no
-   unsandboxed iframe — the litmus introduces none).
-2. **Session-less cold deep-link rehydration (infra gap — C1 owner).** A COLD
-   reload directly on `#/ext/<routeId>` restores no session, and `host.store`
-   reads authorize against the header-bound session, so a session-less cold
-   deep-link cannot rehydrate from the store (the boot normalizes the hash back
-   to `#/`). The litmus proves reload-survival via a session-route reload + a
-   post-reload navigate instead. Closing this needs the ext-route boot path to
-   establish/restore a session context (or a session-independent read scope for
-   pack stores). Tracked for C1/boot, not D1.
-3. **Persisted pack-panel tab module reload (infra gap — B4 owner).** A persisted
-   `kind:"pack"` side-panel tab is restored visually on reload but its lazy
-   module is not re-loaded by the render layer (`renderPackPanelContent` is pure
-   and never kicks off `loadPanelModule`). The litmus re-opens via the pill/route
-   (which calls `openPackPanel`) rather than relying on tab auto-restore. A
-   restore hook that calls `openPackPanel` for persisted pack tabs on boot closes
-   this.
+1. **All artifact types — DONE.** The pack viewer renders HTML (sandboxed
+   `allow-scripts` iframe + postMessage console capture), Markdown (rendered HTML,
+   not raw source), SVG (a no-script `sandbox=""` iframe — never inlined into the
+   main DOM), images, code (real `highlight.js`), PDF (real `pdfjs-dist` page
+   rasterisation), and DOCX (real `docx-preview`). The HTML `sandbox` is preserved
+   (theme-tokens-only; no unsandboxed iframe). The vendored libraries are
+   esbuild-bundled into the pack at publish time.
+2. **Persisted pack-panel tab module reload — DONE.** A persisted `kind:"pack"`
+   side-panel tab now re-mounts on reload: `renderPackPanelContent` auto-loads the
+   registered-but-not-yet-loaded panel module and rehydrates it from the persisted
+   store (proven by the "reload with the viewer panel tab already open" E2E),
+   instead of staying stuck on "Loading…".
+3. **Session-less cold deep-link rehydration — the one remaining residual (tracked,
+   not a parity blocker).** A COLD reload directly on `#/ext/<routeId>` restores no
+   session, and `host.store` reads authorize against the header-bound session, so a
+   session-less cold deep-link cannot rehydrate from the store (the boot normalizes
+   the hash back to `#/`). The **reload-surviving** deep-link path IS proven
+   (session-route reload + a post-reload navigate). Closing the cold-`#/ext` case
+   needs the ext-route boot path to establish/restore a session context (or a
+   session-independent read scope for pack stores) — tracked for the C1/boot owner,
+   and it does not block the deletion.
 
 ## 4. Infra gaps this slice had to CLOSE to land the litmus
 

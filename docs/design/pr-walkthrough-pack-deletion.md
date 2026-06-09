@@ -26,7 +26,7 @@ ONLY public contributions + the durable Host API:
 | Viewer panel | `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` | `panels:` → `panel.js` (lazy ESM, host lit toolkit) — changeset header, phase **nav rail**, diff blocks, suggested comments |
 | Changeset/diff bundle endpoint | `src/server/pr-walkthrough/routes.ts` (`handlePrWalkthroughApiRoute`) | `routes:` → `routes.mjs` (`bundle` LIVE git recompute + `publish` persist), reached via `host.callRoute`, declaring `permissions: ["git","fs"]` |
 | Persisted job/changeset state | `src/server/pr-walkthrough/walkthrough-store.ts` | `stores:` → `host.store.*` (pack-namespaced) |
-| Launcher + SPA deep-link | composer/git-widget launch + `routing.ts` `"walkthrough"` route (`routing.ts:5`/`:47`) | `entrypoints:` (composer-slash + **git-widget-button** + command-palette launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
+| Launcher + SPA deep-link | composer/git-widget launch + the `"walkthrough"` `RouteView` in `src/app/routing.ts` (its union entry + `getRouteFromHash` case) | `entrypoints:` (composer-slash + **git-widget-button** + command-palette launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
 | Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
 
 The mandatory E2E `tests/e2e/ui/pr-walkthrough-pack.spec.ts` exercises the full
@@ -105,14 +105,14 @@ PR-walkthrough QA pass on the pack is green:
   `src/app/pr-walkthrough.ts` and its wiring in `src/app/render.ts`
   (`packPanelContent`/`walkthroughPanelContent` walkthrough branches),
   `src/app/panel-workspace.ts` (the `kind:"walkthrough"` tab), and the
-  `"walkthrough"` `RouteView` in `src/app/routing.ts` (`getRouteFromHash`
-  `#/walkthrough` + `/walkthrough` at `routing.ts:37`/`:51`, plus the
-  `walkthrough` entry in the `RouteView` union at `routing.ts:5`, `setHashRoute`).
-  The generic `ext` route + `pack-entrypoints` deep-link registry replace it.
+  `"walkthrough"` `RouteView` in `src/app/routing.ts` (the `#/walkthrough`
+  `getRouteFromHash`/`setHashRoute` cases plus the `walkthrough` entry in the
+  `RouteView` union). The generic `ext` route + `pack-entrypoints` deep-link
+  registry replace it.
 - **Server routes/dispatch** — `src/server/pr-walkthrough/routes.ts`
-  (`handlePrWalkthroughApiRoute`) and its `server.ts` wiring (the import at
-  `server.ts:201` and the `handlePrWalkthroughApiRoute(...)` dispatch call at
-  `server.ts:2294`). The pack `routes.mjs`
+  (`handlePrWalkthroughApiRoute`) and its `server.ts` wiring (the module import and
+  the `handlePrWalkthroughApiRoute(...)` dispatch call in `handleApiRoute`). The
+  pack `routes.mjs`
   module + the `/api/ext/route/*` endpoint replace the bespoke
   `/api/pr-walkthrough/*` + `/api/internal/pr-walkthrough/*` routes — **for the
   changeset-recompute (LIVE git) + persist + read surface**. Only the
