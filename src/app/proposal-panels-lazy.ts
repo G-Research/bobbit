@@ -15,17 +15,21 @@
  * `dismissTypedProposal`) eagerly load the module and forward / queue the
  * call so callers don't need to await.
  */
-import { html } from "lit";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { ProposalType } from "./proposal-registry.js";
-import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
+import { renderProposalPanelPlaceholder } from "./proposal-panel-placeholder.js";
 import { renderApp } from "./state.js";
 
 let _mod: typeof import("./proposal-panels.js") | null = null;
 let _loadPromise: Promise<typeof import("./proposal-panels.js")> | null = null;
+// Last chunk-load failure. A rejected dynamic import (network blip, deploy
+// skew, corrupt dev-server optimizer cache) must NOT leave the panel spinning
+// forever — we surface the error + a retry/reload affordance instead.
+let _loadError: unknown = null;
 
 function load(): Promise<typeof import("./proposal-panels.js")> {
 	if (_loadPromise) return _loadPromise;
+	_loadError = null;
 	_loadPromise = import("./proposal-panels.js").then((m) => {
 		_mod = m;
 		// Drain any pending forwarded calls.
@@ -47,21 +51,44 @@ function load(): Promise<typeof import("./proposal-panels.js")> {
 		_pendingDismiss.length = 0;
 		renderApp();
 		return m;
+	}).catch((err) => {
+		// Record the failure, reset the memoised promise so the next call (e.g.
+		// the user clicking "Retry") re-attempts the import, and re-render so the
+		// placeholder swaps to the error state instead of an endless spinner.
+		console.error("[proposal-panels-lazy] failed to load proposal panel chunk", err);
+		_loadError = err;
+		_loadPromise = null;
+		renderApp();
+		throw err;
 	});
+	// Swallow the rejection on this internal handle — fire-and-forget callers
+	// (`void load()`) must not produce an unhandled-rejection; the error is
+	// surfaced via `_loadError` + the retry UI instead.
+	_loadPromise.catch(() => {});
 	return _loadPromise;
 }
 
-function loadingPlaceholder() {
-	return html`<div class="flex-1 min-h-0 flex items-center justify-center">${bobbitLoadingAnimation()}</div>`;
+function retryLoad() {
+	_loadError = null;
+	void load();
+	renderApp();
 }
 
-/** Sync entry — returns a placeholder until the chunk lands. */
+function loadingPlaceholder() {
+	return renderProposalPanelPlaceholder({
+		error: _loadError,
+		onRetry: () => retryLoad(),
+		onReload: () => window.location.reload(),
+	});
+}
+
+/** Sync entry — returns a placeholder (or an error + retry UI) until the chunk lands. */
 export function proposalPanelContent(
 	tab: PanelWorkspaceTab,
 	currentAssistantProposalType: () => ProposalType | null,
 ) {
 	if (_mod) return _mod.proposalPanelContent(tab, currentAssistantProposalType);
-	void load();
+	if (!_loadError) void load();
 	return loadingPlaceholder();
 }
 
