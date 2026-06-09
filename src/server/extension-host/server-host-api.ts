@@ -15,6 +15,8 @@
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
+import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
+import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
@@ -23,10 +25,12 @@ export interface ServerHostStoreApi {
 	list(prefix?: string): Promise<string[]>;
 }
 
-/** PHASE 2 — frozen, not implemented. Mirrors HostSessionApi server-side. */
+/** Mirrors HostSessionApi server-side. Slice B2 implements the own-session READS
+ *  (`readTranscript`/`readToolCall`) through the contract adapter; `postMessage`
+ *  stays frozen-not-implemented until C2. */
 export interface ServerHostSessionApi {
-	readTranscript(opts?: unknown): Promise<unknown>;
-	readToolCall(toolUseId: string): Promise<unknown>;
+	readTranscript(opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope>;
+	readToolCall(toolUseId: string): Promise<ToolCallRecord | null>;
 	postMessage(msg: unknown): Promise<void>;
 }
 
@@ -77,6 +81,11 @@ export interface CreateServerHostApiOptions {
 	/** Slice B1 — the process-singleton pack store. When present, `ctx.host.store`
 	 *  delegates to it scoped to the closure `packId`. */
 	packStore?: PackStore;
+	/** Read the BOUND (own) session's raw transcript JSONL (Slice B2). Injected by
+	 *  the gateway so `session.read*` can map rows through the contract adapter.
+	 *  Own-session by construction — there is no parameter for another session. When
+	 *  absent (non-gateway context), the session reads throw a clear error. */
+	readOwnTranscript?: () => Promise<string | null>;
 }
 
 function notImplemented(member: string): never {
@@ -98,9 +107,20 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	void opts.toolUseId;
 	void opts.contributionId;
 
+	// Slice B2: own-session transcript reader (header-bound session, supplied by the
+	// gateway). The reads below map its rows through the single contract adapter.
+	const readOwnTranscript = opts.readOwnTranscript;
+	const requireReader = (member: string): (() => Promise<string | null>) => {
+		if (!readOwnTranscript) {
+			throw new Error(`host.session.${member} requires a gateway transcript reader`);
+		}
+		return readOwnTranscript;
+	};
+
 	// Slice B1: `store` is IMPLEMENTED — flip the flag. It delegates to the
 	// process-singleton PackStore, scoped to the SERVER-DERIVED closure packId
 	// (never caller-supplied), so a handler can only ever touch its own pack's keys.
+	// `session` stays FALSE until C2 (the namespace flips live as a whole).
 	const flags = { callRoute: false, session: false, store: true };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
@@ -119,9 +139,19 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		list: (prefix) => requireStore().list(packId, prefix),
 	};
 
+	// Slice B2: own-session READS are implemented against the contract adapter; the
+	// `session` capability flag stays FALSE until C2 adds writes (the namespace flips
+	// live as a whole — capability-signaling convention, design §0/§4 B2.3). Bobbit
+	// lands the read bodies early purely to decouple the work.
 	const session: ServerHostSessionApi = {
-		readTranscript: () => notImplemented("session.readTranscript"),
-		readToolCall: () => notImplemented("session.readToolCall"),
+		readTranscript: async (sessionOpts) => {
+			const jsonl = await requireReader("readTranscript")();
+			return buildTranscriptEnvelope(transcriptToHostMessages(jsonl), sessionOpts);
+		},
+		readToolCall: async (toolUseId) => {
+			const jsonl = await requireReader("readToolCall")();
+			return transcriptToToolCall(jsonl, toolUseId);
+		},
 		postMessage: () => notImplemented("session.postMessage"),
 	};
 

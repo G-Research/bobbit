@@ -19,6 +19,9 @@ import {
 	HOST_API_VERSION,
 	HOST_CONTRACT_VERSION,
 	type HostApi,
+	type ReadTranscriptOpts,
+	type TranscriptEnvelope,
+	type ToolCallRecord,
 } from "../shared/extension-host/host-api.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { renderApp } from "./state.js";
@@ -121,8 +124,38 @@ export function getHostApi(
 		// ── Phase 2 (frozen, not implemented) ──
 		callRoute: () => notImpl("callRoute"),
 		session: {
-			readTranscript: () => notImpl("session.readTranscript"),
-			readToolCall: () => notImpl("session.readToolCall"),
+			// Slice B2: own-session READS over the namespaced /api/ext endpoints. The
+			// server scopes the read to the HEADER-BOUND session (own-session by
+			// construction — no other-session parameter). `tool` lets the server derive
+			// the trusted packId + gate on allowedTools (same guard as invokeAction).
+			// NOTE: `flags.session` stays FALSE until C2 wires writes — these bodies are
+			// internal-only until the whole namespace flips live (capability-signaling).
+			readTranscript: async (opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope> => {
+				const params = new URLSearchParams();
+				if (sessionId) params.set("sessionId", sessionId);
+				if (packTool) params.set("tool", packTool);
+				if (opts?.offset != null) params.set("offset", String(opts.offset));
+				if (opts?.limit != null) params.set("limit", String(opts.limit));
+				if (opts?.pattern) params.set("pattern", opts.pattern);
+				const resp = await gatewayFetch(
+					`/api/ext/session/transcript?${params.toString()}`,
+					withSession({ method: "GET" }, sessionId),
+				);
+				if (!resp.ok) throw new Error(`session.readTranscript HTTP ${resp.status}`);
+				return resp.json();
+			},
+			readToolCall: async (toolUseId: string): Promise<ToolCallRecord | null> => {
+				const params = new URLSearchParams();
+				if (sessionId) params.set("sessionId", sessionId);
+				if (packTool) params.set("tool", packTool);
+				params.set("toolUseId", toolUseId);
+				const resp = await gatewayFetch(
+					`/api/ext/session/tool-call?${params.toString()}`,
+					withSession({ method: "GET" }, sessionId),
+				);
+				if (!resp.ok) throw new Error(`session.readToolCall HTTP ${resp.status}`);
+				return resp.json();
+			},
 			postMessage: () => notImpl("session.postMessage"),
 			subscribe: () => notImpl("session.subscribe"),
 		} as HostApi["session"],

@@ -44,6 +44,7 @@ import { ActionDispatcher, ActionError, resolveActionToolManager } from "./exten
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
+import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -5296,12 +5297,22 @@ async function handleApiRoute(
 		// client never sends a packId — it names only a tool, and the server maps
 		// tool → winning pack (design extension-host-phase2.md §2.2).
 		const ident = resolvePackIdentityForTool(sessionToolManager, tool);
+		// Slice B2: own-session transcript reader for ctx.host.session.read*. Reads the
+		// HEADER-BOUND session only (single-sourced identity) via the same own-session
+		// read the transcript endpoint uses.
+		const readOwnTranscript = async (): Promise<string | null> => {
+			const ps = sessionManager.getPersistedSession(guard.sessionId);
+			if (!ps?.agentSessionFile) return null;
+			const fsCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+		};
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
 			toolUseId,
 			packId: ident.packId,
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
+			readOwnTranscript,
 		});
 		const start = Date.now();
 		try {
@@ -5388,6 +5399,67 @@ async function handleApiRoute(
 			const message = err instanceof Error ? err.message : String(err);
 			console.warn(`[ext-store] op=${op} tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=error durationMs=${Date.now() - start}: ${message}`);
 			json({ error: message }, 400);
+		}
+		return;
+	}
+
+	// GET /api/ext/session/{transcript,tool-call} — Slice B2 pack-scoped, OWN-SESSION
+	// transcript reads (design extension-host-phase2.md §4 B2.2). The HEADER-BOUND
+	// session is the single canonical identity; there is NO parameter for another
+	// session — reads are own-session by construction. `tool` (query) gates on the
+	// session's allowedTools through the SAME `authorizeScopedRequest` core the
+	// action endpoint uses (no toolUseId required — panels/entrypoints may originate
+	// the read). `sessionId` (query) is the body-vs-header fail-fast input.
+	const extSessionTranscript = url.pathname === "/api/ext/session/transcript";
+	const extSessionToolCall = url.pathname === "/api/ext/session/tool-call";
+	if ((extSessionTranscript || extSessionToolCall) && req.method === "GET") {
+		const extTool = url.searchParams.get("tool") ?? "";
+		const extHeaderSid = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const extResolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			if (persisted) return { allowedTools: persisted.allowedTools };
+			return undefined;
+		};
+		const extGuard = authorizeScopedRequest({
+			tool: extTool,
+			headerSessionId: extHeaderSid,
+			bodySessionId: url.searchParams.get("sessionId"),
+			resolveSession: extResolveSession,
+		});
+		if (!extGuard.ok) {
+			json({ error: extGuard.error }, extGuard.status);
+			return;
+		}
+		// Read the HEADER-BOUND session's transcript ONLY (own-session by construction).
+		const extPs = sessionManager.getPersistedSession(extGuard.sessionId);
+		let extJsonl: string | null = null;
+		if (extPs?.agentSessionFile) {
+			const fsCtx: SessionFsContext = { sandboxed: extPs.sandboxed, projectId: extPs.projectId };
+			extJsonl = await sessionFileRead(fsCtx, extPs.agentSessionFile, sandboxManager);
+		}
+		if (extSessionToolCall) {
+			const toolUseId = url.searchParams.get("toolUseId");
+			if (!toolUseId) { json({ error: "toolUseId required" }, 400); return; }
+			json(transcriptToToolCall(extJsonl, toolUseId));
+			return;
+		}
+		const parseIntQ = (name: string): number | undefined => {
+			const raw = url.searchParams.get(name);
+			if (raw === null) return undefined;
+			const n = Number(raw);
+			return Number.isFinite(n) ? n : undefined;
+		};
+		try {
+			const envelope = buildTranscriptEnvelope(transcriptToHostMessages(extJsonl), {
+				offset: parseIntQ("offset"),
+				limit: parseIntQ("limit"),
+				pattern: url.searchParams.get("pattern") ?? undefined,
+			});
+			json(envelope);
+		} catch (err) {
+			json({ error: err instanceof Error ? err.message : String(err) }, 400);
 		}
 		return;
 	}

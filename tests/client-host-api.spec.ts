@@ -81,10 +81,12 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 
 	test("every Phase-2 stub throws 'reserved for Phase 2'", async ({ page }) => {
 		await gotoAndWait(page);
+		// Slice B2 implemented session.readTranscript/readToolCall (own-session reads);
+		// they are NO LONGER throwing stubs (the `session` capability flag still stays
+		// false until C2 — capability-signaling convention). The remaining members are
+		// still frozen-not-implemented and must throw.
 		const stubs = [
 			"callRoute",
-			"session.readTranscript",
-			"session.readToolCall",
 			"session.postMessage",
 			"session.subscribe",
 			"ui.openPanel",
