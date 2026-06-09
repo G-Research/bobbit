@@ -535,6 +535,86 @@ describe("permission grant — terminate-on-timeout kills a spawned child (blast
 	});
 });
 
+describe("permission grant — a synchronous child is bounded by the wall-cap (no orphan)", () => {
+	it("a `git`-granted pack's long-running spawnSync (NO explicit timeout) is killed by the wall-cap bound", async () => {
+		// A blocking sync call cannot report its pid to the parent's kill-set (the
+		// worker thread is frozen for the call's whole duration), so the worker injects
+		// a bounded `timeout`/`killSignal:SIGKILL` clamped BELOW the wall-cap. Node
+		// SIGKILLs the child before the parent's terminate fires — the child (a child of
+		// the MAIN process) must NOT orphan past the cap, whether the invoke RESOLVES
+		// (Node killed it first) or hits the 504 (Node still killed it before terminate).
+		// The child records its OWN pid to a file at startup so we can verify it dies
+		// regardless of how the invoke settled. A 3s cap clears worst-case worker
+		// startup so the injected bound (~1.5s) fires well before terminate.
+		const cap = 3000;
+		const pidFile = path.join(tmp, `sync-orphan-pid-${seq++}.txt`);
+		const childCode = `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 600000);`;
+		const mh = new ModuleHost({ timeoutMs: cap });
+		try {
+			const url = writeModule(
+				`import { spawnSync } from "node:child_process";\n` +
+				`export const actions = { run: async () => {\n` +
+				`  const r = spawnSync(${JSON.stringify(process.execPath)}, ["-e", ${JSON.stringify(childCode)}]); /* no timeout → worker injects the bound */\n` +
+				`  return { signal: r.signal, pid: r.pid };\n` +
+				`} };`,
+			);
+			let result: { signal: string | null; pid: number } | undefined;
+			try {
+				result = (await mh.invoke(req(url, "run", bareCtx(), {}, { permissions: ["git"], workingDir: tmp }))) as { signal: string | null; pid: number };
+			} catch (e) {
+				assert.ok(e instanceof ActionError && e.status === 504, `invoke must resolve or 504, got: ${(e as Error).message}`);
+			}
+			// Resolve the child pid — from the handler result if the invoke resolved, else
+			// from the pid file the child wrote at startup (covers the 504 path).
+			let pid: number | undefined = result?.pid;
+			for (let i = 0; pid === undefined && i < 60; i++) {
+				if (fs.existsSync(pidFile)) {
+					const n = Number(fs.readFileSync(pidFile, "utf8").trim());
+					if (Number.isInteger(n) && n > 0) pid = n;
+				}
+				if (pid === undefined) await new Promise((r) => setTimeout(r, 50));
+			}
+			assert.equal(typeof pid, "number", "the sync child should have recorded its pid");
+			// Poll for the kill to take effect — the child must NOT outlive the cap.
+			let alive = true;
+			for (let i = 0; i < 80 && alive; i++) {
+				alive = isAlive(pid as number);
+				if (alive) await new Promise((r) => setTimeout(r, 50));
+			}
+			assert.equal(alive, false, `the bounded sync child (pid ${pid}) must be killed, not orphaned past the cap`);
+			// If the invoke resolved, the child was killed by the injected timeout (it
+			// sleeps 600s, so it can NEVER exit on its own) — a non-null signal confirms a
+			// forced kill rather than a natural exit. (Signal name is platform-dependent;
+			// the isAlive check above is the cross-platform no-orphan proof.)
+			if (result) assert.notEqual(result.signal, null, "a resolved sync child must have been force-killed, not exited naturally");
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("an EXPLICIT sync timeout SMALLER than the bound is respected verbatim", async () => {
+		// The wrap CLAMPS an explicit timeout to the wall-cap bound but never raises a
+		// smaller one: a 200ms explicit timeout still fires at ~200ms (not the larger
+		// injected cap), proving the clamp is min(explicit, bound).
+		const mh = new ModuleHost({ timeoutMs: 15_000 });
+		try {
+			const url = writeModule(
+				`import { spawnSync } from "node:child_process";\n` +
+				`export const actions = { run: async () => {\n` +
+				`  const start = Date.now();\n` +
+				`  const r = spawnSync(${JSON.stringify(process.execPath)}, ["-e", "setTimeout(() => {}, 600000)"], { timeout: 200 });\n` +
+				`  return { signal: r.signal, elapsed: Date.now() - start };\n` +
+				`} };`,
+			);
+			const r = (await mh.invoke(req(url, "run", bareCtx(), {}, { permissions: ["git"], workingDir: tmp }))) as { signal: string | null; elapsed: number };
+			assert.notEqual(r.signal, null, "the explicit-timeout sync child is force-killed (signal name is platform-dependent)");
+			assert.ok(r.elapsed < 5000, `the small explicit timeout must fire fast, not at the larger bound (${r.elapsed}ms)`);
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
 describe("server-module host surface — session is READ-ONLY (no postMessage)", () => {
 	it("ctx.host.session exposes readTranscript/readToolCall but NOT postMessage", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });

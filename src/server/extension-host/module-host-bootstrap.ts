@@ -25,8 +25,13 @@
 //     command (sync or async), exactly like a tool. The worker adds CONVENIENCE +
 //     STABILITY only: async spawns default their `cwd` to the session working dir
 //     when unspecified, and every async child is tracked + SIGKILLed on
-//     terminate-on-timeout (a child outliving its worker would leak). NO
-//     binary/argv restriction, NO sync denial, NO cwd containment.
+//     terminate-on-timeout (a child outliving its worker would leak). SYNCHRONOUS
+//     children (`spawnSync`/`execSync`/`execFileSync`) cannot be pid-tracked (the
+//     thread is frozen for the call's whole duration), so they instead get an
+//     injected `timeout`/`killSignal` clamped BELOW the wall-cap — Node SIGKILLs the
+//     sync child before terminate-on-timeout reaps the (blocked) thread, so it can't
+//     orphan past the cap. NO binary/argv restriction, NO sync denial, NO cwd
+//     containment.
 //   - `fs`      → `fs`/`fs/promises` are fully un-gated with NO path containment;
 //     the trusted pack may read/write anywhere the gateway process can. The worker
 //     adds CONVENIENCE only: a LEADING bare-relative path argument is rebased onto
@@ -82,6 +87,31 @@ interface BootstrapData {
 	 *  is enabled, the default spawn `cwd`, and the rebase target for bare-relative
 	 *  fs paths (CONVENIENCE only). */
 	workingDir?: string;
+	/** Slice C3 — the worker's per-invoke wall-time cap (ms). Used to BOUND a
+	 *  SYNCHRONOUS child (`spawnSync`/`execSync`/`execFileSync`): such a blocking
+	 *  call cannot report its pid to the parent's kill-set (the worker thread is
+	 *  frozen for the whole call), so option-(a) pid tracking is infeasible. Instead
+	 *  an injected `timeout`/`killSignal` is clamped BELOW this cap so Node SIGKILLs
+	 *  the sync child before the parent's terminate-on-timeout reaps the thread — it
+	 *  cannot orphan past the cap. STABILITY only; the pack may still run any command. */
+	wallCapMs?: number;
+}
+
+/** Headroom (ms) reserved below the worker wall-cap when bounding a SYNCHRONOUS
+ *  child's injected `timeout`. Node kills the sync child at roughly
+ *  `spawnStart + injected`; keeping `injected = wallCap - headroom` (never below
+ *  half the cap, so a short cap doesn't starve a legitimate sync command) means
+ *  Node SIGKILLs the child BEFORE the parent's terminate-on-timeout reaps the
+ *  blocked worker thread (which would orphan the OS child — it is a child of the
+ *  MAIN process, NOT the worker thread). Generous enough to clear worst-case worker
+ *  startup; for the default 30s cap the child still gets ~28.5s. */
+const SYNC_CHILD_TIMEOUT_HEADROOM_MS = 1500;
+
+/** The bounded `timeout` to inject into a synchronous child call given the worker
+ *  wall-cap: at most `wallCap - headroom`, but never below half the cap (so a short
+ *  cap still lets a real sync command run), and at least 1ms. */
+function boundedSyncTimeout(wallCapMs: number): number {
+	return Math.max(Math.floor(wallCapMs / 2), wallCapMs - SYNC_CHILD_TIMEOUT_HEADROOM_MS, 1);
 }
 
 // Capture the REAL `process` (Node-internal) BEFORE the pack-visible shim replaces
@@ -153,7 +183,7 @@ const grants = Array.isArray(data.permissions) ? data.permissions : [];
 //   (3) Remove ambient web/process globals (`net` keeps the network globals;
 //       `git`/`fs` get a `cwd()` + minimal PATH env on the process shim).
 const confinementReady: Promise<void> = (async () => {
-	applyGrantedModuleWraps(grants, data.workingDir);
+	applyGrantedModuleWraps(grants, data.workingDir, data.wallCapMs);
 	const { isPackPathWithinGroup } = await import("./path-guard.js");
 	configureConfinement({ denied: data.denied, packRoot: data.packRoot, isWithin: isPackPathWithinGroup });
 	registerHooks({ resolve: confinementResolve });
@@ -245,16 +275,17 @@ function removeAmbientGlobals(grants: readonly string[], workingDir?: string): v
  * CJS built-ins BEFORE any pack module imports them, so the pack's module object
  * reflects the wrapped functions. These wraps are CONVENIENCE + STABILITY, NOT a
  * security boundary against the trusted pack:
- *   - `git` → async child-process default-cwd + spawned-child tracking
- *     (`installChildProcessTracking`). `child_process` is fully un-gated.
+ *   - `git` → async child-process default-cwd + spawned-child tracking AND
+ *     synchronous-child timeout bounding (`installChildProcessTracking`).
+ *     `child_process` is fully un-gated.
  *   - `fs`  → leading bare-relative fs path args rebased onto `workingDir`
  *     (`installFsRebase`). `fs`/`fs/promises` are fully un-gated (no containment).
  */
-function applyGrantedModuleWraps(grants: readonly string[], workingDir?: string): void {
+function applyGrantedModuleWraps(grants: readonly string[], workingDir?: string, wallCapMs?: number): void {
 	const dir = typeof workingDir === "string" && workingDir.length > 0 ? workingDir : undefined;
 	if (hasGrant(grants, "git")) {
 		try {
-			installChildProcessTracking(dir);
+			installChildProcessTracking(dir, wallCapMs);
 		} catch {
 			/* best effort — if wrapping fails the child-kill safety net is reduced, but
 			   the wall-time terminate still bounds the worker thread itself */
@@ -310,14 +341,22 @@ function withDefaultCwd(args: unknown[], dir?: string): unknown[] {
  *     any survivor on terminate-on-timeout — `worker.terminate()` reaps the THREAD,
  *     not the spawned OS child (a child of the MAIN process).
  *
- * Synchronous APIs (`spawnSync`/`execSync`/`execFileSync`) are intentionally LEFT
- * UNTOUCHED — they are permitted (trusted code) and complete before returning, so
- * there is nothing to track.
+ * Synchronous APIs (`spawnSync`/`execSync`/`execFileSync`) ARE wrapped too — but a
+ * blocking sync call cannot participate in pid tracking (the worker thread is frozen
+ * for the call's whole duration, so the parent's kill-set never learns the pid
+ * before the call returns; option-(a) tracking is infeasible). Instead the wrap
+ * injects a bounded `timeout` (clamped BELOW the wall-cap via `boundedSyncTimeout`)
+ * + `killSignal: "SIGKILL"` so NODE kills the sync child before the parent's
+ * terminate-on-timeout reaps the blocked thread (terminating the thread would
+ * ORPHAN the child — it is a child of the MAIN process). An explicit caller
+ * `timeout` is respected but CLAMPED to the cap; `killSignal` defaults to SIGKILL.
+ * This is STABILITY only (no leaked long-lived process) — the pack may still run any
+ * command; it just cannot outlive the resource cap.
  *
  * Patching the CJS builtin via `createRequire` BEFORE the pack imports it makes the
  * pack's module facade reflect the wrapped functions.
  */
-function installChildProcessTracking(dir?: string): void {
+function installChildProcessTracking(dir?: string, wallCapMs?: number): void {
 	const require = createRequire(import.meta.url);
 	const cp = require("node:child_process") as Record<string, unknown>;
 	const report = (child: unknown): void => {
@@ -331,6 +370,7 @@ function installChildProcessTracking(dir?: string): void {
 			});
 		} catch { /* not an emitter */ }
 	};
+	// ASYNC spawners: default cwd + report pid to the parent kill-set.
 	for (const name of ["spawn", "exec", "execFile", "fork"]) {
 		const orig = cp[name];
 		if (typeof orig !== "function") continue;
@@ -340,6 +380,49 @@ function installChildProcessTracking(dir?: string): void {
 			return child;
 		};
 	}
+	// SYNC spawners: default cwd + inject a bounded timeout/killSignal so the
+	// blocking child cannot orphan past the wall-cap (pid tracking is infeasible).
+	for (const name of ["spawnSync", "execSync", "execFileSync"]) {
+		const orig = cp[name];
+		if (typeof orig !== "function") continue;
+		cp[name] = function (this: unknown, ...args: unknown[]): unknown {
+			return (orig as (...a: unknown[]) => unknown).apply(this, withBoundedSyncChild(args, dir, wallCapMs));
+		};
+	}
+}
+
+/**
+ * Build a synchronous child-process argument list with (1) a DEFAULTED `cwd` (same
+ * convenience as the async spawners) and (2) a bounded `timeout` + `killSignal` so
+ * the blocking child cannot OUTLIVE the worker wall-cap. A sync call cannot report
+ * its pid to the parent kill-set (the thread is frozen for the call's duration), so
+ * Node's own `timeout` (clamped BELOW the cap by `boundedSyncTimeout`) must SIGKILL
+ * the child before the parent terminates the (blocked) worker thread — otherwise the
+ * OS child (a child of the MAIN process) orphans. An explicit caller `timeout` is
+ * respected but CLAMPED to the bound (so even an explicit huge timeout cannot
+ * outlive the cap); `killSignal` defaults to SIGKILL when unset. Handles the
+ * optional positional `options` object (absent, or after an `args` array). STABILITY
+ * only — no binary/argv restriction, no rejection.
+ */
+function withBoundedSyncChild(args: unknown[], dir?: string, wallCapMs?: number): unknown[] {
+	const out = withDefaultCwd(args, dir).slice(); // fresh copy so the opts slot is safe to mutate
+	const cap = typeof wallCapMs === "number" && wallCapMs > 0 ? boundedSyncTimeout(wallCapMs) : undefined;
+	// Locate the positional options object — first non-array object after the
+	// command/file at index 0 (sync APIs take no trailing callback).
+	let optsIdx = -1;
+	for (let i = 1; i < out.length; i++) {
+		const a = out[i];
+		if (a && typeof a === "object" && !Array.isArray(a)) { optsIdx = i; break; }
+	}
+	const base = optsIdx >= 0 ? (out[optsIdx] as Record<string, unknown>) : {};
+	const existing = typeof base.timeout === "number" && base.timeout > 0 ? base.timeout : undefined;
+	const timeout = cap === undefined ? existing : existing === undefined ? cap : Math.min(existing, cap);
+	const merged: Record<string, unknown> = { ...base };
+	if (typeof timeout === "number") merged.timeout = timeout;
+	if (merged.killSignal === undefined) merged.killSignal = "SIGKILL";
+	if (optsIdx >= 0) out[optsIdx] = merged;
+	else out.push(merged);
+	return out;
 }
 
 /**

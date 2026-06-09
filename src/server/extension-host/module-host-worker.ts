@@ -235,7 +235,13 @@ export class ModuleHost {
 		const worker = new Worker(this.bootstrapUrl(), {
 			// Layer 1 — minimal env: empty by default; only PATH when git/fs is granted.
 			env,
-			workerData: { denied, packRoot: req.packRoot, permissions: [...grants], workingDir: req.workingDir },
+			// `wallCapMs` lets the bootstrap bound a SYNCHRONOUS child's injected
+			// `timeout` BELOW this cap: a blocking sync call (`spawnSync`/`execSync`/
+			// `execFileSync`) cannot report its pid to the kill-set (the worker thread is
+			// frozen for the call's whole duration), so Node's own timeout must SIGKILL
+			// the child before this terminate-on-timeout reaps the (blocked) thread —
+			// otherwise the OS child (a child of the MAIN process) orphans past the cap.
+			workerData: { denied, packRoot: req.packRoot, permissions: [...grants], workingDir: req.workingDir, wallCapMs: limit },
 			// Layer 3 — memory caps.
 			resourceLimits: {
 				maxOldGenerationSizeMb: this.maxOldGenerationSizeMb,
