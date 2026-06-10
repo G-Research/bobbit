@@ -519,6 +519,39 @@ describe("R3 readPackEntityDescriptions (roles/tools/skills/entrypoints)", () =>
 		assert.equal(d.entrypoints!["ep"], "entry point desc");
 	});
 
+	// SECURITY — manifest-declared entity names are path-joined into the pack dir,
+	// but validateManifest does NOT guard roles/tools/skills against `..` or path
+	// separators. A traversal name must NOT cause a read/readdir OUTSIDE the pack
+	// dir (exploitable on Browse alone). Each unsafe name simply yields no row.
+	it("does NOT read outside the pack dir for traversal names (roles/tools/skills)", () => {
+		const root = fs.mkdtempSync(path.join(TMP, "descr-evil-"));
+		// A secret file OUTSIDE the pack dir whose contents must never leak.
+		w(path.join(root, "secret.yaml"), "description: TOP SECRET should never appear\nlabel: SECRET\n");
+		w(path.join(root, "secret", "SKILL.md"), "---\ndescription: TOP SECRET skill leak\n---\nbody\n");
+		const dir = path.join(root, "pack");
+		// Manifest declares traversal names for all three kinds. These bypass
+		// validateManifest (which only basename-guards entrypoints), so the helper
+		// itself must reject them. The `.yaml`/SKILL.md targets are crafted so a
+		// naive path.join would resolve onto the external secret files above.
+		w(path.join(dir, "pack.yaml"),
+			"name: evilpack\ndescription: evil\nversion: 1.0.0\ncontents:\n" +
+			"  roles: ['../secret']\n" +
+			"  tools: ['../../x', '..']\n" +
+			"  skills: ['../secret']\n");
+		const manifest = readManifest(dir)!;
+		// Sanity: the manifest parsed and kept the traversal names verbatim.
+		assert.deepEqual(manifest.contents.roles, ["../secret"]);
+
+		let d: any;
+		assert.doesNotThrow(() => { d = readPackEntityDescriptions(dir, manifest); });
+		// No description rows for any traversal name; nothing leaked from outside.
+		assert.equal(d.roles, undefined);
+		assert.equal(d.tools, undefined);
+		assert.equal(d.skills, undefined);
+		const serialized = JSON.stringify(d);
+		assert.ok(!serialized.includes("TOP SECRET"), `must not leak external file contents; got ${serialized}`);
+	});
+
 	it("collapses whitespace and omits kinds with no usable descriptions", () => {
 		const root = fs.mkdtempSync(path.join(TMP, "descr2-"));
 		const dir = path.join(root, "kit2");
