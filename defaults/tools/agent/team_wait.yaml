@@ -1,0 +1,58 @@
+name: team_wait
+description: "Wait for your child agents; returns on the first idle child plus status of the rest"
+summary: "Wait for your child agents; returns when the first becomes idle, with the rest's status"
+params: [child_session_ids?, timeout_minutes?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Agent
+renderer: src/ui/tools/renderers/DelegateRenderer.ts
+docs: |-
+  Wait for child agents you spawned with `team_delegate(non_blocking: true)`. Returns as soon as ONE awaited child becomes idle (or settles into a terminal state), along with a status line for every awaited child and an instruction to call `team_wait` again for the remainder. Omit `child_session_ids` to await all your live children. Use `read_session` on a returned child to read its full transcript.
+detail_docs: >-
+  ## Purpose
+
+
+  Collect results from child agents launched via
+  `team_delegate(non_blocking: true)`. `team_wait` returns the moment the **first**
+  awaited child becomes idle (or reaches a terminal state), so you can process its
+  output eagerly and then call `team_wait` again to await the rest.
+
+
+  ## Behaviour
+
+
+  - Returns on the **first settled** child (idle, or terminal:
+  `terminated`/`timeout`/`failed`).
+
+  - The result carries (a) the first child's output tail, (b) a **status line for
+  every awaited child** (`idle` / `streaming` / `queued` / `not-started` /
+  `terminated` / `timeout` / `failed`), and (c) an explicit instruction to call
+  `team_wait` **again** to await the remaining children.
+
+  - If a child is already idle when you call, it returns immediately.
+
+  - "not-started" is **not** idle and never satisfies the wait on its own.
+
+
+  ## Parameters
+
+
+  | Name | Type | Description |
+
+  |------|------|-------------|
+
+  | `child_session_ids` | string[] | Children to await. Default: all your live children. |
+
+  | `timeout_minutes` | number | Heartbeat timeout. Default **10**. |
+
+
+  ## Notes
+
+
+  - This differs from blocking `team_delegate`, which waits for **all** spawned
+  children before returning. `team_wait` returns on the **first** — call it
+  repeatedly to drain the set.
+
+  - Use `read_session` on a returned child id to read its full transcript;
+  `team_prompt` to re-task it; `team_dismiss` to stop it.

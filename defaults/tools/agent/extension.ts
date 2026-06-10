@@ -1,33 +1,85 @@
 /**
- * Delegate extension — create independent agent sessions to perform tasks.
+ * Team agent surface — launch and orchestrate child agents.
  *
- * Registers a `delegate` tool that creates real Bobbit sessions for each delegate.
- * Each delegate session appears in the sidebar, has full chat history, survives
- * restarts, and can be viewed in real-time by clicking on it.
+ * Registers `team_delegate` (spawn an isolated child agent in your worktree —
+ * blocking one-shot by default, `non_blocking` opt-in) plus the orchestration
+ * verbs (`team_wait`, `team_prompt`, `team_dismiss`, `team_steer`,
+ * `team_abort`) that operate over the caller's OWN child sessions. Also
+ * registers `read_session` (transcript reader) for every session.
  *
- * The delegate agent has full tool access (bash, read, write, etc.) but gets
- * only AGENTS.md + the instructions you provide — it does NOT see the parent conversation.
+ * All verbs are agent-process tools: they call the gateway over authenticated
+ * REST using on-disk credentials (`_shared/gateway.ts`) and hit the
+ * server-side `/api/sessions/:id/orchestrate/*` routes, which invoke the
+ * in-process `OrchestrationCore`. There is NO inlined creds logic and NO
+ * client-side spawn/wait loop — the server owns the child lifecycle.
+ *
+ * A spawned child agent gets full tool access (bash, read, write, etc.) but
+ * sees only AGENTS.md + the instructions you provide — it does NOT see the
+ * parent conversation. The child inherits the parent's current model and a
+ * copy of the parent's allowed tools MINUS every spawn verb (no grandchildren).
  */
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
 
 // ── Types ──
 
-export interface DelegateResult {
+/** One child entry in the blocking-delegate response (drop-in parity). */
+interface DelegateResultEntry {
 	id: string;
 	sessionId: string;
-	status: "completed" | "failed" | "timeout";
+	status: "completed" | "failed" | "timeout" | "terminated";
 	output: string;
 	durationMs: number;
 	error?: string;
 }
 
-/** Details passed to the UI renderer */
-export interface DelegateDetails {
+interface DelegateRouteResponse {
+	delegates: DelegateResultEntry[];
+	summary?: string;
+}
+
+/** Child status vocabulary returned by the orchestrate routes (§9). */
+type ChildStatus =
+	| "idle"
+	| "streaming"
+	| "queued"
+	| "not-started"
+	| "terminated"
+	| "timeout"
+	| "failed";
+
+interface WaitStatusEntry {
+	sessionId: string;
+	status: ChildStatus;
+	title?: string;
+}
+
+interface WaitRouteResponse {
+	firstIdle?: string;
+	statuses?: WaitStatusEntry[];
+	outputTail?: string;
+	remaining?: number;
+}
+
+interface SpawnedChild {
+	id?: string;
+	sessionId?: string;
+	childSessionId?: string;
+	title?: string;
+	status?: string;
+}
+
+interface SpawnRouteResponse {
+	children?: SpawnedChild[];
+	childSessionId?: string;
+	sessionId?: string;
+	title?: string;
+}
+
+/** Details shape consumed by the (shared) DelegateRenderer. */
+interface DelegateDetails {
 	delegates: Array<{
 		id: string;
 		sessionId: string;
@@ -37,183 +89,42 @@ export interface DelegateDetails {
 	}>;
 }
 
-// ── Gateway API helpers ──
-
-function getGatewayUrl(): string {
-	if (process.env.BOBBIT_GATEWAY_URL) return process.env.BOBBIT_GATEWAY_URL.replace(/\/+$/, "");
-	// Prefer BOBBIT_DIR (always set by rpc-bridge), fall back to ~/.pi/
-	const stateDir = process.env.BOBBIT_DIR
-		? path.join(process.env.BOBBIT_DIR, "state")
-		: path.join(os.homedir(), ".pi");
-	const urlPath = path.join(stateDir, "gateway-url");
-	if (fs.existsSync(urlPath)) {
-		return fs.readFileSync(urlPath, "utf-8").trim();
-	}
-	throw new Error(`Gateway URL not found at ${urlPath} — is the gateway running?`);
-}
-
-function getGatewayToken(): string {
-	if (process.env.BOBBIT_TOKEN) return process.env.BOBBIT_TOKEN;
-	// Prefer BOBBIT_DIR (always set by rpc-bridge), fall back to ~/.pi/
-	const stateDir = process.env.BOBBIT_DIR
-		? path.join(process.env.BOBBIT_DIR, "state")
-		: path.join(os.homedir(), ".pi");
-	const tokenFile = process.env.BOBBIT_DIR ? "token" : "gateway-token";
-	const tokenPath = path.join(stateDir, tokenFile);
-	if (fs.existsSync(tokenPath)) {
-		return fs.readFileSync(tokenPath, "utf-8").trim();
-	}
-	throw new Error(`Gateway token not found at ${tokenPath}`);
-}
-
-async function gatewayFetch(endpoint: string, options: RequestInit = {}): Promise<Response> {
-	const url = getGatewayUrl();
-	const token = getGatewayToken();
-
-	return fetch(`${url}${endpoint}`, {
-		...options,
-		headers: {
-			"Authorization": `Bearer ${token}`,
-			"Content-Type": "application/json",
-			...options.headers,
-		},
-	});
-}
-
-/** Create a delegate session and return its ID */
-export async function createDelegateSession(
-	parentSessionId: string,
-	instructions: string,
-	cwd: string,
-	opts?: { title?: string; context?: Record<string, string> },
-): Promise<string> {
-	const resp = await gatewayFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify({
-			delegateOf: parentSessionId,
-			instructions,
-			cwd,
-			title: opts?.title,
-			context: opts?.context,
-		}),
-	});
-	if (!resp.ok) {
-		const err = await resp.text();
-		throw new Error(`Failed to create delegate session: ${err}`);
-	}
-	const data = await resp.json() as any;
-	return data.id;
-}
-
-/** Wait for a delegate session to finish and get its output */
-export async function waitForDelegate(
-	sessionId: string,
-	timeoutMs: number,
-	signal?: AbortSignal,
-): Promise<{ status: string; output: string }> {
-	// The /wait endpoint blocks until the delegate finishes or times out server-side.
-	// Node's fetch (undici) has a default bodyTimeout of 300s which would kill the
-	// connection before our actual timeout. Use AbortSignal.timeout with generous padding
-	// (30s beyond our timeout) to let the server-side timeout be authoritative.
-	const fetchTimeout = AbortSignal.timeout(timeoutMs + 30_000);
-	const combinedSignal = signal
-		? AbortSignal.any([signal, fetchTimeout])
-		: fetchTimeout;
-
-	const resp = await gatewayFetch(`/api/sessions/${sessionId}/wait`, {
-		method: "POST",
-		body: JSON.stringify({ timeout_ms: timeoutMs }),
-		signal: combinedSignal,
-	});
-
-	if (!resp.ok) {
-		if (resp.status === 408) {
-			return { status: "timeout", output: "" };
-		}
-		return { status: "failed", output: `API error: ${resp.status}` };
-	}
-
-	// The server sends chunked responses with periodic heartbeat newlines
-	// to prevent undici's bodyTimeout. Read full body and trim whitespace.
-	const rawText = await resp.text();
-	const data = JSON.parse(rawText.trim()) as any;
-	if (data.error) {
-		return { status: "timeout", output: "" };
-	}
-	return { status: "completed", output: data.output || "" };
-}
-
-/** Run a single delegate: create session, wait for completion, return result */
-export async function runDelegateSession(
-	parentSessionId: string,
-	instructions: string,
-	cwd: string,
-	timeoutMs: number,
-	signal?: AbortSignal,
-	opts?: { title?: string; context?: Record<string, string> },
-): Promise<DelegateResult> {
-	const startTime = Date.now();
-	let sessionId = "";
-
-	try {
-		sessionId = await createDelegateSession(parentSessionId, instructions, cwd, opts);
-
-		const result = await waitForDelegate(sessionId, timeoutMs, signal);
-
-		// Terminate the delegate session (archives it so it appears in sidebar under "show archived")
-		try { await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }); } catch { /* ignore */ }
-
-		return {
-			id: sessionId.slice(0, 12),
-			sessionId,
-			status: result.status as DelegateResult["status"],
-			output: result.output,
-			durationMs: Date.now() - startTime,
-		};
-	} catch (err: any) {
-		if (signal?.aborted) {
-			// Try to terminate the delegate session on abort (archives it)
-			if (sessionId) {
-				try { await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }); } catch { /* ignore */ }
-			}
-			return {
-				id: sessionId?.slice(0, 12) || "unknown",
-				sessionId,
-				status: "failed",
-				output: "",
-				durationMs: Date.now() - startTime,
-				error: "Aborted by user",
-			};
-		}
-		return {
-			id: sessionId?.slice(0, 12) || "unknown",
-			sessionId,
-			status: "failed",
-			output: "",
-			durationMs: Date.now() - startTime,
-			error: err.message,
-		};
-	}
-}
-
-// ── Discover parent session ID ──
-
-/**
- * Try to find the current session's gateway session ID.
- * The gateway passes this via env or we can read from the session state.
- */
-export function getParentSessionId(ctx: any): string {
-	// The session manager sets this in the agent's environment
-	if (process.env.BOBBIT_SESSION_ID) return process.env.BOBBIT_SESSION_ID;
-	// Fallback: use a placeholder (the server can figure it out from the auth)
-	return "unknown";
-}
-
-// ── read_session helpers ──
+// ── Helpers ──
 
 function getCallerSessionId(): string | undefined {
 	return process.env.BOBBIT_SESSION_ID || undefined;
 }
+
+function firstLine(s: string, max = 100): string {
+	return (s || "").split("\n")[0].slice(0, max);
+}
+
+/** Map an orchestration ChildStatus to the renderer card status vocabulary. */
+function cardStatus(status: string): string {
+	switch (status) {
+		case "idle":
+		case "completed":
+			return "completed";
+		case "streaming":
+			return "running";
+		case "queued":
+			return "running";
+		case "not-started":
+			return "starting";
+		case "timeout":
+			return "timeout";
+		case "terminated":
+		case "failed":
+			return "failed";
+		default:
+			return status;
+	}
+}
+
+const TERMINAL_STATUSES = new Set<ChildStatus>(["terminated", "timeout", "failed"]);
+const SETTLED_STATUSES = new Set<ChildStatus>(["idle", "terminated", "timeout", "failed"]);
+
+// ── read_session helpers ──
 
 interface ReadSessionParams {
 	session_id: string;
@@ -225,9 +136,14 @@ interface ReadSessionParams {
 	verbose?: boolean;
 }
 
-async function callReadSessionEndpoint(params: ReadSessionParams): Promise<{ ok: boolean; status: number; body: any }> {
-	const url = getGatewayUrl();
-	const token = getGatewayToken();
+async function callReadSessionEndpoint(
+	params: ReadSessionParams,
+): Promise<{ ok: boolean; status: number; body: any }> {
+	const credsResult = readGatewayCreds();
+	if ("error" in credsResult) {
+		throw new Error(credsResult.error);
+	}
+	const { token, baseUrl } = credsResult;
 	const qs = new URLSearchParams();
 	if (params.offset !== undefined) qs.set("offset", String(params.offset));
 	if (params.limit !== undefined) qs.set("limit", String(params.limit));
@@ -242,10 +158,10 @@ async function callReadSessionEndpoint(params: ReadSessionParams): Promise<{ ok:
 	};
 	const caller = getCallerSessionId();
 	if (caller) headers["x-bobbit-session-id"] = caller;
-	const resp = await fetch(`${url}/api/sessions/${encodeURIComponent(params.session_id)}/transcript${suffix}`, {
-		method: "GET",
-		headers,
-	});
+	const resp = await fetch(
+		`${baseUrl}/api/sessions/${encodeURIComponent(params.session_id)}/transcript${suffix}`,
+		{ method: "GET", headers },
+	);
 	let body: any = undefined;
 	try { body = await resp.json(); } catch { body = undefined; }
 	return { ok: resp.ok, status: resp.status, body };
@@ -254,8 +170,28 @@ async function callReadSessionEndpoint(params: ReadSessionParams): Promise<{ ok:
 // ── Extension registration ──
 
 const extension: ExtensionFactory = (pi) => {
-	// Register read_session BEFORE the delegate-recursion guard so delegate
-	// sessions can read parent transcripts.
+	const ownerSessionId = getCallerSessionId();
+	const isTeamLead = !!process.env.BOBBIT_GOAL_ID;
+
+	/** POST/GET the orchestrate route family against the OWNER session. */
+	async function orchestrate(method: string, verb: string, body?: unknown): Promise<unknown> {
+		const credsResult = readGatewayCreds();
+		if ("error" in credsResult) {
+			throw new Error(credsResult.error);
+		}
+		const owner = ownerSessionId || "unknown";
+		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body);
+	}
+
+	function ok(text: string, details?: unknown) {
+		return { content: [{ type: "text" as const, text }], details };
+	}
+
+	function fail(msg: string) {
+		return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
+	}
+
+	// ── read_session (registered for every session) ──
 	pi.registerTool({
 		name: "read_session",
 		label: "Read Session",
@@ -312,190 +248,294 @@ const extension: ExtensionFactory = (pi) => {
 		},
 	});
 
-	// Prevent recursive delegation — delegate sessions should not spawn more delegates
-	if (process.env.BOBBIT_DELEGATE_OF) {
-		// Don't register the delegate tool in delegate sessions
-		return;
-	}
-
+	// ── team_delegate ──
 	pi.registerTool({
-		name: "delegate",
-		label: "Delegate",
-		description: "Run a task in an isolated agent subprocess. Blocks until it returns output.",
+		name: "team_delegate",
+		label: "Delegate to Agent",
+		description: "Spawn a child agent in your worktree. Blocks until it finishes; non_blocking to detach.",
 		promptSnippet:
-			"delegate - Run a task in a separate agent process with isolated context. Blocks until complete.",
+			"team_delegate - Spawn a child agent in your worktree with isolated context. Blocking one-shot by default.",
 		promptGuidelines: [
-			"Use delegate when a task benefits from isolated context (e.g., code review, independent analysis)",
-			"The delegate agent has full tool access — it can read files, run commands, write code, etc.",
-			"Provide clear, self-contained instructions — the delegate cannot see this conversation",
-			"Use the 'parallel' parameter to run multiple delegates concurrently",
+			"Use team_delegate when a task benefits from isolated context (e.g. code review, independent analysis)",
+			"The child has full tool access but cannot spawn its own children, and cannot see this conversation",
+			"Provide clear, self-contained instructions — pass file paths and requirements in context",
+			"Use 'parallel' to run multiple children concurrently; blocking mode waits for all to finish",
+			"non_blocking:true detaches — the child shares your worktree for an open-ended life (last-write-wins); orchestrate it with team_wait/team_prompt/team_dismiss",
 		],
 		parameters: Type.Object({
-			instructions: Type.Optional(Type.String({ description: "Required for single delegate; optional with parallel." })),
+			instructions: Type.Optional(Type.String({ description: "Required for a single child; optional with parallel." })),
 			parallel: Type.Optional(Type.Array(
 				Type.Object({
 					instructions: Type.String(),
 					context: Type.Optional(Type.Record(Type.String(), Type.String())),
 				}),
-				{ description: "Run multiple delegates concurrently." },
+				{ description: "Run multiple children concurrently." },
 			)),
 			context: Type.Optional(Type.Record(Type.String(), Type.String())),
-			timeout_minutes: Type.Optional(Type.Number({ description: "Default 10." })),
+			role: Type.Optional(Type.String({ description: "Optional role to inject into the child." })),
+			model: Type.Optional(Type.String({ description: "Child model. Default: inherit your current model." })),
+			thinking_level: Type.Optional(Type.String({ description: "Child thinking level. Default: inherit yours." })),
+			read_only: Type.Optional(Type.Boolean({ description: "Spawn a read-only child (cannot edit files)." })),
+			non_blocking: Type.Optional(Type.Boolean({ description: "Detach instead of blocking; orchestrate via team_wait." })),
+			timeout_minutes: Type.Optional(Type.Number({ description: "Blocking-mode timeout. Default 10." })),
 		}),
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const cwd = (ctx as any).cwd || process.cwd();
+		async execute(_toolCallId, params) {
 			const timeoutMs = (params.timeout_minutes ?? 10) * 60_000;
-			const parentSessionId = getParentSessionId(ctx);
-
-			if (params.parallel && params.parallel.length > 0) {
-				const completedResults: DelegateResult[] = [];
-				const startTime = Date.now();
-				const sessionIds: string[] = new Array(params.parallel.length).fill("");
-
-				// Helper: build current state snapshot for progress updates
-				function buildProgressUpdate() {
-					return {
-						content: [{ type: "text" as const, text: `${completedResults.length}/${params.parallel!.length} delegates finished` }],
-						details: {
-							delegates: params.parallel!.map((p: any, j: number) => {
-								const sid = sessionIds[j];
-								const cr = completedResults.find((c) => c.sessionId === sid);
-								if (cr) return { id: cr.id, sessionId: cr.sessionId, instructions: p.instructions.split("\n")[0].slice(0, 100), status: cr.status, durationMs: cr.durationMs };
-								return { id: sid?.slice(0, 12) || "?", sessionId: sid || "", instructions: p.instructions.split("\n")[0].slice(0, 100), status: sid ? "running" : "starting", durationMs: Date.now() - startTime };
-							}),
-						},
-					};
-				}
-
-				// Emit immediately so the UI shows "starting..." cards
-				if (onUpdate) onUpdate(buildProgressUpdate());
-
-				// Start heartbeat right away (before session creation)
-				const heartbeat = setInterval(() => {
-					if (onUpdate && completedResults.length < params.parallel!.length) {
-						onUpdate(buildProgressUpdate());
-					}
-				}, 3000);
-
-				// Create sessions — emit progress after each one so the UI updates incrementally
-				for (let i = 0; i < params.parallel.length; i++) {
-					const p = params.parallel[i];
-					try {
-						const sid = await createDelegateSession(parentSessionId, p.instructions, cwd, {
-							title: p.instructions.split("\n")[0].slice(0, 60),
-							context: { ...params.context, ...p.context },
-						});
-						sessionIds[i] = sid;
-						if (onUpdate) onUpdate(buildProgressUpdate());
-					} catch (err: any) {
-						completedResults.push({
-							id: "error",
-							sessionId: "",
-							status: "failed",
-							output: "",
-							durationMs: 0,
-							error: err.message,
-						});
-						if (onUpdate) onUpdate(buildProgressUpdate());
-					}
-				}
-
-				// Wait for all delegates in parallel
-				const promises = sessionIds.map((sid, i) => {
-					if (!sid) return Promise.resolve(); // already failed
-					return waitForDelegate(sid, timeoutMs, signal).then(async (result) => {
-						completedResults.push({
-							id: sid.slice(0, 12),
-							sessionId: sid,
-							status: result.status as DelegateResult["status"],
-							output: result.output,
-							durationMs: Date.now() - startTime,
-						});
-						// Terminate the completed delegate session (archives it)
-						try { await gatewayFetch(`/api/sessions/${sid}`, { method: "DELETE" }); } catch { /* ignore */ }
-						if (onUpdate) onUpdate(buildProgressUpdate());
-					}).catch(async (err: any) => {
-						completedResults.push({
-							id: sid.slice(0, 12),
-							sessionId: sid,
-							status: "failed",
-							output: "",
-							durationMs: Date.now() - startTime,
-							error: err.message,
-						});
-						// Terminate even failed delegate sessions (archives them)
-						try { await gatewayFetch(`/api/sessions/${sid}`, { method: "DELETE" }); } catch { /* ignore */ }
-						if (onUpdate) onUpdate(buildProgressUpdate());
-					});
-				});
-
-				await Promise.all(promises);
-				clearInterval(heartbeat);
-
-				// Build final result
-				const lines: string[] = [];
-				const details: DelegateDetails = { delegates: [] };
-				let failCount = 0;
-				for (let i = 0; i < params.parallel.length; i++) {
-					const sid = sessionIds[i];
-					const r = completedResults.find((c) => c.sessionId === sid);
-					const ic = r?.status === "completed" ? "✓" : r?.status === "timeout" ? "⏱" : "✗";
-					lines.push(`### ${ic} Delegate ${i + 1} (${r?.status || "failed"}, ${Math.round((r?.durationMs || 0) / 1000)}s)`);
-					if (r?.error) lines.push(`**Error:** ${r.error}`);
-					if (r?.output) {
-						const truncated = r.output.length > 3000 ? r.output.slice(0, 3000) + "\n...(truncated)" : r.output;
-						lines.push("```\n" + truncated + "\n```");
-					}
-					lines.push("");
-					if (r?.status !== "completed") failCount++;
-					details.delegates.push({
-						id: sid?.slice(0, 12) || "?",
-						sessionId: sid || "",
-						instructions: params.parallel[i].instructions.split("\n")[0].slice(0, 100),
-						status: r?.status || "failed",
-						durationMs: r?.durationMs || 0,
-					});
-				}
-				lines.push(`**Summary:** ${params.parallel.length - failCount}/${params.parallel.length} delegates completed.`);
-
-				return { content: [{ type: "text", text: lines.join("\n") }], details };
+			const hasParallel = Array.isArray(params.parallel) && params.parallel.length > 0;
+			if (!hasParallel && !params.instructions) {
+				return fail("Error: 'instructions' is required for a single child. Use 'parallel' for multiple children.");
 			}
 
-			// Single delegate
-			if (!params.instructions) {
-				return { content: [{ type: "text", text: "Error: 'instructions' is required for a single delegate. Use 'parallel' for multiple delegates." }] };
-			}
-			const result = await runDelegateSession(
-				parentSessionId,
-				params.instructions,
-				cwd,
-				timeoutMs,
-				signal,
-				{ context: params.context },
-			);
+			const common: Record<string, unknown> = {};
+			if (params.role) common.role = params.role;
+			if (params.model) common.model = params.model;
+			if (params.thinking_level) common.thinking_level = params.thinking_level;
+			if (params.read_only) common.read_only = params.read_only;
+			if (params.context) common.context = params.context;
 
-			const lines: string[] = [];
-			lines.push(`**Status:** ${result.status} (${Math.round(result.durationMs / 1000)}s)`);
-			if (result.error) lines.push(`**Error:** ${result.error}`);
-			if (result.output) {
-				const truncated = result.output.length > 5000 ? result.output.slice(0, 5000) + "\n...(truncated)" : result.output;
-				lines.push("", truncated);
+			// ── Non-blocking: spawn and return immediately ──
+			if (params.non_blocking) {
+				const body: Record<string, unknown> = { ...common };
+				if (hasParallel) body.parallel = params.parallel;
+				else body.instructions = params.instructions;
+				let resp: SpawnRouteResponse;
+				try {
+					resp = (await orchestrate("POST", "spawn", body)) as SpawnRouteResponse;
+				} catch (e: any) {
+					return fail(e?.message ?? String(e));
+				}
+				const children = normalizeSpawned(resp);
+				const instrFor = (i: number) =>
+					hasParallel ? firstLine(params.parallel![i].instructions) : firstLine(params.instructions || "");
+				const details: DelegateDetails = {
+					delegates: children.map((c, i) => ({
+						id: (c.sessionId || "").slice(0, 12) || "?",
+						sessionId: c.sessionId || "",
+						instructions: c.title || instrFor(i),
+						status: "running",
+						durationMs: 0,
+					})),
+				};
+				const lines = [
+					`Spawned ${children.length} non-blocking child agent(s):`,
+					...children.map((c, i) => `  • ${c.sessionId} — ${c.title || instrFor(i)}`),
+					"",
+					"They run in YOUR worktree (shared, last-write-wins). Call team_wait to collect results, team_prompt to follow up, or team_dismiss to stop them.",
+				];
+				return ok(lines.join("\n"), details);
 			}
+
+			// ── Blocking one-shot: spawn → wait(all) → auto-dismiss (server-side) ──
+			const body: Record<string, unknown> = { ...common, timeout_ms: timeoutMs };
+			if (hasParallel) body.parallel = params.parallel;
+			else body.instructions = params.instructions;
+
+			let resp: DelegateRouteResponse;
+			try {
+				resp = (await orchestrate("POST", "delegate", body)) as DelegateRouteResponse;
+			} catch (e: any) {
+				return fail(e?.message ?? String(e));
+			}
+
+			const delegates = Array.isArray(resp?.delegates) ? resp.delegates : [];
+			const instrFor = (i: number) =>
+				hasParallel ? firstLine(params.parallel![i].instructions) : firstLine(params.instructions || "");
 
 			const details: DelegateDetails = {
-				delegates: [{
-					id: result.id,
-					sessionId: result.sessionId,
-					instructions: params.instructions.split("\n")[0].slice(0, 100),
-					status: result.status,
-					durationMs: result.durationMs,
-				}],
+				delegates: delegates.map((d, i) => ({
+					id: d.id || (d.sessionId || "").slice(0, 12) || "?",
+					sessionId: d.sessionId || "",
+					instructions: instrFor(i),
+					status: cardStatus(d.status),
+					durationMs: d.durationMs || 0,
+				})),
 			};
 
-			return { content: [{ type: "text", text: lines.join("\n") }], details };
+			const lines: string[] = [];
+			if (delegates.length <= 1) {
+				const d = delegates[0];
+				lines.push(`**Status:** ${d?.status ?? "failed"} (${Math.round((d?.durationMs ?? 0) / 1000)}s)`);
+				if (d?.error) lines.push(`**Error:** ${d.error}`);
+				if (d?.output) {
+					const out = d.output.length > 5000 ? d.output.slice(0, 5000) + "\n...(truncated)" : d.output;
+					lines.push("", out);
+				}
+			} else {
+				delegates.forEach((d, i) => {
+					const ic = d.status === "completed" ? "✓" : d.status === "timeout" ? "⏱" : "✗";
+					lines.push(`### ${ic} Child ${i + 1} (${d.status}, ${Math.round((d.durationMs || 0) / 1000)}s)`);
+					if (d.error) lines.push(`**Error:** ${d.error}`);
+					if (d.output) {
+						const out = d.output.length > 3000 ? d.output.slice(0, 3000) + "\n...(truncated)" : d.output;
+						lines.push("```\n" + out + "\n```");
+					}
+					lines.push("");
+				});
+				lines.push(resp.summary ?? `**Summary:** ${delegates.filter(d => d.status === "completed").length}/${delegates.length} children completed.`);
+			}
+			return ok(lines.join("\n"), details);
 		},
 	});
+
+	// ── team_wait ──
+	pi.registerTool({
+		name: "team_wait",
+		label: "Wait for Child Agent",
+		description: "Wait for your child agents; returns when the first becomes idle, with the status of the rest.",
+		promptSnippet:
+			"team_wait - Wait for your child agents; returns on the first idle child plus status of the others.",
+		promptGuidelines: [
+			"Returns as soon as ONE awaited child becomes idle (or settles) — process it, then call team_wait again for the rest",
+			"Omit child_session_ids to await all your live children",
+			"Use read_session on the returned child to read its full transcript",
+		],
+		parameters: Type.Object({
+			child_session_ids: Type.Optional(Type.Array(Type.String(), { description: "Children to await. Default: all your live children." })),
+			timeout_minutes: Type.Optional(Type.Number({ description: "Heartbeat timeout. Default 10." })),
+		}),
+
+		async execute(_toolCallId, params) {
+			const body: Record<string, unknown> = {};
+			if (params.child_session_ids && params.child_session_ids.length > 0) {
+				body.childSessionIds = params.child_session_ids;
+			}
+			body.timeout_ms = (params.timeout_minutes ?? 10) * 60_000;
+			let resp: WaitRouteResponse;
+			try {
+				resp = (await orchestrate("POST", "wait", body)) as WaitRouteResponse;
+			} catch (e: any) {
+				return fail(e?.message ?? String(e));
+			}
+			const { text, details } = formatWaitResult(resp);
+			return ok(text, details);
+		},
+	});
+
+	// ── Own-children orchestration verbs ──
+	// Goal/team-lead sessions get these (goal-scoped) from team/extension.ts;
+	// non-team-lead sessions get them here, routed through /orchestrate/* to
+	// operate over the caller's OWN child agents.
+	if (!isTeamLead) {
+		pi.registerTool({
+			name: "team_prompt",
+			label: "Prompt Child Agent",
+			description: "Prompt one of your child agents. Runs immediately if idle, else queues.",
+			promptSnippet: "team_prompt - Send a prompt to your child agent (immediate if idle, queued if busy).",
+			parameters: Type.Object({
+				session_id: Type.String(),
+				message: Type.String(),
+			}),
+			async execute(_id, params) {
+				try {
+					return ok(JSON.stringify(await orchestrate("POST", "prompt", { childSessionId: params.session_id, message: params.message }), null, 2));
+				} catch (e: any) { return fail(e?.message ?? String(e)); }
+			},
+		});
+
+		pi.registerTool({
+			name: "team_steer",
+			label: "Steer Child Agent",
+			description: "Send an urgent mid-turn redirect to a streaming child. Fails if idle; use team_prompt.",
+			promptSnippet: "team_steer - Steer a running child agent with an urgent message (mid-turn only).",
+			parameters: Type.Object({
+				session_id: Type.String(),
+				message: Type.String(),
+			}),
+			async execute(_id, params) {
+				try {
+					return ok(JSON.stringify(await orchestrate("POST", "steer", { childSessionId: params.session_id, message: params.message }), null, 2));
+				} catch (e: any) { return fail(e?.message ?? String(e)); }
+			},
+		});
+
+		pi.registerTool({
+			name: "team_abort",
+			label: "Abort Child Agent",
+			description: "Force-abort a stuck child agent; kills and restarts its process.",
+			promptSnippet: "team_abort - Force-abort a stuck child agent by session ID.",
+			parameters: Type.Object({
+				session_id: Type.String(),
+			}),
+			async execute(_id, params) {
+				try {
+					return ok(JSON.stringify(await orchestrate("POST", "abort", { childSessionId: params.session_id }), null, 2));
+				} catch (e: any) { return fail(e?.message ?? String(e)); }
+			},
+		});
+
+		pi.registerTool({
+			name: "team_dismiss",
+			label: "Dismiss Child Agent",
+			description: "Terminate and archive one of your child agents.",
+			promptSnippet: "team_dismiss - Dismiss (terminate + archive) a child agent by session ID.",
+			parameters: Type.Object({
+				session_id: Type.String(),
+			}),
+			async execute(_id, params) {
+				try {
+					return ok(JSON.stringify(await orchestrate("POST", "dismiss", { childSessionId: params.session_id }), null, 2));
+				} catch (e: any) { return fail(e?.message ?? String(e)); }
+			},
+		});
+	}
 };
+
+// ── Pure formatting helpers (module scope for testability) ──
+
+function normalizeSpawned(resp: SpawnRouteResponse): Array<{ sessionId: string; title?: string }> {
+	if (Array.isArray(resp?.children)) {
+		return resp.children.map((c) => ({ sessionId: c.sessionId || c.childSessionId || c.id || "", title: c.title }));
+	}
+	const single = resp?.childSessionId || resp?.sessionId;
+	if (single) return [{ sessionId: single, title: resp?.title }];
+	return [];
+}
+
+/** Build the §9 team_wait result text + renderer details from a WaitResult. */
+function formatWaitResult(wr: WaitRouteResponse): { text: string; details: DelegateDetails } {
+	const statuses = Array.isArray(wr?.statuses) ? wr.statuses : [];
+	const byId = new Map(statuses.map((s) => [s.sessionId, s]));
+	const titleOf = (id: string) => byId.get(id)?.title || id.slice(0, 12);
+
+	const lines: string[] = [];
+	const first = wr.firstIdle;
+	if (first) {
+		const fstatus = byId.get(first)?.status;
+		const header = fstatus && TERMINAL_STATUSES.has(fstatus) ? "First settled child" : "First idle child";
+		lines.push(`${header}: ${first} ("${titleOf(first)}")`);
+		if (wr.outputTail) {
+			lines.push("--- output tail ---");
+			lines.push(wr.outputTail);
+		}
+		lines.push("");
+	}
+
+	lines.push(`Awaited children (${statuses.length}):`);
+	for (const s of statuses) {
+		lines.push(`  • ${s.sessionId} "${titleOf(s.sessionId)}" — ${s.status}`);
+	}
+
+	const remaining = typeof wr.remaining === "number"
+		? wr.remaining
+		: statuses.filter((s) => !SETTLED_STATUSES.has(s.status)).length;
+	if (remaining > 0) {
+		lines.push(`Remaining: ${remaining} child(ren) not yet settled.`);
+		lines.push("➜ Process this result now, then call team_wait again to await the remaining children.");
+	} else {
+		lines.push("All awaited children are settled.");
+	}
+
+	const details: DelegateDetails = {
+		delegates: statuses.map((s) => ({
+			id: s.sessionId.slice(0, 12),
+			sessionId: s.sessionId,
+			instructions: titleOf(s.sessionId),
+			status: cardStatus(s.status),
+			durationMs: 0,
+		})),
+	};
+	return { text: lines.join("\n"), details };
+}
 
 export default extension;

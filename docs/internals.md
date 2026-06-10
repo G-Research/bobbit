@@ -655,7 +655,7 @@ This means crash recovery doesn't require the user to manually clean up pool det
 |---|---|---|---|
 | Normal (assistant) | `POST /api/sessions` for assistant types (goal/project/tool) | No | No |
 | Worktree | `POST /api/sessions` for non-goal, non-assistant sessions in a git repo | Yes (auto) | No |
-| Delegate | Parent session spawns a child via the `delegate` tool | Inherits parent cwd | No |
+| Delegate | Parent session spawns a child via the `team_delegate` tool | Inherits parent cwd | No |
 | Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | No - agent CLI rehydrates from a clone of the source `.jsonl` (no system-prompt injection) |
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.

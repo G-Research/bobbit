@@ -92,7 +92,7 @@ function keyFor(msg: any, group?: string): string {
 }
 
 /** Tool names eligible for cross-message grouping */
-const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "delegate"]);
+const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "team_delegate"]);
 
 /**
  * Check if an assistant message is groupable — contains tool calls of a single type

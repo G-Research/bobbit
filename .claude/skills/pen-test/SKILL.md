@@ -14,7 +14,7 @@ allowed_tools:
   - browser_navigate
   - browser_eval
   - browser_screenshot
-  - delegate
+  - team_delegate
 agent: true
 ---
 
