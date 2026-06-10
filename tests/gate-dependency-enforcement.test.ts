@@ -60,6 +60,17 @@ describe("Gate Dependency Enforcement", () => {
 			assert.ok(error.includes("implementation"), `Error should name blocking gate: ${error}`);
 		});
 
+		it("treats a bypassed upstream gate as satisfied (unblocks dependents)", () => {
+			const gateStates: Array<{ gateId: string; status: string }> = [
+				{ gateId: "design-doc", status: "bypassed" },
+				{ gateId: "implementation", status: "pending" },
+				{ gateId: "ready-to-merge", status: "pending" },
+			];
+
+			const error = checkGateDependencies("implementation", testWorkflowGates, gateStates);
+			assert.equal(error, null, "A bypassed upstream gate must count as satisfied like passed");
+		});
+
 		it("allows when all upstream gates have passed", () => {
 			const gateStates: Array<{ gateId: string; status: string }> = [
 				{ gateId: "design-doc", status: "passed" },

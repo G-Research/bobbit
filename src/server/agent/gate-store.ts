@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
 
-export type GateStatus = "pending" | "passed" | "failed";
+export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
 export interface GateSignalStep {
 	name: string;
@@ -152,6 +153,53 @@ export class GateStore {
 		gate.updatedAt = Date.now();
 		this.save();
 		this.onStatusChange?.(signal.goalId, signal.gateId);
+	}
+
+	/**
+	 * Human-only bypass: force a gate past verification. Appends a synthetic
+	 * audit signal (so the action is auditable like any other signal), sets the
+	 * gate status to "bypassed", persists, and fires onStatusChange.
+	 *
+	 * This is an honesty-system override surfaced ONLY via the human UI — it is
+	 * never advertised to agents (no MCP tool). See docs/design Human Gate Bypass.
+	 */
+	bypassGate(goalId: string, gateId: string, opts: { whyBypassed: string; whoAmI: string }): GateSignal {
+		const key = compositeKey(goalId, gateId);
+		const gate = this.gates.get(key);
+		if (!gate) {
+			throw new Error(`Unknown gate: ${gateId}`);
+		}
+		const now = Date.now();
+		const signal: GateSignal = {
+			id: `bypass-${randomUUID()}`,
+			gateId,
+			goalId,
+			sessionId: "human-bypass",
+			timestamp: now,
+			commitSha: "",
+			content: opts.whyBypassed,
+			metadata: {
+				bypass: "true",
+				whyBypassed: opts.whyBypassed,
+				whoAmI: opts.whoAmI,
+				bypassedAt: String(now),
+			},
+			verification: { status: "passed", steps: [] },
+		};
+		gate.signals.push(signal);
+		gate.status = "bypassed";
+		gate.updatedAt = now;
+		this.save();
+		this.onStatusChange?.(goalId, gateId);
+		return signal;
+	}
+
+	/** Returns the last signal whose metadata.bypass === "true", if any. */
+	getLatestBypassSignal(gate: GateState): GateSignal | undefined {
+		for (let i = gate.signals.length - 1; i >= 0; i--) {
+			if (gate.signals[i]?.metadata?.bypass === "true") return gate.signals[i];
+		}
+		return undefined;
 	}
 
 	updateGateStatus(goalId: string, gateId: string, status: GateStatus): void {

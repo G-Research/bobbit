@@ -2147,7 +2147,7 @@ export class TeamManager {
 	 * Complete a team: dismiss all role agents but keep the team lead alive.
 	 * The team lead remains active to await further instructions.
 	 */
-	async completeTeam(goalId: string): Promise<void> {
+	async completeTeam(goalId: string, opts?: { allowBypassedGates?: boolean }): Promise<void> {
 		const entry = this.teams.get(goalId);
 		if (!entry) {
 			throw new Error(`No active team for goal: ${goalId}`);
@@ -2165,10 +2165,18 @@ export class TeamManager {
 
 		if (goal?.workflow && completeGateStore && (!skipReqs || !skipReqs.includes("workflow"))) {
 			const gateStates = completeGateStore.getGatesForGoal(goalId);
-			const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
-			const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
+			const statusById = new Map(gateStates.map(g => [g.gateId, g.status]));
+			const isResolved = (id: string) => statusById.get(id) === "passed" || statusById.get(id) === "bypassed";
+			const failedGates = goal.workflow.gates.filter(g => !isResolved(g.id));
 			if (failedGates.length > 0) {
 				throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
+			}
+			// Bypassed gates satisfy dependency ordering but still require explicit
+			// human confirmation before the goal can be completed. An agent calling
+			// team_complete (no opts) hits this distinct error and cannot auto-finish.
+			const bypassedGates = goal.workflow.gates.filter(g => statusById.get(g.id) === "bypassed");
+			if (bypassedGates.length > 0 && !opts?.allowBypassedGates) {
+				throw new Error(`Cannot complete: ${bypassedGates.length} gate(s) were bypassed and require human confirmation`);
 			}
 		}
 
