@@ -3,7 +3,7 @@ import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { SquareTerminal } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import type { ToolRenderer, ToolRenderResult, ToolRenderContext } from "../types.js";
 import "../../components/LiveTimer.js";
 
 interface BgParams {
@@ -28,26 +28,30 @@ interface BgParams {
 const processNameCache = new Map<string, string>();
 
 /**
- * Per-tool-call start-timestamp cache. Keyed by toolCallId when available,
- * otherwise by the params object identity (while the call is still
- * streaming and we don't have a result yet). The first render records
- * the wall-clock time; subsequent renders reuse it so <live-timer>
- * counts up from when the call started, not from the latest re-render.
+ * Resolve the wall-clock start time for a `wait`'s elapsed timer.
+ *
+ * The authoritative source is the server-stamped timestamp of the assistant
+ * message that issued this tool call (`ctx.toolCallStartTime`, threaded down
+ * from `AssistantMessage.message.timestamp`). Because it lives in the persisted
+ * transcript, a page refresh or navigate-away-and-back reads the same value
+ * back — the timer never resets to 0.
+ *
+ * Fallbacks (only hit when no message timestamp is available, e.g. a transient
+ * window mid-stream before the assistant message is stamped): the result's own
+ * timestamp once present, else a per-render-cached wall clock so the count is at
+ * least monotonic within this page load.
  */
-const callStartById = new Map<string, number>();
 const callStartByParams = new WeakMap<object, number>();
 
-function getCallStart(params: BgParams, result: ToolResultMessage | undefined): number {
-	const id = result?.toolCallId;
-	if (id) {
-		let t = callStartById.get(id);
-		if (t === undefined) {
-			// Promote any per-params entry so we don't double-count.
-			t = callStartByParams.get(params) ?? Date.now();
-			callStartById.set(id, t);
-		}
-		return t;
+function getCallStart(
+	startTime: number | undefined,
+	params: BgParams,
+	result: ToolResultMessage | undefined,
+): number {
+	if (typeof startTime === "number" && Number.isFinite(startTime) && startTime > 0) {
+		return startTime;
 	}
+	if (result?.timestamp) return result.timestamp;
 	let t = callStartByParams.get(params);
 	if (t === undefined) {
 		t = Date.now();
@@ -169,10 +173,13 @@ function buildHeader(params: BgParams, result: ToolResultMessage | undefined, ti
 	return html`<span style="${S.wrap}">${badge} ${action}${nameAndId} ${sep} ${detail}${timerNode}</span>`;
 }
 
-/** Render the live elapsed timer span. `running` stops the counter when false. */
-function renderCallTimer(params: BgParams, result: ToolResultMessage | undefined, running: boolean): TemplateResult {
-	const startedAt = getCallStart(params, result);
-	return html` <span style="${S.detail}" title="Elapsed since the tool call started">· <live-timer .startTime=${startedAt} .running=${running}></live-timer></span>`;
+/**
+ * Render the live elapsed timer span. `running` stops the counter when false;
+ * once stopped, `endTime` freezes the display at the true start→end duration
+ * (so a reload of a completed wait shows its real elapsed, not "now − start").
+ */
+function renderCallTimer(startedAt: number, running: boolean, endTime: number | null): TemplateResult {
+	return html` <span style="${S.detail}" title="Elapsed since the tool call started">· <live-timer .startTime=${startedAt} .running=${running} .endTime=${endTime}></live-timer></span>`;
 }
 
 export class BgProcessRenderer implements ToolRenderer<BgParams> {
@@ -180,12 +187,17 @@ export class BgProcessRenderer implements ToolRenderer<BgParams> {
 		params: BgParams | undefined,
 		result: ToolResultMessage | undefined,
 		isStreaming?: boolean,
+		ctx?: ToolRenderContext,
 	): ToolRenderResult {
 		// Only `wait` benefits from a live elapsed timer — other actions
 		// (create, logs, grep, …) return effectively immediately.
 		const timerRunning = !result || !!isStreaming;
 		const timerNode = params?.action === "wait"
-			? renderCallTimer(params, result, timerRunning)
+			? renderCallTimer(
+				getCallStart(ctx?.toolCallStartTime, params, result),
+				timerRunning,
+				timerRunning ? null : (result?.timestamp ?? null),
+			)
 			: html``;
 		const headerContent = params ? buildHeader(params, result, timerNode) : html`<span>background process</span>`;
 		const state = getToolState(result, !result);

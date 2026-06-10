@@ -123,8 +123,9 @@ test.describe("Market UI activation controls — disable-entrypoint (pack schema
 		const toggle = page.locator(TOGGLE);
 		await expect(toggle, "the entrypoint toggle must render from the catalogue").toBeVisible({ timeout: 15_000 });
 		await expect(toggle).toBeChecked();
-		// The explanatory copy is present (§9 copy requirement).
-		await expect(page.locator(`[data-testid="market-activation-help"]`).first()).toBeVisible();
+		// Marketplace UI polish R1: the standalone activation-help copy was removed —
+		// the activation toggles now stand on their own — so it must NOT render.
+		await expect(page.locator(`[data-testid="market-activation-help"]`)).toHaveCount(0);
 
 		// ── (1) Disable the entrypoint → PUT + reconcile. It must disappear from the
 		// runtime /api/ext/contributions, while the PANEL stays available. ──

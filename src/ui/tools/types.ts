@@ -15,6 +15,14 @@ export interface ToolRenderContext {
 	toolCallInput?: unknown;
 	/** The gateway session ID that issued the tool call. */
 	sessionId?: string;
+	/**
+	 * Server-stamped timestamp (ms epoch) of the assistant message that issued
+	 * this tool call. Used by time-sensitive renderers (e.g. `bash_bg wait`'s
+	 * live elapsed timer) as a reload-stable anchor for when the call started —
+	 * it comes from the persisted transcript, so a refresh reads the same value
+	 * back rather than resetting to "now". Optional.
+	 */
+	toolCallStartTime?: number;
 	/** The current session's goal ID, when bound to a goal. Used by Children
 	 *  tool renderers (e.g. goal_plan_propose's approval flow). */
 	goalId?: string;

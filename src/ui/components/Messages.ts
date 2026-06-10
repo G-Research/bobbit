@@ -427,6 +427,7 @@ export class AssistantMessage extends LitElement {
 						html`<tool-message
 							.tool=${tool}
 							.toolCall=${tc}
+							.callStartTime=${this.message.timestamp}
 							.result=${result}
 							.partialResult=${this.toolPartialResults?.[tc.id]}
 							.pending=${pending}
@@ -569,6 +570,9 @@ export class ToolMessage extends LitElement {
 	@property({ type: Boolean }) pending: boolean = false;
 	@property({ type: Boolean }) aborted: boolean = false;
 	@property({ type: Boolean }) isStreaming: boolean = false;
+	/** Server-stamped timestamp of the assistant message that issued this call.
+	 *  Threaded to renderers as a reload-stable timer anchor (e.g. bash_bg wait). */
+	@property({ type: Number }) callStartTime?: number;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -706,6 +710,7 @@ export class ToolMessage extends LitElement {
 			{
 				toolUseId: this.toolCall.id,
 				toolCallInput: (this.toolCall as any).input,
+				toolCallStartTime: this.callStartTime,
 				sessionId: sessionIdCtx,
 				goalId: goalIdCtx,
 				getAskResponseAnswers,

@@ -1,6 +1,6 @@
 # PR Walkthrough Panel
 
-The PR walkthrough panel is Bobbit's guided review surface for pull requests and local changesets. For GitHub PRs launched from chat, Bobbit now hosts the walkthrough in a dedicated read-only child agent session so the reviewer can watch progress, inspect the generated review cards, and ask follow-up questions in the same PR-aware chat.
+The PR walkthrough panel is Bobbit's guided review surface for pull requests and local changesets. For GitHub PRs launched from chat, Bobbit hosts the walkthrough in a dedicated read-only child agent session so the reviewer can watch progress and inspect the generated review cards. The child session is **terminated** once the walkthrough reaches a terminal state (a successful submission, or a non-recoverable error); it is not kept alive for follow-up chat (see [Child session lifecycle and teardown](design/pr-walkthrough-agent-session.md#child-session-lifecycle-and-teardown)).
 
 The panel model remains changeset-oriented rather than GitHub-specific. GitHub PRs, local SHA pairs, and fixtures all resolve into the same renderable payload: a changeset reference, diff blocks with hunks and line anchors, logical review cards, warnings, and export capability metadata. The session-hosted agent is the primary GitHub PR ingestion path; the older resolver remains for fixture/local compatibility and standalone restore.
 
@@ -188,11 +188,11 @@ The tool posts to the internal submit endpoint with the child `sessionId`, job i
 
 On validation failure, the job moves to `validation_failed`, the panel remains unpopulated, and the tool returns field-level retry feedback such as `path` plus `message`. The agent can fix the YAML and call the tool again. If the stored bundle is missing, corrupt, or unusable, submission fails deterministically with retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; Bobbit does not silently re-fetch the PR at submit time. Relaunch the walkthrough so launch can resolve and persist a fresh bundle. If the agent becomes idle without a valid submission, Bobbit steers it to call `submit_pr_walkthrough_yaml`; after a failed submission, the reminder includes the last validation errors.
 
-On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, and selects the child walkthrough tab. It does **not** auto-enter fullscreen — the panel shares the preview panel's user-initiated resize semantics, so the reviewer enters fullscreen only by an explicit action (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts)). The tool response tells the agent to stay available for follow-up questions.
+On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, and selects the child walkthrough tab. It does **not** auto-enter fullscreen — the panel shares the preview panel's user-initiated resize semantics, so the reviewer enters fullscreen only by an explicit action (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts)). The tool response tells the agent the walkthrough is complete: `PR walkthrough YAML accepted and published. This walkthrough session is now complete.`
 
-### 5. Follow-up chat remains live
+### 5. Submission completes and terminates the child
 
-A successful YAML submission does not terminate the child session. The user can ask follow-up questions in the walkthrough chat while the PR context, previous investigation, and tool results remain loaded. The child session may carry `readOnly: true` metadata for tool/file policy, but live walkthrough children are still promptable; only archived or terminated walkthrough sessions render as non-interactive. Further `submit_pr_walkthrough_yaml` calls are rejected once the job is `ready`; the published payload is immutable for that job.
+A successful YAML submission publishes the walkthrough and then **terminates the child session** — the node process exits and the persisted session record is archived (so it is never respawned on a later gateway restart). There is **no** follow-up chat in the walkthrough session: the `ready` job is terminal, so the child is torn down via the manager's idempotent `terminateChild()` helper (`SessionManager.terminateSession`). The stored walkthrough payload remains available for review by `changesetId` (side panel, fullscreen, or standalone route); the archived child reappears nested under its parent only while **Show Archived** is on. A non-recoverable `error` terminates the child the same way. `validation_failed` is **not** terminal — the agent retries `submit_pr_walkthrough_yaml` in the same still-live session. See [Child session lifecycle and teardown](design/pr-walkthrough-agent-session.md#child-session-lifecycle-and-teardown).
 
 ## Target scoping and canonicalization
 
@@ -483,7 +483,7 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 - YAML schema validation and YAML-to-card mapping;
 - read-only command policy and walkthrough tool metadata;
 - session child metadata, submit proof restore, job persistence, and duplicate launch behavior;
-- launch API, invalid/valid YAML submission, keeping the child alive after success, and job restore;
+- launch API, invalid/valid YAML submission, terminating the child after success (and on terminal errors), and job restore for in-flight walkthroughs;
 - browser behavior for child session launch/focus, empty waiting panel, validation retry state, final cards, reload persistence, standalone route, and explicit export confirmation;
 - in-app panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, and the standalone route having no panel-level resize chrome while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
