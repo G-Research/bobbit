@@ -286,6 +286,16 @@ export function stopSessionPolling(): void {
 	}
 }
 
+/**
+ * Clear any sessions-fetch error and re-fetch. Used by the sidebar/landing
+ * "Retry" buttons: clearing the error lets `isInitialSessionsLoad` show the
+ * one-time spinner again on a genuine retry after an initial-load failure.
+ */
+export function retryLoadSessions(): void {
+	state.sessionsError = "";
+	refreshSessions();
+}
+
 export async function refreshSessions(): Promise<void> {
 	const isInitial = isInitialSessionsLoad({
 		gatewaySessionsLength: state.gatewaySessions.length,

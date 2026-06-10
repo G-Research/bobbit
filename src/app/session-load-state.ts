@@ -12,13 +12,15 @@
  * extracted here as a tiny dependency-free function that can be unit-tested
  * directly in node — fast and DOM-free.
  *
- * NOTE (TDD red step): this currently encodes the OLD, BUGGY logic that keys
- * off list emptiness. List length is the wrong proxy for "never fetched": a
- * user whose `gatewaySessions` is legitimately empty (projects/goals but no
- * live sessions, or no projects at all) keeps `length === 0` true forever, so
- * every 5s poll tick re-enters "initial load" and re-blanks the sidebar. The
- * correct contract (pinned by tests/sidebar-loading-flash.test.ts) keys off
- * `sessionsGeneration` instead; the green step flips the implementation below.
+ * Contract: initial-load is keyed off whether a fetch has ever COMPLETED —
+ * `state.sessionsGeneration` is -1 until the first successful fetch and >= 0
+ * thereafter — not off list emptiness. List length is the wrong proxy for
+ * "never fetched": a user whose `gatewaySessions` is legitimately empty
+ * (projects/goals but no live sessions, or no projects at all) keeps
+ * `length === 0` true forever, which previously re-entered "initial load" on
+ * every 5s poll tick and re-blanked the sidebar. We still suppress the spinner
+ * while an error is on screen so background poll retries stay silent under the
+ * error/Retry UI. Pinned by tests/sidebar-loading-flash.test.ts.
  */
 export interface SessionLoadStateArgs {
 	/** Current length of `state.gatewaySessions`. */
@@ -34,5 +36,5 @@ export interface SessionLoadStateArgs {
  * spinner for this invocation.
  */
 export function isInitialSessionsLoad(args: SessionLoadStateArgs): boolean {
-	return args.gatewaySessionsLength === 0 && !args.sessionsError;
+	return args.sessionsGeneration < 0 && !args.sessionsError;
 }

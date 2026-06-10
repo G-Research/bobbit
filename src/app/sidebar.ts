@@ -32,7 +32,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState, fetchProjects, saveProjectOrder } from "./api.js";
+import { refreshSessions, retryLoadSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState, fetchProjects, saveProjectOrder } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession } from "./render-helpers.js";
@@ -1554,7 +1554,7 @@ export function renderSidebar() {
 					: state.sessionsError
 						? html`<div class="text-center py-6">
 								<p class="text-red-500 mb-2">${state.sessionsError}</p>
-								<button class="text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
+								<button class="text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${retryLoadSessions}>Retry</button>
 							</div>`
 						: (() => {
 							// Apply search filtering. Staff render as rows inside each project's
