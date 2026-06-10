@@ -613,11 +613,11 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 | `POST /api/marketplace/sources` | Add a source `{ url, ref? }` → syncs + returns the created source. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source (and its cache dir). |
 | `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch); returns updated `lastCommit`. |
-| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: Array<PackManifest & { dirName, hasTools }> }`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. |
+| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: Array<PackManifest & { dirName, hasTools, descriptions? }> }`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. `descriptions?` carries optional one-line per-entity copy (§9.1/§10.4 R3). |
 | `POST /api/marketplace/install` | Body `{ sourceId, packName, scope, projectId? }` → installs; returns `.pack-meta.yaml`. |
 | `POST /api/marketplace/update` | Body `{ scope, packName, projectId? }` → updates; returns new meta. |
 | `DELETE /api/marketplace/installed` | Body `{ scope, packName, projectId? }` → uninstall. |
-| `GET /api/marketplace/installed?projectId=` | List installed packs across all scopes with provenance (`PackMeta[]` + manifest + scope). |
+| `GET /api/marketplace/installed?projectId=` | List installed packs across all scopes with provenance (`PackMeta` + manifest + scope), plus `updateAvailable` + `sourceStatus` (sync-free update gating) per row (§9.1/§10.4 R2). |
 | `GET /api/packs/conflicts?projectId=` | List `(type, name, winner, shadowed[])` conflicts for the resolved list. |
 
 - `scope` ∈ `"global-user" | "server" | "project"`; `projectId` required when `scope === "project"`.

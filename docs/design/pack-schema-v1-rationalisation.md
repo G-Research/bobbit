@@ -1002,7 +1002,9 @@ does not register/resolve); they never feed the activation controls.
 - container: `data-testid="market-activation-<packName>"`
 - per-entity toggle: `data-testid="market-toggle-<kind>-<name>"` (kind ∈ `role|tool|skill|entrypoint`;
   for entrypoints `<name>` = `listName`).
-- the explanatory copy: `data-testid="market-activation-help"`.
+- collapsed entity-description disclosure (Marketplace UI polish §10.4 R3): `data-testid="market-entity-details-<packName>"`,
+  with per-row `data-testid="market-entity-desc-<kind>-<name>"`. (The former standalone explanatory copy
+  `data-testid="market-activation-help"` was REMOVED — the toggles + per-entity descriptions stand on their own.)
 
 After a toggle PUT, re-run the same reconcile the marketplace mutation path already triggers (it
 re-fetches tool/contribution metadata and re-registers renderers/panels/entrypoints — see
