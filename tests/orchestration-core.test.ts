@@ -77,10 +77,11 @@ class FakeView implements OrchestrationSessionView {
 	async forceAbort(id: string): Promise<void> { this.aborted.push(id); }
 }
 
-function makeCore(view: FakeView, model?: string) {
+function makeCore(view: FakeView, model?: string, resolveEffectiveTools?: (id: string) => string[] | undefined) {
 	return new OrchestrationCore({
 		sessionManager: view,
 		resolveSessionModel: () => model,
+		resolveEffectiveTools,
 		audit: () => { /* silent */ },
 	});
 }
@@ -113,7 +114,25 @@ describe("OrchestrationCore.spawn — allowedTools subtraction (recursion guard)
 		assert.deepEqual(view.delegateCalls[0].opts.allowedTools, ["bash", "read", "write"]);
 	});
 
-	it("leaves allowedTools undefined when the owner has none (unrestricted)", async () => {
+	it("synthesizes an explicit all-except-spawn-verbs list when the owner is UNRESTRICTED", async () => {
+		// Finding [LOW]: an unrestricted owner (no explicit allow-list) must still
+		// produce a child whose REGISTERED tool set excludes the spawn verbs — the
+		// core resolves the owner's full effective catalogue and subtracts them.
+		const view = new FakeView();
+		view.owner("owner-1"); // allowedTools undefined → unrestricted
+		const fullCatalogue = ["bash", "read", "write", "team_delegate", "team_spawn", "read_session"];
+		const core = makeCore(view, undefined, () => fullCatalogue);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x" });
+		const childTools: string[] = view.delegateCalls[0].opts.allowedTools;
+		assert.ok(Array.isArray(childTools), "child must get an explicit allow-list, not undefined");
+		assert.ok(!childTools.includes("team_delegate"), "unrestricted owner's child must not carry team_delegate");
+		assert.ok(!childTools.includes("team_spawn"), "unrestricted owner's child must not carry team_spawn");
+		assert.deepEqual(childTools, ["bash", "read", "write", "read_session"]);
+	});
+
+	it("falls back to undefined when the owner is unrestricted AND no catalogue is available", async () => {
+		// No resolveEffectiveTools (e.g. no tool manager) — the core cannot
+		// synthesize a list; assertCanSpawn remains the runtime recursion belt.
 		const view = new FakeView();
 		view.owner("owner-1");
 		const core = makeCore(view);
