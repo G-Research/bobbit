@@ -588,7 +588,7 @@ contributions + the durable Host API:
 |---|---|---|
 | Viewer panel | `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` | `panels/pr-walkthrough-panel.yaml` → `lib/panel.js` |
 | Changeset/diff bundle | `src/server/pr-walkthrough/routes.ts` viewer-feed routes | `routes: bundle` (`lib/routes.mjs`, LIVE git in the confined worker) |
-| Persisted cards | `src/server/pr-walkthrough/walkthrough-store.ts` | `routes: publish` → `host.store.*` (pack-namespaced) |
+| Persisted VIEWER cards | bespoke viewer feed reading `walkthrough-store.ts` | `routes: publish` → `host.store.*` (pack-namespaced), written by the panel's read→publish seam (§8.4). The agent-side `walkthrough-store.ts` stays as the submit pipeline's own store (§8.3/§8.5), never read by the viewer. |
 | Launcher + deep-link | composer/git-widget launch + the `"walkthrough"` RouteView | `entrypoints:` (3 launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `#/ext/pr-walkthrough` |
 | Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
 
@@ -617,43 +617,53 @@ delete until that is green in CI.
   (and `/walkthrough` pathname) cases in `getRouteFromHash` + `setHashRoute`. The
   generic `ext` route replaces them.
 
-**Server (viewer-feed routes + store)**
+**Server (viewer-feed routes only — agent toolchain stays)**
 
 - `src/server/pr-walkthrough/routes.ts` — **split, not wholesale delete**. Remove
-  the **viewer-feed** routes the pack now serves: `GET /api/pr-walkthrough/jobs/:id`,
-  `GET /api/pr-walkthrough/session/:id`, `GET /api/pr-walkthrough/:id`, and the
-  internal `bundle` / `analysis-bundle` routes. **Keep** the agent-lifecycle +
-  GitHub-credential routes: `POST /launch`, `POST /resolve`, `POST
-  …/export/preview`, `POST …/export/submit` (network + GitHub auth — explicitly
-  out of scope per the deletion plan's carve-outs). Adjust the `server.ts`
-  `handlePrWalkthroughApiRoute(...)` dispatch accordingly (keep the import + call;
-  narrow the `isPublicWalkthroughRoute` matcher to the retained routes).
-- `src/server/pr-walkthrough/walkthrough-store.ts` + `git-changeset.ts` +
-  `diff-parser.ts` — **deleted** (decisive, §8.4). The changeset/diff logic is
-  RE-EXPRESSED live in the pack's `lib/routes.mjs` (ambient `child_process`/`fs` in
-  the confined worker), and the persisted viewer cards move to the pack's
-  `host.store` (the submit tool's `publish` bridge, §8.4). **Confirm the E2E green
-  first** (see §8.4 for
-  the persistence caveat before deleting `walkthrough-store.ts`).
+  ONLY the **viewer-feed** routes the deleted client consumed: `GET
+  /api/pr-walkthrough/jobs/:id`, `GET /api/pr-walkthrough/session/:id`, `GET
+  /api/pr-walkthrough/:id`. **Keep** every route the agent toolchain still uses:
+  `POST /launch`, `POST /resolve`, `POST …/export/preview`, `POST …/export/submit`
+  (network + GitHub auth), AND the internal `POST /api/internal/pr-walkthrough/bundle`
+  / `/analysis-bundle` / `/submit-yaml` routes — these are consumed by the KEPT
+  agent tools (`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_yaml`; see
+  `defaults/tools/pr-walkthrough/extension.ts`), NOT by the viewer. Adjust the
+  `server.ts` `handlePrWalkthroughApiRoute(...)` dispatch accordingly (keep the
+  import + call; narrow only the public viewer-feed matcher).
+- **`walkthrough-store.ts` + `git-changeset.ts` + `diff-parser.ts` are KEPT — they
+  are load-bearing for the agent toolchain (carve-out §8.5), NOT viewer surfaces.**
+  `walkthrough-agent-manager.ts` imports `resolveLocalChangeset` (git-changeset) +
+  `saveWalkthrough` (walkthrough-store); `walkthrough-agent-store.ts`,
+  `walkthrough-analysis-bundle.ts`, `walkthrough-yaml-schema.ts` import
+  `storageKeyForChangesetId` (walkthrough-store); `git-changeset` imports
+  `diff-parser`. Deleting them would break `read_pr_walkthrough_bundle` / the
+  submit pipeline / `resolve`. The pack re-expresses the changeset/diff logic
+  **independently** in its own `lib/routes.mjs` (ambient `child_process`/`fs` in
+  the confined worker) for the VIEWER path; the agent-side modules remain the
+  agent path. (This corrects an earlier over-broad deletion claim: the goal
+  migrates the **viewer/contribution/deep-link** surface only — §8.5 carve-out.)
+  **Confirm the E2E green first** (see §8.4 for
+  the persistence seam).
 
 **Tool defs** — `defaults/tools/pr-walkthrough/` is **kept** (the agent-driving
 tools `submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle` / `readonly_bash`
 stay — §8.5).
 
-### 8.4 Persistence — DECISIVE: the pack's `host.store` is the sole viewer-state provider
+### 8.4 Persistence — the pack's `host.store` is the sole VIEWER-state provider
 
-The migrated feature's **durable viewer state** (the changeset → LLM-enhanced
-cards the panel reads) is owned **solely by the pack**, through the pack-scoped
+The migrated feature's **viewer state** (the changeset → LLM-enhanced cards the
+*panel* reads) is owned **solely by the pack**, through the pack-scoped
 `host.store` written by the pack's `publish` route and read by its `bundle` route.
-There is **no fallback** that leaves a viewer-state store built-in. This is a hard
-requirement for this goal, not an option, so the definition of done is
-unambiguous:
+No viewer surface reads a built-in store. (The agent-side `walkthrough-store.ts`
+is NOT a viewer surface — it is the submit pipeline's own persistence, retained as
+the §8.5 carve-out and never read by the panel; see §8.3.)
 
-- **Delete `src/server/pr-walkthrough/walkthrough-store.ts`** and the
-  `/api/pr-walkthrough` + `/api/internal/pr-walkthrough` **viewer-feed** routes
-  (bundle / analysis-bundle / job + session reads). The pack's `lib/routes.mjs`
-  (`bundle` LIVE git recompute + `publish` persist to `host.store`) is the sole
-  provider of that surface (§8.2 parity table).
+- **Delete the VIEWER-FEED routes only** (`GET /api/pr-walkthrough/jobs/:id`,
+  `/session/:id`, `/:id`) — the bytes the deleted client consumed. The pack's
+  `lib/routes.mjs` (`bundle` LIVE git recompute + `publish` persist to
+  `host.store`) is the sole provider of the viewer surface (§8.2 parity table).
+  `walkthrough-store.ts` + the internal `bundle`/`analysis-bundle`/`submit-yaml`
+  routes STAY (agent toolchain, §8.3).
 - **Persistence seam = CLIENT-side `host.callRoute` from the panel (no server-side
   bridge).** This respects the Host API boundary: there is **no** server-side
   `ctx.host.callRoute`, and `host.callRoute` is a **client-side, caller-pack-scoped**
@@ -673,12 +683,19 @@ unambiguous:
   hidden built-in persistence path. `bundle` reads stored cards when present, else
   returns the deterministic in-worker structural fallback. This is what proves a
   first-party pack owns durable feature state through the Host API.
-- **Deleted:** `walkthrough-store.ts` AND the bespoke server submit-time
-  persistence route (`/api/internal/pr-walkthrough/submit-yaml` → `walkthrough-store`).
-  The pack store + the panel's `publish` call replace them entirely. (Parity note:
-  built-in persistence was server-side at submit time; the pack persists at
-  view time when the panel opens — the litmus E2E's `publish`→reload→re-read path
-  already proves viewer-level parity, with `persistedAt` stable across reloads.)
+- **LLM-card parity (the key migration work).** The deleted built-in viewer showed
+  the agent's LLM-enhanced cards. For the pack viewer to match, the agent's
+  submitted cards must reach the **pack store**. The panel does this client-side:
+  on Load it reads the `submit_pr_walkthrough_yaml` tool call
+  (`host.session.readToolCall`), and `host.callRoute("publish", …)` persists the
+  enhanced cards to the pack `host.store` keyed by changeset id; `bundle` then
+  serves them (else the deterministic in-worker structural fallback). The current
+  litmus `panel.js` reads the tool call as display-only enrichment and the litmus
+  E2E calls `publish` via a test helper — **the migration must wire the panel's
+  read→publish seam** (parse the submitted YAML's cards → `publish`) so the real
+  feature reaches LLM-card parity without a test helper. Persistence is therefore
+  view-time, client-driven, through the caller-pack-scoped Host API. `persistedAt`
+  is stamped once → stable across reloads (the store-rehydration parity proof).
 - **What stays agent-side (unchanged carve-out, §8.5):** model-backed card
   synthesis itself, GitHub PR resolution, and `/export/*` (network + GitHub auth).
   Those are *producer/credential* concerns, not viewer state. The submit tool's
