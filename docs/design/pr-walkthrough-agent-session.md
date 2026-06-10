@@ -49,14 +49,14 @@ Goals:
 3. Launch resolves and persists a sanitized, versioned analysis bundle before the analysis child session is created or prompted.
 4. The agent can only perform read-only PR investigation, starts from `read_pr_walkthrough_bundle`, and must submit valid YAML via `submit_pr_walkthrough_yaml` to populate the panel.
 5. Invalid YAML gives actionable retry feedback; no partial cards are rendered.
-6. Successful submission maps against the stored bundle, persists a YAML-derived payload, selects the child's walkthrough tab, and leaves the agent alive. A ready walkthrough does **not** auto-enter fullscreen (superseded — was: "switches the child to fullscreen review mode"); fullscreen is strictly user-initiated via the toolbar button or keyboard shortcut, matching the HTML preview panel.
+6. Successful submission maps against the stored bundle, persists a YAML-derived payload, and selects the child's walkthrough tab. (Superseded — the original design left the agent alive for follow-up questions; the child session is now **terminated** once the walkthrough reaches a terminal state. See [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown).) A ready walkthrough does **not** auto-enter fullscreen (superseded — was: "switches the child to fullscreen review mode"); fullscreen is strictly user-initiated via the toolbar button or keyboard shortcut, matching the HTML preview panel.
 7. Existing final review export remains explicit and user-confirmed.
 
 Non-goals:
 
 - No scraping final chat messages into cards.
 - No panel progress bar during analysis.
-- No automatic termination of the walkthrough agent after success.
+- ~~No automatic termination of the walkthrough agent after success.~~ (Superseded — leaving the child alive leaked its node process and respawned it on every restart; the child is now terminated on terminal job states. See [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown).)
 - No GitHub review/comment submission by the analysis agent.
 - No broad rewrite of the PR walkthrough component UI beyond new waiting/error states and session ownership.
 
@@ -649,7 +649,7 @@ Mirror `VerificationHarness` reminder semantics without failing the session:
 - Rate-limit reminders to avoid loops, e.g. max two automatic reminders per job until the user prompts again.
 - Update job status to `validation_failed` or `waiting_for_yaml` and broadcast panel state.
 
-After success, disable reminders but keep the session running.
+After success, disable reminders. (Superseded — the original design kept the session running for follow-up questions; the child is now terminated on success. See [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown).)
 
 ## Persistence and reload
 
@@ -684,6 +684,47 @@ Reload cases:
 - Child archived/terminated: job remains for historical lookup; launcher dedupe should not reuse terminated children unless explicitly requested. Sidebar filtering hides terminated/archived walkthrough children while **Show Archived** is off and shows them nested under the parent when it is on.
 
 Existing draft review state, comments, decisions, and standalone route should remain keyed by `sessionId + walkthrough tab id` in the current UI stores.
+
+## Child session lifecycle and teardown
+
+A walkthrough child is a **first-class persisted session** (`childKind: "pr-walkthrough"`, with `walkthroughJobId`/`parentSessionId` metadata) written to `sessions.json` — not a transient delegate. That persistence is the whole point: it survives gateway restarts so an in-flight walkthrough can resume with its rotated submit proof. But it also means `SessionManager.restoreSessions()` will **respawn the child as a live node process on every boot** unless something tears it down first.
+
+The original design (see the superseded notes in Goals/Non-goals/Idle reminder above) deliberately kept the child alive after a successful submission for follow-up questions and never terminated it. Combined with respawn-on-boot, that leaked one ~100 MB node process per walkthrough ever launched, and a single restart resurrected all of them at once. The teardown logic below closes that leak: the child is terminated the moment its job can no longer make progress, and any finished/orphaned children that slip through are reaped on boot.
+
+### When the child is terminated
+
+`WalkthroughAgentManager` terminates its child session whenever the job reaches a **terminal** state, via the idempotent best-effort helper `terminateChild()` (in `walkthrough-agent-manager.ts`), which calls `SessionManager.terminateSession(childSessionId)`. Terminating already tears the process down *and* archives the persisted record, so a terminated walkthrough is never restored.
+
+Terminal states that trigger teardown:
+
+- **`ready`** — `submitYaml` accepted valid YAML and published the payload. The walkthrough is complete; there is no further agent work.
+- **`error` from a mapping/diff-resolution failure** — the non-validation throw out of `mapYamlToPayload` (e.g. the launch bundle is unusable). The job is unrecoverable without a relaunch.
+- **`error` from an agent runtime failure** — the child crashed or its runtime failed.
+- **The non-recoverable launch prompt-dispatch error** — the just-created child is torn down so a failed launch does not leave a respawnable husk.
+
+The child is **not** terminated on `validation_failed`. That state is recoverable: the agent retries `submit_pr_walkthrough_yaml` in the same session, so the process must stay alive. Only a transition to `ready` or `error` ends the session.
+
+### Cascade on parent termination/archival
+
+When the launching (parent) session is terminated or archived, its walkthrough children must go with it — otherwise the read-only child is left orphaned and leaks. `SessionManager.terminateSession` historically cascaded only to `delegateOf` children; it now also cascades to children where `childKind === "pr-walkthrough" && parentSessionId === id`. Because archiving a live session flows through `terminateSession`, this single change covers **both** explicit termination and archival, for both in-memory and persisted-but-not-loaded children (the latter are archived directly in their session store).
+
+One guard had to be widened to make this safe in sandboxed projects: a sandboxed prw child shares its parent's `/workspace-wt/<name>` worktree rather than owning a private one. The worktree-cleanup branch in `terminateSession` (which removes the container worktree on teardown) now excludes `childKind === "pr-walkthrough"` exactly as it already excludes delegates, so cascade-terminating a child never deletes the parent's still-active shared worktree.
+
+### Boot reap (defence in depth)
+
+Terminating on terminal states handles the steady state, but the leak had already produced persisted terminal/orphaned children, and a crash could leave a finished walkthrough un-terminated. `SessionManager.restoreOneSession` therefore screens every persisted `pr-walkthrough` child on boot and **archives + skips respawn** instead of resurrecting it when it should not come back.
+
+The decision is the pure helper `shouldReapWalkthroughChildOnBoot()` in [`src/server/pr-walkthrough/walkthrough-reap.ts`](../../src/server/pr-walkthrough/walkthrough-reap.ts). It is kept pure (no fs/store access) so it is trivially unit-testable: the caller reads the job status and parent existence/archival flags and passes them in. It reaps when:
+
+- the linked job record is **missing** (or the session has no `walkthroughJobId`) — nothing to restore for;
+- the job is **terminal** (`ready` or `error`) — no work left;
+- the parent session is **missing** or **archived** — the child can never be reached or completed (orphan).
+
+It keeps — i.e. lets restore normally — only genuinely in-flight walkthroughs (`starting` / `waiting_for_yaml` / `validation_failed`) whose parent still exists and is not archived. Those are the cases where the rotated submit proof (`restoreWalkthroughSubmitEnv` → `rotateSubmissionProofForRestoredJob`) must keep working across the restart, so they are intentionally left untouched.
+
+### Pinning tests
+
+`tests/pr-walkthrough-agent-manager.test.ts` pins the teardown contract against a mocked session manager: termination fires on the terminal states (`ready`/runtime `error`/mapping `error`), the `validation_failed` exemption keeps the child alive, the parent cascade reaches `pr-walkthrough` children, the sandbox shared-worktree is preserved across child teardown, and the `shouldReapWalkthroughChildOnBoot()` decision matrix (missing job / terminal / orphan / in-flight) holds.
 
 ## UI changes by file
 
