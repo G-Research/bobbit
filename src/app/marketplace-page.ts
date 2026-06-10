@@ -212,7 +212,13 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	if (srcRes.ok) {
 		sources = srcRes.data.sources || [];
 		sourcesError = "";
-		if (!selectedSourceId && sources.length > 0) selectedSourceId = sources[0].id;
+		// Default the browse selection to the first USER source, not the synthetic
+		// built-in source (its packs are provided-in-place, not installable, so it's a
+		// poor default browse target). Fall back to whatever exists (e.g. only the
+		// built-in source is present) so the picker is never empty.
+		if (!selectedSourceId && sources.length > 0) {
+			selectedSourceId = (sources.find((s) => !s.builtin) ?? sources[0]).id;
+		}
 	} else {
 		sources = [];
 		sourcesError = srcRes.error;
