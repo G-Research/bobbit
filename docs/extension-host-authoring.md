@@ -761,10 +761,13 @@ render inside a `sandbox="allow-scripts"` iframe. Tests:
 
 ## Worked example: a no-tools pack (pr-walkthrough)
 
-`market-packs/pr-walkthrough/` is the maximal litmus — the PR-walkthrough feature re-expressed
+`market-packs/pr-walkthrough/` is the maximal example — the PR-walkthrough feature re-expressed
 as a pack with **no `tools/` dir at all**. It proves an **orphan / UI-only** pack can build a
 full surface from pack-scoped contributions + the Host API alone, through pack-bound surface
-auth, with **no tool in `allowedTools`**.
+auth, with **no tool in `allowedTools`**. It is no longer a test-only litmus: it now **ships as a
+built-in first-party pack** and is the sole provider of the viewer — its old built-in code is
+deleted (see [First-party packs dogfood the Host API](#first-party-packs-dogfood-the-host-api)
+below and [docs/marketplace.md](marketplace.md#built-in-first-party-packs)).
 
 ```
 pr-walkthrough/
@@ -802,8 +805,52 @@ Two non-obvious decisions worth copying:
    agent-tool-side and read back from the store — a design choice, not a credential restriction;
    see `docs/design/pr-walkthrough-pack-deletion.md`.)
 
-Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (install → launcher → panel renders from
-`callRoute` + store → `readToolCall` → deep-link → uninstall).
+Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
+launcher → panel renders from `callRoute` + store → `readToolCall` → deep-link → disable/re-enable).
+
+## First-party packs dogfood the Host API
+
+The Extension Host is not just for third-party packs: **Bobbit ships some of its own features as
+packs**, resolved through the exact same `PackResolver` + Host API + activation system. The first
+such feature is **`pr-walkthrough`**, which is now delivered *solely* as a built-in first-party
+pack — its bespoke built-in viewer, viewer-feed routes, and UI launch wiring have been **deleted**,
+so the pack is the only provider. (See [docs/marketplace.md](marketplace.md#built-in-first-party-packs)
+for how built-in packs are shipped, resolved in place, and disabled.)
+
+Why do this? It makes the pack contract **load-bearing for production code**, not just for tests —
+if the Host API can't express a real shipped feature, the gap shows up in the app, not in a litmus.
+Two pieces of the migration are worth understanding when authoring your own ambitious pack:
+
+- **Launch re-expression — drive the current agent, don't mint a new principal.** The deleted
+  built-in git-widget button launched a *new dedicated child walkthrough agent* (a fresh session
+  with its own `allowedTools`). Spawning a new principal is **not pack-expressible by design** — a
+  pack acts within the calling session's authority. So the pack re-expresses launch differently:
+  the entrypoints just open the panel (`host.ui.navigate` to `#/ext/pr-walkthrough`), and the panel
+  offers a gesture-gated **"Run PR walkthrough"** button that calls `host.session.postMessage` to
+  direct the **current** session's agent to run the walkthrough using the retained agent tools
+  (`readonly_bash` / `read_pr_walkthrough_bundle` / `submit_pr_walkthrough_yaml`). The agent emits
+  its YAML; the panel reads that tool call (`host.session.readToolCall`) → `host.callRoute("publish")`
+  → renders. This preserves the "click → walkthrough happens" UX without any privilege-minting
+  escape hatch. The panel implements a small state machine (`no-submission` → `posting` → `waiting`
+  → `publishing` → `rendered`, with timeout/refusal/missing-tool error states) so the launch flow is
+  resilient, not just the happy path — see `market-packs/pr-walkthrough/src/panel.js`.
+- **Shared synthesis, one source of truth, bundled into the pack.** The viewer must turn the
+  submitted production YAML into the same cards the deleted built-in produced. That synthesis
+  (`validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + helpers)
+  was extracted to a **pure shared module** `src/shared/pr-walkthrough/yaml-to-cards.ts` (no `node:`
+  / server deps), re-exported so the agent side keeps working unchanged, and **bundled into the
+  pack** by `npm run build:packs` → `market-packs/pr-walkthrough/lib/yaml-to-cards.mjs`. The pack's
+  `publish` route runs that same code in the confined worker — so there is exactly one
+  implementation of the synthesis, used by both the agent path and the pack viewer, with no
+  duplicated logic to drift.
+
+What stays agent-tool-side is the explicit carve-out: the `submit_pr_walkthrough_yaml` /
+`read_pr_walkthrough_bundle` / `readonly_bash` tools, `WalkthroughAgentManager` and its
+`/launch` + `/resolve` + `/export/*` lifecycle, and GitHub network/auth. Those are genuine *agent*
+capabilities (model-backed synthesis, credentialed network), not contribution surfaces. Only the
+viewer / route / store / deep-link / user-facing launch-gesture surfaces moved to the pack. Full
+keep-vs-delete detail is in [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md)
+and [docs/design/built-in-first-party-packs.md §8](design/built-in-first-party-packs.md).
 
 ## Security checklist
 

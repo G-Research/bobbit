@@ -1,8 +1,51 @@
-# PR-Walkthrough-as-Pack — staged deletion plan (Extension Host Phase 2, D2)
+# PR-Walkthrough-as-Pack — deletion plan (Extension Host Phase 2, D2)
 
-Status: **STAGED, not executed.** The bespoke built-in PR-walkthrough remains in
-place and all its existing tests stay green. This document records the exact paths
-a parity-proven deletion PR would remove once the pack has shipped and burned in.
+Status: **EXECUTED (merged on `goal/built-in-first-313bf443`).** The bespoke
+built-in PR-walkthrough viewer is deleted; `pr-walkthrough` now ships as a built-in
+first-party pack and is the **sole provider** of the viewer / route / store /
+deep-link surface (see [`built-in-first-party-packs.md`](./built-in-first-party-packs.md)
+and [docs/marketplace.md](../marketplace.md#built-in-first-party-packs)). This
+document records the plan; the **"What was executed"** box immediately below maps
+the plan onto what actually shipped (the body's older "would remove / not executed"
+framing is retained for the rationale, but is now historical).
+
+> ## What was executed
+>
+> **Deleted** (the built-in viewer/feature surfaces the pack now provides):
+> - The client viewer: `src/ui/components/pr-walkthrough/`, `src/app/pr-walkthrough.ts`
+>   (+ lazy loader), the `render.ts` / `panel-workspace.ts` walkthrough wiring, and
+>   the `"walkthrough"` `RouteView` in `routing.ts` (the generic `ext` route replaces it).
+> - The **viewer-feed** server routes (`GET /api/pr-walkthrough/jobs/:id`,
+>   `/session/:id`, `/:id`) the deleted client consumed.
+> - The UI launch wiring (the git-widget "PR Walkthrough" button →
+>   `open-pr-walkthrough` → `launchPrWalkthroughAgent` → `POST /api/pr-walkthrough/launch`).
+>
+> **Retained** (the §8.5 agent-side carve-out — genuine agent capabilities, NOT
+> built-in UI surfaces): the agent tools `submit_pr_walkthrough_yaml` /
+> `read_pr_walkthrough_bundle` / `readonly_bash`, `WalkthroughAgentManager` and its
+> `submitYaml` / `readBundle` routes + `/launch` + `/resolve` + `/export/*`, and the
+> load-bearing modules `walkthrough-store.ts`, `git-changeset.ts`, `diff-parser.ts`.
+> (An earlier revision of this doc proposed deleting `walkthrough-store.ts` +
+> `git-changeset.ts` + `diff-parser.ts`; that was corrected — they are imported by
+> the kept agent toolchain. The pack re-expresses the changeset/diff logic
+> independently in its own `lib/routes.mjs`.)
+>
+> **Moved / extracted** (the one thing that left the agent-only side): the YAML→cards
+> synthesis (`validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` +
+> `DiffReferenceMapper` + helpers) was extracted to a pure shared module
+> `src/shared/pr-walkthrough/yaml-to-cards.ts`, re-exported so the agent side stays
+> unchanged, and **bundled into the pack** (`build:packs` → `lib/yaml-to-cards.mjs`).
+> One source of truth, used by both the agent path and the pack `publish` route.
+>
+> **Launch re-expression:** the deleted git-widget button spawned a *new child
+> walkthrough agent* (privilege-minting → not pack-expressible). The pack instead
+> drives the **current** session's agent via a gesture-gated `host.session.postMessage`
+> "Run PR walkthrough" action in the panel. So "sole provider" holds for the
+> migrated viewer + contribution + user-facing launch-gesture surface; the agent
+> lifecycle (`/launch` et al.) is the explicit carve-out, kept agent-side.
+
+This document originally recorded the exact paths a parity-proven deletion PR would
+remove once the pack had shipped and burned in; that deletion has now been executed.
 
 **SUPERSEDED (Phase-2 §C3.4 + §D2.3):** the earliest revision of this doc claimed
 live changeset recompute was NOT pack-expressible because the confined worker had

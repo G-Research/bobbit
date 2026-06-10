@@ -1,10 +1,22 @@
 # Built-in first-party packs
 
-Status: **DESIGN — not implemented.** This document specifies the architecture,
-exact file changes, and test plan for shipping a built-in, auto-registered source
-of first-party packs and migrating `pr-walkthrough` into it (deleting its built-in
-twin). It builds on the merged #734 schema (`pack-schema-v1-rationalisation.md`)
-and the #732 isolation simplification.
+Status: **IMPLEMENTED (merged on `goal/built-in-first-313bf443`).** This document
+specifies the architecture, file changes, and test plan that shipped a built-in,
+auto-registered source of first-party packs and migrated `pr-walkthrough` into it
+(deleting its built-in twin). It builds on the merged #734 schema
+(`pack-schema-v1-rationalisation.md`) and the #732 isolation simplification.
+
+The design landed substantially as written below — the synthetic `builtin` source
+(`src/server/agent/builtin-packs.ts`, the composition + special-casing in
+`server.ts`, the wire flag/guards in `marketplace-source-store.ts`), the
+resolve-in-place band, the Market UI section (`src/app/marketplace-page.ts`), the
+ship pipeline (`scripts/copy-builtin-packs.mjs` + `build:packs`), the
+`pr-walkthrough` migration with its built-in twin deleted and the synthesis
+extracted to the shared `src/shared/pr-walkthrough/yaml-to-cards.ts`. The
+user-facing summary lives in [docs/marketplace.md](../marketplace.md#built-in-first-party-packs)
+and [docs/extension-host-authoring.md](../extension-host-authoring.md#first-party-packs-dogfood-the-host-api);
+the executed deletion is reconciled in
+[`pr-walkthrough-pack-deletion.md`](./pr-walkthrough-pack-deletion.md).
 
 Related docs:
 [`pr-walkthrough-pack-deletion.md`](./pr-walkthrough-pack-deletion.md) (the staged
