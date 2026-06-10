@@ -395,13 +395,20 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			}
 		}
 
-		// The deep-link no longer resolves to a registered route → empty state (no panel).
+		// The deep-link no longer resolves to a registered route → "feature
+		// unavailable" empty state (no panel, no crash, no blank — §7.3).
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
 		await page.evaluate((h) => { window.location.hash = h; }, liveDeepLink());
 		await expect.poll(async () => {
 			await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
 			return page.locator('[data-testid="prw-panel-root"]').count();
 		}, { timeout: 15_000 }).toBe(0);
+		// The disabled deep-link surfaces the dismissible empty state instead of nothing.
+		const unavailable = page.locator('[data-testid="ext-route-unavailable"]');
+		await expect(unavailable).toBeVisible({ timeout: 10_000 });
+		await expect(unavailable).toContainText("unavailable");
+		await page.locator('[data-testid="ext-route-unavailable-dismiss"]').click();
+		await expect(unavailable).toHaveCount(0);
 		// The entrypoints are dropped from the contribution registry.
 		await expect.poll(async () => {
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
