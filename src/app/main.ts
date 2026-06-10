@@ -116,13 +116,6 @@ function hasActiveProposalPanel(): boolean {
 	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
 }
 
-function hasActiveWalkthroughPanel(): boolean {
-	// Used by the in-app resize keyboard shortcuts to recognise the unified panel
-	// as a fullscreen-able walkthrough. The standalone `/walkthrough` route has no
-	// panel-level resize chrome, so it intentionally has no special-case here.
-	return activeSidePanelTabIdForSession(state, workspaceSessionId()).startsWith("walkthrough:");
-}
-
 // ============================================================================
 // GATEWAY STARTUP POLLING
 // ============================================================================
@@ -325,18 +318,6 @@ async function handleHashChange(): Promise<void> {
 			applyProjectPalette(gdGoal.projectId);
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
-			renderApp();
-			await refreshSessions();
-		} else if (route.view === "walkthrough") {
-			clearDashboardState();
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
-			state.selectedSessionId = null;
-			state.goalDashboardId = null;
-			state.appView = "authenticated";
 			renderApp();
 			await refreshSessions();
 		} else if (route.view === "roles") {
@@ -648,10 +629,6 @@ async function initApp() {
 				loadDashboardData(route.goalId);
 				renderApp();
 				await refreshSessions();
-			} else if (route.view === "walkthrough") {
-				state.appView = "authenticated";
-				renderApp();
-				await refreshSessions();
 			} else if (route.view === "ext") {
 				// Slice C1 — cold-load pack deep-link restoration.
 				state.appView = "authenticated";
@@ -769,7 +746,7 @@ async function initApp() {
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel());
+			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
 			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
@@ -829,7 +806,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel() || hasActiveProposalPanel());
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
 			if (!hasPanel) return;
 			const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 			if (state.previewPanelFullscreen) {
@@ -853,8 +830,7 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasWalkthroughPanel = hasActiveWalkthroughPanel();
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasWalkthroughPanel || hasActiveProposalPanel());
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				if (state.previewPanelFullscreen) {
@@ -862,7 +838,7 @@ async function initApp() {
 					state.previewPanelFullscreen = false;
 					localStorage.setItem(key, "true");
 					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-				} else if (state.isPreviewSession || hasWalkthroughPanel) {
+				} else if (state.isPreviewSession) {
 					// any non-fullscreen level → 2: jump to fullscreen
 					localStorage.setItem(key, "false");
 					state.previewPanelFullscreen = true;

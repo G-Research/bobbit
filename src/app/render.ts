@@ -5,7 +5,6 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
-import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
 import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
@@ -95,25 +94,13 @@ import {
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
-	walkthroughChangesetIdFromPanelTabId,
-	walkthroughPanelTabId,
 	setPanelTabsForSession,
 	packPanelRefFromTabId,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { renderPackPanelContent } from "./pack-panels.js";
-import type { OpenPrWalkthroughInput } from "./pr-walkthrough.js";
-import { restorePrWalkthroughJobForSession, restorePrWalkthroughPanel, upsertPrWalkthroughJobPanel } from "./pr-walkthrough.js";
-import { ensurePrWalkthroughPanel } from "./pr-walkthrough-lazy.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
-
-function prWalkthroughStandaloneHref(sessionId: string, tabId: string): string {
-	const params = new URLSearchParams();
-	if (sessionId) params.set("session", sessionId);
-	params.set("tab", tabId);
-	return `/walkthrough?${params.toString()}`;
-}
 
 // ──────────────────────────────────────────────────────────────────────
 // Splash-screen new-session gating
@@ -216,102 +203,6 @@ window.addEventListener("bobbit-open-review-document", (e: Event) => {
 	const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
 	if (!doc) showHeaderToast("Could not open review document");
 });
-
-document.addEventListener("open-pr-walkthrough", (e: Event) => {
-	const detail = ((e as CustomEvent).detail || {}) as Record<string, unknown>;
-	const eventSource = (typeof (e as Event).composedPath === "function" ? (e as Event).composedPath()[0] : e.target) as Record<string, unknown> | null;
-	const stringDetail = (...keys: string[]) => {
-		for (const key of keys) {
-			const value = detail[key];
-			if (typeof value === "string" && value.trim()) return value;
-		}
-		return undefined;
-	};
-	const numberDetail = (...keys: string[]) => {
-		for (const key of keys) {
-			const value = detail[key];
-			if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.trunc(value));
-		}
-		return undefined;
-	};
-	const filesFromDetail = () => {
-		const explicit = numberDetail("filesChanged", "fileCount", "changedFiles");
-		if (explicit != null) return explicit;
-		for (const source of [detail, eventSource]) {
-			if (!source) continue;
-			for (const key of ["statusFiles", "status"]) {
-				const value = source[key];
-				if (Array.isArray(value)) return value.length;
-			}
-		}
-		return undefined;
-	};
-	const input = {
-		baseSha: stringDetail("baseSha", "base", "baseRef", "baseBranch"),
-		headSha: stringDetail("headSha", "head", "headRef", "headBranch"),
-		prNumber: typeof detail.prNumber === "string" || typeof detail.prNumber === "number"
-			? detail.prNumber
-			: typeof detail.number === "string" || typeof detail.number === "number"
-				? detail.number
-				: undefined,
-		url: stringDetail("url", "prUrl"),
-		prUrl: stringDetail("prUrl", "url"),
-		title: stringDetail("title", "prTitle"),
-		prTitle: stringDetail("prTitle", "title"),
-		prBody: stringDetail("prBody", "body"),
-		provider: stringDetail("provider"),
-		filesChanged: filesFromDetail(),
-		additions: numberDetail("additions", "insertions", "insertionsVsPrimary"),
-		deletions: numberDetail("deletions", "deletionsVsPrimary"),
-	} satisfies OpenPrWalkthroughInput;
-	void import("./pr-walkthrough.js").then(({ openPrWalkthroughPanel }) => {
-		void openPrWalkthroughPanel(state, activeSessionId() || "", input);
-		renderApp();
-	});
-});
-
-function handlePrWalkthroughJobUpdated(detail: unknown): void {
-	const record = detail && typeof detail === "object" ? detail as Record<string, unknown> : undefined;
-	const job = (record?.job && typeof record.job === "object" ? record.job : record) as any;
-	if (!job?.jobId || !job?.childSessionId || !job?.changesetId || !job?.status) return;
-	const active = activeSessionId();
-	upsertPrWalkthroughJobPanel(state, job, { select: active === job.childSessionId });
-	renderApp();
-}
-
-let prWalkthroughViewerWs: WebSocket | null = null;
-let prWalkthroughViewerReconnect: ReturnType<typeof setTimeout> | null = null;
-
-function connectPrWalkthroughViewerEvents(): void {
-	if (prWalkthroughViewerWs && (prWalkthroughViewerWs.readyState === WebSocket.OPEN || prWalkthroughViewerWs.readyState === WebSocket.CONNECTING)) return;
-	const token = localStorage.getItem("gateway.token");
-	if (!token) {
-		if (prWalkthroughViewerReconnect) clearTimeout(prWalkthroughViewerReconnect);
-		prWalkthroughViewerReconnect = setTimeout(connectPrWalkthroughViewerEvents, 3_000);
-		return;
-	}
-	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-	const ws = new WebSocket(`${protocol}//${location.host}/ws/viewer`);
-	prWalkthroughViewerWs = ws;
-	ws.addEventListener("open", () => {
-		ws.send(JSON.stringify({ type: "auth", token }));
-	});
-	ws.addEventListener("message", (event) => {
-		try {
-			const msg = JSON.parse(event.data as string);
-			if (msg?.type === "pr_walkthrough_job_updated" || msg?.type === "pr-walkthrough-job-updated") handlePrWalkthroughJobUpdated(msg);
-		} catch { /* ignore */ }
-	});
-	ws.addEventListener("close", () => {
-		if (prWalkthroughViewerWs === ws) prWalkthroughViewerWs = null;
-		if (prWalkthroughViewerReconnect) clearTimeout(prWalkthroughViewerReconnect);
-		prWalkthroughViewerReconnect = setTimeout(connectPrWalkthroughViewerEvents, 3_000);
-	});
-}
-
-document.addEventListener("pr-walkthrough-job-updated", (e: Event) => handlePrWalkthroughJobUpdated((e as CustomEvent).detail));
-window.addEventListener("bobbit-pr-walkthrough-job-updated", (e: Event) => handlePrWalkthroughJobUpdated((e as CustomEvent).detail));
-connectPrWalkthroughViewerEvents();
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
@@ -786,16 +677,6 @@ function currentAssistantProposalType(): ProposalType | null {
 }
 
 export function workspaceSessionId(): string {
-	// On the standalone `/walkthrough` route there is no connected session
-	// (`activeSessionId()` is undefined), but the walkthrough's owning session
-	// is carried in the URL. The standalone panel content (e.g. the lazy payload
-	// restore in `walkthroughPanelContent`) must key off the SAME session id the
-	// panel tab is stored under — otherwise it reads a key the renderer never
-	// sees and the walkthrough never hydrates.
-	const route = getRouteFromHash();
-	if (route.view === "walkthrough" && route.walkthroughSessionId) {
-		return panelWorkspaceSessionKey(route.walkthroughSessionId);
-	}
 	return panelWorkspaceSessionKey(activeSessionId());
 }
 
@@ -1186,10 +1067,6 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 /** Ordered list of available unified panel tabs for the current session. */
 export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	const sessionId = workspaceSessionId();
-	const activeGatewaySession = state.gatewaySessions.find((session) => session.id === sessionId) as any;
-	if (activeGatewaySession?.walkthroughJobId || activeGatewaySession?.childKind === "pr-walkthrough") {
-		restorePrWalkthroughJobForSession(state, sessionId);
-	}
 	const derivedTabs = buildPanelWorkspaceTabs({
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
@@ -1967,20 +1844,8 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
-	const walkthroughTabButtonLabel = (tab: UnifiedPanelTab): string | undefined => {
-		if (tab.kind !== "walkthrough") return undefined;
-		const record = { ...((tab.state || {}) as Record<string, unknown>), ...((tab.source || {}) as Record<string, unknown>) };
-		const rawNumber = record.prNumber;
-		const number = typeof rawNumber === "number" && Number.isFinite(rawNumber)
-			? String(Math.trunc(rawNumber))
-			: typeof rawNumber === "string" && rawNumber.trim()
-				? rawNumber.trim().replace(/^#/, "")
-				: "";
-		return number ? `PR: #${number}` : undefined;
-	};
-
 	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
-		walkthroughTabButtonLabel(tab) || tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
+		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
 	);
 
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
@@ -2257,21 +2122,6 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const walkthroughControlButtons = (tab: UnifiedContentTab) => {
-		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
-		const standaloneUrl = prWalkthroughStandaloneHref(sid, tab.id);
-		return html`
-			<button
-				type="button"
-				class="text-muted-foreground hover:text-foreground"
-				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
-				title="Open walkthrough in new tab"
-				data-testid="pr-walkthrough-open-in-new-tab"
-				@click=${() => window.open(`${window.location.origin}${standaloneUrl}`, "_blank", "noopener")}
-			>${icon(ExternalLink, "sm")}</button>
-		`;
-	};
-
 	const inboxPaneContent = () => {
 		const sid = activeSessionId() || "";
 		const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
@@ -2301,27 +2151,6 @@ export function doRenderApp(): void {
 		return lazyProposalPanels.proposalPanelContent(tab, currentAssistantProposalType);
 	};
 
-	const walkthroughChangesetFromTab = (tab: UnifiedContentTab): PrWalkthroughChangesetRef => {
-		const source = (tab.source || {}) as Record<string, unknown>;
-		const tabState = (tab.state || {}) as Record<string, unknown>;
-		const stored = tabState.changeset;
-		if (stored && typeof stored === "object") return stored as PrWalkthroughChangesetRef;
-		return {
-			baseSha: typeof source.baseSha === "string" && source.baseSha ? source.baseSha : "fixture-base",
-			headSha: typeof source.headSha === "string" && source.headSha ? source.headSha : "fixture-head",
-			provider: typeof source.provider === "string" ? source.provider : undefined,
-			externalUrl: typeof source.externalUrl === "string" ? source.externalUrl : typeof source.prUrl === "string" ? source.prUrl : undefined,
-			prUrl: typeof source.prUrl === "string" ? source.prUrl : typeof source.externalUrl === "string" ? source.externalUrl : undefined,
-			prNumber: typeof source.prNumber === "string" || typeof source.prNumber === "number" ? source.prNumber : undefined,
-			prTitle: typeof source.prTitle === "string" ? source.prTitle : undefined,
-			prBody: typeof source.prBody === "string" ? source.prBody : undefined,
-			title: typeof source.title === "string" ? source.title : tab.title,
-			filesChanged: typeof source.filesChanged === "number" ? source.filesChanged : undefined,
-			additions: typeof source.additions === "number" ? source.additions : undefined,
-			deletions: typeof source.deletions === "number" ? source.deletions : undefined,
-		};
-	};
-
 	// Slice B4 — content of a pack-contributed side panel. The lazy module load is
 	// kicked off by openPackPanel; this is a PURE projection of the tab's typed
 	// params onto the loaded panel's render() (or a loading placeholder). No
@@ -2347,78 +2176,6 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
-		if (tab.kind !== "walkthrough") return "";
-		void ensurePrWalkthroughPanel();
-		const changeset = walkthroughChangesetFromTab(tab);
-		const tabState = (tab.state || {}) as Record<string, unknown>;
-		const cards = Array.isArray(tabState.cards) ? tabState.cards as PrWalkthroughCard[] : undefined;
-		const status = typeof tabState.status === "string" ? tabState.status : "fixture";
-		const warnings = Array.isArray(tabState.warnings) ? tabState.warnings : [];
-		const error = typeof tabState.error === "string" ? tabState.error : undefined;
-		const exportCapability = tabState.exportCapability;
-		const validationError = tabState.validationError || tabState.lastValidationError;
-		const jobId = typeof tabState.jobId === "string" ? tabState.jobId : undefined;
-		if (status === "ready" && !cards?.length) {
-			queueMicrotask(() => restorePrWalkthroughPanel(state, workspaceSessionId(), tab.id));
-		}
-		return html`
-			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id} data-walkthrough-status=${status}>
-				<pr-walkthrough-panel
-					.changeset=${changeset}
-					.cards=${cards ?? []}
-					.status=${status}
-					.warnings=${warnings}
-					.error=${error}
-					.exportCapability=${exportCapability}
-					.validationError=${validationError}
-					.jobId=${jobId}
-					.persistenceKey=${tab.id}
-				></pr-walkthrough-panel>
-			</div>
-		`;
-	};
-
-	const standaloneWalkthroughPanel = () => {
-		const route = getRouteFromHash();
-		const sid = route.walkthroughSessionId || workspaceSessionId();
-		const rawTabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, sid);
-		const tabId = rawTabId && rawTabId.startsWith("walkthrough:") && !rawTabId.includes("%")
-			? walkthroughPanelTabId(rawTabId.slice("walkthrough:".length))
-			: rawTabId;
-		const tabCandidates = [tabId, rawTabId].filter(Boolean);
-		const storedTab = panelTabsForSession(state, sid).find((candidate) => tabCandidates.includes(candidate.id) && candidate.kind === "walkthrough") as UnifiedContentTab | undefined;
-		const fallbackTabId = tabId && tabId.startsWith("walkthrough:") ? tabId : "walkthrough:fixture";
-		const fallbackChangesetId = walkthroughChangesetIdFromPanelTabId(fallbackTabId);
-		const tab = storedTab
-			? (tabId && storedTab.id !== tabId ? { ...storedTab, id: tabId } as UnifiedContentTab : storedTab)
-			: {
-				id: fallbackTabId,
-				kind: "walkthrough" as const,
-				title: "PR Walkthrough",
-				label: "Walkthrough",
-				legacyTab: "walkthrough" as const,
-				source: { type: "walkthrough" as const, sessionId: sid, title: "PR Walkthrough", changesetId: fallbackChangesetId },
-				state: { changesetId: fallbackChangesetId },
-			} as UnifiedContentTab;
-		if (route.walkthroughSessionId) restorePrWalkthroughJobForSession(state, sid);
-		if (storedTab) {
-			restorePrWalkthroughPanel(state, sid, storedTab.id);
-		} else if (fallbackChangesetId && fallbackChangesetId !== "fixture") {
-			setPanelTabsForSession(state, sid, [...panelTabsForSession(state, sid), tab as PanelWorkspaceTab]);
-			restorePrWalkthroughPanel(state, sid, tab.id);
-		}
-		// A popped-out standalone walkthrough IS the whole window — there is no
-		// adjacent chat pane to hide — so it carries no panel-level fullscreen /
-		// collapse chrome. It simply fills the window. The component's own internal
-		// rail toggle (rendered inside <pr-walkthrough-panel>) still works.
-		return html`
-			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
-				${walkthroughPanelContent(tab)}
-			</div>
-		`;
-	};
-
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
@@ -2432,7 +2189,6 @@ export function doRenderApp(): void {
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {
 			return proposalPanelContent(tab);
 		}
-		if (tab.kind === "walkthrough") return walkthroughPanelContent(tab);
 		if (tab.kind === "pack") return packPanelContent(tab);
 		return "";
 	};
@@ -2453,7 +2209,7 @@ export function doRenderApp(): void {
 			activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 			activeTab = contentTabs.find((tab) => tab.id === activeId) ?? activeTab;
 		}
-		const activeTabCanFullscreen = activeTab.kind === "preview" || activeTab.kind === "walkthrough";
+		const activeTabCanFullscreen = activeTab.kind === "preview";
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
@@ -2470,9 +2226,8 @@ export function doRenderApp(): void {
 					</div>
 					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
 						${activeTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-						${activeTab.kind === "walkthrough" ? walkthroughControlButtons(activeTab) : ""}
 						${activeTabCanFullscreen ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`${activeTab.kind === "walkthrough" ? "Fullscreen walkthrough" : "Fullscreen preview"}${shortcutHint("toggle-sidebar")}`} data-testid=${activeTab.kind === "walkthrough" ? "pr-walkthrough-fullscreen" : "preview-fullscreen"}>
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`} data-testid="preview-fullscreen">
 							${icon(PanelRightOpen, "sm")}
 						</button>` : ""}
 						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
@@ -2508,9 +2263,6 @@ export function doRenderApp(): void {
 		}
 		// Goal dashboard route
 		const route = getRouteFromHash();
-		if (route.view === "walkthrough") {
-			return standaloneWalkthroughPanel();
-		}
 		if (route.view === "goal-dashboard" && route.goalId) {
 			return lazyPage("goal-dashboard", () => import("./goal-dashboard.js"), "renderGoalDashboard");
 		}
@@ -2547,19 +2299,16 @@ export function doRenderApp(): void {
 			const fullscreenTabs = unifiedPanelContentTabs();
 			const fullscreenActiveId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 			const fullscreenTab = fullscreenTabs.find((tab) => tab.id === fullscreenActiveId) ?? fullscreenTabs[0];
-			const fullscreenContent = fullscreenTab?.kind === "walkthrough"
-				? walkthroughPanelContent(fullscreenTab)
-				: htmlPreviewContent();
-			if (desktop && state.previewPanelFullscreen && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
+			const fullscreenContent = htmlPreviewContent();
+			if (desktop && state.previewPanelFullscreen && fullscreenTab?.kind === "preview") {
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 						<!-- Fullscreen preview header -->
 						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
-							<span class="text-xs font-medium text-muted-foreground">${fullscreenTab.kind === "walkthrough" ? "Walkthrough" : "Preview"}</span>
+							<span class="text-xs font-medium text-muted-foreground">Preview</span>
 							<div class="flex items-center gap-0.5">
 								${fullscreenTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-								${fullscreenTab.kind === "walkthrough" ? walkthroughControlButtons(fullscreenTab) : ""}
 								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 									${icon(PanelRightClose, "sm")}
 								</button>

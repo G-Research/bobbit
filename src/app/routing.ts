@@ -2,7 +2,7 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "settings" | "search" | "walkthrough" | "ext";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "settings" | "search" | "ext";
 
 export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
@@ -18,8 +18,6 @@ export interface AppRoute {
 	settingsScope?: string;
 	settingsTab?: SettingsTabId;
 	searchQuery?: string;
-	walkthroughSessionId?: string;
-	walkthroughTabId?: string;
 	/** Slice C1 — pack deep-link route id parsed from `#/ext/<routeId>` (extension-host-phase2 §7 C1.2a). */
 	extRouteId?: string;
 	/** Slice C1 — query params parsed from `#/ext/<routeId>?<params>` (string-valued, pre-paramKeys filter). */
@@ -34,28 +32,11 @@ const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project",
 
 export function getRouteFromHash(): AppRoute {
 	const path = window.location.pathname || "";
-	if (path === "/walkthrough" || path.endsWith("/walkthrough")) {
-		const params = new URLSearchParams(window.location.search || "");
-		return {
-			view: "walkthrough",
-			walkthroughSessionId: params.get("session") || undefined,
-			walkthroughTabId: params.get("tab") || undefined,
-		};
-	}
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
 		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
 		return { view: "search", searchQuery: params?.get("q") || undefined };
-	}
-	if (hash === "#/walkthrough" || hash.startsWith("#/walkthrough?")) {
-		const qIdx = hash.indexOf("?");
-		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
-		return {
-			view: "walkthrough",
-			walkthroughSessionId: params?.get("session") || undefined,
-			walkthroughTabId: params?.get("tab") || undefined,
-		};
 	}
 	// Slice C1 — pack deep-link route `#/ext/<routeId>?<params>` (extension-host-phase2
 	// §7 C1.2a). getRouteFromHash ONLY parses the hash into a structured route; the app's
@@ -232,8 +213,6 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = "#/market";
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
-	} else if (view === "walkthrough") {
-		newHash = id ? `#/walkthrough?${id}` : "#/walkthrough";
 	} else if (view === "settings") {
 		if (id) {
 			// Compound id like "system/models" or "<uuid>/project" → emit as-is

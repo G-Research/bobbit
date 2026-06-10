@@ -76,11 +76,10 @@ test("hash settings route wins over path session fallback", () => {
 	);
 });
 
-test("walkthrough pathname route remains unchanged", () => {
+test("deprecated /walkthrough pathname no longer resolves to a dedicated route", () => {
+	// The built-in walkthrough viewer was deleted; the first-party pack serves it
+	// via the generic `#/ext/pr-walkthrough` deep-link instead. The legacy pathname
+	// falls through to the landing view.
 	const route = routeWithLocation({ pathname: "/walkthrough", search: "?session=abc&tab=review" });
-	assert.deepEqual(route, {
-		view: "walkthrough",
-		walkthroughSessionId: "abc",
-		walkthroughTabId: "review",
-	});
+	assert.deepEqual(route, { view: "landing" });
 });
