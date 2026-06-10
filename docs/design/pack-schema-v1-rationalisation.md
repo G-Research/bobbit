@@ -140,12 +140,22 @@ actions:
 `stores`/`panels`/`routes`/`entrypoints` parsing from the tool path entirely.
 
 **The old per-tool pack-scoped keys are treated as if they never existed — NOT as a detected error.**
-The goal mandates no backwards compatibility, and the chosen failure mode is *deliberate silence*, not
-rejection. We do **not** want the cognitive/maintenance overhead of a dedicated old-schema detector that
-warns or throws when it spots `panels`/`routes`/`stores`/`entrypoints` on a tool YAML. There is no
-migration path, no deprecation period, and equally no special-case diagnostic: from the V1 parser's
-point of view those keys are simply not part of the tool schema, exactly like any other key it does not
-recognise. `parseContributions()` reads `renderer` + `actions` and ignores everything else.
+
+> **MAINTAINER DECISION (explicit, overrides the literal spec wording).** The goal spec says "a pack
+> authored against the old per-tool `panels`/`routes`/`stores`/`entrypoints` keys is invalid." The goal
+> owner has explicitly directed that **"invalid" here means "unsupported / not part of the V1 schema,"
+> NOT "the parser must detect-and-reject it."** We are to *pretend the old schema never existed* rather
+> than carry the cognitive/maintenance overhead of a reverse back-compat detector that warns or throws on
+> sighting an old key. This is a deliberate authoring/validation-semantics choice by the maintainer, not
+> an oversight: an old-schema key produces **no working surface** (the contributions it used to declare
+> simply do not appear anywhere), which is the operative meaning of "invalid" for a pre-release schema
+> break with no dual-read and no migration path.
+
+Concretely: there is no migration path, no deprecation period, and **no special-case diagnostic**. From
+the V1 parser's point of view those keys are simply not part of the tool schema, exactly like any other
+key it does not recognise. `parseContributions()` reads `renderer` + `actions` and ignores everything
+else. A pack relying on the old keys gets none of those surfaces (it is "invalid" in the unsupported
+sense); the new layout is documented in the authoring guide (§12 docs), which is where authors learn it.
 
 Consequences, stated plainly so implementers do not re-add detection "to be helpful":
 
@@ -802,15 +812,36 @@ New REST endpoints (mirror `/api/marketplace/pack-order` at `server.ts:6156`/`61
 
 ```text
 GET  /api/marketplace/pack-activation?scope=<scope>&projectId=<id>&packName=<name>
-     → { scope, packName, disabled: DisabledRefs }
+     → {
+         scope, packName,
+         catalogue: {            // UNFILTERED — every toggleable entity the pack DECLARES
+           roles:       string[],   // = installed pack manifest.contents.roles
+           tools:       string[],   // = manifest.contents.tools
+           skills:      string[],   // = manifest.contents.skills
+           entrypoints: Array<{ listName: string; label?: string }>  // = contents.entrypoints (+ display label from the entrypoint file)
+         },
+         disabled: DisabledRefs   // current overrides (default {} = all enabled)
+       }
 
 PUT  /api/marketplace/pack-activation
      body: { scope, projectId?, packName, disabled: DisabledRefs }
-     → { scope, packName, disabled: <normalized> }   ; then invalidateResolverCaches()
+     → { scope, packName, catalogue: {...}, disabled: <normalized> }   ; then invalidateResolverCaches()
 ```
 
-Normalisation on PUT: drop refs for entities the pack does not declare (best-effort, like pack-order
-normalisation), persist, invalidate caches.
+**The GET/PUT `catalogue` is the UNFILTERED authoritative source for the Market UI toggles (§9).** It is
+read straight from the *installed* pack's `pack.yaml` manifest (`contents.roles/tools/skills/entrypoints`)
+on disk — NOT from the runtime-filtered `/api/tools` or `/api/ext/contributions` — so a disabled entity
+still appears in the toggle list and can be re-enabled. `disabled` is the current `pack_activation`
+override for the scope. The toggle's checked state = `name ∉ disabled[kind]`. This decoupling is the fix
+for the "disable → reload → entity vanishes → cannot re-enable" hazard: runtime registries stay filtered
+(so disabled entities do not register/resolve), while the activation catalogue stays complete. **`PUT`
+returns the refreshed `catalogue` alongside the normalized `disabled`**, so the UI never needs a
+follow-up `GET` after a toggle. The entrypoint `label` is a display convenience pulled from the
+`entrypoints/<listName>.yaml` file; it is optional and absent for malformed/missing files (the
+`listName` is always the stable toggle key).
+
+Normalisation on PUT: drop refs for entities the pack does not declare (best-effort, validated against
+the same manifest `contents` catalogue), persist, invalidate caches.
 
 ---
 
@@ -918,9 +949,20 @@ On the Market installed-pack surface (`marketplace-page.ts`), add per-pack activ
   that launcher/deep-link, while a tool that opens the same panel is unaffected unless the tool itself is
   disabled.
 
-Data source for the toggle lists per pack: roles/tools/skills from the existing config endpoints +
-origin metadata (which already carries `originPackName`); entrypoints from `/api/ext/contributions`
-(`entrypoints[].listName` + a display label).
+**Single-source rule — Market activation controls render ONLY from `GET /api/marketplace/pack-activation`'s
+unfiltered `catalogue` (§6.7), NEVER from the runtime-filtered endpoints.** `/api/tools` (tools) and
+`/api/ext/contributions` (entrypoints) are filtered for *runtime* use — a disabled entity is removed from
+them so it does not register/resolve — so they CANNOT power the toggle UI: a disabled entity would vanish
+from the list and become impossible to re-enable. For each installed pack the Market UI calls the
+activation GET endpoint and renders one toggle per entity in its `catalogue`
+(`roles`/`tools`/`skills`/`entrypoints[].listName`, read unfiltered from the installed pack manifest),
+with each toggle's checked state computed from the returned `disabled` refs (`checked = name ∉
+disabled[kind]`). Disabled entities therefore remain visible and re-enableable across reloads. The same
+catalogue powers the page on cold load AND is returned by the toggle `PUT` (no follow-up `GET`).
+
+The runtime registries (`pack-renderers`/`pack-panels`/`pack-entrypoints`) continue to consume the
+filtered `/api/tools` + `/api/ext/contributions` ONLY to apply activation effects (a disabled entity
+does not register/resolve); they never feed the activation controls.
 
 **testids (browser E2E):**
 
@@ -1015,9 +1057,14 @@ reload.
 - **pr-walkthrough / no-tools pack** (browser E2E): installs with no `tools/`; an entrypoint launches a
   panel; the panel calls a route (`bundle`) and uses store/session APIs — all via pack-bound surface
   auth with no tool in `allowedTools`.
-- **Market UI disable-entrypoint** (browser E2E): toggling an entrypoint off removes the launcher +
-  deep-link registration while the underlying panel stays available to an enabled tool;
-  re-enable restores it; persists across reload.
+- **Market UI disable-entrypoint** (browser E2E): explicit catalogue-path assertions —
+  (1) toggle an entrypoint off; assert its launcher + deep-link registration is removed while the
+  underlying panel stays available to an enabled tool;
+  (2) **reload the Market page; assert the disabled entrypoint toggle is STILL VISIBLE and UNCHECKED**
+  (proves the unfiltered catalogue source, §6.7/§9 — the entity did not vanish with the filtered runtime
+  endpoints);
+  (3) re-enable it; reload; assert it is checked and the launcher/deep-link registration is restored.
+  The same disable→reload→still-visible assertion applies to a disabled tool/role/skill toggle.
 
 ### 11.3 Invariant → test map (from the goal's "Behaviour/security invariants")
 
