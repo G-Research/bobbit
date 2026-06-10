@@ -1,0 +1,760 @@
+# Built-in first-party packs
+
+Status: **DESIGN — not implemented.** This document specifies the architecture,
+exact file changes, and test plan for shipping a built-in, auto-registered source
+of first-party packs and migrating `pr-walkthrough` into it (deleting its built-in
+twin). It builds on the merged #734 schema (`pack-schema-v1-rationalisation.md`)
+and the #732 isolation simplification.
+
+Related docs:
+[`pr-walkthrough-pack-deletion.md`](./pr-walkthrough-pack-deletion.md) (the staged
+deletion plan — authoritative on the deletion scope and parity argument),
+[`pack-schema-v1-rationalisation.md`](./pack-schema-v1-rationalisation.md),
+[`extension-host.md`](./extension-host.md), [`../marketplace.md`](../marketplace.md).
+
+---
+
+## 1. Summary & goals
+
+Add a **built-in, auto-registered source of first-party packs** that ship with
+Bobbit and resolve as **active-by-default** market packs, so that:
+
+1. the **core app dogfoods the Extension Host / pack API** — a real shipped
+   feature is delivered through the same `PackResolver` + Host API + activation
+   system as third-party packs; and
+2. users can **disable selected shipped features** from the Market surface, using
+   the #734 activation-override toggles.
+
+The dogfood is proven by migrating **`pr-walkthrough`** from a litmus/test market
+pack into the first-party built-in source and **deleting its built-in
+implementation** so the pack is the sole provider of the viewer/route/store/
+deep-link surface. The `submit_pr_walkthrough_yaml` (+ `read_pr_walkthrough_bundle`
+/ `readonly_bash`) agent tools and their `WalkthroughAgentManager` stay as agent
+tools — only the contribution surfaces move.
+
+This is **pre-release**: no backwards-compatibility burden.
+
+### Non-goals
+
+- No hosted/searchable registry.
+- No new Host API capabilities.
+- No re-introduction of `permissions` / capability sandbox (#732).
+- No migration of more than one feature (artifacts is a follow-up).
+
+### Definition of done (mirrors the goal)
+
+- A built-in source auto-registers (idempotent, non-removable) and ships ≥1
+  first-party pack resolved active-by-default via a new resolver band.
+- `pr-walkthrough` is delivered solely by the first-party pack; its built-in
+  twin surfaces are deleted with no dead references.
+- Market UI shows the built-in source/section with enable/disable toggles (no
+  uninstall/remove); disabling removes the feature and persists across
+  reload/restart; re-enabling restores it.
+- #734 orphaned fixtures wired into tests or removed; fixtures README fixed.
+- `npm run check`, `npm run build` (incl. `build:packs`), `npm run test:unit`,
+  `npm run test:e2e` pass; new unit + E2E coverage as specified in §11.
+
+---
+
+## 2. D1 — Resolution model: resolve-in-place band, NOT copy-install
+
+**Decision (D1): auto-register a non-removable built-in *source* pointing at a
+shipped first-party packs directory, and resolve those packs *in place* as a
+dedicated band in `buildPackList()`.** They are NOT copied into any scope's
+`.bobbit/config/market-packs/`.
+
+"Auto-installed" therefore means **present + active by default**: a built-in pack
+is always resolvable; the only opt-out is **disable** via the #734 activation
+overrides (default = enabled). Updates ride the app upgrade for free (the shipped
+dir is replaced on install/upgrade).
+
+### Rejected alternative — copy-install + opt-out ledger
+
+A copy-install model (on startup, copy each shipped pack into a scope's
+`market-packs/<name>/` as a normal install) was rejected because:
+
+- **It fights the user.** Auto-install would re-create a pack the user removed,
+  so we would need a persisted "opted-out" ledger to suppress re-creation —
+  bespoke state with its own migration/repair concerns.
+- **It needs bespoke update-on-upgrade logic.** A copied pack is a frozen
+  snapshot with a `.pack-meta.yaml`; upgrading Bobbit would have to detect and
+  overwrite stale copies (and not clobber a user edit), versus in-place
+  resolution where the dist dir simply changes with the app.
+- **It pollutes the user's scope dirs** with files the user did not install and
+  cannot meaningfully reorder/uninstall.
+
+In-place resolution makes **disable** the single opt-out path, keeps the user's
+`market-packs/` dirs purely user-owned, and keeps the built-in source's contents
+authoritative from the shipped dist tree.
+
+---
+
+## 3. Ship / locate pipeline
+
+### 3.1 Repo home
+
+First-party pack **sources** live at repo-root `market-packs/<name>/` — the
+existing location. `pr-walkthrough` already lives at
+`market-packs/pr-walkthrough/` (`pack.yaml`, `panels/`, `entrypoints/`, `lib/`,
+`src/`). `market-packs/artifacts/` also lives there but is **not** a first-party
+pack (it stays a test-only litmus installed via fixtures); the ship step uses an
+explicit allowlist, not "everything under `market-packs/`".
+
+### 3.2 Ship path + dist layout
+
+Ship the allowlisted packs to **`dist/server/builtin-packs/market-packs/<name>/`**.
+
+The intermediate `market-packs` segment is deliberate: the pack-identity
+derivation keys structurally off a `market-packs` path segment (see §6). Shipping
+under a path that contains that segment makes `derivePackId`,
+`pack-contributions.ts::packIdFromRoot`, and `tool-contributions.ts::isMarketPackBaseDir`
+all resolve a correct, stable `packId` with **zero changes to the
+security-critical identity code**. (The `builtin-packs` parent disambiguates the
+shipped tree from user installs under `<scope>/.bobbit/config/market-packs/`; the
+absolute roots never collide.)
+
+Resulting tree after build:
+
+```
+dist/server/
+  defaults/                      # monolithic builtin pack (unchanged)
+  builtin-packs/
+    market-packs/
+      pr-walkthrough/
+        pack.yaml
+        panels/pr-walkthrough-panel.yaml
+        entrypoints/*.yaml
+        lib/routes.mjs           # hand-authored server module (relocated, not bundled)
+        lib/panel.js             # esbuild output of src/panel.js (built by build:packs)
+```
+
+### 3.3 Build-script changes
+
+- **`scripts/build-market-packs.mjs`** — unchanged in responsibility (it bundles
+  CLIENT entries in place under repo `market-packs/`, e.g. `pr-walkthrough/src/panel.js
+  → pr-walkthrough/lib/panel.js`). It already runs first in `npm run build`.
+- **New `scripts/copy-builtin-packs.mjs`** — mirrors `scripts/copy-defaults.mjs`.
+  Copies an explicit allowlist of repo first-party packs into the dist tree:
+
+  ```js
+  const FIRST_PARTY_PACKS = ["pr-walkthrough"];     // explicit allowlist
+  const SRC = "market-packs";
+  const DEST = "dist/server/builtin-packs/market-packs";
+  // for each name in FIRST_PARTY_PACKS: copyDir(`${SRC}/${name}`, `${DEST}/${name}`)
+  // skip `src/` (source-only) and `node_modules`; copy pack.yaml, panels/,
+  // entrypoints/, lib/ (the lib/ bundles must already exist → run AFTER build:packs).
+  ```
+
+- **`package.json` `build:server`** — append the new copy step so it runs after
+  `copy-defaults.mjs`:
+
+  ```jsonc
+  "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs && shx rm -rf dist/server/builtin-packs && node scripts/copy-builtin-packs.mjs",
+  ```
+
+  `npm run build` already runs `build:packs` before `build:server`, so the
+  `lib/*.js` bundles exist before the copy. (For `pretest:unit`, which lazily runs
+  only `build:server`, the committed `lib/*.js` bundles under repo `market-packs/`
+  are picked up directly — see §3.5.)
+
+### 3.4 npm package inclusion
+
+`package.json` `files` already ships `dist/`. The new `dist/server/builtin-packs/`
+tree is inside `dist/`, so it is included in the tarball automatically once
+`prepublishOnly` (`npm run build`) runs. No `files` change needed.
+
+### 3.5 Committed build output
+
+The pack `lib/` bundles under **repo** `market-packs/<name>/lib/*.js` stay
+committed (as today), so `build:server`-only flows (CI `pretest:unit`) have the
+artefacts to copy. The `dist/` tree itself remains a build artefact (gitignored);
+it is reproduced by `npm run build` / `prepublishOnly`.
+
+### 3.6 Runtime resolution
+
+Mirror `builtin-config.ts`'s `__dirname`-relative resolution. Add to a new module
+`src/server/agent/builtin-packs.ts`:
+
+```ts
+const __dirname = path.dirname(fileURLToPath(import.meta.url)); // dist/server/agent/
+/** dist/server/agent/ → ../builtin-packs/market-packs → the first-party pack band root. */
+export function resolveBuiltinPacksDir(override?: string): string {
+  return override ?? process.env.BOBBIT_BUILTIN_PACKS_DIR
+    ?? path.join(__dirname, "..", "builtin-packs", "market-packs");
+}
+```
+
+The `BOBBIT_BUILTIN_PACKS_DIR` env override (and the `override` param) let tests
+point the band at a fixture dir without touching dist. (Tests may also point it at
+the **repo** `market-packs/` dir, which already contains the built `lib/`
+bundles.)
+
+---
+
+## 4. Built-in source registration
+
+**Decision: a synthetic, reserved source surfaced through the sources API but
+NOT persisted to `marketplace-sources.yaml`.**
+
+### 4.1 Source identity
+
+- **Stable id `"builtin"`** (matches `SOURCE_ID_RE = /^[a-z0-9][a-z0-9-]*$/`).
+- Synthetic wire shape (never written to disk):
+  `{ id: "builtin", url: "builtin:", builtin: true, addedAt: <epoch-0 or build-time> }`.
+- Add an optional `builtin?: boolean` flag to the `MarketplaceSource` wire type
+  (`src/server/agent/marketplace-source-store.ts`) — **wire/response only**; it is
+  never serialized (`serializeSource` ignores it) and `parseSource` rejects/strips
+  any disk-authored `builtin` field. The disk file therefore can never duplicate
+  or shadow the synthetic source.
+
+### 4.2 Idempotency + non-persistence
+
+The built-in source is **not added to `MarketplaceSourceStore`**. Instead, the
+sources REST handler **composes** it into responses at read time:
+
+- `GET /api/marketplace/sources` → `[{ builtin source }, ...sourceStore.list()]`.
+  Because it is computed, it is automatically idempotent across restarts and never
+  duplicated in `marketplace-sources.yaml` (the store never sees it).
+- `MarketplaceSourceStore.add()` rejects `url: "builtin:"` (guard: reject the
+  reserved url and the reserved id `"builtin"`), so a user cannot register a
+  colliding source.
+
+### 4.3 Non-removability + no-op resync
+
+In the `/api/marketplace/sources/:id` handler (`src/server/server.ts`, the
+`sourceMatch` branch):
+
+- `id === "builtin"` must resolve as a known source (so 404 is not returned), but:
+  - `DELETE` → **403** `{ error: "the built-in source cannot be removed" }`.
+  - `POST .../sync` → **200 no-op** (returns the synthetic source; nothing to
+    git-sync — the dir ships with the app). Optionally re-reads the shipped dir.
+  - `GET .../packs` → list the shipped first-party packs (browse), each flagged
+    `builtin: true`.
+
+The store's `get("builtin")` returns `undefined`, so the handler must special-case
+`id === "builtin"` **before** the `sourceStore.get(id)` existence check.
+
+---
+
+## 5. Resolver band — exact `buildPackList()` change + ordering
+
+### 5.1 New band builder
+
+Add to `src/server/agent/builtin-packs.ts`:
+
+```ts
+import type { PackEntry } from "./pack-types.js";
+import { readManifest } from "./pack-manifest.js";
+
+/** Scope the built-in first-party pack entries carry. See §7 for why "server". */
+export const BUILTIN_PACK_SCOPE = "server" as const;
+
+/**
+ * Resolve every shipped first-party pack as an in-place PackEntry (low→high
+ * within the band; readdir order). No `.pack-meta.yaml` required — these are
+ * resolved in place, not installed (D1). A synthetic meta marks provenance so
+ * the Market UI can flag `builtin: true`.
+ */
+export function builtinFirstPartyPackEntries(builtinPacksDir: string): PackEntry[] {
+  let dirents: fs.Dirent[];
+  try { dirents = fs.readdirSync(builtinPacksDir, { withFileTypes: true }); }
+  catch { return []; }
+  const out: PackEntry[] = [];
+  for (const d of dirents.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!d.isDirectory() || d.name.startsWith(".")) continue;
+    const dir = path.join(builtinPacksDir, d.name);
+    const manifest = readManifest(dir);
+    if (!manifest) continue;
+    out.push({
+      id: `builtin-pack:${manifest.name}`,
+      kind: "market",                 // flows through the same resolver/contribution machinery
+      scope: BUILTIN_PACK_SCOPE,      // §7: activation + ordering home
+      path: dir,                      // contains a `market-packs` segment → §6 identity works unchanged
+      readOnly: true,
+      manifest,
+      meta: {                         // synthetic provenance (NOT read from disk)
+        sourceUrl: "builtin:", sourceRef: "", commit: "",
+        packName: manifest.name, version: manifest.version,
+        installedAt: "", updatedAt: "", scope: BUILTIN_PACK_SCOPE,
+      },
+      layout: "defaults-tree",
+      skillSource: "project",
+    });
+  }
+  return out;
+}
+```
+
+The `id` prefix `builtin-pack:` keeps these entries distinguishable from
+user-installed `market:server:<name>` entries in conflict reports and logs.
+
+### 5.2 Insertion point in `buildPackList()`
+
+Add `builtinPacksDir?: string` to `BuildPackListOptions`. Insert the band
+**immediately after the monolithic builtin defaults entry push (step 1) and
+before the server scope band (step 2)** in `src/server/agent/pack-list.ts`:
+
+```ts
+  // 1. Builtin pack (defaults-tree, lowest). [unchanged]
+  entries.push({ id: "builtin", kind: "builtin", scope: "builtin", path: opts.builtinsDir, ... });
+
+  // 1b. NEW — built-in first-party packs (resolve-in-place band). Above the
+  //     monolithic defaults (they beat it by name), below every user scope band
+  //     (a user-installed pack of the same name overrides them — §6.3).
+  if (opts.builtinPacksDir) pushMarket(builtinFirstPartyPackEntries(opts.builtinPacksDir));
+
+  // 2. Server scope: market packs, then the user pack. [unchanged]
+  ...
+```
+
+Wire `builtinPacksDir: resolveBuiltinPacksDir()` at every `buildPackList(...)`
+call site (`src/server/skills/slash-skills.ts:341` and the config-cascade adapter
+path). The simplest is to define a shared `BUILTIN_PACKS_DIR` next to
+`BUILTINS_DIR` and pass both.
+
+### 5.3 Ordering table (low → high priority)
+
+| # | Band | `kind` / `scope` | Inserted |
+|---|---|---|---|
+| 1 | Monolithic builtin defaults | `builtin` / `builtin` | unchanged |
+| **1b** | **Built-in first-party packs** | **`market` / `server`** | **NEW (this design)** |
+| 2 | Server market packs | `market` / `server` | unchanged |
+| 2 | Server user pack | `user` / `server` | unchanged |
+| 3 | Global-user market packs + user pack | `market`/`user` / `global-user` | unchanged |
+| 4 | Project market packs + user pack | `market`/`user` / `project` | unchanged |
+| 5 | Legacy-implicit skill band | `legacy-implicit` | unchanged |
+
+Precedence consequence (higher wins): **builtin-defaults < built-in-first-party <
+server-installed < global-user < project**. Everything from step 2 down is
+**unchanged** in relative order, so `pack_order` semantics and all existing
+precedence invariants hold. The legacy skill band still sits above all market
+packs (finding #1 preserved).
+
+---
+
+## 6. Pack identity — derivation, stability, shadow behaviour
+
+### 6.1 Strategy: ship under a `market-packs` segment (no identity-code change)
+
+Because each built-in pack's absolute `path` is
+`dist/server/builtin-packs/market-packs/<name>`, it contains a literal
+`market-packs` segment. Therefore, **with no change to identity code**:
+
+- `tool-contributions.ts::isMarketPackBaseDir(baseDir)` → `true` (segment present).
+- `pack-identity.ts::derivePackId(baseDir)` → `<name>` (segment + next).
+- `pack-contributions.ts::packIdFromRoot(packRoot)` → `<name>`.
+- `computeRendererKind()` → `"pack"` for `.js` renderers (relevant to a future
+  tool-bearing first-party pack; `pr-walkthrough` has no renderers).
+
+`packId` is thus **stable** = the pack directory name = `manifest.name`, identical
+for every contribution the pack makes, and never caller-supplied (the security
+keystone of #734 §6.6 is preserved verbatim).
+
+### 6.2 Rejected alternative: generalise the derivation
+
+Generalising `derivePackId`/`isMarketPackBaseDir`/`packIdFromRoot` to recognise a
+`builtin-packs` root was rejected: these three functions are the **server-derived
+identity keystone** that store-namespacing (B1) and route-namespace (B3) bind to.
+Touching them risks a security regression and forces three call sites to agree.
+Shipping under a `market-packs` segment is a pure build-layout choice with zero
+identity-logic risk.
+
+### 6.3 User-pack override / shadow behaviour
+
+If a user installs a pack named `pr-walkthrough` at server (or any user) scope,
+both that entry and the built-in entry derive `packId = "pr-walkthrough"`.
+Resolution is by list position, and the user entry is inserted **after** the
+built-in band (step 2+ > step 1b), so:
+
+- **The user pack wins** every role/tool/skill/contribution merge.
+- The conflict detector (`buildConflictsFor`) flags the shadow as
+  market-involved (both `kind: "market"`), surfaced via `/api/packs/conflicts`.
+- **Surface tokens + activation bind to the WINNER.** The pack-contribution
+  registry collapses to the winning pack per `packId` before indexing (see
+  `server.ts:1026` "deduped-on-path … collapses to the winning pack per packId"),
+  so only one `pr-walkthrough` contribution set is registered — the user pack's.
+  The built-in pack's contributions are shadowed out, exactly like a server pack
+  shadowing a global one. No token collision: there is one winner per `packId`.
+- **Activation** for `(server, pr-walkthrough)` (§7) applies to whichever entry
+  wins; disabling targets the feature by name regardless of provider, which is the
+  intended semantics.
+
+---
+
+## 7. Activation + Market UI
+
+### 7.1 Activation scope: `server` (reuse #734 verbatim)
+
+**Decision: built-in-pack activation is stored under the `server`
+`PackOrderScope`**, keyed by pack name, reusing the #734 `pack_activation` store
+unchanged.
+
+Rationale:
+
+- The built-in source is **server-global**, like marketplace sources (which live
+  in the server-scope `marketplace-sources.yaml`). Disabling a shipped feature is
+  a server-wide admin decision, not a per-project one.
+- `PackActivationMap` is `Partial<Record<PackOrderScope, Record<string,
+  DisabledRefs>>>` and the built-in pack **entries carry `scope: "server"`**
+  (§5.1), so the existing config-cascade / slash-skills `PackActivationProvider`
+  (`server.ts:1044`–`1052`) resolves `getPackActivation("server", packName)` with
+  **no new code** and no widening of `PackOrderScope`.
+- Avoids a 4th scope value rippling through `pack_order`, normalisation, and
+  install-scope validation (you cannot install into a `builtin` scope).
+
+Alternative considered — widen `PackOrderScope` to add `"builtin"` (clean,
+collision-free namespace) — rejected for this goal because it touches
+`project-config-store.ts` normalisation + the API scope validators for marginal
+benefit; the `server` mapping is sufficient and pre-release-cheap. (Recorded here
+so a future refactor can revisit.)
+
+Default state: a built-in pack with no `pack_activation` entry is **fully
+enabled** (the #734 default — absent kind ⇒ all enabled).
+
+### 7.2 Disabling semantics
+
+Disabling uses the #734 override system directly: `PUT
+/api/marketplace/pack-activation { scope: "server", packName, disabled }` writes
+`DisabledRefs` (`roles`/`tools`/`skills`/`entrypoints`). For `pr-walkthrough` the
+toggleable surface is its **entrypoints** (the four `contents.entrypoints[]`
+basenames). Disabling them:
+
+- removes the launchers (composer-slash, git-widget-button, command-palette) and
+  the `kind:"route"` deep-link (`routeId: "pr-walkthrough"`) from the
+  pack-contribution registry (one toggle per `listName` disables both the launcher
+  id AND the derived `routeId`, per `DisabledRefs.entrypoints` semantics);
+- **panels + routes stay** as support surfaces for whatever remains enabled (they
+  are not user-facing toggle entries) — but with all entrypoints disabled the
+  panel is simply unreachable.
+
+Because the built-in `pr-walkthrough` twin is deleted (§8), disabling the
+first-party pack makes the feature **genuinely unavailable** — the intended
+capability.
+
+### 7.3 Disabled-state degradation (no crash, no dangling surface)
+
+- The `/api/ext/contributions` registry omits disabled entrypoints (existing #734
+  behaviour), so the client never registers the launcher or the
+  `#/ext/pr-walkthrough` deep-link.
+- The generic `ext` route (`routing.ts` `view: "ext"`, `extRouteId`) must render a
+  **"feature unavailable" empty state** when an `#/ext/<routeId>` deep-link
+  resolves to no registered route (e.g. a bookmarked `#/ext/pr-walkthrough` after
+  disable) — never a crash or blank panel. Verify the existing unknown-routeId
+  path already does this; if not, add the empty state.
+- Surface tokens for a disabled contribution are rejected by the existing
+  installed+active check (`server.ts:5584`–5593): a stale token cannot drive a
+  disabled pack.
+
+### 7.4 Market UI (`src/app/marketplace-page.ts`)
+
+- **Sources tab**: render the built-in source (`source.builtin === true`) as a
+  distinct, labelled "Built-in" section. **No Remove button** for it (gate
+  `handleRemoveSource` / the Remove control on `!source.builtin`). Add copy making
+  clear these are shipped/core features.
+- **Installed tab**: built-in packs appear flagged `builtin: true` with the #734
+  enable/disable **toggle**, but **no Uninstall button** (gate `handleUninstall` /
+  the Uninstall control on `!pack.builtin`).
+- Reuse the existing #734 activation toggle UI + `getPackActivation` /
+  `setPackActivation` calls (`src/app/api.ts`).
+
+### 7.5 Server wire changes for the Installed list
+
+`GET /api/marketplace/installed` currently returns
+`installer.listInstalled(allContexts(projectId))`. Extend the handler
+(`server.ts:6309`) to **prepend** built-in pack rows:
+
+```ts
+const builtin = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+  scope: "server", packName: e.manifest!.name, version: e.manifest!.version,
+  status: "ok", builtin: true, /* + the fields InstalledPackWire expects */
+}));
+json({ installed: [...builtin, ...installer.listInstalled(allContexts(projectId))] });
+```
+
+Add `builtin?: boolean` to the `InstalledPackWire` type (`src/app/api.ts`). The
+`DELETE /api/marketplace/installed` handler (`server.ts:6294`) must **reject**
+(`403`/`409`) when the named pack is a built-in first-party pack — uninstall is
+not an operation on shipped packs.
+
+---
+
+## 8. `pr-walkthrough` migration + built-in deletion
+
+### 8.1 Migration
+
+`pr-walkthrough` already exists as a complete pack at
+`market-packs/pr-walkthrough/` (pack.yaml: no tools, one panel, pack-level
+`routes: { module: lib/routes.mjs, names: [bundle, publish] }`, four entrypoints).
+Migration = **add `"pr-walkthrough"` to the `FIRST_PARTY_PACKS` allowlist** in
+`scripts/copy-builtin-packs.mjs` (§3.3). No manual install: the §5 band resolves it
+active-by-default. The mandatory E2E (§11) drives it with **no install step**.
+
+### 8.2 Parity argument (must be confirmed green before deletion)
+
+Per [`pr-walkthrough-pack-deletion.md`](./pr-walkthrough-pack-deletion.md), the
+pack re-expresses the viewer/route/store/deep-link surface using only public
+contributions + the durable Host API:
+
+| Surface | Built-in origin (deleted) | Pack re-expression (sole provider) |
+|---|---|---|
+| Viewer panel | `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` | `panels/pr-walkthrough-panel.yaml` → `lib/panel.js` |
+| Changeset/diff bundle | `src/server/pr-walkthrough/routes.ts` viewer-feed routes | `routes: bundle` (`lib/routes.mjs`, LIVE git in the confined worker) |
+| Persisted cards | `src/server/pr-walkthrough/walkthrough-store.ts` | `routes: publish` → `host.store.*` (pack-namespaced) |
+| Launcher + deep-link | composer/git-widget launch + the `"walkthrough"` RouteView | `entrypoints:` (3 launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `#/ext/pr-walkthrough` |
+| Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
+
+**Deletion is gated on the mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`)
+passing while served ENTIRELY by the built-in pack** (no manual install). Do not
+delete until that is green in CI.
+
+### 8.3 Files to delete (cross-referenced with the deletion plan)
+
+**Client UI**
+
+- `src/ui/components/pr-walkthrough/` — entire dir (`PrWalkthroughPanel.ts`,
+  `types.ts`, `fixtures.ts`, `index.ts`).
+- `src/app/pr-walkthrough.ts` and `src/app/pr-walkthrough-lazy.ts`.
+- `src/app/render.ts` — remove all walkthrough wiring: the imports from
+  `pr-walkthrough.js` / `pr-walkthrough-lazy.js` / `types.js`, the
+  `open-pr-walkthrough` listener, `handlePrWalkthroughJobUpdated` +
+  `connectPrWalkthroughViewerEvents` + the `pr_walkthrough_job_updated` WS,
+  `walkthroughPanelContent` / `walkthroughControlButtons` /
+  `walkthroughChangesetFromTab` / `walkthroughTabButtonLabel` and the
+  `standaloneUrl` `/walkthrough?...` builder, plus the `workspaceSessionId()`
+  `route.view === "walkthrough"` branch.
+- `src/app/panel-workspace.ts` — the `kind: "walkthrough"` tab handling.
+- `src/app/routing.ts` — the `"walkthrough"` member of the `RouteView` union, the
+  `walkthroughSessionId` / `walkthroughTabId` fields, and the `#/walkthrough`
+  (and `/walkthrough` pathname) cases in `getRouteFromHash` + `setHashRoute`. The
+  generic `ext` route replaces them.
+
+**Server (viewer-feed routes + store)**
+
+- `src/server/pr-walkthrough/routes.ts` — **split, not wholesale delete**. Remove
+  the **viewer-feed** routes the pack now serves: `GET /api/pr-walkthrough/jobs/:id`,
+  `GET /api/pr-walkthrough/session/:id`, `GET /api/pr-walkthrough/:id`, and the
+  internal `bundle` / `analysis-bundle` routes. **Keep** the agent-lifecycle +
+  GitHub-credential routes: `POST /launch`, `POST /resolve`, `POST
+  …/export/preview`, `POST …/export/submit` (network + GitHub auth — explicitly
+  out of scope per the deletion plan's carve-outs). Adjust the `server.ts`
+  `handlePrWalkthroughApiRoute(...)` dispatch accordingly (keep the import + call;
+  narrow the `isPublicWalkthroughRoute` matcher to the retained routes).
+- `src/server/pr-walkthrough/walkthrough-store.ts` + `git-changeset.ts` +
+  `diff-parser.ts` — the changeset/diff logic is RE-EXPRESSED live in the pack's
+  `lib/routes.mjs` (ambient `child_process`/`fs` in the confined worker), so the
+  bespoke viewer no longer depends on them. **Confirm parity first** (see §8.4 for
+  the persistence caveat before deleting `walkthrough-store.ts`).
+
+**Tool defs** — `defaults/tools/pr-walkthrough/` is **kept** (the agent-driving
+tools `submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle` / `readonly_bash`
+stay — §8.5).
+
+### 8.4 Persistence caveat (highest-risk parity item)
+
+The deletion plan replaces `walkthrough-store.ts` with `host.store.*`, written by
+the pack's `publish` route. But the **agent submit tool** (`submit_pr_walkthrough_yaml`)
+is the producer of LLM cards, and it persists today via
+`/api/internal/pr-walkthrough/submit-yaml` → `walkthrough-store`. To make the pack
+the *literal* sole persistence provider, the submit tool must land its cards in the
+pack-scoped `host.store` (via the pack `publish` route).
+
+**Recommendation for this goal:** make the pack the sole **viewer/route/deep-link**
+provider (delete the UI, viewer-feed routes, deep-link, `git-changeset.ts`,
+`diff-parser.ts`), and treat the submit→persistence bridge as the gated step:
+
+- If the submit→`publish` bridge lands cleanly (agent tool calls the pack
+  `publish` route), delete `walkthrough-store.ts` + the internal submit-yaml route.
+- If that bridge is larger than this goal allows, **retain `walkthrough-store.ts`
+  + the internal submit-yaml route as an agent-side persistence detail** (NOT a
+  viewer surface), and have the pack's `bundle` route read those persisted cards.
+  The pack is still the sole VIEWER/contribution provider; the persistence plumbing
+  is the documented follow-up ("PR-walkthrough agent-side migration").
+
+The design doc explicitly flags this so the implementer confirms parity (E2E green)
+before removing `walkthrough-store.ts`.
+
+### 8.5 Agent-tool carve-out
+
+`defaults/tools/pr-walkthrough/` (the `submit_pr_walkthrough_yaml`,
+`read_pr_walkthrough_bundle`, `readonly_bash` tools), `WalkthroughAgentManager`,
+`github-adapter.ts`, `card-synthesis.ts`, `export-mapper.ts`,
+`walkthrough-agent-manager.ts`, `walkthrough-agent-store.ts`,
+`walkthrough-analysis-bundle.ts`, `walkthrough-yaml-schema.ts`,
+`walkthrough-readonly-policy.ts` **all stay** — they are genuine agent capabilities
+(model-backed synthesis + GitHub network/auth), not contribution surfaces. Only the
+viewer/route/store/deep-link surfaces move to the pack.
+
+---
+
+## 9. Caches / lifecycle
+
+- **No new cache.** The built-in band is rebuilt on every `buildPackList(...)`
+  call (a cheap `readdirSync` + `readManifest`), so enable/disable takes effect on
+  the next resolution.
+- **Enable/disable** goes through `PUT /api/marketplace/pack-activation`, which
+  already calls `invalidateResolverCaches()` (`server.ts:6425`). That single
+  synchronous call busts the slash-skill cache, the tool-scan cache, and the
+  dispatcher / route-dispatcher / route-registry / pack-contribution-registry
+  (`server.ts:2336`), so the launcher/deep-link/tool appear or disappear with **no
+  restart/reload**.
+- **Reload-safety**: the synthetic source is computed per request (§4.2); the band
+  is computed per resolution. There is no persisted state to drift across reload or
+  restart. Activation overrides persist in `pack_activation` (server config) and
+  survive restart.
+- **Project scoping**: built-in pack entries carry `scope: "server"` and are
+  server-global; they appear in every project's resolution. Activation is
+  server-scoped (§7.1), so a disable applies across projects — the intended
+  server-wide behaviour for a shipped feature.
+
+---
+
+## 10. Item 0 — #734 fixture cleanup
+
+Findings from `tests/fixtures/market-sources/`:
+
+- Only `retry-demo-src` is used (by `tests/e2e/ui/extension-host.spec.ts` and
+  `artifacts-pack.spec.ts`).
+- `conflict-dup-route-name-src`, `conflict-dup-panel-id-src`,
+  `conflict-dup-entrypoint-id-src`, `conflict-dup-routeid-src`, `no-tools-pack-src`,
+  `panel-only-src` are **orphaned** (no test installs them).
+- The within-pack hard conflicts (dup route name / panel id / entrypoint id) are
+  already unit-tested at the loader level in `tests/pack-contributions.test.ts`
+  via inline temp dirs.
+- The README references a **nonexistent** dir `tests/fixtures/pack-schema-v1/**`.
+
+**Plan:**
+
+1. **Wire the install-level fixtures into a new E2E**
+   `tests/e2e/ui/marketplace-conflicts.spec.ts` (or an API E2E under
+   `tests/e2e/`), asserting behaviour the loader-unit tests cannot:
+   - `conflict-dup-routeid-src` (two packs claiming the same host-global
+     `routeId`) — **install both, register neither** (cross-pack registry
+     conflict, which the within-pack loader unit tests do NOT cover).
+   - `no-tools-pack-src` — an ORPHAN/UI-only pack installs and its panel +
+     entrypoints + pack-level route register (pack-bound surface auth, no tool in
+     `allowedTools`).
+   - `panel-only-src` — a single auto-discovered panel, all-empty `contents`,
+     installs + registers.
+2. **Keep `conflict-dup-route-name-src` / `conflict-dup-panel-id-src` /
+   `conflict-dup-entrypoint-id-src`** ONLY if the new E2E also asserts the
+   install-time surfacing of those conflicts (install succeeds, registration drops
+   the pack with a loud error). If the E2E does not add value beyond the existing
+   loader unit tests, **delete those three orphaned fixtures** (the unit tests
+   already pin the behaviour). Recommended: keep them and assert install-level
+   drop, since install + registry surfacing is a distinct layer.
+3. **Fix `tests/fixtures/market-sources/README.md`**: correct the broken
+   `tests/fixtures/pack-schema-v1/**` reference to the actual location of the
+   loader fixtures (the inline temp dirs in `tests/pack-contributions.test.ts`), or
+   drop the stale sentence.
+
+---
+
+## 11. Test plan
+
+### 11.1 Unit (`tests/*.test.ts`, node:test)
+
+- **`tests/builtin-packs.test.ts`** (new):
+  - `resolveBuiltinPacksDir()` resolves relative to `__dirname` and honours the
+    `override` / `BOBBIT_BUILTIN_PACKS_DIR` override.
+  - `builtinFirstPartyPackEntries(dir)` returns one entry per shipped pack, with
+    stable `id = "builtin-pack:<name>"`, `scope: "server"`, `path` containing a
+    `market-packs` segment, synthetic meta, `manifest` populated.
+  - **packId stable**: `packIdFromRoot(entry.path) === manifest.name` and
+    `isMarketPackBaseDir(entry.path) === true` (point at a fixture dir).
+  - **Idempotent across restart**: two independent `buildPackList(...)` calls (or
+    two source-list compositions) produce identical band entries.
+  - **Precedence**: in a `buildPackList(...)` result, the built-in band sits after
+    the `builtin` defaults entry and before the server band; a user-installed
+    server pack of the same name appears later (wins).
+  - **Activation filtering**: with `pack_activation.server.<name>.entrypoints`
+    listing the four basenames, the resolved/registered entrypoints for that pack
+    are empty.
+- **`tests/marketplace-source-builtin.test.ts`** (new):
+  - The composed `GET /api/marketplace/sources` shape includes the synthetic
+    `{ id: "builtin", builtin: true }` source and `MarketplaceSourceStore` does NOT
+    contain it (not persisted to `marketplace-sources.yaml`; idempotent after a
+    re-instantiated store = simulated restart).
+  - `MarketplaceSourceStore.add({ url: "builtin:" })` / id `"builtin"` is rejected.
+
+### 11.2 Browser E2E (`tests/e2e/ui/*.spec.ts`)
+
+- **`tests/e2e/ui/pr-walkthrough-pack.spec.ts`** (the deletion plan's mandated
+  E2E, updated):
+  - The walkthrough works **end-to-end served entirely by the first-party pack**,
+    with **NO manual install step** (it is resolved by the §5 band): git-widget
+    launcher → panel → `bundle` recomputes the REAL changeset LIVE → diff renders →
+    `publish` persists cards → reload re-reads the same persisted cards.
+  - **Disable** from the Market built-in section removes the launcher + the
+    `#/ext/pr-walkthrough` deep-link + the contribution; the feature is
+    unavailable and the deep-link shows the empty state (no crash).
+  - **Re-enable** restores it; the state **survives reload**.
+  - The built-in **source cannot be removed** (no Remove control; `DELETE` → 403)
+    and built-in **packs cannot be uninstalled** (no Uninstall control; `DELETE
+    /installed` → 403/409).
+- **`tests/e2e/ui/marketplace-conflicts.spec.ts`** (new, item 0): the conflict /
+  no-tools / panel-only fixture assertions from §10.
+
+### 11.3 Phase invariant
+
+All new tests land in exactly one of unit / e2e (pinned by
+`tests/test-phase-invariant.test.ts`). The new browser specs go under
+`tests/e2e/ui/`.
+
+---
+
+## 12. Invariants preserved (#734 + #732)
+
+- **Precedence / `pack_order`** — unchanged from step 2 down; the new band only
+  inserts between builtin-defaults and the server band (§5.3).
+- **Server-derived pack identity** — derived structurally from the
+  `market-packs/<name>` path segment, never caller-supplied (§6). Identity code
+  untouched.
+- **Action guard** (`allowedTools` + `toolUseId`) and **surface tokens
+  re-validated per call** — unchanged; disabled contributions fail the
+  installed+active check (§7.3).
+- **Pack-scoped namespaces** (store + route) — the built-in pack uses the same
+  `host.store` / route namespace keyed off `packId` as any market pack.
+- **Worker confinement (#732)** — the pack `routes.mjs` runs in the confined
+  worker with ambient `child_process`/`fs` (trusted tool/MCP tier), no
+  `permissions` opt-in re-introduced.
+- **Store/session scoping** — unchanged; the built-in pack is server-global with
+  server-scoped activation, consistent with the server-global source model.
+- **Built-in source is non-removable; built-in packs are not copy-installed /
+  uninstalled** — only enabled/disabled (§4.3, §7).
+- **User-source model unchanged** — git/local-dir sources behave exactly as today.
+
+---
+
+## 13. Implementation task breakdown (parallelizable partition)
+
+Partitioned by module to minimise cross-touch conflicts. Tasks A–D can proceed in
+parallel after Task A's type/signature additions land; E–F depend on A–C; G is
+independent.
+
+- **Task A — band + resolution core** (`src/server/agent/builtin-packs.ts` new;
+  `pack-list.ts` `BuildPackListOptions` + insertion; `pack-types.ts`/manifest as
+  needed): `resolveBuiltinPacksDir`, `builtinFirstPartyPackEntries`,
+  `BUILTIN_PACK_SCOPE`, the step-1b insertion, and wiring `builtinPacksDir` at both
+  `buildPackList(...)` call sites. **Unit: `tests/builtin-packs.test.ts`.**
+- **Task B — ship pipeline** (`scripts/copy-builtin-packs.mjs` new;
+  `package.json` `build:server`): the allowlist copy step + dist layout. Verify
+  `npm run build` produces `dist/server/builtin-packs/market-packs/pr-walkthrough/`.
+- **Task C — source registration + sources/installed API**
+  (`marketplace-source-store.ts` `builtin?` wire flag + reserved-id/url guards;
+  `server.ts` sources composition, `:id` DELETE/sync/packs special-casing,
+  installed-list prepend, install/uninstall rejection; `src/app/api.ts`
+  `InstalledPackWire.builtin` + `MarketplaceSource.builtin`). **Unit:
+  `tests/marketplace-source-builtin.test.ts`.**
+- **Task D — Market UI** (`src/app/marketplace-page.ts`): built-in source section
+  (no Remove), built-in pack rows (toggle, no Uninstall), reuse #734 activation.
+- **Task E — pr-walkthrough migration** (allowlist add): confirm the band resolves
+  it active-by-default; the mandatory E2E runs with no install.
+- **Task F — built-in twin deletion** (§8.3 file list; routes.ts split per §8.4):
+  gated on Task E's E2E green. Includes `routing.ts` / `render.ts` /
+  `panel-workspace.ts` cleanup and the `ext`-route empty-state check (§7.3).
+- **Task G — item 0 fixture cleanup** (`tests/fixtures/market-sources/README.md`
+  + `tests/e2e/ui/marketplace-conflicts.spec.ts`): independent of A–F.
+- **Task H — docs**: update `docs/marketplace.md` (built-in source + disabling
+  shipped features) and `docs/extension-host-authoring.md` (first-party packs
+  dogfood the API); reconcile this doc with
+  `docs/design/pr-walkthrough-pack-deletion.md`.
