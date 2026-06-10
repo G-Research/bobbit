@@ -61,19 +61,30 @@ function rawYamlOf(toolCall) {
 	return toolCall && toolCall.input && typeof toolCall.input.yaml === "string" ? toolCall.input.yaml : undefined;
 }
 
-// Derive the REAL jobId from the submitted production doc's `pr` (no litmus literal).
-// Falls back to the panel param's jobId, else a neutral label.
-function deriveJobId(yamlText, fallback) {
+// Derive the REAL job REFERENCE from the submitted production doc's `pr` (no
+// litmus literal): the jobId AND the base/head SHAs the LIVE recompute needs.
+// The shipped launchers navigate to a BARE `#/ext/pr-walkthrough` (no SHA URL
+// params, by design), so the SHAs MUST come from the submitted YAML's `pr` block
+// (`pr.base_sha`/`pr.head_sha`) — without them `publish` stores a pointer with
+// undefined SHAs and `bundle` returns `{ found: false }` (the empty state). The
+// jobId falls back to the panel param's jobId, else a neutral label.
+function deriveJobRef(yamlText, fallback) {
+	const ref = { jobId: fallback || "pr-walkthrough" };
 	if (yamlText) {
 		try {
 			const doc = parseYaml(yamlText);
 			const pr = doc && typeof doc === "object" ? doc.pr : undefined;
-			if (pr && pr.owner && pr.repo && pr.number != null) {
-				return changesetIdForGithub(String(pr.owner), String(pr.repo), pr.number, pr.head_sha ? String(pr.head_sha) : undefined);
+			if (pr && typeof pr === "object") {
+				if (pr.owner && pr.repo && pr.number != null) {
+					ref.jobId = changesetIdForGithub(String(pr.owner), String(pr.repo), pr.number, pr.head_sha ? String(pr.head_sha) : undefined);
+				}
+				if (pr.base_sha != null && String(pr.base_sha).trim()) ref.baseSha = String(pr.base_sha).trim();
+				if (pr.head_sha != null && String(pr.head_sha).trim()) ref.headSha = String(pr.head_sha).trim();
+				if (pr.provider != null && String(pr.provider).trim()) ref.provider = String(pr.provider).trim();
 			}
 		} catch { /* fall through */ }
 	}
-	return fallback || "pr-walkthrough";
+	return ref;
 }
 
 // Map a postMessage failure onto a clear, user-facing message (the §8.4 failure
@@ -249,9 +260,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	return {
 		render(params, host) {
 			const paramJobId = params && params.jobId;
-			// Single panel instance ⇒ a single stable state key (launchers no longer
-			// carry a jobId; the panel resolves the real job from the session).
-			const paramKey = paramJobId || "__session__";
+			// PER-SESSION state key. The module-level `byJob` map outlives a single
+			// session (panels are a single page-lived instance), so keying by a shared
+			// constant leaks session A's rendered bundle into session B (and suppresses
+			// B's Load/Run). The render layer injects the BOUND session id (`__sessionId`)
+			// so each session gets its OWN entry; a bare launcher (no jobId) in a
+			// different session never sees another session's cache and always offers
+			// Load/Run for its own submission. Falls back to the deep-link jobId, then a
+			// neutral constant (non-DOM/unit fixtures with no bound session).
+			const boundSessionId = params && params.__sessionId;
+			const paramKey = boundSessionId || paramJobId || "__session__";
 			const baseSha = params && params.baseSha;
 			const headSha = params && params.headSha;
 			const entry = byJob.get(paramKey) || { status: "idle" };
@@ -280,13 +298,20 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 			const publishAndLoad = async (toolCall) => {
 				const yamlText = rawYamlOf(toolCall);
-				const jobId = deriveJobId(yamlText, paramJobId);
+				const ref = deriveJobRef(yamlText, paramJobId);
+				const jobId = ref.jobId;
+				// SHAs for the LIVE recompute: PREFER the submitted YAML's pr.base_sha/
+				// head_sha (the bare-launcher path carries NO URL params); fall back to the
+				// deep-link params only when the YAML lacks them. Without these, `publish`
+				// stores a pointer with undefined SHAs and `bundle` returns the empty state.
+				const effBaseSha = ref.baseSha || baseSha;
+				const effHeadSha = ref.headSha || headSha;
 				// Persist via the pack's OWN `publish` route BEFORE reading `bundle`, so the
 				// bundle serves the synthesized production cards over the structural fallback.
 				if (yamlText && host.callRoute) {
 					const publishBody = { jobId, yaml: yamlText };
-					if (baseSha) publishBody.baseSha = baseSha;
-					if (headSha) publishBody.headSha = headSha;
+					if (effBaseSha) publishBody.baseSha = effBaseSha;
+					if (effHeadSha) publishBody.headSha = effHeadSha;
 					const result = await host.callRoute("publish", { method: "POST", body: publishBody });
 					if (result && result.ok === false) {
 						const detail = result.summary && Array.isArray(result.summary.errors) && result.summary.errors[0]
@@ -297,8 +322,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					}
 				}
 				const query = { jobId };
-				if (baseSha) query.baseSha = baseSha;
-				if (headSha) query.headSha = headSha;
+				if (effBaseSha) query.baseSha = effBaseSha;
+				if (effHeadSha) query.headSha = effHeadSha;
 				const bundle = await host.callRoute("bundle", { query });
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
 				byJob.set(paramKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId });
