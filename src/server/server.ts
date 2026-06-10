@@ -5580,6 +5580,9 @@ async function handleApiRoute(
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
+			// Sub-goal C: live status reader for host.agents.status/list (the core has
+			// no public status accessor).
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -5950,6 +5953,9 @@ async function handleApiRoute(
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
+			// Sub-goal C: live status reader for host.agents.status/list (the core has
+			// no public status accessor).
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
 		});
 		const start = Date.now();
 		try {
