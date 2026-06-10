@@ -282,6 +282,25 @@ contribution (§5).
 
 ## 3. Confinement root widening
 
+> **Scope of "confinement" in this goal (reconciles the spec's "deny-all" wording).** The confined
+> worker is a **module-import containment + resource/crash isolation** boundary — it is NOT a capability
+> sandbox. The dependency goal #732 ("Simplify Extension Host isolation — delete the false-security
+> capability sandbox", already merged on master) deliberately removed the per-capability sandbox: pack
+> SERVER code is TRUSTED (the tool/MCP tier) and runs with ambient `node:` built-ins (`fs`/
+> `child_process`/`net`), `fetch`, and the normal `process`. The goal spec's invariant phrase "deny-all
+> server-module worker **remains**" is the operative instruction — *preserve the worker as it is* — and
+> "deny-all" describes the **module-import** policy (a pack module may import only `file:` URLs WITHIN its
+> own pack root; everything else is denied), NOT a capability deny-list. This goal makes **no change** to
+> the capability model (confirmed: the only diff to `module-host-bootstrap.ts` / `confinement-loader.ts`
+> vs master is the `isPackPathWithinGroup`→`isPackPathWithinRoot` rename). It only **widens the
+> import-containment root** from the group dir to the pack root, so a pack's own `../lib/*.mjs` resolves
+> while any import escaping the pack root stays rejected. Ambient `node:child_process` use by the
+> migrated pr-walkthrough pack's `lib/routes.mjs` (live `git diff` recompute) is the intended,
+> pre-existing trusted-tier behaviour from #732, not a regression introduced here. "With `permissions`
+> gone there is no opt-in to `git`/`fs`/`net`" means exactly that there is no permission *system* at all
+> (the dependency goal removed it) — capabilities are ambient for trusted pack code, gated only by the
+> resource/crash isolation + import containment, never by a re-introduced permission schema.
+
 Today `action-dispatcher.ts::resolveModulePath` and `route-dispatcher.ts::resolveModulePath` return
 `packRoot = path.join(loc.baseDir, loc.groupDir)` (the **group dir**), and the worker bootstrap confines
 imports to that group dir. A server module importing `../lib/helper.mjs` would be **rejected** by
@@ -1077,7 +1096,7 @@ reload.
 | Surface tokens server-minted/opaque/session-bound/contribution-bound/rejected-when-stale | surface-binding unit tests (extend for pack-bound) |
 | Stores `packId`-namespaced; cross-pack impossible | existing store-scope tests (unchanged) + no-tools-pack store E2E |
 | Session reads own-session; writes user-gesture + one-time permit | existing C2 session-write tests (unchanged) |
-| Worker confinement deny-all; no `permissions` opt-in | confinement `../lib` test (§3) + manifest "no permissions" test |
+| Worker confinement: module-import containment to the pack root + resource/crash isolation; no `permissions` opt-in (see note) | confinement `../lib` test (§3) + manifest "no permissions" test |
 | Cache invalidation on install/update/uninstall/pack-order/activation | extend the resolver-cache invalidation tests to cover `packContributionRegistry.invalidate()` + activation PUT |
 
 ---
