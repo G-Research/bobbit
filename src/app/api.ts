@@ -36,6 +36,7 @@ import {
 	showStopTeamDialog,
 } from "./dialogs-lazy.js";
 import { countDescendants } from "./goal-descendants-count.js";
+import { isInitialSessionsLoad } from "./session-load-state.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -286,7 +287,11 @@ export function stopSessionPolling(): void {
 }
 
 export async function refreshSessions(): Promise<void> {
-	const isInitial = state.gatewaySessions.length === 0 && !state.sessionsError;
+	const isInitial = isInitialSessionsLoad({
+		gatewaySessionsLength: state.gatewaySessions.length,
+		sessionsGeneration: state.sessionsGeneration,
+		sessionsError: state.sessionsError,
+	});
 	if (isInitial) {
 		state.sessionsLoading = true;
 		state.sessionsError = "";
