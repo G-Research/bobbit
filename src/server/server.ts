@@ -6443,7 +6443,12 @@ async function handleApiRoute(
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
-			const entry = entries.find((e) => e.manifest?.name === packName);
+			let entry = entries.find((e) => e.manifest?.name === packName);
+			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
+			// toggleable at server scope — resolve their catalogue from the built-in band.
+			if ((!entry || !entry.manifest) && scope === "server") {
+				entry = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).find((e) => e.manifest?.name === packName);
+			}
 			if (!entry || !entry.manifest) return null;
 			const c = entry.manifest.contents;
 			// Entrypoint display labels (best-effort) from the entrypoint files.

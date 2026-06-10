@@ -408,15 +408,21 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			return meta?.entrypoints?.length ?? 0;
 		}, { timeout: 10_000 }).toBe(0);
 
-		// Disabled state survives a reload.
-		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/ext/${PACK}?jobId=${JOB_ID}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-		await expect(page.locator('[data-testid="prw-panel-root"]')).toHaveCount(0);
+		// Disabled state survives a reload: the server-scope activation override is
+		// persisted, so after a full reload the Market toggle is still OFF and the
+		// entrypoints stay absent from /api/ext/contributions.
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/market`);
+		const group2 = page.locator('[data-testid="market-builtin-group"]');
+		await expect(group2).toBeVisible({ timeout: 20_000 });
+		const gitToggleAfterReload = group2.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
+		await expect(gitToggleAfterReload).toBeVisible({ timeout: 15_000 });
+		await expect(gitToggleAfterReload, "disable must survive reload (toggle stays off)").not.toBeChecked();
+		await expect.poll(async () => {
+			const meta = (await listContributions()).find((p) => p.packId === PACK);
+			return meta?.entrypoints?.length ?? 0;
+		}, { timeout: 10_000 }).toBe(0);
 
 		// ── Re-enable → the launcher + deep-link are restored. ──
-		await navigateToHash(page, "#/market");
-		const group2 = page.locator('[data-testid="market-builtin-group"]');
-		await expect(group2).toBeVisible({ timeout: 15_000 });
 		for (const listName of ENTRYPOINT_LIST_NAMES) {
 			const toggle = group2.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
 			await expect(toggle).toBeVisible({ timeout: 10_000 });
@@ -430,8 +436,12 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
 			return meta?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER) ? "ok" : "no";
 		}, { timeout: 10_000 }).toBe("ok");
-		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}?jobId=${JOB_ID}`);
+		// The deep-link resolves again from a CLEAN context (open a fresh session, then
+		// navigate the deep-link → the panel mounts via the re-registered route).
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
+		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}?jobId=${JOB_ID}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 
 		// ── Step 5: NON-REMOVABLE — built-in source + pack cannot be removed/uninstalled. ──
