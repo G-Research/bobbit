@@ -36,6 +36,7 @@ import {
 	showStopTeamDialog,
 } from "./dialogs-lazy.js";
 import { countDescendants } from "./goal-descendants-count.js";
+import { isInitialSessionsLoad } from "./session-load-state.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -285,8 +286,22 @@ export function stopSessionPolling(): void {
 	}
 }
 
+/**
+ * Clear any sessions-fetch error and re-fetch. Used by the sidebar/landing
+ * "Retry" buttons: clearing the error lets `isInitialSessionsLoad` show the
+ * one-time spinner again on a genuine retry after an initial-load failure.
+ */
+export function retryLoadSessions(): void {
+	state.sessionsError = "";
+	refreshSessions();
+}
+
 export async function refreshSessions(): Promise<void> {
-	const isInitial = state.gatewaySessions.length === 0 && !state.sessionsError;
+	const isInitial = isInitialSessionsLoad({
+		gatewaySessionsLength: state.gatewaySessions.length,
+		sessionsGeneration: state.sessionsGeneration,
+		sessionsError: state.sessionsError,
+	});
 	if (isInitial) {
 		state.sessionsLoading = true;
 		state.sessionsError = "";

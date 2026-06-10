@@ -373,6 +373,13 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 - `renderApp()` debounced via `requestAnimationFrame` — multiple calls collapse
 - For synchronous DOM updates, use `renderAppSync()`
 
+## Sidebar / landing list blanks to "Loading…" every ~5s (or flashes on first load)
+
+- **Symptom**: the left sidebar (and the mobile landing list) periodically replaces the whole projects/goals/sessions list with a centered "Loading…" placeholder and then repopulates. Most visible on first load; for some users it recurs every ~5s while idle.
+- **Root cause**: `refreshSessions()` (`src/app/api.ts`) decided "this is an initial load — show the spinner" via `state.gatewaySessions.length === 0`. List length is the wrong proxy for "never fetched": any user whose live-session list is legitimately empty (projects/goals present but no live sessions, or no projects at all) keeps `length === 0` true forever, so every 5s poll tick re-entered initial-load and re-blanked the list.
+- **Fix**: the decision lives in the pure helper `isInitialSessionsLoad` (`src/app/session-load-state.ts`), keyed off whether a fetch has ever *completed* rather than list emptiness — `state.sessionsGeneration` is `-1` until the first successful fetch and `>= 0` thereafter, so `isInitialSessionsLoad` returns `sessionsGeneration < 0 && !sessionsError`. After the first fetch the spinner never re-appears on background polls. The error term keeps the spinner suppressed while an error is on screen; `retryLoadSessions()` (`src/app/api.ts`) clears `sessionsError` before re-fetching so the Retry button shows the one-time spinner again after an initial-load failure. The helper is dependency-free (no `renderApp`/DOM import) so it can be unit-tested in node.
+- **Pinning test**: `tests/sidebar-loading-flash.test.ts` — proves a second poll tick with an empty `gatewaySessions` list does not re-enter initial-load once `sessionsGeneration >= 0`, while genuine first load and post-error retry still show the spinner.
+
 ## Toolbar / sidebar buttons missing shortcut hints in `title`
 
 - **Symptom**: hovering a toolbar or sidebar button on a freshly-booted app shows a bare label (e.g. `New goal`, `Terminate session`, `Collapse preview`) instead of the labelled-with-shortcut form (`New goal (Alt+G)`, etc.). A second render — any WS event, sessions poll, hash change, or user input — fixes it. Under heavy parallel e2e load this race accounted for the largest single category of toolbar-locator flakes.

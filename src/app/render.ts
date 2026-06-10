@@ -21,7 +21,7 @@ import {
 	getSidebarData,
 	setRenderSuppressed,
 } from "./state.js";
-import { gatewayFetch, refreshSessions } from "./api.js";
+import { gatewayFetch, retryLoadSessions } from "./api.js";
 import { clearAllAnnotations, clearAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import {
 	clearPersistedReviewDocuments,
@@ -544,7 +544,7 @@ function renderMobileLanding() {
 					: state.sessionsError
 						? html`<div class="text-center py-12">
 								<p class="text-red-500 mb-3">${state.sessionsError}</p>
-								<button class="text-muted-foreground underline" title="Retry" @click=${refreshSessions}>Retry</button>
+								<button class="text-muted-foreground underline" title="Retry" @click=${retryLoadSessions}>Retry</button>
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
 							? html`<div class="text-center py-12">
