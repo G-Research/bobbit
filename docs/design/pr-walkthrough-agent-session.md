@@ -11,7 +11,7 @@
 
 ## Summary
 
-Launching a PR walkthrough creates a first-class, read-only child agent session instead of resolving cards silently in the launching session. Before that child starts, the server resolves the PR metadata and diff once, sanitizes it, and persists a versioned analysis bundle for the job. The child session owns the walkthrough side panel, reports progress in chat, reads the persisted bundle through a scoped tool, submits one validated YAML document through a walkthrough-only tool, then stays alive for follow-up questions.
+Launching a PR walkthrough creates a first-class, read-only child agent session instead of resolving cards silently in the launching session. Before that child starts, the server resolves the PR metadata and diff once, sanitizes it, and persists a versioned analysis bundle for the job. The child session owns the walkthrough side panel, reports progress in chat, reads the persisted bundle through a scoped tool, submits one validated YAML document through a walkthrough-only tool, then is **terminated** once the walkthrough reaches a terminal state (`ready` or `error`) — there is no follow-up chat (see [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown)).
 
 This design replaces the old `POST /api/pr-walkthrough/resolve` model-backed synthesis path with an asynchronous session-hosted workflow while preserving the existing walkthrough panel, persistence, standalone route, and explicit GitHub export flow. The launch-time analysis bundle is the authoritative source for YAML hunk mapping and final payload construction; submission-time PR diff re-fetch is not part of the model.
 
@@ -315,7 +315,7 @@ The first prompt should explicitly say:
 - Do not edit files, run tests/builds/checks, install dependencies, start servers, commit, push, or submit GitHub reviews/comments.
 - Report rough percentage progress in chat.
 - Finish only by calling `submit_pr_walkthrough_yaml` with one YAML document.
-- After successful submission, remain available for follow-up questions.
+- After a successful submission the walkthrough is published and the session is terminated — there is no follow-up chat. (Superseded — the original prompt told the agent to remain available; see [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown).)
 
 ## Child session panel lifecycle
 
@@ -468,7 +468,7 @@ Response on success:
   "warnings": [
     { "code": "unmapped_hunk", "severity": "warning", "message": "2 hunk references could not be mapped." }
   ],
-  "message": "Walkthrough YAML accepted and published. Stay available for follow-up questions."
+  "message": "PR walkthrough YAML accepted and published. This walkthrough session is now complete."
 }
 ```
 
@@ -672,7 +672,7 @@ Detailed ownership:
 | Original PR body | Final payload `changeset.prBody` plus Orientation card metadata | Existing payload restore |
 | Active tab (no fullscreen-on-ready intent — superseded; ready never auto-fullscreens) | Panel workspace state plus job/session UI metadata | Session switch/job restore |
 | Comments, decisions, completed cards, diff mode | Existing browser draft state keyed by walkthrough tab/checksum | Existing panel local storage restore |
-| Agent transcript and follow-up context | Existing session transcript store | Normal child session restore |
+| Agent transcript and investigation context | Existing session transcript store | Normal child session restore (only for in-flight walkthroughs; terminal/orphaned children are reaped on boot) |
 
 Reload cases:
 
@@ -797,10 +797,10 @@ Update `src/app/render-helpers.ts` and session types to render `parentSessionId`
 ## Failure behavior
 
 - **Child creation fails before session exists:** launcher gets `502 AGENT_CREATE_FAILED`; no panel is opened. The launcher notice includes the target and retry guidance.
-- **Child exists but prompt/model fails:** persist job `error`, keep the child row visible, write a chat/system error into the child transcript when possible, and show the error panel. The same child is reused after the user retries from the child unless the session is terminated.
-- **Model unavailable before first prompt:** create the child/session record first when practical, then transition `starting` to `error` with code `MODEL_UNAVAILABLE`, provider/model name when safe, and guidance to select another model or retry. If session creation itself fails, return `502` to the launcher.
-- **Agent startup/runtime crash:** transition `waiting_for_yaml` to `error` with code `AGENT_RUNTIME_FAILED`, keep transcript/panel available, and allow the user to prompt/retry in the same child after the runtime recovers.
-- **Prompt dispatch failure:** transition `starting` to `error` with code `PROMPT_DISPATCH_FAILED`; the child remains visible and retrying launch focuses the existing child and resends the first prompt after clearing the error.
+- **Child exists but prompt/model fails:** persist job `error`, write a chat/system error into the child transcript when possible, and show the error panel — then **terminate the child**, because any `error` is a terminal state (see [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown)). The walkthrough is not retried in the same child; relaunching creates a fresh child (`shouldReuse` never reuses a terminated session).
+- **Model unavailable before first prompt:** create the child/session record first when practical, then transition `starting` to `error` with code `MODEL_UNAVAILABLE`, provider/model name when safe, and guidance to select another model and relaunch. The errored child is terminated; if session creation itself fails, return `502` to the launcher.
+- **Agent startup/runtime crash:** transition `waiting_for_yaml` to `error` with code `AGENT_RUNTIME_FAILED`, write the failure into the transcript/panel, then **terminate the child** (runtime `error` is terminal). The user relaunches to start a fresh walkthrough rather than retrying in the dead child. (Superseded — the original design kept the child alive to prompt/retry in place; see [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown).)
+- **Prompt dispatch failure:** transition `starting` to `error` with code `PROMPT_DISPATCH_FAILED` and **terminate the just-created child** so a failed launch does not leave a respawnable husk (this is the non-recoverable launch dispatch error called out in [Child session lifecycle and teardown](#child-session-lifecycle-and-teardown)). Relaunching creates a fresh child. (Superseded — was: the child remained visible and a retry resent the first prompt in the same child.)
 - **GitHub auth/rate limit/private PR during launch:** use explicit error codes (`GITHUB_AUTH_REQUIRED`, `GITHUB_FORBIDDEN`, `GITHUB_RATE_LIMITED`, `GITHUB_NOT_FOUND_OR_PRIVATE`). The panel must state whether a token is missing, permissions are insufficient, the PR may be private, or the reset time from GitHub rate-limit headers when available. These errors surface before the analysis child session starts; after auth/permission/rate-limit recovery, the user relaunches.
 - **Invalid YAML:** tool returns retryable field errors, transitions or remains `validation_failed`, and keeps the panel unpopulated with a validation banner. A later valid tool call transitions to `ready`.
 - **Large PR/truncation:** submission can succeed with `warnings` and `limits`; panel shows warnings in Orientation/Audit and the agent explains prioritization in chat.
@@ -814,14 +814,14 @@ Status transitions and retry semantics:
 | `starting` | analysis bundle resolved and persisted, then session and first prompt created | `waiting_for_yaml` | Existing child is active. |
 | `starting` | metadata/diff resolution fails before child exists | `error` / launch error | User relaunches after auth/network/rate-limit recovery; no waiting child is created. |
 | `starting` | session creation fails before child exists | no job / launch `502` | User retries launch; no child to reuse. |
-| `starting` | model unavailable or prompt dispatch fails after child persisted | `error` | Reuse existing child; retry can resend prompt after config/auth fix. |
+| `starting` | model unavailable or prompt dispatch fails after child persisted | `error` | **Child terminated** (`error` is terminal). Relaunch creates a fresh child; `shouldReuse` skips terminated sessions. (Superseded — was: reuse existing child and resend prompt.) |
 | `waiting_for_yaml` | invalid YAML tool call | `validation_failed` | Same child; agent retries tool call. |
 | `validation_failed` | another invalid YAML tool call | `validation_failed` | Update latest summary and reminder context. |
-| `waiting_for_yaml` or `validation_failed` | valid YAML tool call | `ready` | Persist payload, select walkthrough tab (no auto-fullscreen — user-initiated only), keep agent alive. |
+| `waiting_for_yaml` or `validation_failed` | valid YAML tool call | `ready` | Persist payload, select walkthrough tab (no auto-fullscreen — user-initiated only), then **terminate the child** (`ready` is terminal — process exits, record archived, no follow-up chat). |
 | `waiting_for_yaml` or `validation_failed` | agent idle without successful tool call | same status | Enqueue rate-limited reminder; no cards rendered. |
 | `waiting_for_yaml` or `validation_failed` | stored analysis bundle is missing or unusable during bundle read or YAML submission | `error` with `PR_WALKTHROUGH_BUNDLE_MISSING` | Retryable, but requires relaunch; no submit-time diff re-fetch. |
-| `error` | duplicate launch of same parent/target | `error` or `waiting_for_yaml` after explicit retry | Focus existing child; do not create duplicate. |
-| `ready` | duplicate launch of same parent/target | `ready` | Focus existing child and existing panel. |
+| `error` | duplicate launch of same parent/target | new `starting` → `waiting_for_yaml` | The prior child was terminated on the `error`, so `shouldReuse` does not reuse it; relaunch creates a fresh child. |
+| `ready` | duplicate launch of same parent/target | new `starting` → `waiting_for_yaml` | The ready child was terminated, so relaunch creates a fresh walkthrough child rather than focusing a terminated one (the stored payload remains available by `changesetId`). |
 
 ## Migration plan
 
@@ -859,7 +859,7 @@ API E2E:
 - Duplicate launch from same parent/target returns the existing child.
 - Same target from a different parent creates a separate child.
 - Invalid `submit_pr_walkthrough_yaml` returns structured errors and leaves job/panel unpopulated.
-- Valid submission stores `WalkthroughStorePayload`, returns ready, and leaves the child session alive.
+- Valid submission stores `WalkthroughStorePayload`, returns ready, and **terminates the child session** (process exits, record archived); the test asserts termination.
 - Missing analysis bundle on read/submission returns `PR_WALKTHROUGH_BUNDLE_MISSING` and does not re-fetch PR diff data.
 - `GET /api/pr-walkthrough/session/:childSessionId` restores waiting, failed, and ready states.
 - Sandbox token cannot submit YAML or read a bundle for another session/job.
