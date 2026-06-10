@@ -83,7 +83,10 @@ async function waitForPublishedUpstream(
 	branch: string,
 ): Promise<{ upstreamName: string; remoteSha: string }> {
 	const expectedUpstream = `origin/${branch}`;
-	const deadline = Date.now() + 10_000;
+	// Full unit runs exercise many git-heavy fixtures concurrently on Windows;
+	// keep this eventual-background-publish wait long enough to test the
+	// contract instead of scheduler contention.
+	const deadline = Date.now() + 60_000;
 	let lastUpstream: string | null = null;
 	let lastRemoteSha: string | null = null;
 

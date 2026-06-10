@@ -74,16 +74,22 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should have one entry after fill");
+			const { stdout: beforeBranchList } = await execFile("git", ["branch", "--list", "pool/_pool-*", "--format=%(refname:short)"], { cwd: repo });
+			const originalPoolBranch = beforeBranchList.trim();
+			assert.ok(originalPoolBranch.startsWith("pool/_pool-"), `fixture should have one pool branch, got: ${beforeBranchList}`);
 
 			const claim = await pool.claim("session/abcd1234");
 			assert.ok(claim, "claim should succeed");
 			assert.equal(claim!.branchName, "session/abcd1234");
 			assert.equal(claim!.degraded, false);
 
-			// Verify the branch was renamed (no `pool/_pool-*` branch left).
-			const { stdout: branchList } = await execFile("git", ["branch", "--list"], { cwd: repo });
-			assert.ok(branchList.includes("session/abcd1234"), "target branch should exist");
-			assert.ok(!branchList.includes("pool/_pool-"), "pool branch should be gone");
+			// Verify the claimed branch was renamed. claim() replenishes the pool in
+			// the background, so a different pool/_pool-* branch may already exist;
+			// only the original claimed pool branch must be gone.
+			const { stdout: branchList } = await execFile("git", ["branch", "--list", "--format=%(refname:short)"], { cwd: repo });
+			const branches = branchList.split(/\r?\n/).map(b => b.trim()).filter(Boolean);
+			assert.ok(branches.includes("session/abcd1234"), "target branch should exist");
+			assert.ok(!branches.includes(originalPoolBranch), "claimed pool branch should be gone");
 
 			// Verify the directory was moved (path basename is the flattened slug).
 			assert.equal(path.basename(claim!.worktreePath), "session-abcd1234");
