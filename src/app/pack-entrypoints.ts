@@ -112,6 +112,19 @@ const launchers = new Map<string, RegisteredLauncher>();
 /** routeId → deep-link route entry (at most ONE pack owns a routeId). */
 const routes = new Map<string, PackRouteEntry>();
 
+/** Notified AFTER every {@link registerPackEntrypoints} rebuild of the route map
+ *  (the SINGLE chokepoint that mutates `routes`). The app uses this to RE-DERIVE
+ *  an open `#/ext/<routeId>` deep-link's resolution whenever the entrypoint
+ *  registry changes — a pack disable/enable/uninstall reconcile now flips the
+ *  deep-link between its panel and the "feature unavailable" empty state, instead
+ *  of the decision being a one-shot taken at hashchange time (which raced the
+ *  async reconcile and could strand the empty state). Best-effort; never throws
+ *  into the registry rebuild. */
+let onRoutesChanged: (() => void) | undefined;
+export function setRoutesChangedListener(fn: (() => void) | undefined): void {
+	onRoutesChanged = fn;
+}
+
 function isRouteEntrypoint(ep: EntrypointInfo): ep is RouteEntrypoint {
 	return ep.kind === "route";
 }
@@ -181,6 +194,10 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 	for (const [k, v] of nextLaunchers) launchers.set(k, v);
 	routes.clear();
 	for (const [k, v] of nextRoutes) routes.set(k, v);
+	// Re-derive any open deep-link's resolution against the freshly-rebuilt route
+	// map (disable → empty state; enable → panel). Guarded so a listener fault
+	// never corrupts the registry rebuild.
+	try { onRoutesChanged?.(); } catch { /* listener best-effort */ }
 }
 
 /** Resolve a deep-link `routeId` → its registered route entry, or undefined when

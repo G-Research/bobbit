@@ -33,7 +33,7 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
-import { doRenderApp, showHeaderToast, workspaceSessionId } from "./render.js";
+import { doRenderApp, showHeaderToast, workspaceSessionId, showExtRouteUnavailable, dismissExtRouteUnavailable } from "./render.js";
 import { renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
@@ -156,35 +156,78 @@ async function waitForGateway(url: string, token: string): Promise<void> {
  * (so a cold-load deep-link resolves even if the boot reconcile is still in flight),
  * look the routeId up in the client pack-route registry, and open the target panel
  * with the parsed params (the panel rehydrates its content from host.store). A
- * routeId with no registered owner (e.g. the pack was uninstalled) is ignored.
+ * routeId with no registered owner (e.g. the pack was disabled/uninstalled) shows
+ * the "feature unavailable" empty state (§7.3).
+ *
+ * RACE-FREE: the empty-state-vs-panel decision is NOT a one-shot taken here. We
+ * record the deep-link in {@link activeExtRoute} and re-derive it through
+ * {@link evaluateActiveExtRoute} BOTH now AND on every later entrypoint-registry
+ * change (via {@link setRoutesChangedListener}). So a disable/enable reconcile that
+ * lands AFTER this hashchange (the test's `__bobbitReconcilePackRenderers`, or a
+ * Market activation toggle's own reconcile) flips the open deep-link between its
+ * panel and the empty state — the previous imperative one-shot could strand the
+ * empty state when the reconcile hadn't propagated by the instant we looked up.
  */
-async function restoreExtRoute(routeId: string | undefined, params: Record<string, string> | undefined): Promise<void> {
-	if (!routeId) return;
+let activeExtRoute: { routeId: string; params?: Record<string, string> } | null = null;
+let extRouteListenerInstalled = false;
+
+/** Re-derive the active `#/ext/<routeId>` deep-link against the CURRENT route
+ *  registry: no owner → empty state; owner → clear the empty state and open (or
+ *  re-focus, idempotently) its panel. No active deep-link → clear any stale empty
+ *  state. Safe to call repeatedly (openPackPanel focuses an existing tab). */
+async function evaluateActiveExtRoute(): Promise<void> {
 	try {
-		const { reconcilePackEntrypointsForProject, lookupPackRoute } = await import("./pack-entrypoints.js");
-		const { reconcilePackPanelsForProject, openPackPanel } = await import("./pack-panels.js");
-		// Reconcile BOTH registries before resolving: a cold-load `#/ext/<routeId>`
-		// must find its owning route (entrypoints) AND its target panel must be
-		// registered (panels) or openPackPanel no-ops against an unregistered panel.
-		await Promise.all([
-			reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined),
-			reconcilePackPanelsForProject(state.activeProjectId ?? undefined),
-		]);
-		const { showExtRouteUnavailable, dismissExtRouteUnavailable } = await import("./render.js");
-		const entry = lookupPackRoute(routeId);
+		const cur = activeExtRoute;
+		if (!cur) { dismissExtRouteUnavailable(); return; }
+		const { lookupPackRoute } = await import("./pack-entrypoints.js");
+		const { openPackPanel } = await import("./pack-panels.js");
+		const entry = lookupPackRoute(cur.routeId);
 		if (!entry) {
 			// Owning pack disabled/uninstalled for this project: the routeId resolves
 			// to no registered route. Surface a "feature unavailable" empty state for
 			// the deep-link (§7.3) instead of silently no-oping (blank panel).
-			showExtRouteUnavailable(routeId);
+			showExtRouteUnavailable(cur.routeId);
 			return;
 		}
 		dismissExtRouteUnavailable(); // a resolvable deep-link clears any stale empty state
 		const openParams: Record<string, unknown> = {};
-		if (params) for (const key of entry.paramKeys) if (key in params) openParams[key] = params[key];
+		if (cur.params) for (const key of entry.paramKeys) if (key in cur.params) openParams[key] = cur.params[key];
 		// The target panel is resolved within the SAME pack — thread the route's
 		// owning packId so the {packId, panelId} lookup is exact (pack schema V1 §8.1).
 		openPackPanel({ panelId: entry.targetPanelId, params: openParams }, entry.packId);
+	} catch { /* non-fatal — a bad deep-link must never break the app */ }
+}
+
+/** Clear the tracked deep-link + any empty state when navigating AWAY from an ext
+ *  view, so a later unrelated reconcile never re-surfaces the overlay. */
+function clearActiveExtRoute(): void {
+	activeExtRoute = null;
+	dismissExtRouteUnavailable();
+}
+
+async function restoreExtRoute(routeId: string | undefined, params: Record<string, string> | undefined): Promise<void> {
+	if (!routeId) { clearActiveExtRoute(); return; }
+	try {
+		const ep = await import("./pack-entrypoints.js");
+		const { reconcilePackPanelsForProject } = await import("./pack-panels.js");
+		// Install the registry-change listener ONCE so every subsequent
+		// registerPackEntrypoints rebuild (reconcile / activation toggle / uninstall)
+		// re-derives the open deep-link's resolution.
+		if (!extRouteListenerInstalled) {
+			ep.setRoutesChangedListener(() => { void evaluateActiveExtRoute(); });
+			extRouteListenerInstalled = true;
+		}
+		// Record the deep-link BEFORE reconciling so a route-map rebuild fired during
+		// the reconcile already sees it and re-derives.
+		activeExtRoute = { routeId, params };
+		// Reconcile BOTH registries before resolving: a cold-load `#/ext/<routeId>`
+		// must find its owning route (entrypoints) AND its target panel must be
+		// registered (panels) or openPackPanel no-ops against an unregistered panel.
+		await Promise.all([
+			ep.reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined),
+			reconcilePackPanelsForProject(state.activeProjectId ?? undefined),
+		]);
+		await evaluateActiveExtRoute();
 	} catch { /* non-fatal — a bad deep-link must never break boot */ }
 }
 
@@ -219,6 +262,13 @@ async function handleHashChange(): Promise<void> {
 		// the editor content lost when the DOM is replaced (CT-02, PI-04f).
 		if (route.view !== "session") {
 			flushAndTeardownDraft();
+		}
+
+		// Leaving an `#/ext/<routeId>` deep-link: drop the tracked route + any empty
+		// state so a later unrelated entrypoint reconcile never re-surfaces the
+		// overlay on top of a different view.
+		if (route.view !== "ext") {
+			clearActiveExtRoute();
 		}
 
 		if (route.view === "ext") {
