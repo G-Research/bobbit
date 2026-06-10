@@ -25,6 +25,33 @@
 // from the user's "Load walkthrough" click (the gesture). Theme tokens only; the
 // content is structured data rendered via the escaping lit toolkit (no raw-HTML /
 // unsafeHTML injection surface — the iframe-sandbox convention is preserved).
+//
+// LLM-CARD PARITY — the read→publish seam (design built-in-first-party-packs §8.4):
+// On Load the panel reads the submit_pr_walkthrough_yaml tool call, PARSES the cards
+// out of the submitted YAML, and PERSISTS them to the pack-scoped host.store via
+// host.callRoute("publish", …) — all inside the user's Load gesture (no auto-invoke
+// on mount, no test helper). The subsequent host.callRoute("bundle") then prefers the
+// just-persisted LLM cards over the deterministic in-worker structural fallback, so
+// the pack viewer reaches parity with the deleted built-in viewer using only the
+// caller-pack-scoped Host API. The agent's submit tool stays unchanged.
+
+import { parse as parseYaml } from "yaml";
+
+// Extract the LLM-enhanced cards from the submitted YAML tool call. The agent's
+// submit_pr_walkthrough_yaml emits a YAML document; the migration-friendly shape
+// carries the rendered cards under a top-level `cards:` (or `walkthrough.cards:`)
+// array, which the panel publishes verbatim to the pack store. Returns [] when the
+// tool call is absent/unparseable or carries no cards (→ structural fallback).
+function cardsFromSubmittedYaml(toolCall) {
+	const yamlText = toolCall && toolCall.input && typeof toolCall.input.yaml === "string" ? toolCall.input.yaml : undefined;
+	if (!yamlText) return [];
+	let doc;
+	try { doc = parseYaml(yamlText); } catch { return []; }
+	if (!doc || typeof doc !== "object") return [];
+	if (Array.isArray(doc.cards)) return doc.cards;
+	if (doc.walkthrough && Array.isArray(doc.walkthrough.cards)) return doc.walkthrough.cards;
+	return [];
+}
 
 // Phase ordering + labels mirror PrWalkthroughPanel.ts PHASES so the nav rail
 // groups the cards exactly as the bespoke walkthrough does.
@@ -214,6 +241,20 @@ export default function createPanel({ html, nothing, renderHeader }) {
 							}
 							if (submitId) toolCall = await host.session.readToolCall(submitId);
 						} catch { /* enrichment is non-fatal */ }
+					}
+					// LLM-card parity (design §8.4): persist the agent's submitted cards to
+					// the pack-scoped store via the pack's OWN `publish` route BEFORE reading
+					// `bundle`, so the bundle serves the LLM cards over the structural
+					// fallback. Keyed by base/head so the live recompute finds them. This is
+					// the read→publish seam — it runs inside the Load gesture, never on mount.
+					const llmCards = cardsFromSubmittedYaml(toolCall);
+					if (llmCards.length > 0 && host.callRoute) {
+						try {
+							const publishBody = { jobId, cards: llmCards };
+							if (baseSha) publishBody.baseSha = baseSha;
+							if (headSha) publishBody.headSha = headSha;
+							await host.callRoute("publish", { method: "POST", body: publishBody });
+						} catch { /* publish is best-effort; bundle falls back to structural cards */ }
 					}
 					// Dynamic data via the pack's OWN route — NEVER a raw fetch. The route
 					// RECOMPUTES the changeset live via git (design §D2.3) when base/head are
