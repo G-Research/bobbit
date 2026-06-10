@@ -894,7 +894,7 @@ describe("WalkthroughAgentManager", () => {
 		assert.ok(events.some(event => event.type === "pr_walkthrough_job_updated"));
 	});
 
-	it("route exposes launch, job restore, session restore, and submit-yaml", async () => {
+	it("route exposes launch and submit-yaml (viewer-feed jobs/session GETs removed)", async () => {
 		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
@@ -903,14 +903,14 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(launch.body.status, "waiting_for_yaml");
 		assert.equal(launch.body.job.submissionProofHash, undefined);
 
-		const job = await callRoute(manager, "GET", `/api/pr-walkthrough/jobs/${encodeURIComponent(launch.body.jobId)}`);
-		assert.equal(job.status, 200);
-		assert.equal(job.body.job.childSessionId, launch.body.childSessionId);
-		assert.equal(job.body.job.submissionProofHash, undefined);
-
-		const session = await callRoute(manager, "GET", `/api/pr-walkthrough/session/${encodeURIComponent(launch.body.childSessionId)}`);
-		assert.equal(session.status, 200);
-		assert.equal(session.body.job.jobId, launch.body.jobId);
+		// The viewer-feed GET routes (/jobs/:id, /session/:id) were deleted with the
+		// built-in viewer; they now 405. The agent toolchain reads the job via the
+		// manager directly, not these HTTP routes.
+		const goneJob = await callRoute(manager, "GET", `/api/pr-walkthrough/jobs/${encodeURIComponent(launch.body.jobId)}`);
+		assert.equal(goneJob.status, 405);
+		const goneSession = await callRoute(manager, "GET", `/api/pr-walkthrough/session/${encodeURIComponent(launch.body.childSessionId)}`);
+		assert.equal(goneSession.status, 405);
+		assert.equal(manager.getJob(launch.body.jobId)?.childSessionId, launch.body.childSessionId);
 		const proof = submitProof(sessionManager, launch.body.childSessionId);
 
 		const missingProof = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: "schema_version: 1\n" });
