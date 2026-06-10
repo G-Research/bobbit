@@ -124,7 +124,7 @@ interface SerializableCtx {
 	workingDir?: string;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean };
+	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
 }
 
 const port = parentPort;
@@ -424,6 +424,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			callRoute: flags.callRoute,
 			session: flags.session,
 			store: flags.store,
+			agents: flags.agents,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		store: {
@@ -438,6 +439,17 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		session: {
 			readTranscript: (opts?: unknown) => callHost(["session", "readTranscript"], [opts]),
 			readToolCall: (toolUseId: string) => callHost(["session", "readToolCall"], [toolUseId]),
+		},
+		// SUB-GOAL C: the ambient `host.agents` namespace. Each verb marshals to the
+		// PARENT's live ServerHostApi (where owner/source scoping + recursion denial are
+		// enforced). Poll-based only — NO blocking `wait`.
+		agents: {
+			spawn: (spawnOpts: unknown) => callHost(["agents", "spawn"], [spawnOpts]),
+			prompt: (childSessionId: string, message: string) => callHost(["agents", "prompt"], [childSessionId, message]),
+			dismiss: (childSessionId: string) => callHost(["agents", "dismiss"], [childSessionId]),
+			list: () => callHost(["agents", "list"], []),
+			read: (childSessionId: string, opts?: unknown) => callHost(["agents", "read"], [childSessionId, opts]),
+			status: (childSessionId: string) => callHost(["agents", "status"], [childSessionId]),
 		},
 	};
 }

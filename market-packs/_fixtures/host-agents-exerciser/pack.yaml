@@ -1,0 +1,23 @@
+name: host-agents-exerciser
+description: >-
+  DETERMINISTIC Orchestration-Core Sub-goal C fixture (orchestration-core §13).
+  A server pack that exercises the ambient `host.agents` capability end to end
+  (spawn → poll status → prompt → poll → list → read → dismiss) through a
+  CANNED / no-LLM child (the e2e mock agent), proving a trusted in-process pack
+  can launch + orchestrate child agents over the sanctioned Host API with NO raw
+  transport. Lives under market-packs/_fixtures/ so it ships only for tests; the
+  host-agents E2E drives lib/exerciser.mjs through the confined worker
+  (ModuleHost.invoke) so the `ctx.host.agents` proxy path is exercised exactly
+  like a shipped pack. Non-flaky → e2e phase only (NEVER test:manual).
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+# Pack-level routes (the same opener-independent contribution shape pr-walkthrough
+# uses). `module` resolves relative to THIS pack.yaml and stays inside the pack
+# root. Both handlers receive `ctx.host` with the ambient `host.agents` namespace.
+routes:
+  module: lib/exerciser.mjs
+  names: [exercise, spawnOnly]

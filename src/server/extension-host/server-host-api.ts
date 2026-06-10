@@ -24,12 +24,57 @@ import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-
 import type { PackStore } from "./pack-store.js";
 import type { ReadTranscriptOpts, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
+// SUB-GOAL C: the ambient `host.agents` capability is backed by the SAME shared
+// OrchestrationCore that services the agent-tool `/orchestrate/*` routes. The type
+// import is erased at runtime (no module cycle); the gateway injects the live
+// instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
+import type { OrchestrationCore } from "../agent/orchestration-core.js";
 
 /** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	put<T = unknown>(key: string, value: T): Promise<void>;
 	list(prefix?: string): Promise<string[]>;
+}
+
+/**
+ * The ambient `host.agents` capability (orchestration-core §8.3) — sub-goal C.
+ *
+ * A POLL-BASED surface (NO blocking `wait`: the worker tier terminates a call on
+ * timeout, so a handler `spawn`s then polls `status`/`list`/`read` across worker
+ * calls). Every verb is bound to the calling session id (`opts.sessionId`) as the
+ * owner AND filtered to the `childKind === "host-agents"` SOURCE DISCRIMINATOR, so
+ * a pack handler sees ONLY the children IT spawned through `host.agents` — never an
+ * agent-tool (`delegate`) child or `team` child of the same session, and never any
+ * foreign session. There is NO parameter for a foreign/user session: the method
+ * simply does not exist (mirrors `ServerHostSessionApi` being own-session-only).
+ *
+ * Hard invariant: a spawned child inherits the bound session's sandbox + credential
+ * scope via `OrchestrationCore.spawn` and can never exceed it. The pack receives
+ * orchestration VERBS, not transport (no token, no raw `fetch`).
+ */
+export interface ServerHostAgentsApi {
+	/** Launch a child agent owned by the bound session (childKind "host-agents").
+	 *  Throws if the bound session is itself a child (no grandchildren). */
+	spawn(opts: {
+		instructions: string;
+		role?: string;
+		model?: string;
+		thinkingLevel?: string;
+		readOnly?: boolean;
+		context?: Record<string, string>;
+		lifecycle?: "bare" | "full";
+	}): Promise<{ childSessionId: string }>;
+	/** Run-if-idle / queue a follow-up prompt to an owned host.agents child. */
+	prompt(childSessionId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
+	/** Terminate + archive an owned host.agents child. */
+	dismiss(childSessionId: string): Promise<boolean>;
+	/** List the bound session's host.agents children (source-filtered). */
+	list(): Promise<Array<{ childSessionId: string; status: string; childKind: string }>>;
+	/** Read an owned host.agents child's transcript/output. */
+	read(childSessionId: string, opts?: ReadTranscriptOpts): Promise<unknown>;
+	/** Poll an owned host.agents child's live status. */
+	status(childSessionId: string): Promise<{ status: "idle" | "streaming" | "queued" | "preparing" | "terminated" }>;
 }
 
 /** Mirrors HostSessionApi server-side, but READ-ONLY. Slice B2 implements the
@@ -57,6 +102,9 @@ export interface ServerHostCapabilities {
 	readonly session: boolean;
 	/** Ownership-scoped persistence (Slice B1). True once the store backend is wired. */
 	readonly store: boolean;
+	/** Ambient child-agent orchestration (sub-goal C). True once `host.agents` is
+	 *  wired to the injected OrchestrationCore. */
+	readonly agents: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -77,6 +125,8 @@ export interface ServerHostApi {
 	readonly store: ServerHostStoreApi;
 	/** Transcript + message capabilities. PHASE 2 (frozen, not implemented). */
 	readonly session: ServerHostSessionApi;
+	/** Ambient child-agent orchestration (sub-goal C) — own host.agents children only. */
+	readonly agents: ServerHostAgentsApi;
 }
 
 export interface CreateServerHostApiOptions {
@@ -107,6 +157,11 @@ export interface CreateServerHostApiOptions {
 	 *  flips the flag + implements the namespace. Typed `unknown` here so A does
 	 *  not freeze C's import shape. */
 	orchestrationCore?: unknown;
+	/** SUB-GOAL C: read a child session's live status for `host.agents.status`/`list`
+	 *  (the OrchestrationCore exposes no public status accessor). Injected by the
+	 *  gateway as `sessionManager.getSession(id)?.status`. Absent in non-gateway
+	 *  contexts → status reports "preparing". */
+	readChildStatus?: (sessionId: string) => string | undefined;
 }
 
 /**
@@ -120,13 +175,8 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// the SERVER-DERIVED packId + contributionId (Slice A). The scoped Phase-2
 	// capabilities (store/session/callRoute) read these when they land; no flag
 	// flips in Slice A (identity is plumbing).
-	void opts.sessionId;
 	void opts.toolUseId;
 	void opts.contributionId;
-	// SUB-GOAL A SEAM: the OrchestrationCore is injected but NOT yet consumed.
-	// Sub-goal C reads it to back the ambient `host.agents` namespace + flips the
-	// `agents` capability flag. Until then it is intentionally inert.
-	void opts.orchestrationCore;
 
 	// Slice B2: own-session transcript reader (header-bound session, supplied by the
 	// gateway). The reads below map its rows through the single contract adapter.
@@ -143,7 +193,10 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// (never caller-supplied), so a handler can only ever touch its own pack's keys.
 	// Slice C2: `session` flips TRUE (reads from B2 + write here = full namespace live).
 	// `callRoute`/`ui` are client-only surfaces — deliberately absent (not gaps).
-	const flags = { session: true, store: true };
+	// SUB-GOAL C: `agents` is IMPLEMENTED — flip the flag. The namespace closes over
+	// the bound owner session id + the injected OrchestrationCore and exposes ONLY
+	// the six poll-based verbs scoped to this session's `host-agents` children.
+	const flags = { session: true, store: true, agents: true };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -179,5 +232,85 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		// capability. A server handler has no user gesture, so it must not be able to post.
 	};
 
-	return { version: HOST_API_VERSION, contractVersion: HOST_CONTRACT_VERSION, capabilities, store, session };
+	// ── host.agents (sub-goal C) ────────────────────────────────────────────────
+	// Source discriminator: every child this namespace mints carries
+	// childKind="host-agents"; every verb filters to children of THIS session with
+	// that kind, so host.agents can never see delegate/team children of the same
+	// session nor any foreign session.
+	const HOST_AGENTS_KIND = "host-agents";
+	const ownerSessionId = opts.sessionId;
+	const core = opts.orchestrationCore as OrchestrationCore | undefined;
+	const readChildStatus = opts.readChildStatus;
+	const requireCore = (): OrchestrationCore => {
+		if (!core) throw new Error("host.agents backend unavailable");
+		return core;
+	};
+	/** The bound session's host.agents children (source-filtered). */
+	const ownHostAgentsChildren = () =>
+		requireCore().list(ownerSessionId).filter((h) => h.childKind === HOST_AGENTS_KIND);
+	/** Enforce that `childSessionId` is one of THIS session's host.agents children. */
+	const requireOwnAgentsChild = (childSessionId: string): void => {
+		if (!ownHostAgentsChildren().some((h) => h.sessionId === childSessionId)) {
+			throw new Error(`host.agents: ${childSessionId} is not a host.agents child of this session`);
+		}
+	};
+	type AgentStatus = "idle" | "streaming" | "queued" | "preparing" | "terminated";
+	const mapStatus = (raw: string | undefined): AgentStatus => {
+		switch (raw) {
+			case "idle": return "idle";
+			case "streaming":
+			case "aborting": return "streaming";
+			case "terminated": return "terminated";
+			case "preparing":
+			case "starting": return "preparing";
+			default: return "preparing";
+		}
+	};
+	const agents: ServerHostAgentsApi = {
+		spawn: async (spawnOpts) => {
+			const c = requireCore();
+			// Recursion denial reuses A's shared guard (no grandchildren), surfaced as a
+			// capability-specific message.
+			try {
+				c.assertCanSpawn(ownerSessionId);
+			} catch {
+				throw new Error("host.agents.spawn is not permitted for a child session");
+			}
+			const handle = await c.spawn({
+				ownerSessionId,
+				instructions: spawnOpts.instructions,
+				role: spawnOpts.role,
+				model: spawnOpts.model,
+				thinkingLevel: spawnOpts.thinkingLevel,
+				readOnly: spawnOpts.readOnly,
+				context: spawnOpts.context,
+				lifecycle: spawnOpts.lifecycle,
+				childKind: HOST_AGENTS_KIND,
+			});
+			return { childSessionId: handle.sessionId };
+		},
+		prompt: async (childSessionId, message) => {
+			requireOwnAgentsChild(childSessionId);
+			return requireCore().prompt(ownerSessionId, childSessionId, message);
+		},
+		dismiss: async (childSessionId) => {
+			requireOwnAgentsChild(childSessionId);
+			return requireCore().dismiss(ownerSessionId, childSessionId);
+		},
+		list: async () => ownHostAgentsChildren().map((h) => ({
+			childSessionId: h.sessionId,
+			status: mapStatus(readChildStatus?.(h.sessionId)),
+			childKind: h.childKind,
+		})),
+		read: async (childSessionId, readOpts) => {
+			requireOwnAgentsChild(childSessionId);
+			return requireCore().read(ownerSessionId, childSessionId, readOpts);
+		},
+		status: async (childSessionId) => {
+			requireOwnAgentsChild(childSessionId);
+			return { status: mapStatus(readChildStatus?.(childSessionId)) };
+		},
+	};
+
+	return { version: HOST_API_VERSION, contractVersion: HOST_CONTRACT_VERSION, capabilities, store, session, agents };
 }

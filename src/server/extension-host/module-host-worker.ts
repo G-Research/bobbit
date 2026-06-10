@@ -115,6 +115,11 @@ const PROXYABLE: Record<string, Set<string>> = {
 	// EXCLUDED: the parent `ServerHostApi` omits it (server modules have no user
 	// gesture), so proxying it would always throw — authors get reads only.
 	session: new Set(["readTranscript", "readToolCall"]),
+	// SUB-GOAL C: the ambient `host.agents` capability. A pack handler drives child
+	// agents through these six poll-based verbs ONLY (no blocking `wait`); the live
+	// `ServerHostApi` with the bound owner/source scoping stays in the PARENT and
+	// services the proxied calls over the same channel.
+	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
 };
 
 /** Invoke a proxied host method on the PARENT's live host, enforcing the
@@ -192,6 +197,7 @@ export class ModuleHost {
 				callRoute: capSrc?.callRoute === true,
 				session: capSrc?.session === true,
 				store: capSrc?.store === true,
+				agents: capSrc?.agents === true,
 			},
 		};
 
