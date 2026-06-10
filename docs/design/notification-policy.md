@@ -197,6 +197,47 @@ Concrete cadence under unattended overnight (no human input, no productive lead 
 
 The first nudge of a fresh idle period still arrives at the base delay, so genuinely abandoned goals aren't silently ignored.
 
+## 9b. Worker-idle nudge debounce
+
+A second server-side notification mechanism, distinct from §9. When a **team member (worker)** session finishes a turn (`agent_end`), `TeamManager` tells the team lead so it can reassign work: a steer like *"Agent &lt;id&gt; (&lt;role&gt;) has finished with no assigned tasks."* That nudge is correct when the worker is genuinely done — but `agent_end` also fires on transient blips.
+
+Tests: [`tests/team-manager-worker-idle-debounce.test.ts`](../../tests/team-manager-worker-idle-debounce.test.ts). The behaviour change also rippled into [`tests/team-manager-reviewer-resume.test.ts`](../../tests/team-manager-reviewer-resume.test.ts) and the E2E [`tests/e2e/gate-verification-resume.spec.ts`](../../tests/e2e/gate-verification-resume.spec.ts), which were adapted to wait out (or shrink) the new debounce window.
+
+### 9b.1 The problem
+
+A worker whose tool call errors momentarily — e.g. a flaky network call — emits `agent_end` and then resumes (`agent_start`) a moment later. The worker was never actually done; it just blipped. Pre-fix, `TeamManager` called `notifyTeamLead(...)` **immediately** on every `agent_end`, so each blip steered the team lead needlessly. Over a long-running goal these transient nudges add up to real churn: the lead keeps getting pulled in to "check tasks and decide next steps" for a worker that is still busy.
+
+The pre-existing 30s repeat-debounce inside `notifyTeamLead` (§9b.3) didn't help here, because it only suppresses *repeat* nudges for the same worker — the **first** nudge of each blip still fired instantly.
+
+### 9b.2 The fix: 5s debounce, cancelled on resume
+
+On worker `agent_end`, `TeamManager` no longer calls `notifyTeamLead` directly. Instead it schedules the call after a short debounce and cancels it if the worker comes back:
+
+- A shared per-worker-session timer map `pendingIdleNotify` (keyed by worker `sessionId`) holds at most one pending timer per worker. On `agent_end` the code clears any existing timer for that session, then `setTimeout`s a new one for `WORKER_IDLE_NUDGE_DEBOUNCE_MS = 5_000` that fires `notifyTeamLead`. Clear-before-set guarantees a worker never accumulates two pending timers.
+- On worker `agent_start` (the worker resumed), the pending timer is cleared and deleted — **no** nudge fires. A blip shorter than 5s is therefore invisible to the team lead.
+- A worker that emits `agent_end` and stays idle past 5s fires exactly one nudge (then subject to §9b.3).
+
+Both worker-event subscription sites now route through a single `subscribeWorkerEvents(...)` helper in `src/server/agent/team-manager.ts`: the live `spawnRole` path and the boot re-subscribe path in `resubscribeTeamEvents()`. Previously each site attached its own `agent_end → notifyTeamLead` listener; consolidating them means the debounce (and the `agent_start` cancellation) is defined once and can't drift between the two paths.
+
+This deliberately mirrors the **team-lead idle-nudge pattern** (`subscribeTeamLeadEvents`, §9): `agent_end` starts a one-shot timer, `agent_start` clears it. Reusing the proven shape keeps the two mechanisms easy to reason about together.
+
+**Cleanup on worker removal.** When a worker is torn down (`dismissRole`), its pending timer is cleared and deleted alongside the existing `lastNotifyTime` cleanup. This prevents a nudge from firing against a removed/terminated session and avoids leaking timers.
+
+### 9b.3 Relationship to the 30s repeat-debounce
+
+The 5s debounce is **separate from and sits in front of** the pre-existing 30s repeat-debounce inside `notifyTeamLead` — do not conflate them:
+
+| Debounce | Where | Keyed by | Purpose |
+|---|---|---|---|
+| **5s idle debounce** *(new)* | `subscribeWorkerEvents` → `pendingIdleNotify` timer | worker `sessionId` | Swallow transient `agent_end` blips; cancelled by `agent_start`. |
+| **30s repeat-debounce** *(unchanged)* | inside `notifyTeamLead` → `lastNotifyTime` | worker `sessionId` | Suppress *repeat* nudges for the same worker within 30s of the last delivered one. |
+
+A worker `agent_end` first waits out the 5s timer; only if it survives (no resume) does `notifyTeamLead` run, where the 30s `lastNotifyTime` check and the reviewer-session guard apply exactly as before. Neither the 30s window nor the reviewer guard changed.
+
+### 9b.4 Test-only debounce override
+
+The 5s duration is also exposed as an overridable instance field `workerIdleNudgeDebounceMs`, defaulting to the static `WORKER_IDLE_NUDGE_DEBOUNCE_MS`. This exists purely so in-process tests can shrink the window to a negligible value and assert deterministically via fast polling instead of waiting out a real 5s timer. Production never reassigns it.
+
 ## 10. Key files
 
 | File | Role |
@@ -209,3 +250,5 @@ The first nudge of a fresh idle period still arrives at the base delay, so genui
 | `tests/notification-policy.spec.ts` | Unit pin — 9-row truth table + bonus. |
 | `tests/e2e/ui/notification-policy.spec.ts` | Browser E2E — sidebar wiring + reload persistence. |
 | `tests/spurious-idle-unread.spec.ts` | Independent invariant — the 15s status heartbeat must not bump `lastActivity` and therefore must not produce spurious dots. Unchanged by this work. |
+| `src/server/agent/team-manager.ts` | Server-side idle nudges (§9, §9b): `subscribeTeamLeadEvents`, `subscribeWorkerEvents`, `pendingIdleNotify`, `WORKER_IDLE_NUDGE_DEBOUNCE_MS`, `notifyTeamLead`, `dismissRole`. |
+| `tests/team-manager-worker-idle-debounce.test.ts` | Unit pin for the 5s worker-idle debounce (§9b): blip-within-window suppressed, idle-past-window delivered, cleared on removal. |

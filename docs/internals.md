@@ -181,6 +181,8 @@ The persisted-agent shape (`PersistedTeamEntry.agents[]` in `team-store.ts`) car
 
 Back-compat: `team-state.json` entries written before the field existed have `kind === undefined` after load. The harness treats `undefined` as `"worker"` (the safer default for old records, all of which were workers in practice), but the defensive guard in both sites also accepts `role === "reviewer"` as a fallback discriminator. A persisted reviewer entry that was missing `kind` after a cross-version restart still gets correctly skipped.
 
+Worker `agent_end → notifyTeamLead` nudges are debounced 5s (`WORKER_IDLE_NUDGE_DEBOUNCE_MS`, `pendingIdleNotify` in `subscribeWorkerEvents`) and cancelled if the worker resumes (`agent_start`), so transient blips don't churn the lead; this is distinct from the 30s repeat-debounce inside `notifyTeamLead`. See [docs/design/notification-policy.md §9b](design/notification-policy.md#9b-worker-idle-nudge-debounce).
+
 Key files: `src/server/agent/team-manager.ts`, `src/server/agent/team-store.ts`. Regression test: `tests/team-manager-reviewer-resume.test.ts`.
 
 #### Reminder race after restart-resume
