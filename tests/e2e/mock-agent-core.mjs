@@ -604,6 +604,19 @@ export class MockAgentCore {
 			};
 		}
 
+		// Orchestration Core (team_delegate) card render litmus
+		// (tests/e2e/ui/team-delegate.spec.ts). Emits a team_delegate tool_use +
+		// toolResult carrying details.delegates so the shared DelegateRenderer
+		// mounts. CANNED — does NOT spawn a real child (the renderer is what the
+		// browser test asserts; real spawn/wait/dismiss are covered by the API
+		// specs). TEAM_DELEGATE_CARD_PARALLEL renders the multi-child card.
+		if (text.includes("TEAM_DELEGATE_CARD_PARALLEL")) {
+			return { teamDelegateCard: "parallel" };
+		}
+		if (text.includes("TEAM_DELEGATE_CARD")) {
+			return { teamDelegateCard: "single" };
+		}
+
 		// Autonomous skill activation: drives the activate_skill tool path.
 		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).
 		const activateMatch = text.match(/please\s+activate_skill\s+([\w-]+)(?:\s+([\s\S]*))?$/i);
@@ -811,6 +824,8 @@ export class MockAgentCore {
 			await this._handleComponentConfigProposal();
 		} else if (toolAction && toolAction.activateSkill) {
 			await this._handleActivateSkill(toolAction.activateSkill);
+		} else if (toolAction && toolAction.teamDelegateCard) {
+			await this._handleTeamDelegateCard(toolAction.teamDelegateCard);
 		} else if (toolAction && toolAction.proposalBurst) {
 			await this._handleProposalBurst();
 		} else if (toolAction && toolAction.multiTool) {
@@ -1874,6 +1889,58 @@ export class MockAgentCore {
 			toolName,
 			isError: false,
 			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Emit a canned team_delegate tool_use + toolResult whose toolResult carries
+	 * `details.delegates` in the shape the shared DelegateRenderer consumes
+	 * (see defaults/tools/agent/extension.ts + src/ui/tools/renderers/DelegateRenderer.ts).
+	 * Used by tests/e2e/ui/team-delegate.spec.ts to assert the blocking-one-shot
+	 * card renders. Deterministic: no real child is spawned.
+	 */
+	async _handleTeamDelegateCard(variant) {
+		const toolId = `tool_teamdelegate_${Date.now()}`;
+		const input = variant === "parallel"
+			? { parallel: [{ instructions: "Review the auth module" }, { instructions: "Audit the API surface" }] }
+			: { instructions: "Summarise the design doc" };
+		this.emit({ type: "tool_execution_start", toolName: "team_delegate", toolId, input });
+		await this.tick(10);
+
+		const delegates = variant === "parallel"
+			? [
+				{ id: "child-aaaaaaaa", sessionId: "child-aaaaaaaa-1111", instructions: "Review the auth module", status: "completed", durationMs: 1200 },
+				{ id: "child-bbbbbbbb", sessionId: "child-bbbbbbbb-2222", instructions: "Audit the API surface", status: "completed", durationMs: 1500 },
+			]
+			: [
+				{ id: "child-cccccccc", sessionId: "child-cccccccc-3333", instructions: "Summarise the design doc", status: "completed", durationMs: 900 },
+			];
+		const output = variant === "parallel"
+			? "2/2 children completed."
+			: "TEAM_DELEGATE_CARD_OUTPUT — child finished and was auto-dismissed.";
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: "team_delegate", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "team_delegate", isError: false });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "team_delegate", arguments: input, input },
+				{ type: "text", text: "Delegation complete." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "team_delegate",
+			isError: false,
+			content: [{ type: "text", text: output }],
+			details: { delegates },
 		};
 		this.conversationMessages.push(toolResultMsg);
 		this.emit({ type: "message_end", message: toolResultMsg });

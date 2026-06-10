@@ -1,16 +1,29 @@
 /**
  * Unit test enforcing the team-tools group-policy invariant.
  *
- * Design: only the team lead may call team management tools (team_spawn,
- * team_dismiss, team_prompt, team_steer, team_abort, team_complete, team_list).
- * The shipping `defaults/tool-group-policies.yaml` therefore defaults the
- * `Team` group to `never`, and `defaults/roles/team-lead.yaml` overrides it
- * back to `allow` via `toolPolicies.Team`.
+ * Design (Orchestration Core sub-goal A, docs/design/orchestration-core.md §8.1):
+ * the team-tool surface is split into two policy classes:
  *
- * Without this invariant, every contributor agent (coder, reviewer, tester …)
- * gets the team tools' system-prompt docs even though the team extension is
- * only loaded for the team-lead session — pure context bloat plus a footgun
- * that leads workers to attempt spawns that fail at runtime.
+ *   • GOAL-ONLY verbs — `team_spawn`, `team_complete`, `team_list` — stay in
+ *     the `Team` group, which `defaults/tool-group-policies.yaml` defaults to
+ *     `never`. Only the team-lead re-enables them via `toolPolicies.Team: allow`.
+ *     They are meaningless outside a goal (own worktree on a sub-branch toward a
+ *     gate), so a non-goal session must NOT see them.
+ *
+ *   • OWN-CHILDREN ORCHESTRATION verbs — `team_delegate`, `team_wait`,
+ *     `team_prompt`, `team_steer`, `team_abort`, `team_dismiss` — live in the
+ *     allow-by-default `Agent` group. A NON-goal agent legitimately uses these
+ *     to orchestrate the child agents it spawned with `team_delegate` (the
+ *     acceptance flow: team_delegate → team_prompt → team_wait → read_session →
+ *     team_dismiss). The REAL guard that a non-goal caller cannot reach a
+ *     foreign/goal session is the server `/api/sessions/:id/orchestrate/*`
+ *     route's own-children scoping (`orchestrationCore.list(ownerId)`), NOT the
+ *     tool-group policy. The group only controls tool EXPOSURE.
+ *
+ * This is a deliberate invariant change from the prior "all team_* are Team"
+ * rule. Pinning it here prevents a regression that would either (a) re-hide the
+ * orchestration verbs from non-goal owners (breaking the acceptance flow) or
+ * (b) leak the goal-only verbs to non-goal sessions.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -18,19 +31,62 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
+const { resolveGrantPolicy } = await import("../src/server/agent/tool-activation.ts");
+import type { GrantPolicy, GroupPolicyProvider } from "../src/server/agent/tool-activation.ts";
+
 const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "defaults");
 const ROLES_DIR = path.join(DEFAULTS_DIR, "roles");
 const GROUP_POLICIES_FILE = path.join(DEFAULTS_DIR, "tool-group-policies.yaml");
-const TEAM_TOOLS_DIR = path.join(DEFAULTS_DIR, "tools", "team");
+const TOOLS_DIR = path.join(DEFAULTS_DIR, "tools");
+
+/** Goal-only team verbs — must stay `group: Team` (never for non-goal). */
+const GOAL_ONLY_TEAM_TOOLS = ["team_spawn", "team_complete", "team_list"];
+/** Own-children orchestration verbs — must be `group: Agent` (allow-by-default). */
+const AGENT_ORCHESTRATION_TOOLS = [
+	"team_delegate",
+	"team_wait",
+	"team_prompt",
+	"team_steer",
+	"team_abort",
+	"team_dismiss",
+];
 
 function loadGroupPolicies(): Record<string, string> {
 	const text = fs.readFileSync(GROUP_POLICIES_FILE, "utf-8");
 	return (YAML.parse(text) ?? {}) as Record<string, string>;
 }
 
-function loadRole(name: string): { toolPolicies?: Record<string, string> } {
+function loadRole(name: string): { toolPolicies?: Record<string, GrantPolicy> } {
 	const text = fs.readFileSync(path.join(ROLES_DIR, `${name}.yaml`), "utf-8");
-	return YAML.parse(text) as { toolPolicies?: Record<string, string> };
+	return YAML.parse(text) as { toolPolicies?: Record<string, GrantPolicy> };
+}
+
+function defaultGroupPolicyProvider(): GroupPolicyProvider {
+	const raw = loadGroupPolicies() as Record<string, GrantPolicy>;
+	return {
+		getGroupPolicy: (group: string) => raw[group] ?? null,
+		getAll: () => raw,
+		getSubgoalsEnabled: () => true,
+	};
+}
+
+/**
+ * Resolve a tool's declared `group:` by scanning every `defaults/tools/**\/*.yaml`.
+ * Mirrors the tool-manager scan (`group = data.group || groupDir`). Returns the
+ * group string, or undefined if the tool YAML is not found.
+ */
+function declaredGroupOf(toolName: string): string | undefined {
+	for (const groupDir of fs.readdirSync(TOOLS_DIR, { withFileTypes: true })) {
+		if (!groupDir.isDirectory()) continue;
+		const dirPath = path.join(TOOLS_DIR, groupDir.name);
+		for (const file of fs.readdirSync(dirPath)) {
+			if (!file.endsWith(".yaml")) continue;
+			const def = YAML.parse(fs.readFileSync(path.join(dirPath, file), "utf-8")) as
+				{ name?: string; group?: string };
+			if (def?.name === toolName) return def.group || groupDir.name;
+		}
+	}
+	return undefined;
 }
 
 describe("team-tools group policy invariant", () => {
@@ -39,7 +95,16 @@ describe("team-tools group policy invariant", () => {
 		assert.equal(
 			policies.Team,
 			"never",
-			"defaults/tool-group-policies.yaml must declare `Team: never` so non-lead agents never see team tools",
+			"defaults/tool-group-policies.yaml must declare `Team: never` so non-lead agents never see goal-only team tools",
+		);
+	});
+
+	it("Agent group is NOT denied (allow-by-default for orchestration verbs)", () => {
+		const policies = loadGroupPolicies();
+		assert.notEqual(
+			policies.Agent,
+			"never",
+			"Agent group must remain allow-by-default so non-goal owners can orchestrate their own children",
 		);
 	});
 
@@ -52,21 +117,49 @@ describe("team-tools group policy invariant", () => {
 		);
 	});
 
-	it("every Team-group tool actually declares group: Team", () => {
-		// Sanity-check the assumption the `Team: never` policy relies on:
-		// each YAML file in defaults/tools/team/ must opt into the Team group.
-		const files = fs
-			.readdirSync(TEAM_TOOLS_DIR)
-			.filter((f) => f.endsWith(".yaml"));
-		assert.ok(files.length > 0, "expected team tool YAMLs in defaults/tools/team/");
-		for (const file of files) {
-			const text = fs.readFileSync(path.join(TEAM_TOOLS_DIR, file), "utf-8");
-			const def = YAML.parse(text) as { group?: string };
+	it("goal-only verbs declare group: Team", () => {
+		for (const tool of GOAL_ONLY_TEAM_TOOLS) {
 			assert.equal(
-				def.group,
+				declaredGroupOf(tool),
 				"Team",
-				`${file} must declare \`group: Team\` so the group-policy default applies`,
+				`${tool} must declare \`group: Team\` (goal-only; stripped from non-goal sessions)`,
 			);
 		}
 	});
+
+	it("own-children orchestration verbs declare group: Agent", () => {
+		for (const tool of AGENT_ORCHESTRATION_TOOLS) {
+			assert.equal(
+				declaredGroupOf(tool),
+				"Agent",
+				`${tool} must declare \`group: Agent\` (own-children orchestration; allow-by-default, server-side scoped)`,
+			);
+		}
+	});
+});
+
+describe("non-goal session resolved team-tool policy (the deliberate invariant change)", () => {
+	const groupPolicyStore = defaultGroupPolicyProvider();
+	// A non-goal session with no role-level overrides — the default contributor.
+	const noRole = undefined;
+
+	for (const tool of GOAL_ONLY_TEAM_TOOLS) {
+		it(`non-goal session resolves ${tool} to never (goal-only)`, () => {
+			assert.equal(
+				resolveGrantPolicy(tool, "Team", noRole, undefined, groupPolicyStore),
+				"never",
+				`${tool} must resolve to never for a non-goal session (Team group default)`,
+			);
+		});
+	}
+
+	for (const tool of AGENT_ORCHESTRATION_TOOLS) {
+		it(`non-goal session resolves ${tool} to allow (own-children orchestration)`, () => {
+			assert.equal(
+				resolveGrantPolicy(tool, "Agent", noRole, undefined, groupPolicyStore),
+				"allow",
+				`${tool} must resolve to allow for a non-goal session; own-children scoping is enforced server-side by /orchestrate/* (orchestrationCore.list(ownerId)), not by tool-group policy`,
+			);
+		});
+	}
 });

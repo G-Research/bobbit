@@ -5,7 +5,10 @@ params: [session_id]
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: Team
+# Reclassified Team→Agent (Orchestration Core sub-goal A) — own-children
+# orchestration verb; allow-by-default, server-side own-children scoping.
+# See tests/role-team-tools-policy.test.ts.
+group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
   Use after the agent's work is merged back to the goal branch. Cleans up the agent's git worktree. To kill all agents at once, use `team_complete` or `team_abort`.

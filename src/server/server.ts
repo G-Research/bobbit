@@ -1746,6 +1746,8 @@ export function createGateway(config: GatewayConfig) {
 		sessionManager,
 		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
 		teamManager,
+		/** @internal Exposed for in-process E2E tests to drive restart-survival (rebuildIndexFromPersisted + remindOwnersWithLiveChildren) directly. */
+		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
 		async start(): Promise<number> {

@@ -5,7 +5,10 @@ params: [session_id, message]
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: Team
+# Reclassified Team→Agent (Orchestration Core sub-goal A) — own-children
+# orchestration verb; allow-by-default, server-side own-children scoping.
+# See tests/role-team-tools-policy.test.ts.
+group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
   The agent sees it as a user message interleaved with its current work. Use sparingly — prefer letting agents finish their turn first.

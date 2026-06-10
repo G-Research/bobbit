@@ -54,6 +54,8 @@ export interface GatewayInfo {
 	sessionManager: any;  // Exposed for sandbox security tests
 	bgProcessManager: any;  // Exposed for bg-wait abort tests
 	teamManager: any;     // Exposed for pause-cascade supervisor-respawn tests
+	orchestrationCore: any; // Exposed for orchestration restart-survival tests
+	projectContextManager: any; // Exposed for restart-survival (persisted-session list)
 }
 
 function readHarnessToken(info: GatewayInfo): string {
@@ -297,6 +299,8 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			sessionManager: gw.sessionManager,
 			bgProcessManager: gw.bgProcessManager,
 			teamManager: (gw as any).teamManager,
+			orchestrationCore: (gw as any).orchestrationCore,
+			projectContextManager: (gw as any).projectContextManager,
 		};
 
 		await use(info);

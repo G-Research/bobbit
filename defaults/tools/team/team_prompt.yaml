@@ -5,7 +5,14 @@ params: [session_id, message, workflowGateId?, inputGateIds?]
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: Team
+# Reclassified Team→Agent (Orchestration Core sub-goal A): this verb also
+# operates over a NON-goal agent's OWN child agents (registered by
+# defaults/tools/agent/extension.ts for non-team-leads). Agent is allow-by-
+# default so both team-leads and non-goal owners can use it; the REAL
+# own-children scoping is enforced server-side by the /orchestrate/* routes
+# (orchestrationCore.list(ownerId)). Goal-only verbs (team_spawn/complete/list)
+# stay group: Team. Pinned by tests/role-team-tools-policy.test.ts.
+group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
   Send a follow-up user message to an existing agent. Use for additional tasks after initial work completes, or to provide feedback/corrections. Supports `workflowGateId`/`inputGateIds` for context injection.
