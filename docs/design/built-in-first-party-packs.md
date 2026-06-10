@@ -340,8 +340,9 @@ before the server scope band (step 2)** in `src/server/agent/pack-list.ts`:
 ```
 
 Wire `builtinPacksDir: resolveBuiltinPacksDir()` at every `buildPackList(...)`
-call site (`src/server/skills/slash-skills.ts:341` and the config-cascade adapter
-path). The simplest is to define a shared `BUILTIN_PACKS_DIR` next to
+call site (the `buildPackList(...)` call in `src/server/skills/slash-skills.ts`
+and the config-cascade adapter path). The simplest is to define a shared
+`BUILTIN_PACKS_DIR` next to
 `BUILTINS_DIR` and pass both.
 
 ### 5.3 Ordering table (low → high priority)
@@ -402,8 +403,9 @@ built-in band (step 2+ > step 1b), so:
 - The conflict detector (`buildConflictsFor`) flags the shadow as
   market-involved (both `kind: "market"`), surfaced via `/api/packs/conflicts`.
 - **Surface tokens + activation bind to the WINNER.** The pack-contribution
-  registry collapses to the winning pack per `packId` before indexing (see
-  `server.ts:1026` "deduped-on-path … collapses to the winning pack per packId"),
+  registry collapses to the winning pack per `packId` before indexing (the
+  pack-contribution registry build in `server.ts` is "deduped-on-path … collapses
+  to the winning pack per packId"),
   so only one `pr-walkthrough` contribution set is registered — the user pack's.
   The built-in pack's contributions are shadowed out, exactly like a server pack
   shadowing a global one. No token collision: there is one winner per `packId`.
@@ -487,7 +489,7 @@ Rationale:
 - `PackActivationMap` is `Partial<Record<PackOrderScope, Record<string,
   DisabledRefs>>>` and the built-in pack **entries carry `scope: "server"`**
   (§5.1), so the existing config-cascade / slash-skills `PackActivationProvider`
-  (`server.ts:1044`–`1052`) resolves `getPackActivation("server", packName)` with
+  wiring in `server.ts` resolves `getPackActivation("server", packName)` with
   **no new code** and no widening of `PackOrderScope`.
 - Avoids a 4th scope value rippling through `pack_order`, normalisation, and
   install-scope validation (you cannot install into a `builtin` scope).
@@ -532,8 +534,8 @@ capability.
   disable) — never a crash or blank panel. Verify the existing unknown-routeId
   path already does this; if not, add the empty state.
 - Surface tokens for a disabled contribution are rejected by the existing
-  installed+active check (`server.ts:5584`–5593): a stale token cannot drive a
-  disabled pack.
+  installed+active check in the surface-token validation path (`server.ts`): a
+  stale token cannot drive a disabled pack.
 
 ### 7.4 Market UI (`src/app/marketplace-page.ts`)
 
@@ -558,8 +560,9 @@ capability.
 ### 7.5 Server wire changes for the Installed list
 
 `GET /api/marketplace/installed` currently returns
-`installer.listInstalled(allContexts(projectId))`. Extend the handler
-(`server.ts:6309`) to **prepend** built-in pack rows:
+`installer.listInstalled(allContexts(projectId))`. Extend the
+`GET /api/marketplace/installed` handler (`server.ts`) to **prepend** built-in
+pack rows:
 
 ```ts
 const builtin = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
@@ -571,7 +574,7 @@ json({ installed: [...builtin, ...installer.listInstalled(allContexts(projectId)
 
 Add `builtin?: boolean` to the `InstalledPackWire` type (`src/app/api.ts`); the
 client list key includes it (§6.4) so a built-in row and a same-name user-install
-row are distinct. The `DELETE /api/marketplace/installed` handler (`server.ts:6294`)
+row are distinct. The `DELETE /api/marketplace/installed` handler (`server.ts`)
 operates on the install ledger only: it **rejects** (`403`) when `packName` is a
 built-in pack with **no** matching ledger entry, and otherwise uninstalls the real
 ledger entry (a server-scope user override of the same name is fully uninstallable
@@ -781,10 +784,12 @@ both. The `submit_pr_walkthrough_yaml` tool itself is UNCHANGED.
   call (a cheap `readdirSync` + `readManifest`), so enable/disable takes effect on
   the next resolution.
 - **Enable/disable** goes through `PUT /api/marketplace/pack-activation`, which
-  already calls `invalidateResolverCaches()` (`server.ts:6425`). That single
+  already calls `invalidateResolverCaches()` (the activation-toggle handler in
+  `server.ts`). That single
   synchronous call busts the slash-skill cache, the tool-scan cache, and the
   dispatcher / route-dispatcher / route-registry / pack-contribution-registry
-  (`server.ts:2336`), so the launcher/deep-link/tool appear or disappear with **no
+  (`invalidateResolverCaches()` in `server.ts`), so the launcher/deep-link/tool
+  appear or disappear with **no
   restart/reload**.
 - **Reload-safety**: the synthetic source is computed per request (§4.2); the band
   is computed per resolution. There is no persisted state to drift across reload or

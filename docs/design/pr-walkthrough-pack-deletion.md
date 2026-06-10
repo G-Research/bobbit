@@ -57,12 +57,24 @@ is a pack DESIGN CHOICE (keep `bundle` deterministic), not a credential limitati
 
 ## What proves parity
 
-The litmus pack now ships as a first-class installable market pack at the
-repo-root design-specified location `market-packs/pr-walkthrough/` (`pack.yaml` +
-`tools/pr-walkthrough/{pr_walkthrough.yaml,panel.js,routes.mjs}`), NOT as a test
-fixture. The mandatory E2E registers `market-packs/` as a local-dir marketplace
-source and installs the `pr-walkthrough` pack. It re-expresses the feature using
-ONLY public contributions + the durable Host API:
+> **Reconciled to the shipped model.** This section originally described the
+> litmus path — register `market-packs/` as a local-dir marketplace source,
+> *install* `pr-walkthrough`, later *uninstall*. **That is not how it ships.**
+> `pr-walkthrough` is now a **built-in first-party pack** resolved **in place**
+> active-by-default via the built-in first-party band in `buildPackList()`
+> (`builtinFirstPartyPackEntries()`) — **no manual install**, and it cannot be
+> uninstalled, only **disabled** via the activation toggles. It is a **no-tools /
+> UI-only** pack (`pack.yaml` + `panels/` + `entrypoints/` + `lib/`), not a
+> `tools/`-bearing pack. See
+> [built-in-first-party-packs.md](./built-in-first-party-packs.md) and
+> [docs/marketplace.md § Built-in (first-party) packs](../marketplace.md#built-in-first-party-packs).
+> The parity table below stays accurate (it maps bespoke surfaces → pack
+> re-expression); only the install/uninstall framing is historical.
+
+The pack ships at the repo-root design-specified location
+`market-packs/pr-walkthrough/` (NOT as a test fixture) and is built by
+`npm run build:packs`. It re-expresses the feature using ONLY public
+contributions + the durable Host API:
 
 | Surface | Bespoke origin | Pack re-expression |
 |---|---|---|
@@ -73,16 +85,17 @@ ONLY public contributions + the durable Host API:
 | Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
 
 The mandatory E2E `tests/e2e/ui/pr-walkthrough-pack.spec.ts` exercises the full
-chain end-to-end (install → **git-widget-button** launcher launches panel →
+chain end-to-end (the pack resolves active-by-default via the built-in band →
+**git-widget-button** launcher opens the panel at `#/ext/pr-walkthrough` →
 `bundle` recomputes the **REAL changeset LIVE via `git`** in the confined worker
 over a freshly-`git init`'d repo → real diff block renders → publish LLM-enhanced
 cards via the pack's own `publish` route → reload re-reads the SAME persisted cards
-(stable `persistedAt`) → uninstall reconciles). The diff is computed live (NOT a
-hand-seeded `provider:"fixture"` bundle); only the LLM-enhanced cards are persisted
-(the submit-time credential seam). Acceptance criterion 1 ("built-in ships as an
-installable pack with behavioral parity; bespoke paths deleted OR deletion PR
-ready") is satisfied by this pack + E2E + this plan, with only the credential/scope
-carve-outs below.
+(stable `persistedAt`) → disabling the pack from the Market built-in section
+removes the launcher/deep-link and the feature degrades to an empty state). The
+diff is computed live (NOT a hand-seeded `provider:"fixture"` bundle); only the
+LLM-enhanced cards are persisted (the submit-time credential seam). The bespoke
+viewer/route/store/deep-link surfaces are deleted (the pack is the sole provider),
+with only the credential/scope carve-outs below kept agent-side.
 
 ## Live changeset recompute IS now pack-expressible (Phase-2 §C3.4 + §D2.3)
 

@@ -6,6 +6,49 @@ The panel model remains changeset-oriented rather than GitHub-specific. GitHub P
 
 The checked-in prototype in [`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html) remains the UX reference for the ready-state review surface. This document describes the production launch, agent, persistence, export, and troubleshooting behavior around that UI.
 
+> ## Current model: the viewer is a built-in first-party pack
+>
+> **The PR-walkthrough VIEWER now ships as a built-in first-party pack**
+> (`market-packs/pr-walkthrough/`), auto-resolved **active-by-default** with no
+> manual install, and is the **sole provider** of the viewer panel + its data
+> + deep-link. The bespoke built-in viewer was **deleted**. What this changes
+> versus the older descriptions below:
+>
+> - **Route.** The viewer opens at the generic extension route
+>   **`#/ext/pr-walkthrough`** (via `host.ui.navigate`/`openPanel`). The deleted
+>   `#/walkthrough` SPA route and standalone `/walkthrough?...` pathname route no
+>   longer exist.
+> - **Launch.** A pack **entrypoint** (git-widget button / composer-slash /
+>   command palette) opens the pack panel; the panel's "Run PR walkthrough"
+>   action uses **`host.session.postMessage`** to drive the **current** session's
+>   agent. The deleted `open-pr-walkthrough` event → `launchPrWalkthroughAgent`
+>   → `POST /api/pr-walkthrough/launch` **child-agent spawn** path is gone; the
+>   walkthrough now runs in the session you launched it from, not a nested child.
+> - **Viewer + data.** The panel is `market-packs/pr-walkthrough/lib/panel.js`;
+>   its changeset/diff bundle and persisted cards come from the pack's own
+>   `lib/routes.mjs` (`bundle` recomputes the changeset LIVE via `git`; `publish`
+>   persists cards) and pack-namespaced `host.store`. The YAML→cards synthesis is
+>   shared at `src/shared/pr-walkthrough/yaml-to-cards.ts`.
+> - **Deleted:** `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` (+ dir),
+>   `src/app/pr-walkthrough.ts`, the viewer-feed routes
+>   (`GET /api/pr-walkthrough/jobs/:id`, `/session/:id`, `/:id`), and the E2E specs
+>   `pr-walkthrough-panel.spec.ts` / `pr-walkthrough-real.spec.ts` /
+>   `pr-walkthrough-session-ux.spec.ts` (replaced by
+>   `tests/e2e/ui/pr-walkthrough-pack.spec.ts`).
+> - **Retained agent-side:** the `submit_pr_walkthrough_yaml` /
+>   `read_pr_walkthrough_bundle` / `readonly_bash` tools, `WalkthroughAgentManager`,
+>   `walkthrough-store.ts`, `git-changeset.ts`, `diff-parser.ts`, and the
+>   `/launch` / `/resolve` / `/export/*` routes. The YAML schema, card model,
+>   review flow, and GitHub export described below remain accurate.
+>
+> See [docs/marketplace.md § Built-in (first-party) packs](marketplace.md#built-in-first-party-packs),
+> [docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md),
+> and [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md)
+> for the pack model. **The sections below retain the pre-migration child-session /
+> standalone-route descriptions as historical context for the agent flow and
+> review UX; where they conflict with the bullets above, the bullets above are
+> authoritative.**
+
 ## Launch paths and surfaces
 
 Users can open a walkthrough from these entry points:
@@ -15,8 +58,16 @@ Users can open a walkthrough from these entry points:
   - GitHub PR URLs carry the owner, repository, host, and PR number.
   - Numbers, with or without `#`, resolve against the launching session's GitHub `origin` remote.
   - Re-launching the same PR from the same parent focuses the existing walkthrough child when it is still usable.
-- **Git Status Widget / custom event** — when the widget has PR metadata/status, its expanded Pull Request section shows a **Walkthrough** button. Clicking it dispatches `open-pr-walkthrough` with the detected PR number/URL/title/status plus branch, file stats, and local base/head metadata.
-- **Standalone route** — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>` opens an already-created walkthrough tab in a wide review surface.
+- **Pack entrypoint (current)** — the git-widget **Walkthrough** button, the
+  `/walkthrough-pr` composer-slash entry, and a command-palette launcher are pack
+  **entrypoints**. Activating one opens the pack panel at `#/ext/pr-walkthrough`;
+  the panel's "Run PR walkthrough" action then drives the **current** session's
+  agent via `host.session.postMessage`. *(Historical: the git-widget button
+  previously dispatched an `open-pr-walkthrough` event that spawned a read-only
+  child walkthrough agent — that path is deleted.)*
+- *(Historical) Standalone route* — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>`
+  opened an already-created walkthrough tab in a wide review surface. This
+  pathname route is **deleted**; the pack panel renders at `#/ext/pr-walkthrough`.
 - **Compatibility resolver** — fixture and local SHA walkthroughs can still be resolved directly into a tab by the standalone/local resolver paths. Session-hosted walkthrough agents currently support GitHub PR targets only.
 
 For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. Before that child exists, launch resolves and persists a sanitized analysis bundle containing the PR metadata, body, stats, diff hunks, warnings, limits, and export capability. The stored launch-time bundle is authoritative for the job; YAML submission maps against that bundle instead of re-fetching PR diff data.
@@ -79,8 +130,8 @@ is disruptive and was the source of the original "dead controls" bug. See
 for the full root-cause analysis and the special-casing that was removed.
 
 The walkthrough panel's **own internal rail sidebar toggle**
-(`data-testid="pr-walkthrough-rail-toggle"`, rendered inside
-`<pr-walkthrough-panel>` in `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts`)
+(`data-testid="pr-walkthrough-rail-toggle"`, rendered inside the pack panel
+`market-packs/pr-walkthrough/lib/panel.js`)
 is a different control — it collapses/expands the review rail *within* the
 walkthrough, not the window-level panel. It works on every surface and is
 unaffected by the panel-level sizing logic.
@@ -109,22 +160,17 @@ walkthrough hydrates correctly even with no connected session.
 
 ### Pinning tests
 
-These behaviours are pinned by browser E2E and must not regress:
+These behaviours are pinned by browser E2E and must not regress. The pack-served
+viewer is covered end-to-end by `tests/e2e/ui/pr-walkthrough-pack.spec.ts`
+(install-free built-in-band resolution → launcher → live `bundle` recompute →
+render → `publish` → reload persistence → disable). *(Historical: the deleted
+bespoke viewer was pinned by `pr-walkthrough-panel.spec.ts` /
+`pr-walkthrough-real.spec.ts` for the now-removed standalone-route resize chrome
+and child-session cases.)*
 
-- **In-app controls are user-driven** — `tests/e2e/ui/pr-walkthrough-panel.spec.ts`
-  ("in-app ready walkthrough panel resize controls are user-driven"): a ready
-  panel does not auto-enter fullscreen, the fullscreen/collapse buttons and the
-  `Ctrl+]` shortcut operate on it, and the collapsed state persists across
-  reload.
-- **Fullscreen is user-initiated, including on live children** — same file
-  ("fullscreen toolbar control enters fullscreen on live child walkthroughs
-  (user-initiated)") and `tests/e2e/ui/pr-walkthrough-real.spec.ts`.
-- **Standalone has no panel-level chrome but keeps its rail toggle** — same file
-  ("standalone ready walkthrough has no panel-level resize chrome but keeps its
-  internal rail toggle").
 - **HTML preview panel sizing unchanged** —
-  `tests/e2e/ui/preview-fullscreen-controls.spec.ts` (this fix does not touch the
-  preview panel).
+  `tests/e2e/ui/preview-fullscreen-controls.spec.ts` (the panel-sizing logic does
+  not touch the preview panel).
 
 See [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design (this supersedes the
@@ -351,7 +397,13 @@ Persistence has five layers:
 - **Resolved walkthrough payload** — after valid YAML, the existing walkthrough store persists final changeset/cards/diff blocks/warnings/export metadata under the `changesetId`.
 - **Reviewer interaction state** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`.
 
-When the app reloads or the user selects a walkthrough child, the UI calls `GET /api/pr-walkthrough/session/<childSessionId>` to restore waiting, validation-failed, ready, or error job state. Ready tabs then call `GET /api/pr-walkthrough/<changeset-id>` if cards are not already loaded.
+When the app reloads or the user re-opens `#/ext/pr-walkthrough`, the pack panel
+re-reads its state through the pack's own `lib/routes.mjs` `bundle` route (which
+recomputes the changeset LIVE and reads any persisted LLM cards from the
+pack-namespaced `host.store`); a stamped-once `persistedAt` keeps the cards stable
+across reloads. *(Historical: the deleted bespoke viewer restored via
+`GET /api/pr-walkthrough/session/<childSessionId>` and reloaded ready cards via
+`GET /api/pr-walkthrough/<changeset-id>` — both viewer-feed routes are removed.)*
 
 When a PR walkthrough child session is restored, Bobbit rotates the submit proof and rehydrates the tool environment with `BOBBIT_SESSION_ID`, `BOBBIT_WALKTHROUGH_JOB_ID`, `BOBBIT_WALKTHROUGH_SUBMIT_PROOF`, and target-scoping variables. Restored waiting sessions retain scoped `read_pr_walkthrough_bundle` access for their own job and can continue to use `submit_pr_walkthrough_yaml` without persisting the raw proof.
 
@@ -409,12 +461,10 @@ Warnings are shown at the top of the panel and again in export preview when they
 The walkthrough API is internal to the Bobbit UI but useful for tests and integrations:
 
 - `POST /api/pr-walkthrough/launch` — create or focus a session-hosted GitHub PR walkthrough child. For new GitHub jobs, launch resolves and persists the analysis bundle before child creation/focus; if resolution fails, the response contains the structured job error and no waiting child is created. Returns the job, `childSessionId`, `changesetId`, tab id, status, and whether the job was newly created.
-- `GET /api/pr-walkthrough/jobs/<jobId>` — return the sanitized persisted job record, including `analysisBundle` metadata when a bundle artifact exists.
-- `GET /api/pr-walkthrough/session/<childSessionId>` — return the sanitized job for a child session so the UI can restore waiting/failed/ready/error state.
+- *(DELETED — viewer-feed routes)* `GET /api/pr-walkthrough/jobs/<jobId>`, `GET /api/pr-walkthrough/session/<childSessionId>`, and `GET /api/pr-walkthrough/<changeset-id>` were the bespoke viewer's read endpoints. They are removed; the pack reads its viewer data through its own `lib/routes.mjs` `bundle` route (live `git` changeset recompute) and `publish` route (persist cards) over the pack-namespaced `host.store`, reached via `host.callRoute`.
 - `GET /api/internal/pr-walkthrough/bundle` / `POST /api/internal/pr-walkthrough/bundle` — internal endpoint used only by `read_pr_walkthrough_bundle`; requires scoped session/job access and returns bounded manifest/file reads from the persisted launch bundle. `/api/internal/pr-walkthrough/analysis-bundle` is the compatibility alias.
 - `POST /api/internal/pr-walkthrough/submit-yaml` — internal tool endpoint used only by `submit_pr_walkthrough_yaml`; requires scoped session access and submit proof and maps against the stored launch bundle.
 - `POST /api/pr-walkthrough/resolve` — compatibility resolver for fixture/local/direct walkthrough payloads. Stores the resolved payload.
-- `GET /api/pr-walkthrough/<changeset-id>` — reload a stored ready payload.
 - `POST /api/pr-walkthrough/<changeset-id>/export/preview` — build a provider review preview from a draft.
 - `POST /api/pr-walkthrough/<changeset-id>/export/submit` — submit a provider review only when `confirm: true` and export is available.
 
