@@ -76,6 +76,7 @@ export type WalkthroughSessionManagerLike = {
 	updateSessionMeta?: (sessionId: string, updates: Record<string, unknown>) => boolean;
 	setTitle?: (sessionId: string, title: string, opts?: Record<string, unknown>) => void;
 	enqueuePrompt?: (sessionId: string, text: string, opts?: Record<string, unknown>) => Promise<unknown> | unknown;
+	terminateSession?: (sessionId: string) => Promise<boolean> | boolean;
 };
 
 export type WalkthroughAgentManagerDeps = {
@@ -296,6 +297,8 @@ export class WalkthroughAgentManager {
 				job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
 				this.broadcastJob(job);
 				await this.notifyChildOfError(child, typed, "kickoff prompt dispatch");
+				// Terminal, non-recoverable launch error: tear down the just-created child.
+				await this.terminateChild(childSessionId);
 			}
 		}
 
@@ -382,14 +385,25 @@ export class WalkthroughAgentManager {
 			warnings,
 		}) ?? job;
 		this.broadcastJob(updated);
+		// Terminal state: the walkthrough is published, so tear down the read-only
+		// child session process and let its persisted record be archived (it must
+		// not be respawned on the next gateway restart).
+		await this.terminateChild(updated.childSessionId);
 		return {
 			ok: true,
 			status: "ready",
 			job: publicJob(updated) ?? updated,
 			changesetId: updated.changesetId,
 			warnings,
-			message: "PR walkthrough YAML accepted and published. Stay available for follow-up questions in this session.",
+			message: "PR walkthrough YAML accepted and published. This walkthrough session is now complete.",
 		};
+	}
+
+	/** Best-effort, idempotent teardown of a walkthrough child session. */
+	private async terminateChild(childSessionId: string | undefined): Promise<void> {
+		if (!childSessionId) return;
+		try { await this.deps.sessionManager?.terminateSession?.(childSessionId); }
+		catch (err) { console.warn(`[pr-walkthrough] failed to terminate child ${childSessionId}:`, err); }
 	}
 
 	restore(): void {
@@ -607,7 +621,10 @@ export class WalkthroughAgentManager {
 		const error = { code: "AGENT_RUNTIME_FAILED", message: `PR walkthrough agent failed before publishing YAML: ${message}`, retryable: true };
 		const updated = this.store.update(jobId, { status: "error", error }) ?? job;
 		this.broadcastJob(updated);
+		// Surface the error in the transcript first, then terminate the child so the
+		// failed walkthrough is not respawned on the next restart.
 		await this.notifyChildOfError(this.getSession(sessionId), error, "agent runtime");
+		await this.terminateChild(sessionId);
 	}
 
 	private async remindIfNeeded(sessionId: string, jobId: string): Promise<void> {
