@@ -33,7 +33,7 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
-import { doRenderApp, showHeaderToast, workspaceSessionId, showExtRouteUnavailable, dismissExtRouteUnavailable } from "./render.js";
+import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable } from "./render.js";
 import { renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
@@ -159,37 +159,38 @@ async function waitForGateway(url: string, token: string): Promise<void> {
  * routeId with no registered owner (e.g. the pack was disabled/uninstalled) shows
  * the "feature unavailable" empty state (§7.3).
  *
- * RACE-FREE: the empty-state-vs-panel decision is NOT a one-shot taken here. We
- * record the deep-link in {@link activeExtRoute} and re-derive it through
+ * RACE-FREE: the empty-state-vs-panel decision is NOT a one-shot. The "feature
+ * unavailable" empty state is now RENDER-DERIVED (render.ts::extRouteUnavailable
+ * reads the current `#/ext/<routeId>` hash + the live pack-route registry on every
+ * render), so this function only has to (a) open the target panel when the route
+ * resolves and (b) drive a re-render when the registry changes. We record the
+ * deep-link in {@link activeExtRoute} and re-evaluate it through
  * {@link evaluateActiveExtRoute} BOTH now AND on every later entrypoint-registry
  * change (via {@link setRoutesChangedListener}). So a disable/enable reconcile that
  * lands AFTER this hashchange (the test's `__bobbitReconcilePackRenderers`, or a
  * Market activation toggle's own reconcile) flips the open deep-link between its
- * panel and the empty state — the previous imperative one-shot could strand the
- * empty state when the reconcile hadn't propagated by the instant we looked up.
+ * panel and the render-derived empty state.
  */
 let activeExtRoute: { routeId: string; params?: Record<string, string> } | null = null;
 let extRouteListenerInstalled = false;
 
-/** Re-derive the active `#/ext/<routeId>` deep-link against the CURRENT route
- *  registry: no owner → empty state; owner → clear the empty state and open (or
- *  re-focus, idempotently) its panel. No active deep-link → clear any stale empty
- *  state. Safe to call repeatedly (openPackPanel focuses an existing tab). */
+/** Re-evaluate the active `#/ext/<routeId>` deep-link against the CURRENT route
+ *  registry and re-render: an owner → open (or re-focus, idempotently) its panel.
+ *  The empty-state overlay itself is render-derived (render.ts) so this just needs
+ *  to drive a renderApp + open the panel when resolvable. Safe to call repeatedly
+ *  (openPackPanel focuses an existing tab). */
 async function evaluateActiveExtRoute(): Promise<void> {
 	try {
+		// The render-derived overlay re-evaluates the hash + registry on every render,
+		// so a registry change must trigger a render (disable → overlay appears;
+		// enable → overlay clears once the route resolves + the panel opens below).
+		renderApp();
 		const cur = activeExtRoute;
-		if (!cur) { dismissExtRouteUnavailable(); return; }
+		if (!cur) return;
 		const { lookupPackRoute } = await import("./pack-entrypoints.js");
 		const { openPackPanel } = await import("./pack-panels.js");
 		const entry = lookupPackRoute(cur.routeId);
-		if (!entry) {
-			// Owning pack disabled/uninstalled for this project: the routeId resolves
-			// to no registered route. Surface a "feature unavailable" empty state for
-			// the deep-link (§7.3) instead of silently no-oping (blank panel).
-			showExtRouteUnavailable(cur.routeId);
-			return;
-		}
-		dismissExtRouteUnavailable(); // a resolvable deep-link clears any stale empty state
+		if (!entry) return; // no owner → render-derived empty state already shows
 		const openParams: Record<string, unknown> = {};
 		if (cur.params) for (const key of entry.paramKeys) if (key in cur.params) openParams[key] = cur.params[key];
 		// The target panel is resolved within the SAME pack — thread the route's

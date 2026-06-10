@@ -206,6 +206,7 @@ window.addEventListener("bobbit-open-review-document", (e: Event) => {
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
+import { lookupPackRoute } from "./pack-entrypoints.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import "./config-scope.css";
 
@@ -646,18 +647,37 @@ function headerToast() {
 // resolves to no registered route. Rather than silently no-op (blank panel), we
 // surface a dismissible "feature unavailable" empty state so a bookmarked
 // `#/ext/<routeId>` degrades cleanly — no crash, no dangling surface.
-let _extUnavailableRouteId = "";
-export function showExtRouteUnavailable(routeId: string): void {
-	_extUnavailableRouteId = routeId;
-	try { renderApp(); } catch { /* non-DOM */ }
-}
+//
+// RENDER-DERIVED (built-in-first-party-packs §7.3): the overlay is computed
+// SYNCHRONOUSLY in the render path from (a) the current `#/ext/<routeId>` hash
+// route and (b) the CURRENT pack-route registry (`lookupPackRoute`, a sync map
+// read). It is NOT a one-shot imperative flag set during an async reconcile —
+// that dance raced the reconcile and could strand the overlay out of the DOM.
+// A re-render is driven whenever the entrypoint registry rebuilds (the
+// `setRoutesChangedListener` hook in main.ts calls renderApp), so a
+// disable/enable flips the deep-link between its panel and this empty state.
+//
+// `dismiss` records the dismissed routeId so the overlay stays hidden for that
+// deep-link until the user navigates to a different `#/ext/<routeId>` (a new
+// routeId is not dismissed → overlay can re-surface).
+let _dismissedExtRouteId = "";
 export function dismissExtRouteUnavailable(): void {
-	if (!_extUnavailableRouteId) return;
-	_extUnavailableRouteId = "";
+	const route = getRouteFromHash();
+	const routeId = route.view === "ext" ? (route.extRouteId ?? "") : "";
+	if (_dismissedExtRouteId === routeId) return;
+	_dismissedExtRouteId = routeId;
 	try { renderApp(); } catch { /* non-DOM */ }
 }
 function extRouteUnavailable() {
-	if (!_extUnavailableRouteId) return "";
+	const route = getRouteFromHash();
+	// Only on an `#/ext/<routeId>` deep-link.
+	if (route.view !== "ext" || !route.extRouteId) return "";
+	// User dismissed THIS deep-link's overlay — stay hidden until they navigate
+	// to a different routeId.
+	if (route.extRouteId === _dismissedExtRouteId) return "";
+	// The routeId resolves to a registered (enabled) pack route → the panel owns
+	// the surface; no empty state.
+	if (lookupPackRoute(route.extRouteId)) return "";
 	return html`
 		<div class="ext-unavailable-overlay" data-testid="ext-route-unavailable" role="alert">
 			<div class="ext-unavailable-card">
