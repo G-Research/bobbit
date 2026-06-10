@@ -123,8 +123,10 @@ export const routes = {
 		// `git rev-parse --verify` below (no other-repo data is ever returned).
 		const live = await resolveLocalChangeset(workerCwd(), baseSha, headSha);
 
-		// Prefer LLM-enhanced cards persisted at submit time (keyed by changeset id);
-		// else the deterministic fallback cards computed in-worker above.
+		// Prefer the synthesized production cards persisted at submit time (keyed by
+		// changeset id); else the deterministic fallback cards computed in-worker above.
+		// When stored cards exist we also serve the STORED changeset (it carries the PR
+		// title/metadata from the production YAML) over the bare local changeset.
 		const stored = await ctx.host.store.get(cardsKey(live.changesetId));
 		const hasStored = stored && Array.isArray(stored.cards) && stored.cards.length > 0;
 		return {
@@ -132,10 +134,10 @@ export const routes = {
 			live: true,
 			jobId,
 			changesetId: live.changesetId,
-			changeset: live.changeset,
+			changeset: hasStored && stored.changeset ? stored.changeset : live.changeset,
 			cards: hasStored ? stored.cards : live.cards,
 			warnings: live.warnings,
-			cardsSource: hasStored ? "stored-llm" : "fallback",
+			cardsSource: hasStored ? "stored-synthesis" : "fallback",
 			persistedAt: hasStored ? stored.persistedAt : undefined,
 		};
 	},
@@ -221,6 +223,9 @@ export const routes = {
 		await ctx.host.store.put(cardsKey(changesetId), {
 			schemaVersion: STORE_SCHEMA_VERSION,
 			changesetId,
+			// Persist the synthesized changeset too (it carries the production PR
+			// title/metadata) so `bundle` renders the real header, not the bare sha range.
+			changeset: result.changeset,
 			cards,
 			warnings,
 			persistedAt,

@@ -141,6 +141,12 @@ async function main() {
 				// RULE 2 — single self-contained file (no splitting).
 				splitting: false,
 				define: { "process.env.NODE_ENV": '"production"' },
+				// platform:"node" ESM bundles need a real `require` so a bundled CJS dep
+				// (e.g. `yaml`) that lazily `require("process")` resolves — ESM has no
+				// implicit `require`, so esbuild's dynamic-require shim throws without this.
+				...(entry.platform === "node"
+					? { banner: { js: "import { createRequire as __bbCreateRequire } from 'node:module';\nconst require = __bbCreateRequire(import.meta.url);" } }
+					: {}),
 				plugins: [plugin],
 				logLevel: "info",
 			});
