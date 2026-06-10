@@ -29,10 +29,19 @@ import type { PackEntry, PackScope } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
 import { parseCustomDirectories, type ProjectConfigReader } from "./config-directories.js";
 import { readManifest, readMeta } from "./pack-manifest.js";
+import { builtinFirstPartyPackEntries } from "./builtin-packs.js";
 
 export interface BuildPackListOptions {
 	/** dist/server/defaults — the builtin pack root. */
 	builtinsDir: string;
+	/**
+	 * dist/server/builtin-packs/market-packs — the first-party pack band root
+	 * (resolveBuiltinPacksDir()). When set, every shipped first-party pack is
+	 * resolved in place as a band ABOVE the monolithic builtin defaults and
+	 * BELOW every user scope band (design §5.2/§5.3). Omitted ⇒ no band (the
+	 * legacy zero-market-pack resolution is byte-identical).
+	 */
+	builtinPacksDir?: string;
 	/** <server-cwd> — base for the server scope. */
 	serverBase: string;
 	/** os.homedir() — base for the global-user scope. */
@@ -188,6 +197,11 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 			contents: { roles: [], tools: [], skills: [], entrypoints: [] },
 		},
 	});
+
+	// 1b. Built-in first-party packs (resolve-in-place band). Above the
+	//     monolithic defaults (they beat it by name), below every user scope
+	//     band (a user-installed pack of the same name overrides them — §6.3).
+	if (opts.builtinPacksDir) pushMarket(builtinFirstPartyPackEntries(opts.builtinPacksDir));
 
 	// ── Roles/tools scope segments (low→high): builtin < server < global-user
 	//    < project. Within each scope: market packs (lowest) then the user pack

@@ -17,6 +17,7 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
+import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./builtin-packs.js";
 
 /**
  * `user` corresponds to the global-user scope. It is additive: global-user is
@@ -108,6 +109,15 @@ export class ConfigCascade {
 	 */
 	private globalUserBase: string;
 
+	/**
+	 * The first-party pack band root (`resolveBuiltinPacksDir()`). Shipped
+	 * first-party packs resolve in place as a band ABOVE the builtin defaults
+	 * and BELOW every user scope band (design §5.3). Injectable so unit tests can
+	 * point it at a fixture dir; defaults to the shipped dist tree (which is
+	 * absent under source/test runs ⇒ no band ⇒ byte-identical legacy merge).
+	 */
+	private builtinPacksDir: string;
+
 	constructor(
 		private builtins: BuiltinConfigProvider,
 		private serverStores: ServerStores,
@@ -115,8 +125,10 @@ export class ConfigCascade {
 		private projectRegistry?: ProjectAncestorRegistry,
 		private marketPackProvider?: MarketPackProvider,
 		globalUserBase?: string,
+		builtinPacksDir?: string,
 	) {
 		this.globalUserBase = globalUserBase ?? os.homedir();
+		this.builtinPacksDir = builtinPacksDir ?? resolveBuiltinPacksDir();
 	}
 
 	/** Late-bind the market-pack provider (server.ts wires it after fs/store setup). */
@@ -357,6 +369,16 @@ export class ConfigCascade {
 		};
 
 		const entries: PackEntry[] = [layer("builtin", "builtin", builtinItems)];
+		// Built-in first-party packs (resolve-in-place band, design §5.3): above
+		// the monolithic builtin defaults, below every user scope band. Deduped by
+		// path like market entries. Activation filtering (below) treats them as
+		// normal server-scope market packs.
+		for (const e of builtinFirstPartyPackEntries(this.builtinPacksDir)) {
+			const key = path.resolve(e.path);
+			if (seenMarketPaths.has(key)) continue;
+			seenMarketPaths.add(key);
+			entries.push(e);
+		}
 		// Server segment: market packs below the server user pack.
 		pushMarket("server");
 		entries.push(layer("user:server", "server", serverItems));
