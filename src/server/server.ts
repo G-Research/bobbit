@@ -6175,7 +6175,7 @@ async function handleApiRoute(
 		const builtinSource = { id: BUILTIN_SOURCE_ID, url: "builtin:", builtin: true, addedAt: new Date(0).toISOString() };
 		// A pack name is "built-in" iff a shipped first-party pack declares it.
 		const isBuiltinPackName = (name: string): boolean =>
-			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest.name === name);
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest?.name === name);
 		// True iff a real user install of `(scope, packName)` exists in the ledger.
 		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
 			installer.listInstalled(allContexts(projectId)).some((p) => p.scope === scope && p.packName === packName);
@@ -6279,9 +6279,9 @@ async function handleApiRoute(
 					// Map the shipped first-party packs to the same browse-row shape
 					// `installer.browsePacks` returns, flagged builtin + provided.
 					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
-						...e.manifest,
-						dirName: e.manifest.name,
-						hasTools: e.manifest.contents.tools.length > 0,
+						...e.manifest!,
+						dirName: e.manifest!.name,
+						hasTools: e.manifest!.contents.tools.length > 0,
 						builtin: true,
 						provided: true,
 					}));
@@ -6385,8 +6385,8 @@ async function handleApiRoute(
 				// user-installed same-name pack still appears as its own ledger row.
 				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
 					scope: "server" as InstallScope,
-					packName: e.manifest.name,
-					manifest: e.manifest,
+					packName: e.manifest!.name,
+					manifest: e.manifest!,
 					meta: e.meta,
 					status: "ok" as const,
 					builtin: true,

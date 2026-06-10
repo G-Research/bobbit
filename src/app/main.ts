@@ -53,7 +53,7 @@ function clearDashboardState(): void {
 	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
-import { activeSidePanelTabIdForSession, loadPersistedPanelWorkspace } from "./panel-workspace.js";
+import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
 import { bootMark } from "./boot-timing.js";
 
 // Boot-timing: this fires only after the entire eager module graph has been

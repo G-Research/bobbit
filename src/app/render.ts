@@ -2374,22 +2374,6 @@ export function doRenderApp(): void {
 
 	if (desktop) {
 		teardownMobileScrollTracking();
-		if (getRouteFromHash().view === "walkthrough") {
-			render(html`
-				<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
-					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5" data-testid="pr-walkthrough-standalone-topbar">
-						<div class="flex items-center gap-2 min-w-0">
-							${bobbitIcon}
-							<span class="text-sm font-semibold text-foreground">Bobbit</span>
-							<span class="text-xs text-muted-foreground">PR Walkthrough</span>
-						</div>
-						<theme-toggle></theme-toggle>
-					</div>
-					<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
-				</div>
-			`, app);
-			return;
-		}
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
