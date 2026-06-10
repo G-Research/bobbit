@@ -94,7 +94,7 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 
 ## PR Walkthrough Panel
 
-The PR walkthrough panel is a guided pull-request or changeset review surface. For GitHub PRs, `/walkthrough-pr <url|number>` launches or focuses a read-only child walkthrough agent session; that child owns the waiting panel, publishes cards only through validated `submit_pr_walkthrough_yaml`, and remains available for follow-up chat. Ready walkthroughs can be reviewed in the side panel, fullscreen/wide mode, or a standalone `/walkthrough?...` route. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
+The PR walkthrough panel is a guided pull-request or changeset review surface. For GitHub PRs, `/walkthrough-pr <url|number>` launches or focuses a read-only child walkthrough agent session; that child owns the waiting panel and publishes cards only through validated `submit_pr_walkthrough_yaml`. The child session is terminated once the walkthrough reaches a terminal state (successful submission or non-recoverable error) — it is not kept alive for follow-up chat. Ready walkthroughs can be reviewed in the side panel, fullscreen/wide mode, or a standalone `/walkthrough?...` route. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
 
 ## Assistant Registry
 

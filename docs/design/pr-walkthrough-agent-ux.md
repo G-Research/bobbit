@@ -15,7 +15,7 @@
 
 ## UX principle
 
-Launching a walkthrough should feel like inviting a senior reviewer into the current workspace. The new agent is visible, read-only, progress-bearing, and remains available for follow-up questions after it has populated the review panel.
+Launching a walkthrough should feel like inviting a senior reviewer into the current workspace. The new agent is visible, read-only, and progress-bearing while it works; once it publishes the review panel (or hits a non-recoverable error) the walkthrough reaches a terminal state and the child session is terminated. (Superseded — the original UX kept the agent available for follow-up questions after publishing; see [Child session lifecycle and teardown](pr-walkthrough-agent-session.md#child-session-lifecycle-and-teardown).)
 
 ## Launcher experience
 
@@ -107,9 +107,10 @@ After a valid YAML submission:
 1. Persist the YAML-derived walkthrough payload under the child session/walkthrough id.
 2. Replace the waiting panel with the populated PR walkthrough cards.
 3. Leave the panel in the normal split view. The walkthrough panel does **not** automatically switch to fullscreen (superseded — was: "automatically switch the child session to fullscreen review configuration"); it shares the HTML preview panel's resize logic and fullscreen is strictly user-initiated.
-4. Keep chat available beside the panel so the user can ask follow-up questions with PR context still loaded.
-5. Add a concise success message in chat: `Walkthrough published. I can answer follow-up questions about any card or hunk.`
-6. Do not terminate or archive the walkthrough agent.
+4. Add a concise success message in chat: `PR walkthrough YAML accepted and published. This walkthrough session is now complete.`
+5. **Terminate the child session** — `ready` is a terminal state, so the process exits and the persisted record is archived (the stored payload remains reviewable by `changesetId` in the side panel, fullscreen, or standalone route). There is no follow-up chat in the walkthrough session.
+
+(Superseded — steps 4–6 originally kept chat available for follow-up questions and said "Do not terminate or archive the walkthrough agent"; leaving the child alive leaked its node process and respawned it on every restart. See [Child session lifecycle and teardown](pr-walkthrough-agent-session.md#child-session-lifecycle-and-teardown).)
 
 Fullscreen is entered only when the user explicitly requests it (toolbar button or keyboard shortcut); Escape/collapse returns to the normal split layout. There is no automatic fullscreen transition on ready.
 
@@ -151,4 +152,4 @@ Failure should be visible and actionable from the launcher or child, depending o
 - No changes to GitHub review submission flow; export remains explicit and user-confirmed.
 - No scraping final chat messages into cards.
 - No determinate panel progress bar during analysis.
-- No automatic cleanup of the walkthrough agent after successful submission.
+- ~~No automatic cleanup of the walkthrough agent after successful submission.~~ (Superseded — the child is now terminated on terminal job states; see [Child session lifecycle and teardown](pr-walkthrough-agent-session.md#child-session-lifecycle-and-teardown).)

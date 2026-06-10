@@ -233,7 +233,7 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
-import { MarketplaceInstaller, MarketplaceError, type InstallScope, type PackOrderStore } from "./agent/marketplace-install.js";
+import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 
@@ -6356,7 +6356,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string }> } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string }>; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6378,6 +6378,10 @@ async function handleApiRoute(
 					const label = labelByListName.get(listName);
 					return label !== undefined ? { listName, label } : { listName };
 				}),
+				// One-line per-entity descriptions for the activation disclosure (R3).
+				// Read from the SAME installed pack dir as the catalogue above — never
+				// from the runtime-filtered /api/tools or /api/ext/contributions.
+				descriptions: readPackEntityDescriptions(entry.path, entry.manifest),
 			};
 		};
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "GET") {

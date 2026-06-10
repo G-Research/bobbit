@@ -69,6 +69,16 @@ Private repos rely on your ambient git credentials (credential helper / SSH agen
 
 Select a source to list its packs. Each pack shows its name, version, description, and declared entities (the `contents` from `pack.yaml`, rendered as chips). A directory in the source is only treated as a pack if it contains a valid `pack.yaml`; anything else (a `README.md`, a `docs/` folder) is ignored.
 
+**Per-entity descriptions.** Below the entity chips, a collapsed **"Show details"** disclosure (a `<details>` element) reveals a one-line description for each declared role, tool, skill, and entry point. Descriptions are read straight from the pack dir on the source — role frontmatter, a representative tool-group YAML, skill `SKILL.md` frontmatter, and entry-point YAML respectively. The disclosure is collapsed by default so the at-a-glance chips stay the default and the descriptions are progressive disclosure — a pack with many entities never produces a wall of text. Entities without a description are simply omitted, and the disclosure disappears entirely when nothing would render.
+
+**Install state is reflected up front.** Rather than always offering an Install button, the browse card cross-references the installed list for the **currently-selected install scope** (project identity included, so it never matches a different project):
+
+- Not installed → an **Install** button (`market-install-pack`).
+- Installed but behind the source's latest version (same version comparison as [Updating and uninstalling](#updating-and-uninstalling)) → an **Update** button (`market-browse-update-pack`).
+- Installed and current → an **"Installed"** indicator (`market-browse-installed`).
+
+Why surface this on Browse? Without it, Browse always said "Install" even for packs already present, so users hit confusing `409 already installed` errors; showing the real state guides them to the correct action.
+
 ### Installing to a scope
 
 Each pack has an **Install** button with a scope picker. Installing copies the pack's directory verbatim into the chosen scope's `market-packs/<pack-name>/` and writes a generated `.pack-meta.yaml` recording provenance. Every contained role/tool/skill then resolves through the single resolver, tagged with that pack as its `origin`.
@@ -92,10 +102,23 @@ There is no signing, and the worker isolation around pack server modules is **st
 
 The **Installed** panel lists installed packs grouped by scope, each with the provenance from its `.pack-meta.yaml`: origin source URL, version, commit short SHA, and install/updated dates. A partially-copied or corrupt install (missing/invalid `.pack-meta.yaml`) is surfaced with a `corrupt` status so you can re-install or clean it up; corrupt packs are ignored by the resolver.
 
+Each installed pack also carries two install-state signals on its wire row (`InstalledPackWire`): `updateAvailable` (boolean) and `sourceStatus` (`"ok" | "unknown"`). These drive the action column honestly:
+
+- **Up to date** (`updateAvailable: false`, `sourceStatus: "ok"`) → no Update button. There is nothing to do, so nothing is shown.
+- **Update available** (`updateAvailable: true`) → an **Update** button (`market-update-pack`).
+- **Source can't be checked** (`sourceStatus: "unknown"` — the originating source was removed, never synced, or carries no version data) → a muted/warning **"Source not found"** lozenge (`market-source-unknown`) in place of the Update button.
+- **Uninstall is always available**, regardless of source state — you must always be able to remove an installed pack even if its source is gone.
+
+Why two fields instead of one boolean? A single "update available" flag can't distinguish *confirmed up to date* from *couldn't check*. Showing nothing in the unknown case would falsely imply the pack is current, and showing a stale Update button would mislead. The `updateAvailable` + `sourceStatus` split lets the UI render the honest third state — the "Source not found" lozenge.
+
 ### Updating and uninstalling
 
 - **Update** re-syncs the originating source, re-resolves the commit, and atomically replaces the installed directory (preserving the original `installedAt`, bumping `updatedAt`). Re-syncing a source then updating reflects upstream changes.
 - **Uninstall** deletes the pack directory and removes it from the scope's `pack_order`. Because the directory is the unit of truth, uninstall removes exactly what install added — no orphans.
+
+**When the Update button appears (change detection).** The Update button is shown only when the source's latest **manifest version** differs from the installed `.pack-meta.yaml` version — a plain version-string comparison, not a commit-SHA or file diff. This is cheap, deterministic, and matches the semver the publisher advertises.
+
+Crucially, this comparison is computed **server-side without a network sync**: it reads only the *existing* local source cache (a git source's already-cloned cache dir, or a local-dir source read in place). Why sync-free? The installed list (`GET /api/marketplace/installed`) is fetched on every Market-page open, and doing a per-pack `git fetch` there would be slow and would fail outright when offline. The cheap local-cache read is good enough to flag a likely update; the explicit **"Re-sync"** action (and the Update action itself) still refresh the source live, so a deliberate check is always one click away.
 
 ### Resolving same-name conflicts
 
@@ -136,6 +159,22 @@ register/resolve). The `PUT` returns the refreshed catalogue alongside the norma
 `disabled`, then invalidates resolver caches so the effect is live without a reload. Scope
 split mirrors `pack_order`: project activation lives in the project config, server +
 global-user in the server config.
+
+**No standalone help paragraph.** An earlier version rendered an explanatory paragraph below
+the toggles; it has been removed. Once each entity carries its own one-line description (below),
+the toggles are self-explanatory and the paragraph was just noise competing with the pack
+provenance and action buttons for vertical space.
+
+**Per-entity descriptions (collapsed by default).** As on the Browse card, each installed pack
+exposes a collapsed **"Show details"** disclosure listing a one-line description per declared
+role / tool / skill / entry point. The descriptions are read straight from the **installed pack's
+manifest/dir** — the same authoritative source the activation catalogue reads from, **never**
+from `/api/tools` or `/api/ext/contributions`. This preserves the unfiltered-catalogue invariant:
+if the descriptions came from the runtime-filtered endpoints, a disabled entity would vanish and
+become impossible to re-enable. Manifest-declared entity names are **path-validated** (safe
+basename + a realpath-aware pack-root containment check) before any file is read, because the
+manifest's `contents` names are publisher-authored and this helper also runs on Browse, before
+any install. A rejected name simply yields no description row.
 
 ### Config-page integration
 
