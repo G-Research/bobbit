@@ -48,12 +48,13 @@ export interface PanelWorkspaceTab {
 			[key: string]: unknown;
 		}
 		| {
-			/** Slice B4 — a pack-contributed side panel (design extension-host-phase2.md §6).
-			 *  `panelId` keys the client pack-panel registry; `params` is the typed
-			 *  PanelTarget.params the panel rehydrates from (e.g. `{ artifactId }`). */
+			/** A pack-contributed side panel (pack schema V1 §8.1). `{packId, panelId}`
+			 *  is the COMPOUND key into the client pack-panel registry (panel ids are
+			 *  only pack-unique now); `params` is the typed PanelTarget.params the panel
+			 *  rehydrates from (e.g. `{ artifactId }`). */
 			type: "pack";
+			packId: string;
 			panelId: string;
-			tool?: string;
 			params?: Record<string, unknown>;
 			sessionId?: string;
 			[key: string]: unknown;
@@ -142,8 +143,9 @@ const PROPOSAL_LABELS: Record<ProposalType, string> = {
 const PREVIEW_ENTRY_ID_RE = /^preview:entry:([^:]+)(?::v:(\d+))?$/;
 const PROPOSAL_ID_RE = /^proposal:([^:]+)(?::rev:(\d+))?$/;
 const WALKTHROUGH_ID_RE = /^walkthrough:([^:]+)$/;
-// Slice B4 — pack side-panel tab id scheme `pack:<encoded panelId>`.
-const PACK_PANEL_ID_RE = /^pack:(.+)$/;
+// Pack side-panel tab id scheme `pack:<encoded packId>:<encoded panelId>` (pack
+// schema V1 §8.1 — panel ids are only pack-unique, so the tab id carries BOTH).
+const PACK_PANEL_ID_RE = /^pack:([^:]+):(.+)$/;
 
 function isLegacyPreviewPanelTabId(id: string | null | undefined): boolean {
 	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || id === LIVE_PREVIEW_PANEL_TAB_ID;
@@ -228,22 +230,31 @@ function isWalkthroughPanelTabId(id: string): boolean {
 	return typeof decoded === "string" && decoded.length > 0;
 }
 
-/** Build the side-panel tab id for a pack panel (Slice B4). */
-export function packPanelTabId(panelId: string): string {
-	return `pack:${encodeURIComponent(panelId)}`;
+/** A `{packId, panelId}` reference into the client pack-panel registry. */
+export interface PackPanelRef {
+	packId: string;
+	panelId: string;
 }
 
-/** Extract the panelId from a `pack:<id>` tab id, or undefined if not one. */
-export function packPanelIdFromTabId(id: string | null | undefined): string | undefined {
+/** Build the side-panel tab id for a pack panel (pack schema V1 §8.1) — encodes
+ *  BOTH packId and panelId since panel ids are only pack-unique. */
+export function packPanelTabId(packId: string, panelId: string): string {
+	return `pack:${encodeURIComponent(packId)}:${encodeURIComponent(panelId)}`;
+}
+
+/** Extract the `{packId, panelId}` from a `pack:<packId>:<panelId>` tab id, or
+ *  undefined if not one. */
+export function packPanelRefFromTabId(id: string | null | undefined): PackPanelRef | undefined {
 	if (!id) return undefined;
 	const match = PACK_PANEL_ID_RE.exec(id);
 	if (!match) return undefined;
-	const decoded = decodeTabComponent(match[1]);
-	return decoded && decoded.length > 0 ? decoded : undefined;
+	const packId = decodeTabComponent(match[1]);
+	const panelId = decodeTabComponent(match[2]);
+	return packId && panelId ? { packId, panelId } : undefined;
 }
 
 function isPackPanelTabId(id: string): boolean {
-	return packPanelIdFromTabId(id) != null;
+	return packPanelRefFromTabId(id) != null;
 }
 
 export function isSidePanelTabId(id: unknown): id is string {
@@ -728,7 +739,11 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 	if (kind === "pack") {
 		const source = (rawTab.source || {}) as Record<string, unknown>;
 		const tabState = (rawTab.state || {}) as Record<string, unknown>;
-		const panelId = packPanelIdFromTabId(id)
+		const ref = packPanelRefFromTabId(id);
+		const packId = ref?.packId
+			|| (typeof source.packId === "string" ? source.packId : "")
+			|| (typeof tabState.packId === "string" ? tabState.packId : "");
+		const panelId = ref?.panelId
 			|| (typeof source.panelId === "string" ? source.panelId : "")
 			|| (typeof tabState.panelId === "string" ? tabState.panelId : "");
 		const title = rawTab.title || panelId || "Panel";
@@ -739,8 +754,8 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 			title,
 			label: rawTab.label || title,
 			legacyTab: "pack",
-			source: { ...source, type: "pack", panelId } as PanelWorkspaceTab["source"],
-			state: { ...tabState, panelId },
+			source: { ...source, type: "pack", packId, panelId } as PanelWorkspaceTab["source"],
+			state: { ...tabState, packId, panelId },
 		};
 	}
 	return {

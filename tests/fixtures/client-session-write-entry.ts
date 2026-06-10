@@ -64,8 +64,9 @@ window.fetch = (async (input: any, init?: any): Promise<Response> => {
 	return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 }) as any;
 
-// A panel/entrypoint origin binds toolUseId:undefined — postMessage must still work.
-const host = (): any => getHostApi("sess-1", undefined, "sample_action");
+// A tool-bound origin (renderer) binds toolUseId:undefined — postMessage must still
+// work. Pack schema V1 §8.4: the third arg is a SurfaceRef, not a bare tool name.
+const host = (): any => getHostApi("sess-1", undefined, { kind: "tool", tool: "sample_action" });
 
 // No activation → must throw SYNCHRONOUSLY (mount-time post fails loudly), no send.
 (window as any).__postNoGesture = (): string | null => {

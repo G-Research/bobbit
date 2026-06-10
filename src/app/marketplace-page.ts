@@ -28,20 +28,24 @@ import { setHashRoute } from "./routing.js";
 import {
 	addMarketplaceSource,
 	browseMarketplacePacks,
+	getPackActivation,
 	getPackConflicts,
 	installMarketplacePack,
 	listInstalledPacks,
 	listMarketplaceSources,
 	removeMarketplaceSource,
+	setPackActivation,
 	setPackOrder,
 	syncMarketplaceSource,
 	uninstallMarketplacePack,
 	updateInstalledPack,
 	type BrowsePackWire,
 	type ConflictWire,
+	type DisabledRefs,
 	type InstalledPackWire,
 	type MarketplaceSource,
 	type MarketScope,
+	type PackActivationResponse,
 } from "./api.js";
 
 // ============================================================================
@@ -64,6 +68,13 @@ let browseLoading = false;
 let installed: InstalledPackWire[] = [];
 let installedError = "";
 let conflicts: ConflictWire[] = [];
+
+/** Per-installed-pack activation catalogue + disabled overrides, keyed by
+ *  `${scope}:${packName}` (pack schema V1 §6.7/§9). This is the UNFILTERED
+ *  authoritative source for the activation toggles — read from the installed
+ *  pack manifest's `contents`, NOT from the runtime-filtered /api/tools or
+ *  /api/ext/contributions — so a DISABLED entity stays visible + re-enableable. */
+const activationByPack = new Map<string, PackActivationResponse>();
 
 let newSourceUrl = "";
 let newSourceRef = "";
@@ -106,6 +117,7 @@ export function clearMarketplaceState(): void {
 	installed = [];
 	installedError = "";
 	conflicts = [];
+	activationByPack.clear();
 	newSourceUrl = "";
 	newSourceRef = "";
 	addingSource = false;
@@ -154,31 +166,28 @@ export function activeSessionProjectId(): string | undefined {
  *  `registerPackRenderers` also tears down renderers no longer present — the
  *  uninstall reconciliation path (§4a). Best-effort; never throws. */
 export async function reconcileRenderersForActiveSession(): Promise<void> {
-	const [{ fetchTools }, { registerPackRenderers }, { registerPackPanels }, { registerPackEntrypoints, entrypointInfosFromTools }] = await Promise.all([
+	const [
+		{ fetchTools, fetchContributions },
+		{ registerPackRenderers },
+		{ registerPackPanels, panelInfosFromContributions },
+		{ registerPackEntrypoints, entrypointInfosFromContributions },
+	] = await Promise.all([
 		import("./api.js"),
 		import("./pack-renderers.js"),
 		import("./pack-panels.js"),
 		import("./pack-entrypoints.js"),
 	]);
 	const projectId = activeSessionProjectId();
+	// Tool renderers stay TOOL-scoped — reconcile from /api/tools (pack schema V1 §8.3).
 	const tools = await fetchTools(projectId);
 	registerPackRenderers(tools, projectId);
-	// Slice B4 — same install/uninstall reconcile for pack-contributed panels. The
-	// dedupe guard would skip an unchanged project, so re-register directly from the
-	// freshly-fetched metadata (uninstall reconciliation drops removed panels).
-	const panelInfos = tools.flatMap((t) => {
-		const declared = (t as { panels?: Array<{ id?: unknown; title?: unknown }> }).panels;
-		if (!Array.isArray(declared)) return [];
-		return declared
-			.filter((p) => typeof p?.id === "string")
-			.map((p) => ({ panelId: p.id as string, tool: t.name, title: typeof p?.title === "string" ? p.title : undefined }));
-	});
-	registerPackPanels(panelInfos, projectId);
-	// Slice C1 — same install/uninstall reconcile for pack-contributed entrypoints +
-	// deep-link routes (force re-register from the freshly fetched metadata; the
-	// dedupe guard would skip an unchanged project; uninstall reconcile drops removed
-	// entrypoints/routes so a stale deep-link no longer resolves).
-	registerPackEntrypoints(entrypointInfosFromTools(tools), projectId);
+	// Panels + entrypoints are PACK-scoped — reconcile from /api/ext/contributions
+	// (pack schema V1 §8.1/§8.2). Force re-register directly from the freshly-fetched
+	// metadata (the dedupe guard would skip an unchanged project); uninstall reconcile
+	// drops removed panels/entrypoints/routes so a stale deep-link no longer resolves.
+	const packs = await fetchContributions(projectId);
+	registerPackPanels(panelInfosFromContributions(packs), projectId);
+	registerPackEntrypoints(entrypointInfosFromContributions(packs), projectId);
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {
@@ -216,7 +225,75 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	loading = false;
 	renderApp();
 
+	// Activation catalogues are fetched in the background (one GET per installed
+	// pack) so the page paints immediately; the toggles appear once they resolve.
+	void loadActivationForInstalled();
+
 	if (selectedSourceId) await loadBrowse(selectedSourceId);
+}
+
+/** Fetch the UNFILTERED activation catalogue + disabled overrides for every
+ *  installed pack (pack schema V1 §6.7/§9). The catalogue is the SINGLE source
+ *  for the toggle UI — never the runtime-filtered /api/tools or
+ *  /api/ext/contributions, which would hide a disabled entity and make it
+ *  impossible to re-enable. Best-effort; repaints when done. */
+async function loadActivationForInstalled(): Promise<void> {
+	const snapshot = installed.slice();
+	const results = await Promise.all(snapshot.map(async (p) => {
+		const projectId = p.scope === "project" ? currentProjectId() : undefined;
+		const res = await getPackActivation(p.scope, p.packName, projectId);
+		return { key: `${p.scope}:${p.packName}`, res };
+	}));
+	let changed = false;
+	for (const { key, res } of results) {
+		if (res.ok) { activationByPack.set(key, res.data); changed = true; }
+	}
+	if (changed) renderApp();
+}
+
+/** Maps the singular testid kind → the `DisabledRefs` array key. */
+const ACTIVATION_KIND_KEY: Record<"role" | "tool" | "skill" | "entrypoint", keyof DisabledRefs> = {
+	role: "roles",
+	tool: "tools",
+	skill: "skills",
+	entrypoint: "entrypoints",
+};
+
+/** Toggle a user-facing pack entity's activation. Computes the new `disabled`
+ *  set, PUTs it (the response carries the refreshed catalogue + normalized
+ *  disabled — no follow-up GET), then re-runs the marketplace reconcile so a
+ *  disabled entrypoint disappears from launchers/deep-links WITHOUT a reload
+ *  (pack schema V1 §9). Entrypoints are keyed by `listName`. */
+async function handleToggleActivation(
+	pack: InstalledPackWire,
+	kind: "role" | "tool" | "skill" | "entrypoint",
+	name: string,
+	enable: boolean,
+): Promise<void> {
+	const cacheKey = `${pack.scope}:${pack.packName}`;
+	const current = activationByPack.get(cacheKey);
+	const kindKey = ACTIVATION_KIND_KEY[kind];
+	const set = new Set(current?.disabled?.[kindKey] ?? []);
+	if (enable) set.delete(name); else set.add(name);
+	const disabled: DisabledRefs = { ...(current?.disabled ?? {}), [kindKey]: [...set] };
+	const projectId = pack.scope === "project" ? currentProjectId() : undefined;
+	const busyKey = `activation:${cacheKey}:${kind}:${name}`;
+	busy.add(busyKey);
+	renderApp();
+	const res = await setPackActivation({ scope: pack.scope, projectId, packName: pack.packName, disabled });
+	busy.delete(busyKey);
+	if (res.ok) {
+		// The PUT returns the refreshed UNFILTERED catalogue + normalized disabled.
+		activationByPack.set(cacheKey, res.data);
+		// Re-run the same reconcile a marketplace mutation triggers so the runtime
+		// registries (renderers/panels/entrypoints) drop/restore the toggled entity
+		// without a reload (the catalogue source above is unaffected).
+		await refreshConfigPages();
+		renderApp();
+	} else {
+		installedError = res.error;
+		renderApp();
+	}
 }
 
 async function loadBrowse(sourceId: string): Promise<void> {
@@ -735,6 +812,7 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 					${pack.manifest?.description ? html`<div class="text-xs text-muted-foreground mt-0.5">${pack.manifest.description}</div>` : ""}
 					${renderProvenance(pack)}
 					${expanded && hasConflict ? renderConflictDetails(packConflicts) : ""}
+					${renderActivationControls(pack)}
 				</div>
 				<div class="flex flex-col items-end gap-1 shrink-0">
 					<div class="flex items-center gap-1">
@@ -762,6 +840,65 @@ function renderProvenance(pack: InstalledPackWire): TemplateResult {
 			${m.commit ? html`<span title="Commit">commit ${m.commit.slice(0, 7)}</span>` : ""}
 			<span title="Installed">installed ${installed}</span>
 			${updated !== installed ? html`<span title="Updated">updated ${updated}</span>` : ""}
+		</div>
+	`;
+}
+
+/** Per-pack activation controls (pack schema V1 §9). Toggles ONLY user-facing
+ *  entities — roles, tools, skills, entrypoints. Panels/routes/stores/renderers/
+ *  actions/lib are support surfaces and are NOT toggleable (not shown as
+ *  switches). Rendered SOLELY from the UNFILTERED `catalogue` returned by
+ *  `GET /api/marketplace/pack-activation` (never from /api/tools or
+ *  /api/ext/contributions), so a disabled entity stays visible + re-enableable;
+ *  each toggle's checked state = `name ∉ disabled[kind]`. */
+function renderActivationControls(pack: InstalledPackWire): TemplateResult {
+	const activation = activationByPack.get(`${pack.scope}:${pack.packName}`);
+	if (!activation) return html``;
+	const cat = activation.catalogue;
+	const disabled = activation.disabled || {};
+	const isEnabled = (kindKey: keyof DisabledRefs, name: string) => !(disabled[kindKey] ?? []).includes(name);
+
+	const toggle = (kind: "role" | "tool" | "skill" | "entrypoint", name: string, label: string): TemplateResult => {
+		const kindKey = ACTIVATION_KIND_KEY[kind];
+		const checked = isEnabled(kindKey, name);
+		const busyKey = `activation:${pack.scope}:${pack.packName}:${kind}:${name}`;
+		return html`
+			<label class="market-activation-toggle ${checked ? "" : "market-activation-toggle--off"}" title=${`${kind}: ${name}`}>
+				<input
+					type="checkbox"
+					data-testid="market-toggle-${kind}-${name}"
+					.checked=${checked}
+					?disabled=${busy.has(busyKey)}
+					@change=${(e: Event) => handleToggleActivation(pack, kind, name, (e.target as HTMLInputElement).checked)}
+				/>
+				<span>${label}</span>
+			</label>
+		`;
+	};
+
+	const group = (title: string, toggles: TemplateResult[]): TemplateResult => html`
+		<div class="market-activation-group">
+			<div class="market-activation-group-title">${title}</div>
+			<div class="market-activation-toggles">${toggles}</div>
+		</div>
+	`;
+
+	const groups: TemplateResult[] = [];
+	if (cat.roles.length) groups.push(group("Roles", cat.roles.map((n) => toggle("role", n, n))));
+	if (cat.tools.length) groups.push(group("Tools", cat.tools.map((n) => toggle("tool", n, n))));
+	if (cat.skills.length) groups.push(group("Skills", cat.skills.map((n) => toggle("skill", n, n))));
+	if (cat.entrypoints.length) {
+		groups.push(group("Entry points", cat.entrypoints.map((e) => toggle("entrypoint", e.listName, e.label || e.listName))));
+	}
+	if (groups.length === 0) return html``;
+
+	return html`
+		<div class="market-activation" data-testid="market-activation-${pack.packName}">
+			<div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mt-2">Activation</div>
+			${groups}
+			<div class="market-activation-help text-[10px] text-muted-foreground/90" data-testid="market-activation-help">
+				Disable an entry point to hide its launcher and deep-link. A tool that opens the same panel is unaffected unless you disable the tool itself. Disabling a tool, role, or skill removes it from its resolved list (a shadowed lower-priority entity may reappear). Panels and routes are support surfaces and stay available while the pack is installed.
+			</div>
 		</div>
 	`;
 }

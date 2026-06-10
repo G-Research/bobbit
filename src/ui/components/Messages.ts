@@ -709,7 +709,7 @@ export class ToolMessage extends LitElement {
 				goalId: goalIdCtx,
 				getAskResponseAnswers,
 				packTool: toolName,
-				host: getHostApi(sessionIdCtx, this.toolCall.id, toolName),
+				host: getHostApi(sessionIdCtx, this.toolCall.id, { kind: "tool", tool: toolName }),
 			},
 		);
 

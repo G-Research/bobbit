@@ -297,3 +297,59 @@
 	background: color-mix(in oklch, var(--negative, var(--destructive)) 8%, transparent);
 	color: var(--negative, var(--destructive));
 }
+
+/* ── Activation controls (pack schema V1 §9) ─────────────────────────────────
+ * Per-pack toggles for user-facing entities only (roles/tools/skills/entrypoints).
+ * Support surfaces (panels/routes/stores/renderers/actions/lib) are NOT toggled. */
+.market-activation {
+	margin-top: 0.5rem;
+	padding-top: 0.5rem;
+	border-top: 1px dashed var(--border);
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+}
+
+.market-activation-group {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.market-activation-group-title {
+	font-size: 0.625rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--muted-foreground);
+}
+
+.market-activation-toggles {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 0.625rem;
+}
+
+.market-activation-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.375rem;
+	font-size: 0.6875rem;
+	color: var(--foreground);
+	cursor: pointer;
+	user-select: none;
+}
+
+.market-activation-toggle input {
+	accent-color: var(--primary);
+	cursor: pointer;
+}
+
+.market-activation-toggle--off {
+	color: var(--muted-foreground);
+}
+
+.market-activation-help {
+	line-height: 1.4;
+	color: var(--muted-foreground);
+}

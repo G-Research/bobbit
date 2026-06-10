@@ -396,10 +396,12 @@ The panel module's factory is handed the host toolkit **plus a `host`** bound to
 session and the panel's pack (`toolUseId` is `undefined` — a panel originates no tool call).
 So a panel can call `host.store.*`, `host.callRoute`, and `host.session.*` — everything a
 renderer can except `invokeAction` (which is tool-call-scoped). The panel is served
-bearer-only by `GET /api/tools/:tool/panel/:panelId` (serving module bytes is
-static-asset-equivalent), lazily imported, registered through the **same
-generation-guarded chokepoint** as renderers (reload-safe, reconcile-on-uninstall,
-project-scoped).
+bearer-only by the **pack-addressed** `GET /api/ext/packs/:packId/panels/:panelId`
+(panel ids are only pack-unique, so the client keys the registry + serving URL by
+`{packId, panelId}`; serving module bytes is static-asset-equivalent), lazily imported,
+registered through the **same generation-guarded chokepoint** as renderers (reload-safe,
+reconcile-on-uninstall, project-scoped). The client reconciles panels from
+`GET /api/ext/contributions` (pack-scoped), not `/api/tools`.
 
 **Panel conventions (enforced — identical to renderer rules):** theme tokens only (no
 hardcoded colors, no private `:root{}`, no `prefers-color-scheme`); preserve any embedded
