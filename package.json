@@ -14,7 +14,7 @@
     "README.md"
   ],
   "scripts": {
-    "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs",
+    "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs && shx rm -rf dist/server/builtin-packs && node scripts/copy-builtin-packs.mjs",
     "build:ui": "vite build",
     "build:packs": "node scripts/build-market-packs.mjs",
     "build": "npm run build:packs && npm run build:server && npm run build:ui",
