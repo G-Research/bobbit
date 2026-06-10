@@ -760,12 +760,14 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 					<div class="text-xs text-muted-foreground mt-0.5">${pack.description}</div>
 					<div class="mt-1.5">${entityChips(pack)}</div>
 				</div>
-				<button
-					class="market-btn market-btn--primary shrink-0"
-					data-testid="market-install-pack"
-					?disabled=${installing}
-					@click=${() => handleInstall(pack)}
-				>${icon(Download, "xs")} ${installing ? "Installing…" : "Install"}</button>
+				${pack.builtin
+					? html`<span class="market-builtin-badge shrink-0" data-testid="market-browse-provided" title="Shipped with Bobbit — manage it from the Installed tab's toggles">Provided (built-in)</span>`
+					: html`<button
+							class="market-btn market-btn--primary shrink-0"
+							data-testid="market-install-pack"
+							?disabled=${installing}
+							@click=${() => handleInstall(pack)}
+						>${icon(Download, "xs")} ${installing ? "Installing…" : "Install"}</button>`}
 			</div>
 		</div>
 	`;
@@ -777,6 +779,22 @@ function conflictsForPack(pack: InstalledPackWire): ConflictWire[] {
 	const id = `market:${pack.scope}:${pack.packName}`;
 	return conflicts.filter((c) =>
 		c.winner.packEntryId === id || c.shadowed.some((s) => s.packEntryId === id),
+	);
+}
+
+/** §6.4/§7.4 — derive the built-in row's shadow state from RESOLVER winner state
+ *  (`/api/packs/conflicts`), NOT a name-match heuristic. The built-in entry's
+ *  PackEntry id is `builtin-pack:<name>` (see `builtin-packs.ts`); a same-name
+ *  user install is `market:<scope>:<name>`. The built-in row is shadowed ONLY
+ *  when a same-name pack actually WINS over the built-in entry — i.e. the built-in
+ *  `builtin-pack:<name>` appears as a SHADOWED entry of a conflict whose winner is
+ *  some other (same-name) pack. A corrupt install (excluded from resolution) never
+ *  becomes a winner, so it never suppresses the built-in toggle. With no winning
+ *  override, the built-in row owns the live (server, packName) toggle. */
+function builtinRowShadowed(packName: string): boolean {
+	const builtinId = `builtin-pack:${packName}`;
+	return conflicts.some(
+		(c) => c.winner.packEntryId !== builtinId && c.shadowed.some((s) => s.packEntryId === builtinId),
 	);
 }
 
@@ -819,9 +837,7 @@ function renderBuiltinGroup(packs: InstalledPackWire[]): TemplateResult {
  *  installed row keeps its toggles. */
 function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 	const isCorrupt = pack.status === "corrupt";
-	// Shadowed when any non-built-in installed pack of the same name exists — the
-	// winner owns the live (server, packName) toggle, so this row must not.
-	const shadowed = installed.some((p) => !p.builtin && p.packName === pack.packName);
+	const shadowed = builtinRowShadowed(pack.packName);
 	return html`
 		<div
 			class="market-pack-card"
