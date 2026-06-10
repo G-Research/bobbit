@@ -234,6 +234,26 @@ In the `/api/marketplace/sources/:id` handler (`src/server/server.ts`, the
 The store's `get("builtin")` returns `undefined`, so the handler must special-case
 `id === "builtin"` **before** the `sourceStore.get(id)` existence check.
 
+### 4.4 Install / update from the built-in source are rejected (resolve-in-place)
+
+Because the model is resolve-in-place (D1), copy-installing or updating a pack
+*from* the built-in source would violate it (it would create a frozen copy under a
+scope's `market-packs/`, then shadow-collide with the in-place band). Both
+mutating endpoints therefore **reject** a built-in-source target:
+
+- `POST /api/marketplace/install` with `sourceId === "builtin"` → **400/403**
+  `{ error: "built-in packs are provided in place and cannot be installed" }`.
+- `POST /api/marketplace/update` with `scope: "server"` + a `packName` that is a
+  built-in first-party pack **and has no real user install** at that scope →
+  **400/403** `{ error: "built-in packs update with the app; nothing to update" }`.
+  (A genuine user install of the same name at server scope — see §6.3 — is a real
+  installed pack and updates normally; the rejection keys off "no install ledger
+  entry for `(scope, packName)`", not off the name alone.)
+- `GET /api/marketplace/sources/builtin/packs` browse rows are flagged
+  `builtin: true` + `provided: true`; the Market UI renders them as **already
+  provided / toggleable** (an enable/disable affordance), never with an **Install**
+  button. An API/E2E assertion covers both rejections (§11.2).
+
 ---
 
 ## 5. Resolver band — exact `buildPackList()` change + ordering
@@ -379,6 +399,41 @@ built-in band (step 2+ > step 1b), so:
   wins; disabling targets the feature by name regardless of provider, which is the
   intended semantics.
 
+### 6.4 API identity / provenance disambiguation (same-name built-in + user install)
+
+The resolver already collapses to one runtime winner per `packId` (§6.3). The
+remaining ambiguity is purely at the **Market/installed API + UI** layer, where a
+built-in row and a same-`(scope, packName)` user-installed row could otherwise
+collide. Resolved by treating the built-in pack as a **distinct, non-install row
+kind** rather than another entry in the install ledger:
+
+- **Row identity key.** Built-in rows are keyed `builtin:<packName>`; real
+  installed rows keep `<scope>:<packName>`. The two key spaces never collide, so a
+  user-installed server `pr-walkthrough` and the built-in `pr-walkthrough` render
+  as **two distinct rows** (the built-in one in the "Built-in" section, the
+  installed one in its scope group), each with its own controls. `InstalledPackWire`
+  gains `builtin?: boolean` (and the UI list key includes it) so row identity,
+  status rendering, and React-style keying are unambiguous.
+- **Uninstall.** `DELETE /api/marketplace/installed` operates **only on the
+  install ledger** (`installer.listInstalled`). A built-in pack is not in the
+  ledger, so: with NO user install of that name, the delete finds nothing → the
+  handler returns **403** `{ error: "built-in packs cannot be uninstalled" }`
+  (special-cased when `packName` is a built-in pack and no ledger entry matches);
+  WITH a user install of the same name at the scope, the delete targets the
+  **ledger entry** (the user install) and succeeds normally — it never touches the
+  built-in band. So a server-scope override is fully uninstallable; deleting it
+  simply re-exposes the built-in pack as the winner again (the intended revert).
+  The UI shows an Uninstall button only on `!row.builtin` rows.
+- **Update.** Same rule (§4.4): updates the ledger entry when one exists; rejects
+  when the name resolves only to the built-in band.
+- **Activation.** Keyed `(server, packName)` regardless of provider (one
+  `pack_activation` entry per name+scope). It applies to the resolved winner — if a
+  user override exists, toggling disables the override's entries; with no override
+  it disables the built-in pack's. This is the intended "disable the feature by
+  name" semantics, and is stated explicitly so the toggle's effect is predictable
+  in the override case. Surface tokens bind to the single registered winner (§6.3),
+  so there is no token ambiguity.
+
 ---
 
 ## 7. Activation + Market UI
@@ -471,10 +526,13 @@ const builtin = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) =
 json({ installed: [...builtin, ...installer.listInstalled(allContexts(projectId))] });
 ```
 
-Add `builtin?: boolean` to the `InstalledPackWire` type (`src/app/api.ts`). The
-`DELETE /api/marketplace/installed` handler (`server.ts:6294`) must **reject**
-(`403`/`409`) when the named pack is a built-in first-party pack — uninstall is
-not an operation on shipped packs.
+Add `builtin?: boolean` to the `InstalledPackWire` type (`src/app/api.ts`); the
+client list key includes it (§6.4) so a built-in row and a same-name user-install
+row are distinct. The `DELETE /api/marketplace/installed` handler (`server.ts:6294`)
+operates on the install ledger only: it **rejects** (`403`) when `packName` is a
+built-in pack with **no** matching ledger entry, and otherwise uninstalls the real
+ledger entry (a server-scope user override of the same name is fully uninstallable
+— §6.4).
 
 ---
 
@@ -540,38 +598,51 @@ delete until that is green in CI.
   `handlePrWalkthroughApiRoute(...)` dispatch accordingly (keep the import + call;
   narrow the `isPublicWalkthroughRoute` matcher to the retained routes).
 - `src/server/pr-walkthrough/walkthrough-store.ts` + `git-changeset.ts` +
-  `diff-parser.ts` — the changeset/diff logic is RE-EXPRESSED live in the pack's
-  `lib/routes.mjs` (ambient `child_process`/`fs` in the confined worker), so the
-  bespoke viewer no longer depends on them. **Confirm parity first** (see §8.4 for
+  `diff-parser.ts` — **deleted** (decisive, §8.4). The changeset/diff logic is
+  RE-EXPRESSED live in the pack's `lib/routes.mjs` (ambient `child_process`/`fs` in
+  the confined worker), and the persisted viewer cards move to the pack's
+  `host.store` (the submit tool's `publish` bridge, §8.4). **Confirm the E2E green
+  first** (see §8.4 for
   the persistence caveat before deleting `walkthrough-store.ts`).
 
 **Tool defs** — `defaults/tools/pr-walkthrough/` is **kept** (the agent-driving
 tools `submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle` / `readonly_bash`
 stay — §8.5).
 
-### 8.4 Persistence caveat (highest-risk parity item)
+### 8.4 Persistence — DECISIVE: the pack's `host.store` is the sole viewer-state provider
 
-The deletion plan replaces `walkthrough-store.ts` with `host.store.*`, written by
-the pack's `publish` route. But the **agent submit tool** (`submit_pr_walkthrough_yaml`)
-is the producer of LLM cards, and it persists today via
-`/api/internal/pr-walkthrough/submit-yaml` → `walkthrough-store`. To make the pack
-the *literal* sole persistence provider, the submit tool must land its cards in the
-pack-scoped `host.store` (via the pack `publish` route).
+The migrated feature's **durable viewer state** (the changeset → LLM-enhanced
+cards the panel reads) is owned **solely by the pack**, through the pack-scoped
+`host.store` written by the pack's `publish` route and read by its `bundle` route.
+There is **no fallback** that leaves a viewer-state store built-in. This is a hard
+requirement for this goal, not an option, so the definition of done is
+unambiguous:
 
-**Recommendation for this goal:** make the pack the sole **viewer/route/deep-link**
-provider (delete the UI, viewer-feed routes, deep-link, `git-changeset.ts`,
-`diff-parser.ts`), and treat the submit→persistence bridge as the gated step:
+- **Delete `src/server/pr-walkthrough/walkthrough-store.ts`** and the
+  `/api/pr-walkthrough` + `/api/internal/pr-walkthrough` **viewer-feed** routes
+  (bundle / analysis-bundle / job + session reads). The pack's `lib/routes.mjs`
+  (`bundle` LIVE git recompute + `publish` persist to `host.store`) is the sole
+  provider of that surface (§8.2 parity table).
+- **Submit→publish bridge (required).** The agent tool `submit_pr_walkthrough_yaml`
+  is the *producer* of LLM cards. Its persistence is rewired so the cards land in
+  the **pack-scoped `host.store`** — it calls the pack's `publish` route (the
+  submit-time persistence seam named in `pr-walkthrough-pack-deletion.md`) instead
+  of `walkthrough-store`. The internal `submit-yaml` write route to
+  `walkthrough-store` is removed with the store. The tool stays an agent tool
+  (model-backed synthesis + the agent's credentials are unchanged); only its
+  *persistence sink* moves to the pack store, which is exactly what proves a
+  first-party pack can own durable feature state through the Host API.
+- **What stays agent-side (unchanged carve-out, §8.5):** model-backed card
+  synthesis itself, GitHub PR resolution, and `/export/*` (network + GitHub auth).
+  Those are *producer/credential* concerns, not viewer state, and never read or
+  write the viewer store except via the `publish` seam above.
 
-- If the submit→`publish` bridge lands cleanly (agent tool calls the pack
-  `publish` route), delete `walkthrough-store.ts` + the internal submit-yaml route.
-- If that bridge is larger than this goal allows, **retain `walkthrough-store.ts`
-  + the internal submit-yaml route as an agent-side persistence detail** (NOT a
-  viewer surface), and have the pack's `bundle` route read those persisted cards.
-  The pack is still the sole VIEWER/contribution provider; the persistence plumbing
-  is the documented follow-up ("PR-walkthrough agent-side migration").
-
-The design doc explicitly flags this so the implementer confirms parity (E2E green)
-before removing `walkthrough-store.ts`.
+**Gating.** Deletion of `walkthrough-store.ts` + the viewer-feed routes is gated on
+the mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) being green while the
+feature is served entirely by the pack — including the publish→reload→re-read
+cards path that proves the pack store is the durable provider. The implementer must
+confirm that E2E green **before** removing the bespoke store/routes, but the target
+state is fixed: the bespoke viewer store is deleted, not retained.
 
 ### 8.5 Agent-tool carve-out
 
@@ -690,7 +761,16 @@ Findings from `tests/fixtures/market-sources/`:
   - **Re-enable** restores it; the state **survives reload**.
   - The built-in **source cannot be removed** (no Remove control; `DELETE` → 403)
     and built-in **packs cannot be uninstalled** (no Uninstall control; `DELETE
-    /installed` → 403/409).
+    /installed` → 403).
+  - **Install/update from the built-in source are rejected** (§4.4): `POST
+    /api/marketplace/install { sourceId: "builtin", ... }` → 400/403, and `POST
+    /api/marketplace/update { scope: "server", packName: "pr-walkthrough" }` (no
+    user install) → 400/403. The built-in browse rows render as provided/toggleable,
+    never with an Install button.
+  - **Same-name override (§6.4):** installing a user pack named `pr-walkthrough`
+    at server scope yields TWO distinct Market rows (built-in + installed); the
+    installed row is uninstallable and the built-in row is not; after uninstalling
+    the override the built-in pack is the winner again.
 - **`tests/e2e/ui/marketplace-conflicts.spec.ts`** (new, item 0): the conflict /
   no-tools / panel-only fixture assertions from §10.
 
