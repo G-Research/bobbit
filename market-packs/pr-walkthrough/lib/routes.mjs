@@ -352,6 +352,13 @@ function parseUnifiedDiff(diff, warnings) {
 			}
 		}
 	}
+	// A modified file's `--- a/X` / `+++ b/X` headers set oldPath === filePath. The
+	// shared DiffReferenceMapper indexes a block under BOTH paths, so a redundant
+	// oldPath double-indexes it and breaks the sole-hunk lenient match (suggested-
+	// comment anchors then fail to map). Keep oldPath ONLY for true renames/copies.
+	for (const block of blocks) {
+		if (block.oldPath && block.oldPath === block.filePath) block.oldPath = undefined;
+	}
 	return blocks;
 }
 
