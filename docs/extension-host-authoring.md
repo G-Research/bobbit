@@ -366,7 +366,7 @@ terminated on timeout (the CPU control), bounded by memory caps, and any child p
 spawns is SIGKILLed on terminate. Separately, the module graph's `import`/`require` resolution
 is **confined to the pack root** — so a handler may `import("../lib/helper.mjs")` (a sibling
 of `tools/`), but an import that resolves outside the pack root is rejected. That containment
-is import hygiene / loader stability, **not** a capability sandbox (it is near-cosmetic now
+is import hygiene / loader stability, **not** an OS-level security boundary (it is near-cosmetic now
 that `fs` is ambient).
 
 > **Confinement root = pack root.** Earlier the import-containment root was the tool's group
