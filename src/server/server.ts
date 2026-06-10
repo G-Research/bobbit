@@ -26,37 +26,6 @@ import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, 
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, type WaitResult } from "./agent/orchestration-core.js";
-
-/**
- * Render the `team_wait` result text (orchestration-core design §9). Returns on
- * the first SETTLED child (idle or terminal); enumerates every awaited child's
- * status and instructs the agent to call `team_wait` again for the remainder.
- */
-function formatWaitText(result: WaitResult): string {
-	const lines: string[] = [];
-	const first = result.firstIdle;
-	if (first) {
-		const fh = result.statuses.find(s => s.sessionId === first);
-		const header = result.firstIsTerminal ? "First settled child" : "First idle child";
-		lines.push(`${header}: ${first}${fh?.title ? ` ("${fh.title}")` : ""}`);
-		if (result.outputTail) {
-			lines.push("--- output tail ---");
-			lines.push(result.outputTail);
-		}
-		lines.push("");
-	}
-	lines.push(`Awaited children (${result.statuses.length}):`);
-	for (const s of result.statuses) {
-		lines.push(`  • ${s.sessionId}${s.title ? ` "${s.title}"` : ""} — ${s.status}`);
-	}
-	if (result.remaining === 0) {
-		lines.push("All awaited children are settled.");
-	} else {
-		lines.push(`Remaining: ${result.remaining} child(ren) not yet settled.`);
-		lines.push("➜ Process this result now, then call team_wait again to await the remaining children.");
-	}
-	return lines.join("\n");
-}
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -96,7 +65,7 @@ import {
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
-import { resolveGrantPolicy } from "./agent/tool-activation.js";
+import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
 import {
@@ -114,6 +83,37 @@ import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
+
+/**
+ * Render the `team_wait` result text (orchestration-core design §9). Returns on
+ * the first SETTLED child (idle or terminal); enumerates every awaited child's
+ * status and instructs the agent to call `team_wait` again for the remainder.
+ */
+function formatWaitText(result: WaitResult): string {
+	const lines: string[] = [];
+	const first = result.firstIdle;
+	if (first) {
+		const fh = result.statuses.find(s => s.sessionId === first);
+		const header = result.firstIsTerminal ? "First settled child" : "First idle child";
+		lines.push(`${header}: ${first}${fh?.title ? ` ("${fh.title}")` : ""}`);
+		if (result.outputTail) {
+			lines.push("--- output tail ---");
+			lines.push(result.outputTail);
+		}
+		lines.push("");
+	}
+	lines.push(`Awaited children (${result.statuses.length}):`);
+	for (const s of result.statuses) {
+		lines.push(`  • ${s.sessionId}${s.title ? ` "${s.title}"` : ""} — ${s.status}`);
+	}
+	if (result.remaining === 0) {
+		lines.push("All awaited children are settled.");
+	} else {
+		lines.push(`Remaining: ${result.remaining} child(ren) not yet settled.`);
+		lines.push("➜ Process this result now, then call team_wait again to await the remaining children.");
+	}
+	return lines.join("\n");
+}
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -1177,6 +1177,20 @@ export function createGateway(config: GatewayConfig) {
 			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
 		},
 		resolveSessionThinking: (sessionId: string) => sessionManager.getSession(sessionId)?.spawnPinnedThinkingLevel,
+		// Resolve the owner's FULL effective tool catalogue so the core can
+		// synthesize an explicit "all-except-spawn-verbs" allow-list when the owner
+		// is unrestricted (orchestration-core §7 — a child must never have a spawn
+		// verb registered). Mirrors SessionManager.resolveEffectiveAllowedTools.
+		resolveEffectiveTools: (sessionId: string) => {
+			const session = sessionManager.getSession(sessionId);
+			if (session?.allowedTools && session.allowedTools.length > 0) return session.allowedTools;
+			const ps = sessionManager.getPersistedSession(sessionId);
+			const roleName = session?.role ?? ps?.role
+				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
+			const role = roleManager.getRole(roleName);
+			if (!role) return undefined;
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
 
@@ -9216,6 +9230,29 @@ async function handleApiRoute(
 		const ownerId = orchestrateMatch[1];
 		const verb = orchestrateMatch[2];
 
+		// ── Caller→owner authorization (S1) ─────────────────────────────────────
+		// The shared gateway bearer only proves "some token-holder"; it does NOT
+		// prove the caller IS `ownerId`. Without this, any agent could enumerate /
+		// prompt / steer / abort / dismiss a FOREIGN owner's children (including
+		// team workers, which team-manager registers under the team-lead session
+		// id) — bypassing the authz `/api/goals/:id/team/*` enforces and violating
+		// the goal's "no method drives a foreign session" constraint. Bind the
+		// request to the unforgeable per-session secret and require the AUTHENTIC
+		// caller to BE the owner. Mirrors the children-mutation authz pattern
+		// (see session-secret.ts + the spawn-child / archive-child routes).
+		{
+			const h = req.headers as Record<string, string | string[] | undefined>;
+			const secretHeader = h["x-bobbit-session-secret"];
+			const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
+			const authenticCaller = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+				typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+			);
+			if (!authenticCaller || authenticCaller !== ownerId) {
+				json({ error: "Caller session is not the owner of these child agents", code: "NOT_OWNER" }, 403);
+				return;
+			}
+		}
+
 		// Map OrchestrationCore error codes → HTTP status.
 		const ocStatus = (err: unknown): number => {
 			if (err instanceof OrchestrationCoreError) {
@@ -9323,8 +9360,19 @@ async function handleApiRoute(
 			// children settle; server owns the chunked heartbeat (undici parity).
 			if (verb === "delegate") {
 				const timeoutMs = body?.timeout_ms ?? 600_000;
+				// Reject empty/missing instructions (and empty `parallel`) up front for
+				// direct callers — matches the team_delegate tool wrapper's guard.
+				const hasParallel = Array.isArray(body?.parallel) && body.parallel.length > 0;
+				if (!hasParallel && (typeof body?.instructions !== "string" || !body.instructions.trim())) {
+					json({ error: "Missing 'instructions' (or provide a non-empty 'parallel' array)" }, 400);
+					return;
+				}
+				if (hasParallel && body.parallel.some((p: any) => typeof p?.instructions !== "string" || !p.instructions.trim())) {
+					json({ error: "Each 'parallel' entry requires non-empty 'instructions'" }, 400);
+					return;
+				}
 				const spawnSet: Array<{ instructions: string; context?: Record<string, string> }> =
-					Array.isArray(body?.parallel) && body.parallel.length > 0
+					hasParallel
 						? body.parallel.map((p: any) => ({ instructions: String(p.instructions ?? ""), context: p.context }))
 						: [{ instructions: String(body?.instructions ?? ""), context: body?.context }];
 				const lifecycle: "full" | undefined = body?.lifecycle === "full" ? "full" : undefined;

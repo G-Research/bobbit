@@ -61,6 +61,8 @@ interface WaitRouteResponse {
 	statuses?: WaitStatusEntry[];
 	outputTail?: string;
 	remaining?: number;
+	/** Server-formatted result text (§9) — the SINGLE source of truth for wording. */
+	text?: string;
 }
 
 interface SpawnedChild {
@@ -172,6 +174,12 @@ async function callReadSessionEndpoint(
 const extension: ExtensionFactory = (pi) => {
 	const ownerSessionId = getCallerSessionId();
 	const isTeamLead = !!process.env.BOBBIT_GOAL_ID;
+	// The unforgeable per-session capability secret. Only this session's process
+	// holds it (injected as env exactly where BOBBIT_SESSION_ID is). The
+	// `/orchestrate/*` routes resolve it back to the AUTHENTIC caller and require
+	// the caller to BE the owner — so a token-holder cannot drive a foreign
+	// owner's children. See src/server/auth/session-secret.ts.
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
 
 	/** POST/GET the orchestrate route family against the OWNER session. */
 	async function orchestrate(method: string, verb: string, body?: unknown): Promise<unknown> {
@@ -180,7 +188,9 @@ const extension: ExtensionFactory = (pi) => {
 			throw new Error(credsResult.error);
 		}
 		const owner = ownerSessionId || "unknown";
-		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body);
+		const extraHeaders: Record<string, string> = {};
+		if (sessionSecret) extraHeaders["X-Bobbit-Session-Secret"] = sessionSecret;
+		return apiCall(credsResult, method, `/api/sessions/${owner}/orchestrate/${verb}`, body, { extraHeaders });
 	}
 
 	function ok(text: string, details?: unknown) {
@@ -407,8 +417,11 @@ const extension: ExtensionFactory = (pi) => {
 			} catch (e: any) {
 				return fail(e?.message ?? String(e));
 			}
-			const { text, details } = formatWaitResult(resp);
-			return ok(text, details);
+			// Single source of truth for the wording is the SERVER (formatWaitText);
+			// the extension only derives the renderer `details` from the statuses.
+			// formatWaitResult.text is a defensive fallback if the server omits it.
+			const built = formatWaitResult(resp);
+			return ok(typeof resp.text === "string" && resp.text ? resp.text : built.text, built.details);
 		},
 	});
 

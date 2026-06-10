@@ -111,4 +111,56 @@ test.describe("orchestration restart survival", () => {
 
 		await deleteSession(child).catch(() => {});
 	});
+
+	// The two tests above drive the boot helpers DIRECTLY. This one asserts the
+	// actual WIRING: that SessionManager.restoreSessions() invokes the rebuild +
+	// the reminder with the childKind!=="team" filter, and that its delegate
+	// boot-reap archives an orphaned (owner-archived) live child. Deterministic —
+	// no real reboot, no real LLM. restoreOneSession is stubbed so re-running
+	// restore does not re-spawn already-live regular sessions.
+	test("restoreSessions() wires the rebuild + team-filtered reminder and boot-reaps an orphaned child", async ({ gateway }) => {
+		const sm = gateway.sessionManager;
+		const core = gateway.orchestrationCore;
+		const parent = await createSession();
+		const child = await spawnChild(parent, "orphan-on-boot helper");
+		expect(await listChildren(parent)).toContain(child);
+
+		// Spy on the two orchestration boot hooks; delegate to the originals.
+		const origRebuild = core.rebuildIndexFromPersisted.bind(core);
+		const origRemind = core.remindOwnersWithLiveChildren.bind(core);
+		const origRestoreOne = (sm as any).restoreOneSession;
+		let rebuildCalled = false;
+		let remindFilter: ((h: any) => boolean) | undefined;
+		core.rebuildIndexFromPersisted = (p: any) => { rebuildCalled = true; return origRebuild(p); };
+		core.remindOwnersWithLiveChildren = (f: any) => { remindFilter = f; return origRemind(f); };
+		(sm as any).restoreOneSession = async () => { /* skip heavy live-session restore */ };
+
+		try {
+			// Archive ONLY the parent at the store level (no terminate cascade) so the
+			// child remains LIVE but orphaned — the exact state the boot-reap closes.
+			const projectId = sm.getPersistedSession(parent)?.projectId;
+			sm.getSessionStore(projectId).archive(parent);
+
+			await sm.restoreSessions();
+
+			// Rebuild + reminder were actually invoked by restoreSessions().
+			expect(rebuildCalled).toBe(true);
+			expect(typeof remindFilter).toBe("function");
+			// The reminder filter skips team-managed children (team-manager nudges
+			// those separately) but covers delegate children.
+			expect(remindFilter!({ childKind: "team" })).toBe(false);
+			expect(remindFilter!({ childKind: "delegate" })).toBe(true);
+
+			// Boot-reap: the orphaned (owner-archived) live child is archived, not left
+			// as a live orphan.
+			const stillLive = gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child);
+			expect(stillLive).toBe(false);
+		} finally {
+			core.rebuildIndexFromPersisted = origRebuild;
+			core.remindOwnersWithLiveChildren = origRemind;
+			(sm as any).restoreOneSession = origRestoreOne;
+			await deleteSession(child).catch(() => {});
+			await deleteSession(parent).catch(() => {});
+		}
+	});
 });

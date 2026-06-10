@@ -224,6 +224,15 @@ export interface OrchestrationCoreDeps {
 	/** Returns `${provider}/${id}` for the owner's CURRENT model (server.ts:1536 shape). */
 	resolveSessionModel: (id: string) => string | undefined;
 	resolveSessionThinking?: (id: string) => string | undefined;
+	/**
+	 * Returns the owner's FULL effective tool catalogue (every tool the owner is
+	 * granted). Used to synthesize an explicit "all-except-spawn-verbs" allow-list
+	 * for the child when the owner is UNRESTRICTED — so a child never carries a
+	 * spawn verb in its REGISTERED tool set (§7). `assertCanSpawn` stays the
+	 * runtime belt. Optional: when absent/empty (e.g. no tool manager in tests),
+	 * the child falls back to inheriting the owner's allow-list unchanged.
+	 */
+	resolveEffectiveTools?: (id: string) => string[] | undefined;
 	audit?: (event: OrchestrationAuditEvent) => void;
 	/** Optional reader for the `read` verb (delegates to read_session machinery). */
 	readTranscript?: (sessionId: string, opts?: ReadTranscriptLike) => Promise<unknown>;
@@ -267,11 +276,28 @@ export class OrchestrationCore {
 		}
 	}
 
-	/** Compute the child's allowedTools = owner's minus every spawn verb (§7). */
+	/**
+	 * Compute the child's allowedTools = owner's effective set MINUS every spawn
+	 * verb (§7). A child must never have a spawn verb REGISTERED, so even when the
+	 * owner is unrestricted (no explicit allow-list) we resolve the owner's full
+	 * effective tool catalogue and subtract the spawn verbs — producing an
+	 * explicit "all-except-spawn-verbs" list rather than `undefined` (which the
+	 * tool-activation layer treats as "all tools", spawn verbs included).
+	 */
 	private childAllowedTools(ownerId: string): string[] | undefined {
-		const ownerTools = this.deps.sessionManager.getSession(ownerId)?.allowedTools;
-		if (!ownerTools || ownerTools.length === 0) return undefined;
-		return ownerTools.filter(t => !SPAWN_VERBS.includes(t));
+		const explicit = this.deps.sessionManager.getSession(ownerId)?.allowedTools;
+		if (explicit && explicit.length > 0) {
+			return explicit.filter(t => !SPAWN_VERBS.includes(t));
+		}
+		// Owner is UNRESTRICTED — synthesize an explicit list from the full
+		// effective catalogue so spawn verbs are never registered on the child.
+		const effective = this.deps.resolveEffectiveTools?.(ownerId);
+		if (effective && effective.length > 0) {
+			return effective.filter(t => !SPAWN_VERBS.includes(t));
+		}
+		// No catalogue available (e.g. no tool manager) — cannot synthesize a list;
+		// fall back to undefined. assertCanSpawn still blocks recursion at runtime.
+		return undefined;
 	}
 
 	private addHandle(handle: ChildHandle): void {

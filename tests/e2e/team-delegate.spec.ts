@@ -201,6 +201,54 @@ test.describe("team_delegate — non-blocking interactive flow", () => {
 			await deleteSession(stranger);
 		}
 	});
+
+	test("a DIFFERENT caller is denied (403) when targeting a FOREIGN owner's children (caller→owner authz)", async ({ gateway }) => {
+		// HIGH finding: the shared gateway bearer is not enough — the orchestrate
+		// routes must bind the request to the per-session secret and require the
+		// AUTHENTIC caller to BE the owner. Otherwise any token-holder could
+		// enumerate / dismiss / abort a foreign owner's children (incl. team
+		// workers). Here `attacker` authenticates as ITSELF but targets `owner`'s
+		// orchestrate path — every verb must 403.
+		const owner = await createSession();
+		const attacker = await createSession();
+		try {
+			// owner spawns a real child (apiFetch auto-injects owner's secret).
+			const spawn = await orchestrate(owner, "spawn", { instructions: "owner's child" });
+			expect(spawn.status).toBe(201);
+			const childId = spawn.json.childSessionId as string;
+			expect(childId).toBeTruthy();
+
+			// attacker's own secret — supplying it suppresses owner-secret auto-injection.
+			const attackerSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(attacker);
+			const attackerHeaders = { "X-Bobbit-Session-Secret": attackerSecret };
+
+			// Enumerating a foreign owner's children is denied.
+			const listResp = await apiFetch(`/api/sessions/${owner}/orchestrate/children`, { headers: attackerHeaders });
+			expect(listResp.status).toBe(403);
+
+			// Dismissing a foreign owner's child is denied (would otherwise terminate it).
+			const dismissResp = await apiFetch(`/api/sessions/${owner}/orchestrate/dismiss`, {
+				method: "POST",
+				headers: attackerHeaders,
+				body: JSON.stringify({ childSessionId: childId }),
+			});
+			expect(dismissResp.status).toBe(403);
+
+			// A request with NO secret at all is also denied (bearer alone is insufficient).
+			const noSecret = await fetch(`${gateway.baseURL}/api/sessions/${owner}/orchestrate/children`, {
+				headers: { Authorization: `Bearer ${process.env.BOBBIT_TOKEN}` },
+			});
+			expect(noSecret.status).toBe(403);
+
+			// The legitimate owner (auto-injected secret) can still see + dismiss its child.
+			expect((await listChildren(owner)).map((c) => c.sessionId)).toContain(childId);
+			const ownerDismiss = await orchestrate(owner, "dismiss", { childSessionId: childId });
+			expect(ownerDismiss.status).toBe(200);
+		} finally {
+			await deleteSession(owner);
+			await deleteSession(attacker);
+		}
+	});
 });
 
 test.describe("team_delegate — team-lead parity", () => {
