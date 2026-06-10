@@ -689,6 +689,14 @@ the §8.5 carve-out and never read by the panel; see §8.3.)
     3. **Pack `publish` route maps the REAL schema.** The panel passes the RAW submitted YAML text to `host.callRoute("publish", { yaml, jobId })`; the route (confined worker) validates + maps it against the LIVE-computed parsed diff (the same `git` recompute `bundle` does) via the bundled synthesis, and stores `PrWalkthroughCard[]` keyed by the REAL changeset id. `bundle` serves stored cards over the structural fallback (the parity proof).
     4. **Panel derives the REAL job/changeset from the session**, not `job-litmus-1`: read the `submit_pr_walkthrough_yaml` tool call (`host.session.readToolCall`), compute the changeset id from the submitted doc's `pr` (`changesetIdForGithub`), thread it as the jobId; per-changeset store keys (fixes the shared-literal `job/${jobId}` collision).
     5. **Launch = drive the CURRENT session's agent via `host.session.postMessage` (pack-expressible).** The built-in git-widget button launched a NEW dedicated child walkthrough agent (`POST /api/pr-walkthrough/launch` → `WalkthroughAgentManager`, a fresh child session) — that specific privilege-minting (spawning a new principal) is the ONLY non-pack-expressible bit, and is NOT needed. Re-express it: the git-widget/composer/palette entrypoints drop the hard-coded `jobId` and navigate to `#/ext/pr-walkthrough`; the panel resolves the job from the current session. When no walkthrough has been submitted for the session yet, the panel shows a **"Run PR walkthrough"** action that, on the user's click (gesture-gated), calls `host.session.postMessage` to direct the CURRENT agent to perform the walkthrough using the kept agent tools (`readonly_bash` / `read_pr_walkthrough_bundle` / `submit_pr_walkthrough_yaml`), optionally threading current branch/PR context. The agent submits the production YAML; the panel then reads that tool call (step 4) → `publish` → renders the synthesized cards. `host.session.postMessage` is a supported Host-API surface (one-time content-bound write permit + `allowedTools` gate + audit, §12); launchers only open the panel (they navigate; the PANEL posts). So the "click → walkthrough happens" UX is preserved, driven by the current session's agent rather than a spawned child.
+
+    **Panel launch-flow state machine + failure contract** (so the implementation is resilient, not just the happy path):
+    - `no-submission` (idle) — no `submit_pr_walkthrough_yaml` tool call in the session yet → render the **"Run PR walkthrough"** button (+ structural `bundle` fallback if the user just wants the diff). No auto-post on mount (gesture rule).
+    - `posting` — user clicked Run: mint the write permit + `postMessage`; disable the button and show "Asking the agent…". **Duplicate clicks** are ignored while in `posting`/`waiting` (guard a single in-flight request id).
+    - `waiting` — posted; poll/observe the session transcript for a NEW `submit_pr_walkthrough_yaml` tool call (newer than the post). A **timeout** (e.g. a few minutes, no submission) → `error` with a "the agent didn't produce a walkthrough — try again" state + re-enabled Run button. Agent **refusal / non-response** surfaces the same way (no new tool call).
+    - `publishing` — a new submit tool call appeared: read its YAML → `host.callRoute("publish", { yaml, jobId })` → on success transition to `rendered`; on `publish`/validation error → `error` (show the validation message; Run remains available to retry).
+    - `rendered` — `bundle` serves the stored synthesized cards.
+    - **No active session / pack-served context missing** (`host.session` unavailable) → the Run action is hidden and the panel shows the structural `bundle` fallback only (postMessage requires a session surface). **Missing required tool** (the session's agent lacks `submit_pr_walkthrough_yaml` in `allowedTools`) → the server rejects the post (allowedTools gate) → surface a clear "this session can't run a walkthrough" error rather than a silent no-op.
     6. **E2E uses the REAL production schema** (not the `{ cards }` test shape): the injected `submit_pr_walkthrough_yaml` tool call carries a valid production `pr`+`walkthrough` document, and the test asserts the synthesized cards (orientation/design/review/audit) render.
   Persistence stays view-time, client-driven, caller-pack-scoped (no server-side `callRoute`); `persistedAt` stamped once → stable across reloads.
 - **What stays agent-side (unchanged carve-out, §8.5):** model-backed card
@@ -697,12 +705,23 @@ the §8.5 carve-out and never read by the panel; see §8.3.)
   responsibility ends at emitting the YAML tool call; it never reads or writes the
   viewer store.
 
-**Gating.** Deletion of `walkthrough-store.ts` + the viewer-feed routes is gated on
-the mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) being green while the
-feature is served entirely by the pack — including the publish→reload→re-read
-cards path that proves the pack store is the durable provider. The implementer must
-confirm that E2E green **before** removing the bespoke store/routes, but the target
-state is fixed: the bespoke viewer store is deleted, not retained.
+**Exact target state (resolves the keep-vs-delete ambiguity — ONE answer).**
+- **DELETE:** the client viewer (§8.3 client list) + the **viewer-feed routes**
+  `GET /api/pr-walkthrough/jobs/:id`, `/session/:id`, `/:id`, and the client
+  launch wiring (`open-pr-walkthrough` → `launchPrWalkthroughAgent`, the git-widget
+  button). These are the built-in feature/viewer SURFACES the pack now provides.
+- **KEEP (unchanged):** `walkthrough-store.ts`, `git-changeset.ts`,
+  `diff-parser.ts`, `WalkthroughAgentManager`, and its `submitYaml` / `readBundle`
+  routes + `/launch` + `/resolve` + `/export/*` — the agent-side toolchain
+  (§8.5). The pack's viewer state lives in its OWN pack `host.store` (§8.4); the
+  agent-side `walkthrough-store.ts` is a SEPARATE store the panel never reads. We
+  do NOT delete or split `walkthrough-store.ts`.
+
+**Gating.** Deleting the client viewer + viewer-feed routes is gated on the
+mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) being green while the
+feature is served entirely by the pack — including the publish→reload→re-read cards
+path that proves the PACK store is the durable viewer provider. Confirm that E2E
+green **before** removing the viewer-feed routes.
 
 ### 8.5 Agent-tool carve-out
 
@@ -720,13 +739,27 @@ viewer/route/store/deep-link surfaces move to the pack.
 imported by the agent side AND bundled into the pack — one source of truth, used by
 both. The `submit_pr_walkthrough_yaml` tool itself is UNCHANGED.
 
-**Launch re-expression (§8.4 step 5):** the built-in `POST /api/pr-walkthrough/launch`
-(spawns a NEW child walkthrough agent) is the lone privilege-minting capability that
-does not move to the pack. The pack instead drives the CURRENT session's agent via
-`host.session.postMessage` (a panel "Run PR walkthrough" action), so the user-facing
-"start a walkthrough" gesture is preserved without spawning a new principal. The
-`/launch` route + `WalkthroughAgentManager` remain for any agent-side/child-session
-launch path that still needs them.
+**Launch re-expression (§8.4 step 5) — what is deleted vs retained, unambiguously:**
+- **DELETED (built-in UI feature surface):** the git-widget "PR Walkthrough" button
+  + the client `open-pr-walkthrough` → `launchPrWalkthroughAgent` →
+  `POST /api/pr-walkthrough/launch` wiring. This was the only UI caller of `/launch`.
+- **RETAINED (agent-side walkthrough lifecycle, the §8.5 carve-out — NOT a built-in
+  UI feature surface):** `WalkthroughAgentManager` and its routes
+  `submitYaml` (`/api/internal/.../submit-yaml`) + `readBundle`
+  (`/api/internal/.../bundle`,`/analysis-bundle`) + `/launch` + `/resolve` +
+  `/export/*`. Justification (not "for any path that still needs them"):
+  `WalkthroughAgentManager` is **load-bearing for the kept agent tools** —
+  `read_pr_walkthrough_bundle` calls `readBundle` and `submit_pr_walkthrough_yaml`
+  calls `submitYaml` (verified: `routes.ts` is the only caller of every manager
+  method). `/launch` is part of the SAME manager and the SAME agent capability
+  family (launch an isolated read-only child agent that runs the walkthrough tools
+  + submits YAML) — a genuine *agent* capability, exactly the class the goal's §8.5
+  keeps agent-side, distinct from the deleted UI entry. It mints a new principal,
+  which is why it CANNOT be a pack surface; the pack instead drives the CURRENT
+  agent via `host.session.postMessage` (an additional, pack-expressible launch
+  gesture). "Sole provider" therefore holds for the migrated **viewer +
+  contribution + user-facing launch-gesture** surface; the agent lifecycle is the
+  explicit carve-out, kept agent-side just like synthesis / GitHub export.
 
 ---
 
@@ -820,6 +853,7 @@ Findings from `tests/fixtures/market-sources/`:
     re-instantiated store = simulated restart).
   - `MarketplaceSourceStore.add({ url: "builtin:" })` / id `"builtin"` is rejected.
   - `parseSource` / a re-instantiated store rejects a disk-authored row with `id: "builtin"` or `url: "builtin:"`.
+  - **Disabled-state survives RESTART (DoD: "reload/restart")**: write `pack_activation.server.<name>.entrypoints` via the store, **re-instantiate the server config store from disk** (simulated gateway restart), and assert the disabled refs persist and the contribution registry still filters them — covering the restart half of the DoD that the browser reload E2E does not (the E2E only proves client-reload persistence).
 - **`tests/pr-walkthrough-yaml-schema.test.ts`** (existing, keep green after the extraction): the agent-side `validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` re-exports behave identically post-move to `src/shared/pr-walkthrough/yaml-to-cards.ts` (the extraction is behavior-preserving). Optionally add a focused test that the shared module is import-clean (no `node:`/server deps) so the pack bundle stays loadable.
 
 ### 11.2 Browser E2E (`tests/e2e/ui/*.spec.ts`)
