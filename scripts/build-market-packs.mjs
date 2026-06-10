@@ -105,6 +105,11 @@ const PACKS = [
 			// from panels/pr-walkthrough-panel.yaml). routes.mjs is hand-authored and
 			// relocated to lib/ — NOT bundled here.
 			{ in: "panel.js", out: "lib/panel.js" },
+			// SERVER-side synthesis bundle: the pure shared YAML→cards mapper (with its
+			// `yaml` dep inlined), imported by the hand-authored routes.mjs `publish`
+			// route in the confined NODE worker. platform:"node" so Buffer + node:* stay
+			// node globals/builtins and are NOT browser-polyfilled. Emits `.mjs`.
+			{ in: "yaml-to-cards.js", out: "lib/yaml-to-cards.mjs", platform: "node" },
 		],
 	},
 ];
@@ -124,7 +129,10 @@ async function main() {
 				outfile: outFile,
 				bundle: true,
 				format: "esm",
-				platform: "browser",
+				// Most entries are CLIENT panels (browser); a server-side bundle (e.g.
+				// pr-walkthrough's yaml-to-cards, run in the confined Node worker) opts
+				// into platform:"node" so Buffer/node:* stay node globals/builtins.
+				platform: entry.platform ?? "browser",
 				target: "es2022",
 				minify: true,
 				legalComments: "none",
