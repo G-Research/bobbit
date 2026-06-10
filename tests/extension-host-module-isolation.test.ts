@@ -264,6 +264,26 @@ describe("ModuleHost — file-resolution confinement (pack module graph is confi
 		}
 	});
 
+	it("(§3) an entry at tools/<group>/ importing `../../lib/helper.mjs` LOADS (pack-root confinement, not group-dir)", async () => {
+		// New layout: the pack root holds tools/ AND lib/ as siblings. The confined
+		// worker is handed the PACK ROOT (path.dirname(baseDir)), so a tool module
+		// reaching `../../lib/*.mjs` resolves while staying inside the pack root.
+		const root = packDir();
+		writeInDir(path.join(root, "lib"), "helper.mjs", `export const v = 7;`);
+		const url = writeInDir(
+			path.join(root, "tools", "demo"),
+			"actions.mjs",
+			`import { v } from "../../lib/helper.mjs";\nexport const actions = { run: async () => v };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			// packRoot = the actual pack root (not the group dir).
+			assert.equal(await mh.invoke(req(url, "run", bareCtx(), {}, root)), 7);
+		} finally {
+			mh.dispose();
+		}
+	});
+
 	it("a STATIC import of `../outside.mjs` (relative walk out of the pack root) is REJECTED", async () => {
 		const dir = packDir();
 		// The escape target lives in `tmp`, OUTSIDE the pack root `dir`.

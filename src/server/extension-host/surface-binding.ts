@@ -44,6 +44,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { resolvePackIdentityForTool } from "./pack-identity.js";
 import type { ActionToolLocationResolver } from "./action-dispatcher.js";
+import type { PackContributionResolver } from "./pack-contribution-registry.js";
 
 /** The trusted identity a surface token binds. Every field is SERVER-resolved at
  *  mint time from the winning contribution — never caller-supplied. */
@@ -52,10 +53,12 @@ export interface SurfaceBinding {
 	sessionId: string;
 	/** The SERVER-derived pack id (the winning contribution's pack dir). */
 	packId: string;
-	/** The contributing tool/group key that won resolution (`${groupDir}/${tool}`). */
+	/** The SERVER-derived contribution id. Tool-bound: `${groupDir}/${tool}`.
+	 *  Pack-bound: `panel:<id>` | `entrypoint:<id>` | `route:<name>`. */
 	contributionId: string;
-	/** The pack's contributing tool name (proves pack ownership via allowedTools). */
-	tool: string;
+	/** The pack's contributing tool name — PRESENT only for tool-bound surfaces
+	 *  (renderer/action). ABSENT for pack-bound surfaces (panel/entrypoint/route). */
+	tool?: string;
 }
 
 interface TokenPayload extends SurfaceBinding {
@@ -120,8 +123,10 @@ export function validateSurfaceToken(
 		!payload ||
 		typeof payload.sessionId !== "string" || !payload.sessionId ||
 		typeof payload.packId !== "string" || !payload.packId ||
-		typeof payload.contributionId !== "string" ||
-		typeof payload.tool !== "string" || !payload.tool ||
+		typeof payload.contributionId !== "string" || !payload.contributionId ||
+		// `tool` is OPTIONAL (pack-bound surfaces carry no tool); when present it
+		// must be a non-empty string.
+		(payload.tool !== undefined && (typeof payload.tool !== "string" || !payload.tool)) ||
 		typeof payload.iat !== "number"
 	) {
 		return null;
@@ -129,11 +134,13 @@ export function validateSurfaceToken(
 	const ttl = opts?.ttlMs && opts.ttlMs > 0 ? opts.ttlMs : DEFAULT_SURFACE_TOKEN_TTL_MS;
 	const now = (opts?.now ?? Date.now)();
 	if (now > payload.iat + ttl) return null;
-	return { sessionId: payload.sessionId, packId: payload.packId, contributionId: payload.contributionId, tool: payload.tool };
+	const out: SurfaceBinding = { sessionId: payload.sessionId, packId: payload.packId, contributionId: payload.contributionId };
+	if (payload.tool !== undefined) out.tool = payload.tool;
+	return out;
 }
 
 export type SurfaceIdentityResult =
-	| { ok: true; sessionId: string; packId: string; tool: string; contributionId: string }
+	| { ok: true; sessionId: string; packId: string; tool?: string; contributionId: string }
 	| { ok: false; status: number; error: string };
 
 /**
@@ -153,6 +160,11 @@ export function resolveSurfaceIdentity(input: {
 	token: unknown;
 	headerSessionId: string | undefined;
 	resolver: ActionToolLocationResolver;
+	/** Pack-bound re-resolution (pack-schema-v1 §4.4) — required to validate a
+	 *  token with no `tool` against the project-scoped pack-contribution registry. */
+	contributions?: PackContributionResolver;
+	/** The session's project scope, for pack-bound registry re-resolution. */
+	projectId?: string;
 	now?: () => number;
 }): SurfaceIdentityResult {
 	const binding = validateSurfaceToken(input.token, { now: input.now });
@@ -160,12 +172,42 @@ export function resolveSurfaceIdentity(input: {
 	if (!input.headerSessionId || binding.sessionId !== input.headerSessionId) {
 		return { ok: false, status: 403, error: "surface token session mismatch" };
 	}
-	const ident = resolvePackIdentityForTool(input.resolver, binding.tool);
-	if (!ident.isPack || !ident.packId) {
+
+	// ── Tool-bound surface (renderer / action): re-resolve via the tool-location
+	//    resolver + assert packId match (rejects a token gone stale after an
+	//    uninstall / precedence change). Unchanged path. ──
+	if (binding.tool !== undefined) {
+		const ident = resolvePackIdentityForTool(input.resolver, binding.tool);
+		if (!ident.isPack || !ident.packId) {
+			return { ok: false, status: 403, error: "surface token does not resolve to a market pack" };
+		}
+		if (ident.packId !== binding.packId) {
+			return { ok: false, status: 403, error: "surface token pack identity mismatch" };
+		}
+		return { ok: true, sessionId: binding.sessionId, packId: ident.packId, tool: binding.tool, contributionId: ident.contributionId };
+	}
+
+	// ── Pack-bound surface (panel / entrypoint / route): re-resolve via the
+	//    pack-contribution registry — the pack must still be installed + active in
+	//    scope AND still expose binding.contributionId (§4.4/§4.5). No `allowedTools`
+	//    gate; the trust boundary is installed + active + own-session. ──
+	const contributions = input.contributions;
+	if (!contributions) {
 		return { ok: false, status: 403, error: "surface token does not resolve to a market pack" };
 	}
-	if (ident.packId !== binding.packId) {
-		return { ok: false, status: 403, error: "surface token pack identity mismatch" };
+	const pack = contributions.getPack(input.projectId, binding.packId);
+	if (!pack) {
+		return { ok: false, status: 403, error: "surface token pack is not installed or active" };
 	}
-	return { ok: true, sessionId: binding.sessionId, packId: ident.packId, tool: binding.tool, contributionId: ident.contributionId };
+	const sep = binding.contributionId.indexOf(":");
+	const kind = sep > 0 ? binding.contributionId.slice(0, sep) : "";
+	const id = sep > 0 ? binding.contributionId.slice(sep + 1) : "";
+	let exists = false;
+	if (kind === "panel") exists = !!contributions.getPanel(input.projectId, binding.packId, id);
+	else if (kind === "entrypoint") exists = !!contributions.getEntrypoint(input.projectId, binding.packId, id);
+	else if (kind === "route") exists = contributions.hasRoute(input.projectId, binding.packId, id);
+	if (!exists) {
+		return { ok: false, status: 403, error: "surface token contribution is no longer available" };
+	}
+	return { ok: true, sessionId: binding.sessionId, packId: pack.packId, contributionId: binding.contributionId };
 }

@@ -37,6 +37,33 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
+	describe("pack_activation (pack-schema-v1 §6.7)", () => {
+		it("round-trips disabled refs by scope + packName and emits native YAML", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			store.setPackActivation("project", "artifacts", { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] });
+			assert.deepEqual(store.getPackActivation("project", "artifacts"), { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] });
+			// On-disk native YAML (NOT a JSON string).
+			const onDisk = readYaml().pack_activation as Record<string, unknown>;
+			assert.deepEqual(onDisk, { project: { artifacts: { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] } } });
+			// Reload picks it up.
+			const reloaded = new ProjectConfigStore(tmpDir);
+			assert.deepEqual(reloaded.getPackActivation("project", "artifacts"), { tools: ["artifact_demo"], entrypoints: ["artifacts-deeplink"] });
+		});
+
+		it("an empty disabled set clears the pack override", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			store.setPackActivation("server", "p", { roles: ["r"] });
+			store.setPackActivation("server", "p", {});
+			assert.deepEqual(store.getPackActivation("server", "p"), {});
+			assert.equal(readYaml().pack_activation, undefined);
+		});
+
+		it("a default (unset) pack reads as all-enabled ({})", () => {
+			const store = new ProjectConfigStore(tmpDir);
+			assert.deepEqual(store.getPackActivation("project", "never-set"), {});
+		});
+	});
+
 	describe("config_directories", () => {
 		it("loads native YAML form", () => {
 			writeYaml([

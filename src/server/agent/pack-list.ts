@@ -185,7 +185,7 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 			name: "builtin",
 			description: "Bobbit built-ins",
 			version: "0.0.0",
-			contents: { roles: [], tools: [], skills: [] },
+			contents: { roles: [], tools: [], skills: [], entrypoints: [] },
 		},
 	});
 
