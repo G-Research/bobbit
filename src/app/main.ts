@@ -170,8 +170,16 @@ async function restoreExtRoute(routeId: string | undefined, params: Record<strin
 			reconcilePackEntrypointsForProject(state.activeProjectId ?? undefined),
 			reconcilePackPanelsForProject(state.activeProjectId ?? undefined),
 		]);
+		const { showExtRouteUnavailable, dismissExtRouteUnavailable } = await import("./render.js");
 		const entry = lookupPackRoute(routeId);
-		if (!entry) return; // owning pack not installed for this project
+		if (!entry) {
+			// Owning pack disabled/uninstalled for this project: the routeId resolves
+			// to no registered route. Surface a "feature unavailable" empty state for
+			// the deep-link (§7.3) instead of silently no-oping (blank panel).
+			showExtRouteUnavailable(routeId);
+			return;
+		}
+		dismissExtRouteUnavailable(); // a resolvable deep-link clears any stale empty state
 		const openParams: Record<string, unknown> = {};
 		if (params) for (const key of entry.paramKeys) if (key in params) openParams[key] = params[key];
 		// The target panel is resolved within the SAME pack — thread the route's

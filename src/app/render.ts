@@ -7,7 +7,7 @@ import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -639,6 +639,36 @@ export function showHeaderToast(text: string): void {
 function headerToast() {
 	if (!_headerToastText) return "";
 	return html`<div class="review-toast" data-testid="header-toast">${_headerToastText}</div>`;
+}
+
+// ── Disabled `#/ext/<routeId>` deep-link empty state (built-in-first-party-packs
+// §7.3). A deep-link to an extension whose owning pack is disabled/uninstalled
+// resolves to no registered route. Rather than silently no-op (blank panel), we
+// surface a dismissible "feature unavailable" empty state so a bookmarked
+// `#/ext/<routeId>` degrades cleanly — no crash, no dangling surface.
+let _extUnavailableRouteId = "";
+export function showExtRouteUnavailable(routeId: string): void {
+	_extUnavailableRouteId = routeId;
+	try { renderApp(); } catch { /* non-DOM */ }
+}
+export function dismissExtRouteUnavailable(): void {
+	if (!_extUnavailableRouteId) return;
+	_extUnavailableRouteId = "";
+	try { renderApp(); } catch { /* non-DOM */ }
+}
+function extRouteUnavailable() {
+	if (!_extUnavailableRouteId) return "";
+	return html`
+		<div class="ext-unavailable-overlay" data-testid="ext-route-unavailable" role="alert">
+			<div class="ext-unavailable-card">
+				<div class="ext-unavailable-title">${icon(AlertTriangle, "sm")} Feature unavailable</div>
+				<div class="ext-unavailable-body">
+					This extension is unavailable — it may be disabled or not installed.
+				</div>
+				<button class="market-btn" data-testid="ext-route-unavailable-dismiss" @click=${dismissExtRouteUnavailable}>Dismiss</button>
+			</div>
+		</div>
+	`;
 }
 
 // ============================================================================
@@ -2377,6 +2407,7 @@ export function doRenderApp(): void {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
+				${extRouteUnavailable()}
 				${renderClientDebugButton()}
 				<div class="flex items-center border-b border-border shrink-0 header-shadow">
 					${state.sidebarCollapsed ? html`
@@ -2420,6 +2451,7 @@ export function doRenderApp(): void {
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
 				${headerToast()}
+				${extRouteUnavailable()}
 				${renderClientDebugButton()}
 				<div id="app-header"
 					class="fixed top-0 left-0 right-0 z-50 bg-background flex flex-col">
@@ -2445,6 +2477,7 @@ export function doRenderApp(): void {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
 				${headerToast()}
+				${extRouteUnavailable()}
 				<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow">
 					${headerLeft()}
 					${headerRight()}
