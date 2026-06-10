@@ -6,6 +6,19 @@ shape REAL, **purely additively**. No change to v1 signatures in
 (`src/shared/extension-host/host-api.ts` declares it `as const`); each capability flips
 its `host.capabilities` flag `false → true` as it lands.
 
+> **⚠️ Superseded on-disk schema (read this first).** This build plan was written when every
+> contribution was declared on the tool YAML and slices were keyed by per-tool reserved keys
+> (`stores:`/`panels:`/`routes:`/`entrypoints:`). **Pack-schema V1 relocated those** to
+> pack-scoped files (`panels/<panel>.yaml`, `entrypoints/<ep>.yaml`), the top-level `pack.yaml`
+> `routes:` block, and an implicit store; the panel endpoint is now pack-addressed
+> (`GET /api/ext/packs/:packId/panels/:panelId`), the `RouteRegistry` builds off pack-level
+> routes, surface binding is tool-OR-pack, and `/api/tools` is tool-scoped only (pack-scoped
+> metadata moved to `GET /api/ext/contributions`). The Host API, guards, and worker isolation
+> below are unchanged. Read the slice schemas through
+> **[pack-schema-v1-rationalisation.md](pack-schema-v1-rationalisation.md)** (authoritative V1
+> schema) and the relocation map at the top of
+> [extension-host.md §2](extension-host.md#2-contribution-point-manifest-schema).
+
 **Source of truth:** `docs/design/extension-host.md` (the frozen v1 contract). Do not
 change v1 signatures/types in that doc — they stay byte-identical (frozen). Its §3/§6
 prose **status notes** are flipped from "frozen, not implemented" → "implemented" as each
@@ -690,11 +703,18 @@ lazy import + `/* @vite-ignore */` + host-toolkit factory are identical to
 
 ### B4.2 Panel serving endpoint (server.ts)
 
+> **⚠️ Superseded by V1.** Panel ids are only pack-unique, so the endpoint is now
+> **pack-addressed**: `GET /api/ext/packs/:packId/panels/:panelId?projectId=`. It resolves the
+> panel through the project-scoped `PackContributionRegistry` (`getPanel(projectId, packId,
+> panelId)`), re-validates the resolved `entry` against the **pack root**, and responds
+> `text/javascript`. Still bearer-only (static-asset-equivalent, NO `allowedTools` check). The
+> tool-keyed form below is historical.
+
 `GET /api/tools/:tool/panel/:panelId?projectId=` — bearer-only (static-asset-equivalent,
-EXACTLY like the renderer endpoint at `server.ts:5170`, NO allowedTools check): resolve the
+EXACTLY like the renderer endpoint, NO allowedTools check): resolve the
 winning `{baseDir,groupDir}` via the project-scoped `resolveActionToolManager`, look up the
-`panels[]` entry whose `id===panelId`, read its `entry` `.js` (path-traversal re-validated
-as at `server.ts:5197`), respond `text/javascript`.
+`panels[]` entry whose `id===panelId`, read its `entry` `.js` (path-traversal re-validated),
+respond `text/javascript`.
 
 ### B4.3 Panel host surface + `openPanel`
 
