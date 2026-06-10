@@ -16,11 +16,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 
 const { MarketplaceSourceStore, BUILTIN_SOURCE_ID, BUILTIN_SOURCE_URL } = await import(
 	"../src/server/agent/marketplace-source-store.ts"
 );
+const { builtinFirstPartyPackEntries } = await import("../src/server/agent/builtin-packs.ts");
+const { PackContributionRegistry } = await import("../src/server/extension-host/pack-contribution-registry.ts");
+const { ProjectConfigStore } = await import("../src/server/agent/project-config-store.ts");
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_MARKET_PACKS = path.join(REPO_ROOT, "market-packs");
 
 let TMP: string;
 before(() => { TMP = fs.mkdtempSync(path.join(os.tmpdir(), "mkt-builtin-")); });
@@ -87,6 +94,54 @@ describe("built-in source guards (§11.1)", () => {
 		assert.deepEqual(all.map((s) => s.id), ["repo"]);
 		assert.ok(!all.some((s) => s.id === BUILTIN_SOURCE_ID), "no builtin id row loaded");
 		assert.ok(!all.some((s) => s.url === BUILTIN_SOURCE_URL), "no builtin: url row loaded");
+	});
+
+	it("disabling a built-in pack's entrypoints SURVIVES a simulated restart and the registry still filters them (§11.1)", () => {
+		const PACK = "pr-walkthrough";
+		const ENTRYPOINT_LIST_NAMES = [
+			"pr-walkthrough-git-widget",
+			"pr-walkthrough-open",
+			"pr-walkthrough-palette",
+			"pr-walkthrough-route",
+		];
+		const cfgDir = fs.mkdtempSync(path.join(TMP, "cfg-restart-"));
+
+		// The built-in band resolves the shipped pr-walkthrough pack in place. Enumerate
+		// it the way the resolver does (repo market-packs carries the committed bundles).
+		const enumerate = () => builtinFirstPartyPackEntries(REPO_MARKET_PACKS).filter((e) => e.manifest?.name === PACK);
+		assert.ok(enumerate().length === 1, "the built-in pr-walkthrough pack must resolve");
+
+		// Baseline: with NO activation override, all four entrypoints register.
+		const baseStore = new ProjectConfigStore(cfgDir);
+		const baseRegistry = new PackContributionRegistry(
+			enumerate,
+			(scope, projectId, packName) => baseStore.getPackActivation(scope, packName).entrypoints ?? [],
+		);
+		assert.equal(baseRegistry.getPack(undefined, PACK)?.entrypoints.length, 4, "all entrypoints enabled by default");
+
+		// Disable all four entrypoints at server scope (the #734 activation override).
+		baseStore.setPackActivation("server", PACK, { entrypoints: ENTRYPOINT_LIST_NAMES });
+
+		// ── Simulated gateway RESTART: re-instantiate the config store FROM DISK. ──
+		const restarted = new ProjectConfigStore(cfgDir);
+		assert.deepEqual(
+			(restarted.getPackActivation("server", PACK).entrypoints ?? []).slice().sort(),
+			ENTRYPOINT_LIST_NAMES.slice().sort(),
+			"disabled entrypoint refs must persist across restart",
+		);
+
+		// The contribution registry built off the restarted store still filters them:
+		// the pack registers ZERO user-facing entrypoints (launchers + deep-link gone).
+		const restartedRegistry = new PackContributionRegistry(
+			enumerate,
+			(scope, projectId, packName) => restarted.getPackActivation(scope, packName).entrypoints ?? [],
+		);
+		const pack = restartedRegistry.getPack(undefined, PACK);
+		assert.ok(pack, "the built-in pack still resolves after restart");
+		assert.equal(pack!.entrypoints.length, 0, "all entrypoints stay filtered after restart");
+		// Panels + routes remain as support surfaces (only user-facing entrypoints toggle).
+		assert.ok(pack!.panels.some((p) => p.id === "pr-walkthrough.panel"), "the panel stays registered");
+		assert.ok(pack!.routes?.names?.includes("bundle"), "the routes stay registered");
 	});
 
 	it("strips a disk-authored `builtin` flag on load", () => {

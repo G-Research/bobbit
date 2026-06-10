@@ -21,9 +21,13 @@
  *      flagged `builtin:true`, and contributes NOTHING to /api/tools (no-tools pack).
  *   2. ENTRYPOINT LAUNCH — the git-widget-button launcher mounts the viewer (no
  *      auto-invoke before the Load click).
- *   3. LIVE RECOMPUTE + PANEL PUBLISH — Load publishes the agent's cards then reads
- *      the live bundle; the real git diff renders and the LLM card (PR title +
- *      suggested comment) shows; a reload re-reads the SAME persisted cards.
+ *   3. LIVE RECOMPUTE + PANEL PUBLISH — Load hands the RAW production YAML to the
+ *      pack's publish route, which runs the SAME synthesis as the deleted built-in
+ *      (validate + map against the live diff) and persists PrWalkthroughCard[]; the
+ *      real git diff renders, the SYNTHESIZED cards (orientation/design/review/audit
+ *      nav rail) show with the PR title + suggested comment; a reload re-reads them.
+ *   3a. RUN — the "Run PR walkthrough" action posts to the current agent (the launch
+ *      re-expression, §8.4 step 5).
  *   3b. PATH-TRAVERSAL PROBE — a caller-supplied `repoDir` cannot exfiltrate another
  *      repo's diff (the route ignores it and runs in the session worktree).
  *   4. DISABLE/RE-ENABLE — toggling the pack's entrypoints off in the Market
@@ -46,7 +50,6 @@ test.describe.configure({ mode: "serial" });
 
 const PACK = "pr-walkthrough";
 const PANEL_ID = "pr-walkthrough.panel";
-const JOB_ID = "job-litmus-1";
 const SUBMIT_TOOL = "submit_pr_walkthrough_yaml";
 const SUBMIT_TOOL_USE_ID = "tu-prw-submit-1";
 const GIT_WIDGET_LAUNCHER = "pr-walkthrough.git-widget";
@@ -114,63 +117,93 @@ function setupOutsideRepo(): void {
 	outsideHeadSha = gitIn(outsideRepoDir, ["rev-parse", "HEAD"]);
 }
 
-/** LLM-enhanced cards the agent would synthesize at submit time — carried in the
- *  submitted YAML (a `cards:` array). The panel's read→publish seam parses them
- *  and persists them to the pack store; `bundle` then serves them. */
-function llmCards() {
-	return [
-		{
-			id: "orientation-summary",
-			phaseId: "orientation",
+const HUNK_HEADER = "@@ -2,3 +2,3 @@ export class SyncWorker {";
+
+/** The RAW production walkthrough YAML the agent's submit_pr_walkthrough_yaml emits
+ *  (the rich `pr` + `walkthrough.{context,merge_assessment,design_decisions,
+ *  review_chunks,omissions_and_followups,audit,display}` schema — NOT a `{cards}`
+ *  shortcut). The pack's publish route validates + maps it (against the LIVE git
+ *  diff) into PrWalkthroughCard[] via the SAME synthesis the deleted built-in ran.
+ *  YAML is a superset of JSON, so the pack/route `yaml` parser reads this. */
+function submitYaml(): string {
+	const doc = {
+		schema_version: 1,
+		pr: {
+			provider: "github",
+			owner: "SuuBro",
+			repo: "bobbit",
+			number: 4242,
 			title: PR_TITLE,
-			navLabel: "Orientation",
-			summary: "Adds bounded exponential backoff to the background sync worker so transient network failures self-heal instead of dropping jobs.",
-			rationale: "Previously a single failed fetch aborted the whole sync pass.",
-			diffBlocks: [],
-			checklist: ["Testing: added unit coverage for the backoff schedule."],
+			url: "https://github.com/SuuBro/bobbit/pull/4242",
+			base_sha: "abc1234",
+			head_sha: "def5678",
+			original_description: { body: "## Why\nTransient network failures dropped sync jobs.", source: "gh_api", fetched_at: "2026-01-01T00:00:00Z" },
+			stats: { files_changed: 1, additions: 1, deletions: 1 },
 		},
-		{
-			id: "significant-sync-worker",
-			phaseId: "significant",
-			title: "Retry/backoff in the sync worker",
-			navLabel: "Retry logic",
-			summary: "Wrap the fetch in a retry loop with capped exponential delay.",
-			diffBlocks: [
+		walkthrough: {
+			context: {
+				why_created: "Transient network failures aborted the whole sync pass.",
+				problem_solved: "Adds bounded exponential backoff so failures self-heal.",
+				why_worth_merging: "It makes the sync worker resilient with no API change.",
+				merge_concerns: "Watch for thundering-herd retries without jitter.",
+				author_intent: "Make sync robust to flaky networks.",
+				reviewer_map: `core: ${SYNC_FILE} — the retry wrapper`,
+			},
+			merge_assessment: {
+				recommendation: "comment",
+				confidence: "medium",
+				summary: "Sound change; consider jitter before merge.",
+				blocking_concerns: [],
+				non_blocking_concerns: ["Add jitter to avoid synchronized retries."],
+			},
+			design_decisions: [
 				{
-					id: "block-1-sync-worker",
-					filePath: SYNC_FILE,
-					status: "modified",
-					hunks: [
-						{
-							id: "block-1-sync-worker-h1",
-							header: "@@ -2,3 +2,3 @@ export class SyncWorker {",
-							lines: [
-								{ id: "block-1-sync-worker:h0:l0", side: "old", oldLine: 3, kind: "del", text: "    return this.fetchBatch();" },
-								{ id: "block-1-sync-worker:h0:l1", side: "new", newLine: 3, kind: "add", text: "    return this.withRetry(() => this.fetchBatch());" },
-							],
-						},
-					],
+					id: "backoff-strategy",
+					title: "Bounded exponential backoff",
+					explanation: "Wrap the fetch in a capped retry loop.",
+					chosen_approach: "Exponential delay capped at a ceiling.",
+					alternatives_considered: [{ option: "Fixed delay", pros: ["simple"], cons: ["slow recovery"] }],
+					tradeoffs: ["More latency on persistent failure."],
+					suggested_reviewer_concerns: ["Confirm the cap is sensible."],
+					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, why_relevant: "introduces the retry wrapper" }],
 				},
 			],
-			suggestedComments: [
-				{ id: "sc-1", cardId: "significant-sync-worker", diffBlockId: "block-1-sync-worker", lineId: "block-1-sync-worker:h0:l1", body: "Consider adding jitter to avoid thundering-herd retries." },
+			review_chunks: [
+				{
+					id: "sync-worker",
+					phase: "significant",
+					title: "Retry/backoff in the sync worker",
+					reviewer_goal: "Verify the retry wrapper is correct.",
+					explanation: "Wrap the fetch in a retry loop with capped exponential delay.",
+					files: [SYNC_FILE],
+					relevant_hunks: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, line_range: "3", why_relevant: "the retry call" }],
+					suggested_concerns: [
+						{
+							severity: "non_blocking",
+							concern: "No jitter on retries.",
+							suggested_comment: "Consider adding jitter to avoid thundering-herd retries.",
+							anchors: [{ file: SYNC_FILE, hunk_header: HUNK_HEADER, line: 3 }],
+						},
+					],
+					positive_notes: ["Clear, minimal change."],
+				},
 			],
+			omissions_and_followups: [
+				{ category: "tests", expected_artifact: "Unit test for the backoff schedule.", evidence_checked: "No new test file in the diff.", concern: "Backoff timing is untested.", suggested_comment: "Add a unit test for the delay schedule.", severity: "non_blocking" },
+			],
+			audit: {
+				remaining_changed_areas: [SYNC_FILE],
+				low_signal_or_mechanical_changes: [],
+				generated_or_binary_files: [],
+				reviewer_checklist: ["Confirm the retry cap.", "Confirm no behavioral regression."],
+			},
+			display: {
+				phase_order: ["orientation", "design", "significant", "other", "audit"],
+				chunk_order: ["sync-worker"],
+			},
 		},
-		{
-			id: "audit-coverage",
-			phaseId: "audit",
-			title: "Audit remaining coverage",
-			navLabel: "Audit",
-			summary: "Final pass over the resolved diff.",
-			diffBlocks: [],
-		},
-	];
-}
-
-/** The submitted YAML document. YAML is a superset of JSON, so the pack panel's
- *  `yaml` parser reads this and finds the `cards:` array to publish. */
-function submitYaml(): string {
-	return JSON.stringify({ schema_version: 1, job: JOB_ID, cards: llmCards() });
+	};
+	return JSON.stringify(doc);
 }
 
 async function listToolNames(): Promise<Array<{ name: string }>> {
@@ -261,7 +294,9 @@ async function callBundleRoute(sid: string, query: Record<string, string>): Prom
 }
 
 function liveDeepLink(): string {
-	const params = new URLSearchParams({ jobId: JOB_ID, baseSha, headSha });
+	// No jobId — the launchers dropped it; the panel resolves the real job from the
+	// session's submitted doc. baseSha/headSha drive the LIVE recompute.
+	const params = new URLSearchParams({ baseSha, headSha });
 	return `#/ext/${PACK}?${params.toString()}`;
 }
 
@@ -319,8 +354,9 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 
 		// ── Step 2: ENTRYPOINT LAUNCH — the git-widget-button launcher opens the panel. ──
 		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
+		// The launcher dropped its hard-coded jobId → it navigates to the bare deep-link.
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 })
-			.toBe(`#/ext/${PACK}?jobId=${JOB_ID}`);
+			.toBe(`#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible();
 		expect(bundlePosts, "panel must NOT auto-invoke callRoute on mount").toHaveLength(0);
@@ -340,12 +376,20 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		const resp1 = await liveResp;
 		expect(resp1.status(), `live bundle callRoute failed: ${await resp1.text().catch(() => "")}`).toBe(200);
 
-		// Header renders the LIVE changeset (short sha range); the published LLM card
-		// surfaces PR_TITLE (proving the panel publish → bundle serve path).
+		// The header renders the PRODUCTION PR title (synthesized changeset, persisted by
+		// publish); the sha-range sibling shows the LIVE recomputed changeset. The nav
+		// rail shows the SYNTHESIZED phases — orientation / design / significant / audit —
+		// proving the pack ran the SAME YAML→cards synthesis as the deleted built-in.
 		await expect(page.locator('[data-testid="prw-navrail"]').first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(baseSha.slice(0, 7));
-		await expect(page.locator('[data-testid="prw-card"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-		// The significant card carries the REAL changed file's diff + its suggested comment.
+		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
+		await expect(page.locator('[data-testid="prw-bundle"]').first()).toContainText(baseSha.slice(0, 7));
+		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"]').first()).toBeVisible();
+		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="design-backoff-strategy"]').first()).toBeVisible();
+		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="audit-checklist"]').first()).toBeVisible();
+		// The first (orientation) card renders its synthesized guided sections.
+		await expect(page.locator('[data-testid="prw-card"]').first()).toContainText("PR context");
+		// The significant review card carries the REAL changed file's diff + its mapped
+		// suggested comment (DiffReferenceMapper resolved the anchor against the live diff).
 		await page.locator('[data-testid="prw-nav-card"][data-prw-nav="significant-sync-worker"]').first().click();
 		const liveDiff = page.locator('[data-testid="prw-diffblock"]').first();
 		await expect(liveDiff).toBeVisible({ timeout: 10_000 });
@@ -357,7 +401,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 
 		// ── Step 3b: PATH-TRAVERSAL PROBE — a caller-supplied repoDir cannot exfiltrate
 		// another repo's diff (the route ignores it; the outside SHAs fail closed). ──
-		const attack = await callBundleRoute(sid!, { jobId: JOB_ID, baseSha: outsideBaseSha, headSha: outsideHeadSha, repoDir: outsideRepoDir! });
+		const attack = await callBundleRoute(sid!, { baseSha: outsideBaseSha, headSha: outsideHeadSha, repoDir: outsideRepoDir! });
 		expect(attack.text, "the other repo's secret must NEVER leak through repoDir").not.toContain(OUTSIDE_SECRET_MARKER);
 		expect(attack.text).not.toContain(OUTSIDE_SECRET_FILE);
 		expect(attack.status, `repoDir traversal must NOT return other-repo data (got ${attack.status})`).not.toBe(200);
@@ -374,7 +418,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			const loadBtn = page.locator('[data-testid="prw-load"]').first();
 			await expect(loadBtn).toBeVisible({ timeout: 20_000 });
 			await loadBtn.click();
-			await expect(page.locator('[data-testid="prw-card"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
+			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
 			return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
 		};
 		const persistedAt2 = await reopenAndLoad();
@@ -448,8 +492,20 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
-		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}?jobId=${JOB_ID}`);
+		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
+
+		// ── Step 3a: RUN PR WALKTHROUGH — the launch re-expression (§8.4 step 5). The
+		// panel posts to the CURRENT agent via host.session.postMessage (gesture-gated)
+		// instead of spawning a child agent. A no-tools pack may post (the pack-bound
+		// surface token already proved installed+active+own-session), so the click drives
+		// the state machine into posting → waiting (the seeded agent produces no NEW
+		// submission, so we assert the in-flight waiting state, not a full round-trip). ──
+		const runBtn = page.locator('[data-testid="prw-run"]').first();
+		await expect(runBtn, "Run is offered when a session surface is present").toBeVisible({ timeout: 10_000 });
+		await runBtn.click();
+		await expect(page.locator('[data-testid="prw-run-status"]').first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="prw-run-status"]').first()).toContainText(/agent/i);
 
 		// ── Step 5: NON-REMOVABLE — built-in source + pack cannot be removed/uninstalled. ──
 		// Built-in pack card has no Uninstall control.
