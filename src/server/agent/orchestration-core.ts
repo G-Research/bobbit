@@ -1,0 +1,568 @@
+// src/server/agent/orchestration-core.ts
+//
+// OrchestrationCore — the ONE goal-agnostic implementation of "launch and
+// orchestrate a child agent (a new, properly-scoped principal)".
+//
+// Background (docs/design/orchestration-core.md): "launch a child agent" used
+// to be reimplemented in four divergent places (team-manager, the `delegate`
+// extension, the legacy pr-walkthrough wiring, and the pr-walkthrough pack).
+// This module is the single shared core. It owns the child-principal lifecycle
+// by WRAPPING the existing, mature `SessionManager` primitives through a narrow
+// injected view (`OrchestrationSessionView`) — it never duplicates session
+// logic.
+//
+// Two entry points converge here:
+//   • agent-process tools  → REST route (`/api/sessions/:id/orchestrate/*`) → core (in-process)
+//   • extension-host packs → `host.agents` (sub-goal C)                     → core (in-process)
+//
+// Key invariants (see the design doc):
+//   • Parent↔child linkage is DERIVED from existing persisted session fields
+//     (`delegateOf` / `parentSessionId` + `childKind`). There is NO new
+//     persisted registry. The core keeps an in-memory index keyed on owner
+//     session id, rebuilt on boot from those fields (§3).
+//   • "Blocking-ness" is RUNTIME-ONLY, never persisted (§4).
+//   • ONE shared `wait` primitive with two policies (`all` / `first`) and
+//     terminal-child handling that never rejects the aggregate (§2.3).
+//   • Recursion is fully blocked at all depths: `assertCanSpawn` rejects a
+//     bound-child owner AND `spawn` subtracts every spawn verb from the child's
+//     `allowedTools` (§7).
+//   • Model inheritance: a child inherits the owner's CURRENT model unless
+//     overridden per-call (§2.2).
+
+/** Spawn verbs a child must never inherit (recursion guard, §7). */
+export const SPAWN_VERBS: readonly string[] = ["team_delegate", "team_spawn"];
+
+export type ChildKind = "delegate" | "team" | "pr-walkthrough" | "host-agents" | (string & {});
+export type SpawnLifecycle = "bare" | "full";
+
+/** Live session statuses surfaced to orchestration callers. */
+export type LiveChildStatus = "idle" | "streaming" | "queued" | "not-started";
+/** Terminal statuses derived from a `waitForIdle` rejection (§2.3). */
+export type TerminalChildStatus = "terminated" | "timeout" | "failed";
+/** A child is SETTLED when its status is idle OR terminal. */
+export type ChildStatus = LiveChildStatus | TerminalChildStatus;
+
+const TERMINAL_STATUSES = new Set<ChildStatus>(["terminated", "timeout", "failed"]);
+export function isTerminalStatus(s: ChildStatus): boolean {
+	return TERMINAL_STATUSES.has(s);
+}
+export function isSettledStatus(s: ChildStatus): boolean {
+	return s === "idle" || isTerminalStatus(s);
+}
+
+/** The raw session status vocabulary used by SessionManager. */
+export type RawSessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
+
+/** Map a live SessionManager status to the orchestration ChildStatus vocabulary. */
+export function liveStatusToChildStatus(status: RawSessionStatus | string | undefined): ChildStatus {
+	switch (status) {
+		case "idle": return "idle";
+		case "streaming": return "streaming";
+		case "aborting": return "streaming"; // still mid-turn from the caller's POV
+		case "terminated": return "terminated";
+		case "preparing":
+		case "starting": return "not-started";
+		default: return "not-started";
+	}
+}
+
+/** Map a `waitForIdle` rejection to a terminal status (§2.3). */
+export function classifyTerminal(err: unknown): TerminalChildStatus {
+	const msg = err instanceof Error ? err.message : String(err ?? "");
+	if (/timeout/i.test(msg)) return "timeout";
+	if (/exited unexpectedly|process exit|not found/i.test(msg)) return "terminated";
+	return "failed";
+}
+
+export interface SpawnOpts {
+	/** The parent/owner session id; the in-memory index key. */
+	ownerSessionId: string;
+	instructions: string;
+	/** Optional role injection (goal/team path). */
+	role?: string;
+	/** Default: inherit the owner's CURRENT model (resolveSessionModel). */
+	model?: string;
+	/** Default: inherit the owner's thinking level. */
+	thinkingLevel?: string;
+	/** `readOnly:true` always forces lifecycle:"bare". */
+	readOnly?: boolean;
+	context?: Record<string, string>;
+	/** Default "bare"; "full" opt-in (Lifecycle Hub). */
+	lifecycle?: SpawnLifecycle;
+	/** Default "delegate". */
+	childKind?: ChildKind;
+	title?: string;
+	/**
+	 * Worktree mode. `shared` = child shares owner cwd (delegate parity — the
+	 * documented unbounded-lifetime race in non-blocking mode, §10). `sub-branch`
+	 * = own worktree on a goal sub-branch (goal/team only).
+	 */
+	worktree?:
+		| { mode: "shared"; cwd: string }
+		| { mode: "sub-branch"; repoPath: string; goalId: string; branch: string; cwd: string };
+}
+
+export interface ChildHandle {
+	sessionId: string;
+	ownerSessionId: string;
+	childKind: ChildKind;
+	spawnedAt: number;
+	title?: string;
+	/** RUNTIME-ONLY — never persisted (§4). On boot every child is non-blocking. */
+	blocking: boolean;
+}
+
+export interface WaitResult {
+	/** Session id of the first child that became settled (idle or terminal). */
+	firstIdle?: string;
+	/** Whether `firstIdle` settled as a terminal status (drives the header wording). */
+	firstIsTerminal?: boolean;
+	statuses: Array<{ sessionId: string; status: ChildStatus; title?: string }>;
+	/** Short tail of `firstIdle`'s output. */
+	outputTail?: string;
+	/** Awaited children that are NEITHER idle NOR terminal. */
+	remaining: number;
+}
+
+export interface ReapInput {
+	childKind: ChildKind;
+	ownerSessionId?: string;
+	ownerExists: boolean;
+	ownerArchived: boolean;
+	/** Kind-specific terminal signal (e.g. walkthrough job ready/error). undefined ⇒ not terminal. */
+	kindTerminal?: boolean;
+	kindTerminalReason?: string;
+}
+export interface ReapDecision {
+	reap: boolean;
+	reason?: string;
+}
+
+/**
+ * Generalized boot-reap decision (§5). Replaces the walkthrough-specific
+ * `shouldReapWalkthroughChildOnBoot`; a thin per-kind adapter supplies
+ * `kindTerminal` (e.g. pr-walkthrough job status) so existing behaviour stays
+ * byte-identical. A child is reaped on boot ONLY when it is kind-terminal, or
+ * its owner is gone / archived. A child whose owner is restoring is never reaped.
+ */
+export function shouldReapChildOnBoot(i: ReapInput): ReapDecision {
+	if (i.kindTerminal) return { reap: true, reason: i.kindTerminalReason ?? "kind terminal" };
+	if (!i.ownerSessionId || !i.ownerExists) return { reap: true, reason: "owner session no longer exists" };
+	if (i.ownerArchived) return { reap: true, reason: "owner session is archived" };
+	return { reap: false };
+}
+
+export interface OrchestrationAuditEvent {
+	event: "spawn" | "prompt" | "steer" | "abort" | "dismiss" | "wait" | "reminder" | "reap";
+	ownerSessionId: string;
+	childSessionId?: string;
+	childKind?: ChildKind;
+	detail?: string;
+}
+
+/** Persisted session fields the index rebuild reads (structural subset). */
+export interface PersistedSessionLike {
+	id: string;
+	title?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	archived?: boolean;
+}
+
+/** Live session fields the core reads (structural subset of SessionInfo). */
+export interface OrchestrationSessionLike {
+	id: string;
+	status: RawSessionStatus | string;
+	title?: string;
+	cwd?: string;
+	allowedTools?: string[];
+}
+
+export interface ReadTranscriptLike {
+	offset?: number;
+	limit?: number;
+	pattern?: string;
+	case_sensitive?: boolean;
+	context?: number;
+	verbose?: boolean;
+}
+
+/**
+ * The narrow injected surface of SessionManager. Keeping the core decoupled
+ * from the full class makes it unit-testable with a fake.
+ */
+export interface OrchestrationSessionView {
+	createDelegateSession(parentSessionId: string, opts: {
+		instructions: string;
+		cwd: string;
+		title?: string;
+		context?: Record<string, string>;
+		allowedTools?: string[];
+		initialModel?: string;
+		initialThinkingLevel?: string;
+	}): Promise<{ id: string }>;
+	createSession(
+		cwd: string,
+		agentArgs: string[] | undefined,
+		goalId: string | undefined,
+		assistantType: string | undefined,
+		opts?: Record<string, unknown>,
+	): Promise<{ id: string }>;
+	enqueuePrompt(sessionId: string, text: string, opts?: Record<string, unknown>): Promise<{ status: string }>;
+	deliverLiveSteer(sessionId: string, message: string, opts?: Record<string, unknown>): Promise<unknown>;
+	waitForIdle(sessionId: string, timeoutMs: number): Promise<void>;
+	getSessionOutput(sessionId: string): Promise<string>;
+	getSession(id: string): OrchestrationSessionLike | undefined;
+	getPersistedSession(id: string): PersistedSessionLike | undefined;
+	terminateSession(id: string): Promise<boolean>;
+	forceAbort(id: string, gracePeriodMs?: number): Promise<void>;
+}
+
+export interface OrchestrationCoreDeps {
+	sessionManager: OrchestrationSessionView;
+	/** Returns `${provider}/${id}` for the owner's CURRENT model (server.ts:1536 shape). */
+	resolveSessionModel: (id: string) => string | undefined;
+	resolveSessionThinking?: (id: string) => string | undefined;
+	audit?: (event: OrchestrationAuditEvent) => void;
+	/** Optional reader for the `read` verb (delegates to read_session machinery). */
+	readTranscript?: (sessionId: string, opts?: ReadTranscriptLike) => Promise<unknown>;
+}
+
+export class OrchestrationCoreError extends Error {
+	constructor(message: string, readonly code: string = "ORCHESTRATION_ERROR") {
+		super(message);
+		this.name = "OrchestrationCoreError";
+	}
+}
+
+const OUTPUT_TAIL_CHARS = 1500;
+
+export class OrchestrationCore {
+	/** In-memory index keyed on owner session id (NOT persisted). */
+	private index = new Map<string, ChildHandle[]>();
+
+	constructor(private deps: OrchestrationCoreDeps) {}
+
+	private audit(ev: OrchestrationAuditEvent): void {
+		try {
+			if (this.deps.audit) this.deps.audit(ev);
+			else console.log(`[orchestration] ${ev.event} owner=${ev.ownerSessionId} child=${ev.childSessionId ?? "-"} kind=${ev.childKind ?? "-"}${ev.detail ? ` ${ev.detail}` : ""}`);
+		} catch { /* audit must never throw into the orchestration path */ }
+	}
+
+	/**
+	 * The SINGLE recursion guard (§7). Throws if `ownerId` is itself a bound
+	 * child (has `delegateOf` or any `childKind`). Called by BOTH the agent-tool
+	 * spawn path (A) and `host.agents.spawn` (C). No child of any kind spawns
+	 * grandchildren.
+	 */
+	assertCanSpawn(ownerId: string): void {
+		const ps = this.deps.sessionManager.getPersistedSession(ownerId);
+		if (ps && (ps.delegateOf || ps.childKind)) {
+			throw new OrchestrationCoreError(
+				"Spawning child agents is not permitted from a child session (no grandchildren).",
+				"NO_GRANDCHILDREN",
+			);
+		}
+	}
+
+	/** Compute the child's allowedTools = owner's minus every spawn verb (§7). */
+	private childAllowedTools(ownerId: string): string[] | undefined {
+		const ownerTools = this.deps.sessionManager.getSession(ownerId)?.allowedTools;
+		if (!ownerTools || ownerTools.length === 0) return undefined;
+		return ownerTools.filter(t => !SPAWN_VERBS.includes(t));
+	}
+
+	private addHandle(handle: ChildHandle): void {
+		const list = this.index.get(handle.ownerSessionId) ?? [];
+		if (!list.some(h => h.sessionId === handle.sessionId)) list.push(handle);
+		this.index.set(handle.ownerSessionId, list);
+	}
+
+	private resolveOwnerCwd(ownerId: string): string | undefined {
+		return this.deps.sessionManager.getSession(ownerId)?.cwd;
+	}
+
+	async spawn(opts: SpawnOpts): Promise<ChildHandle> {
+		this.assertCanSpawn(opts.ownerSessionId);
+
+		const childKind: ChildKind = opts.childKind ?? "delegate";
+		const model = opts.model ?? this.deps.resolveSessionModel(opts.ownerSessionId);
+		const thinkingLevel = opts.thinkingLevel ?? this.deps.resolveSessionThinking?.(opts.ownerSessionId);
+		const childAllowed = this.childAllowedTools(opts.ownerSessionId);
+		// readOnly always implies bare (§2.2).
+		const lifecycle: SpawnLifecycle = opts.readOnly ? "bare" : (opts.lifecycle ?? "bare");
+
+		const sharedMode = !opts.worktree || opts.worktree.mode === "shared";
+
+		let childId: string;
+		if (lifecycle === "bare" && sharedMode) {
+			const cwd = opts.worktree?.mode === "shared"
+				? opts.worktree.cwd
+				: (this.resolveOwnerCwd(opts.ownerSessionId) ?? process.cwd());
+			const child = await this.deps.sessionManager.createDelegateSession(opts.ownerSessionId, {
+				instructions: opts.instructions,
+				cwd,
+				title: opts.title,
+				context: opts.context,
+				allowedTools: childAllowed,
+				initialModel: model,
+				initialThinkingLevel: thinkingLevel,
+			});
+			childId = child.id;
+		} else {
+			// Full lifecycle and/or sub-branch worktree → createSession path.
+			const worktreeOpts = opts.worktree?.mode === "sub-branch"
+				? { repoPath: opts.worktree.repoPath }
+				: undefined;
+			const goalId = opts.worktree?.mode === "sub-branch" ? opts.worktree.goalId : undefined;
+			const cwd = opts.worktree?.mode === "sub-branch"
+				? opts.worktree.cwd
+				: (this.resolveOwnerCwd(opts.ownerSessionId) ?? process.cwd());
+			const createOpts: Record<string, unknown> = {
+				parentSessionId: opts.ownerSessionId,
+				childKind,
+				readOnly: opts.readOnly,
+				allowedTools: childAllowed,
+				initialModel: model,
+				initialThinkingLevel: thinkingLevel,
+				roleName: opts.role,
+				worktreeOpts,
+			};
+			if (opts.worktree?.mode === "sub-branch") {
+				createOpts.sandboxBranch = opts.worktree.branch;
+			}
+			const child = await this.deps.sessionManager.createSession(cwd, undefined, goalId, undefined, createOpts);
+			childId = child.id;
+			// Bare/full createSession children still need the spawn prompt delivered.
+			await this.deps.sessionManager.enqueuePrompt(childId, opts.instructions);
+		}
+
+		const title = opts.title ?? this.deps.sessionManager.getSession(childId)?.title;
+		const handle: ChildHandle = {
+			sessionId: childId,
+			ownerSessionId: opts.ownerSessionId,
+			childKind,
+			spawnedAt: Date.now(),
+			title,
+			blocking: false,
+		};
+		this.addHandle(handle);
+		this.audit({ event: "spawn", ownerSessionId: opts.ownerSessionId, childSessionId: childId, childKind });
+		return handle;
+	}
+
+	/** Register an externally-created child (e.g. team worker) in the runtime index. */
+	registerChild(handle: Omit<ChildHandle, "spawnedAt" | "blocking"> & { spawnedAt?: number; blocking?: boolean }): void {
+		this.addHandle({
+			sessionId: handle.sessionId,
+			ownerSessionId: handle.ownerSessionId,
+			childKind: handle.childKind,
+			title: handle.title,
+			spawnedAt: handle.spawnedAt ?? Date.now(),
+			blocking: handle.blocking ?? false,
+		});
+	}
+
+	/** Forget a child from the runtime index (cleanup after dismiss/terminate). */
+	forgetChild(sessionId: string): void {
+		for (const [owner, list] of this.index) {
+			const next = list.filter(h => h.sessionId !== sessionId);
+			if (next.length !== list.length) {
+				if (next.length === 0) this.index.delete(owner);
+				else this.index.set(owner, next);
+			}
+		}
+	}
+
+	/** Forget all children of an owner from the runtime index (owner terminated). */
+	forgetOwner(ownerId: string): void {
+		this.index.delete(ownerId);
+	}
+
+	list(ownerId: string): ChildHandle[] {
+		return [...(this.index.get(ownerId) ?? [])];
+	}
+
+	/** Resolve a tracked child handle, enforcing own-children scoping. */
+	private requireOwnChild(ownerId: string, childId: string): ChildHandle {
+		const handle = (this.index.get(ownerId) ?? []).find(h => h.sessionId === childId);
+		if (!handle) {
+			throw new OrchestrationCoreError(
+				`Child session ${childId} is not owned by ${ownerId}.`,
+				"NOT_OWN_CHILD",
+			);
+		}
+		return handle;
+	}
+
+	async prompt(ownerId: string, childId: string, message: string): Promise<{ status: "dispatched" | "queued" }> {
+		this.requireOwnChild(ownerId, childId);
+		const result = await this.deps.sessionManager.enqueuePrompt(childId, message);
+		this.audit({ event: "prompt", ownerSessionId: ownerId, childSessionId: childId });
+		// enqueuePrompt returns run-if-idle ("dispatched"/running) or "queued".
+		const status = result?.status === "queued" ? "queued" : "dispatched";
+		return { status };
+	}
+
+	async steer(ownerId: string, childId: string, message: string): Promise<unknown> {
+		this.requireOwnChild(ownerId, childId);
+		const session = this.deps.sessionManager.getSession(childId);
+		if (!session || session.status !== "streaming") {
+			throw new OrchestrationCoreError(
+				"Agent is not currently streaming — use prompt instead.",
+				"NOT_STREAMING",
+			);
+		}
+		const result = await this.deps.sessionManager.deliverLiveSteer(childId, message);
+		this.audit({ event: "steer", ownerSessionId: ownerId, childSessionId: childId });
+		return result;
+	}
+
+	async abort(ownerId: string, childId: string): Promise<void> {
+		this.requireOwnChild(ownerId, childId);
+		await this.deps.sessionManager.forceAbort(childId);
+		this.audit({ event: "abort", ownerSessionId: ownerId, childSessionId: childId });
+	}
+
+	async dismiss(ownerId: string, childId: string): Promise<boolean> {
+		this.requireOwnChild(ownerId, childId);
+		const ok = await this.deps.sessionManager.terminateSession(childId);
+		this.forgetChild(childId);
+		this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });
+		return ok;
+	}
+
+	async read(ownerId: string, childId: string, opts?: ReadTranscriptLike): Promise<unknown> {
+		this.requireOwnChild(ownerId, childId);
+		if (this.deps.readTranscript) return this.deps.readTranscript(childId, opts);
+		return { output: await this.deps.sessionManager.getSessionOutput(childId) };
+	}
+
+	/** Per-child settle: never rejects — maps a `waitForIdle` rejection to a terminal status (§2.3). */
+	private settle(childId: string, timeoutMs: number): Promise<{ id: string; terminal?: TerminalChildStatus }> {
+		return this.deps.sessionManager.waitForIdle(childId, timeoutMs)
+			.then(() => ({ id: childId }))
+			.catch((err) => ({ id: childId, terminal: classifyTerminal(err) }));
+	}
+
+	private childTitle(childId: string): string | undefined {
+		return this.deps.sessionManager.getSession(childId)?.title
+			?? this.deps.sessionManager.getPersistedSession(childId)?.title;
+	}
+
+	/**
+	 * The single `wait` primitive (§2.3). `policy:"all"` resolves when EVERY
+	 * awaited child is settled (idle or terminal) and never rejects on one
+	 * crash. `policy:"first"` resolves on the FIRST settled child. Both share
+	 * the catch-wrapped `settle`.
+	 */
+	async wait(
+		ownerId: string,
+		childIds: string[],
+		opts: { policy: "first" | "all"; timeoutMs: number },
+	): Promise<WaitResult> {
+		for (const id of childIds) this.requireOwnChild(ownerId, id);
+		this.audit({ event: "wait", ownerSessionId: ownerId, detail: `policy=${opts.policy} n=${childIds.length}` });
+
+		const terminalById = new Map<string, TerminalChildStatus>();
+
+		if (opts.policy === "all") {
+			const settled = await Promise.all(childIds.map(id => this.settle(id, opts.timeoutMs)));
+			for (const s of settled) if (s.terminal) terminalById.set(s.id, s.terminal);
+		} else {
+			// Race: first settled wins. Other settle promises keep running with a
+			// no-op catch already attached (no unhandled rejection).
+			const first = await Promise.race(childIds.map(id => this.settle(id, opts.timeoutMs)));
+			if (first.terminal) terminalById.set(first.id, first.terminal);
+		}
+
+		const statuses = childIds.map(id => {
+			const terminal = terminalById.get(id);
+			const status: ChildStatus = terminal ?? liveStatusToChildStatus(this.deps.sessionManager.getSession(id)?.status);
+			return { sessionId: id, status, title: this.childTitle(id) };
+		});
+
+		const firstSettled = statuses.find(s => isSettledStatus(s.status));
+		let outputTail: string | undefined;
+		if (firstSettled) {
+			const full = await this.deps.sessionManager.getSessionOutput(firstSettled.sessionId).catch(() => "");
+			outputTail = full.length > OUTPUT_TAIL_CHARS ? full.slice(-OUTPUT_TAIL_CHARS) : full;
+		}
+		const remaining = statuses.filter(s => !isSettledStatus(s.status)).length;
+
+		return {
+			firstIdle: firstSettled?.sessionId,
+			firstIsTerminal: firstSettled ? isTerminalStatus(firstSettled.status) : undefined,
+			statuses,
+			outputTail,
+			remaining,
+		};
+	}
+
+	/**
+	 * Rebuild the in-memory index on boot from persisted session fields (§3).
+	 * A child is any persisted session with `delegateOf` set, OR
+	 * (`parentSessionId` set AND `childKind` present). Owner = delegateOf ??
+	 * parentSessionId. Archived sessions are skipped. Blocking-ness is never
+	 * persisted, so every restored child is `blocking:false`.
+	 */
+	rebuildIndexFromPersisted(persisted: PersistedSessionLike[]): void {
+		this.index.clear();
+		for (const ps of persisted) {
+			if (ps.archived) continue;
+			const isChild = !!ps.delegateOf || (!!ps.parentSessionId && !!ps.childKind);
+			if (!isChild) continue;
+			const ownerSessionId = ps.delegateOf ?? ps.parentSessionId;
+			if (!ownerSessionId) continue;
+			this.addHandle({
+				sessionId: ps.id,
+				ownerSessionId,
+				childKind: (ps.childKind as ChildKind) ?? "delegate",
+				title: ps.title,
+				spawnedAt: Date.now(),
+				blocking: false,
+			});
+		}
+	}
+
+	/**
+	 * After boot, inject a system reminder into every owner that has ≥1 live
+	 * restored child (restart survival, §4). The owner re-collects through the
+	 * shared `team_wait` path — no transparent tool-call resumption.
+	 *
+	 * `filterOwner` lets callers skip owners handled elsewhere (e.g. team-managed
+	 * children are nudged by team-manager — filter childKind!=="team").
+	 */
+	async remindOwnersWithLiveChildren(filter?: (handle: ChildHandle) => boolean): Promise<number> {
+		let reminded = 0;
+		for (const [ownerId, handlesAll] of this.index) {
+			const handles = filter ? handlesAll.filter(filter) : handlesAll;
+			if (handles.length === 0) continue;
+			// Only remind owners that are themselves restorable (exist, not a child).
+			const ownerPs = this.deps.sessionManager.getPersistedSession(ownerId);
+			if (!ownerPs || ownerPs.archived) continue;
+			const enumerated = handles
+				.map(h => `${h.sessionId}${h.title ? ` "${h.title}"` : ""}`)
+				.join(", ");
+			const msg =
+				`[ORCHESTRATION] The gateway restarted. You have ${handles.length} live child agent(s) ` +
+				`from before the restart: ${enumerated}. Their results were not collected. Call ` +
+				`team_wait to collect them (it returns on the first child idle and tells you who remains).`;
+			try {
+				await this.deps.sessionManager.enqueuePrompt(ownerId, msg, { source: "system", isSteered: true });
+				this.audit({ event: "reminder", ownerSessionId: ownerId, detail: `${handles.length} children` });
+				reminded++;
+			} catch (err) {
+				console.error(`[orchestration] Failed to remind owner ${ownerId} of live children:`, err);
+			}
+		}
+		return reminded;
+	}
+
+	/** Reap-on-boot decision (generalized §5). Exposed as a method for parity/testing. */
+	shouldReapChildOnBoot(input: ReapInput): ReapDecision {
+		return shouldReapChildOnBoot(input);
+	}
+}

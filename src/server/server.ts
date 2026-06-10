@@ -25,6 +25,38 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { OrchestrationCore, OrchestrationCoreError, type WaitResult } from "./agent/orchestration-core.js";
+
+/**
+ * Render the `team_wait` result text (orchestration-core design §9). Returns on
+ * the first SETTLED child (idle or terminal); enumerates every awaited child's
+ * status and instructs the agent to call `team_wait` again for the remainder.
+ */
+function formatWaitText(result: WaitResult): string {
+	const lines: string[] = [];
+	const first = result.firstIdle;
+	if (first) {
+		const fh = result.statuses.find(s => s.sessionId === first);
+		const header = result.firstIsTerminal ? "First settled child" : "First idle child";
+		lines.push(`${header}: ${first}${fh?.title ? ` ("${fh.title}")` : ""}`);
+		if (result.outputTail) {
+			lines.push("--- output tail ---");
+			lines.push(result.outputTail);
+		}
+		lines.push("");
+	}
+	lines.push(`Awaited children (${result.statuses.length}):`);
+	for (const s of result.statuses) {
+		lines.push(`  • ${s.sessionId}${s.title ? ` "${s.title}"` : ""} — ${s.status}`);
+	}
+	if (result.remaining === 0) {
+		lines.push("All awaited children are settled.");
+	} else {
+		lines.push(`Remaining: ${result.remaining} child(ren) not yet settled.`);
+		lines.push("➜ Process this result now, then call team_wait again to await the remaining children.");
+	}
+	return lines.join("\n");
+}
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -1129,12 +1161,32 @@ export function createGateway(config: GatewayConfig) {
 	// scoped store is instantiated solely so construction doesn't require a project.
 	const firstCtxForInit = projectContextManager.all().next().value as import("./agent/project-context.js").ProjectContext | undefined;
 	const taskStore = firstCtxForInit ? firstCtxForInit.taskStore : new TaskStore(stateDir);
+	// OrchestrationCore (docs/design/orchestration-core.md) — the ONE goal-agnostic
+	// child-agent lifecycle implementation. Constructed near teamManager and wired
+	// back into sessionManager (boot index rebuild + restart reminder) and into
+	// teamManager (goal adapter routes spawn/dismiss through it). The
+	// `/api/sessions/:id/orchestrate/*` routes call it in-process; sub-goal C's
+	// `host.agents` capability will call the SAME core.
+	const orchestrationCore = new OrchestrationCore({
+		sessionManager,
+		// Inherit the owner's CURRENT model (same shape as the pr-walkthrough
+		// resolveParentInitialModel resolver) so a child no longer drops to the
+		// system default.
+		resolveSessionModel: (sessionId: string) => {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+		},
+		resolveSessionThinking: (sessionId: string) => sessionManager.getSession(sessionId)?.spawnPinnedThinkingLevel,
+	});
+	sessionManager.setOrchestrationCore(orchestrationCore);
+
 	const teamManager = new TeamManager(sessionManager, {
 		colorStore,
 		taskManager: new TaskManager(taskStore),
 		roleStore,
 		projectContextManager,
 		toolManager,
+		orchestrationCore,
 	});
 	const bgProcessManager = new BgProcessManager((sessionId: string) => {
 		const session = sessionManager.getSession(sessionId);
@@ -1271,7 +1323,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2291,6 +2343,7 @@ async function handleApiRoute(
 	colorStore: ColorStore,
 	prStatusStore: PrStatusStore,
 	teamManager: TeamManager,
+	orchestrationCore: OrchestrationCore,
 	roleManager: RoleManager,
 	toolManager: ToolManager,
 	projectContextManager: ProjectContextManager,
@@ -5523,6 +5576,8 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
+			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
+			orchestrationCore,
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -5891,6 +5946,8 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
+			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
+			orchestrationCore,
 		});
 		const start = Date.now();
 		try {
@@ -9136,6 +9193,212 @@ async function handleApiRoute(
 		}
 		return;
 	}
+
+	// ──────────────────────────────────────────────────────────────────────────
+	// OrchestrationCore agent-tool routes (docs/design/orchestration-core.md §8.2).
+	//
+	// `:id` is the OWNER session. The unified `team_*` agent tools call these via
+	// _shared/gateway.ts; the server invokes `orchestrationCore.*` IN-PROCESS with
+	// server-enforced own-children scoping (a verb only touches a child returned by
+	// orchestrationCore.list(ownerId)). The pack-side `host.agents` capability
+	// (sub-goal C) calls the SAME core through a different in-process path.
+	// ──────────────────────────────────────────────────────────────────────────
+	const orchestrateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/orchestrate\/([a-z]+)$/);
+	if (orchestrateMatch && (req.method === "POST" || req.method === "GET")) {
+		const ownerId = orchestrateMatch[1];
+		const verb = orchestrateMatch[2];
+
+		// Map OrchestrationCore error codes → HTTP status.
+		const ocStatus = (err: unknown): number => {
+			if (err instanceof OrchestrationCoreError) {
+				if (err.code === "NOT_STREAMING") return 409;
+				if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
+				return 400;
+			}
+			return 500;
+		};
+
+		// GET /api/sessions/:id/orchestrate/children — list owner's tracked children.
+		if (verb === "children" && req.method === "GET") {
+			json({ children: orchestrationCore.list(ownerId) });
+			return;
+		}
+
+		if (req.method !== "POST") { json({ error: "Method not allowed" }, 405); return; }
+		const body = await readBody(req).catch(() => ({}));
+
+		try {
+			// POST /orchestrate/spawn — non-blocking spawn (single or parallel).
+			if (verb === "spawn") {
+				const lifecycle: "full" | undefined = body?.lifecycle === "full" ? "full" : undefined;
+				const baseOpts = {
+					ownerSessionId: ownerId,
+					role: typeof body?.role === "string" ? body.role : undefined,
+					model: typeof body?.model === "string" ? body.model : undefined,
+					thinkingLevel: typeof body?.thinking_level === "string" ? body.thinking_level : undefined,
+					readOnly: body?.read_only === true,
+					lifecycle,
+				};
+				const spawnSet: Array<{ instructions: string; context?: Record<string, string> }> =
+					Array.isArray(body?.parallel) && body.parallel.length > 0
+						? body.parallel.map((p: any) => ({ instructions: String(p.instructions ?? ""), context: p.context }))
+						: [{ instructions: String(body?.instructions ?? ""), context: body?.context }];
+				const children = [];
+				for (const item of spawnSet) {
+					const handle = await orchestrationCore.spawn({
+						...baseOpts,
+						instructions: item.instructions,
+						context: { ...(body?.context ?? {}), ...(item.context ?? {}) },
+					});
+					children.push({ childSessionId: handle.sessionId, childKind: handle.childKind, title: handle.title });
+				}
+				json({ children, childSessionId: children[0]?.childSessionId }, 201);
+				return;
+			}
+
+			// POST /orchestrate/prompt — run-if-idle / queue.
+			if (verb === "prompt") {
+				if (!body?.childSessionId || typeof body?.message !== "string") { json({ error: "Missing childSessionId or message" }, 400); return; }
+				const result = await orchestrationCore.prompt(ownerId, body.childSessionId, body.message);
+				json({ ok: true, status: result.status });
+				return;
+			}
+
+			// POST /orchestrate/steer — mid-turn steer (409 if child not streaming).
+			if (verb === "steer") {
+				if (!body?.childSessionId || typeof body?.message !== "string") { json({ error: "Missing childSessionId or message" }, 400); return; }
+				await orchestrationCore.steer(ownerId, body.childSessionId, body.message);
+				json({ ok: true, dispatched: true });
+				return;
+			}
+
+			// POST /orchestrate/abort — force-abort own child.
+			if (verb === "abort") {
+				if (!body?.childSessionId) { json({ error: "Missing childSessionId" }, 400); return; }
+				await orchestrationCore.abort(ownerId, body.childSessionId);
+				const after = sessionManager.getSession(body.childSessionId);
+				json({ ok: true, status: after?.status || "idle" });
+				return;
+			}
+
+			// POST /orchestrate/dismiss — terminate + archive own child.
+			if (verb === "dismiss") {
+				if (!body?.childSessionId) { json({ error: "Missing childSessionId" }, 400); return; }
+				const ok = await orchestrationCore.dismiss(ownerId, body.childSessionId);
+				json({ ok });
+				return;
+			}
+
+			// POST /orchestrate/wait — policy:"first"; chunked heartbeat like /wait.
+			if (verb === "wait") {
+				const timeoutMs = body?.timeout_ms ?? 600_000;
+				const childIds: string[] = Array.isArray(body?.childSessionIds) && body.childSessionIds.length > 0
+					? body.childSessionIds.map((s: any) => String(s))
+					: orchestrationCore.list(ownerId).map(h => h.sessionId);
+				if (childIds.length === 0) { json({ error: "No children to await" }, 400); return; }
+				res.writeHead(200, { "Content-Type": "application/json", "Transfer-Encoding": "chunked", "Cache-Control": "no-cache" });
+				const heartbeat = setInterval(() => { try { res.write("\n"); } catch { /* ignore */ } }, 60_000);
+				try {
+					const result = await orchestrationCore.wait(ownerId, childIds, { policy: "first", timeoutMs });
+					res.end(JSON.stringify({ ...result, text: formatWaitText(result) }));
+				} catch (err) {
+					res.end(JSON.stringify({ error: String(err instanceof Error ? err.message : err) }));
+				} finally {
+					clearInterval(heartbeat);
+				}
+				return;
+			}
+
+			// POST /orchestrate/delegate — the pinned BLOCKING contract (§8.2.1).
+			// spawn (single or parallel) → wait(policy:"all") with terminal mapping
+			// → auto-dismiss EVERY child in finally → aggregate. Always 2xx once
+			// children settle; server owns the chunked heartbeat (undici parity).
+			if (verb === "delegate") {
+				const timeoutMs = body?.timeout_ms ?? 600_000;
+				const spawnSet: Array<{ instructions: string; context?: Record<string, string> }> =
+					Array.isArray(body?.parallel) && body.parallel.length > 0
+						? body.parallel.map((p: any) => ({ instructions: String(p.instructions ?? ""), context: p.context }))
+						: [{ instructions: String(body?.instructions ?? ""), context: body?.context }];
+				const lifecycle: "full" | undefined = body?.lifecycle === "full" ? "full" : undefined;
+
+				res.writeHead(200, { "Content-Type": "application/json", "Transfer-Encoding": "chunked", "Cache-Control": "no-cache" });
+				const heartbeat = setInterval(() => { try { res.write("\n"); } catch { /* ignore */ } }, 60_000);
+				const startTime = Date.now();
+				const handles: Array<{ sessionId: string } | null> = [];
+				try {
+					// Spawn the full set. assertCanSpawn / spawn failures become a
+					// failed delegate entry rather than aborting the others.
+					const spawnErrors: Array<string | undefined> = [];
+					for (const item of spawnSet) {
+						try {
+							const handle = await orchestrationCore.spawn({
+								ownerSessionId: ownerId,
+								instructions: item.instructions,
+								role: typeof body?.role === "string" ? body.role : undefined,
+								model: typeof body?.model === "string" ? body.model : undefined,
+								thinkingLevel: typeof body?.thinking_level === "string" ? body.thinking_level : undefined,
+								readOnly: body?.read_only === true,
+								lifecycle,
+								context: { ...(body?.context ?? {}), ...(item.context ?? {}) },
+							});
+							handles.push({ sessionId: handle.sessionId });
+							spawnErrors.push(undefined);
+						} catch (err) {
+							handles.push(null);
+							spawnErrors.push(err instanceof Error ? err.message : String(err));
+						}
+					}
+					const liveIds = handles.filter((h): h is { sessionId: string } => !!h).map(h => h.sessionId);
+					const waitResult = liveIds.length > 0
+						? await orchestrationCore.wait(ownerId, liveIds, { policy: "all", timeoutMs })
+						: { statuses: [], remaining: 0 } as Awaited<ReturnType<typeof orchestrationCore.wait>>;
+					const statusById = new Map(waitResult.statuses.map(s => [s.sessionId, s.status]));
+
+					const delegates = [];
+					for (let i = 0; i < handles.length; i++) {
+						const h = handles[i];
+						if (!h) {
+							delegates.push({ id: "error", sessionId: "", status: "failed", output: "", durationMs: Date.now() - startTime, error: spawnErrors[i] });
+							continue;
+						}
+						const childStatus = statusById.get(h.sessionId);
+						const status = childStatus === "idle" ? "completed"
+							: childStatus === "timeout" ? "timeout"
+							: childStatus === "terminated" ? "terminated"
+							: "failed";
+						const output = await sessionManager.getSessionOutput(h.sessionId).catch(() => "");
+						delegates.push({ id: h.sessionId.slice(0, 12), sessionId: h.sessionId, status, output, durationMs: Date.now() - startTime });
+					}
+					const completed = delegates.filter(d => d.status === "completed").length;
+					const summary = `${completed}/${delegates.length} delegates completed.`;
+					res.end(JSON.stringify({ delegates, summary }));
+				} catch (err) {
+					res.end(JSON.stringify({ delegates: [], summary: "", error: String(err instanceof Error ? err.message : err) }));
+				} finally {
+					// Guaranteed cleanup — dismiss EVERY spawned child regardless of outcome.
+					for (const h of handles) {
+						if (h) { try { await orchestrationCore.dismiss(ownerId, h.sessionId); } catch { /* already gone */ } }
+					}
+					clearInterval(heartbeat);
+				}
+				return;
+			}
+
+			json({ error: `Unknown orchestrate verb: ${verb}` }, 404);
+		} catch (err) {
+			const status = ocStatus(err);
+			json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, status);
+		}
+		return;
+	}
+
+	// ── SUB-GOAL B SEAM (orchestration-core §6.1) ──────────────────────────────
+	// Sub-goal B appends an OPTIONAL `GET /api/sessions/:id/children-count` route
+	// HERE so the non-goal archive confirmation modal can enumerate the child
+	// agents that will be cascade-archived. Intentionally absent in sub-goal A;
+	// this comment marks the disjoint region B edits (no overlap with C's flag
+	// flip elsewhere). Do not remove.
+	// ───────────────────────────────────────────────────────────────────────────
 
 	// POST /api/sessions/:archivedId/continue — Continue-Archived (lossless)
 	//

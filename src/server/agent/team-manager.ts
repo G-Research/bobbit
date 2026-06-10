@@ -85,6 +85,7 @@ export function formatElapsed(sinceMs: number): string {
 
 // Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
 import { TaskManager } from "./task-manager.js";
+import type { OrchestrationCore } from "./orchestration-core.js";
 
 
 export interface TeamAgent {
@@ -154,6 +155,16 @@ export interface TeamManagerConfig {
 	projectContextManager?: ProjectContextManager;
 	/** Tool manager for resolving extension paths via the cascade */
 	toolManager?: ToolManager;
+	/**
+	 * OrchestrationCore — the goal-agnostic child-agent lifecycle core
+	 * (docs/design/orchestration-core.md). The team-manager is the GOAL ADAPTER:
+	 * it keeps all goal-specific logic (worktree-on-sub-branch, role injection,
+	 * gate checks, idle-nudge/stuck-watchdog, team_complete, maxConcurrent) but
+	 * routes the generic spawn/dismiss bookkeeping through the core so team
+	 * children are visible to the shared orchestration index. Behaviour-preserving
+	 * and additive — optional so the test path can omit it.
+	 */
+	orchestrationCore?: OrchestrationCore;
 }
 
 export class TeamManager {
@@ -1814,6 +1825,25 @@ export class TeamManager {
 			this.sessionToGoal.set(session.id, goalId);
 			this.persistEntry(goalId);
 
+			// Route the spawn through OrchestrationCore (goal adapter): register the
+			// worker as a tracked child keyed on the team-lead so it is visible to
+			// the shared orchestration index. Runtime-only and behaviour-preserving
+			// — the goal-scoped worktree/role/gate semantics above are unchanged;
+			// team children are nudged on restart by team-manager (not the core's
+			// reminder, which filters childKind!=="team").
+			if (entry.teamLeadSessionId) {
+				try {
+					this.config.orchestrationCore?.registerChild({
+						sessionId: session.id,
+						ownerSessionId: entry.teamLeadSessionId,
+						childKind: "team",
+						title: this.sessionManager.getSession(session.id)?.title,
+					});
+				} catch (err) {
+					console.warn(`[team-manager] OrchestrationCore.registerChild failed for ${session.id}:`, err);
+				}
+			}
+
 			// Enrich task prompt with upstream dependency context if available
 			const enrichedTask = workflowContext ? task + workflowContext : task;
 
@@ -2002,6 +2032,9 @@ export class TeamManager {
 		}
 
 		const agent = entry.agents[agentIndex];
+
+		// Forget the worker from the OrchestrationCore runtime index (goal adapter).
+		try { this.config.orchestrationCore?.forgetChild(sessionId); } catch { /* best-effort */ }
 
 		// Unsubscribe from agent_end events before terminating
 		if (agent.unsubscribeEvent) {

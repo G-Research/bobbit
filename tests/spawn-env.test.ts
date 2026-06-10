@@ -55,17 +55,32 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
+	it("source: BOBBIT_DELEGATE_OF env var is NO LONGER written (recursion guard moved to OrchestrationCore)", () => {
+		const src = readFileSync(
+			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
+			"utf-8",
+		);
+		// The legacy delegate-recursion guard wrote BOBBIT_DELEGATE_OF into the
+		// child's env so the agent extension could early-return and skip
+		// registering the delegate tool. That mechanism is replaced by
+		// OrchestrationCore.assertCanSpawn + allowedTools subtraction (every spawn
+		// verb stripped from the child) — see docs/design/orchestration-core.md §7.
+		// Assert the env-write is gone so the dead mechanism can't silently return.
+		assert.ok(
+			!/BOBBIT_DELEGATE_OF:/.test(src),
+			"session-setup.ts must NOT write BOBBIT_DELEGATE_OF — recursion is guarded by OrchestrationCore.assertCanSpawn + allowedTools subtraction",
+		);
+	});
+
 	it("functional: replicated env-construction logic seeds BOBBIT_SESSION_ID + secret before caller env", () => {
-		// Faithful reproduction of the env-merge in resolveBridgeOptions.
-		function buildBridgeEnv(plan: { id: string; env?: Record<string, string>; delegateOf?: string }) {
-			let env: Record<string, string> = {
+		// Faithful reproduction of the env-merge in resolveBridgeOptions. The
+		// delegate-of env branch is intentionally gone (see the source test above).
+		function buildBridgeEnv(plan: { id: string; env?: Record<string, string> }) {
+			const env: Record<string, string> = {
 				BOBBIT_SESSION_ID: plan.id,
 				BOBBIT_SESSION_SECRET: `secret-for-${plan.id}`,
 				...(plan.env ?? {}),
 			};
-			if (plan.delegateOf) {
-				env = { ...env, BOBBIT_DELEGATE_OF: plan.delegateOf };
-			}
 			return env;
 		}
 
@@ -73,9 +88,9 @@ describe("session-setup spawn env contract", () => {
 		assert.equal(env1.BOBBIT_SESSION_ID, "sess-abc-123");
 		assert.equal(env1.BOBBIT_SESSION_SECRET, "secret-for-sess-abc-123");
 
-		const env2 = buildBridgeEnv({ id: "delegate-xyz", delegateOf: "parent-1" });
+		const env2 = buildBridgeEnv({ id: "delegate-xyz" });
 		assert.equal(env2.BOBBIT_SESSION_ID, "delegate-xyz");
-		assert.equal(env2.BOBBIT_DELEGATE_OF, "parent-1");
+		assert.equal(env2.BOBBIT_DELEGATE_OF, undefined);
 
 		const env3 = buildBridgeEnv({ id: "sess-keep", env: { OTHER_VAR: "v" } });
 		assert.equal(env3.BOBBIT_SESSION_ID, "sess-keep");

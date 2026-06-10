@@ -99,6 +99,14 @@ export interface CreateServerHostApiOptions {
 	 *  Own-session by construction — there is no parameter for another session. When
 	 *  absent (non-gateway context), the session reads throw a clear error. */
 	readOwnTranscript?: () => Promise<string | null>;
+	/** SUB-GOAL A SEAM (orchestration-core §8.3): the gateway injects the shared
+	 *  OrchestrationCore so sub-goal C can implement the ambient `host.agents`
+	 *  capability (spawn/prompt/dismiss/list/read/status) over the SAME core that
+	 *  backs the agent-tool `/orchestrate/*` routes. Sub-goal A only passes it in
+	 *  (the `agents` capability flag stays FALSE and no namespace is exposed); C
+	 *  flips the flag + implements the namespace. Typed `unknown` here so A does
+	 *  not freeze C's import shape. */
+	orchestrationCore?: unknown;
 }
 
 /**
@@ -115,6 +123,10 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	void opts.sessionId;
 	void opts.toolUseId;
 	void opts.contributionId;
+	// SUB-GOAL A SEAM: the OrchestrationCore is injected but NOT yet consumed.
+	// Sub-goal C reads it to back the ambient `host.agents` namespace + flips the
+	// `agents` capability flag. Until then it is intentionally inert.
+	void opts.orchestrationCore;
 
 	// Slice B2: own-session transcript reader (header-bound session, supplied by the
 	// gateway). The reads below map its rows through the single contract adapter.

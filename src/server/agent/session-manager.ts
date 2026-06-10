@@ -70,7 +70,7 @@ import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import { rotateSubmissionProofForRestoredJob, WalkthroughAgentStore } from "../pr-walkthrough/walkthrough-agent-store.js";
-import { shouldReapWalkthroughChildOnBoot } from "../pr-walkthrough/walkthrough-reap.js";
+import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import { WorktreePool } from "./worktree-pool.js";
@@ -712,6 +712,17 @@ export class SessionManager {
 
 	setSandboxManager(manager: SandboxManager | null): void {
 		this.sandboxManager = manager;
+	}
+
+	/**
+	 * OrchestrationCore wiring (docs/design/orchestration-core.md). Injected by
+	 * server.ts after construction (the core is built near teamManager and needs
+	 * a ref back to this manager's narrow view). Used by `restoreSessions` to
+	 * rebuild the in-memory child index + remind owners of live children on boot.
+	 */
+	private orchestrationCore: OrchestrationCore | null = null;
+	setOrchestrationCore(core: OrchestrationCore | null): void {
+		this.orchestrationCore = core;
 	}
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
@@ -3194,11 +3205,43 @@ export class SessionManager {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
+			// Generalized boot-reap (orchestration-core §5): reap an orphaned
+			// delegate child whose owner session is gone or archived. This closes
+			// the orphan-delegate gap — delegates were previously NEVER boot-reaped
+			// (only pr-walkthrough children were). A child whose owner is restoring
+			// (exists, not archived) is kept dormant and re-collectable via team_wait.
+			const owner = ps.delegateOf ? this.getPersistedSession(ps.delegateOf) : undefined;
+			const reap = shouldReapChildOnBoot({
+				childKind: ps.childKind ?? "delegate",
+				ownerSessionId: ps.delegateOf,
+				ownerExists: !!owner,
+				ownerArchived: owner?.archived === true,
+			});
+			if (reap.reap) {
+				console.log(`[session-manager] Reaping orphaned delegate child ${ps.id} on boot — ${reap.reason}`);
+				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
+				continue;
+			}
 			// Existence check deferred to addClient() revive — add as dormant unconditionally
 			// (the file is in the agent's coordinate system; checking it here would require
 			// async docker exec for sandbox sessions, and the file may not be needed until
 			// the user opens the session)
 			this.addDormantSession(ps);
+		}
+
+		// OrchestrationCore (§3/§4): rebuild the in-memory child index from the
+		// already-persisted link fields (delegateOf / parentSessionId+childKind)
+		// — no new persisted registry — then remind any owner with live restored
+		// children to re-collect them via team_wait (restart survival, no
+		// transparent tool-call resumption). Team-managed children (childKind
+		// "team") are skipped here; team-manager nudges those in resubscribeTeamEvents.
+		if (this.orchestrationCore) {
+			try {
+				this.orchestrationCore.rebuildIndexFromPersisted(persisted);
+				await this.orchestrationCore.remindOwnersWithLiveChildren(h => h.childKind !== "team");
+			} catch (err) {
+				console.warn("[session-manager] OrchestrationCore boot index/reminder failed:", err);
+			}
 		}
 
 		// Recover worktrees whose directories are missing OR whose .git metadata is broken.
@@ -3300,12 +3343,26 @@ export class SessionManager {
 				catch (err) { console.warn(`[session-manager] Failed to read walkthrough job for ${ps.id}:`, err); }
 			}
 			const parent = ps.parentSessionId ? this.getPersistedSession(ps.parentSessionId) : undefined;
-			const decision = shouldReapWalkthroughChildOnBoot({
-				walkthroughJobId: ps.walkthroughJobId,
-				parentSessionId: ps.parentSessionId,
-				jobStatus,
-				parentExists: !!parent,
-				parentArchived: parent?.archived === true,
+			// Generalized boot-reap (orchestration-core §5). A thin pr-walkthrough
+			// adapter maps the walkthrough job status to the kind-specific terminal
+			// signal so behaviour stays byte-identical to the old
+			// shouldReapWalkthroughChildOnBoot (missing job record OR ready/error).
+			let kindTerminal = false;
+			let kindTerminalReason: string | undefined;
+			if (!ps.walkthroughJobId || !jobStatus) {
+				kindTerminal = true;
+				kindTerminalReason = "walkthrough job record is missing";
+			} else if (jobStatus === "ready" || jobStatus === "error") {
+				kindTerminal = true;
+				kindTerminalReason = `walkthrough job is terminal (${jobStatus})`;
+			}
+			const decision = shouldReapChildOnBoot({
+				childKind: "pr-walkthrough",
+				ownerSessionId: ps.parentSessionId,
+				ownerExists: !!parent,
+				ownerArchived: parent?.archived === true,
+				kindTerminal,
+				kindTerminalReason,
 			});
 			if (decision.reap) {
 				console.log(`[session-manager] Reaping PR-walkthrough child ${ps.id} on boot — ${decision.reason}`);
@@ -3997,6 +4054,19 @@ export class SessionManager {
 		cwd: string;
 		title?: string;
 		context?: Record<string, string>;
+		/**
+		 * Explicit allowedTools override (OrchestrationCore recursion guard, §7):
+		 * the core passes the owner's allowedTools MINUS every spawn verb. When
+		 * omitted, the child inherits the parent's full allowedTools (legacy).
+		 */
+		allowedTools?: string[];
+		/**
+		 * Model / thinking-level inheritance (fixes the delegate model-default
+		 * drop, §2.2). The core resolves the owner's CURRENT model and forwards
+		 * it here. When omitted, the agent CLI falls back to its own default.
+		 */
+		initialModel?: string;
+		initialThinkingLevel?: string;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
@@ -4020,10 +4090,12 @@ export class SessionManager {
 
 		const titleSummary = opts.title || opts.instructions.split("\n")[0].slice(0, 60) || "Delegate";
 
-		// Inherit tool access from parent session
+		// Inherit tool access from parent session, unless the caller passes an
+		// explicit allowedTools override (OrchestrationCore strips spawn verbs).
 		const parentSession = this.sessions.get(parentSessionId);
-		const parentAllowedTools: EffectiveTool[] | undefined = parentSession?.allowedTools
-			? parentSession.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
+		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
+		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
+			? sourceAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
 			: undefined;
 
 		const plan: SessionSetupPlan = {
@@ -4037,6 +4109,10 @@ export class SessionManager {
 			context: opts.context,
 			effectiveAllowedTools: parentAllowedTools,
 			projectId: parentProjectId,
+			// Model inheritance (§2.2): forward the resolved owner model/thinking
+			// level so a delegate no longer silently drops to the system default.
+			initialModel: opts.initialModel,
+			initialThinkingLevel: opts.initialThinkingLevel,
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
@@ -5294,10 +5370,18 @@ export class SessionManager {
 		return parseImageModelPref(pref);
 	}
 
-	async terminateSession(id: string): Promise<boolean> {
-		const session = this.sessions.get(id);
-		if (!session) return false;
-
+	/**
+	 * Cascade-reap an owner's child agents (OrchestrationCore §6 seam).
+	 *
+	 * SUB-GOAL A: this is a behaviour-preserving extraction of the cascade body
+	 * that previously lived inline at the top of `terminateSession`. It still
+	 * only fires from the terminate path (archival flows through terminate).
+	 * SUB-GOAL B fills in the generalized runtime hook so a child never outlives
+	 * its parent's archival on ALL archive entry points (not just terminate),
+	 * generalized to every child kind. The seam (method + terminate call site)
+	 * exists now so B only has to widen it.
+	 */
+	private async cascadeReapOwner(id: string): Promise<void> {
 		// Cascade: terminate all delegate (child) sessions first. PR-walkthrough
 		// children are linked via parentSessionId/childKind (not delegateOf), so they
 		// must be cascaded too — otherwise the read-only child process leaks when its
@@ -5317,6 +5401,16 @@ export class SessionManager {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 			}
 		}
+		// Keep the OrchestrationCore in-memory index consistent.
+		try { this.orchestrationCore?.forgetOwner(id); } catch { /* best-effort */ }
+	}
+
+	async terminateSession(id: string): Promise<boolean> {
+		const session = this.sessions.get(id);
+		if (!session) return false;
+
+		// Cascade-reap this owner's child agents (extracted seam — §6).
+		await this.cascadeReapOwner(id);
 
 		// Resolve any pending grant request so the guard's long-poll returns immediately
 		if (session.pendingGrantRequest) {
