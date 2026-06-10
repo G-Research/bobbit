@@ -31,8 +31,10 @@ export function checkGateDependencies(
 	const wfGate = workflowGates.find(g => g.id === workflowGateId);
 	if (!wfGate || !wfGate.dependsOn?.length) return null;
 
+	// A bypassed gate counts as satisfied for dependency ordering (it unblocks
+	// downstream gates exactly like a passed gate). See Human Gate Bypass design.
 	const passedIds = new Set(
-		gateStates.filter(g => g.status === "passed").map(g => g.gateId),
+		gateStates.filter(g => g.status === "passed" || g.status === "bypassed").map(g => g.gateId),
 	);
 	const notPassed = wfGate.dependsOn.filter(depId => !passedIds.has(depId));
 

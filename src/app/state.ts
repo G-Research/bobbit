@@ -305,6 +305,8 @@ export const state = {
 	 *  notification-policy hot path can do an O(1) check without recounting. */
 	gateStatusCache: new Map<string, {
 		passed: number;
+		/** Count of gates a human forced past verification (distinct from passed). */
+		bypassed: number;
 		total: number;
 		verifying: boolean;
 		verifyingCount: number;
@@ -313,7 +315,7 @@ export const state = {
 		runningGateIds?: string[];
 		gates?: Array<{
 			gateId: string;
-			status: "pending" | "passed" | "failed";
+			status: "pending" | "passed" | "failed" | "bypassed";
 			effectiveStatus?: "pending" | "passed" | "failed" | "running";
 			running?: boolean;
 			awaitingSignoffCount?: number;

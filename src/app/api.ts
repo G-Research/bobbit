@@ -956,7 +956,7 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 export interface GateStatusSummaryGate {
 	gateId: string;
 	name?: string;
-	status: "pending" | "passed" | "failed";
+	status: "pending" | "passed" | "failed" | "bypassed";
 	effectiveStatus: "pending" | "passed" | "failed" | "running";
 	running: boolean;
 	awaitingSignoffCount: number;
@@ -968,6 +968,10 @@ export interface GateStatusSummaryGate {
 
 export interface GateStatusSummary {
 	passed: number;
+	/** Count of gates a human forced past verification. Distinct from passed. */
+	bypassed: number;
+	/** Alias for `bypassed` — server emits both names. */
+	bypassedCount: number;
 	total: number;
 	verifying: boolean;
 	verifyingCount: number;
@@ -980,6 +984,8 @@ export interface GateStatusSummary {
 function emptyGateStatusSummary(): GateStatusSummary {
 	return {
 		passed: 0,
+		bypassed: 0,
+		bypassedCount: 0,
 		total: 0,
 		verifying: false,
 		verifyingCount: 0,
@@ -994,8 +1000,13 @@ function normalizeGateStatusSummary(data: any): GateStatusSummary {
 	const raw = data?.summary && typeof data.summary === "object" ? data.summary : data;
 	const awaitingSignoffCount = typeof raw?.awaitingSignoffCount === "number" ? raw.awaitingSignoffCount : 0;
 	const runningGateIds = Array.isArray(raw?.runningGateIds) ? raw.runningGateIds.filter((id: unknown): id is string => typeof id === "string") : [];
+	const bypassed = typeof raw?.bypassed === "number"
+		? raw.bypassed
+		: (typeof raw?.bypassedCount === "number" ? raw.bypassedCount : 0);
 	return {
 		passed: typeof raw?.passed === "number" ? raw.passed : 0,
+		bypassed,
+		bypassedCount: bypassed,
 		total: typeof raw?.total === "number" ? raw.total : (Array.isArray(data?.gates) ? data.gates.length : 0),
 		verifying: typeof raw?.verifying === "boolean" ? raw.verifying : runningGateIds.length > 0,
 		verifyingCount: typeof raw?.verifyingCount === "number" ? raw.verifyingCount : runningGateIds.length,
@@ -1020,6 +1031,7 @@ function applyGateStatusSummary(goalId: string, summary: GateStatusSummary): boo
 	const prev = state.gateStatusCache.get(goalId);
 	const next = {
 		passed: summary.passed,
+		bypassed: summary.bypassed,
 		total: summary.total,
 		verifying: summary.verifying,
 		verifyingCount: summary.verifyingCount,
@@ -1030,6 +1042,7 @@ function applyGateStatusSummary(goalId: string, summary: GateStatusSummary): boo
 	};
 	if (!prev
 		|| prev.passed !== next.passed
+		|| prev.bypassed !== next.bypassed
 		|| prev.total !== next.total
 		|| prev.verifying !== next.verifying
 		|| prev.verifyingCount !== next.verifyingCount
@@ -1481,10 +1494,11 @@ export async function getTeamState(goalId: string): Promise<any | null> {
 	}
 }
 
-export async function completeTeam(goalId: string): Promise<boolean> {
+export async function completeTeam(goalId: string, opts?: { confirmBypassedGates?: boolean }): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/complete`, {
 			method: "POST",
+			body: JSON.stringify({ confirmBypassedGates: opts?.confirmBypassedGates === true }),
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		await refreshSessions();
