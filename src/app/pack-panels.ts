@@ -1,31 +1,34 @@
 // src/app/pack-panels.ts
 //
-// CLIENT registry of pack-contributed SIDE-PANEL modules (Slice B4 —
-// `panels:` + `host.ui.openPanel`; design docs/design/extension-host-phase2.md §6).
+// CLIENT registry of pack-contributed SIDE-PANEL modules (pack schema V1 §8.1;
+// design docs/design/pack-schema-v1-rationalisation.md). Panels are now
+// PACK-scoped, not anchored to a carrier tool: panel ids are unique only WITHIN
+// a pack, so the registry is keyed by the COMPOUND `{packId, panelId}` and the
+// lazy loader fetches the pack-addressed endpoint
+// GET /api/ext/packs/:packId/panels/:panelId.
 //
 // This MIRRORS `pack-renderers.ts` + the `renderer-registry.ts`
-// generation-guarded chokepoint, but panels are a DISTINCT registry keyed by
-// `panelId` (not tool name). It does NOT fork `renderer-registry.ts`; it copies
+// generation-guarded chokepoint, but panels are a DISTINCT registry. It copies
 // the `applyRegistration` contract (capture generation before any await, drop
 // superseded applies, reconcile-on-uninstall) into its OWN map so the registry
 // always ends matching the LAST REQUESTED project, never whichever async fetch
 // happened to resolve last.
 //
-// On cold load (and after a marketplace install/uninstall re-fetches /api/tools)
-// the UI calls `reconcilePackPanelsForProject(projectId)`. For every tool that
-// declares `panels[]` it registers each panel keyed by `panelId` (with the
-// declaring `tool`, so the lazy loader can address the bearer-only serving
-// endpoint GET /api/tools/:tool/panel/:panelId). `openPackPanel(target)` lazily
-// imports the panel module through a Blob URL (authed via gatewayFetch — the bare
-// module URL would not carry the bearer), invokes its default factory handing it
-// the host's own lit toolkit (so the pack shares the app's single lit instance
-// and standard header shape), caches the resulting panel, and mounts/focuses a
-// side-panel tab whose content the render layer pulls by `panelId`.
+// On cold load (and after a marketplace install/uninstall re-fetches
+// /api/ext/contributions) the UI calls `reconcilePackPanelsForProject(projectId)`.
+// For every pack contribution row it registers each panel keyed by
+// `{packId, panelId}`. `openPackPanel(target, callerPackId)` stays PACK-RELATIVE:
+// the caller surface's bound packId resolves `panelId` → `{packId, panelId}`,
+// lazily imports the panel module through a Blob URL (authed via gatewayFetch —
+// the bare module URL would not carry the bearer), invokes its default factory
+// handing it the host's own lit toolkit, caches the resulting panel, and
+// mounts/focuses a side-panel tab whose content the render layer pulls by
+// `{packId, panelId}`.
 
 import { html, nothing, type TemplateResult } from "lit";
 import { renderHeader } from "../ui/tools/renderer-registry.js";
 import { gatewayFetch } from "./gateway-fetch.js";
-import { fetchTools, type ToolInfo } from "./api.js";
+import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { state, renderApp } from "./state.js";
 import {
 	packPanelTabId,
@@ -41,6 +44,13 @@ import type { HostApi, PanelTarget } from "../shared/extension-host/host-api.js"
  *  `pack-renderers.ts` hands a renderer factory). */
 const HOST_TOOLKIT = { html, nothing, renderHeader };
 
+/** Compound registry key — panel ids are only pack-unique, so a registration is
+ *  addressed by `{packId, panelId}`. The NUL separator can never appear in either
+ *  segment. */
+function panelKey(packId: string, panelId: string): string {
+	return `${packId}\u0000${panelId}`;
+}
+
 /** A pack panel instance returned by the module factory. `render(params)` is a
  *  PURE projection of the typed `PanelTarget.params` (e.g. `{ artifactId }`) onto
  *  a lit value — it MUST NOT auto-invoke actions / navigate on mount (design §6,
@@ -49,24 +59,24 @@ const HOST_TOOLKIT = { html, nothing, renderHeader };
 export interface PackPanel {
 	/** PURE projection of the typed `PanelTarget.params` onto a lit value. The second
 	 *  arg is the per-session Host API (scoped capabilities — callRoute / store / session)
-	 *  bound `getHostApi(sessionId, undefined, packTool)` per the panel host-context
-	 *  binding (design §2a.2). It is `undefined` in a non-DOM/unit context or when no
-	 *  session is active; a panel MUST tolerate that and MUST NOT auto-invoke on mount. */
+	 *  bound to the active session + the panel's pack-bound surface. It is `undefined`
+	 *  in a non-DOM/unit context or when no session is active; a panel MUST tolerate
+	 *  that and MUST NOT auto-invoke on mount. */
 	render(params?: Record<string, unknown>, host?: HostApi): TemplateResult | unknown;
 }
 
 /** A host-API factory the app wires once (host-api.ts self-registers it), so a
  *  pack panel's `render(params, host)` can reach the scoped Phase-2 capabilities
- *  (`store`/`callRoute`/`session`) bound to the ACTIVE session + the panel's own
- *  pack tool — design §2a.2 ("the panel host API is built
- *  `getHostApi(sessionId, undefined, packTool)`"). Kept as an injected factory
- *  rather than a direct `getHostApi` import so `pack-panels.ts` stays free of a
- *  `host-api.ts` import cycle (host-api already imports `openPackPanel`). When the
- *  factory is unset (e.g. unit fixtures that never load host-api) panels render
- *  with `host === undefined` exactly as before. */
-let panelHostFactory: ((sessionId: string | undefined, packTool: string | undefined) => HostApi) | undefined;
+ *  (`store`/`callRoute`/`session`) bound to the ACTIVE session + the panel's
+ *  PACK-BOUND surface (pack schema V1 §8.4 — the panel mints via
+ *  `{kind:"pack", packId, contributionKind:"panel", contributionId:panelId}`).
+ *  Kept as an injected factory rather than a direct `getHostApi` import so
+ *  `pack-panels.ts` stays free of a `host-api.ts` import cycle (host-api already
+ *  imports `openPackPanel`). When the factory is unset (e.g. unit fixtures that
+ *  never load host-api) panels render with `host === undefined` exactly as before. */
+let panelHostFactory: ((sessionId: string | undefined, packId: string, panelId: string) => HostApi) | undefined;
 export function setPanelHostFactory(
-	fn: (sessionId: string | undefined, packTool: string | undefined) => HostApi,
+	fn: (sessionId: string | undefined, packId: string, panelId: string) => HostApi,
 ): void {
 	panelHostFactory = fn;
 }
@@ -86,74 +96,92 @@ export type PackPanelFactory = (toolkit: typeof HOST_TOOLKIT) => PackPanel | { d
  *  client-side (the server resolves it from the winning contribution); it is
  *  retained for symmetry with the design's PackPanelInfo. */
 export interface PackPanelInfo {
+	packId: string;
 	panelId: string;
-	tool: string;
 	entry?: string;
 	title?: string;
 }
 
-/** A registered panel: the declaring `tool` (used to build the serving URL) plus
- *  the `projectId` the registration was driven for (so the lazy loader fetches
- *  the SAME winning provider the metadata fetch saw — no split-brain, design §4b). */
+/** A registered panel: the owning `packId` (used to build the pack-addressed
+ *  serving URL + mint the pack-bound surface token) plus the `projectId` the
+ *  registration was driven for (so the lazy loader fetches the SAME winning
+ *  provider the metadata fetch saw — no split-brain, design §4b). */
 interface RegisteredPanel {
-	tool: string;
+	packId: string;
+	panelId: string;
 	title?: string;
 	projectId?: string;
 }
 
-/** panelId → registration. Reconciled from /api/tools metadata; an uninstall (or
- *  precedence change) that drops a panelId removes it here so a later
- *  `openPackPanel` for it no-ops. */
+/** `{packId, panelId}` key → registration. Reconciled from /api/ext/contributions
+ *  metadata; an uninstall (or precedence change) that drops a key removes it here
+ *  so a later `openPackPanel` for it no-ops. */
 const panels = new Map<string, RegisteredPanel>();
 
-/** panelId → loaded panel instance (cached after first successful load). */
+/** key → loaded panel instance (cached after first successful load). */
 const loadedPanels = new Map<string, PackPanel>();
 
-/** panelId → in-flight load promise (so concurrent opens share one fetch). */
+/** key → in-flight load promise (so concurrent opens share one fetch). */
 const inFlight = new Map<string, Promise<PackPanel | undefined>>();
 
 /** Per-panel load-generation token. Bumped by {@link invalidatePanel} whenever a
- *  registration supersedes prior intent for the panelId (uninstall, or a
- *  project/tool change that must re-fetch under the new scope). A load captures
- *  the generation BEFORE awaiting and only writes `loadedPanels` if it is still
- *  current on resolve — so a superseded in-flight load cannot resurrect a stale
+ *  registration supersedes prior intent for the key (uninstall, or a project
+ *  change that must re-fetch under the new scope). A load captures the generation
+ *  BEFORE awaiting and only writes `loadedPanels` if it is still current on
+ *  resolve — so a superseded in-flight load cannot resurrect a stale
  *  (wrong-project) module. Mirrors renderer-registry.ts `loadGeneration`. */
 const loadGeneration = new Map<string, number>();
 
-/** Invalidate any cached/in-flight load for `panelId`: bump its generation (so a
+/** Invalidate any cached/in-flight load for `key`: bump its generation (so a
  *  superseded load becomes a no-op on resolve) and drop the cached instance +
  *  shared in-flight promise so the next open re-fetches under the new scope. */
-function invalidatePanel(panelId: string): void {
-	loadGeneration.set(panelId, (loadGeneration.get(panelId) ?? 0) + 1);
-	loadedPanels.delete(panelId);
-	inFlight.delete(panelId);
+function invalidatePanel(key: string): void {
+	loadGeneration.set(key, (loadGeneration.get(key) ?? 0) + 1);
+	loadedPanels.delete(key);
+	inFlight.delete(key);
 }
 
 /**
- * Idempotent + reconciling registration, re-driven from /api/tools metadata —
- * byte-for-byte the {@link reconcilePackPanelsForProject} → registerPackPanels
- * shape of `pack-renderers.ts`. Replaces the registry with `next` and:
- *  - INVALIDATES any panel whose tool/project changed (so the next open
- *    re-fetches the new project's module) or that disappeared (uninstall);
+ * Idempotent + reconciling registration, re-driven from /api/ext/contributions
+ * metadata — byte-for-byte the {@link reconcilePackPanelsForProject} →
+ * registerPackPanels shape of `pack-renderers.ts`. Replaces the registry with
+ * `next` and:
+ *  - INVALIDATES any panel whose project changed (so the next open re-fetches the
+ *    new project's module) or that disappeared (uninstall);
  *  - removes the side-panel TAB of a panel that disappeared, so a running UI
  *    stops showing an uninstalled pack's panel without a reload (design §6).
+ *
+ * `opts.invalidateLoaded` FORCES invalidation of every SURVIVING panel's cached
+ * module + in-flight load even when its `{packId, panelId, projectId}` are
+ * unchanged. A marketplace UPDATE/reinstall re-registers the SAME key but with
+ * fresh bytes behind the same serving URL, so without this the stale module keeps
+ * serving until a full reload. Pass it ONLY from a real pack MUTATION
+ * (install/update/reorder via `reconcileRenderersForActiveSession`) — NEVER from a
+ * benign session-switch reconcile (`reconcilePackPanelsForProject`), which must
+ * keep the cached module to avoid a needless re-import + "Loading…" flash.
  */
-export function registerPackPanels(list: ReadonlyArray<PackPanelInfo>, projectId?: string): void {
+export function registerPackPanels(
+	list: ReadonlyArray<PackPanelInfo>,
+	projectId?: string,
+	opts?: { invalidateLoaded?: boolean },
+): void {
 	const next = new Map<string, RegisteredPanel>();
 	for (const info of list) {
-		if (!info?.panelId || !info.tool) continue;
-		next.set(info.panelId, { tool: info.tool, title: info.title, projectId });
+		if (!info?.packId || !info.panelId) continue;
+		next.set(panelKey(info.packId, info.panelId), { packId: info.packId, panelId: info.panelId, title: info.title, projectId });
 	}
 	// RECONCILE: compare prior registry to the fresh one.
-	for (const [panelId, prev] of panels) {
-		const incoming = next.get(panelId);
+	for (const [key, prev] of panels) {
+		const incoming = next.get(key);
 		if (!incoming) {
 			// Uninstall / precedence change → invalidate + drop its tab.
-			invalidatePanel(panelId);
-			removePackPanelTab(panelId);
-		} else if (incoming.tool !== prev.tool || incoming.projectId !== prev.projectId) {
-			// Same panelId now served by a different tool/project → re-fetch on next open.
-			invalidatePanel(panelId);
+			invalidatePanel(key);
+			removePackPanelTab(prev.packId, prev.panelId);
+		} else if (incoming.projectId !== prev.projectId || opts?.invalidateLoaded) {
+			// Project change OR a forced pack-mutation re-register (update/reinstall):
+			// drop the cached/in-flight module so the next open/render re-imports the
+			// fresh bytes from the (same) serving URL.
+			invalidatePanel(key);
 		}
 	}
 	panels.clear();
@@ -168,65 +196,68 @@ const UNRECONCILED = Symbol("unreconciled");
  *  apply so a failed/superseded attempt does not poison it. */
 let lastReconciledProject: string | undefined | typeof UNRECONCILED = UNRECONCILED;
 /** Monotonic generation token for {@link reconcilePackPanelsForProject}: a newer
- *  reconcile supersedes an older one whose `await fetchTools` is still in flight,
- *  so an out-of-order late response cannot clobber the registry. */
+ *  reconcile supersedes an older one whose `await fetchContributions` is still in
+ *  flight, so an out-of-order late response cannot clobber the registry. */
 let reconcileGeneration = 0;
 
 /**
- * Re-drive pack-panel registration for `projectId`: fetch the tool metadata
- * scoped to that project and (re-)register every declared panel with the CURRENT
- * project id. Mirrors `reconcilePackRenderersForProject` exactly — same dedupe
- * guard, generation guard, and fire-and-forget try/catch (never blocks a session
- * switch; built-in panels are unaffected on failure).
+ * Re-drive pack-panel registration for `projectId`: fetch the pack-contribution
+ * metadata scoped to that project and (re-)register every declared panel with the
+ * CURRENT project id. Mirrors `reconcilePackRenderersForProject` exactly — same
+ * dedupe guard, generation guard, and fire-and-forget try/catch (never blocks a
+ * session switch; built-in panels are unaffected on failure).
  */
 export async function reconcilePackPanelsForProject(projectId: string | undefined): Promise<void> {
 	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === projectId) return;
 	const gen = ++reconcileGeneration;
 	try {
-		const tools = await fetchTools(projectId);
+		const packs = await fetchContributions(projectId);
 		// A newer reconcile started while our fetch was in flight — it owns the
 		// registry + dedupe now. Drop this stale response.
 		if (gen !== reconcileGeneration) return;
-		registerPackPanels(panelInfosFromTools(tools), projectId);
+		registerPackPanels(panelInfosFromContributions(packs), projectId);
 		lastReconciledProject = projectId;
 	} catch {
 		// Non-fatal — leave lastReconciledProject untouched so a later call retries.
 	}
 }
 
-/** Flatten the `panels[]` contribution of each tool into PackPanelInfo[] (the
- *  declaring tool name is what addresses the serving endpoint). */
-function panelInfosFromTools(tools: ReadonlyArray<ToolInfo>): PackPanelInfo[] {
+/** Flatten the `panels[]` of each pack contribution row into PackPanelInfo[]
+ *  (the owning packId is what addresses the pack-scoped serving endpoint).
+ *  Exported so the marketplace mutation path can force a re-register from freshly
+ *  fetched metadata (bypassing the dedupe guard). */
+export function panelInfosFromContributions(packs: ReadonlyArray<PackContributionsWire>): PackPanelInfo[] {
 	const out: PackPanelInfo[] = [];
-	for (const t of tools) {
-		const declared = (t as ToolInfo & { panels?: Array<{ id?: unknown; title?: unknown }> }).panels;
-		if (!Array.isArray(declared)) continue;
-		for (const p of declared) {
-			const panelId = typeof p?.id === "string" ? p.id : undefined;
+	for (const p of packs) {
+		const packId = typeof p?.packId === "string" ? p.packId : undefined;
+		if (!packId || !Array.isArray(p.panels)) continue;
+		for (const panel of p.panels) {
+			const panelId = typeof panel?.id === "string" ? panel.id : undefined;
 			if (!panelId) continue;
-			out.push({ panelId, tool: t.name, title: typeof p?.title === "string" ? p.title : undefined });
+			out.push({ packId, panelId, title: typeof panel?.title === "string" ? panel.title : undefined });
 		}
 	}
 	return out;
 }
 
 /**
- * Lazy-load a panel module by id: fetch the pre-built ESM bytes from the
- * bearer-only serving endpoint, import them via a Blob URL (`/* @vite-ignore *​/`
- * so Vite does not pre-bundle a runtime URL), invoke the default factory with the
- * host toolkit, and cache the resulting panel. Generation-guarded: a load
- * superseded by a re-register/uninstall while in flight does not write the cache.
+ * Lazy-load a panel module by `{packId, panelId}`: fetch the pre-built ESM bytes
+ * from the pack-addressed bearer-only serving endpoint, import them via a Blob URL
+ * (`/* @vite-ignore *​/` so Vite does not pre-bundle a runtime URL), invoke the
+ * default factory with the host toolkit, and cache the resulting panel.
+ * Generation-guarded: a load superseded by a re-register/uninstall while in flight
+ * does not write the cache.
  */
-function loadPanelModule(panelId: string, reg: RegisteredPanel): Promise<PackPanel | undefined> {
-	const existing = inFlight.get(panelId);
+function loadPanelModule(key: string, reg: RegisteredPanel): Promise<PackPanel | undefined> {
+	const existing = inFlight.get(key);
 	if (existing) return existing;
-	if (loadedPanels.has(panelId)) return Promise.resolve(loadedPanels.get(panelId));
-	const gen = loadGeneration.get(panelId) ?? 0;
+	if (loadedPanels.has(key)) return Promise.resolve(loadedPanels.get(key));
+	const gen = loadGeneration.get(key) ?? 0;
 	const qs = reg.projectId ? `?projectId=${encodeURIComponent(reg.projectId)}` : "";
 	const p: Promise<PackPanel | undefined> = (async () => {
-		const url = `/api/tools/${encodeURIComponent(reg.tool)}/panel/${encodeURIComponent(panelId)}${qs}`;
+		const url = `/api/ext/packs/${encodeURIComponent(reg.packId)}/panels/${encodeURIComponent(reg.panelId)}${qs}`;
 		const resp = await gatewayFetch(url); // authed (admin bearer); static-asset-equivalent
-		if (!resp.ok) throw new Error(`panel ${panelId} HTTP ${resp.status}`);
+		if (!resp.ok) throw new Error(`panel ${reg.packId}/${reg.panelId} HTTP ${resp.status}`);
 		const blob = await resp.blob();
 		const objUrl = URL.createObjectURL(blob.slice(0, blob.size, "text/javascript"));
 		try {
@@ -237,8 +268,8 @@ function loadPanelModule(panelId: string, reg: RegisteredPanel): Promise<PackPan
 			const out = (factory as PackPanelFactory)(HOST_TOOLKIT);
 			const panel = (out && typeof out === "object" && "default" in out ? out.default : out) as PackPanel;
 			// Generation guard: only cache if not superseded while in flight.
-			if ((loadGeneration.get(panelId) ?? 0) === gen) {
-				loadedPanels.set(panelId, panel);
+			if ((loadGeneration.get(key) ?? 0) === gen) {
+				loadedPanels.set(key, panel);
 				// Repaint so a mounted pack-panel tab swaps the placeholder for content.
 				try { renderApp(); } catch { /* non-DOM (unit fixtures) */ }
 			}
@@ -249,53 +280,75 @@ function loadPanelModule(panelId: string, reg: RegisteredPanel): Promise<PackPan
 	})()
 		.catch((err) => {
 			// eslint-disable-next-line no-console
-			console.error(`[pack-panels] failed to load panel "${panelId}":`, err);
+			console.error(`[pack-panels] failed to load panel "${reg.packId}/${reg.panelId}":`, err);
 			return undefined;
 		})
 		.finally(() => {
 			// Drop only OUR own in-flight entry (identity-checked — a fresh load
 			// started under a bumped generation may have installed a newer promise).
-			if (inFlight.get(panelId) === p) inFlight.delete(panelId);
+			if (inFlight.get(key) === p) inFlight.delete(key);
 		});
-	inFlight.set(panelId, p);
+	inFlight.set(key, p);
 	return p;
 }
 
 /**
- * Load + mount a pack panel by id (design §6.3): resolve the registered panel,
- * kick off (or reuse) its lazy module load, and add/focus a side-panel tab
- * carrying the typed `PanelTarget.params`. No-op (with a warn) if no panel is
- * registered for `target.panelId` (e.g. the owning pack was uninstalled).
+ * Resolve a `{callerPackId?, panelId}` open request to a registered panel.
+ *  - PACK-BOUND callers (panel / entrypoint / launcher surfaces) pass their
+ *    authoritative `callerPackId`: an exact `{packId, panelId}` lookup, no
+ *    fallback (pack-relative — never reach into another pack's panel).
+ *  - TOOL renderer callers now ALSO pass their owning structural `packId`
+ *    (threaded from `/api/tools` via `packIdForTool` into the renderer's host
+ *    surface), so an exact `{packId, panelId}` lookup opens the renderer's OWN
+ *    pack's panel even when another installed pack shares the pack-local panel id.
+ *  - The bare-`panelId` (no `callerPackId`) branch is a NARROW defensive fallback
+ *    for a caller with a genuinely-unknown packId (e.g. a built-in renderer or a
+ *    unit fixture): it resolves ONLY when the panel id is globally unique, and is
+ *    a no-op when ambiguous (so a shared panel id never silently cross-resolves).
  */
-export function openPackPanel(target: PanelTarget): void {
-	const panelId = target?.panelId;
-	if (!panelId) return;
-	const reg = panels.get(panelId);
-	if (!reg) {
-		// eslint-disable-next-line no-console
-		console.warn(`[pack-panels] openPanel: no registered panel "${panelId}"`);
-		return;
-	}
-	void loadPanelModule(panelId, reg);
-	mountPackPanelTab(panelId, reg, target.params);
+function resolveOpenPanel(callerPackId: string | undefined, panelId: string): RegisteredPanel | undefined {
+	if (callerPackId) return panels.get(panelKey(callerPackId, panelId));
+	const matches = [...panels.values()].filter((r) => r.panelId === panelId);
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
-/** Add or focus the side-panel tab for `panelId`, carrying `params`. Best-effort:
- *  guarded so a non-DOM/unit context (no app state) never throws. */
-function mountPackPanelTab(panelId: string, reg: RegisteredPanel, params?: Record<string, unknown>): void {
+/**
+ * Load + mount a pack panel by id (design §6.3). PACK-RELATIVE: the caller's bound
+ * `callerPackId` (threaded from the host factory / launcher registration) resolves
+ * `target.panelId` → `{packId, panelId}`. Resolves the registered panel, kicks off
+ * (or reuses) its lazy module load, and adds/focuses a side-panel tab carrying the
+ * typed `PanelTarget.params`. No-op (with a warn) if no panel resolves (e.g. the
+ * owning pack was uninstalled, or an ambiguous panel id with no caller packId).
+ */
+export function openPackPanel(target: PanelTarget, callerPackId?: string): void {
+	const panelId = target?.panelId;
+	if (!panelId) return;
+	const reg = resolveOpenPanel(callerPackId, panelId);
+	if (!reg) {
+		// eslint-disable-next-line no-console
+		console.warn(`[pack-panels] openPanel: no registered panel "${callerPackId ?? "?"}/${panelId}"`);
+		return;
+	}
+	void loadPanelModule(panelKey(reg.packId, reg.panelId), reg);
+	mountPackPanelTab(reg, target.params);
+}
+
+/** Add or focus the side-panel tab for `{packId, panelId}`, carrying `params`.
+ *  Best-effort: guarded so a non-DOM/unit context (no app state) never throws. */
+function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown>): void {
 	try {
 		const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
 		const sid = s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
-		const id = packPanelTabId(panelId);
-		const title = reg.title || panelId;
+		const id = packPanelTabId(reg.packId, reg.panelId);
+		const title = reg.title || reg.panelId;
 		const tab: PanelWorkspaceTab = {
 			id,
 			kind: "pack",
 			title,
 			label: title,
 			legacyTab: "pack",
-			source: { type: "pack", panelId, tool: reg.tool, params, sessionId: sid },
-			state: { panelId, params },
+			source: { type: "pack", packId: reg.packId, panelId: reg.panelId, params, sessionId: sid },
+			state: { packId: reg.packId, panelId: reg.panelId, params },
 		};
 		const tabs = panelTabsForSession(state, sid);
 		const idx = tabs.findIndex((t) => t?.id === id);
@@ -312,9 +365,9 @@ function mountPackPanelTab(panelId: string, reg: RegisteredPanel, params?: Recor
 
 /** Remove the side-panel tab of an uninstalled panel from every session that has
  *  it open (reconcile-on-uninstall). Best-effort + guarded. */
-function removePackPanelTab(panelId: string): void {
+function removePackPanelTab(packId: string, panelId: string): void {
 	try {
-		const id = packPanelTabId(panelId);
+		const id = packPanelTabId(packId, panelId);
 		const bySession = (state as unknown as { panelTabsBySession?: Record<string, PanelWorkspaceTab[]> }).panelTabsBySession;
 		if (!bySession || typeof bySession !== "object") return;
 		for (const [sid, tabs] of Object.entries(bySession)) {
@@ -330,9 +383,10 @@ function removePackPanelTab(panelId: string): void {
 
 /**
  * Render the content of a mounted pack-panel tab (called from the panel render
- * layer). Returns the loaded panel's `render(params)` projection, or a standard
- * loading placeholder until the lazy module resolves. A panel that is no longer
- * registered (uninstalled) renders nothing.
+ * layer with the tab's `{packId, panelId}`). Returns the loaded panel's
+ * `render(params)` projection, or a standard loading placeholder until the lazy
+ * module resolves. A panel that is no longer registered (uninstalled) renders
+ * nothing.
  *
  * RELOAD-SAFETY: a persisted side-panel tab is restored by panel-workspace
  * WITHOUT going through `openPackPanel`, so on a fresh page load `loadedPanels`
@@ -344,31 +398,32 @@ function removePackPanelTab(panelId: string): void {
  * repaints via `renderApp()` on resolve to swap in the real content. This loads
  * only the panel module the user already had open — no auto-invoke beyond that.
  */
-export function renderPackPanelContent(panelId: string, params?: Record<string, unknown>): TemplateResult | unknown {
-	const panel = loadedPanels.get(panelId);
+export function renderPackPanelContent(packId: string, panelId: string, params?: Record<string, unknown>): TemplateResult | unknown {
+	const key = panelKey(packId, panelId);
+	const panel = loadedPanels.get(key);
 	if (panel) {
 		try {
-			// Build a session-bound host for this pack tool (design §2a.2) so the
-			// panel can rehydrate from `host.store.*` etc. `getHostApi` is supplied via
-			// the injected factory (host-api self-registers) to avoid an import cycle;
-			// when unset (unit fixtures) the panel renders with host === undefined.
-			const reg = panels.get(panelId);
-			const host = panelHostFactory && reg
-				? panelHostFactory(currentSessionIdForPanel(), reg.tool)
+			// Build a session-bound host for this pack's panel surface (pack schema V1
+			// §8.4) so the panel can rehydrate from `host.store.*` etc. `getHostApi` is
+			// supplied via the injected factory (host-api self-registers) to avoid an
+			// import cycle; when unset (unit fixtures) the panel renders with
+			// host === undefined.
+			const host = panelHostFactory
+				? panelHostFactory(currentSessionIdForPanel(), packId, panelId)
 				: undefined;
 			return panel.render(params, host);
 		} catch (err) {
 			// eslint-disable-next-line no-console
-			console.error(`[pack-panels] render failed for "${panelId}":`, err);
+			console.error(`[pack-panels] render failed for "${packId}/${panelId}":`, err);
 			return renderHeader("error", null, html`<span class="font-mono">${panelId}</span> — panel failed to render`);
 		}
 	}
-	const reg = panels.get(panelId);
+	const reg = panels.get(key);
 	if (!reg) return nothing;
 	// Restored (or otherwise not-yet-loaded) registered panel: kick off its lazy
 	// module load. `loadPanelModule` is generation-guarded and `inFlight`-deduped,
 	// so repeated render-time calls share one fetch and repaint on resolve.
-	void loadPanelModule(panelId, reg);
+	void loadPanelModule(key, reg);
 	return html`
 		<div class="p-4 text-sm text-muted-foreground" data-pack-panel-loading=${panelId}>
 			Loading ${panelId}…

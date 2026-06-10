@@ -1,0 +1,5 @@
+id: dupa.deeplink
+kind: route
+routeId: shared-deeplink
+target:
+  panelId: dupa.viewer

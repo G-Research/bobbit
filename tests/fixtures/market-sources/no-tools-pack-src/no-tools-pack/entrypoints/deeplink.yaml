@@ -1,0 +1,6 @@
+id: notools.deeplink
+kind: route
+routeId: notools
+target:
+  panelId: notools.viewer
+paramKeys: [jobId]

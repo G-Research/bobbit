@@ -1,0 +1,9 @@
+id: pr-walkthrough.palette
+kind: command-palette
+label: Open PR Walkthrough
+# A command-palette LAUNCHER (the command palette). Its selection IS the user
+# gesture; it navigates to the deep-link route.
+target:
+  route: pr-walkthrough
+  params:
+    jobId: job-litmus-1

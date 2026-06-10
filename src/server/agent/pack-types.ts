@@ -34,7 +34,15 @@ export type SkillSource = "project" | "personal" | "legacy" | "built-in" | "cust
 
 // ── Manifests ────────────────────────────────────────────────────
 
-/** Parsed `pack.yaml`. `contents` is REQUIRED with all three array keys. */
+/** A pack-level routes reference (pack.yaml `routes`). The pack contributes
+ *  server routes from `module` (relative to pack.yaml, contained in the pack
+ *  root), gated by the `names` allowlist. See pack-schema-v1-rationalisation §1.2. */
+export interface PackRoutesRef {
+	module?: string;
+	names?: string[];
+}
+
+/** Parsed `pack.yaml`. `contents` is REQUIRED with all entity-list keys. */
 export interface PackManifest {
 	name: string;
 	description: string;
@@ -42,16 +50,25 @@ export interface PackManifest {
 	author?: string;
 	homepage?: string;
 	/**
-	 * Authoritative advertised contents. All three keys REQUIRED but each MAY
-	 * be empty. NO `mcp` key in a publishable manifest (MVP boundary — packs
-	 * may not ship/install MCP configs). `mcp` exists only as a reserved
-	 * code-level {@link EntityType} for the future loader seam.
+	 * Authoritative advertised contents. All keys REQUIRED but each MAY be
+	 * empty. NO `mcp` key in a publishable manifest (MVP boundary — packs may
+	 * not ship/install MCP configs). `mcp` exists only as a reserved code-level
+	 * {@link EntityType} for the future loader seam.
+	 *
+	 * `entrypoints` lists the basenames (no extension) of `entrypoints/<name>.yaml`
+	 * files — the user-facing activation catalogue the Market UI toggles and the
+	 * pack-contribution registry keys by (default-enabled). Panels are NOT listed
+	 * here: they are auto-discovered support surfaces (pack-schema-v1 §1.2).
 	 */
 	contents: {
 		roles: string[];
 		tools: string[]; // tool group dir names
 		skills: string[];
+		entrypoints: string[]; // entrypoints/<name>.yaml basenames; toggleable
 	};
+	/** Optional top-level pack-level routes (module + allowlist). Support surface,
+	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */
+	routes?: PackRoutesRef;
 }
 
 /** Generated `.pack-meta.yaml` — install provenance. Never authored by hand. */

@@ -121,3 +121,74 @@ describe("resolveSurfaceIdentity — derives identity from the token, never the 
 		if (!r.ok) assert.match(r.error, /pack identity mismatch/);
 	});
 });
+
+// ── Pack-bound surfaces (panel / entrypoint / route) — no carrier tool (§4). ──
+
+/** A minimal PackContributionResolver stub: knows one pack with one panel id. */
+function packContribStub(installed: { packId: string; panelId?: string; entrypointId?: string; routeName?: string } | null) {
+	const pack = installed
+		? { packId: installed.packId, packName: installed.packId, packRoot: `/p/market-packs/${installed.packId}`, panels: installed.panelId ? [{ id: installed.panelId, entry: "x.js", sourceFile: "x", packRoot: "x" }] : [], entrypoints: installed.entrypointId ? [{ id: installed.entrypointId, kind: "route" as const, listName: "ep", sourceFile: "x", packRoot: "x" }] : [] }
+		: undefined;
+	return {
+		list: () => (pack ? [pack] : []),
+		getPack: (_pid: string | undefined, packId: string) => (pack && pack.packId === packId ? pack : undefined),
+		getPanel: (_pid: string | undefined, packId: string, panelId: string) => (pack && pack.packId === packId ? pack.panels.find((p) => p.id === panelId) : undefined),
+		getEntrypoint: (_pid: string | undefined, packId: string, id: string) => (pack && pack.packId === packId ? pack.entrypoints.find((e) => e.id === id) : undefined),
+		hasRoute: (_pid: string | undefined, packId: string, name: string) => !!(pack && pack.packId === packId && installed?.routeName === name),
+	} as never;
+}
+
+describe("resolveSurfaceIdentity — pack-bound (panel/entrypoint/route) tokens (§4.4/§4.5)", () => {
+	const PB = { sessionId: "sess-1", packId: "artifacts", contributionId: "panel:artifacts.viewer" };
+
+	it("a pack-bound token round-trips with NO tool", () => {
+		const token = mintSurfaceToken(PB);
+		assert.deepEqual(validateSurfaceToken(token), PB);
+	});
+
+	it("resolves when the pack is installed + active and the contribution exists", () => {
+		const token = mintSurfaceToken(PB);
+		const r = resolveSurfaceIdentity({
+			token, headerSessionId: "sess-1", resolver: makeResolver({}),
+			contributions: packContribStub({ packId: "artifacts", panelId: "artifacts.viewer" }),
+		});
+		assert.equal(r.ok, true);
+		if (r.ok) {
+			assert.equal(r.packId, "artifacts");
+			assert.equal(r.contributionId, "panel:artifacts.viewer");
+			assert.equal(r.tool, undefined);
+		}
+	});
+
+	it("rejects a pack-bound token for an UNINSTALLED/inactive pack", () => {
+		const token = mintSurfaceToken(PB);
+		const r = resolveSurfaceIdentity({ token, headerSessionId: "sess-1", resolver: makeResolver({}), contributions: packContribStub(null) });
+		assert.equal(r.ok, false);
+		if (!r.ok) assert.match(r.error, /not installed or active/);
+	});
+
+	it("rejects a pack-bound token whose contribution no longer exists", () => {
+		const token = mintSurfaceToken(PB);
+		// Pack installed but the panel id is gone.
+		const r = resolveSurfaceIdentity({ token, headerSessionId: "sess-1", resolver: makeResolver({}), contributions: packContribStub({ packId: "artifacts" }) });
+		assert.equal(r.ok, false);
+		if (!r.ok) assert.match(r.error, /no longer available/);
+	});
+
+	it("rejects a pack-bound token presented on a DIFFERENT session (cross-session)", () => {
+		const token = mintSurfaceToken(PB); // bound to sess-1
+		const r = resolveSurfaceIdentity({ token, headerSessionId: "sess-OTHER", resolver: makeResolver({}), contributions: packContribStub({ packId: "artifacts", panelId: "artifacts.viewer" }) });
+		assert.equal(r.ok, false);
+		if (!r.ok) assert.match(r.error, /session mismatch/);
+	});
+
+	it("resolves an entrypoint-bound and a route-bound token", () => {
+		const epToken = mintSurfaceToken({ sessionId: "sess-1", packId: "artifacts", contributionId: "entrypoint:artifacts.deeplink" });
+		const epR = resolveSurfaceIdentity({ token: epToken, headerSessionId: "sess-1", resolver: makeResolver({}), contributions: packContribStub({ packId: "artifacts", entrypointId: "artifacts.deeplink" }) });
+		assert.equal(epR.ok, true);
+
+		const rtToken = mintSurfaceToken({ sessionId: "sess-1", packId: "artifacts", contributionId: "route:bundle" });
+		const rtR = resolveSurfaceIdentity({ token: rtToken, headerSessionId: "sess-1", resolver: makeResolver({}), contributions: packContribStub({ packId: "artifacts", routeName: "bundle" }) });
+		assert.equal(rtR.ok, true);
+	});
+});

@@ -1,12 +1,33 @@
 name: pr-walkthrough
 description: >-
   Extension Host Phase-2 MAXIMAL litmus pack — the PR-walkthrough feature
-  re-expressed as an installable market pack using ALL reserved contribution
-  keys: panels + routes + stores + entrypoints (launcher + kind:"route"
-  deep-link) + host.session.readToolCall. Proves a third-party pack can build
-  this whole surface from public contributions + the Host API alone.
+  re-expressed as an installable market pack with NO tools. It uses only
+  pack-scoped contributions: an auto-discovered panel
+  (panels/pr-walkthrough-panel.yaml) + pack-level routes (routes:) + four
+  entrypoints (three launchers + one kind:"route" deep-link, in entrypoints/)
+  + an implicit pack-scoped store + host.session.readToolCall. Proves an
+  ORPHAN / UI-only pack can build this whole surface from public contributions
+  + the Host API alone, through pack-bound surface auth, with no tool in
+  allowedTools.
 version: 1.0.0
 contents:
   roles: []
-  tools: [pr-walkthrough]
+  tools: []
   skills: []
+  entrypoints:
+    - pr-walkthrough-open
+    - pr-walkthrough-git-widget
+    - pr-walkthrough-palette
+    - pr-walkthrough-route
+# ── routes: (pack-level) — re-expresses handlePrWalkthroughApiRoute under the
+#    pack's namespace. Reached via host.callRoute("bundle"|"publish"). The server
+#    resolves the trusted packId from the caller's surface token and resolves the
+#    route MODULE via the pack-level RouteRegistry (opener-independent).
+#    `module` resolves relative to THIS pack.yaml and stays inside the pack root.
+#    LIVE RECOMPUTE (design §D2.3): node:child_process + node:fs are ambient in
+#    the confined worker (trusted tool/MCP tier), so `bundle` runs REAL `git diff`
+#    LIVE against the SERVER-derived session worktree. `publish` persists
+#    LLM-enhanced cards to the implicit pack-scoped store.
+routes:
+  module: lib/routes.mjs
+  names: [bundle, publish]

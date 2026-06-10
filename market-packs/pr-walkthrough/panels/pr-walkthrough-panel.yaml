@@ -1,0 +1,9 @@
+id: pr-walkthrough.panel
+title: PR Walkthrough
+# `entry` resolves relative to THIS yaml (panels/) and stays inside the pack
+# root. The built panel bundle lives in the shared lib/ dir. The viewer is the
+# bearer-only-served ESM lazy-imported by the client pack-panels registry and
+# opened via host.ui.openPanel({ panelId, params:{ jobId } }). It loads its
+# changeset/diff bundle ONLY via host.callRoute (never a raw fetch) and reads
+# the submit tool call via host.session.readToolCall.
+entry: ../lib/panel.js

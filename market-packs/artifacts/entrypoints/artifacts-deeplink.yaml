@@ -1,0 +1,6 @@
+id: artifacts.deeplink
+kind: route
+routeId: artifacts
+target:
+  panelId: artifacts.viewer
+paramKeys: [artifactId]

@@ -1,0 +1,14 @@
+name: dup-route-name
+description: >-
+  V1-schema HARD-CONFLICT litmus #1 — duplicate route name WITHIN a pack. The
+  pack-level routes.names allowlist lists the same name twice; the registry must
+  reject this (dedupe-or-reject; reject is simplest and matches today's intent).
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+routes:
+  module: lib/routes.mjs
+  names: [bundle, bundle]

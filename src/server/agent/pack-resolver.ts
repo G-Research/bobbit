@@ -28,10 +28,16 @@ import { scanSkillDir, scanCommandsDir, type SlashSkill } from "../skills/slash-
 
 // ── Pipeline ─────────────────────────────────────────────────────
 
+/** Activation filter (pack-schema-v1 §7): return false to DROP a loaded entity
+ *  BEFORE precedence merge, so a lower-priority shadow can reappear as the winner.
+ *  Applied per (entry, type, name). Absent ⇒ keep everything. */
+export type ActivationFilter = (entry: PackEntry, type: EntityType, name: string) => boolean;
+
 export class PackResolver {
 	constructor(
 		private readonly entries: PackEntry[],
 		private readonly loaders: EntityLoader<unknown>[],
+		private readonly activationFilter?: ActivationFilter,
 	) {}
 
 	/** Resolve all entities of `type`. `entries` are ordered low→high priority. */
@@ -43,6 +49,9 @@ export class PackResolver {
 			for (const loader of this.loaders) {
 				if (loader.type !== type || !loader.supports(entry)) continue;
 				for (const { name, item } of loader.load(entry)) {
+					// Activation filtering BEFORE merge — a disabled entity is dropped here
+					// so a lower-priority same-name entity can win (§7).
+					if (this.activationFilter && !this.activationFilter(entry, type, name)) continue;
 					const prev = byName.get(name);
 					byName.set(name, {
 						name,

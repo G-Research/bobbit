@@ -1626,7 +1626,8 @@ export class SessionManager {
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
 		// the activator) or when explicitly already populated.
 		if (!parts.skillsCatalog) {
-			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore);
+			const catalogProjectId = this.sessions.get(sessionId)?.projectId;
+			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId);
 		}
 		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
 		// into both the assembled prompt and the persisted prompt-sections snapshot.
@@ -1653,6 +1654,7 @@ export class SessionManager {
 		allowedTools: string[] | undefined,
 		discoveryRoot: string,
 		projectConfigStore?: { get(key: string): string | undefined },
+		projectId?: string,
 	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
 		// allowedTools=undefined or empty => no restrictions; include catalog.
 		// allowedTools restricted => require activate_skill in the list.
@@ -1670,6 +1672,17 @@ export class SessionManager {
 				projectBase: discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
 				projectConfigStore: projectConfigStore as SkillMarketContext["projectConfigStore"],
+				// pack-schema-v1 §7: filter disabled market-pack skills out of the runtime
+				// activation catalog too, using the SAME pack_activation store (server/
+				// global-user → server config store; project → the project's config store).
+				packActivation: (scope, packName) => {
+					const store = scope === "project"
+						? (projectId && this.projectContextManager
+							? this.projectContextManager.getOrCreate(projectId)?.projectConfigStore
+							: undefined)
+						: this.projectConfigStore;
+					return store?.getPackActivation(scope, packName) ?? {};
+				},
 			};
 			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext);
 			// Filter: omit disable-model-invocation and skills with empty descriptions.

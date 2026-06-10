@@ -2,33 +2,37 @@
 //
 // CLIENT registry of pack-contributed ENTRYPOINTS — launcher surfaces
 // (composer slash-command / git-widget button / command-palette launcher) AND
-// deep-linkable client ROUTES (Slice C1 — `entrypoints:` + `host.ui.navigate`;
-// design docs/design/extension-host-phase2.md §7 / §7 C1.1a).
+// deep-linkable client ROUTES (pack schema V1 §8.2; design
+// docs/design/pack-schema-v1-rationalisation.md). Entrypoints are now
+// PACK-scoped — each registered launcher/route carries the owning `packId`
+// (used to mint the pack-bound surface token + address panel bytes), not a
+// carrier tool.
 //
 // This MIRRORS `pack-renderers.ts` / `pack-panels.ts` + the
 // `renderer-registry.ts` generation-guarded chokepoint — it does NOT fork it.
 // It copies the `applyRegistration` contract (capture generation before any
 // await, drop superseded applies, reconcile-on-uninstall, project-scoped,
-// reload-safe) into TWO of its own maps: a launcher map (keyed by entrypoint id)
+// reload-safe) into TWO of its own maps: a launcher map (keyed by the COMPOUND
+// `{packId, entrypointId}` launcher key — entrypoint ids are only PACK-unique, so
+// two packs may validly share a launcher id and BOTH must stay addressable)
 // and a deep-link route map (keyed by `routeId`). The route map is the
 // reload-safe surface `getRouteFromHash` (routing.ts) restores `#/ext/<routeId>`
 // against; `navigateToTarget` serializes a structured `RouteTarget` onto it so
 // packs NEVER build URLs (v1 §3 structured addressing).
 //
-// On cold load (and after a marketplace install/uninstall re-fetches /api/tools)
-// the UI calls `reconcilePackEntrypointsForProject(projectId)`. For every tool
-// that declares `entrypoints[]` it (re-)registers each launcher + route; an
+// On cold load (and after a marketplace install/uninstall re-fetches
+// /api/ext/contributions) the UI calls `reconcilePackEntrypointsForProject(projectId)`.
+// For every pack contribution row it (re-)registers each launcher + route; an
 // uninstall (or precedence change) that drops an entrypoint removes it here so a
 // later launch / deep-link no-ops (reconcile-on-uninstall — a deep-link to an
 // uninstalled pack's route no longer resolves, mirroring panel/renderer
 // uninstall reconcile).
 //
-// Duplicate `routeId` across packs/tools is REJECTED at registry-build time
+// Duplicate `routeId` across packs is REJECTED at registry-build time
 // (the rare real-conflict failure — at most ONE pack owns a `routeId`, so
-// `lookupPackRoute` is unambiguous). Per-tool parsing stays tolerant
-// (tool-contributions.ts) because it cannot see other tools/packs.
+// `lookupPackRoute` is unambiguous).
 
-import { fetchTools, type ToolInfo } from "./api.js";
+import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { setExtRoute } from "./routing.js";
 import { openPackPanel } from "./pack-panels.js";
 import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api.js";
@@ -44,7 +48,7 @@ export type LauncherKind = "composer-slash" | "git-widget-button" | "command-pal
  *  invocation is the user gesture (design §7 C1.3, v1 §5 v). */
 export interface LauncherEntrypoint {
 	id: string;
-	tool: string;
+	packId: string;
 	kind: LauncherKind;
 	label: string;
 	target: PanelTarget | RouteTarget;
@@ -55,7 +59,7 @@ export interface LauncherEntrypoint {
  *  `navigateToTarget` + reload restoration (design §7 C1.1a). */
 export interface RouteEntrypoint {
 	id: string;
-	tool: string;
+	packId: string;
 	kind: "route";
 	routeId: string;
 	target: PanelTarget;
@@ -64,27 +68,46 @@ export interface RouteEntrypoint {
 
 export type EntrypointInfo = LauncherEntrypoint | RouteEntrypoint;
 
-/** A resolved deep-link route entry (the value `lookupPackRoute` returns). */
+/** A resolved deep-link route entry (the value `lookupPackRoute` returns). The
+ *  target panel is resolved within the SAME pack, so `packId` threads into
+ *  `openPackPanel` on restore. */
 export interface PackRouteEntry {
 	routeId: string;
 	targetPanelId: string;
 	paramKeys: string[];
-	tool: string;
+	packId: string;
 	projectId?: string;
 }
 
-/** A registered launcher (the declaring tool + project, so reconcile can drop a
- *  pack's launchers precisely). */
+/** A registered launcher (the owning pack + project, so reconcile can drop a
+ *  pack's launchers precisely). `key` is the COMPOUND `{packId, id}` launcher key
+ *  the registry is addressed by — entrypoint ids are only PACK-unique, so two
+ *  packs may validly declare the same launcher id and BOTH must be addressable.
+ *  Surfaces dispatch with `key` (never the bare `id`). */
 interface RegisteredLauncher {
+	key: string;
 	id: string;
-	tool: string;
+	packId: string;
 	kind: LauncherKind;
 	label: string;
 	target: PanelTarget | RouteTarget;
 	projectId?: string;
 }
 
-/** entrypoint id → launcher. Reconciled from /api/tools metadata. */
+/** Compound launcher key — entrypoint ids are only pack-unique, so a launcher is
+ *  addressed by `{packId, id}`. The NUL separator can never appear in either
+ *  segment (mirrors `pack-panels.ts::panelKey`). Surfaces thread THIS key (not the
+ *  bare id) into dispatch + `data-entrypoint-id`, so same-id launchers from two
+ *  packs do not collide. NUL is DOM-attribute-safe but mangled inside a CSS
+ *  selector — match it in JS (`dataset.entrypointId === key`), never via
+ *  `[data-entrypoint-id='…']`. */
+export function launcherKey(packId: string, id: string): string {
+	return `${packId}\u0000${id}`;
+}
+
+/** compound `{packId, id}` key → launcher. Reconciled from /api/ext/contributions
+ *  metadata. Keyed by the compound key (NOT the bare id) so same-id launchers
+ *  from different packs coexist. */
 const launchers = new Map<string, RegisteredLauncher>();
 /** routeId → deep-link route entry (at most ONE pack owns a routeId). */
 const routes = new Map<string, PackRouteEntry>();
@@ -99,51 +122,53 @@ function isPanelTarget(t: PanelTarget | RouteTarget | undefined): t is PanelTarg
 }
 
 /**
- * Idempotent + reconciling registration, re-driven from /api/tools metadata —
- * byte-for-byte the {@link reconcilePackEntrypointsForProject} → registerPackEntrypoints
- * shape of `pack-renderers.ts` / `pack-panels.ts`. Replaces both registries with the
- * fresh set; an entrypoint that disappeared (uninstall / precedence change) is dropped
- * so a later launch / deep-link no-ops.
+ * Idempotent + reconciling registration, re-driven from /api/ext/contributions
+ * metadata — byte-for-byte the {@link reconcilePackEntrypointsForProject} →
+ * registerPackEntrypoints shape of `pack-renderers.ts` / `pack-panels.ts`.
+ * Replaces both registries with the fresh set; an entrypoint that disappeared
+ * (uninstall / precedence change) is dropped so a later launch / deep-link no-ops.
  *
- * Duplicate `routeId` (two packs/tools claiming the same id) is REJECTED here — the
- * conflicting routeId is registered by NEITHER (so `lookupPackRoute` stays unambiguous)
- * and a clear error names the conflict.
+ * Duplicate `routeId` (two packs claiming the same id) is REJECTED here — the
+ * conflicting routeId is registered by NEITHER (so `lookupPackRoute` stays
+ * unambiguous) and a clear error names the conflict.
  */
 export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, projectId?: string): void {
 	const nextLaunchers = new Map<string, RegisteredLauncher>();
 	const nextRoutes = new Map<string, PackRouteEntry>();
-	// Track routeIds seen so a duplicate (even across packs/tools) is rejected.
-	const routeOwners = new Map<string, string>(); // routeId → "tool" first claimant
+	// Track routeIds seen so a duplicate (even across packs) is rejected.
+	const routeOwners = new Map<string, string>(); // routeId → "packId" first claimant
 	const conflictedRouteIds = new Set<string>();
 
 	for (const ep of eps) {
-		if (!ep || typeof ep.id !== "string" || !ep.id || typeof ep.tool !== "string" || !ep.tool) continue;
+		if (!ep || typeof ep.id !== "string" || !ep.id || typeof ep.packId !== "string" || !ep.packId) continue;
 		if (isRouteEntrypoint(ep)) {
 			const routeId = ep.routeId;
 			const panelId = ep.target?.panelId;
 			if (typeof routeId !== "string" || !routeId || typeof panelId !== "string" || !panelId) continue;
 			const prevOwner = routeOwners.get(routeId);
-			if (prevOwner !== undefined && prevOwner !== ep.tool) {
-				// Duplicate routeId across DIFFERENT tools/packs — hard conflict.
+			if (prevOwner !== undefined && prevOwner !== ep.packId) {
+				// Duplicate routeId across DIFFERENT packs — hard conflict.
 				// eslint-disable-next-line no-console
 				console.error(
-					`[pack-entrypoints] duplicate routeId "${routeId}" declared by both "${prevOwner}" and "${ep.tool}" — registering NEITHER`,
+					`[pack-entrypoints] duplicate routeId "${routeId}" declared by both "${prevOwner}" and "${ep.packId}" — registering NEITHER`,
 				);
 				conflictedRouteIds.add(routeId);
 				nextRoutes.delete(routeId);
 				continue;
 			}
-			routeOwners.set(routeId, ep.tool);
+			routeOwners.set(routeId, ep.packId);
 			if (conflictedRouteIds.has(routeId)) continue;
 			const paramKeys = Array.isArray(ep.paramKeys) ? ep.paramKeys.filter((k): k is string => typeof k === "string") : [];
-			nextRoutes.set(routeId, { routeId, targetPanelId: panelId, paramKeys, tool: ep.tool, projectId });
+			nextRoutes.set(routeId, { routeId, targetPanelId: panelId, paramKeys, packId: ep.packId, projectId });
 		} else {
 			if (ep.kind !== "composer-slash" && ep.kind !== "git-widget-button" && ep.kind !== "command-palette") continue;
 			if (typeof ep.label !== "string" || !ep.label) continue;
 			if (!isPanelTarget(ep.target) && !(ep.target && typeof (ep.target as RouteTarget).route === "string")) continue;
-			nextLaunchers.set(ep.id, {
+			const key = launcherKey(ep.packId, ep.id);
+			nextLaunchers.set(key, {
+				key,
 				id: ep.id,
-				tool: ep.tool,
+				packId: ep.packId,
 				kind: ep.kind,
 				label: ep.label,
 				target: ep.target,
@@ -180,18 +205,34 @@ export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher
 /**
  * Run a launcher entrypoint's target (design §7 C1.3). This is the SINGLE
  * dispatch chokepoint a surface calls on a genuine user click — a PanelTarget
- * opens its panel; a RouteTarget navigates (deep-link). NEVER call this on mount;
- * invocation is the user gesture (v1 §5 v). A no-op for an unknown id.
+ * opens its panel (PACK-RELATIVE, resolved against the launcher's own packId); a
+ * RouteTarget navigates (deep-link). NEVER call this on mount; invocation is the
+ * user gesture (v1 §5 v).
+ *
+ * `keyOrId` is the COMPOUND launcher key ({@link launcherKey}) the surfaces
+ * thread — entrypoint ids are only pack-unique, so two packs may share a launcher
+ * id and must both be addressable. As a NARROW convenience for id-only callers
+ * (e.g. the `__bobbitRunPackLauncher` E2E hook) a bare id is also accepted IFF it
+ * resolves UNAMBIGUOUSLY to exactly one launcher; an ambiguous bare id (two packs)
+ * is a no-op so the caller must use the compound key. A no-op for an unknown key.
  */
-export function runLauncherEntrypoint(id: string): void {
-	const l = launchers.get(id);
+export function runLauncherEntrypoint(keyOrId: string): void {
+	let l = launchers.get(keyOrId);
 	if (!l) {
-		// eslint-disable-next-line no-console
-		console.warn(`[pack-entrypoints] runLauncherEntrypoint: no launcher "${id}"`);
-		return;
+		// Narrow fallback: a bare id that matches exactly ONE launcher resolves it.
+		const byId = [...launchers.values()].filter((x) => x.id === keyOrId);
+		if (byId.length === 1) {
+			l = byId[0];
+		} else {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`[pack-entrypoints] runLauncherEntrypoint: no unambiguous launcher "${keyOrId}"`,
+			);
+			return;
+		}
 	}
 	if (isPanelTarget(l.target)) {
-		openPackPanel(l.target);
+		openPackPanel(l.target, l.packId);
 	} else {
 		navigateToTarget(l.target as RouteTarget);
 	}
@@ -223,18 +264,17 @@ export function navigateToTarget(target: RouteTarget): void {
 	setExtRoute(routeId, filtered);
 }
 
-/** Flatten the `entrypoints[]` contribution of each tool into EntrypointInfo[]
- *  (the declaring tool name is what scopes ownership for reconcile + identity).
- *  Exported so the marketplace mutation path can force a re-register from freshly
- *  fetched metadata (bypassing the dedupe guard), mirroring `pack-panels`. */
-export function entrypointInfosFromTools(tools: ReadonlyArray<ToolInfo>): EntrypointInfo[] {
+/** Flatten the `entrypoints[]` of each pack contribution row into EntrypointInfo[]
+ *  (the owning packId scopes ownership for reconcile + identity). Exported so the
+ *  marketplace mutation path can force a re-register from freshly fetched metadata
+ *  (bypassing the dedupe guard), mirroring `pack-panels`. */
+export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContributionsWire>): EntrypointInfo[] {
 	const out: EntrypointInfo[] = [];
-	for (const t of tools) {
-		const declared = (t as ToolInfo & { entrypoints?: unknown }).entrypoints;
-		if (!Array.isArray(declared)) continue;
-		for (const raw of declared) {
-			if (!raw || typeof raw !== "object") continue;
-			const e = raw as Record<string, unknown>;
+	for (const p of packs) {
+		const packId = typeof p?.packId === "string" ? p.packId : undefined;
+		if (!packId || !Array.isArray(p.entrypoints)) continue;
+		for (const e of p.entrypoints) {
+			if (!e || typeof e !== "object") continue;
 			const id = typeof e.id === "string" ? e.id : undefined;
 			const kind = typeof e.kind === "string" ? e.kind : undefined;
 			if (!id || !kind) continue;
@@ -246,12 +286,12 @@ export function entrypointInfosFromTools(tools: ReadonlyArray<ToolInfo>): Entryp
 				const paramKeys = Array.isArray(e.paramKeys)
 					? (e.paramKeys.filter((k): k is string => typeof k === "string"))
 					: [];
-				out.push({ id, tool: t.name, kind: "route", routeId, target: { panelId, params: target?.params }, paramKeys });
+				out.push({ id, packId, kind: "route", routeId, target: { panelId, params: target?.params }, paramKeys });
 			} else if (kind === "composer-slash" || kind === "git-widget-button" || kind === "command-palette") {
 				const label = typeof e.label === "string" ? e.label : undefined;
 				const target = e.target as PanelTarget | RouteTarget | undefined;
 				if (!label || !target) continue;
-				out.push({ id, tool: t.name, kind, label, target });
+				out.push({ id, packId, kind, label, target });
 			}
 		}
 	}
@@ -266,26 +306,26 @@ const UNRECONCILED = Symbol("unreconciled");
  *  apply so a failed/superseded attempt does not poison it. */
 let lastReconciledProject: string | undefined | typeof UNRECONCILED = UNRECONCILED;
 /** Monotonic generation token: a newer reconcile supersedes an older one whose
- *  `await fetchTools` is still in flight, so an out-of-order late response cannot
- *  clobber the registry. Mirrors `pack-panels.ts` / `pack-renderers.ts`. */
+ *  `await fetchContributions` is still in flight, so an out-of-order late response
+ *  cannot clobber the registry. Mirrors `pack-panels.ts` / `pack-renderers.ts`. */
 let reconcileGeneration = 0;
 
 /**
- * Re-drive pack-entrypoint registration for `projectId`: fetch the tool metadata
- * scoped to that project and (re-)register every declared entrypoint + route with
- * the CURRENT project id. Mirrors `reconcilePackPanelsForProject` exactly — same
- * dedupe guard, generation guard, and fire-and-forget try/catch (never blocks a
- * session switch; built-in surfaces are unaffected on failure).
+ * Re-drive pack-entrypoint registration for `projectId`: fetch the pack-contribution
+ * metadata scoped to that project and (re-)register every declared entrypoint +
+ * route with the CURRENT project id. Mirrors `reconcilePackPanelsForProject`
+ * exactly — same dedupe guard, generation guard, and fire-and-forget try/catch
+ * (never blocks a session switch; built-in surfaces are unaffected on failure).
  */
 export async function reconcilePackEntrypointsForProject(projectId: string | undefined): Promise<void> {
 	if (lastReconciledProject !== UNRECONCILED && lastReconciledProject === projectId) return;
 	const gen = ++reconcileGeneration;
 	try {
-		const tools = await fetchTools(projectId);
+		const packs = await fetchContributions(projectId);
 		// A newer reconcile started while our fetch was in flight — it owns the
 		// registry + dedupe now. Drop this stale response.
 		if (gen !== reconcileGeneration) return;
-		registerPackEntrypoints(entrypointInfosFromTools(tools), projectId);
+		registerPackEntrypoints(entrypointInfosFromContributions(packs), projectId);
 		lastReconciledProject = projectId;
 	} catch {
 		// Non-fatal — leave lastReconciledProject untouched so a later call retries.

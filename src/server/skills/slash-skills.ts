@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { parseCustomDirectories as parseCustomDirsFromConfig, type ProjectConfigReader } from "../agent/config-directories.js";
 import { buildPackList } from "../agent/pack-list.js";
-import { PackResolver, SkillLoader } from "../agent/pack-resolver.js";
+import { PackResolver, SkillLoader, type ActivationFilter } from "../agent/pack-resolver.js";
 import type { PackEntry, LoadedEntity, ResolvedEntity } from "../agent/pack-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -72,7 +72,29 @@ export interface SkillMarketContext {
 	serverConfigStore?: ProjectConfigReader;
 	/** Reads `pack_order.project` + legacy keys (project config store). */
 	projectConfigStore?: ProjectConfigReader;
+	/**
+	 * pack-schema-v1 §7: per-scope disabled-skill lookup, pre-bound to the
+	 * project at the call site. Mirrors the config-cascade's
+	 * `PackActivationProvider.disabled` (same `pack_activation` store, single
+	 * source of truth) but scoped to skills. When supplied, a market-pack skill
+	 * named in `disabled.skills` is dropped from the resolved list BEFORE the
+	 * precedence merge, so a lower-priority same-named shadow can reappear.
+	 * Omitted ⇒ no activation filtering (back-compat).
+	 */
+	packActivation?: SkillActivationLookup;
 }
+
+/**
+ * Per-scope disabled-entity lookup for skill activation filtering
+ * (pack-schema-v1 §7). Returns the disabled-entity refs for one market pack at a
+ * scope; missing ⇒ `{}` (all enabled). Pre-bound to the project at the call site
+ * so skill discovery stays decoupled from store/projectId wiring — mirrors the
+ * cascade's `PackActivationProvider.disabled` return shape.
+ */
+export type SkillActivationLookup = (
+	scope: "server" | "global-user" | "project",
+	packName: string,
+) => { skills?: string[] };
 
 interface FrontMatter {
 	name?: string;
@@ -390,7 +412,23 @@ export function discoverSlashSkillsResolved(
 ): ResolvedEntity<SlashSkill>[] {
 	const store = projectConfigStore as ProjectConfigReader | undefined;
 	const entries = buildSkillPackList(cwd, store, marketContext);
-	return new PackResolver(entries, [new SkillLoader()]).resolve<SlashSkill>("skills");
+	// pack-schema-v1 §7: drop disabled market-pack skills BEFORE precedence merge
+	// (so a lower-priority shadow can reappear), keyed by pack name + scope exactly
+	// like config-cascade.ts does for roles/tools. Reuses the SAME `pack_activation`
+	// store via the injected lookup — no second source of truth. Non-market entries
+	// are never filtered.
+	const activation = marketContext?.packActivation;
+	const filter: ActivationFilter | undefined = activation
+		? (entry, type, name): boolean => {
+			if (type !== "skills") return true;
+			if (entry.kind !== "market" || !entry.manifest) return true;
+			const scope = entry.scope;
+			if (scope !== "server" && scope !== "global-user" && scope !== "project") return true;
+			const disabled = activation(scope, entry.manifest.name).skills;
+			return !disabled || !disabled.includes(name);
+		}
+		: undefined;
+	return new PackResolver(entries, [new SkillLoader()], filter).resolve<SlashSkill>("skills");
 }
 
 /** Look up a single slash skill by name. */

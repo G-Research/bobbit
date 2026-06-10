@@ -58,10 +58,11 @@ test.describe("Command palette surface (C1 command-palette launchers)", () => {
 			const w = window as any;
 			w.__register();
 			w.__openPalette();
-			return { items: w.__paletteItems(), ids: w.__paletteIds(), hash: w.__hash() };
+			return { items: w.__paletteItems(), ids: w.__paletteIds(), hash: w.__hash(), keys: [w.__key("cp.nav"), w.__key("cp.other")] };
 		});
 		expect(items.items).toEqual(["Open Demo (palette)", "Second Command"]);
-		expect(items.ids).toEqual(["cp.nav", "cp.other"]);
+		// data-entrypoint-id carries the COMPOUND launcher key (packId+id).
+		expect(items.ids).toEqual(items.keys);
 		// Opening the palette must NOT have navigated/invoked any launcher.
 		expect(items.hash).toBe("");
 	});
@@ -72,7 +73,7 @@ test.describe("Command palette surface (C1 command-palette launchers)", () => {
 			const w = window as any;
 			w.__register();
 			w.__openPalette();
-			w.__clickPaletteItem("cp.nav");
+			w.__clickPaletteItem(w.__key("cp.nav"));
 			return { hash: w.__hash(), open: w.__paletteOpen() };
 		});
 		expect(result.hash).toBe("#/ext/demo.route?itemId=x1");
@@ -86,9 +87,9 @@ test.describe("Command palette surface (C1 command-palette launchers)", () => {
 			w.__register();
 			w.__openPalette();
 			w.__filterPalette("second");
-			return w.__paletteIds();
+			return { ids: w.__paletteIds(), key: w.__key("cp.other") };
 		});
-		expect(filtered).toEqual(["cp.other"]);
+		expect(filtered.ids).toEqual([filtered.key]);
 	});
 });
 
@@ -100,9 +101,10 @@ test.describe("Git-widget launcher surface (C1 git-widget-button)", () => {
 			w.__register();
 			const el = await w.__mountGit();
 			await w.__openGitDropdown(el);
-			return { launchers: w.__gitLaunchers(), hasOpener: w.__gitHasPaletteOpener(), hash: w.__hash() };
+			return { launchers: w.__gitLaunchers(), hasOpener: w.__gitHasPaletteOpener(), hash: w.__hash(), key: w.__key("gw.nav") };
 		});
-		expect(out.launchers).toEqual([{ id: "gw.nav", label: "Demo Git Button" }]);
+		// data-entrypoint-id carries the COMPOUND launcher key (packId+id).
+		expect(out.launchers).toEqual([{ id: out.key, label: "Demo Git Button" }]);
 		expect(out.hasOpener).toBe(true);
 		// Rendering the dropdown must NOT auto-invoke any launcher.
 		expect(out.hash).toBe("");
@@ -115,7 +117,7 @@ test.describe("Git-widget launcher surface (C1 git-widget-button)", () => {
 			w.__register();
 			const el = await w.__mountGit();
 			await w.__openGitDropdown(el);
-			w.__clickGitLauncher("gw.nav");
+			w.__clickGitLauncher(w.__key("gw.nav"));
 			return w.__hash();
 		});
 		expect(click).toBe("#/ext/demo.route?itemId=g1");

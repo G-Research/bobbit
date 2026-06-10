@@ -1,0 +1,3 @@
+id: panelonly.viewer
+title: Panel Only
+entry: ../lib/panel.js

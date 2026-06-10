@@ -30,6 +30,7 @@ import type { ToolManager } from "../agent/tool-manager.js";
 import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
 import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
 import { resolveSurfaceIdentity } from "../extension-host/surface-binding.js";
+import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
@@ -239,6 +240,7 @@ export function handleWebSocketConnection(
 	sandboxTokenStore?: SandboxTokenStore,
 	projectContextManager?: ProjectContextManager,
 	toolManager?: ToolManager,
+	packContributionRegistry?: PackContributionResolver,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -1035,13 +1037,15 @@ export function handleWebSocketConnection(
 					// caller-supplied `tool`). The token's bound session must equal THIS
 					// connection's authenticated session (cross-session token use rejected).
 					const surf = extToolManager
-						? resolveSurfaceIdentity({ token: mintMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager })
-						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack tools" } as const);
+						? resolveSurfaceIdentity({ token: mintMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
+						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack contributions" } as const);
 					if (!surf.ok || !contentHash) {
 						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: surf.ok ? "missing content hash" : surf.error });
 						break;
 					}
-					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool, contentHash });
+					// Pack-bound surfaces (no tool) bind the permit with an empty tool
+					// surrogate — packId is the trusted scope key either way.
+					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash });
 					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
 					break;
 				}
@@ -1074,14 +1078,15 @@ export function handleWebSocketConnection(
 					// caller-supplied `tool`), session-bound to THIS connection. A
 					// missing/invalid/wrong-session token is rejected with NO post.
 					const surf = extToolManager
-						? resolveSurfaceIdentity({ token: postMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager })
-						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack tools" } as const);
+						? resolveSurfaceIdentity({ token: postMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
+						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack contributions" } as const);
 					if (!surf.ok) {
 						send(ws, { type: "ext_session_post_result", requestId, ok: false, error: surf.error });
 						break;
 					}
 					const result = await handleSessionPost({
 						tool: surf.tool,
+						packId: surf.packId,
 						// The TRUSTED, server-authenticated bound session of THIS connection.
 						sessionId,
 						role: postMsg.role,

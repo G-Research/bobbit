@@ -181,7 +181,9 @@ async function restoreExtRoute(routeId: string | undefined, params: Record<strin
 		if (!entry) return; // owning pack not installed for this project
 		const openParams: Record<string, unknown> = {};
 		if (params) for (const key of entry.paramKeys) if (key in params) openParams[key] = params[key];
-		openPackPanel({ panelId: entry.targetPanelId, params: openParams });
+		// The target panel is resolved within the SAME pack — thread the route's
+		// owning packId so the {packId, panelId} lookup is exact (pack schema V1 §8.1).
+		openPackPanel({ panelId: entry.targetPanelId, params: openParams }, entry.packId);
 	} catch { /* non-fatal — a bad deep-link must never break boot */ }
 }
 

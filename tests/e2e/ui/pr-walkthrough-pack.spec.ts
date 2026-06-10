@@ -37,8 +37,16 @@
  *     the route serves the persisted cards (with suggested comments) + a stable
  *     persistedAt across reloads (the store-rehydration parity proof).
  *
+ *   NO-TOOLS PACK (pack schema V1 §10.2): pr-walkthrough is now an ORPHAN /
+ *   UI-only pack — it ships NO `tools/`, so `pr_walkthrough` is NOT in /api/tools.
+ *   It installs, registers an entrypoint + panel + pack-level routes, opens the
+ *   panel, calls a route (`bundle`/`publish`), and uses store/session APIs through
+ *   PACK-BOUND surface auth (installed + active + own-session), with NO tool in
+ *   `allowedTools`.
+ *
  *   1. Install the `pr-walkthrough` pack (local-dir source) at SERVER scope →
- *      /api/tools lists `pr_walkthrough`.
+ *      /api/ext/contributions lists the pack's panel + entrypoints + route names
+ *      (NOT /api/tools — the pack has no tools).
  *   2. A live session is created + its transcript seeded with a
  *      `submit_pr_walkthrough_yaml` tool call (read via host.session.readToolCall).
  *   3. ENTRYPOINT LAUNCH: the `pr-walkthrough.git-widget` git-widget-button launcher
@@ -75,7 +83,10 @@ test.describe.configure({ mode: "serial" });
 const SOURCE_DIR = fileURLToPath(new URL("../../../market-packs", import.meta.url));
 
 const PACK = "pr-walkthrough";
-const TOOL = "pr_walkthrough";
+// NO-TOOLS pack: the pack-bound surface is its PANEL (pack schema V1 §10.2), so
+// scoped route/store calls mint a pack-bound token for the panel contribution —
+// there is no carrier tool.
+const PANEL_ID = "pr-walkthrough.panel";
 const JOB_ID = "job-litmus-1";
 const SUBMIT_TOOL = "submit_pr_walkthrough_yaml";
 const SUBMIT_TOOL_USE_ID = "tu-prw-submit-1";
@@ -253,11 +264,28 @@ async function cleanup(): Promise<void> {
 	}
 }
 
-/** Fetch the server-scope tool list (no projectId → server ToolManager). */
+/** Fetch the server-scope tool list (no projectId → server ToolManager). A
+ *  no-tools pack contributes NOTHING here. */
 async function listToolNames(): Promise<Array<{ name: string; rendererKind?: string }>> {
 	const res = await apiFetch("/api/tools");
 	expect(res.ok).toBe(true);
 	return (await res.json()).tools as Array<{ name: string; rendererKind?: string }>;
+}
+
+interface PackContributionsMeta {
+	packId: string;
+	packName: string;
+	panels: { id: string; title?: string }[];
+	entrypoints: Array<{ id: string; kind: string; routeId?: string; listName: string }>;
+	routeNames: string[];
+}
+
+/** Fetch the server-scope pack-contribution metadata (panels/entrypoints/routes —
+ *  pack schema V1 §6.4). For a no-tools pack this is the ONLY place it appears. */
+async function listContributions(): Promise<PackContributionsMeta[]> {
+	const res = await apiFetch("/api/ext/contributions");
+	expect(res.ok).toBe(true);
+	return (await res.json()).packs as PackContributionsMeta[];
 }
 
 /**
@@ -307,15 +335,18 @@ async function seedSubmitToolCall(gateway: GatewayInfo, sid: string): Promise<vo
 		.toBeGreaterThanOrEqual(4);
 }
 
-/** Mint a SERVER-MINTED surface token for the pack tool — the same token the real
- *  host API mints (in its closure) before any scoped call. Direct route callers must
- *  now carry it: the server DERIVES {packId, tool} from the validated token and
- *  IGNORES any body `tool`, so identity can no longer be forged by naming a tool. */
+/** Mint a SERVER-MINTED PACK-BOUND surface token for the pack's PANEL — the same
+ *  token the real panel host API mints (in its closure) before any scoped call.
+ *  There is NO carrier tool (no-tools pack): the server validates the pack is
+ *  installed + active + the panel contribution exists + own-session (pack schema
+ *  V1 §4.3/§6.5), then DERIVES the trusted packId from the validated token. Route
+ *  calls resolve the route module by that token packId (§6.6), so the panel surface
+ *  can call the pack's own `bundle`/`publish` routes. */
 async function mintSurfaceToken(sid: string): Promise<string> {
 	const res = await apiFetch("/api/ext/surface-token", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sid },
-		body: JSON.stringify({ sessionId: sid, tool: TOOL }),
+		body: JSON.stringify({ sessionId: sid, packId: PACK, contributionKind: "panel", contributionId: PANEL_ID }),
 	});
 	const body = await res.text();
 	expect(res.status, `surface-token mint failed: ${body}`).toBe(200);
@@ -385,8 +416,15 @@ test.describe("Extension Host Phase 2 — D2 pr-walkthrough-as-pack (live git re
 		// ── Step 1: install at server scope BEFORE opening the app so the cold-load
 		// reconcile sees the pack. ──
 		await installPack();
+		// No-tools pack: it must NOT appear in /api/tools, but MUST appear in
+		// /api/ext/contributions with its panel + entrypoints + route names.
 		const tools = await listToolNames();
-		expect(tools.find((t) => t.name === TOOL), "pr_walkthrough must be listed after install").toBeTruthy();
+		expect(tools.find((t) => t.name === "pr_walkthrough"), "a no-tools pack contributes NOTHING to /api/tools").toBeFalsy();
+		const packMeta = (await listContributions()).find((p) => p.packId === PACK);
+		expect(packMeta, "the pr-walkthrough pack must appear in /api/ext/contributions").toBeTruthy();
+		expect(packMeta?.panels?.some((p) => p.id === PANEL_ID), "the panel must be declared").toBe(true);
+		expect(packMeta?.routeNames, "the pack-level routes must be declared").toEqual(expect.arrayContaining(["bundle", "publish"]));
+		expect(packMeta?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER), "the git-widget launcher entrypoint must be declared").toBe(true);
 
 		// Count POSTs to the bundle route so we can prove control v1 §5 v (no
 		// auto-invoke on mount — only on a user click).
@@ -508,16 +546,17 @@ test.describe("Extension Host Phase 2 — D2 pr-walkthrough-as-pack (live git re
 		const persistedAt2 = await reopenAndLoad();
 		expect(persistedAt2, "deep-link must rehydrate the SAME persisted store record").toBe(persistedAt1);
 
-		// ── Step 6: UNINSTALL → /api/tools drops pr_walkthrough; the client reconcile
-		// tears the panel + deep-link route out of the LIVE UI without a reload. ──
+		// ── Step 6: UNINSTALL → /api/ext/contributions drops the pack; the client
+		// reconcile tears the panel + deep-link route out of the LIVE UI without a
+		// reload. ──
 		const delRes = await apiFetch("/api/marketplace/installed", {
 			method: "DELETE",
 			body: JSON.stringify({ scope: "server", packName: PACK }),
 		});
 		expect(delRes.status).toBe(204);
 
-		const afterTools = await listToolNames();
-		expect(afterTools.find((t) => t.name === TOOL), "pr_walkthrough must be gone after uninstall").toBeFalsy();
+		const afterContrib = await listContributions();
+		expect(afterContrib.find((p) => p.packId === PACK), "the pr-walkthrough pack must be gone after uninstall").toBeFalsy();
 
 		await expect
 			.poll(async () => {

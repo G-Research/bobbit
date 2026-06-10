@@ -10,7 +10,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "yaml";
-import type { PackManifest, PackMeta, PackScope } from "./pack-types.js";
+import type { PackManifest, PackMeta, PackRoutesRef, PackScope } from "./pack-types.js";
+
+/** Route name guard — mirrors the per-pack route allowlist token shape. */
+const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 /** Pack name guard — used as a directory name; reject traversal/unsafe. */
 const PACK_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -22,6 +25,28 @@ export function isValidPackName(name: unknown): name is string {
 		!name.includes("..") &&
 		!name.includes("/") &&
 		!name.includes("\\")
+	);
+}
+
+/**
+ * Safe-basename guard for `contents.entrypoints[]` entries (pack-schema-v1 §1.2).
+ * Each entry is the basename of an `entrypoints/<name>.yaml` file and is later
+ * `path.join`ed into the pack's `entrypoints/` dir, so it MUST NOT carry path
+ * structure. Reject anything that is empty, contains a path separator, a `..`
+ * segment, a null byte, or is absolute / Windows drive-absolute. The strict
+ * charset (`/^[A-Za-z0-9._-]+$/`) already excludes separators, `:` and NUL, but
+ * the explicit `..` check is kept for clarity and defense-in-depth.
+ */
+const SAFE_BASENAME_RE = /^[A-Za-z0-9._-]+$/;
+export function isSafeBasename(name: unknown): name is string {
+	return (
+		typeof name === "string" &&
+		name.length > 0 &&
+		!name.includes("\0") &&
+		!name.includes("/") &&
+		!name.includes("\\") &&
+		!name.includes("..") &&
+		SAFE_BASENAME_RE.test(name)
 	);
 }
 
@@ -77,16 +102,61 @@ export function validateManifest(
 	if (roles === null) return fail("pack.yaml: contents.roles must be an array of strings");
 	if (tools === null) return fail("pack.yaml: contents.tools must be an array of strings");
 	if (skills === null) return fail("pack.yaml: contents.skills must be an array of strings");
+	// NEW (pack-schema-v1 §1.2): contents.entrypoints — basenames of entrypoints/<name>.yaml
+	// files. Optional + defaults to [] (a pack with no entrypoints stays valid); when
+	// present it MUST be a string array.
+	let entrypoints: string[] = [];
+	if (c.entrypoints !== undefined) {
+		const parsed = asStringArray(c.entrypoints);
+		if (parsed === null) return fail("pack.yaml: contents.entrypoints must be an array of strings");
+		// Path-traversal guard: each entry is a file basename joined into
+		// entrypoints/<name>.yaml — reject separators, `..`, absolute/drive forms.
+		for (const e of parsed) {
+			if (!isSafeBasename(e)) {
+				return fail(
+					`pack.yaml: contents.entrypoints entry ${JSON.stringify(e)} is not a safe basename ` +
+						`(must match /^[A-Za-z0-9._-]+$/ with no path separators or ".." segments)`,
+				);
+			}
+		}
+		entrypoints = parsed;
+	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills },
+		contents: { roles, tools, skills, entrypoints },
 	};
+	// NEW (pack-schema-v1 §1.2): optional top-level `routes: { module?, names? }`.
+	// Tolerant — a malformed routes block is dropped (no routes), never fatal.
+	const routes = parseRoutesRef(d.routes);
+	if (routes) manifest.routes = routes;
 	if (nonEmptyString(d.author)) manifest.author = (d.author as string).trim();
 	if (nonEmptyString(d.homepage)) manifest.homepage = (d.homepage as string).trim();
 	return manifest; // unknown top-level keys ignored (forward-compat)
+}
+
+/**
+ * Parse the optional top-level `routes` block of a pack.yaml into a
+ * {@link PackRoutesRef}. Tolerant: a non-object, missing module, or all-invalid
+ * names yields `undefined` (the pack contributes no routes). `module` path-safety
+ * is enforced at resolve/import time against the pack root, so only obvious
+ * garbage is dropped here. Route names are filtered to the allowlist token shape.
+ */
+function parseRoutesRef(raw: unknown): PackRoutesRef | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const obj = raw as Record<string, unknown>;
+	const out: PackRoutesRef = {};
+	if (typeof obj.module === "string" && obj.module.trim().length > 0) {
+		out.module = obj.module.trim();
+	}
+	if (Array.isArray(obj.names)) {
+		const names = obj.names.filter((n): n is string => typeof n === "string" && ROUTE_NAME_RE.test(n));
+		if (names.length > 0) out.names = names;
+	}
+	if (out.module === undefined && out.names === undefined) return undefined;
+	return out;
 }
 
 /** Parse a `pack.yaml` string into a manifest, or `null` if invalid. */

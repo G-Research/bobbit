@@ -18,6 +18,7 @@ import { i18n } from "../utils/i18n.js";
 import { fetchToolContent } from "../utils/fetch-tool-content.js";
 import { state as appState } from "../../app/state.js";
 import { getHostApi } from "../../app/host-api.js";
+import { packIdForTool } from "../../app/pack-renderers.js";
 import "./ThinkingBlock.js";
 import "./LiveTimer.js";
 import "./ToolGroup.js";
@@ -709,7 +710,7 @@ export class ToolMessage extends LitElement {
 				goalId: goalIdCtx,
 				getAskResponseAnswers,
 				packTool: toolName,
-				host: getHostApi(sessionIdCtx, this.toolCall.id, toolName),
+				host: getHostApi(sessionIdCtx, this.toolCall.id, { kind: "tool", tool: toolName, packId: packIdForTool(toolName) }),
 			},
 		);
 

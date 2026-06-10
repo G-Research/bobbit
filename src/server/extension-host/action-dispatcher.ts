@@ -21,7 +21,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { isPackPathWithinGroup } from "./path-guard.js";
+import { isPackPathWithinRoot } from "./path-guard.js";
 import { pathToFileURL } from "node:url";
 import type { ServerHostApi } from "./server-host-api.js";
 import { ModuleHost } from "./module-host-worker.js";
@@ -185,19 +185,24 @@ export class ActionDispatcher {
 	private resolveModulePath(tool: string, resolver: ActionToolLocationResolver = this.toolManager): { abs: string; packRoot: string } | null {
 		const loc = resolver.resolveToolLocation(tool);
 		if (!loc || !loc.baseDir) return null;
+		// The actions module resolves RELATIVE to the tool YAML's dir
+		// (`<baseDir>/<groupDir>`), but containment is enforced against the PACK
+		// ROOT (`path.dirname(baseDir)` — the dir holding pack.yaml), so a tool may
+		// reference a shared `../../lib/X.mjs` module (pack-schema-v1 §2/§3).
 		const dir = path.join(loc.baseDir, loc.groupDir || "");
+		const packRoot = path.dirname(loc.baseDir);
 		const moduleRel = loc.actionsModule ?? "actions.js";
 
 		const abs = path.resolve(dir, moduleRel);
-		// Path-traversal + symlink re-validation: abs must stay within `dir` both
-		// lexically and after realpath resolution (rejects symlink escapes).
-		if (!isPackPathWithinGroup(dir, abs)) {
+		// Path-traversal + symlink re-validation: abs must stay within the PACK ROOT
+		// both lexically and after realpath resolution (rejects symlink escapes).
+		if (!isPackPathWithinRoot(packRoot, abs)) {
 			throw new ActionError(400, `unsafe actions module path for tool "${tool}"`);
 		}
-		// `dir` is the validated pack root; forwarded into the confined worker so the
-		// pack module graph can only resolve `file:` URLs WITHIN it (module-import
-		// containment — loader/stability hygiene, not a security boundary).
-		return { abs, packRoot: dir };
+		// `packRoot` is the validated pack root; forwarded into the confined worker so
+		// the pack module graph can only resolve `file:` URLs WITHIN it (so
+		// `../lib/*.mjs` loads while an outside-root import stays rejected — §3).
+		return { abs, packRoot };
 	}
 
 	/**

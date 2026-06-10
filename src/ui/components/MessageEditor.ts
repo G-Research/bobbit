@@ -259,9 +259,12 @@ export class MessageEditor extends LitElement {
 			const eps = listLauncherEntrypoints("composer-slash");
 			if (eps.length === 0) return skills;
 			const names = new Set(skills.map((s) => s.name.toLowerCase()));
+			// `name` is the user-facing slash trigger (the pack-local entrypoint id);
+			// `entrypointId` carries the COMPOUND launcher key (packId+entrypointId) so
+			// dispatch addresses the exact launcher even when two packs share an id.
 			const packEntries: SlashSkillInfo[] = eps
 				.filter((e) => !names.has(e.id.toLowerCase()))
-				.map((e) => ({ name: e.id, description: e.label, source: "pack" as const, entrypointId: e.id }));
+				.map((e) => ({ name: e.id, description: e.label, source: "pack" as const, entrypointId: e.key }));
 			return [...skills, ...packEntries];
 		} catch {
 			return skills;

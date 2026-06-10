@@ -1,0 +1,12 @@
+name: panel-only
+description: >-
+  V1-schema litmus — a pack that contributes ONLY an auto-discovered panel: no
+  tools, no entrypoints, no routes. Proves panels are auto-discovered from
+  panels/*.yaml (never listed in contents) and that a pack with an all-empty
+  contents catalogue still installs and exposes its panel as a support surface.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []

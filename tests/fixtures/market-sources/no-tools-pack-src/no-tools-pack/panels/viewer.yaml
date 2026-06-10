@@ -1,0 +1,3 @@
+id: notools.viewer
+title: No-Tools Viewer
+entry: ../lib/panel.js

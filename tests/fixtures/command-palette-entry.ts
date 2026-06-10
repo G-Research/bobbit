@@ -8,16 +8,16 @@
 // navigates (sets `#/ext/<routeId>?…`), which we assert without needing a server.
 import "../../src/ui/components/CommandPalette.js";
 import "../../src/ui/components/GitStatusWidget.js";
-import { registerPackEntrypoints } from "../../src/app/pack-entrypoints.js";
+import { registerPackEntrypoints, launcherKey } from "../../src/app/pack-entrypoints.js";
 import { openCommandPalette } from "../../src/ui/components/CommandPalette.js";
 
 function register(): void {
 	registerPackEntrypoints(
 		[
-			{ id: "tp.route", tool: "tp", kind: "route", routeId: "demo.route", target: { panelId: "demo.viewer" }, paramKeys: ["itemId"] },
-			{ id: "cp.nav", tool: "tp", kind: "command-palette", label: "Open Demo (palette)", target: { route: "demo.route", params: { itemId: "x1" } } },
-			{ id: "cp.other", tool: "tp", kind: "command-palette", label: "Second Command", target: { route: "demo.route", params: { itemId: "x2" } } },
-			{ id: "gw.nav", tool: "tp", kind: "git-widget-button", label: "Demo Git Button", target: { route: "demo.route", params: { itemId: "g1" } } },
+			{ id: "tp.route", packId: "tp", kind: "route", routeId: "demo.route", target: { panelId: "demo.viewer" }, paramKeys: ["itemId"] },
+			{ id: "cp.nav", packId: "tp", kind: "command-palette", label: "Open Demo (palette)", target: { route: "demo.route", params: { itemId: "x1" } } },
+			{ id: "cp.other", packId: "tp", kind: "command-palette", label: "Second Command", target: { route: "demo.route", params: { itemId: "x2" } } },
+			{ id: "gw.nav", packId: "tp", kind: "git-widget-button", label: "Demo Git Button", target: { route: "demo.route", params: { itemId: "g1" } } },
 		],
 		"proj1",
 	);
@@ -31,6 +31,9 @@ function clearRegistry(): void {
 (window as any).__clearRegistry = clearRegistry;
 (window as any).__hash = () => window.location.hash;
 (window as any).__clearHash = () => history.replaceState({}, "", window.location.pathname);
+// All fixture launchers belong to pack "tp"; the surfaces key dispatch + the
+// data-entrypoint-id attribute by the COMPOUND launcher key (packId+id).
+(window as any).__key = (id: string) => launcherKey("tp", id);
 
 // ── Command palette helpers ──
 (window as any).__openPalette = () => openCommandPalette();
@@ -45,9 +48,12 @@ function clearRegistry(): void {
 	input.value = q;
 	input.dispatchEvent(new Event("input", { bubbles: true }));
 };
-(window as any).__clickPaletteItem = (id: string) => {
-	const el = document.querySelector<HTMLElement>(`[data-testid='command-palette-item'][data-entrypoint-id='${id}']`);
-	if (!el) throw new Error(`palette item ${id} not found`);
+(window as any).__clickPaletteItem = (key: string) => {
+	// Match by dataset in JS — the compound key contains a NUL separator that a CSS
+	// attribute selector would mangle.
+	const el = [...document.querySelectorAll<HTMLElement>("[data-testid='command-palette-item']")]
+		.find((e) => e.dataset.entrypointId === key);
+	if (!el) throw new Error(`palette item ${key} not found`);
 	el.click();
 };
 
@@ -74,9 +80,10 @@ async function mountGit() {
 		id: (e as HTMLElement).dataset.entrypointId,
 		label: (e.textContent || "").trim(),
 	}));
-(window as any).__clickGitLauncher = (id: string) => {
-	const el = document.querySelector<HTMLElement>(`#git-status-dropdown [data-testid='git-widget-launcher'][data-entrypoint-id='${id}']`);
-	if (!el) throw new Error(`git launcher ${id} not found`);
+(window as any).__clickGitLauncher = (key: string) => {
+	const el = [...document.querySelectorAll<HTMLElement>("#git-status-dropdown [data-testid='git-widget-launcher']")]
+		.find((e) => e.dataset.entrypointId === key);
+	if (!el) throw new Error(`git launcher ${key} not found`);
 	el.click();
 };
 (window as any).__gitHasPaletteOpener = () =>

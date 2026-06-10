@@ -1,32 +1,27 @@
 // src/server/extension-host/route-dispatcher.ts
 //
-// Slice B3 — `routes:` + `host.callRoute` (Extension Host Phase 2, design
-// docs/design/extension-host-phase2.md §5).
+// `routes:` + `host.callRoute` (Extension Host Phase 2, design
+// docs/design/extension-host-phase2.md §5; rebuilt for pack-schema-v1 §5.3).
 //
-// A pack tool ships `tools/<group>/routes.js` exporting
-// `export const routes = { bundle: (ctx, req) => ... }`. A pack renderer/panel/
-// entrypoint reaches its OWN pack's route via the client `host.callRoute(name,
-// init)` → `POST /api/ext/route/:name`. The server authorizes the caller +
-// derives the trusted `packId` (Slice A), then resolves the route MODULE through
-// the PACK-LEVEL `RouteRegistry` (NOT the opener tool's location) so a route
-// declared on tool Y is reachable from a surface opened by tool X in the SAME
-// pack — pack-scoped, opener-independent (§5 B3.1).
+// Routes are now declared at the PACK LEVEL (`pack.yaml.routes`), not on a
+// carrier tool. A pack renderer/panel/entrypoint reaches its OWN pack's route via
+// the client `host.callRoute(name, init)` → `POST /api/ext/route/:name`. The
+// server authorizes the caller + derives the trusted `packId` from the surface
+// token, then resolves the route MODULE through the pack-level `RouteRegistry`
+// (built off the `PackContributionRegistry`, opener-INDEPENDENT).
 //
 // `RouteDispatcher` structurally MIRRORS `ActionDispatcher` (epoch-guarded module
 // cache + bounded in-flight reload + per-call timeout + permit-held-until-settle
-// + the SINGLE invocation seam). It is kept self-contained rather than forking
-// `ActionDispatcher`'s private internals: C3 (server-module isolation) unifies the
-// two dispatchers' single invocation seam behind one worker host — at which point
-// the shared loader is extracted there. Until then this is a deliberate, low-risk
-// parallel copy keyed off `routes` instead of `actions`.
+// + the SINGLE invocation seam). It now dispatches by a RESOLVED `{ modulePath,
+// packRoot }` instead of a tool, because routes have no carrier tool.
 
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ActionError, type ActionHandlerCtx, type ActionDispatcherOptions } from "./action-dispatcher.js";
 import { ModuleHost } from "./module-host-worker.js";
-import { resolvePackIdentity } from "./pack-identity.js";
-import { isPackPathWithinGroup } from "./path-guard.js";
+import { isPackPathWithinRoot } from "./path-guard.js";
+import type { PackContributionResolver } from "./pack-contribution-registry.js";
 
 /** The verified context handed to a route handler. Reuses the action ctx shape
  *  (design §5 B3.1: `RouteHandlerCtx = ActionHandlerCtx`). */
@@ -44,31 +39,6 @@ export type RouteHandler = (ctx: RouteHandlerCtx, req: RouteRequest) => Promise<
 /** The export shape a pack routes module declares. Resolved + validated INSIDE
  *  the worker (module-host-bootstrap) — the parent never constructs/imports it. */
 export type RoutesModule = { routes: Record<string, RouteHandler> };
-
-/** The resolved on-disk location of a tool's routes module. Mirrors the action
- *  resolver's shape but carries `routesModule` (default "routes.js") + the
- *  declared `routeNames` the pack-level registry indexes by. */
-export interface RouteToolLocation {
-	baseDir: string;
-	groupDir: string;
-	/** Routes module path relative to the group dir (default "routes.js"). */
-	routesModule?: string;
-	/** Declared route-name allowlist from `routes.names` — the registry indexes by these. */
-	routeNames?: string[];
-}
-
-/** Minimal structural resolver the DISPATCHER depends on: resolve a tool's
- *  winning on-disk location + its `routes.module` (independent of `provider:`). */
-export interface RouteToolLocationResolver {
-	resolveToolLocation(tool: string): RouteToolLocation | undefined;
-}
-
-/** The richer resolver the REGISTRY depends on: enumerate every scanned tool name
- *  (so the pack-level index can collect every routes-bearing tool in a pack) on
- *  top of the per-tool location resolution. `ToolManager` satisfies this. */
-export interface RouteToolEnumerator extends RouteToolLocationResolver {
-	getAllToolNames(): string[];
-}
 
 /** A simple per-session token-bucket rate limiter (mirrors ActionDispatcher's). */
 class TokenBucketLimiter {
@@ -104,36 +74,25 @@ class TokenBucketLimiter {
  * the gateway process lifetime; `invalidate()` drops its module cache from
  * `invalidateResolverCaches()`.
  *
- * The `tool` passed to `dispatch` is the route's DECLARING tool (resolved by the
- * pack-level `RouteRegistry`), NOT the opener tool — so the loaded module is the
- * pack's route module regardless of which surface issued the call (§5 B3.1).
+ * Dispatch is keyed by a RESOLVED `{ modulePath, packRoot }` (the pack-level
+ * `RouteRegistry` produced it from the pack's `routes` ref), NOT a tool — routes
+ * are pack-scoped and opener-independent (§5.3).
  */
 export class RouteDispatcher {
-	/** Caches ONLY {path → {mtimeMs, epoch, url}} — NEVER a module object. The
-	 *  parent does no `import()`, so pack top-level code never runs here. */
+	/** Caches ONLY {path → {mtimeMs, epoch, url}} — NEVER a module object. */
 	private readonly cache = new Map<string, { mtimeMs: number; epoch: number; url: string }>();
 	private readonly timeoutMs: number;
 	private readonly maxConcurrent: number;
 	private readonly limiter: TokenBucketLimiter | null;
-	/** Slice C3 — the SINGLE invocation seam runs every route handler through this
-	 *  confined worker host (server-module isolation, design §9). Always present so
-	 *  there is NO in-process path. */
 	private readonly moduleHost: ModuleHost;
 	private inFlight = 0;
-	/** Bumped on invalidate() so a post-invalidate import is always fresh even
-	 *  under coarse (Windows) mtime resolution. */
 	private epoch = 0;
 
-	constructor(
-		private readonly toolManager: RouteToolLocationResolver,
-		opts: ActionDispatcherOptions = {},
-	) {
+	constructor(opts: ActionDispatcherOptions = {}) {
 		this.timeoutMs = opts.timeoutMs ?? 30_000;
 		this.maxConcurrent = opts.maxConcurrent ?? 8;
 		const rate = opts.rate === undefined ? { capacity: 60, refillPerSec: 30 } : opts.rate;
 		this.limiter = rate ? new TokenBucketLimiter(rate.capacity, rate.refillPerSec) : null;
-		// Slice C3: isolation is UNCONDITIONAL — share the threaded ModuleHost (or
-		// self-construct one) so route handlers always run confined (no in-process path).
 		this.moduleHost = opts.moduleHost ?? new ModuleHost({ timeoutMs: this.timeoutMs });
 	}
 
@@ -143,53 +102,30 @@ export class RouteDispatcher {
 		this.epoch++;
 	}
 
-	/** Resolve the absolute on-disk path of a tool's routes module (default
-	 *  "routes.js"), re-validating it stays within the group dir. */
-	private resolveModulePath(tool: string, resolver: RouteToolLocationResolver): { abs: string; packRoot: string } | null {
-		const loc = resolver.resolveToolLocation(tool);
-		if (!loc || !loc.baseDir) return null;
-		const dir = path.join(loc.baseDir, loc.groupDir || "");
-		const moduleRel = loc.routesModule ?? "routes.js";
-
-		const abs = path.resolve(dir, moduleRel);
-		// Path-traversal + symlink re-validation: abs must stay within `dir` both
-		// lexically and after realpath resolution (rejects symlink escapes).
-		if (!isPackPathWithinGroup(dir, abs)) {
-			throw new ActionError(400, `unsafe routes module path for tool "${tool}"`);
+	/** Re-validate a pre-resolved route module path stays within the pack root,
+	 *  then build its epoch-cache-busted import URL WITHOUT importing it (the
+	 *  parent does NO `import()`; the worker imports + validates the `routes`
+	 *  export + member). */
+	private resolveModuleUrl(modulePath: string, packRoot: string): { url: string; packRoot: string } | null {
+		const abs = path.resolve(modulePath);
+		if (!isPackPathWithinRoot(packRoot, abs)) {
+			throw new ActionError(400, `unsafe routes module path "${modulePath}"`);
 		}
-		// `dir` is the validated pack root; forwarded into the confined worker so the
-		// pack module graph can only resolve `file:` URLs WITHIN it (module-import
-		// containment — loader/stability hygiene, not a security boundary).
-		return { abs, packRoot: dir };
-	}
-
-	/** Resolve the epoch-cache-busted import URL for a tool's routes module WITHOUT
-	 *  importing it (mirrors ActionDispatcher.resolveModuleUrl — the parent does NO
-	 *  `import()`; the worker imports + validates the `routes` export + member). */
-	private resolveModuleUrl(tool: string, resolver: RouteToolLocationResolver): { url: string; packRoot: string } | null {
-		const resolved = this.resolveModulePath(tool, resolver);
-		if (!resolved) return null;
-		const { abs, packRoot } = resolved;
-
 		let stat: fs.Stats;
 		try {
 			stat = fs.statSync(abs);
 		} catch {
 			return null; // module file does not exist
 		}
-
 		const epoch = this.epoch;
 		const hit = this.cache.get(abs);
 		if (hit && hit.mtimeMs === stat.mtimeMs && hit.epoch === epoch) return { url: hit.url, packRoot };
-
 		const url = `${pathToFileURL(abs).href}?v=${stat.mtimeMs}&e=${epoch}`;
 		this.cache.set(abs, { mtimeMs: stat.mtimeMs, epoch, url });
 		return { url, packRoot };
 	}
 
-	/** Race `work` (combined module load+eval AND handler execution) against the
-	 *  per-call timeout with try/catch isolation. Identical strategy to
-	 *  ActionDispatcher.runWithTimeout. */
+	/** Race `work` against the per-call timeout with try/catch isolation. */
 	private runWithTimeout(work: Promise<unknown>, timeoutMs: number): Promise<unknown> {
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
@@ -216,16 +152,17 @@ export class RouteDispatcher {
 	}
 
 	/**
-	 * Resolve + run the route handler under blast-radius controls. Throws
-	 * `ActionError` (carrying an HTTP status) on any failure; the endpoint maps it
-	 * to a JSON error response.
+	 * Resolve + run the route handler under blast-radius controls. `modulePath` +
+	 * `packRoot` come from the pack-level `RouteRegistry`. Throws `ActionError`
+	 * (carrying an HTTP status) on any failure; the endpoint maps it to a JSON
+	 * error response.
 	 */
 	async dispatch(
-		tool: string,
+		modulePath: string,
+		packRoot: string,
 		name: string,
 		ctx: RouteHandlerCtx,
 		req: RouteRequest,
-		resolver: RouteToolLocationResolver = this.toolManager,
 	): Promise<unknown> {
 		if (this.limiter && !this.limiter.allow(ctx.sessionId)) {
 			throw new ActionError(429, "route rate limit exceeded for this session");
@@ -235,28 +172,15 @@ export class RouteDispatcher {
 		}
 		this.inFlight++;
 
-		// ONE combined per-call timeout spans BOTH the module load+eval AND the
-		// handler execution; since the PARENT does NO `import()`, the timeout bounds
-		// module eval too (a top-level `while(1)` is killed by terminate — see
-		// ActionDispatcher).
 		const work = (async (): Promise<unknown> => {
-			const resolved = this.resolveModuleUrl(tool, resolver);
-			if (!resolved) throw new ActionError(404, `no routes module found for tool "${tool}"`);
-
-			// SINGLE invocation seam (the ONLY place pack code runs) — the PARENT does NO
-			// `import()`. The CONFINED worker (server-module isolation, design §9) imports
-			// the epoch-cache-busted URL, resolves `routes[member]` (own-function check),
-			// and either invokes it or returns a structured `{error, status}` mapped to the
-			// SAME ActionError statuses (500 "no 'routes' export" / 404 "unknown route").
-			// Isolation is unconditional (no in-process path).
+			const resolved = this.resolveModuleUrl(modulePath, packRoot);
+			if (!resolved) throw new ActionError(404, `no routes module found at "${modulePath}"`);
 			return await this.moduleHost.invoke(
 				{ url: resolved.url, packRoot: resolved.packRoot, epoch: this.epoch, exportKind: "routes", member: name, ctx, arg: req, workingDir: ctx.workingDir },
 				this.timeoutMs,
 			);
 		})();
 
-		// Release the permit EXACTLY ONCE when `work` ACTUALLY settles (not when the
-		// timeout race settles) — a hung import/handler keeps its slot until it does.
 		void work.then(
 			() => { this.inFlight--; },
 			() => { this.inFlight--; },
@@ -266,96 +190,47 @@ export class RouteDispatcher {
 	}
 }
 
-/** A resolved registry entry: which tool declares the route + its module path. */
+/** A resolved registry entry: the route module path + the pack root for confinement. */
 export interface ResolvedRoute {
-	declaringTool: string;
 	modulePath: string;
+	packRoot: string;
 }
 
 /**
- * Pack-LEVEL route index (design §5 B3.1). For a `packId`, enumerates every
- * scanned tool, keeps those whose winning location resolves to that `packId`,
- * and collects their declared `routes.names` into one
- * `routeName → { declaringTool, modulePath }` map (built once per
- * resolver+packId, cached). Resolution is OPENER-INDEPENDENT: any surface in the
- * pack reaches the same routes.
+ * Pack-LEVEL route index (pack-schema-v1 §5.3). Resolves `(projectId, packId,
+ * routeName)` → `{ modulePath, packRoot }` from the pack's pack-level
+ * `RouteContribution` (`pack.yaml.routes`), via the `PackContributionRegistry`.
+ * A route is reachable only when `routeName ∈ routes.names` (the allowlist).
  *
- * **Duplicate-route rejection (the one hard registry-build conflict):** if two
- * tools in the SAME pack declare the SAME route name, that is a hard rejection
- * (ActionError 409) naming the conflicting tools + route — guaranteeing at most
- * one declaring tool per `(packId, routeName)` so `resolve` is unambiguous.
+ * Duplicate route names within a pack are rejected EARLIER, at pack-contribution
+ * load time (`pack-contributions.ts`), so the resolution here is unambiguous.
  * Cross-pack names never collide (the index is keyed by `packId`).
- *
- * The cache is keyed by the per-call enumerator (a session's project-scoped tool
- * manager, else the server-level one) so project/server scopes never contaminate
- * each other; `invalidate()` drops it on pack install/update/uninstall.
  */
 export class RouteRegistry {
-	private cache = new WeakMap<RouteToolEnumerator, Map<string, Map<string, ResolvedRoute>>>();
+	constructor(private readonly contributions: PackContributionResolver) {}
 
-	constructor(private readonly enumerator: RouteToolEnumerator) {}
-
-	/** Drop the cached pack indexes — rebuilt lazily on next resolve. */
+	/** No per-instance cache to drop — resolution reads through the
+	 *  `PackContributionRegistry`, which owns the cache + its invalidation. */
 	invalidate(): void {
-		this.cache = new WeakMap();
+		/* no-op: the PackContributionRegistry owns the cache */
 	}
 
 	/**
-	 * Resolve `(packId, routeName) → { declaringTool, modulePath }`, or undefined
-	 * when the pack declares no such route. `enumerator` defaults to the
-	 * constructor one; the endpoint passes the session's project-scoped tool
-	 * manager so resolution honors the SAME winning precedence the dispatcher loads from.
+	 * Resolve `(packId, routeName) → { modulePath, packRoot }`, or undefined when
+	 * the pack declares no such route (or is not installed/active). The route
+	 * module resolves relative to the declaring `pack.yaml`'s dir (the pack root)
+	 * and stays contained within it.
 	 */
 	resolve(
 		packId: string,
 		routeName: string,
-		enumerator: RouteToolEnumerator = this.enumerator,
+		projectId: string | undefined,
 	): ResolvedRoute | undefined {
 		if (!packId) return undefined;
-		return this.packMap(enumerator, packId).get(routeName);
-	}
-
-	private packMap(enumerator: RouteToolEnumerator, packId: string): Map<string, ResolvedRoute> {
-		let byPack = this.cache.get(enumerator);
-		if (!byPack) {
-			byPack = new Map();
-			this.cache.set(enumerator, byPack);
-		}
-		const cached = byPack.get(packId);
-		if (cached) return cached;
-		const built = this.buildPackMap(enumerator, packId);
-		byPack.set(packId, built);
-		return built;
-	}
-
-	private buildPackMap(enumerator: RouteToolEnumerator, packId: string): Map<string, ResolvedRoute> {
-		const map = new Map<string, ResolvedRoute>();
-		// Track the declaring tool per route name to detect intra-pack duplicates.
-		const declaredBy = new Map<string, string>();
-		for (const tool of enumerator.getAllToolNames()) {
-			const loc = enumerator.resolveToolLocation(tool);
-			if (!loc || !loc.baseDir) continue;
-			const ident = resolvePackIdentity({ baseDir: loc.baseDir, groupDir: loc.groupDir }, tool);
-			if (!ident.isPack || ident.packId !== packId) continue;
-			const names = loc.routeNames;
-			if (!names || names.length === 0) continue; // a routes-bearing tool MUST declare names to be reachable
-
-			const dir = path.join(loc.baseDir, loc.groupDir || "");
-			const moduleRel = loc.routesModule ?? "routes.js";
-			const modulePath = path.resolve(dir, moduleRel);
-
-			for (const name of names) {
-				const prior = declaredBy.get(name);
-				if (prior !== undefined && prior !== tool) {
-					throw new ActionError(
-						409,
-						`pack "${packId}" declares route "${name}" on two tools ("${prior}" and "${tool}"); route names must be unique within a pack`,
-					);
-				}
-				declaredBy.set(name, tool);
-				map.set(name, { declaringTool: tool, modulePath });
-			}
-		}
-		return map;
+		const pack = this.contributions.getPack(projectId, packId);
+		const routes = pack?.routes;
+		if (!routes || !routes.names.includes(routeName)) return undefined;
+		const modulePath = path.resolve(path.dirname(routes.sourceFile), routes.module);
+		return { modulePath, packRoot: routes.packRoot };
 	}
 }

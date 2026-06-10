@@ -204,11 +204,11 @@ describe("market pack overlaying a shared builtin group (finding #1)", () => {
 });
 
 // ── Fix 2: rendererKind + resolveToolLocation must source the renderer from the
-//    PARSED/validated contribution, NOT the raw YAML `renderer:` field. An unsafe
-//    renderer path (e.g. `../evil.js`) is dropped by parseContributions, so it must
-//    NOT be advertised as rendererKind:"pack" (which would make the client register
-//    a pack renderer that only fails later at the GET endpoint). It must degrade to
-//    rendererKind:"builtin" with no pack renderer path.
+//    PARSED/validated contribution, NOT the raw YAML `renderer:` field. A
+//    STRUCTURALLY-unsafe renderer path (absolute / drive-absolute) is dropped by
+//    parseContributions, so it must NOT be advertised as rendererKind:"pack". A
+//    relative `../../lib/X.js` path is now ALLOWED (pack-schema-v1 §2.1 — shared
+//    lib/ modules); containment is enforced at the GET endpoint, not parse time.
 describe("renderer-path validation flows into rendererKind + resolveToolLocation (Fix 2)", () => {
 	// A market-pack root whose path contains a real `market-packs` segment, so the
 	// rendererKind helper treats a `.js` renderer as "pack".
@@ -221,9 +221,13 @@ describe("renderer-path validation flows into rendererKind + resolveToolLocation
 	w(path.join(pack, "demo", "safe_tool.yaml"),
 		`name: safe_tool\ndescription: safe\ngroup: demo\nrenderer: SafeRenderer.js\n`);
 	w(path.join(pack, "demo", "SafeRenderer.js"), "export default {};\n");
-	// Unsafe renderer (path traversal) → parseContributions drops it; must degrade.
+	// Structurally-unsafe renderer (absolute path) → parseContributions drops it; must degrade.
 	w(path.join(pack, "demo", "evil_tool.yaml"),
-		`name: evil_tool\ndescription: evil\ngroup: demo\nrenderer: ../evil.js\n`);
+		`name: evil_tool\ndescription: evil\ngroup: demo\nrenderer: /etc/evil.js\n`);
+	// Shared lib/ renderer via `../../lib/` — now ALLOWED at parse time (§2.1).
+	w(path.join(pf, ".bobbit", "config", "market-packs", "demo", "lib", "Shared.js"), "export default {};\n");
+	w(path.join(pack, "demo", "lib_tool.yaml"),
+		`name: lib_tool\ndescription: lib\ngroup: demo\nrenderer: ../../lib/Shared.js\n`);
 
 	function tm(): InstanceType<typeof ToolManager> {
 		__resetToolScanCache();
@@ -240,7 +244,7 @@ describe("renderer-path validation flows into rendererKind + resolveToolLocation
 		assert.equal(loc!.rendererFile, "SafeRenderer.js");
 	});
 
-	it("an unsafe `../evil.js` renderer is NOT advertised as pack and resolveToolLocation returns no pack renderer", () => {
+	it("a structurally-unsafe absolute renderer is NOT advertised as pack and resolveToolLocation returns no pack renderer", () => {
 		const m = tm();
 		// Dropped renderer ⇒ rendererKind must NOT be "pack".
 		const byName = m.getToolByName("evil_tool")!;
@@ -250,5 +254,13 @@ describe("renderer-path validation flows into rendererKind + resolveToolLocation
 		const loc = m.resolveToolLocation("evil_tool");
 		assert.notEqual(loc!.rendererKind, "pack");
 		assert.equal(loc!.rendererFile, undefined);
+	});
+
+	it("a `../../lib/Shared.js` renderer IS allowed (pack-schema-v1 §2.1 shared lib) and resolves as pack", () => {
+		const m = tm();
+		assert.equal(m.getToolByName("lib_tool")!.rendererKind, "pack");
+		const loc = m.resolveToolLocation("lib_tool");
+		assert.equal(loc!.rendererKind, "pack");
+		assert.equal(loc!.rendererFile, "../../lib/Shared.js");
 	});
 });

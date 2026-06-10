@@ -86,18 +86,10 @@ function toolInfoFrom(data: any, fallbackGroup: string, baseDir: string, filePat
 		rendererKind: computeRendererKind(baseDir, data.renderer),
 		hasActions: !!contributions.actions,
 		actionNames: contributions.actions?.names,
-		// Slice B1/B4 (D1 fix): the cascade/market-pack load path MUST emit the same
-		// additive contribution wire fields `contributionFields` (tool-manager.ts) does,
-		// or an INSTALLED pack's `stores:`/`panels:` never reach the client (panel
-		// registration + store declarations silently vanish). Mirror it exactly.
-		// Expose the additive contribution wire fields so an INSTALLED pack's
-		// stores/panels/routes/entrypoints reach the client through the config-cascade
-		// tool list (/api/tools resolves via configCascade.resolveTools / toolInfoFrom,
-		// not getAvailableTools) — mirroring tool-manager.ts::contributionFields.
-		storeIds: contributions.stores?.map((s) => s.id),
-		panels: contributions.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),
-		routeNames: contributions.routes?.names,
-		entrypoints: contributions.entrypoints,
+		// pack-schema-v1 §6.1: a tool YAML carries ONLY the tool-scoped contributions
+		// (renderer + actions). Pack-scoped declarations (panels/entrypoints/routes/
+		// stores) moved off tools to their own pack-level sites and reach the client
+		// through /api/ext/contributions, NOT /api/tools — so nothing else is emitted here.
 		grantPolicy: data.grantPolicy,
 		params: Array.isArray(data.params)
 			? data.params.filter((p: unknown): p is string => typeof p === "string")

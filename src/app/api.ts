@@ -2076,25 +2076,71 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
-	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive). */
-	storeIds?: string[];
-	/** Optional `panels:` the tool contributes (Slice B4, additive). The ESM
-	 *  `entry` path stays server-side; the client addresses panels by `id`. */
-	panels?: { id: string; title?: string }[];
-	/** Optional declared route names (from `routes.names`); the pack-level RouteRegistry
-	 *  indexes a pack's routes by these (Slice B3). */
-	routeNames?: string[];
-	/** Optional typed `entrypoints:` the tool contributes (Slice C1); consumed by the
-	 *  client `pack-entrypoints.ts` registry (launcher surfaces + deep-link routes). */
-	entrypoints?: Array<{
-		id: string;
-		kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
-		label?: string;
-		routeId?: string;
-		target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
-		paramKeys?: string[];
-	}>;
+	/** Structural `packId` of the winning pack that contributed this tool (pack
+	 *  schema V1 — present only for `rendererKind:"pack"` tools). The client threads
+	 *  it into the tool renderer's host so `host.ui.openPanel({panelId})` resolves
+	 *  the panel within the renderer's OWN pack, never a global panel-id search that
+	 *  would collide when another installed pack shares the panel id. */
+	packId?: string;
 	grantPolicy?: string;
+}
+
+// ============================================================================
+// PACK-SCOPED CONTRIBUTIONS (pack schema V1 — design pack-schema-v1-rationalisation.md §6.4)
+//
+// Panels / entrypoints / routes are PACK-scoped (no longer anchored to a carrier
+// tool). They are served by GET /api/ext/contributions?projectId=, ONE row per
+// installed + active pack (after the winning-pack collapse), with empty arrays
+// when a pack declares none. Activation filtering is applied server-side
+// (disabled entrypoints omitted; panels/routes always present when the pack is
+// installed + active). The client registries (pack-panels / pack-entrypoints)
+// reconcile from THIS endpoint, not /api/tools.
+// ============================================================================
+
+/** One pack-contributed panel (id + optional display title; the ESM `entry`
+ *  path stays server-side — the client addresses panels by `{packId, panelId}`). */
+export interface PackPanelWire {
+	id: string;
+	title?: string;
+}
+
+/** One pack-contributed entrypoint. `listName` is the `contents.entrypoints[]`
+ *  basename — the SINGLE activation toggle key mapping onto both the launcher id
+ *  and (for `kind:"route"`) the deep-link routeId. */
+export interface PackEntrypointWire {
+	id: string;
+	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
+	label?: string;
+	routeId?: string;
+	target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+	paramKeys?: string[];
+	listName: string;
+}
+
+/** All pack-scoped contributions for ONE installed + active pack (§6.4). */
+export interface PackContributionsWire {
+	packId: string;
+	packName: string;
+	panels: PackPanelWire[];
+	entrypoints: PackEntrypointWire[];
+	routeNames: string[];
+}
+
+/** Fetch the project-scoped pack-contribution metadata (§6.4). Returns one row
+ *  per installed + active pack (empty arrays when it declares no
+ *  panels/entrypoints/routes), so the client reconcile is deterministic
+ *  (reconcile-on-uninstall keys off a row disappearing, not becoming empty). */
+export async function fetchContributions(projectId?: string): Promise<PackContributionsWire[]> {
+	try {
+		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+		const res = await gatewayFetch(`/api/ext/contributions${qs}`);
+		if (!res.ok) throw await errorFromResponse(res, `Failed to fetch contributions: ${res.status}`);
+		const data = await res.json();
+		return Array.isArray(data?.packs) ? (data.packs as PackContributionsWire[]) : [];
+	} catch (err) {
+		console.error("[pack-api] fetchContributions failed:", err);
+		return [];
+	}
 }
 
 export async function fetchTools(projectId?: string): Promise<ToolInfo[]> {
@@ -2590,4 +2636,49 @@ export function setPackOrder(opts: { scope: MarketScope; projectId?: string; ord
 export function getPackConflicts(projectId?: string): Promise<MarketResult<{ conflicts: ConflictWire[] }>> {
 	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 	return marketFetch(`/api/packs/conflicts${qs}`);
+}
+
+// ============================================================================
+// PACK ACTIVATION (pack schema V1 — design pack-schema-v1-rationalisation.md §6.7/§9)
+//
+// Per-scope/project activation overrides for USER-FACING entities only:
+// roles, tools, skills, entrypoints (entrypoints keyed by `listName`). Default
+// (absent) = all enabled. The GET/PUT `catalogue` is the UNFILTERED authoritative
+// source for the Market UI toggles — read straight from the installed pack
+// manifest's `contents`, NOT from the runtime-filtered /api/tools or
+// /api/ext/contributions — so a disabled entity stays visible + re-enableable.
+// ============================================================================
+
+/** Disabled entity refs by kind for one pack/scope. Entrypoints keyed by `listName`. */
+export interface DisabledRefs {
+	roles?: string[];
+	tools?: string[];
+	skills?: string[];
+	entrypoints?: string[];
+}
+
+/** The UNFILTERED catalogue of toggleable entities a pack DECLARES (§6.7). */
+export interface PackActivationCatalogue {
+	roles: string[];
+	tools: string[];
+	skills: string[];
+	entrypoints: Array<{ listName: string; label?: string }>;
+}
+
+/** GET/PUT /api/marketplace/pack-activation response (§6.7). */
+export interface PackActivationResponse {
+	scope: MarketScope;
+	packName: string;
+	catalogue: PackActivationCatalogue;
+	disabled: DisabledRefs;
+}
+
+export function getPackActivation(scope: MarketScope, packName: string, projectId?: string): Promise<MarketResult<PackActivationResponse>> {
+	const params = new URLSearchParams({ scope, packName });
+	if (projectId) params.set("projectId", projectId);
+	return marketFetch(`/api/marketplace/pack-activation?${params}`);
+}
+
+export function setPackActivation(opts: { scope: MarketScope; projectId?: string; packName: string; disabled: DisabledRefs }): Promise<MarketResult<PackActivationResponse>> {
+	return marketFetch("/api/marketplace/pack-activation", jsonInit("PUT", opts));
 }

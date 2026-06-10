@@ -122,6 +122,16 @@ contents:
   skills: [lit-review]
 ```
 
+> **Pack-schema V1 addition.** `contents` also accepts an optional **`entrypoints: string[]`**
+> key (basenames of `entrypoints/<name>.yaml` files), and `pack.yaml` accepts an optional
+> top-level **`routes: { module, names }`** block. Both belong to the
+> [Extension Host](extension-host-authoring.md); they extend (do not replace) the resolver
+> schema below. Extension-Host **panels** are auto-discovered from `panels/*.yaml` and are not
+> listed in `contents`; **stores** are implicit (no key); there is **no `permissions` key**.
+> The authoritative schema is
+> [pack-schema-v1-rationalisation.md](pack-schema-v1-rationalisation.md). The
+> roles/tools/skills resolver semantics in this doc are unchanged.
+
 TypeScript shape (parser output):
 
 ```ts
@@ -131,19 +141,22 @@ export interface PackManifest {
   version: string;
   author?: string;
   homepage?: string;
-  // REQUIRED object; all three array keys REQUIRED but MAY be empty.
+  // REQUIRED object; the roles/tools/skills array keys REQUIRED but MAY be empty.
   // NO `mcp` key in a publishable manifest — packs may NOT ship/install MCP
   // configs (goal MVP boundary). `mcp` exists only as a reserved code-level
   // EntityType (§2.2) for the future loader seam, never in a published pack.yaml.
   contents: {
     roles: string[];
-    tools: string[];   // tool group dir names
+    tools: string[];          // tool group dir names
     skills: string[];
+    entrypoints?: string[];   // V1: Extension-Host entrypoints/<name>.yaml basenames
   };
+  // V1: optional Extension-Host pack-level routes (see pack-schema-v1-rationalisation.md).
+  routes?: { module?: string; names?: string[] };
 }
 ```
 
-Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name; reject path separators, `..`, leading dot — reuse `isSafeRelPath`-style guarding). `description` and `version` non-empty. `contents` REQUIRED with all three array keys present (each may be empty). A `contents.mcp` key in a published manifest is **rejected** in MVP (MCP installs out of scope). Other unknown top-level keys ignored (forward-compat). A pack whose `pack.yaml` is missing or fails validation is **skipped with a warning**, not fatal.
+Validation: `name` must match `/^[a-z0-9][a-z0-9-]*$/` (used as a directory name; reject path separators, `..`, leading dot — reuse `isSafeRelPath`-style guarding). `description` and `version` non-empty. `contents` REQUIRED with the `roles`/`tools`/`skills` array keys present (each may be empty); `contents.entrypoints` and the top-level `routes:` block are optional (V1). A `contents.mcp` key in a published manifest is **rejected** in MVP (MCP installs out of scope). Other unknown top-level keys ignored (forward-compat). A pack whose `pack.yaml` is missing or fails validation is **skipped with a warning**, not fatal.
 
 ### 1.5 `.pack-meta.yaml` schema
 

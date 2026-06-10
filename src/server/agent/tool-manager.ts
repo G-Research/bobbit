@@ -4,7 +4,7 @@ import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
 import { profile } from "./profiling.js";
-import { parseContributions, computeRendererKind, type ToolContributions, type PanelContribution, type EntrypointContribution } from "./tool-contributions.js";
+import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,6 +14,20 @@ export interface ToolProvider {
 	extension?: string;  // for bobbit-extension
 	server?: string;     // for mcp
 	mcpTool?: string;    // for mcp
+}
+
+/**
+ * One installed market-pack `tools/` root, carrying the pack-activation
+ * disabled-tool-name list for that pack at the resolving scope (pack-schema-v1
+ * §7). Runtime tool resolution (renderer GET, action POST, surface-token mint,
+ * prompt docs, `/api/tools`) drops disabled pack tool names so it matches the
+ * ConfigCascade listing instead of split-braining — a disabled high-priority
+ * pack tool stops resolving and a lower-priority same-name tool reappears.
+ * `disabledTools` is keyed by the SAME `pack_activation` store the cascade reads.
+ */
+export interface MarketToolRoot {
+	dir: string;
+	disabledTools?: string[];
 }
 
 /** Base tool definition loaded from YAML */
@@ -55,18 +69,6 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
-	/** Optional advisory `stores:` ids the tool declares (Slice B1, additive wire field). */
-	storeIds?: string[];
-	/** Optional `panels:` the tool contributes (Slice B4, additive wire field). The
-	 *  `entry` path stays server-side; the client addresses panels by `id`. */
-	panels?: { id: string; title?: string }[];
-	/** Optional declared route names (from `routes.names`) the pack-level RouteRegistry
-	 *  indexes by (Slice B3, additive wire field). */
-	routeNames?: string[];
-	/** Optional typed `entrypoints:` the tool contributes (Slice C1, additive wire
-	 *  field). Consumed by the client `pack-entrypoints.ts` registry (launchers +
-	 *  deep-link routes). */
-	entrypoints?: EntrypointContribution[];
 	/** Grant policy from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
 	/** Optional positional parameter names (trailing `?` marks optional). */
@@ -76,17 +78,9 @@ export interface ToolInfo {
 /** Map the extension-host contribution fields from a scanned BaseToolInfo onto the
  *  wire ToolInfo (design §2.5). Optional fields only — additive, never reorders or
  *  changes existing values, preserving the `buildPackList` byte-identical invariant. */
-function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames" | "storeIds" | "panels" | "routeNames" | "entrypoints"> {
+function contributionFields(base: BaseToolInfo): Pick<ToolInfo, "rendererKind" | "hasActions" | "actionNames"> {
 	const c = base.contributions;
 	return {
-		storeIds: c.stores?.map((s) => s.id),
-		// Slice C1 — expose the typed entrypoints for the client registry.
-		entrypoints: c.entrypoints,
-		// Slice B4 — expose declared panels (id + title only; the ESM `entry` path
-		// stays server-side, served by the bearer-only panel endpoint).
-		panels: c.panels?.map((p) => (p.title !== undefined ? { id: p.id, title: p.title } : { id: p.id })),
-		// Slice B3 — expose declared route names for the pack-level RouteRegistry.
-		routeNames: c.routes?.names,
 		// Source the renderer from the PARSED/validated contribution — NOT the raw
 		// `base.renderer` — so an unsafe/dropped renderer path (e.g. `../evil.js`,
 		// rejected by parseContributions) yields rendererKind "builtin", never "pack".
@@ -277,17 +271,26 @@ export function __resetToolScanCache(): void {
  * (builtin → toolsDir) and is byte-identical to the legacy behavior — see
  * docs/design/pack-based-marketplace.md §3.2 / finding #1.
  */
-function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: string[] = []): BaseToolInfo[] {
+function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
 	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir, marketRoots));
 }
 
-function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: string[] = []): BaseToolInfo[] {
+function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
 	// Ordered layers, low→high priority. The builtin layer is lowest, the
 	// scope's own user `toolsDir` overlay is highest, market-pack tool roots sit
 	// in between (caller orders them server < global-user < project, design §3.2).
-	const layers: Array<{ dir: string; isBuiltin: boolean }> = [];
+	// Each market layer carries its pack-activation `disabledTools` set so a
+	// disabled pack tool is dropped at winner selection — mirroring the
+	// ConfigCascade activation filter so runtime and `/api/tools` never split-brain.
+	const layers: Array<{ dir: string; isBuiltin: boolean; disabledTools?: Set<string> }> = [];
 	if (builtinToolsDir) layers.push({ dir: builtinToolsDir, isBuiltin: true });
-	for (const r of marketRoots) layers.push({ dir: r, isBuiltin: false });
+	for (const r of marketRoots) {
+		layers.push({
+			dir: r.dir,
+			isBuiltin: false,
+			disabledTools: r.disabledTools && r.disabledTools.length > 0 ? new Set(r.disabledTools) : undefined,
+		});
+	}
 	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
 	const userIdx = layers.length - 1;
 
@@ -307,9 +310,16 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 	const order: string[] = [];
 	scanned.forEach((tools, idx) => {
 		const isBuiltin = layers[idx].isBuiltin;
+		const disabledTools = layers[idx].disabledTools;
 		for (const t of tools) {
 			// Builtin tool in a group the user owns ⇒ whole-group shadowed.
 			if (isBuiltin && t.groupDir && userGroups.has(t.groupDir)) continue;
+			// pack-schema-v1 §7: a market-pack tool disabled via pack_activation
+			// drops out, so a lower-priority same-name tool (an earlier market
+			// layer or the builtin) becomes the resolved winner — exactly as the
+			// ConfigCascade does for the `/api/tools` listing. Builtins are never
+			// toggleable (no disabledTools set), so they are unaffected.
+			if (disabledTools && disabledTools.has(t.name)) continue;
 			if (!winner.has(t.name)) order.push(t.name);
 			winner.set(t.name, t); // higher layer overwrites lower by name
 		}
@@ -350,22 +360,29 @@ export class ToolManager {
 	 * so resolution is byte-identical to the legacy two-layer cascade.
 	 * See docs/design/pack-based-marketplace.md §3.2 / finding #1.
 	 */
-	private marketRootsProvider?: () => string[];
+	private marketRootsProvider?: () => Array<string | MarketToolRoot>;
 
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
 	}
 
-	/** Late-bind the installed market-pack `tools/` roots provider (design §3.2). */
-	setMarketToolRootsProvider(provider: () => string[]): void {
+	/**
+	 * Late-bind the installed market-pack `tools/` roots provider (design §3.2).
+	 * A root may be a bare `dir` string (no activation filtering) or a
+	 * {@link MarketToolRoot} carrying the pack's `pack_activation` disabled-tool
+	 * list, so disabled pack tools drop out of runtime resolution consistently
+	 * with the cascade listing (pack-schema-v1 §7).
+	 */
+	setMarketToolRootsProvider(provider: () => Array<string | MarketToolRoot>): void {
 		this.marketRootsProvider = provider;
 	}
 
-	/** Resolve the current ordered market-pack `tools/` roots (low→high). */
-	private marketRoots(): string[] {
+	/** Resolve the current ordered market-pack `tools/` roots (low→high), normalized. */
+	private marketRoots(): MarketToolRoot[] {
 		try {
-			return this.marketRootsProvider?.() ?? [];
+			const raw = this.marketRootsProvider?.() ?? [];
+			return raw.map((r) => (typeof r === "string" ? { dir: r } : r));
 		} catch {
 			return [];
 		}
@@ -655,12 +672,6 @@ export class ToolManager {
 		actionsModule?: string;
 		rendererKind?: "builtin" | "pack";
 		actionNames?: string[];
-		/** Slice B4 — typed `panels:` (with the ESM `entry` path) so the panel GET
-		 *  endpoint can resolve a panelId to its on-disk module. */
-		panels?: PanelContribution[];
-		/** Slice B3 — routes module + declared names for the RouteDispatcher/RouteRegistry. */
-		routesModule?: string;
-		routeNames?: string[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
@@ -677,11 +688,6 @@ export class ToolManager {
 			actionsModule: c.actions?.module,
 			rendererKind: computeRendererKind(base.baseDir, c.renderer),
 			actionNames: c.actions?.names,
-			panels: c.panels,
-			// Slice B3: the routes module + declared names the RouteDispatcher loads
-			// and the RouteRegistry indexes by (default module "routes.js").
-			routesModule: c.routes?.module,
-			routeNames: c.routes?.names,
 		};
 	}
 

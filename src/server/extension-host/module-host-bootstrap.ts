@@ -162,8 +162,8 @@ const data = (workerData ?? {}) as BootstrapData;
 //   (3) Override `process.cwd()` to the session working dir (tool parity).
 const confinementReady: Promise<void> = (async () => {
 	applySessionDirWraps(data.workingDir, data.wallCapMs);
-	const { isPackPathWithinGroup } = await import("./path-guard.js");
-	configureConfinement({ packRoot: data.packRoot, isWithin: isPackPathWithinGroup });
+	const { isPackPathWithinRoot } = await import("./path-guard.js");
+	configureConfinement({ packRoot: data.packRoot, isWithin: isPackPathWithinRoot });
 	registerHooks({ resolve: confinementResolve });
 	setSessionCwd(data.workingDir);
 })();

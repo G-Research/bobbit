@@ -1,0 +1,9 @@
+id: pr-walkthrough.git-widget
+kind: git-widget-button
+label: PR Walkthrough
+# A git-widget-button LAUNCHER (the git status widget dropdown). Its selection
+# IS the user gesture; it navigates to the deep-link route.
+target:
+  route: pr-walkthrough
+  params:
+    jobId: job-litmus-1
