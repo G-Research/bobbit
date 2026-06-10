@@ -175,6 +175,19 @@
 	color: var(--chart-3);
 }
 
+.market-builtin-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	font-size: 10px;
+	font-weight: 500;
+	border-radius: 4px;
+	line-height: 1.4;
+	white-space: nowrap;
+	background: color-mix(in oklch, var(--primary) 14%, transparent);
+	color: var(--primary);
+}
+
 .market-corrupt,
 .market-conflict-icon {
 	display: inline-flex;
