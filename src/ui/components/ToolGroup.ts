@@ -27,7 +27,7 @@ const TOOL_ICONS: Record<string, any> = {
 	ls: ChevronRight,
 	find: FileText,
 	grep: FileText,
-	delegate: Bot,
+	team_delegate: Bot,
 };
 
 /** Human-readable past-tense verb + noun per tool */
@@ -39,7 +39,7 @@ const TOOL_LABELS: Record<string, { verb: string; noun: string; nounPlural: stri
 	ls: { verb: "Listed", noun: "directory", nounPlural: "directories" },
 	find: { verb: "Searched", noun: "pattern", nounPlural: "patterns" },
 	grep: { verb: "Searched", noun: "pattern", nounPlural: "patterns" },
-	delegate: { verb: "Delegated", noun: "task", nounPlural: "tasks" },
+	team_delegate: { verb: "Delegated", noun: "task", nounPlural: "tasks" },
 };
 
 /** Extract the most useful short label from a tool call's params */
@@ -56,7 +56,7 @@ function summarizeCall(toolName: string, args: Record<string, any>): string {
 			return args?.pattern ? `"${args.pattern}"` : "pattern";
 		case "find":
 			return args?.pattern || args?.path || "files";
-		case "delegate": {
+		case "team_delegate": {
 			const instr = args?.instructions || "";
 			return truncate(instr.split("\n")[0], 80);
 		}

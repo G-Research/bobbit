@@ -40,7 +40,7 @@ export function formatTimestamp(ts: number | string | undefined): string {
 const MIN_GROUP_SIZE = 2;
 
 /** Tool names eligible for grouping */
-const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "delegate"]);
+const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "team_delegate"]);
 
 /**
  * Persisted record of a user-typed slash-skill invocation. Mirrors the

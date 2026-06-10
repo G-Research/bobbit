@@ -315,7 +315,7 @@ test.describe("GET /api/tools", () => {
 		expect(names).toContain("read");
 		expect(names).toContain("write");
 		expect(names).toContain("bash");
-		expect(names).toContain("delegate");
+		expect(names).toContain("team_delegate");
 	});
 });
 

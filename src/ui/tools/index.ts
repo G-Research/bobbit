@@ -108,7 +108,11 @@ registerLazyToolRenderer("bash_bg", async () => {
 	const { BgProcessRenderer } = await import("./renderers/BgProcessRenderer.js");
 	return new BgProcessRenderer();
 });
-registerLazyToolRenderer("delegate", async () => {
+registerLazyToolRenderer("team_delegate", async () => {
+	const { DelegateRenderer } = await import("./renderers/DelegateRenderer.js");
+	return new DelegateRenderer();
+});
+registerLazyToolRenderer("team_wait", async () => {
 	const { DelegateRenderer } = await import("./renderers/DelegateRenderer.js");
 	return new DelegateRenderer();
 });
