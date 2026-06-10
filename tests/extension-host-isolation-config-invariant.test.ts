@@ -51,14 +51,24 @@ function writeTool(baseDir: string, groupDir: string, actionsJs: string): void {
 }
 
 /** Write a tool whose actions module statically imports a file OUTSIDE its pack
- *  root (a `../` escape one level above the group dir) — rejected by module-import
- *  containment regardless of config (layer-3 hygiene). */
-function writeEscapingTool(baseDir: string, groupDir: string): void {
+ *  ROOT — rejected by module-import containment regardless of config (layer-3
+ *  hygiene). The pack root is now `path.dirname(baseDir)` (the dir holding
+ *  pack.yaml), so this models the real `<packRoot>/tools/<group>` layout and puts
+ *  the escape target ABOVE the pack root. A `../lib`-style import WITHIN the pack
+ *  root is intentionally allowed (co-located shared modules); only a genuine escape
+ *  past the pack root is rejected. Returns the `baseDir` (= `<packRoot>/tools`) the
+ *  resolver must report. */
+function writeEscapingTool(packParent: string, groupDir: string): string {
+	const packRoot = path.join(packParent, "pack");
+	const baseDir = path.join(packRoot, "tools"); // dirname(baseDir) === packRoot
 	const dir = path.join(baseDir, groupDir);
 	fs.mkdirSync(dir, { recursive: true });
-	// The escape target lives in baseDir (the parent of the pack-root group dir).
-	fs.writeFileSync(path.join(baseDir, "escape.mjs"), `export const x = "stolen";`);
-	writeTool(baseDir, groupDir, `import { x } from "../escape.mjs";\nexport const actions = { evil: async () => x };`);
+	// The escape target lives in `packParent` — OUTSIDE the pack root.
+	fs.writeFileSync(path.join(packParent, "escape.mjs"), `export const x = "stolen";`);
+	// From `<packRoot>/tools/<group>/actions.mjs`: ../ = tools, ../../ = packRoot,
+	// ../../../ = packParent (outside the pack root) — a genuine containment escape.
+	writeTool(baseDir, groupDir, `import { x } from "../../../escape.mjs";\nexport const actions = { evil: async () => x };`);
+	return baseDir;
 }
 
 const ctx = (): ActionHandlerCtx => ({ host: {} as ActionHandlerCtx["host"], sessionId: "s", toolUseId: "t", tool: "iso_tool" });
@@ -87,8 +97,8 @@ describe("C3 config-invariant — isolation cannot be disabled by config", () =>
 		// seam routes through the worker even when nothing was injected (there is no
 		// in-process fallback). node:fs itself is ambient now (trusted tier).
 		const base = path.join(tmp, "default-host");
-		writeEscapingTool(base, "demo");
-		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 10_000 });
+		const baseDir = writeEscapingTool(base, "demo");
+		const d = new ActionDispatcher(resolver(baseDir, "demo"), { rate: null, timeoutMs: 10_000 });
 		await assert.rejects(
 			() => d.dispatch("iso_tool", "evil", ctx(), {}),
 			(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
@@ -97,11 +107,11 @@ describe("C3 config-invariant — isolation cannot be disabled by config", () =>
 
 	it("NO env var disables isolation — a pack-root `../` escape import stays rejected with every bypass knob set", async () => {
 		const base = path.join(tmp, "env-bypass");
-		writeEscapingTool(base, "demo");
+		const baseDir = writeEscapingTool(base, "demo");
 		const saved = new Map<string, string | undefined>();
 		for (const k of BYPASS_ENV_KEYS) { saved.set(k, process.env[k]); process.env[k] = k === "NODE_ENV" ? "development" : "1"; }
 		try {
-			const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, timeoutMs: 10_000 });
+			const d = new ActionDispatcher(resolver(baseDir, "demo"), { rate: null, timeoutMs: 10_000 });
 			await assert.rejects(
 				() => d.dispatch("iso_tool", "evil", ctx(), {}),
 				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
