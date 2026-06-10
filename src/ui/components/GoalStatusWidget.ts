@@ -27,20 +27,24 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
+import { AlertTriangle, CheckCircle2, Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 
-type GateStatus = "pending" | "passed" | "failed" | "running";
+type GateStatus = "pending" | "passed" | "failed" | "running" | "bypassed";
 
 interface GateSummary {
 	id: string;
 	name: string;
 	status: GateStatus;
 	latestPassedSignalId?: string;
+	/** Human justification recorded when a gate was bypassed (honesty system). */
+	whyBypassed?: string;
+	/** Free-text “who am I” label of whoever bypassed the gate. */
+	whoAmI?: string;
 }
 
 interface SignoffRequest {
@@ -71,6 +75,15 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _reviewLaunchErrors: Map<string, string> = new Map();
 	@state() private _resetLoading: Set<string> = new Set();
 	@state() private _resetErrors: Map<string, string> = new Map();
+	// Inline bypass form (human-only gate override). `_bypassing` holds the gate
+	// id whose form is open, or null. Mirrors the reset loading/error patterns.
+	@state() private _bypassing: string | null = null;
+	@state() private _bypassWhy = "";
+	@state() private _bypassWho = "";
+	@state() private _bypassLoading: Set<string> = new Set();
+	@state() private _bypassErrors: Map<string, string> = new Map();
+	@state() private _confirmCompletionLoading = false;
+	@state() private _confirmCompletionError = "";
 	@state() private _closing = false;
 
 	private _ws: WebSocket | null = null;
@@ -153,6 +166,13 @@ export class GoalStatusWidget extends LitElement {
 			this._reviewLaunchErrors = new Map();
 			this._resetLoading = new Set();
 			this._resetErrors = new Map();
+			this._bypassing = null;
+			this._bypassWhy = "";
+			this._bypassWho = "";
+			this._bypassLoading = new Set();
+			this._bypassErrors = new Map();
+			this._confirmCompletionLoading = false;
+			this._confirmCompletionError = "";
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -160,7 +180,7 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError")) {
 			this._syncDropdown();
 		}
 	}
@@ -236,13 +256,47 @@ export class GoalStatusWidget extends LitElement {
 			const status: GateStatus = obj.status === "passed" ? "passed"
 				: obj.status === "failed" ? "failed"
 				: obj.status === "running" ? "running"
+				: obj.status === "bypassed" ? "bypassed"
 				: "pending";
 			const latestPassedSignalId = typeof obj.latestPassedSignalId === "string"
 				? obj.latestPassedSignalId
 				: this._latestPassedSignalId(obj.signals);
-			out.push({ id, name, status, latestPassedSignalId });
+			let whyBypassed: string | undefined;
+			let whoAmI: string | undefined;
+			if (status === "bypassed") {
+				// Canonical top-level read-model fields (server §5), with a fallback
+				// to the latest synthetic bypass signal for robustness.
+				whyBypassed = typeof obj.whyBypassed === "string" ? obj.whyBypassed : undefined;
+				whoAmI = typeof obj.whoAmI === "string" ? obj.whoAmI : undefined;
+				if (whyBypassed === undefined || whoAmI === undefined) {
+					const fallback = this._latestBypassSignalMeta(obj.signals);
+					if (whyBypassed === undefined) whyBypassed = fallback?.whyBypassed;
+					if (whoAmI === undefined) whoAmI = fallback?.whoAmI;
+				}
+			}
+			out.push({ id, name, status, latestPassedSignalId, whyBypassed, whoAmI });
 		}
 		return out;
+	}
+
+	/** Fallback reader: pull why/who from the latest signal whose metadata
+	 *  marks it as a bypass audit signal (metadata.bypass === "true"). Used only
+	 *  when the canonical top-level read-model fields are absent. */
+	private _latestBypassSignalMeta(rawSignals: unknown): { whyBypassed?: string; whoAmI?: string } | undefined {
+		if (!Array.isArray(rawSignals)) return undefined;
+		for (let i = rawSignals.length - 1; i >= 0; i--) {
+			const signal = rawSignals[i];
+			if (!signal || typeof signal !== "object") continue;
+			const meta = (signal as Record<string, unknown>).metadata;
+			if (!meta || typeof meta !== "object") continue;
+			const m = meta as Record<string, unknown>;
+			if (m.bypass !== "true") continue;
+			return {
+				whyBypassed: typeof m.whyBypassed === "string" ? m.whyBypassed : undefined,
+				whoAmI: typeof m.whoAmI === "string" ? m.whoAmI : undefined,
+			};
+		}
+		return undefined;
 	}
 
 	private _latestPassedSignalId(rawSignals: unknown): string | undefined {
@@ -593,10 +647,89 @@ export class GoalStatusWidget extends LitElement {
 		return `Unable to reset gate (${resp.status})`;
 	}
 
+	// ── Bypass (human-only gate override) ─────────────────────────────
+
+	private _openBypassForm(gate: GateSummary): void {
+		const next = new Map(this._bypassErrors); next.delete(gate.id); this._bypassErrors = next;
+		this._bypassWhy = "";
+		this._bypassWho = "";
+		this._bypassing = gate.id;
+	}
+
+	private _cancelBypassForm(): void {
+		this._bypassing = null;
+		this._bypassWhy = "";
+		this._bypassWho = "";
+	}
+
+	private async _confirmBypass(gate: GateSummary): Promise<void> {
+		if (this._bypassLoading.has(gate.id)) return;
+		const whyBypassed = this._bypassWhy.trim();
+		const whoAmI = this._bypassWho.trim();
+		if (!whyBypassed || !whoAmI) return;
+		const loading = new Set(this._bypassLoading); loading.add(gate.id); this._bypassLoading = loading;
+		const errors = new Map(this._bypassErrors); errors.delete(gate.id); this._bypassErrors = errors;
+		try {
+			const resp = await this._fetch(`/api/goals/${encodeURIComponent(this.goalId)}/gates/${encodeURIComponent(gate.id)}/bypass`, {
+				method: "POST",
+				body: JSON.stringify({ whyBypassed, whoAmI, isInitiatedByHuman: true }),
+			});
+			if (!resp) throw new Error("Unable to bypass gate (network)");
+			if (!resp.ok) throw new Error(await this._bypassErrorMessage(resp));
+			this._bypassing = null;
+			this._bypassWhy = "";
+			this._bypassWho = "";
+			await Promise.all([this._refreshGates(), this._refreshActive()]);
+		} catch (err) {
+			const next = new Map(this._bypassErrors);
+			next.set(gate.id, err instanceof Error ? err.message : "Unable to bypass gate");
+			this._bypassErrors = next;
+		} finally {
+			const next = new Set(this._bypassLoading); next.delete(gate.id); this._bypassLoading = next;
+		}
+	}
+
+	private async _bypassErrorMessage(resp: Response): Promise<string> {
+		const data = await resp.json().catch(() => null);
+		if (typeof data?.error === "string" && data.error.trim()) return data.error;
+		return `Unable to bypass gate (${resp.status})`;
+	}
+
+	private async _confirmCompletion(): Promise<void> {
+		if (this._confirmCompletionLoading) return;
+		const bypassedCount = this._gates.filter(g => g.status === "bypassed").length;
+		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		this._dropdownEl?.classList.add("goal-status-confirming");
+		const confirmed = await confirmAction(
+			"Complete goal despite bypassed gate(s)?",
+			`${bypassedCount} gate(s) were forced past verification. Completing now records the goal as done with un-verified gates. This cannot be undone automatically.`,
+			"Complete",
+			true,
+		);
+		this._dropdownEl?.classList.remove("goal-status-confirming");
+		if (!confirmed) return;
+		this._confirmCompletionLoading = true;
+		this._confirmCompletionError = "";
+		try {
+			const { completeTeam } = await import("../../app/api.js");
+			const ok = await completeTeam(this.goalId, { confirmBypassedGates: true });
+			if (!ok) {
+				this._confirmCompletionError = "Unable to complete goal";
+				return;
+			}
+			await Promise.all([this._refreshGates(), this._refreshActive()]);
+		} catch (err) {
+			this._confirmCompletionError = err instanceof Error ? err.message : "Unable to complete goal";
+		} finally {
+			this._confirmCompletionLoading = false;
+		}
+	}
+
 	// ── Render ───────────────────────────────────────────────────────
 
 	private _renderDropdownContent(): TemplateResult {
 		const live = this._awaitingSignoffs;
+		const anyBypassed = this._gates.some(g => g.status === "bypassed");
 		return html`
 			<div class="flex items-center justify-between gap-2 mb-2 text-foreground font-medium text-sm">
 				<div class="flex items-center gap-1.5 min-w-0">
@@ -604,13 +737,25 @@ export class GoalStatusWidget extends LitElement {
 					<span>Goal status</span>
 					${renderGateProgressBadge(this.goalId)}
 				</div>
-				<button
-					class="goal-widget-button goal-widget-button-neutral shrink-0"
-					@click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); setHashRoute("goal-dashboard", this.goalId); }}
-					data-testid="goal-widget-dashboard-link"
-					title="Goal dashboard"
-				>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
+				<div class="flex items-center gap-1.5 shrink-0">
+					${anyBypassed ? html`
+						<button
+							class="goal-widget-button goal-widget-button-bypass"
+							?disabled=${this._confirmCompletionLoading}
+							@click=${(e: MouseEvent) => { e.stopPropagation(); void this._confirmCompletion(); }}
+							data-testid="goal-widget-confirm-completion"
+							title="Confirm completion despite bypassed gate(s)"
+						>${this._confirmCompletionLoading ? icon(Loader2, "xs", "animate-spin") : icon(CheckCircle2, "xs")}<span>${this._confirmCompletionLoading ? "Completing…" : "Confirm completion"}</span></button>
+					` : nothing}
+					<button
+						class="goal-widget-button goal-widget-button-neutral"
+						@click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); setHashRoute("goal-dashboard", this.goalId); }}
+						data-testid="goal-widget-dashboard-link"
+						title="Goal dashboard"
+					>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
+				</div>
 			</div>
+			${anyBypassed && this._confirmCompletionError ? html`<div class="goal-widget-gate-error mb-2" data-testid="goal-widget-confirm-completion-error">${this._confirmCompletionError}</div>` : nothing}
 
 			<div class="border-t border-border mb-2"></div>
 
@@ -634,12 +779,18 @@ export class GoalStatusWidget extends LitElement {
 	private _renderGateRow(gate: GateSummary): TemplateResult {
 		const resetting = this._resetLoading.has(gate.id);
 		const resetError = this._resetErrors.get(gate.id);
+		const bypassError = this._bypassErrors.get(gate.id);
 		const effectiveStatus: GateStatus = this._activeGateIds.has(gate.id) ? "running" : gate.status;
+		const canBypass = effectiveStatus === "pending" || effectiveStatus === "failed";
+		const formOpen = this._bypassing === gate.id;
+		const rowTitle = effectiveStatus === "bypassed" && (gate.whoAmI || gate.whyBypassed)
+			? `Bypassed by ${gate.whoAmI || "unknown"}${gate.whyBypassed ? `: ${gate.whyBypassed}` : ""}`
+			: gate.name;
 		return html`
 			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${effectiveStatus}>
 				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
 					${this._renderGateStatusIndicator(gate)}
-					<span class="truncate text-foreground" title=${gate.name}>${gate.name}</span>
+					<span class="truncate text-foreground" title=${rowTitle}>${gate.name}</span>
 				</div>
 				${effectiveStatus === "passed" ? html`
 					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
@@ -658,7 +809,69 @@ export class GoalStatusWidget extends LitElement {
 						>${resetting ? icon(Loader2, "xs", "animate-spin") : icon(RotateCcw, "xs")}<span>${resetting ? "Resetting…" : "Reset"}</span></button>
 					</div>
 				` : nothing}
+				${canBypass && !formOpen ? html`
+					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
+						<button
+							type="button"
+							class="goal-widget-button goal-widget-button-bypass goal-widget-gate-action"
+							@click=${(e: MouseEvent) => { e.stopPropagation(); this._openBypassForm(gate); }}
+							data-testid="goal-widget-gate-bypass"
+							title="Force this gate past verification (human override)"
+						>${icon(AlertTriangle, "xs")}<span>Bypass</span></button>
+					</div>
+				` : nothing}
 				${resetError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-reset-error">${resetError}</div>` : nothing}
+			</div>
+			${effectiveStatus === "bypassed" && (gate.whoAmI || gate.whyBypassed) ? html`
+				<div class="goal-widget-bypass-caption" data-testid="goal-widget-gate-bypass-info" title=${rowTitle}>
+					Bypassed${gate.whoAmI ? html` by <span class="goal-widget-bypass-who">${gate.whoAmI}</span>` : nothing}${gate.whyBypassed ? html`: ${gate.whyBypassed}` : nothing}
+				</div>
+			` : nothing}
+			${formOpen ? this._renderBypassForm(gate) : nothing}
+			${bypassError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-bypass-error">${bypassError}</div>` : nothing}
+		`;
+	}
+
+	private _renderBypassForm(gate: GateSummary): TemplateResult {
+		const loading = this._bypassLoading.has(gate.id);
+		const canConfirm = !loading && this._bypassWhy.trim().length > 0 && this._bypassWho.trim().length > 0;
+		return html`
+			<div class="goal-widget-bypass-form" data-testid="goal-widget-bypass-form" @click=${(e: MouseEvent) => e.stopPropagation()}>
+				<div class="goal-widget-bypass-warning">${icon(AlertTriangle, "xs")}<span>Forcing this gate past verification is a human-only override. It will not be a clean pass.</span></div>
+				<label class="goal-widget-bypass-label">Why are you bypassing this gate?</label>
+				<textarea
+					class="goal-widget-bypass-input"
+					data-testid="goal-widget-bypass-why"
+					rows="3"
+					placeholder="Justification (recorded for audit)"
+					.value=${this._bypassWhy}
+					@input=${(e: Event) => { this._bypassWhy = (e.target as HTMLTextAreaElement).value; }}
+				></textarea>
+				<label class="goal-widget-bypass-label">Who are you?</label>
+				<input
+					class="goal-widget-bypass-input"
+					data-testid="goal-widget-bypass-who"
+					type="text"
+					placeholder="Your name / role"
+					.value=${this._bypassWho}
+					@input=${(e: Event) => { this._bypassWho = (e.target as HTMLInputElement).value; }}
+				/>
+				<div class="flex items-center justify-end gap-2 mt-1">
+					<button
+						type="button"
+						class="goal-widget-button goal-widget-button-neutral"
+						?disabled=${loading}
+						@click=${(e: MouseEvent) => { e.stopPropagation(); this._cancelBypassForm(); }}
+						data-testid="goal-widget-bypass-cancel"
+					>Cancel</button>
+					<button
+						type="button"
+						class="goal-widget-button goal-widget-button-bypass"
+						?disabled=${!canConfirm}
+						@click=${(e: MouseEvent) => { e.stopPropagation(); void this._confirmBypass(gate); }}
+						data-testid="goal-widget-bypass-confirm"
+					>${loading ? icon(Loader2, "xs", "animate-spin") : icon(AlertTriangle, "xs")}<span>${loading ? "Bypassing…" : "Confirm bypass"}</span></button>
+				</div>
 			</div>
 		`;
 	}
@@ -837,6 +1050,72 @@ export class GoalStatusWidget extends LitElement {
 				background: color-mix(in oklch, var(--negative, var(--destructive, #dc2626)) 10%, transparent);
 				border-color: color-mix(in oklch, var(--negative, var(--destructive, #dc2626)) 40%, var(--border));
 				color: var(--negative, var(--destructive, #dc2626));
+			}
+			.goal-widget-button-bypass {
+				color: var(--warning, var(--negative, var(--destructive, #dc2626)));
+				border-color: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 35%, var(--border));
+			}
+			.goal-widget-button-bypass:hover:not(:disabled) {
+				background: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 12%, transparent);
+				border-color: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 55%, var(--border));
+				color: var(--warning, var(--negative, var(--destructive, #dc2626)));
+			}
+			.goal-widget-bypass-caption {
+				font-size: 11px;
+				color: var(--muted-foreground);
+				padding: 0 0 2px 20px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.goal-widget-bypass-who {
+				color: var(--foreground);
+				font-weight: 600;
+			}
+			.goal-widget-bypass-form {
+				display: flex;
+				flex-direction: column;
+				gap: 4px;
+				padding: 8px;
+				margin: 2px 0 4px;
+				border: 1px solid color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 35%, var(--border));
+				border-radius: 6px;
+				background: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 6%, transparent);
+			}
+			.goal-widget-bypass-warning {
+				display: flex;
+				align-items: flex-start;
+				gap: 5px;
+				font-size: 11px;
+				color: var(--warning, var(--negative, var(--destructive, #dc2626)));
+				line-height: 1.3;
+			}
+			.goal-widget-bypass-warning svg {
+				width: 12px;
+				height: 12px;
+				flex-shrink: 0;
+				margin-top: 1px;
+			}
+			.goal-widget-bypass-label {
+				font-size: 11px;
+				font-weight: 500;
+				color: var(--muted-foreground);
+			}
+			.goal-widget-bypass-input {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 5px 7px;
+				border: 1px solid var(--border);
+				border-radius: 4px;
+				background: var(--background);
+				color: var(--foreground);
+				font-size: 12px;
+				font-family: inherit;
+				resize: vertical;
+			}
+			.goal-widget-bypass-input:focus {
+				outline: none;
+				border-color: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 55%, var(--border));
 			}
 			@keyframes goal-widget-running-dot-pulse {
 				0%, 100% { transform: scale(0.86); opacity: 0.55; box-shadow: 0 0 0 0 color-mix(in oklch, var(--info, #3b82f6) 36%, transparent); }
