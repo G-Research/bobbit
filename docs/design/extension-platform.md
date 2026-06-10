@@ -3,6 +3,13 @@
 Status: design / implementation blueprint. Each phase in §13 is written to convert 1:1 into a
 mission goal with acceptance criteria.
 
+> **Execution authority:** implement from
+> [extension-platform-implementation-plan.md](extension-platform-implementation-plan.md)
+> (goal map, owned files, RED→GREEN tests) — including its **§0.2 refinement** (new entity
+> types load via the pack-contributions path, NOT new `EntityLoader` entities; that
+> supersedes the §4 sketch below). Program-wide sequencing + master checklist:
+> [fable-program-execution-plan.md](fable-program-execution-plan.md).
+
 ---
 
 ## 1. Mission & principles

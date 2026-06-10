@@ -1,5 +1,9 @@
 # Extension Platform — Implementation Plan (hand-off)
 
+Status: ready for execution, not started. Workstream **EP** in
+[fable-program-execution-plan.md](fable-program-execution-plan.md) (program sequencing +
+master checklist; its §0-equivalent rules ARE this document's §0).
+
 Companion to [extension-platform.md](extension-platform.md) (the WHAT/WHY — read its §3–§12
 before implementing anything). This document is the HOW: a tree of goals, each independently
 mergeable and verifiable, written so an implementer agent **that has not seen any other goal**

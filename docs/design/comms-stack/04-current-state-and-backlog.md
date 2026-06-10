@@ -12,6 +12,11 @@
 > hand-off tasks** (each executable by an agent who sees only that task's text), grouped into
 > waves with acceptance gates.
 >
+> **Status:** backlog not started. Workstream **CS** in
+> [../fable-program-execution-plan.md](../fable-program-execution-plan.md) (program
+> sequencing + master checklist). Land CS tasks in the §7 merge-map order; `session-manager.ts`
+> is also touched by CE-G3 and EP — serialize per the execution plan's shared-seam table.
+>
 > **Method:** every claim was re-verified against the current tree by parallel adversarial
 > audits (file:line anchors below are current as of `6ec8c8f9`, not the drifted anchors in
 > docs 01–03). SDK ground truth was read from the installed `pi-coding-agent`/`pi-agent-core`

@@ -1,7 +1,9 @@
 # Token & Cost Efficiency — audit, findings, and remediation plan
 
 Status: **investigation complete, remediation not started** · Audited: 2026-06-10 against
-master @ `4e7fce1f` and live state on the primary dev machine.
+master @ `4e7fce1f` and live state on the primary dev machine. Workstream **CE** in
+[fable-program-execution-plan.md](fable-program-execution-plan.md) (program sequencing +
+master checklist).
 Companion docs: [extension-platform-implementation-plan.md](extension-platform-implementation-plan.md)
 (several goals here ride its pack surfaces), [comms-stack/04-current-state-and-backlog.md](comms-stack/04-current-state-and-backlog.md)
 (overlapping retry findings).

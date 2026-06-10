@@ -8,6 +8,13 @@
 > **Scope:** race conditions and redraw correctness in the sidebar's data flow; whether
 > goal/subgoal nesting is modelled and rendered optimally; reuse/composability defects.
 > Each backlog task (§4) is self-contained for hand-off to an implementer agent.
+>
+> **Status:** audit complete, backlog (T1–T9) not started. Workstream **SN** in
+> [fable-program-execution-plan.md](fable-program-execution-plan.md). ⚠️ Seam overlap with
+> the battery plan ([client-performance-battery.md](client-performance-battery.md)):
+> **T2/T3 and PB-FX5 both rewrite `api.ts` `refreshSessions`/`startSessionPolling`** — land
+> T2 (concurrency hardening) first, then FX5 (poll demotion) on top; **T5/T7 reshape the
+> sidebar render paths PB-FX7 throttles** — sequence per the execution plan, not ad hoc.
 
 ---
 
