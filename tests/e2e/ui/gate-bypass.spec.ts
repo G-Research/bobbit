@@ -270,7 +270,24 @@ test.describe("gate bypass (human-only override)", () => {
 			await expect.poll(async () => bypassedBadge(sidebarRow), { timeout: 10_000, message: "sidebar goal row should show a red (2/3)! badge" })
 				.toMatchObject({ text: "(2/3)!", color: RED_RGB });
 
-			// Persist across reload: bypassed state + red badge survive.
+			// The bypass badge keeps the live animations, just tinted red. Drive a
+			// verifying summary into the shared cache and confirm the numerator blinks
+			// (same gate-blink animation used for a clean verifying run) while staying
+			// red with the trailing `!`.
+			await page.evaluate((id) => {
+				const st = (window as any).bobbitState ?? (window as any).__bobbitState;
+				const prev = st.gateStatusCache.get(id) ?? {};
+				st.gateStatusCache.set(id, { ...prev, verifying: true, verifyingCount: 1 });
+				(window as any).__bobbitRenderApp?.();
+				window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
+			}, goalId);
+			const blink = pill.locator(".gate-blink").first();
+			await expect(blink, "verifying bypass badge should reuse the gate-blink animation").toBeVisible({ timeout: 5_000 });
+			await expect.poll(async () => bypassedBadge(pill), { timeout: 5_000, message: "verifying bypass badge should stay red with a trailing !" })
+				.toMatchObject({ text: "(3/3)!", color: RED_RGB });
+
+			// Persist across reload: bypassed state + red badge survive. (Reload
+			// refetches the mocked summary, which clears the synthetic verifying flag.)
 			await page.reload();
 			await openSession(page, sessionId);
 			const pillAfter = page.locator("[data-testid='goal-status-widget-pill']").first();

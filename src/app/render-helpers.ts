@@ -1205,44 +1205,48 @@ export function renderGateProgressBadge(goalId: string): TemplateResult | string
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
 	const bypassed = gs.bypassed ?? 0;
-	if (bypassed > 0) {
-		// A human forced ≥1 gate past verification. The numerator counts the
-		// bypassed gate(s) so a fully-resolved goal reads (N/N), but the whole
-		// badge turns red with a trailing `!` to make clear this is NOT a clean
-		// pass. Static (no wave/verify animation) by design.
-		const numerator = gs.passed + bypassed;
-		const bypassStyle = `font-size:0.75em;color:#dc2626;font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
-		const title = `${numerator} of ${gs.total} gates resolved — ${bypassed} bypassed (NOT a clean pass)`;
-		return html`<span class="shrink-0" style="${bypassStyle}" title="${title}">(${numerator}/${gs.total})!</span>`;
-	}
+	// A human bypass means ≥1 gate was forced past verification. The numerator
+	// counts bypassed gates as resolved (so a fully-resolved goal reads N/N), the
+	// badge gets a trailing `!`, and every state is tinted red to flag that this
+	// is NOT a clean pass. The wave/blink animations are preserved — only the
+	// colour changes — so a working/verifying team still reads as live.
+	const isBypass = bypassed > 0;
+	const RED = "#dc2626";
+	const suffix = isBypass ? "!" : "";
+
 	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !isChildSession(s));
 	const hasTeam = goalAgents.some(s => s.role === "team-lead" && s.status !== "terminated");
 	const anyAgentWorking = goalAgents.some(s => s.status === "streaming" || s.status === "busy" || s.isCompacting);
-	const allPassed = gs.passed === gs.total;
-	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : anyAgentWorking ? "#3b82f6" : "#7a8ea8";
+	const numerator = gs.passed + bypassed;
+	const allPassed = numerator === gs.total;
+	const color = isBypass ? RED : (!hasTeam ? "#6b7280" : allPassed ? "#22c55e" : anyAgentWorking ? "#3b82f6" : "#7a8ea8");
 	const baseStyle = `font-size:0.75em;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
+	const resolvedTitle = isBypass
+		? `${numerator} of ${gs.total} gates resolved — ${bypassed} bypassed (NOT a clean pass)`
+		: `${gs.passed} of ${gs.total} gates passed`;
 	if (gs.verifying && gs.verifyingCount > 0) {
-		// Verifying state is always blue — override the base color which may be muted when agents are idle.
+		// Verifying state is blue (red when a bypass is in play) — override the base
+		// colour which may be muted when agents are idle.
 		// Clamp the animated numerator because an already-passed gate can be re-signaled
 		// and running while the stored pass count is still true in server history.
-		const verifyStyle = `font-size:0.75em;color:#3b82f6;font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
-		const displayed = Math.min(gs.total, gs.passed + gs.verifyingCount);
-		return html`<span class="shrink-0" style="${verifyStyle}" title="${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})</span></span>`;
+		const verifyStyle = `font-size:0.75em;color:${isBypass ? RED : "#3b82f6"};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
+		const displayed = Math.min(gs.total, numerator + gs.verifyingCount);
+		const verifyTitle = isBypass
+			? `${numerator} of ${gs.total} gates resolved (${bypassed} bypassed) — verifying ${gs.verifyingCount}`
+			: `${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}`;
+		return html`<span class="shrink-0" style="${verifyStyle}" title="${verifyTitle}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})${suffix}</span></span>`;
 	}
-	if (!allPassed && hasTeam) {
-		// Wave animation only when agents are actively working or verifications are running
-		if (anyAgentWorking) {
-			const label = `(${gs.passed}/${gs.total})`;
-			const chars = label.split("");
-			const totalDur = 1.2;
-			const stagger = totalDur / chars.length;
-			return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">${chars.map((ch, i) =>
-				html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
-			)}</span>`;
-		}
-		return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
+	if (!allPassed && hasTeam && anyAgentWorking) {
+		// Wave animation only when agents are actively working.
+		const label = `(${numerator}/${gs.total})${suffix}`;
+		const chars = label.split("");
+		const totalDur = 1.2;
+		const stagger = totalDur / chars.length;
+		return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${resolvedTitle}">${chars.map((ch, i) =>
+			html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
+		)}</span>`;
 	}
-	return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
+	return html`<span class="shrink-0" style="${baseStyle}" title="${resolvedTitle}">(${numerator}/${gs.total})${suffix}</span>`;
 }
 
 /**
