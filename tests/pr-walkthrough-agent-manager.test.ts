@@ -1092,6 +1092,31 @@ describe("SessionManager.terminateSession cascade to pr-walkthrough children", (
 
 		assert.equal(store.get("prw-dormant")?.archived, true, "persisted-only pr-walkthrough child must be archived with its parent");
 	});
+
+	it("terminating a sandboxed pr-walkthrough child does NOT remove the shared parent worktree", async () => {
+		const store = new SessionStore(stateRoot);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+
+		const removed: string[] = [];
+		const sandbox = { removeWorktree: async (name: string) => { removed.push(name); } };
+		manager.sandboxManager = { get: () => sandbox };
+
+		// prw child is sandboxed and shares the parent's /workspace-wt/<name> cwd.
+		manager.sessions.set("prw-child", makeInfo(store, "prw-child", {
+			childKind: "pr-walkthrough",
+			parentSessionId: "parent",
+			sandboxed: true,
+			projectId: "project-1",
+			cwd: "/workspace-wt/shared-branch",
+		}));
+
+		await manager.terminateSession("prw-child");
+
+		assert.equal(manager.sessions.has("prw-child"), false, "prw child must still be terminated");
+		assert.deepEqual(removed, [], "terminating a prw child must NOT remove the parent's shared sandbox worktree");
+	});
 });
 
 describe("shouldReapWalkthroughChildOnBoot", () => {

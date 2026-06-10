@@ -5367,9 +5367,11 @@ export class SessionManager {
 		this.sessionSecretStore.remove(id);
 
 		// Clean up sandbox worktree inside the container.
-		// Skip for delegate sessions — they share the parent's worktree and must
-		// never remove it.  Only the owning (non-delegate) session should clean up.
-		if (session.sandboxed && !session.delegateOf && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+		// Skip for delegate sessions AND pr-walkthrough children — both share the
+		// parent's worktree and must never remove it. Only the owning session should
+		// clean up (cascade-terminating a prw child must not delete the launching
+		// session's still-active /workspace-wt/<name>).
+		if (session.sandboxed && !session.delegateOf && session.childKind !== "pr-walkthrough" && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
 			try {
 				const sandbox = this.sandboxManager.get(session.projectId);
 				if (sandbox) {
