@@ -137,9 +137,33 @@ actions:
 ```
 
 `parseContributions()` must parse **only** `renderer` + `actions` from a tool YAML. Drop
-`stores`/`panels`/`routes`/`entrypoints` parsing from the tool path entirely. A tool YAML carrying any of
-those keys: the keys are simply ignored (unknown keys are not fatal — keep the tolerant scan), but the
-**migrated packs must not ship them** and tests pin that the tool path no longer parses them.
+`stores`/`panels`/`routes`/`entrypoints` parsing from the tool path entirely.
+
+**The old per-tool pack-scoped keys are treated as if they never existed — NOT as a detected error.**
+The goal mandates no backwards compatibility, and the chosen failure mode is *deliberate silence*, not
+rejection. We do **not** want the cognitive/maintenance overhead of a dedicated old-schema detector that
+warns or throws when it spots `panels`/`routes`/`stores`/`entrypoints` on a tool YAML. There is no
+migration path, no deprecation period, and equally no special-case diagnostic: from the V1 parser's
+point of view those keys are simply not part of the tool schema, exactly like any other key it does not
+recognise. `parseContributions()` reads `renderer` + `actions` and ignores everything else.
+
+Consequences, stated plainly so implementers do not re-add detection "to be helpful":
+
+- A tool YAML carrying an old pack-scoped key parses to a `ToolContributions` with **no**
+  `panels`/`routes`/`entrypoints`/`stores` — those fields no longer exist on the type. No warning is
+  emitted specifically for them; no install fails because of them.
+- The **migrated shipped packs must not ship these keys** (they move to `panels/*.yaml`,
+  `entrypoints/*.yaml`, and `pack.yaml.routes`).
+- **Pin (server lane):** a test feeds a tool YAML carrying each old key and asserts the resulting
+  `ToolContributions` carries no `panels`/`routes`/`entrypoints`/`stores` — i.e. the tool path no longer
+  parses them. The test must NOT assert any old-schema-specific diagnostic, precisely because we want no
+  such code path to exist.
+
+> Rationale: the goal is to make the new schema match runtime scope, not to build a back-compat shim in
+> reverse (a "you used the old schema" linter is just back-compat awareness with extra steps). Pretending
+> the old schema never existed keeps the parser smaller and the mental model clean. Authors who copy an
+> old pack get panels/entrypoints/routes that don't appear — the authoring guide (§12 docs) documents the
+> new layout, which is where that learning happens, not a runtime warning.
 
 ### 1.4 Panel file `panels/<panel>.yaml`
 
@@ -505,10 +529,42 @@ export class PackContributionRegistry implements PackContributionResolver {
 The registry's pack enumeration reuses the **same** market-pack enumeration the tool cascade uses:
 `scopeMarketPackEntries(scope, base, packOrder)` (`pack-list.ts:123`), interleaved server <
 global-user < project, dedup-on-path (mirroring `marketToolRoots` in `server.ts:975`). For each
-`PackEntry` it calls `loadPackContributions(entry.path, entry.manifest)`. **Activation filtering**
-(§7) drops disabled entrypoints before they reach `list()`/`getEntrypoint()`; panels/routes are always
-present when the pack is installed + active. The registry caches per project and is dropped on
-`invalidate()`.
+`PackEntry` it calls `loadPackContributions(entry.path, entry.manifest)`. The registry caches per
+project and is dropped on `invalidate()`.
+
+#### 5.2.1 Winning-pack collapse BEFORE indexing (precedence invariant)
+
+`packId` is derived structurally from the pack name (`§4.2`/`pack-identity.ts:328`), so the **same pack
+name installed at two scopes** (e.g. global-user *and* project) yields two `PackEntry` rows with the
+**same `packId`**. The registry MUST collapse those to the single **winning** pack before it indexes any
+panels/entrypoints/routes — otherwise `getPack(projectId, packId)` is ambiguous, panels/entrypoints from
+a shadowed variant could leak, and two scope variants of the same pack would trip the duplicate-`routeId`
+conflict (§5.4) against *themselves*. Precedence must remain byte-identical to the tool cascade (a goal
+invariant: "scope order and `pack_order` resolution remain unchanged").
+
+The collapse rule, stated explicitly:
+
+1. Enumerate `PackEntry[]` low→high precedence exactly as the cascade does (server < global-user <
+   project, then `pack_order` within a scope), already deduped-on-path.
+2. **Reduce to one winning entry per `packId`**: walk low→high and keep the LAST (highest-precedence)
+   entry for each `packId`. This is the same "highest scope/order wins" rule the cascade applies to
+   roles/tools/skills, so a project-scope `artifacts` shadows a global-user `artifacts` and ONLY the
+   project variant's `panels/`, `entrypoints/`, and `pack.yaml.routes` are loaded.
+3. Load + index `loadPackContributions(entry.path, entry.manifest)` over the **winning set only**.
+4. **Activation filtering** (§7) is applied to that winning set: disabled entrypoints are dropped before
+   they reach `list()`/`getEntrypoint()`/the cross-pack routeId index; panels/routes are always present
+   when the (winning) pack is installed + active.
+5. **All hard-conflict detection (§5.4) runs over the winning active set only.** A shadowed lower-scope
+   variant can never conflict with its own winning variant, and a host-global `routeId` collision is
+   detected only between *distinct* winning packs.
+
+`getPack`/`getPanel`/`getEntrypoint`/`hasRoute`/`list` all read from this collapsed, filtered,
+per-project index. The `packId` lookup surface is therefore unambiguous by construction.
+
+**Pin (server lane):** the same pack name installed at global-user and project scope yields exactly ONE
+`getPack(packId)` result — the project (winning) variant — and its panels/entrypoints/routes are the
+project variant's; the shadowed variant contributes nothing and raises no duplicate-`routeId` conflict
+against the winner.
 
 ### 5.3 RouteRegistry rebuild
 
@@ -660,9 +716,12 @@ Notes:
   launcher id and the deep-link routeId.
 - `routeNames[]` is the allowlist (so a client could feature-detect route availability; primarily for
   completeness/tests).
-- Packs with no panels/entrypoints/routes still appear (empty arrays) when installed + active, so the
-  client can reconcile-on-uninstall. (Implementation may omit a pack with all-empty arrays; the client
-  reconcile handles both — but emitting the row is preferred for deterministic reconcile.)
+- **Every installed + active pack appears (with empty arrays when it has no panels/entrypoints/routes).**
+  This is the single frozen contract — there is no "implementation may omit" latitude. The server MUST
+  emit one `packs[]` row per installed active pack (after the winning-pack collapse of §5.2.1), even when
+  `panels`, `entrypoints`, and `routeNames` are all empty, so the client reconcile is deterministic
+  (reconcile-on-uninstall keys off the row disappearing, not off it becoming empty). Pinned by the
+  API/E2E tests (§11).
 
 ### 6.5 `POST /api/ext/surface-token` — tool OR pack ref
 
@@ -938,7 +997,8 @@ reload.
 |---|---|
 | manifest validation | `contents.entrypoints` accepted (string[]); `routes:{module,names}` accepted; `contents.mcp` still rejected; no `stores`/`permissions` schema |
 | pack-contribution parsing | `panels/*.yaml` + `entrypoints/*.yaml` (single-file) + `pack.yaml.routes` parse to the §5.1 shapes; malformed file warned + dropped; `listName` carried |
-| tool-contribution parsing | tool YAML parses ONLY `renderer`+`actions`; `panels`/`routes`/`entrypoints`/`stores` keys on a tool YAML are ignored (not parsed into contributions) |
+| tool-contribution parsing | tool YAML parses ONLY `renderer`+`actions`; `panels`/`routes`/`entrypoints`/`stores` keys on a tool YAML are ignored (not parsed into contributions). The test asserts ONLY non-registration — NOT any old-schema-specific diagnostic, since the old schema is treated as if it never existed (§1.3) |
+| registry precedence collapse (§5.2.1) | same pack name installed at global-user + project scope yields exactly ONE `getPack(packId)` (the project/winning variant); shadowed variant contributes nothing and raises no self-conflict |
 | path containment to pack root | `renderer: ../../lib/x.js`, `entry: ../lib/x.js`, `routes.module: lib/x.mjs` resolve + pass `isPackPathWithinRoot`; an escaping path is rejected |
 | registry conflict ×4 | dup route name in pack; dup global routeId; dup panel id in pack; dup entrypoint id in pack — each rejected |
 | activation filtering | disabled tool/role/skill dropped from resolved list (shadow reappears); disabled entrypoint omitted from registry/`/api/ext/contributions`; panel/route stay present |
