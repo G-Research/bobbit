@@ -28,6 +28,28 @@ export function isValidPackName(name: unknown): name is string {
 	);
 }
 
+/**
+ * Safe-basename guard for `contents.entrypoints[]` entries (pack-schema-v1 §1.2).
+ * Each entry is the basename of an `entrypoints/<name>.yaml` file and is later
+ * `path.join`ed into the pack's `entrypoints/` dir, so it MUST NOT carry path
+ * structure. Reject anything that is empty, contains a path separator, a `..`
+ * segment, a null byte, or is absolute / Windows drive-absolute. The strict
+ * charset (`/^[A-Za-z0-9._-]+$/`) already excludes separators, `:` and NUL, but
+ * the explicit `..` check is kept for clarity and defense-in-depth.
+ */
+const SAFE_BASENAME_RE = /^[A-Za-z0-9._-]+$/;
+export function isSafeBasename(name: unknown): name is string {
+	return (
+		typeof name === "string" &&
+		name.length > 0 &&
+		!name.includes("\0") &&
+		!name.includes("/") &&
+		!name.includes("\\") &&
+		!name.includes("..") &&
+		SAFE_BASENAME_RE.test(name)
+	);
+}
+
 function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
@@ -87,6 +109,16 @@ export function validateManifest(
 	if (c.entrypoints !== undefined) {
 		const parsed = asStringArray(c.entrypoints);
 		if (parsed === null) return fail("pack.yaml: contents.entrypoints must be an array of strings");
+		// Path-traversal guard: each entry is a file basename joined into
+		// entrypoints/<name>.yaml — reject separators, `..`, absolute/drive forms.
+		for (const e of parsed) {
+			if (!isSafeBasename(e)) {
+				return fail(
+					`pack.yaml: contents.entrypoints entry ${JSON.stringify(e)} is not a safe basename ` +
+						`(must match /^[A-Za-z0-9._-]+$/ with no path separators or ".." segments)`,
+				);
+			}
+		}
 		entrypoints = parsed;
 	}
 

@@ -27,6 +27,8 @@ import path from "node:path";
 import { parse } from "yaml";
 import type { PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
+import { isSafeBasename } from "./pack-manifest.js";
+import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -177,11 +179,24 @@ function loadEntrypoints(packRoot: string, manifest: PackManifest): EntrypointCo
 	const seenId = new Set<string>();
 	for (const listName of listNames) {
 		if (typeof listName !== "string" || listName.length === 0) continue;
+		// Defense-in-depth (validateManifest is the primary guard): a listName must
+		// be a safe file basename — never path structure — before it is joined into
+		// the entrypoints/ dir. Drop-with-warning keeps the tolerant-loader contract.
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] entrypoint listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
 		// Resolve the file; tolerate either .yaml or .yml.
 		let sourceFile = path.join(dir, `${listName}.yaml`);
 		if (!fs.existsSync(sourceFile)) {
 			const alt = path.join(dir, `${listName}.yml`);
 			if (fs.existsSync(alt)) sourceFile = alt;
+		}
+		// Assert the resolved file stays within entrypoints/ (realpath-aware) — no
+		// read outside the dir even if the basename guard were ever bypassed.
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] entrypoint '${listName}' resolves outside entrypoints/ (${sourceFile}); skipping`);
+			continue;
 		}
 		let data: unknown;
 		try {

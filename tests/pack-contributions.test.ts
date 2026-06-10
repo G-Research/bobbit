@@ -58,6 +58,20 @@ describe("validateManifest (§1.2)", () => {
 	it("rejects a non-string-array contents.entrypoints", () => {
 		assert.equal(validateManifest({ ...ok, contents: { ...ok.contents, entrypoints: [1, 2] } }), null);
 	});
+	it("rejects unsafe (path-traversal) contents.entrypoints basenames", () => {
+		for (const bad of ["../outside", "..", "a/b", "a\\b", "/abs", "C:\\drive", "with\0null", ""]) {
+			const problems: string[] = [];
+			assert.equal(
+				validateManifest({ ...ok, contents: { ...ok.contents, entrypoints: [bad] } }, problems),
+				null,
+				`expected ${JSON.stringify(bad)} to be rejected`,
+			);
+			assert.match(problems.join("; "), /entrypoints entry/);
+		}
+		// A valid basename still passes.
+		const good = validateManifest({ ...ok, contents: { ...ok.contents, entrypoints: ["artifacts-deeplink"] } });
+		assert.deepEqual(good!.contents.entrypoints, ["artifacts-deeplink"]);
+	});
 	it("accepts top-level routes:{module,names}", () => {
 		const m = validateManifest({ ...ok, routes: { module: "lib/routes.mjs", names: ["bundle", "publish"] } });
 		assert.deepEqual(m!.routes, { module: "lib/routes.mjs", names: ["bundle", "publish"] });
@@ -123,6 +137,21 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		const root = packRoot("s1c", "p");
 		const escaping = path.resolve(root, "..", "..", "evil.js");
 		assert.equal(isPackPathWithinRoot(root, escaping), false);
+	});
+
+	it("an unsafe entrypoint listName does not read/register a file outside entrypoints/", () => {
+		const root = packRoot("s1e", "evil");
+		w(path.join(root, "pack.yaml"), "name: evil\n");
+		// A well-formed entrypoint YAML planted OUTSIDE entrypoints/ (in the pack
+		// root) that a `../outside`-style listName would otherwise reach.
+		w(path.join(root, "outside.yaml"), "id: evil.escaped\nkind: composer-slash\nlabel: Escaped\ntarget:\n  panelId: x\n");
+		// A legitimate, listed entrypoint to prove the safe path still loads.
+		w(path.join(root, "entrypoints", "ok.yaml"), "id: evil.ok\nkind: composer-slash\nlabel: OK\ntarget:\n  panelId: x\n");
+		// Bypass validateManifest (the primary guard) to exercise the loader's
+		// defense-in-depth directly with an unsafe listName.
+		const m = manifest("evil", { entrypoints: ["../outside", "ok"] });
+		const c = loadPackContributions(root, m);
+		assert.deepEqual(c.entrypoints.map((e) => e.id), ["evil.ok"]);
 	});
 
 	it("a no-tools pack still loads panels + entrypoints + routes", () => {
