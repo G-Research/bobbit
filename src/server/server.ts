@@ -8971,7 +8971,7 @@ async function handleApiRoute(
 				// Session not in memory — check if it's a dormant store entry (e.g. completed delegate)
 				if (purge) {
 					// Archive it first so purge can find it, then purge
-					sessionManager.storeArchive(id);
+					await sessionManager.storeArchive(id);
 					const purged = await sessionManager.purgeArchivedSession(id);
 					if (purged) {
 						json({ ok: true });
@@ -9395,11 +9395,21 @@ async function handleApiRoute(
 	}
 
 	// ── SUB-GOAL B SEAM (orchestration-core §6.1) ──────────────────────────────
-	// Sub-goal B appends an OPTIONAL `GET /api/sessions/:id/children-count` route
-	// HERE so the non-goal archive confirmation modal can enumerate the child
-	// agents that will be cascade-archived. Intentionally absent in sub-goal A;
-	// this comment marks the disjoint region B edits (no overlap with C's flag
-	// flip elsewhere). Do not remove.
+	// GET /api/sessions/:id/children-count — live child agents that would be
+	// cascade-archived if this (non-goal) session is archived. Enumerated with
+	// the SAME predicate `cascadeReapOwner` uses (delegateOf===id OR
+	// childKind+parentSessionId===id) over live sessions, so the non-goal archive
+	// confirmation modal can name the children before the user confirms. The
+	// goal-archival path enumerates affected sessions separately and is untouched.
+	const childrenCountMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/children-count$/);
+	if (childrenCountMatch && req.method === "GET") {
+		const id = decodeURIComponent(childrenCountMatch[1]);
+		const children = sessionManager.listSessions()
+			.filter(s => s.id !== id && (s.delegateOf === id || (!!s.childKind && s.parentSessionId === id)))
+			.map(s => ({ id: s.id, title: s.title, childKind: s.childKind }));
+		json({ count: children.length, children });
+		return;
+	}
 	// ───────────────────────────────────────────────────────────────────────────
 
 	// POST /api/sessions/:archivedId/continue — Continue-Archived (lossless)
@@ -9707,7 +9717,7 @@ async function handleApiRoute(
 				try { await sessionManager.terminateSession(id); } catch {}
 			} else {
 				// Dormant/store-only session — archive directly in the store
-				sessionManager.storeArchive(id);
+				await sessionManager.storeArchive(id);
 			}
 		}
 

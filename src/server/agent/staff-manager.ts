@@ -146,10 +146,10 @@ export class StaffManager {
 		if (oldSessionId && sessionManager) {
 			try {
 				const terminated = await sessionManager.terminateSession(oldSessionId);
-				if (!terminated) sessionManager.storeArchive(oldSessionId);
+				if (!terminated) await sessionManager.storeArchive(oldSessionId);
 			} catch (err) {
 				console.warn(`[staff-manager] Failed to terminate old session ${oldSessionId} while re-assigning staff ${staffId}:`, err);
-				try { sessionManager.storeArchive(oldSessionId); } catch { /* best-effort */ }
+				try { await sessionManager.storeArchive(oldSessionId); } catch { /* best-effort */ }
 			}
 		}
 

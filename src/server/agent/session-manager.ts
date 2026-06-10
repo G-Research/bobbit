@@ -818,7 +818,7 @@ export class SessionManager {
 							console.warn(`[orphan-cleanup] WARN: would-archive ${session.id} but worktree+recent-transcript present — leaving live`);
 						} else {
 							console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
-							try { this.getSessionStore(session.projectId).archive(session.id); } catch { /* best-effort */ }
+							try { await this.archiveWithCascade(session.id, this.getSessionStore(session.projectId)); } catch { /* best-effort */ }
 							broadcastStatus(session, "terminated");
 						}
 						continue;
@@ -5371,38 +5371,61 @@ export class SessionManager {
 	}
 
 	/**
-	 * Cascade-reap an owner's child agents (OrchestrationCore §6 seam).
+	 * Cascade-reap an owner's child agents (OrchestrationCore §6).
 	 *
-	 * SUB-GOAL A: this is a behaviour-preserving extraction of the cascade body
-	 * that previously lived inline at the top of `terminateSession`. It still
-	 * only fires from the terminate path (archival flows through terminate).
-	 * SUB-GOAL B fills in the generalized runtime hook so a child never outlives
-	 * its parent's archival on ALL archive entry points (not just terminate),
-	 * generalized to every child kind. The seam (method + terminate call site)
-	 * exists now so B only has to widen it.
+	 * Generalized over EVERY child kind (not just pr-walkthrough): a child is any
+	 * session with `delegateOf === id`, OR (`childKind` set AND
+	 * `parentSessionId === id`). Live children are terminate+archived; dormant
+	 * (persisted-but-not-in-memory) children are archived directly. This is the
+	 * single hook that guarantees a live child never outlives its parent's
+	 * archival — it runs from `terminateSession` AND from the runtime archive
+	 * seam `archiveWithCascade`, so the cascade fires even when the parent is
+	 * dormant/not-live or was archived while the server was down. The boot-reap
+	 * (`shouldReapChildOnBoot`) remains as defense-in-depth.
 	 */
 	private async cascadeReapOwner(id: string): Promise<void> {
-		// Cascade: terminate all delegate (child) sessions first. PR-walkthrough
-		// children are linked via parentSessionId/childKind (not delegateOf), so they
-		// must be cascaded too — otherwise the read-only child process leaks when its
-		// parent is terminated or archived (archival flows through terminateSession).
-		const children = [...this.sessions.values()].filter(s => s.delegateOf === id || (s.childKind === "pr-walkthrough" && s.parentSessionId === id));
+		// Cascade: terminate all live child sessions first. Children are linked via
+		// `delegateOf` (delegate kind) OR `parentSessionId`+`childKind` (team /
+		// pr-walkthrough / host-agents / any future kind) — otherwise a child
+		// process leaks when its parent is terminated or archived.
+		const children = [...this.sessions.values()].filter(s => s.delegateOf === id || (!!s.childKind && s.parentSessionId === id));
 		for (const child of children) {
 			console.log(`[session ${id}] Cascading terminate to child ${child.id}`);
 			await this.terminateSession(child.id);
 		}
-		// Also archive persisted-but-not-in-memory delegate / pr-walkthrough children
+		// Also archive persisted-but-not-in-memory children of any kind.
 		const allLiveForTerminate = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
 			: (this._testStore?.getLive() ?? []);
 		for (const ps of allLiveForTerminate) {
-			const isChild = ps.delegateOf === id || (ps.childKind === "pr-walkthrough" && ps.parentSessionId === id);
+			const isChild = ps.delegateOf === id || (!!ps.childKind && ps.parentSessionId === id);
 			if (isChild && !this.sessions.has(ps.id)) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 			}
 		}
 		// Keep the OrchestrationCore in-memory index consistent.
 		try { this.orchestrationCore?.forgetOwner(id); } catch { /* best-effort */ }
+	}
+
+	/**
+	 * The single runtime archive seam (OrchestrationCore §6). EVERY runtime
+	 * archive entry point that can archive a PARENT session routes through here
+	 * so a live child never outlives its parent's archival — even when the parent
+	 * is dormant/not-live, or was archived while the server was down. It cascade-
+	 * reaps the owner's children FIRST (generalized to all child kinds via
+	 * `cascadeReapOwner`), then archives the owner in its store. Reaped children
+	 * archive IDENTICALLY to today's team-shutdown child archival (same status,
+	 * same "show archived" surface, no new badge). `terminateSession` already
+	 * cascades at its top, so its own internal archive does NOT route through
+	 * here (avoids a redundant second cascade). The boot-restore reap
+	 * (`shouldReapChildOnBoot`) stays as defense-in-depth for the server-was-down
+	 * case.
+	 */
+	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
+		await this.cascadeReapOwner(id);
+		const target = store ?? this.resolveStoreForId(id);
+		if (!target) return false;
+		try { return target.archive(id); } catch { return false; }
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
@@ -5564,11 +5587,13 @@ export class SessionManager {
 		return ps?.archived ? ps : undefined;
 	}
 
-	/** Archive a session directly in the store (for dormant/store-only sessions). */
-	storeArchive(id: string): boolean {
-		const store = this.resolveStoreForId(id);
-		if (!store) return false;
-		return store.archive(id);
+	/**
+	 * Archive a session directly in the store (for dormant/store-only sessions).
+	 * Routes through the runtime archive seam (§6) so a dormant parent's live
+	 * children are cascade-reaped before it is archived.
+	 */
+	async storeArchive(id: string): Promise<boolean> {
+		return this.archiveWithCascade(id);
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
@@ -5746,6 +5771,12 @@ export class SessionManager {
 				// check error — best-effort, the rest of the cleanup logs.
 			}
 		}
+
+		// Cascade-reap any child agents before destroying the parent's data (§6).
+		// A parent normally cascades at archive time, but purge is a terminal data
+		// destruction — reap here as a final safety net so a child never outlives
+		// the purge of its parent.
+		try { await this.cascadeReapOwner(ps.id); } catch { /* best-effort */ }
 
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
@@ -6052,22 +6083,22 @@ export class SessionManager {
 				if (didTerminate) {
 					terminated++;
 				} else {
-					// Session not in memory — try direct archive
+					// Session not in memory — try direct archive (cascade-reap children first)
 					try {
 						const ps = this.resolveStoreForId(id)?.get(id);
 						if (ps) {
-							this.getSessionStore(ps.projectId).archive(id);
+							await this.archiveWithCascade(id, this.getSessionStore(ps.projectId));
 							terminated++;
 						}
 					} catch { /* project gone */ }
 				}
 			} catch (err) {
 				console.warn(`[session-manager] Failed to terminate orphan ${id}:`, err);
-				// Try direct archive as fallback
+				// Try direct archive as fallback (cascade-reap children first)
 				try {
 					const ps = this.resolveStoreForId(id)?.get(id);
 					if (ps) {
-						this.getSessionStore(ps.projectId).archive(id);
+						await this.archiveWithCascade(id, this.getSessionStore(ps.projectId));
 						terminated++;
 					}
 				} catch { /* project gone */ }

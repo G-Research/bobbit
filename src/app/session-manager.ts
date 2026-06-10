@@ -2389,11 +2389,37 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	const sessionTitle = session?.title || "this session";
 	const isTeamLead = opts?.isTeamLead ?? session?.role === "team-lead";
 	const goalId = opts?.goalId ?? session?.goalId ?? session?.teamGoalId;
+	// Non-goal archive cascade (OrchestrationCore §6.1): a plain session that has
+	// spawned child agents (team_delegate / host.agents children) will have those
+	// children cascade-archived server-side. Enumerate them from the already-
+	// loaded live sessions so the user sees what else gets archived before
+	// confirming. The goal-archival path (app/api.ts) enumerates affected
+	// sessions separately and is intentionally left untouched.
+	let childCount = 0;
+	if (!(isTeamLead && goalId)) {
+		// Prefer the server route (authoritative — includes on-demand child
+		// sessions not yet loaded into state.gatewaySessions); fall back to the
+		// already-loaded live sessions if it is unavailable.
+		try {
+			const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/children-count`);
+			if (res.ok) {
+				const data = await res.json().catch(() => null) as { count?: number } | null;
+				if (data && typeof data.count === "number") childCount = data.count;
+			} else {
+				childCount = state.gatewaySessions.filter((s) => s.id !== sessionId && (s.delegateOf === sessionId || s.parentSessionId === sessionId)).length;
+			}
+		} catch {
+			childCount = state.gatewaySessions.filter((s) => s.id !== sessionId && (s.delegateOf === sessionId || s.parentSessionId === sessionId)).length;
+		}
+	}
+	const childCascadeNote = childCount > 0
+		? ` This will also archive its ${childCount} child agent${childCount === 1 ? "" : "s"}.`
+		: "";
 	const confirmed = await confirmAction(
 		isTeamLead && goalId ? "End Team" : "Terminate Session",
 		isTeamLead && goalId
 			? `Are you sure you want to end the team for "${sessionTitle}"? This will dismiss all agents and terminate the team lead.`
-			: `Are you sure you want to terminate "${sessionTitle}"? This will end the agent process and cannot be undone.`,
+			: `Are you sure you want to terminate "${sessionTitle}"? This will end the agent process and cannot be undone.${childCascadeNote}`,
 		isTeamLead && goalId ? "End Team" : "Terminate",
 		true,
 	);
