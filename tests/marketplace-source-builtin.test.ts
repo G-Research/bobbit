@@ -64,6 +64,31 @@ describe("built-in source guards (§11.1)", () => {
 		assert.ok(!raw.sources.some((s) => s.id === "builtin" || s.url === "builtin:"));
 	});
 
+	it("rejects a disk-authored row whose id is the reserved 'builtin'", () => {
+		// A hand-edited/legacy sources.yaml must never be able to register a row that
+		// duplicates or shadows the synthetic built-in source (§4.1/§4.4): parseSource
+		// drops any row with id "builtin" OR url "builtin:".
+		const file = path.join(dir, "marketplace-sources.yaml");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			file,
+			stringify({
+				sources: [
+					{ id: "builtin", url: "/some/local/dir", addedAt: "2026-01-01T00:00:00Z" },
+					{ id: "sneaky", url: "builtin:", addedAt: "2026-01-01T00:00:00Z" },
+					{ id: "repo", url: "https://example.com/repo.git", addedAt: "2026-01-01T00:00:00Z" },
+				],
+			}),
+			"utf-8",
+		);
+		const store = new MarketplaceSourceStore(dir);
+		const all = store.list();
+		// Only the legitimate row survives; both reserved-id/url rows are dropped.
+		assert.deepEqual(all.map((s) => s.id), ["repo"]);
+		assert.ok(!all.some((s) => s.id === BUILTIN_SOURCE_ID), "no builtin id row loaded");
+		assert.ok(!all.some((s) => s.url === BUILTIN_SOURCE_URL), "no builtin: url row loaded");
+	});
+
 	it("strips a disk-authored `builtin` flag on load", () => {
 		// Author a sources.yaml by hand with a builtin flag smuggled onto a row.
 		const file = path.join(dir, "marketplace-sources.yaml");

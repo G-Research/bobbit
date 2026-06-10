@@ -60,6 +60,10 @@ function parseSource(raw: unknown): MarketplaceSource | null {
 	const r = raw as Record<string, unknown>;
 	if (!isValidSourceId(r.id)) return null;
 	if (!nonEmptyString(r.url)) return null;
+	// §4.1/§4.4 — the built-in source is synthetic and composed only at the API
+	// layer. Reject any disk-authored row that would duplicate or shadow it so a
+	// hand-edited/legacy `marketplace-sources.yaml` can never collide with it.
+	if (r.id === BUILTIN_SOURCE_ID || (r.url as string).trim() === BUILTIN_SOURCE_URL) return null;
 	const s: MarketplaceSource = {
 		id: r.id,
 		url: (r.url as string).trim(),
