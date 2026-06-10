@@ -319,3 +319,139 @@ baseline once the harness exists) · [extension-platform.md](extension-platform.
 [token-cost-efficiency.md](token-cost-efficiency.md) (budgets, aux models) ·
 `docs/staff-agents.md` · `docs/staff-triggers.md` · `docs/staff-inbox.md` ·
 `docs/mcp-meta-tools.md` · `docs/rest-api.md`.
+Execution tracking: [fable-program-execution-plan.md](fable-program-execution-plan.md).
+
+---
+
+## Appendix A — Implementation contracts (definite lists; do not re-derive)
+
+The universal definition-of-done in
+[extension-platform-implementation-plan.md §0](extension-platform-implementation-plan.md)
+(read-before-edit, test-first RED→GREEN, gates, browser E2E, no flake, minimal change) is
+binding for every MC phase. This appendix fixes the contracts a weaker implementer would
+otherwise have to invent.
+
+### A.1 Constants and storage layout
+
+```ts
+// project-registry.ts (exists): SYSTEM_PROJECT_ID = "system"
+// NEW in project-registry.ts:
+export function isSystemScope(projectId: string): boolean; // === SYSTEM_PROJECT_ID
+export function missionControlDir(): string; // path.join(stateDir, "mission-control"); mkdir lazily
+```
+
+State additions under `.bobbit/state/`:
+`mission-control/` (cwd workspace for global sessions/staff) · `activity.jsonl` (+ rotated
+`activity-YYYY-MM-DD.jsonl`, rotate when current file > 8 MB).
+
+### A.2 `PersistedStaff` change (MC-P0)
+
+```ts
+// staff-store.ts — add ONE field; loader normalises missing → false:
+global?: boolean;   // true ⇒ projectId === "system" is legitimate, not an orphan
+// Validation matrix (staff-manager.ts):
+//   global:true  ⇒ projectId must be "system"; cwd inside missionControlDir(); worktree
+//                  forced off; sandboxed allowed (plain boolean, unchanged semantics)
+//   global:false ⇒ existing rules unchanged (real project required)
+// GET /api/staff/orphaned: exclude records with global === true. Everything else unchanged.
+```
+
+### A.3 `bobbit` meta-tool — file layout and operation catalog v1
+
+Tool-group anatomy copies `defaults/tools/team/` exactly: one YAML per tool +
+`extension.ts`, `provider: { type: bobbit-extension, extension: extension.ts }`,
+`group: Bobbit`. Files: `defaults/tools/bobbit/bobbit.yaml`, `bobbit_describe.yaml`,
+`extension.ts`. The operation registry lives server-side in a new
+`src/server/agent/bobbit-meta-tool.ts`; the extension calls the gateway over the existing
+tool-extension HTTP bridge (`tool-guard-extension.ts` pattern) — never spawning a second
+HTTP client against localhost REST.
+
+```ts
+export type OpTier = "read" | "mutate" | "sensitive";
+export interface BobbitOp {
+  op: string;                  // enum value exposed to the model
+  tier: OpTier;
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  path: string;                // REST path template, e.g. "/api/projects/:id/goals"
+  argsSchema: object;          // JSON schema; bobbit_describe returns it verbatim
+  doc: string;                 // one-liner; bobbit_describe returns it
+}
+```
+
+Catalog v1 (complete; adding an op later = registry row + pinning-test row, nothing else):
+
+| op | tier | REST |
+|---|---|---|
+| `projects.list` | read | `GET /api/projects` |
+| `projects.preflight` | read | the add-project preflight route (`docs/add-project-preflight.md`) |
+| `projects.add` | sensitive | the add-project route used by the UI proposal flow |
+| `sessions.list` | read | `GET /api/sessions` |
+| `sessions.create` | mutate | `POST /api/sessions` |
+| `sessions.send_message` | mutate | the prompt-queue enqueue route (`docs/prompt-queue.md`) |
+| `sessions.archive` | sensitive | existing archive route |
+| `goals.list` | read | `GET /api/goals` (per project) |
+| `goals.tree` | read | the nested-goals tree route (`docs/nested-goals.md`) |
+| `goals.create` | mutate | existing goal-create route (supports `parentId` for nesting) |
+| `goals.archive` | sensitive | existing archive route |
+| `staff.list` | read | `GET /api/staff` |
+| `staff.wake` | mutate | existing wake route |
+| `staff.inbox_enqueue` | mutate | `POST /api/staff/:id/inbox` |
+| `staff.propose` | mutate | drives the staff-proposal flow (returns proposal for human accept — never creates directly) |
+| `worktrees.list` | read | worktree-pool route |
+| `worktrees.cleanup` | sensitive | existing cleanup route |
+| `packs.list` | read | marketplace list route |
+| `packs.install` | sensitive | `marketplace-install` route, registered sources only |
+| `config.read` | read | config-cascade read route |
+| `costs.read` | read | session-cost routes (`docs/session-cost.md`) |
+| `activity.read` | read | `GET /api/activity` (MC-P3) |
+
+Resolve each "existing route" by reading `docs/rest-api.md` + the matching `server.ts`
+handler **at implementation time**; the pinning test (`tests/bobbit-meta-tool.test.ts`)
+asserts every catalog row dispatches to a registered handler, so a renamed route fails the
+test rather than drifting silently. Tier enforcement: `sensitive` ⇒ route through the
+blocking-ask flow (`docs/blocking-tools.md`); `mutate`+`sensitive` ⇒ `recordActivity()`.
+
+### A.4 Flight recorder (MC-P3)
+
+```ts
+// src/server/agent/activity-store.ts
+export interface ActivityEntry {
+  ts: string;                                    // ISO-8601 UTC
+  actor: { kind: "session" | "staff" | "policy" | "user"; id: string; label?: string };
+  action: string;                                // e.g. "bobbit.goals.create", "improvement.auto-approved"
+  target?: { kind: string; id: string; projectId?: string };
+  tier: "read" | "mutate" | "sensitive";         // reads are recorded only for `sensitive`-adjacent audits — default: don't record reads
+  evidence?: string;                             // link/path, e.g. session id or proposal id
+  revert?: { kind: "improvement" | "api"; ref: string };
+}
+export function recordActivity(e: ActivityEntry): void;  // append + size-based rotation
+// REST: GET /api/activity?since=<iso>&actor=<id>&tier=<t>&projectId=<id>&limit=<n (default 100, max 500)>
+// WS: event type "activity_entry", delivered ONLY to sockets that sent
+//     {type:"subscribe_activity"} (goal-fanout lesson — no broadcast).
+```
+
+### A.5 mission-control pack layout (MC-P4)
+
+Copy `market-packs/pr-walkthrough/` structure; built-in band via
+`scripts/copy-builtin-packs.mjs` `FIRST_PARTY_PACKS`.
+
+```
+market-packs/mission-control/
+  pack.yaml                    # name, schema, contents: panels, entrypoints, roles, skills
+  roles/{caretaker,archivist,improver,observer}.yaml   # standing-order-format prompts (§5)
+  skills/…                     # crew skills (briefing format, sweep checklists)
+  staff-templates/crew.yaml    # name/role/accessory/triggers per §5 table; consumed by the
+                               # core "create crew" REST action (idempotent by staff name)
+  src/panel.ts → lib/          # dashboard panel at #/ext/mission-control
+```
+
+### A.6 Owned files per phase (PR boundaries)
+
+| Phase | New files | Modified files |
+|---|---|---|
+| MC-P0 | — | `project-registry.ts`, `staff-store.ts`, `staff-manager.ts`, `server.ts` (orphan route), `docs/staff-agents.md` |
+| MC-P1 | `tests/e2e/ui/mission-control.spec.ts` | session-create path (`server.ts`/`session-setup.ts`), `src/app/sidebar.ts`, `src/app/render.ts` (mobile shell) |
+| MC-P2 | `defaults/tools/bobbit/*`, `src/server/agent/bobbit-meta-tool.ts`, `tests/bobbit-meta-tool.test.ts` | tool-activation default policy for system scope, `tests/tool-description-budget.test.ts` |
+| MC-P3 | `src/server/agent/activity-store.ts`, activity panel module in `src/app/` | `server.ts` (REST+WS), `sidebar.ts` (Activity nav) |
+| MC-P4 | `market-packs/mission-control/*` | `copy-builtin-packs.mjs`, `goal-trigger-dispatcher.ts` (new push triggers, if not landed via AI-P1/GA-R2 first — coordinate, land once) |
+| MC-P5 | — | Observer role prompt (pack), first-run routing in `src/app/`, config keys + budget check, briefing tests |

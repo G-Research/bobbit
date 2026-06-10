@@ -271,3 +271,18 @@ without re-deriving context):
   cheap-model summarization over messages since `lastSeen` (reuse the compaction-summary
   path; aux-model slot per G11); client: collapsible "while you were away" banner above the
   transcript tail. Behind a setting; browser E2E for banner render + dismissal persistence.
+
+R2 trigger contract (so implementation cannot drift): extend the `StaffTrigger` union with
+
+```ts
+{ type: "schedule"; config: { cron: string; timezone?: string } | { at: string /* ISO-8601 */ } }
+{ type: "gate_failed";     config: {}; prompt: string }   // required prompt, like goal_created
+{ type: "session_errored"; config: {}; prompt: string }
+```
+
+`at` semantics: fire once when `now >= at && !lastFired`, then set `enabled: false` (record
+kept for audit). Push triggers dispatch from the gate-failure and session-error mutation
+points via `goal-trigger-dispatcher.ts`, mirroring `goal_created` exactly (including the
+required-prompt validation in `docs/staff-triggers.md`).
+
+Execution tracking for every row above: [fable-program-execution-plan.md](fable-program-execution-plan.md).

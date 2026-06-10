@@ -309,3 +309,102 @@ recorder, inbox digests) · [harness-gap-analysis.md](harness-gap-analysis.md) G
 [token-cost-efficiency.md](token-cost-efficiency.md) (cost ledger CE-G0.1, aux summarizer) ·
 [skill-ux-and-autonomous-activation.md](skill-ux-and-autonomous-activation.md) ·
 [editable-proposals.md](editable-proposals.md) · [human-signoff-gates.md](human-signoff-gates.md).
+Execution tracking: [fable-program-execution-plan.md](fable-program-execution-plan.md).
+
+---
+
+## Appendix A — Implementation contracts (definite lists; do not re-derive)
+
+Universal definition-of-done:
+[extension-platform-implementation-plan.md §0](extension-platform-implementation-plan.md)
+binds every AI phase.
+
+### A.1 Types (AI-P1, `src/server/agent/improvement-store.ts`)
+
+```ts
+export type ChangeClass =
+  | "memory" | "skill-new" | "skill-patch" | "skill-lifecycle"
+  | "prompt-context" | "tool-new" | "config";          // §2 table is the law for ceilings
+
+export type ProposalStatus =
+  | "draft" | "approved-human" | "approved-policy" | "rejected"
+  | "applied" | "reverted" | "superseded";
+
+export interface ImprovementProposal {
+  id: string;                       // nanoid, same generator as session ids
+  ts: string;                       // ISO-8601 UTC
+  changeClass: ChangeClass;
+  title: string;                    // one line, imperative
+  diff?: string;                    // unified diff for patches
+  files?: { path: string; content: string }[];   // for skill-new (paths relative to the learned-skills pack root)
+  evidence: {
+    signal: string;                 // which observer signal fired (e.g. "user-correction", "gate_failed")
+    sessionIds: string[];
+    excerpts: string[];             // verbatim transcript quotes, ≤ 500 chars each, ≤ 5
+    expectedImpact: string;
+    rollbackPlan: string;
+  };
+  confidence?: number;              // 0..1, judge-assigned; absent until judged
+  judge?: { model: string; rubricVersion: string; wouldAutoApproveAt: number[] }; // thresholds it clears
+  status: ProposalStatus;
+  decision?: { by: "human" | "policy"; ts: string; reason?: string; editedBeforeApprove?: boolean };
+  applied?: { ts: string; snapshotRef?: string };
+  outcome?: "helped" | "neutral" | "regressed";  // AI-P6
+}
+```
+
+Storage: `.bobbit/state/improvement/proposals.jsonl` (append-only; status changes append a
+new full record with same `id` — last-writer-wins on load, crash-safe per
+[session-store-crash-safety.md](session-store-crash-safety.md)). Snapshots:
+`.bobbit/state/improvement/snapshots/<iso>/…tar.gz`. Skill archive:
+`.bobbit/state/improvement/skill-archive/`. Dream lock:
+`.bobbit/state/improvement/dream.lock` (mtime = lastDreamAt; same gate semantics as
+autoDream §1).
+
+### A.2 REST (AI-P1/P4/P5)
+
+| Route | Notes |
+|---|---|
+| `GET /api/improvements?status&class&limit` | newest-first |
+| `POST /api/improvements` | from the `propose_improvement` tool path only |
+| `POST /api/improvements/:id/decision` | body `{approve: boolean, reason?, editedFiles?}` |
+| `POST /api/improvements/:id/revert` | restores snapshot, appends `reverted`, demotes class |
+| `GET /api/improvements/calibration?class` | `{class, decisions: n, perThreshold: [{theta, agreement, falseApproves}]}` |
+
+### A.3 Tool + prompts
+
+`defaults/tools/proposals/propose_improvement.yaml` — params:
+`change_class, title, diff?, files?, evidence` (mirror the `propose_staff` YAML shape;
+provider `bobbit-extension`). The Improver's review prompt, judge rubrics (one per
+`ChangeClass`, versioned `rubricVersion: "1"`), and the dream prompt live in the
+mission-control pack: `market-packs/mission-control/skills/improver/…` — **never hardcoded
+in server source**, so prompt iteration is a pack update, not a release.
+
+### A.4 Settings keys (AI-P5; config cascade)
+
+```yaml
+autoimprovement:
+  enabled: true            # global kill switch — false drops everything to L0 behavior
+  levels:                  # server clamps to §2 ceilings regardless of config
+    memory: 0              # 0=L0, 0.5=shadow, 1=L1, 2=L2
+    skill-new: 0
+    skill-patch: 0
+    skill-lifecycle: 0
+  thresholds: { memory: 0.85, skill-new: 0.85, skill-patch: 0.9, skill-lifecycle: 0.9 }
+  curator: { intervalHours: 168, minIdleHours: 2, staleAfterDays: 30, archiveAfterDays: 90 }
+  dream:    { minHours: 24, minSessions: 5 }
+auxiliary:                 # gap-analysis G11; resolution mirrors per-role-model-overrides.md
+  improver-judge: { model: auto }
+  dreamer:        { model: auto }
+```
+
+### A.5 Owned files per phase (PR boundaries)
+
+| Phase | New | Modified |
+|---|---|---|
+| AI-P1 | `improvement-store.ts`, `defaults/tools/proposals/propose_improvement.yaml` (+extension wiring), proposal-panel parser/view for kind `improvement` | `server.ts` (routes), `proposal-registry.ts`, `proposal-parsers.ts`, `goal-trigger-dispatcher.ts` (push triggers — coordinate with MC-P4/GA-R2, land once) |
+| AI-P2 | improver role/skills in mission-control pack; judge module `src/server/agent/improvement-judge.ts`; learned-skills pack bootstrap in `src/server/agent/learned-skills-pack.ts` | skill-load usage hook in `slash-skills.ts` |
+| AI-P3 | curator module `src/server/agent/improvement-curator.ts` (+snapshot/rollback helpers) | archivist role (pack), staff page curator controls |
+| AI-P4 | calibration math in `improvement-store.ts` + report endpoint | Improver staff page section |
+| AI-P5 | — | settings page, `improvement-store.ts` (policy path), `activity-store.ts` writers, inbox digest |
+| AI-P6 | outcome evaluator in `improvement-curator.ts` | — |

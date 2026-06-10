@@ -318,3 +318,102 @@ Cross-references: [token-cost-efficiency.md](token-cost-efficiency.md) (the sibl
 (the Observer staff can watch for perf regressions once the harness exists),
 [harness-gap-analysis.md](harness-gap-analysis.md) §battery for how peer harnesses avoid this
 class of cost (mostly by being TUIs — Bobbit's bar is higher because it ships a real UI).
+Execution tracking: [fable-program-execution-plan.md](fable-program-execution-plan.md).
+
+---
+
+## Appendix A — Implementation contracts (definite lists; do not re-derive)
+
+The universal definition-of-done in
+[extension-platform-implementation-plan.md §0](extension-platform-implementation-plan.md)
+applies to every phase here. This appendix removes the remaining judgment calls.
+
+### A.1 Complete `infinite`-animation inventory and classification
+
+Source of truth: `grep -rn "animation:.*infinite" src --include=*.css` (re-run before
+starting; if new rules appeared, classify them with the same three buckets and extend this
+table in the same PR).
+
+Buckets: **ambient** = pause under `html.anims-paused` (P1 step 2) · **status** = must run
+*only* under a working/busy state selector (P1 step 3) · **keep** = semantically must keep
+running (rare; justify inline).
+
+| File:line | Keyframes | Bucket | Note |
+|---|---|---|---|
+| `src/app/app.css:108` | `status-pulse` | status | also FX3: rewrite off `box-shadow` |
+| `src/app/app.css:478` | `gentle-float` | ambient | empty-state decoration |
+| `src/app/app.css:943` | `unseen-dot-pulse` | ambient | FX3 rewrite; already has reduced-motion opt-out — keep |
+| `src/app/app.css:967` | `bobbit-unread-tap` | ambient | |
+| `src/app/app.css:985` | `bobbit-sidebar-unread-blink` | ambient | `steps()` — cheap but still wakes compositor |
+| `src/app/app.css:1007` | `sidebar-heartbeat` | status | |
+| `src/app/app.css:1026` | `sidebar-conic-spin` | status | spinner — runs only while loading; verify it unmounts |
+| `src/app/app.css:1064,1075` | `gate-wave`, `gate-blink` | status | gate in-progress only |
+| `src/app/app.css:1102` | `title-wave` | ambient | |
+| `src/app/app.css:1111` | `pr-conflict-pulse` | ambient | FX3 rewrite |
+| `src/app/goal-dashboard.css:781,1039` | `phase-glow`, `phase-glow-rejected` | status | dashboard visible + phase active only |
+| `src/app/goal-dashboard.css:793,1070` | `phase-dot-pulse` | status | |
+| `src/app/goal-dashboard.css:796` | `status-indicator-pulse` | status | |
+| `src/app/goal-dashboard.css:944` | `gate-dot-pulse` | status | |
+| `src/ui/app.css:1117,1140` | `shimmer` ×2 | ambient | loading placeholder; disabled entirely in battery-saver |
+| `src/ui/app.css:1166` | `ask-heartbeat` | status | pending-ask only |
+| `src/ui/app.css:1239,1411,1412,1521,1586+` | `blob-busy-*` family (move/eyes/shadow) | status | already gated on the busy blob — verify the element unmounts when idle |
+| `src/ui/app.css:1526,1669` | `blob-*-idle-sleep-breathe` | **ambient** | the idle/sleep "breathing" loops — these are the FX2 headline: idle sprites must be static |
+| `src/ui/app.css:1555,1700,1775,…` | `blob-compact-squash(-rigid)` (all ~10 sites) | ambient | several use `!important` — remove the `!important` when adding the gate |
+| `src/ui/app.css:1755–2089` | `magnifier-depth-idle` (×7), `wand-depth-idle` | ambient | accessory idle loops |
+| `src/ui/app.css:2041,2050` | `flask-bubbles` ×2 | ambient | |
+| `src/ui/app.css:2154,2165` | `wand-sparkle-a/b` | ambient | |
+| `src/app/app.css:359–474` | `bobbit-bob`, `bobbit-breathe`, `bobbit-eyes(-s)`, squish family | status | sidebar/chat sprites: working state only (FX2) |
+
+### A.2 `animation-power.ts` contract
+
+```ts
+// src/app/animation-power.ts
+export function initAnimationPower(): void; // called once from main.ts after state init
+// Internally:
+//   shouldPause = document.hidden
+//     || !anySessionWorking()          // derive from state.gatewaySessions statuses
+//     || isBatterySaverOn()            // P3.3; returns false until that phase lands
+//     || matchMedia("(prefers-reduced-motion: reduce)").matches
+//   → document.documentElement.classList.toggle("anims-paused", shouldPause)
+// Inputs: "visibilitychange" listener + a state subscription invoked from the same
+// place session status updates already call renderApp(). No polling. No timers.
+// Perf-flag: if isPerfFlagEnabled("-pauseAmbientAnims") → never add the class.
+```
+
+CSS gate (one block per file, appended at end):
+`html.anims-paused :is(<every ambient selector from A.1>) { animation-play-state: paused; }`
+Never use a bare `html.anims-paused *` rule — it would freeze one-shot transitions mid-flight.
+
+### A.3 `perf-monitor` report shape
+
+```ts
+// window.__bobbitPerf.report() →
+{ windowMs: number,
+  rendersPerSec: number,            // renderApp rAF executions
+  timerWakeups: { perSec: number, byCallsite: Record<string, number> },
+  longTasks: { count: number, totalMs: number },
+  runningAnimations: number,        // document.getAnimations().length, last sample
+  wsFramesPerSec: Record<string, number> }   // keyed by frame type
+```
+
+### A.4 Poll-site checklist (the loops; one-shots are out of scope)
+
+| Site | Today | Required end state |
+|---|---|---|
+| `src/app/api.ts:273` `startSessionPolling` | 5 s, visibility-gated | FX5: 60 s while WS healthy; 5 s only while WS down; refresh on reconnect + visible |
+| `src/app/goal-dashboard.ts:1090` `startLiveVerifTimer` | 1 s full `renderApp()` | FX6: scoped elapsed-label update only |
+| `src/app/render-helpers.ts:338` | 60 s `renderApp()` | keep (within budget) |
+| `src/app/session-manager.ts:2821` git-status poll | 30 s, gated, coalesced | keep — this is the reference pattern |
+| remaining `setInterval` loops in `goal-dashboard.ts` / `dialogs.ts` | unaudited | P2.4: classify from the P0 wakeup report; loops get the git-status pattern |
+
+### A.5 Owned files per phase (PR boundaries)
+
+- **PB-P0**: new `src/app/perf-monitor.ts`; one guarded hook line in `state.ts::renderApp`;
+  baseline table in this doc. No behavior change.
+- **PB-P1**: new `src/app/animation-power.ts`; `main.ts` (one init call); the four CSS files
+  in A.1; new `tests/e2e/ui/animation-power.spec.ts`; CSS-pinning unit test
+  `tests/animation-gate.test.ts` (regex: every `infinite` rule in the four files is either
+  bucket-listed here or fails).
+- **PB-P2**: `api.ts`, `goal-dashboard.ts`, `state.ts` (`renderAppThrottled`), streaming
+  dispatch call sites in `session-manager.ts`/`message-reducer.ts`; tests beside each.
+- **PB-P3**: settings page + `animation-power.ts` (battery-saver input); docs.
