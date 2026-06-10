@@ -150,8 +150,21 @@ function invalidatePanel(key: string): void {
  *    new project's module) or that disappeared (uninstall);
  *  - removes the side-panel TAB of a panel that disappeared, so a running UI
  *    stops showing an uninstalled pack's panel without a reload (design §6).
+ *
+ * `opts.invalidateLoaded` FORCES invalidation of every SURVIVING panel's cached
+ * module + in-flight load even when its `{packId, panelId, projectId}` are
+ * unchanged. A marketplace UPDATE/reinstall re-registers the SAME key but with
+ * fresh bytes behind the same serving URL, so without this the stale module keeps
+ * serving until a full reload. Pass it ONLY from a real pack MUTATION
+ * (install/update/reorder via `reconcileRenderersForActiveSession`) — NEVER from a
+ * benign session-switch reconcile (`reconcilePackPanelsForProject`), which must
+ * keep the cached module to avoid a needless re-import + "Loading…" flash.
  */
-export function registerPackPanels(list: ReadonlyArray<PackPanelInfo>, projectId?: string): void {
+export function registerPackPanels(
+	list: ReadonlyArray<PackPanelInfo>,
+	projectId?: string,
+	opts?: { invalidateLoaded?: boolean },
+): void {
 	const next = new Map<string, RegisteredPanel>();
 	for (const info of list) {
 		if (!info?.packId || !info.panelId) continue;
@@ -164,8 +177,10 @@ export function registerPackPanels(list: ReadonlyArray<PackPanelInfo>, projectId
 			// Uninstall / precedence change → invalidate + drop its tab.
 			invalidatePanel(key);
 			removePackPanelTab(prev.packId, prev.panelId);
-		} else if (incoming.projectId !== prev.projectId) {
-			// Same panel now resolved under a different project → re-fetch on next open.
+		} else if (incoming.projectId !== prev.projectId || opts?.invalidateLoaded) {
+			// Project change OR a forced pack-mutation re-register (update/reinstall):
+			// drop the cached/in-flight module so the next open/render re-imports the
+			// fresh bytes from the (same) serving URL.
 			invalidatePanel(key);
 		}
 	}
@@ -282,10 +297,14 @@ function loadPanelModule(key: string, reg: RegisteredPanel): Promise<PackPanel |
  *  - PACK-BOUND callers (panel / entrypoint / launcher surfaces) pass their
  *    authoritative `callerPackId`: an exact `{packId, panelId}` lookup, no
  *    fallback (pack-relative — never reach into another pack's panel).
- *  - TOOL renderer callers have NO structural packId client-side (`/api/tools`
- *    exposes only the PackEntry id, not the structural panel packId), so they
- *    pass `undefined` and we resolve by a UNIQUE registered `panelId`. Ambiguous
- *    (multiple packs declaring the same panel id) → no-op.
+ *  - TOOL renderer callers now ALSO pass their owning structural `packId`
+ *    (threaded from `/api/tools` via `packIdForTool` into the renderer's host
+ *    surface), so an exact `{packId, panelId}` lookup opens the renderer's OWN
+ *    pack's panel even when another installed pack shares the pack-local panel id.
+ *  - The bare-`panelId` (no `callerPackId`) branch is a NARROW defensive fallback
+ *    for a caller with a genuinely-unknown packId (e.g. a built-in renderer or a
+ *    unit fixture): it resolves ONLY when the panel id is globally unique, and is
+ *    a no-op when ambiguous (so a shared panel id never silently cross-resolves).
  */
 function resolveOpenPanel(callerPackId: string | undefined, panelId: string): RegisteredPanel | undefined {
 	if (callerPackId) return panels.get(panelKey(callerPackId, panelId));

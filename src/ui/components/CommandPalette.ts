@@ -82,7 +82,9 @@ export class CommandPalette extends LitElement {
 
 	private _loadItems(): PaletteItem[] {
 		try {
-			return listLauncherEntrypoints("command-palette").map((l) => ({ id: l.id, label: l.label }));
+			// `id` carries the COMPOUND launcher key (packId+entrypointId) so two packs
+			// declaring the same launcher id stay distinct + individually dispatchable.
+			return listLauncherEntrypoints("command-palette").map((l) => ({ id: l.key, label: l.label }));
 		} catch {
 			return [];
 		}

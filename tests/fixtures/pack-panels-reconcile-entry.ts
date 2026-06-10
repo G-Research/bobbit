@@ -63,9 +63,13 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 // Start a reconcile WITHOUT awaiting so a test can interleave two reconciles.
 (window as any).__startReconcile = (pid?: string): Promise<void> => reconcilePackPanelsForProject(pid);
 (window as any).__register = (pid?: string) => registerPackPanels(panelInfosFromContributions(contributions as any), pid);
+// Force a re-register that invalidates surviving panels' cached modules — the
+// marketplace install/update/reinstall mutation path (pack schema V1 FIX 3).
+(window as any).__registerForce = (pid?: string) =>
+	registerPackPanels(panelInfosFromContributions(contributions as any), pid, { invalidateLoaded: true });
 // openPackPanel is PACK-RELATIVE — the launcher/route supplies the caller packId.
-// A tool-renderer caller (no packId) resolves by unique panelId; pass the packId
-// explicitly here to exercise the exact {packId, panelId} lookup.
+// A tool-renderer caller now ALSO carries its own packId (threaded from /api/tools);
+// pass the packId explicitly here to exercise the exact {packId, panelId} lookup.
 (window as any).__open = (panelId: string, packId?: string) => { openPackPanel({ panelId }, packId ?? "demo_pack"); };
 (window as any).__openByPanelId = (panelId: string) => { openPackPanel({ panelId }); };
 (window as any).__flush = async (): Promise<void> => { await new Promise((r) => setTimeout(r, 30)); };

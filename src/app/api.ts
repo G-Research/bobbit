@@ -2076,6 +2076,12 @@ export interface ToolInfo {
 	hasActions?: boolean;
 	/** Optional declared action-name allowlist (from `actions.names`). */
 	actionNames?: string[];
+	/** Structural `packId` of the winning pack that contributed this tool (pack
+	 *  schema V1 — present only for `rendererKind:"pack"` tools). The client threads
+	 *  it into the tool renderer's host so `host.ui.openPanel({panelId})` resolves
+	 *  the panel within the renderer's OWN pack, never a global panel-id search that
+	 *  would collide when another installed pack shares the panel id. */
+	packId?: string;
 	grantPolicy?: string;
 }
 

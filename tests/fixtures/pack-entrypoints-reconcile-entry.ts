@@ -23,6 +23,7 @@ import {
 	navigateToTarget,
 	runLauncherEntrypoint,
 	listLauncherEntrypoints,
+	launcherKey,
 } from "../../src/app/pack-entrypoints.js";
 import { getRouteFromHash } from "../../src/app/routing.js";
 import { registerPackPanels } from "../../src/app/pack-panels.js";
@@ -95,10 +96,18 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 // Register the third-party panel in the (separate) pack-panel registry so a panel-
 // target launcher's openPackPanel actually resolves + fetches the /panels/ endpoint
 // (panel registration is a distinct registry from the entrypoint registry).
-(window as any).__registerPanel = (pid?: string) =>
-	registerPackPanels([{ packId: "thirdparty_pack", panelId: "thirdparty.viewer" }], pid);
-(window as any).__runLauncher = (id: string) => runLauncherEntrypoint(id);
+(window as any).__registerPanel = (pid?: string, packId?: string, panelId?: string) =>
+	registerPackPanels([{ packId: packId ?? "thirdparty_pack", panelId: panelId ?? "thirdparty.viewer" }], pid);
+// Register MULTIPLE panels at once — registerPackPanels REPLACES the whole registry,
+// so two packs' panels must be registered together (used by the collision test).
+(window as any).__registerPanels = (list: Array<{ packId: string; panelId: string }>, pid?: string) =>
+	registerPackPanels(list, pid);
+(window as any).__runLauncher = (keyOrId: string) => runLauncherEntrypoint(keyOrId);
 (window as any).__launchers = (kind?: any) => listLauncherEntrypoints(kind).map((l) => l.id);
+// Compound launcher keys (packId+id) — for the same-id-across-packs collision test.
+(window as any).__launcherKey = (packId: string, id: string) => launcherKey(packId, id);
+(window as any).__launcherEntries = (kind?: any) =>
+	listLauncherEntrypoints(kind).map((l) => ({ id: l.id, packId: l.packId, key: l.key }));
 (window as any).__route = () => getRouteFromHash();
 (window as any).__hash = () => window.location.hash;
 (window as any).__setHash = (h: string) => { window.location.hash = h; };
