@@ -2434,6 +2434,16 @@ async function handleApiRoute(
 			projectBase: ctx?.project.rootPath,
 			serverConfigStore: projectConfigStore,
 			projectConfigStore: ctx?.projectConfigStore,
+			// pack-schema-v1 §7: thread the SAME pack_activation store the roles/tools
+			// cascade uses (single source of truth) so disabled market-pack skills are
+			// filtered out of /api/slash-skills, /api/slash-skills/details, and the
+			// conflicts endpoint before the precedence merge. server/global-user read
+			// the server config store; project reads the project's config store — the
+			// same scope→store split as the cascade's `packActivationStore`.
+			packActivation: (scope, packName) => {
+				const store = scope === "project" ? ctx?.projectConfigStore : projectConfigStore;
+				return store?.getPackActivation(scope as PackOrderScope, packName) ?? {};
+			},
 		};
 	}
 
@@ -5175,7 +5185,25 @@ async function handleApiRoute(
 	if (url.pathname === "/api/tools" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
 		const resolved = configCascade.resolveTools(projectId);
-		const tools: Array<Record<string, unknown>> = resolved.map(r => withOrigin(r as any));
+		// pack-schema-v1: expose each market-pack tool's STRUCTURAL packId (the
+		// `market-packs/<name>` dir segment via the same `resolvePackIdentityForTool`
+		// the renderer/action endpoints + /api/ext/contributions use) so a tool
+		// renderer's `host.ui.openPanel({panelId})` resolves the panel WITHIN its own
+		// pack (panel ids are pack-local) via /api/ext/packs/:packId/panels/:panelId.
+		// Empty/absent for builtins. Tool-scoped origin identity only — NOT a
+		// pack-scoped contribution field.
+		const toolPackTm = resolveActionToolManager(
+			toolManager,
+			projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined,
+		);
+		const tools: Array<Record<string, unknown>> = resolved.map(r => {
+			const out = withOrigin(r as any);
+			if (r.originPackId && toolPackTm) {
+				const packId = resolvePackIdentityForTool(toolPackTm, r.item.name).packId;
+				if (packId) out.packId = packId;
+			}
+			return out;
+		});
 		// Include MCP/external tools not covered by the config cascade
 		if (toolManager) {
 			const resolvedNames = new Set(resolved.map(r => r.item.name));
@@ -5210,7 +5238,10 @@ async function handleApiRoute(
 			const cascadeEntry = configCascade.resolveTools(projectId).find(r => r.item.name === name);
 			if (cascadeEntry) {
 				const withMeta = withOrigin(cascadeEntry as any);
-				json({ ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName });
+				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
+				// tools edit page keeps the same own-pack identity for a market-pack tool.
+				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
+				json({ ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) });
 			} else {
 				json(tool);
 			}
