@@ -38,7 +38,18 @@ export interface MarketplaceSource {
 	addedAt: string; // ISO-8601
 	lastSyncedAt?: string; // ISO-8601
 	lastCommit?: string;
+	/**
+	 * Response-only flag marking the synthetic, non-persisted built-in source
+	 * (built-in-first-party-packs §4.4). NEVER written to disk by
+	 * {@link serializeSource} and NEVER read from disk by {@link parseSource}; it
+	 * is composed only at the API layer. A disk-authored `builtin` is stripped.
+	 */
+	builtin?: boolean;
 }
+
+/** Reserved identifiers for the synthetic built-in source (§4.4). */
+export const BUILTIN_SOURCE_ID = "builtin";
+export const BUILTIN_SOURCE_URL = "builtin:";
 
 function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
@@ -163,8 +174,15 @@ export class MarketplaceSourceStore {
 	add(input: { url: string; ref?: string }): MarketplaceSource {
 		const url = input.url.trim();
 		if (!nonEmptyString(url)) throw new Error("source url is required");
+		// Reject the reserved built-in url scheme (§4.4): the built-in source is
+		// synthetic and must never be user-registered/persisted.
+		if (url === BUILTIN_SOURCE_URL || url.toLowerCase().startsWith("builtin:")) {
+			throw new Error(`the built-in source cannot be added`);
+		}
 		if (this.getByUrl(url)) throw new Error(`source already registered: ${url}`);
 		const id = deriveSourceId(url, new Set(this.sources.map((s) => s.id)));
+		// Reject the reserved built-in id (§4.4) even if a url happens to slug to it.
+		if (id === BUILTIN_SOURCE_ID) throw new Error(`the built-in source cannot be added`);
 		const source: MarketplaceSource = {
 			id,
 			url,

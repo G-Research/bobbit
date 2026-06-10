@@ -2534,11 +2534,17 @@ export interface MarketplaceSource {
 	addedAt: string;
 	lastSyncedAt?: string;
 	lastCommit?: string;
+	/** Response-only: marks the synthetic, non-removable built-in source (§4.4). */
+	builtin?: boolean;
 }
 
 export interface BrowsePackWire extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
+	/** Response-only: shipped first-party pack (built-in source). */
+	builtin?: boolean;
+	/** Response-only: resolved in place (not copy-installed). */
+	provided?: boolean;
 }
 
 export interface InstalledPackWire {
@@ -2547,6 +2553,8 @@ export interface InstalledPackWire {
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";
+	/** Response-only: a built-in first-party pack row (no install ledger entry). */
+	builtin?: boolean;
 }
 
 export interface ConflictPackRef {

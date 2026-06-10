@@ -233,6 +233,7 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
+import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, type InstallScope, type PackOrderStore } from "./agent/marketplace-install.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
@@ -1029,6 +1030,18 @@ export function createGateway(config: GatewayConfig) {
 	const marketPackEntriesForProject = (projectId?: string): PackEntry[] => {
 		const out: PackEntry[] = [];
 		const seen = new Set<string>();
+		// Built-in first-party band (built-in-first-party-packs §7.5): the shipped
+		// packs are NOT installed, so they must be injected here or their
+		// panels/entrypoints/routes never register. Push FIRST (lowest priority),
+		// deduped by resolved path with the same `seen` set, so a user-installed
+		// same-name pack (pushed later from a scope band) still wins when the
+		// registry collapses to one winning pack per packId.
+		for (const e of builtinFirstPartyPackEntries(resolveBuiltinPacksDir())) {
+			const key = path.resolve(e.path);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(e);
+		}
 		for (const scope of ["server", "global-user", "project"] as const) {
 			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
 				const key = path.resolve(e.path);
@@ -6155,6 +6168,18 @@ async function handleApiRoute(
 		const installer = marketplaceInstaller;
 		const sourceStore = marketplaceSourceStore;
 
+		// ── Built-in first-party source (built-in-first-party-packs §4.4, §6.4) ──
+		// The built-in source is synthetic + non-persisted: it is composed only here
+		// and points at the shipped first-party packs resolved in place.
+		const BUILTIN_SOURCE_ID = "builtin";
+		const builtinSource = { id: BUILTIN_SOURCE_ID, url: "builtin:", builtin: true, addedAt: new Date(0).toISOString() };
+		// A pack name is "built-in" iff a shipped first-party pack declares it.
+		const isBuiltinPackName = (name: string): boolean =>
+			builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).some((e) => e.manifest.name === name);
+		// True iff a real user install of `(scope, packName)` exists in the ledger.
+		const hasUserInstall = (scope: InstallScope, packName: string, projectId?: string): boolean =>
+			installer.listInstalled(allContexts(projectId)).some((p) => p.scope === scope && p.packName === packName);
+
 		const MARKET_SCOPES = new Set(["global-user", "server", "project"]);
 		const parseScope = (raw: unknown): InstallScope | null =>
 			typeof raw === "string" && MARKET_SCOPES.has(raw) ? (raw as InstallScope) : null;
@@ -6208,7 +6233,8 @@ async function handleApiRoute(
 		// ── Sources ───────────────────────────────────────────────
 		// GET /api/marketplace/sources
 		if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
-			json({ sources: sourceStore.list() });
+			// Prepend the synthetic, non-removable built-in source (§4.4).
+			json({ sources: [builtinSource, ...sourceStore.list()] });
 			return;
 		}
 		// POST /api/marketplace/sources { url, ref? }
@@ -6237,6 +6263,34 @@ async function handleApiRoute(
 		if (sourceMatch) {
 			const id = decodeURIComponent(sourceMatch[1]);
 			const sub = sourceMatch[2];
+			// Built-in source (§4.4): special-cased BEFORE the 404 check because
+			// `sourceStore.get("builtin")` is undefined (never persisted).
+			if (id === BUILTIN_SOURCE_ID) {
+				if (!sub && req.method === "DELETE") {
+					json({ error: "the built-in source cannot be removed" }, 403);
+					return;
+				}
+				if (sub === "/sync" && req.method === "POST") {
+					// No-op resync: built-in packs ride the app upgrade.
+					json({ source: builtinSource });
+					return;
+				}
+				if (sub === "/packs" && req.method === "GET") {
+					// Map the shipped first-party packs to the same browse-row shape
+					// `installer.browsePacks` returns, flagged builtin + provided.
+					const packs = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+						...e.manifest,
+						dirName: e.manifest.name,
+						hasTools: e.manifest.contents.tools.length > 0,
+						builtin: true,
+						provided: true,
+					}));
+					json({ packs });
+					return;
+				}
+				json({ error: "unsupported built-in source operation" }, 405);
+				return;
+			}
 			if (!isValidSourceId(id) || !sourceStore.get(id)) { json({ error: `unknown source: ${id}` }, 404); return; }
 
 			if (!sub && req.method === "DELETE") {
@@ -6267,6 +6321,8 @@ async function handleApiRoute(
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
 			const dirName = typeof body?.dirName === "string" ? body.dirName : (typeof body?.packName === "string" ? body.packName : undefined);
 			if (typeof body?.sourceId !== "string" || typeof dirName !== "string") { json({ error: "sourceId and dirName are required" }, 400); return; }
+			// Built-in packs are resolved in place; they cannot be copy-installed (§4.4).
+			if (body.sourceId === BUILTIN_SOURCE_ID) { json({ error: "built-in packs are provided in place and cannot be installed" }, 403); return; }
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
@@ -6282,6 +6338,13 @@ async function handleApiRoute(
 			const scope = parseScope(body?.scope);
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
 			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
+			// Built-in packs update with the app; a server-scope built-in with no
+			// ledger entry has nothing to update (§4.4). A genuine user install of
+			// the same name proceeds normally below.
+			if (scope === "server" && isBuiltinPackName(body.packName) && !hasUserInstall("server", body.packName, body?.projectId)) {
+				json({ error: "built-in packs update with the app; nothing to update" }, 403);
+				return;
+			}
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
@@ -6297,6 +6360,13 @@ async function handleApiRoute(
 			const scope = parseScope(body?.scope);
 			if (!scope) { json({ error: "invalid scope" }, 400); return; }
 			if (typeof body?.packName !== "string") { json({ error: "packName is required" }, 400); return; }
+			// Built-in packs are not in the install ledger and cannot be uninstalled
+			// (§4.4); only enable/disable applies. A genuine user install of the same
+			// name (ledger entry present) proceeds normally below.
+			if (isBuiltinPackName(body.packName) && !hasUserInstall(scope, body.packName, body?.projectId)) {
+				json({ error: "built-in packs cannot be uninstalled" }, 403);
+				return;
+			}
 			const st = resolveScopeTarget(scope, body?.projectId);
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			try {
@@ -6309,7 +6379,20 @@ async function handleApiRoute(
 		// GET /api/marketplace/installed?projectId=
 		if (url.pathname === "/api/marketplace/installed" && req.method === "GET") {
 			const projectId = url.searchParams.get("projectId") || undefined;
-			try { json({ installed: installer.listInstalled(allContexts(projectId)) }); } catch (err) { jsonError(500, err); }
+			try {
+				// Prepend synthetic built-in pack rows (§6.4): a distinct non-install
+				// row kind (no meta/ledger entry) flagged `builtin: true`. A
+				// user-installed same-name pack still appears as its own ledger row.
+				const builtinRows = builtinFirstPartyPackEntries(resolveBuiltinPacksDir()).map((e) => ({
+					scope: "server" as InstallScope,
+					packName: e.manifest.name,
+					manifest: e.manifest,
+					meta: e.meta,
+					status: "ok" as const,
+					builtin: true,
+				}));
+				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
+			} catch (err) { jsonError(500, err); }
 			return;
 		}
 
