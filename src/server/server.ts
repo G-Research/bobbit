@@ -39,7 +39,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
+import { ToolManager, copyDirRecursive, __resetToolScanCache, type MarketToolRoot } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
@@ -978,8 +978,14 @@ export function createGateway(config: GatewayConfig) {
 	// #1). Mirrors the cascade scope order (server < global-user < project) and
 	// dedups self-managed-project path collisions, keeping the FIRST (lowest)
 	// scope, exactly as `ConfigCascade.resolveEntities` does.
-	const marketToolRoots = (projectId?: string): string[] => {
-		const roots: string[] = [];
+	// Each root carries its pack's pack_activation `disabledTools` list at the
+	// resolving scope (pack-schema-v1 §7), so runtime resolution drops disabled
+	// pack tools and reinstates a lower-priority shadow EXACTLY as the cascade
+	// listing does — no split-brain between `/api/tools` and the renderer/action/
+	// surface-token/prompt-doc paths. `packActivationStore` is the SAME store the
+	// cascade reads (defined just below; referenced lazily at request time).
+	const marketToolRoots = (projectId?: string): MarketToolRoot[] => {
+		const roots: MarketToolRoot[] = [];
 		const seen = new Set<string>();
 		for (const scope of ["server", "global-user", "project"] as const) {
 			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
@@ -987,7 +993,11 @@ export function createGateway(config: GatewayConfig) {
 				const key = path.resolve(toolsDir);
 				if (seen.has(key)) continue;
 				seen.add(key);
-				roots.push(toolsDir);
+				const packName = e.manifest?.name;
+				const disabledTools = packName
+					? packActivationStore(scope, projectId)?.getPackActivation(scope, packName).tools
+					: undefined;
+				roots.push({ dir: toolsDir, disabledTools: disabledTools ?? undefined });
 			}
 		}
 		return roots;
