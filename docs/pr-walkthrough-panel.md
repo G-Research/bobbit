@@ -1,265 +1,124 @@
 # PR Walkthrough Panel
 
-The PR walkthrough panel is Bobbit's guided review surface for pull requests and local changesets. For GitHub PRs launched from chat, Bobbit now hosts the walkthrough in a dedicated read-only child agent session so the reviewer can watch progress, inspect the generated review cards, and ask follow-up questions in the same PR-aware chat.
+The PR walkthrough is Bobbit's guided review surface for pull requests and local
+changesets. A reviewer steps through logically-grouped review cards (orientation,
+key design choices, significant changes, omissions, audit), comments on lines and
+cards, and exports a draft GitHub review.
 
-The panel model remains changeset-oriented rather than GitHub-specific. GitHub PRs, local SHA pairs, and fixtures all resolve into the same renderable payload: a changeset reference, diff blocks with hunks and line anchors, logical review cards, warnings, and export capability metadata. The session-hosted agent is the primary GitHub PR ingestion path; the older resolver remains for fixture/local compatibility and standalone restore.
+The model is **changeset-oriented**, not GitHub-specific: GitHub PRs, local SHA
+pairs, and fixtures all resolve into the same renderable payload — a changeset
+reference, diff blocks with hunks and line anchors, logical review cards,
+warnings, and export-capability metadata. The reviewer UI never needs to know how
+the cards were produced; it renders the same cards, comments, decisions, draft
+review, and export preview for every provider.
 
-The checked-in prototype in [`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html) remains the UX reference for the ready-state review surface. This document describes the production launch, agent, persistence, export, and troubleshooting behavior around that UI.
+The checked-in prototype in
+[`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html)
+remains the UX reference for the ready-state review surface.
 
-> ## Current model: the viewer is a built-in first-party pack
->
-> **The PR-walkthrough VIEWER now ships as a built-in first-party pack**
-> (`market-packs/pr-walkthrough/`), auto-resolved **active-by-default** with no
-> manual install, and is the **sole provider** of the viewer panel + its data
-> + deep-link. The bespoke built-in viewer was **deleted**. What this changes
-> versus the older descriptions below:
->
-> - **Route.** The viewer opens at the generic extension route
->   **`#/ext/pr-walkthrough`** (via `host.ui.navigate`/`openPanel`). The deleted
->   `#/walkthrough` SPA route and standalone `/walkthrough?...` pathname route no
->   longer exist.
-> - **Launch.** A pack **entrypoint** (git-widget button / composer-slash /
->   command palette) opens the pack panel; the panel's "Run PR walkthrough"
->   action uses **`host.session.postMessage`** to drive the **current** session's
->   agent. The deleted `open-pr-walkthrough` event → `launchPrWalkthroughAgent`
->   → `POST /api/pr-walkthrough/launch` **child-agent spawn** path is gone; the
->   walkthrough now runs in the session you launched it from, not a nested child.
-> - **Viewer + data.** The panel is `market-packs/pr-walkthrough/lib/panel.js`;
->   its changeset/diff bundle and persisted cards come from the pack's own
->   `lib/routes.mjs` (`bundle` recomputes the changeset LIVE via `git`; `publish`
->   persists cards) and pack-namespaced `host.store`. The YAML→cards synthesis is
->   shared at `src/shared/pr-walkthrough/yaml-to-cards.ts`.
-> - **Deleted:** `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` (+ dir),
->   `src/app/pr-walkthrough.ts`, the viewer-feed routes
->   (`GET /api/pr-walkthrough/jobs/:id`, `/session/:id`, `/:id`), and the E2E specs
->   `pr-walkthrough-panel.spec.ts` / `pr-walkthrough-real.spec.ts` /
->   `pr-walkthrough-session-ux.spec.ts` (replaced by
->   `tests/e2e/ui/pr-walkthrough-pack.spec.ts`).
-> - **Retained agent-side:** the `submit_pr_walkthrough_yaml` /
->   `read_pr_walkthrough_bundle` / `readonly_bash` tools, `WalkthroughAgentManager`,
->   `walkthrough-store.ts`, `git-changeset.ts`, `diff-parser.ts`, and the
->   `/launch` / `/resolve` / `/export/*` routes. The YAML schema, card model,
->   review flow, and GitHub export described below remain accurate.
->
-> See [docs/marketplace.md § Built-in (first-party) packs](marketplace.md#built-in-first-party-packs),
-> [docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md),
-> and [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md)
-> for the pack model. **The sections below retain the pre-migration child-session /
-> standalone-route descriptions as historical context for the agent flow and
-> review UX; where they conflict with the bullets above, the bullets above are
-> authoritative.**
+## How it works now (built-in first-party pack)
 
-## Launch paths and surfaces
+**The PR-walkthrough viewer ships as a built-in first-party pack**
+(`market-packs/pr-walkthrough/`), auto-resolved **active-by-default** with no
+manual install, and is the **sole provider** of the viewer panel, its data
+routes, and its deep-link. The bespoke built-in viewer (the old
+`PrWalkthroughPanel.ts` component, the standalone `/walkthrough?...` browser
+route, the `/walkthrough-pr` client slash intercept, and the child-session
+side-panel viewer) was **deleted**. The pre-migration surfaces are kept only as
+[historical rationale](#historical-pre-pack-migration--retained-for-rationale) at
+the end of this document; none of it is current.
 
-Users can open a walkthrough from these entry points:
+The current end-to-end flow:
 
-- **Slash command** — `/walkthrough-pr <url|number>` in chat.
-  - The composer exposes `/walkthrough-pr` as a built-in slash-command autocomplete entry with the hint `<GitHub PR URL or #>`.
-  - GitHub PR URLs carry the owner, repository, host, and PR number.
-  - Numbers, with or without `#`, resolve against the launching session's GitHub `origin` remote.
-  - Re-launching the same PR from the same parent focuses the existing walkthrough child when it is still usable.
-- **Pack entrypoint (current)** — the git-widget **Walkthrough** button, the
-  `/walkthrough-pr` composer-slash entry, and a command-palette launcher are pack
-  **entrypoints**. Activating one opens the pack panel at `#/ext/pr-walkthrough`;
-  the panel's "Run PR walkthrough" action then drives the **current** session's
-  agent via `host.session.postMessage`. *(Historical: the git-widget button
-  previously dispatched an `open-pr-walkthrough` event that spawned a read-only
-  child walkthrough agent — that path is deleted.)*
-- *(Historical) Standalone route* — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>`
-  opened an already-created walkthrough tab in a wide review surface. This
-  pathname route is **deleted**; the pack panel renders at `#/ext/pr-walkthrough`.
-- **Compatibility resolver** — fixture and local SHA walkthroughs can still be resolved directly into a tab by the standalone/local resolver paths. Session-hosted walkthrough agents currently support GitHub PR targets only.
+- **Route.** The viewer opens at the generic extension route **`#/ext/pr-walkthrough`**
+  (via the pack's `host.ui.navigate` / `openPanel`). There is no `#/walkthrough`
+  SPA route and no standalone `/walkthrough?...` pathname route.
+- **Launch.** A pack **entrypoint** — a git-widget button, a composer-slash
+  launcher, a command-palette launcher, and a `kind:"route"` deep-link — opens
+  the pack panel. The entrypoints carry **no** hard-coded `jobId`; opening a
+  launcher just navigates to the panel.
+- **Run.** When no walkthrough has been submitted for the session yet, the panel
+  shows a **"Run PR walkthrough"** action. On the user's click it calls
+  **`host.session.postMessage`** to direct the **current** session's agent to run
+  the walkthrough using the kept agent tools (`readonly_bash`,
+  `read_pr_walkthrough_bundle`, `submit_pr_walkthrough_yaml`). The walkthrough
+  runs **in the session you launched it from**, not in a nested child session.
+- **Job + SHAs from the submitted YAML.** The panel derives the real job id and
+  the base/head SHAs from the agent's submitted YAML (`pr.owner` / `pr.repo` /
+  `pr.number` → canonical job id; `pr.base_sha` / `pr.head_sha` → the SHAs it
+  hands the `bundle` route). It reads that submission by scanning the current
+  session's transcript for the `submit_pr_walkthrough_yaml` tool call
+  (`host.session.readTranscript` → `host.session.readToolCall`).
+- **Data via pack routes.** The panel never makes a raw `fetch`. It calls the
+  pack's own routes (`market-packs/pr-walkthrough/lib/routes.mjs`, registered in
+  `pack.yaml` `routes:`) through `host.callRoute`:
+  - **`publish`** validates the submitted YAML and persists the synthesized cards
+    in the pack-namespaced `host.store`.
+  - **`bundle`** recomputes the changeset **live** via `git` inside the confined
+    worker (the git working dir is always the session worktree, server-derived —
+    never caller-supplied) and serves it together with any persisted cards.
+- **YAML → cards.** The synthesis that turns the agent's validated YAML into
+  review cards is shared at **`src/shared/pr-walkthrough/yaml-to-cards.ts`** and
+  bundled into the pack's `publish` route, so the pack maps the YAML to cards
+  itself.
+- **Persistence.** On reload (or re-opening `#/ext/pr-walkthrough`) the panel
+  re-reads state through the `bundle` route, which recomputes the changeset live
+  and reads any persisted cards from `host.store`; a stamped-once `persistedAt`
+  keeps the cards stable across reloads.
 
-For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. Before that child exists, launch resolves and persists a sanitized analysis bundle containing the PR metadata, body, stats, diff hunks, warnings, limits, and export capability. The stored launch-time bundle is authoritative for the job; YAML submission maps against that bundle instead of re-fetching PR diff data.
+The **agent-side lifecycle** that actually produces the YAML — the three
+read-only tools, `WalkthroughAgentManager`, and the
+`/api/pr-walkthrough/launch` · `/resolve` · `/export/*` routes — is **retained**
+in the codebase (see [Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained)).
+What changed is only that those routes are **no longer reached from a built-in UI
+launcher**: the git-widget button and the `/walkthrough-pr` client intercept that
+called `/launch` were deleted.
 
-The UI switches/focuses the child session, expands the needed sidebar containers, and shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata. This nesting applies to ordinary sessions, goal sessions, team member sessions, and team-lead rows, and it is restored after reload from persisted session metadata and sidebar expansion state. Terminated or archived walkthrough children are hidden while **Show Archived** is off and reappear nested under their parent when it is on.
-
-## Sidebar expansion state
-
-A first-class child (PR walkthrough: `parentSessionId` set, no `delegateOf`) is shown nested under its parent and the parent gets an expand/collapse chevron. Whether that chevron actually hides the child is governed by one of **three** independent sidebar expansion models, all defined in `src/app/state.ts` and consulted by the row renderers in `src/app/render-helpers.ts` (`renderSessionRow`, `renderTeamGroup`). They differ in default state and in whether the persisted set records expansions or collapses:
-
-| Model | State + accessors | localStorage key | Semantics | Default | Governs |
-|---|---|---|---|---|---|
-| Archived / delegate | `expandedDelegateParents`, `isArchivedParentExpanded` / `setArchivedParentExpanded` / `toggleArchivedParentExpanded` | `bobbit-expanded-delegate-parents` | **opt-in** — set holds IDs that are expanded | collapsed | delegate-session children and archived-parent nesting |
-| Team lead | `collapsedTeamLeadSessions`, `isTeamLeadExpanded` / `setTeamLeadExpanded` / `toggleTeamLeadExpanded` | `bobbit-collapsed-team-leads` | **opt-out** — set holds IDs that are collapsed | expanded | a team lead's team members |
-| First-class parent | `collapsedFirstClassParents`, `isFirstClassParentExpanded` / `setFirstClassParentExpanded` / `toggleFirstClassParentExpanded` | `bobbit-collapsed-first-class-parents` | **opt-out** — set holds IDs that are collapsed | expanded | a parent's first-class (PR walkthrough) children |
-
-**Why first-class parents use the opt-out model.** A PR walkthrough child is launched on purpose and the user almost always wants to watch it, so it must be **visible by default** — exactly like team members under a team lead. But the chevron must still work: the user can collapse the nesting and that choice must persist across reload. The opt-in `expandedDelegateParents` model can't express "expanded by default", so first-class parents get their own opt-out set modeled on `collapsedTeamLeadSessions`.
-
-This third model fixed two chevron bugs. Previously `renderSessionRow` force-expanded any parent with a first-class child (an `autoExpanded` short-circuit), making its chevron a no-op; it now routes both the chevron glyph and child visibility through `isFirstClassParentExpanded`. And `renderTeamGroup` gated the team lead's first-class children on an independent always-on condition, so collapsing the lead never hid its PR-walkthrough child; the lead's first-class children are now gated on the same `tlExpanded` (i.e. `isTeamLeadExpanded`) that gates the team members, so the lead's chevron collapses members and the walkthrough child together.
-
-All three sets are pruned for archived session IDs in `resetArchivedExpandState()` so explicit per-session choices don't leak back when a session is archived and its ID is later reused.
-
-A ready walkthrough is reviewed in the **pack panel** opened at
-`#/ext/pr-walkthrough` (via `host.ui.navigate`/`openPanel`). The panel supports
-user-initiated fullscreen / collapse via the shared preview-panel toolbar — see
-[Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts). *(Historical:
-the deleted bespoke viewer offered a child-session side panel beside chat and a
-standalone `/walkthrough?...` browser tab; both surfaces are gone — there is no
-child session and no standalone pathname route.)*
-
-### Untrusted-host launch dialog
-
-A launch against a host that is neither in the always-trusted baseline nor the managed [trusted-host allowlist](#trusted-github-hosts) is rejected **before** any job, child session, or tab is created, so a failed launch never leaves a stale waiting tab. The host trust check is synchronous: `POST /api/pr-walkthrough/launch` returns HTTP `400` with body `{ code: "untrusted_github_host", host }`.
-
-The UI detects the `untrusted_github_host` code (carried through `fetchWalkthroughJson` error handling, with the offending host taken from the response body and a message-regex fallback) and, instead of toasting the raw error, shows a security-aware confirmation dialog that:
-
-- names the specific host that is not trusted;
-- warns that adding it lets Bobbit fetch repository and pull-request content (metadata and diffs) from that host, and to continue only if the host is trusted;
-- offers **Add & continue** and **Cancel**.
-
-On **Add & continue**, Bobbit normalizes the host, persists it to `githubTrustedHosts` via `PUT /api/preferences`, and retries the launch once with the same input (a one-shot guard prevents retry loops if it still fails). Because the allowlist is read live per request, the retry succeeds without a server restart or re-entering the PR. On **Cancel**, the launch aborts cleanly — no walkthrough child, no tab. A defensive path also catches a `201` launch whose job is already in the `untrusted_github_host` error state and routes it through the same dialog rather than rendering an error tab.
+For the pack model, see
+[docs/marketplace.md § Built-in (first-party) packs](marketplace.md#built-in-first-party-packs),
+[docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md),
+and [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md).
 
 ## Panel sizing: fullscreen, collapse, and shortcuts
 
-The in-app walkthrough side panel uses the **same** resize logic as the HTML
-preview panel — there is no walkthrough-specific resize code path. When a
-walkthrough is open beside chat it renders the shared unified toolbar with a
-fullscreen (wide review) button and a collapse button, and it honors
-`state.previewPanelFullscreen` plus the per-session collapse key
-(`bobbit-preview-collapsed-<id>`) identically to the preview panel. The same
-keyboard shortcuts drive it: `toggle-sidebar` (Ctrl+[, expand one level),
+The pack panel opened at `#/ext/pr-walkthrough` uses the **same** resize logic as
+the HTML preview panel — there is no walkthrough-specific resize code path. It
+renders the shared unified toolbar with a fullscreen (wide review) button and a
+collapse button, and it honors `state.previewPanelFullscreen` plus the per-session
+collapse key (`bobbit-preview-collapsed-<id>`) identically to the preview panel.
+The same keyboard shortcuts drive it: `toggle-sidebar` (Ctrl+[, expand one level),
 `toggle-preview` (Ctrl+], collapse one level), and `toggle-fullscreen-preview`
 (Ctrl+#, jump to fullscreen or collapsed). State persists across reload.
 
-The panel **never auto-enters fullscreen**. Fullscreen is strictly
-user-initiated, via a toolbar button or one of those shortcuts. This matches the
-preview panel and is the behaviour the rest of the app expects — a panel that
-seizes the whole window on its own (for example when a walkthrough becomes ready)
-is disruptive and was the source of the original "dead controls" bug. See
+The panel **never auto-enters fullscreen**. Fullscreen is strictly user-initiated,
+via a toolbar button or one of those shortcuts. This matches the preview panel and
+is the behaviour the rest of the app expects — a panel that seizes the whole
+window on its own (for example when a walkthrough becomes ready) is disruptive and
+was the source of the original "dead controls" bug. See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the full root-cause analysis and the special-casing that was removed.
 
 The walkthrough panel's **own internal rail sidebar toggle**
 (`data-testid="pr-walkthrough-rail-toggle"`, rendered inside the pack panel
-`market-packs/pr-walkthrough/lib/panel.js`)
-is a different control — it collapses/expands the review rail *within* the
-walkthrough, not the window-level panel. It works on every surface and is
-unaffected by the panel-level sizing logic.
-
-> *(Historical: the deleted bespoke viewer also offered a popped-out standalone
-> `/walkthrough?...` browser tab — rendered by `standaloneWalkthroughPanel()` in
-> `src/app/render.ts` — which filled the window with no panel-level
-> fullscreen/collapse chrome, plus a route-aware `workspaceSessionId()` /
-> `route.walkthroughSessionId` session-key helper. That route, its panel branch,
-> and the helper are all **deleted**; the pack panel renders only at
-> `#/ext/pr-walkthrough`.)*
+`market-packs/pr-walkthrough/lib/panel.js`) is a different control — it
+collapses/expands the review rail *within* the walkthrough, not the window-level
+panel.
 
 ### Pinning tests
 
-These behaviours are pinned by browser E2E and must not regress. The pack-served
-viewer is covered end-to-end by `tests/e2e/ui/pr-walkthrough-pack.spec.ts`
-(install-free built-in-band resolution → launcher → live `bundle` recompute →
-render → `publish` → reload persistence → disable). *(Historical: the deleted
-bespoke viewer was pinned by `pr-walkthrough-panel.spec.ts` /
-`pr-walkthrough-real.spec.ts` for the now-removed standalone-route resize chrome
-and child-session cases.)*
-
-- **HTML preview panel sizing unchanged** —
-  `tests/e2e/ui/preview-fullscreen-controls.spec.ts` (the panel-sizing logic does
-  not touch the preview panel).
-
-See [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
-for the root-cause analysis and the corrected design (this supersedes the
-incorrect first attempt in PR #677).
-
-## Session-hosted GitHub PR flow
-
-### 1. Launch or focus a child session
-
-`/walkthrough-pr <url|number>` calls `POST /api/pr-walkthrough/launch` with the launching `sessionId` and target. The server:
-
-1. resolves the parent session and cwd;
-2. canonicalizes the GitHub target;
-3. checks for an existing job for the same `(parentSessionId, canonicalKey)`;
-4. creates a `starting` job record with stable job and child-session ids;
-5. resolves PR metadata and diff data, sanitizes it, and persists the launch-time analysis bundle;
-6. creates a normal read-only child session with role `pr-walkthrough` only after the bundle is usable;
-7. marks the job `waiting_for_yaml`, opens the walkthrough tab in the child session, and prompts the agent to investigate.
-
-The child title is `PR #<number> Walkthrough` when the PR number is known. If launch-time target or bundle resolution fails, Bobbit returns the structured job error before child creation/focus so no waiting child is left without input.
-
-### 2. Empty waiting panel
-
-The child session initially looks like a goal assistant: chat on one side, PR walkthrough panel on the other. The panel is intentionally empty while the agent investigates. It shows a waiting state explaining that cards appear only after the read-only walkthrough agent calls `submit_pr_walkthrough_yaml` with valid YAML.
-
-Progress is reported in chat by the agent, not by a panel progress bar. The panel may also show validation or runtime errors from the job record, but it does not scrape chat messages into cards.
-
-### 3. Read-only investigation
-
-Walkthrough sessions receive a narrow tool set:
-
-- `read_pr_walkthrough_bundle` for bounded reads of the scoped persisted launch-time PR metadata and diff bundle;
-- `readonly_bash` for additional read-only PR/diff/file inspection;
-- `submit_pr_walkthrough_yaml` for publishing the completed walkthrough.
-
-The agent prompt tells the agent to start with `read_pr_walkthrough_bundle` in manifest mode, then request bounded file/hunk reads as needed. The bundle tool validates the current `sessionId` and job id, reads only that walkthrough job's artifact, and does not loosen `readonly_bash` path or command policy.
-
-They do not receive unrestricted `bash`, file write/edit tools, build/test/install commands, commit/push tools, or GitHub review/comment submission tools.
-
-`readonly_bash` enforces policy before execution. At a high level it allows commands such as:
-
-- `gh pr view` and `gh pr diff` for the launched PR;
-- scoped `gh api` reads for the launched repository and PR;
-- read-only `git diff`, `git show`, `git log`, `git grep`, `git rev-parse`, `git status`, and `git for-each-ref` for ref inspection/search;
-- bounded file/search commands such as `rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, `pwd`, and `sed`.
-
-It blocks mutating commands, tests/builds, dependency installs, server starts, shell chaining/redirection, long-running follow modes, hidden/ignore override flags, unsafe `git grep` pager/editor or untracked/ignore-bypass flags, sensitive path reads, repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh` actions that would create reviews or comments. `git for-each-ref` is allowed only as read-only ref inspection; escape/output flags such as `--git-dir`, `--work-tree`, `--output`, `--shell`, `--perl`, `--python`, and `--tcl` remain blocked.
-
-### 4. YAML submission is the completion path
-
-The walkthrough panel is populated only through `submit_pr_walkthrough_yaml`. The agent must submit exactly one YAML document matching the PR walkthrough schema. A final chat answer is never treated as completion.
-
-The agent prompt includes the schema as a fenced `yaml` block for readability. That fence is documentation only: the `submit_pr_walkthrough_yaml` tool argument must be raw YAML with no Markdown fences, backticks, blockquotes, commentary, or extra YAML documents.
-
-The tool posts to the internal submit endpoint with the child `sessionId`, job id, YAML text, and a scoped submit proof. The gateway validates:
-
-- YAML syntax and single-document shape;
-- required fields, enum values, size limits, and cross-field target consistency;
-- authoritative PR identity against the launched target;
-- hunk/file references against the stored launch-time analysis bundle where possible.
-
-On validation failure, the job moves to `validation_failed`, the panel remains unpopulated, and the tool returns field-level retry feedback such as `path` plus `message`. The agent can fix the YAML and call the tool again. If the stored bundle is missing, corrupt, or unusable, submission fails deterministically with retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; Bobbit does not silently re-fetch the PR at submit time. Relaunch the walkthrough so launch can resolve and persist a fresh bundle. If the agent becomes idle without a valid submission, Bobbit steers it to call `submit_pr_walkthrough_yaml`; after a failed submission, the reminder includes the last validation errors.
-
-On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, and selects the child walkthrough tab. It does **not** auto-enter fullscreen — the panel shares the preview panel's user-initiated resize semantics, so the reviewer enters fullscreen only by an explicit action (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts)). The tool response tells the agent to stay available for follow-up questions.
-
-### 5. Follow-up chat remains live
-
-A successful YAML submission does not terminate the child session. The user can ask follow-up questions in the walkthrough chat while the PR context, previous investigation, and tool results remain loaded. The child session may carry `readOnly: true` metadata for tool/file policy, but live walkthrough children are still promptable; only archived or terminated walkthrough sessions render as non-interactive. Further `submit_pr_walkthrough_yaml` calls are rejected once the job is `ready`; the published payload is immutable for that job.
-
-## Target scoping and canonicalization
-
-GitHub PR targets are canonicalized so repeated launches focus the same child instead of duplicating work:
-
-- Full PR URL: `github:<owner>/<repo>#<number>` for github.com, or `github:<host>/<owner>/<repo>#<number>` for a trusted enterprise host.
-- Number-only launch: Bobbit infers `<owner>/<repo>` from the launching session's GitHub `origin` remote and then uses the same canonical key (host-qualified for non-github.com remotes).
-
-The host is included in the canonical key for non-github.com hosts so two trusted enterprise hosts sharing the same owner/repo/PR number do not collide into one job; github.com keeps its legacy unqualified key. See [Enterprise host identity and token scoping](#enterprise-host-identity-and-token-scoping).
-
-A number-only target fails with an actionable error when the session worktree has no GitHub `origin` remote. Passing a full PR URL avoids that dependency.
-
-The child tool runtime receives scoped environment variables for the launched GitHub target, including provider, owner, repo, and number. `readonly_bash` uses those values to reject cross-repo and cross-PR GitHub reads. The submit tool also receives a per-job submit proof; only its hash is persisted.
-
-## Local changesets and standalone behavior
-
-Session-hosted walkthrough agents currently support GitHub PRs only. Launching an agent for a local `baseSha` / `headSha` changeset returns `LOCAL_WALKTHROUGH_AGENT_UNSUPPORTED` and tells the caller to use the standalone local walkthrough resolver.
-
-The existing local resolver behavior remains relevant for:
-
-- fixtures and development compatibility;
-- local SHA-pair walkthroughs;
-- restoring already-persisted walkthrough payloads by `changesetId`.
-
-The pack panel itself recomputes the changeset LIVE through the pack's own
-`lib/routes.mjs` `bundle` route (`git`-backed) rather than relying on a standalone
-pathname route. *(Historical: the deleted bespoke viewer relied on a standalone
-`/walkthrough?...` route to re-open an existing tab; that route is gone.)*
-
-Local walkthroughs can produce review drafts and export previews, but they cannot submit to GitHub because there is no provider review target.
+The pack-served viewer is covered end-to-end by
+`tests/e2e/ui/pr-walkthrough-pack.spec.ts` (install-free built-in-band resolution
+→ launcher → live `bundle` recompute → render → `publish` → reload persistence →
+disable). HTML-preview-panel sizing is independently pinned by
+`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (the panel-sizing logic does
+not touch the preview panel). See
+[design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
+for the root-cause analysis and the corrected design.
 
 ## Changeset and card model
 
-The shared walkthrough model lives under `src/shared/pr-walkthrough/` and is consumed by both server and UI.
+The shared walkthrough model lives under `src/shared/pr-walkthrough/` and is
+consumed by both server and the pack panel.
 
 Key concepts:
 
@@ -270,11 +129,12 @@ Key concepts:
 - **Card** — a logical review unit in one of the walkthrough phases. A card can contain multiple diff blocks across one or more files. Each card also carries an optional `navLabel` (a compact ≤3-word sidebar label distinct from the full `title`) and the Orientation card carries optional `sections` (the guided "beats" — see [Guided orientation step-through](#guided-orientation-step-through)). Both are optional, so legacy/partial payloads still render.
 - **Warning** — visible ingestion, mapping, validation, or export issue with a severity, code, message, and optional file path.
 
-The UI never needs to know whether cards came from the session-hosted YAML flow or the compatibility resolver. It renders the same cards, warnings, comments, decisions, draft review, and export preview for every provider.
-
 ## YAML-to-card mapping
 
-Validated YAML is mapped into the existing card model:
+The agent submits exactly one YAML document matching the PR walkthrough schema.
+That YAML is mapped into the card model by the shared synthesis at
+`src/shared/pr-walkthrough/yaml-to-cards.ts` (bundled into the pack's `publish`
+route):
 
 - `walkthrough.context`, `merge_assessment`, and `pr.original_description.body` become the Orientation card, including the six structured guided `sections` (see [Guided orientation step-through](#guided-orientation-step-through)).
 - `design_decisions` become Key design choices cards with trade-offs, alternatives, suggested concerns, and linked hunks.
@@ -284,9 +144,18 @@ Validated YAML is mapped into the existing card model:
 - `audit` feeds the final Audit card and draft reviewer checklist.
 - `display.phase_order` and `display.chunk_order` influence visible ordering while preserving the known phase set.
 
-Hunk references are best-effort mapped to parsed diff blocks by normalized file path and hunk identity. Exact hunk-header matches are preferred, but Bobbit also maps by the numeric old/new hunk ranges when either side includes, omits, or changes the trailing context text after the closing `@@`. Unmapped references are preserved as warnings or card suggestions rather than silently disappearing, and fallback file-level mapping avoids duplicating diff blocks.
+Hunk references are best-effort mapped to parsed diff blocks by normalized file
+path and hunk identity. Exact hunk-header matches are preferred, but Bobbit also
+maps by the numeric old/new hunk ranges when either side includes, omits, or
+changes the trailing context text after the closing `@@`. Unmapped references are
+preserved as warnings or card suggestions rather than silently disappearing, and
+fallback file-level mapping avoids duplicating diff blocks.
 
-The older model-backed synthesis and deterministic grouping remain compatibility behavior for direct resolver paths. The session-hosted GitHub flow does not populate cards from chat text or from silent model synthesis in the launcher.
+The older model-backed synthesis and deterministic grouping remain compatibility
+behavior for direct resolver paths (see
+[Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained)).
+The pack flow populates cards only from validated YAML, never from chat text or
+silent model synthesis.
 
 ## Review flow
 
@@ -298,13 +167,25 @@ The walkthrough is organised into five phases:
 4. **Other + omissions** — covers smaller changes, expected artifacts, and follow-up concerns.
 5. **Audit** — checks remaining coverage and renders the final draft review.
 
-Every phase can contain normal diff-backed cards. A card can span multiple files or hunks when that better matches the reviewer story. Audit cards use the same line comments, card comments, suggestions, diff expansion, and Like/Dislike controls as other cards, then render the copyable draft review.
+Every phase can contain normal diff-backed cards. A card can span multiple files
+or hunks when that better matches the reviewer story. Audit cards use the same
+line comments, card comments, suggestions, diff expansion, and Like/Dislike
+controls as other cards, then render the copyable draft review.
 
 ## Guided orientation step-through
 
-Phase 0 (Orientation) is rendered as a **guided step-through** rather than a single card body. This exists because the orientation card previously joined the structured context fields (`why_created`, `problem_solved`, `why_worth_merging`, `author_intent`, `reviewer_map`, `merge_assessment`, `merge_concerns`) into two `\n`-joined `<p>` blobs. CSS collapses those newlines into a single space, so the reviewer faced an intimidating wall of text with the verdict, concerns, and reviewer file-map all buried. The redesign breaks orientation into six single-idea **beats**, each readable in under ~20 seconds, with Back/Next navigation and a step counter.
+Phase 0 (Orientation) is rendered as a **guided step-through** rather than a single
+card body. This exists because the orientation card previously joined the
+structured context fields (`why_created`, `problem_solved`, `why_worth_merging`,
+`author_intent`, `reviewer_map`, `merge_assessment`, `merge_concerns`) into two
+`\n`-joined `<p>` blobs. CSS collapses those newlines into a single space, so the
+reviewer faced an intimidating wall of text with the verdict, concerns, and
+reviewer file-map all buried. The redesign breaks orientation into six single-idea
+**beats**, each readable in under ~20 seconds, with Back/Next navigation and a step
+counter.
 
-The six beats are **server-defined** and sourced entirely from the existing YAML `walkthrough.context` + `merge_assessment` — no new agent fields are required:
+The six beats are **server-defined** and sourced entirely from the existing YAML
+`walkthrough.context` + `merge_assessment` — no new agent fields are required:
 
 1. **At a glance** — a verdict badge (`recommendation` + `confidence`, e.g. `APPROVE · medium confidence`), the one-line summary, and the diff stats.
 2. **Why it exists** — `why_created` (eyebrow "The problem").
@@ -318,15 +199,23 @@ Navigation:
 - **Back** is disabled on the first beat. **Next** advances one beat; on the last beat it reads **"Start review →"** and advances to the next card, marking the orientation card complete.
 - **Per-section rail circles.** Under the Phase 0 rail entry, the panel renders one circle per beat with the beat's ≤3-word label below it. Visited beats show a filled `✓`, the current beat a ringed primary dot, and upcoming beats a hollow circle. Clicking a circle jumps to that beat; Back/Next keep the rail circles in sync. When orientation is not the active card, all circles render done if it was completed, else hollow.
 
-Both `sections` and the per-beat model are **optional and backward-compatible**: an orientation card without `sections` (legacy or partial YAML) falls back to the legacy single card-button in the rail and the generic card body. The legacy `summary`/`rationale`/`checklist` fields are still populated so older renderers and stored payloads keep working; the redesigned panel prefers `sections`.
+Both `sections` and the per-beat model are **optional and backward-compatible**: an
+orientation card without `sections` (legacy or partial YAML) falls back to the
+legacy single card-button in the rail and the generic card body. The legacy
+`summary`/`rationale`/`checklist` fields are still populated so older renderers and
+stored payloads keep working; the redesigned panel prefers `sections`.
 
 ## Short navigation labels
 
-Every sidebar rail entry uses a compact label distinct from the card's full descriptive title. This exists because full titles (e.g. `render.ts: fullscreen predicate and standalone panel simplification`) overflow and truncate badly in the ~240px rail. The full title is retained for the card `<h2>` header and the rail `title=` tooltip; the rail itself shows the short label.
+Every sidebar rail entry uses a compact label distinct from the card's full
+descriptive title. This exists because full titles (e.g. `render.ts: fullscreen
+predicate and standalone panel simplification`) overflow and truncate badly in the
+~240px rail. The full title is retained for the card `<h2>` header and the rail
+`title=` tooltip; the rail itself shows the short label.
 
 - The rail renders `card.navLabel ?? deriveNavLabel(card.title)` for every card, and the beat's own `navLabel` for orientation circles.
-- `deriveNavLabel` and `navLabelError` live in `src/shared/pr-walkthrough/nav-label.ts` (shared by server and UI). The cap is `NAV_LABEL_MAX_WORDS = 3` and `NAV_LABEL_MAX_CHARS = 24`. `deriveNavLabel` takes the text before the first `:` / `—` / ` - ` separator (when non-empty), keeps the first ≤3 words, and hard-truncates to 23 chars + `…` if still over the char cap. `navLabelError` rejects empty/whitespace-only, >3-word, or >24-char labels.
-- The LLM review agent may supply an optional `nav_label` per card in its submitted YAML (see [PR walkthrough agent UX](design/pr-walkthrough-agent-ux.md)). In the `submit_pr_walkthrough_yaml` path the server derives a label from the title when `nav_label` is **missing or empty/whitespace-only**; a non-empty `nav_label` that exceeds the caps (>3 words or >24 chars) is **rejected with a validation error** rather than silently truncated, so the agent fixes it and resubmits. (The derive-on-invalid fallback applies only to the internal LLM card-synthesis path, not to submitted YAML.) Either way, existing and partial YAML always render a non-truncating rail label.
+- `deriveNavLabel` and `navLabelError` live in `src/shared/pr-walkthrough/nav-label.ts` (shared by server and the pack panel). The cap is `NAV_LABEL_MAX_WORDS = 3` and `NAV_LABEL_MAX_CHARS = 24`. `deriveNavLabel` takes the text before the first `:` / `—` / ` - ` separator (when non-empty), keeps the first ≤3 words, and hard-truncates to 23 chars + `…` if still over the char cap. `navLabelError` rejects empty/whitespace-only, >3-word, or >24-char labels.
+- The review agent may supply an optional `nav_label` per card in its submitted YAML (see [PR walkthrough agent UX](design/pr-walkthrough-agent-ux.md)). In the `submit_pr_walkthrough_yaml` path the server derives a label from the title when `nav_label` is **missing or empty/whitespace-only**; a non-empty `nav_label` that exceeds the caps (>3 words or >24 chars) is **rejected with a validation error** rather than silently truncated, so the agent fixes it and resubmits. (The derive-on-invalid fallback applies only to the internal model card-synthesis path, not to submitted YAML.) Either way, existing and partial YAML always render a non-truncating rail label.
 
 ## Diff behaviour
 
@@ -335,14 +224,19 @@ Diffs render from the card/block/hunk model in two modes:
 - **Split** — side-by-side old/new columns. This is the default in wide layouts.
 - **Inline** — a single column. This is the default in narrow layouts.
 
-The user can toggle either mode at any width. Split diffs use one shared horizontal overflow container per diff widget, so old and new columns scroll together.
+The user can toggle either mode at any width. Split diffs use one shared
+horizontal overflow container per diff widget, so old and new columns scroll
+together.
 
-Deleted old-side lines and added new-side lines each have their own suggestions, saved comments, and active editor below the row. Context rows share a single detail area because both columns represent the same logical line.
+Deleted old-side lines and added new-side lines each have their own suggestions,
+saved comments, and active editor below the row. Context rows share a single detail
+area because both columns represent the same logical line.
 
-Diff rendering is defensive at two layers so a single malformed block can never blank the whole pane:
+Diff rendering is defensive at two layers so a single malformed block can never
+blank the whole pane:
 
-- **Header coercion.** `PrWalkthroughHunk.header` is a required `string`, but the panel still treats it defensively: `hunkSignature` coerces a non-string header to `""` (rendering no signature label) instead of dereferencing it. The producer honors the same contract — the bundle-reconstruction path (`diffBlockFromBundleFile` and the writer `bundleHunkFromDiffHunk` in `src/server/pr-walkthrough/walkthrough-analysis-bundle.ts`) coerces `header` to a string, and the `isDiffBlock` guards require a string hunk `header` before admitting a block.
-- **Per-block error boundary.** Each diff block renders through `renderDiffBlockSafe`, which wraps `renderDiffBlock` in a `try/catch`; on a render throw it logs a warning and renders a small local fallback (`data-testid="pr-walkthrough-diff-block-error"`) naming the file, so the rest of the card and panel stay interactive. See [docs/design/pr-walkthrough-hunk-header-fix.md](design/pr-walkthrough-hunk-header-fix.md) for the regression this guards against.
+- **Header coercion.** `PrWalkthroughHunk.header` is a required `string`, but both the producer and the renderer treat it defensively. The synthesis at `src/shared/pr-walkthrough/yaml-to-cards.ts` and the pack panel (`market-packs/pr-walkthrough/lib/panel.js`) coerce a non-string header to `""` (rendering no signature label) instead of dereferencing it. The producer honors the same contract — the bundle-reconstruction path (`diffBlockFromBundleFile` and the writer `bundleHunkFromDiffHunk` in `src/server/pr-walkthrough/walkthrough-analysis-bundle.ts`) coerces `header` to a string, and the `isDiffBlock` guards require a string hunk `header` before admitting a block.
+- **Per-block error boundary.** Each diff block renders through a `try/catch` wrapper; on a render throw it logs a warning and renders a small local fallback (`data-testid="pr-walkthrough-diff-block-error"`) naming the file, so the rest of the card and panel stay interactive. See [docs/design/pr-walkthrough-hunk-header-fix.md](design/pr-walkthrough-hunk-header-fix.md) for the regression this guards against.
 
 ## Comments, decisions, and draft review
 
@@ -350,13 +244,20 @@ Review state is built from comments plus per-card decisions.
 
 ### Line comments
 
-Diff lines are interactive. Hovering or clicking a line reveals the comment affordance; keyboard users can open it from the focused line. Line comments are anchored by card id, diff block id, and line id. Export mapping later resolves those anchors to provider-specific file/side/line coordinates.
+Diff lines are interactive. Hovering or clicking a line reveals the comment
+affordance; keyboard users can open it from the focused line. Line comments are
+anchored by card id, diff block id, and line id. Export mapping later resolves those
+anchors to provider-specific file/side/line coordinates.
 
-Suggested line comments can appear beside matching lines. The reviewer can accept, accept and edit, or dismiss them. Accepted suggestions become normal queued comments.
+Suggested line comments can appear beside matching lines. The reviewer can accept,
+accept and edit, or dismiss them. Accepted suggestions become normal queued
+comments.
 
 ### Card comments
 
-Every card has a card-level comment area for broad concerns that do not belong on a specific line. Card-level comments are included in the audit/export body rather than submitted as GitHub line comments.
+Every card has a card-level comment area for broad concerns that do not belong on a
+specific line. Card-level comments are included in the audit/export body rather than
+submitted as GitHub line comments.
 
 ### Like, Dislike, and Prev
 
@@ -364,7 +265,9 @@ Every card has a card-level comment area for broad concerns that do not belong o
 - **Dislike** is disabled until the card has at least one non-empty supporting line or card comment.
 - **Prev** moves back so reviewers can revise comments or decisions.
 
-If the last supporting comment for a disliked card is deleted, the invalid disliked decision is cleared. This prevents unsupported change requests from appearing in the audit draft.
+If the last supporting comment for a disliked card is deleted, the invalid disliked
+decision is cleared. This prevents unsupported change requests from appearing in the
+audit draft.
 
 ### Audit draft
 
@@ -380,25 +283,16 @@ The draft can always be copied, even when provider export is unavailable.
 
 ## Persistence and reload
 
-Persistence has five layers:
+The pack panel's reviewable state has two durable layers plus browser-local
+interaction state:
 
-- **Child session metadata** — the session store persists `parentSessionId`, `childKind: "pr-walkthrough"`, `readOnly`, `walkthroughJobId`, `walkthroughChangesetId`, and `walkthroughTargetKey` so reloads restore the visible child relationship and read-only tool identity. The sidebar renders these first-class children under their parent even when the parent is a team lead or the goal/team session list filters out child sessions from the top-level roster. Terminated or archived children are filtered out while **Show Archived** is off and shown again in the same nested location when it is on.
-- **Walkthrough job record** — the PR walkthrough agent store persists status (`starting`, `waiting_for_yaml`, `validation_failed`, `ready`, or `error`), target, tab id, last validation error, warnings, submitted timestamp, payload timestamp, an `analysisBundle` metadata block, and a submit-proof hash. Sensitive values such as tokens and raw submit proofs are sanitized.
-- **Analysis bundle store** — launch persists the sanitized, versioned PR metadata/diff bundle as a job artifact. The job's `analysisBundle` metadata records the artifact identity, schema/kind, checksum, generated timestamp, and file count; the full bundle remains separate from the final renderable payload.
-- **Resolved walkthrough payload** — after valid YAML, the existing walkthrough store persists final changeset/cards/diff blocks/warnings/export metadata under the `changesetId`.
-- **Reviewer interaction state** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`.
+- **Persisted cards (pack store)** — on a successful `submit_pr_walkthrough_yaml`, the pack's `publish` route validates the YAML, synthesizes cards via `yaml-to-cards.ts`, and persists them in the pack-namespaced `host.store` keyed by changeset id, with a stamped-once `persistedAt`. The persisted job pointer also records the base/head SHAs so a deep-link carrying only the `jobId` can recompute the same changeset.
+- **Live changeset (recomputed)** — the changeset itself is **not** stored as a frozen payload; the `bundle` route recomputes it live via `git` from the session worktree on every open, then overlays the persisted cards.
+- **Reviewer interaction state (browser-local)** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`. This is local to the browser/tab and is not synchronized across browsers or devices.
 
-When the app reloads or the user re-opens `#/ext/pr-walkthrough`, the pack panel
-re-reads its state through the pack's own `lib/routes.mjs` `bundle` route (which
-recomputes the changeset LIVE and reads any persisted LLM cards from the
-pack-namespaced `host.store`); a stamped-once `persistedAt` keeps the cards stable
-across reloads. *(Historical: the deleted bespoke viewer restored via
-`GET /api/pr-walkthrough/session/<childSessionId>` and reloaded ready cards via
-`GET /api/pr-walkthrough/<changeset-id>` — both viewer-feed routes are removed.)*
-
-When a PR walkthrough child session is restored, Bobbit rotates the submit proof and rehydrates the tool environment with `BOBBIT_SESSION_ID`, `BOBBIT_WALKTHROUGH_JOB_ID`, `BOBBIT_WALKTHROUGH_SUBMIT_PROOF`, and target-scoping variables. Restored waiting sessions retain scoped `read_pr_walkthrough_bundle` access for their own job and can continue to use `submit_pr_walkthrough_yaml` without persisting the raw proof.
-
-Because fullscreen, collapse, and reload all refer to the same tab id and persistence key, comments and decisions survive tab switching, wide review, and reload. Browser-local interaction state is not shared across browsers or devices.
+When the app reloads or the user re-opens `#/ext/pr-walkthrough`, the panel re-reads
+its state through the `bundle` route (live `git` recompute + persisted cards from
+`host.store`); the stamped `persistedAt` keeps the cards stable across reloads.
 
 ## GitHub export
 
@@ -407,7 +301,8 @@ GitHub export is deliberately two-step and user-confirmed:
 1. **Preview** — `POST /api/pr-walkthrough/<changeset-id>/export/preview` maps the current draft to a review body and per-line GitHub review comments.
 2. **Confirmed submit** — `POST /api/pr-walkthrough/<changeset-id>/export/submit` requires `confirm: true`. The UI only sends this after the reviewer clicks **Confirm submit to GitHub** in the preview dialog.
 
-The walkthrough analysis agent never submits comments or reviews to GitHub. `readonly_bash` also blocks GitHub review/comment actions during analysis.
+The walkthrough analysis agent never submits comments or reviews to GitHub.
+`readonly_bash` also blocks GitHub review/comment actions during analysis.
 
 Preview behavior:
 
@@ -423,11 +318,14 @@ Submit behavior:
 - Uses the current draft event as **Request changes** when there are comments or disliked cards; otherwise it submits an approval.
 - Returns the GitHub review URL when GitHub provides one.
 
-Unavailable cases still show a safe preview/copy path. Local changesets, unauthenticated GitHub walkthroughs, missing adapters, invalid tokens, insufficient permissions, and unmappable-only drafts do not silently submit.
+Unavailable cases still show a safe preview/copy path. Local changesets,
+unauthenticated GitHub walkthroughs, missing adapters, invalid tokens, insufficient
+permissions, and unmappable-only drafts do not silently submit.
 
 ## Edge states and warnings
 
-The panel renders waiting, validation-failed, loading, error, empty, and warning states instead of falling back to broken UI.
+The panel renders waiting, validation-failed, loading, error, empty, and warning
+states instead of falling back to broken UI.
 
 Common warning/error categories:
 
@@ -436,66 +334,180 @@ Common warning/error categories:
 - **Permission failure** — GitHub `403` with remaining rate limit usually means the token cannot access the repository or PR.
 - **Rate limit** — GitHub `403` with no remaining quota reports rate limiting; configure a token or retry later.
 - **Validation failure** — invalid YAML keeps the panel empty and returns retryable field-level errors.
-- **Missing or unusable analysis bundle** — missing, corrupt, or unreadable launch bundle artifacts return retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; relaunch the walkthrough so launch resolves a fresh bundle before analysis.
-- **Agent runtime failure** — launch or runtime failures before YAML publication become job errors shown in the child session and panel.
+- **Missing or unusable analysis bundle** — missing, corrupt, or unreadable launch bundle artifacts return retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; rerun the walkthrough so Bobbit resolves a fresh bundle before analysis.
+- **Agent runtime failure** — runtime failures before YAML publication become job errors shown in the session and panel.
 - **Large/truncated diffs** — local diff output, GitHub patch bytes, per-file line counts, or changed-file pages can be truncated. Warnings identify the affected files when possible.
 - **Generated files** — generated-looking paths are flagged as low-signal and grouped into edge-case cards.
 - **Binary files** — binary changes have no reviewable text hunks and cannot receive GitHub line comments.
 - **Renamed/deleted/copied files** — status and old paths are preserved so reviewers can understand the file movement and export can map valid line anchors.
 - **Empty diffs** — resolve to an orientation-only walkthrough with zero changed files.
-- **Untrusted PR hosts** — non-allowlisted hosts are rejected before fetching metadata or rendering clickable URLs. On launch the rejection is synchronous (before any job/tab is created) and surfaces the risk-warning [untrusted-host dialog](#untrusted-host-launch-dialog) that can add the host to the [trusted-host allowlist](#trusted-github-hosts) and retry.
+- **Untrusted PR hosts** — non-allowlisted hosts are rejected before fetching metadata or rendering clickable URLs (see [Trusted GitHub hosts](#trusted-github-hosts)).
 
-Warnings are shown at the top of the panel and again in export preview when they affect submission.
+Warnings are shown at the top of the panel and again in export preview when they
+affect submission.
 
-## API summary
+## Agent-side walkthrough lifecycle (retained)
 
-The walkthrough API is internal to the Bobbit UI but useful for tests and integrations:
+The agent that produces the walkthrough YAML, the read-only tool surface it uses,
+and the `WalkthroughAgentManager` + `/api/pr-walkthrough/launch` · `/resolve` ·
+`/export/*` routes are **retained in the codebase**. What was removed is only the
+*built-in UI launcher* that called `/launch` (the git-widget button and the
+`/walkthrough-pr` client intercept — see
+[Historical](#historical-pre-pack-migration--retained-for-rationale)). In the
+current pack model the panel drives the **current** session's agent via
+`host.session.postMessage` instead of spawning a dedicated child session, but the
+underlying agent capabilities and routes below are unchanged.
 
-- `POST /api/pr-walkthrough/launch` — create or focus a session-hosted GitHub PR walkthrough child. For new GitHub jobs, launch resolves and persists the analysis bundle before child creation/focus; if resolution fails, the response contains the structured job error and no waiting child is created. Returns the job, `childSessionId`, `changesetId`, tab id, status, and whether the job was newly created.
-- *(DELETED — viewer-feed routes)* `GET /api/pr-walkthrough/jobs/<jobId>`, `GET /api/pr-walkthrough/session/<childSessionId>`, and `GET /api/pr-walkthrough/<changeset-id>` were the bespoke viewer's read endpoints. They are removed; the pack reads its viewer data through its own `lib/routes.mjs` `bundle` route (live `git` changeset recompute) and `publish` route (persist cards) over the pack-namespaced `host.store`, reached via `host.callRoute`.
+### Read-only investigation tools
+
+A walkthrough agent uses a narrow tool set:
+
+- `read_pr_walkthrough_bundle` for bounded reads of the scoped persisted launch-time PR metadata and diff bundle;
+- `readonly_bash` for additional read-only PR/diff/file inspection;
+- `submit_pr_walkthrough_yaml` for publishing the completed walkthrough.
+
+The agent prompt tells the agent to start with `read_pr_walkthrough_bundle` in
+manifest mode, then request bounded file/hunk reads as needed. The bundle tool
+validates the current `sessionId` and job id, reads only that walkthrough job's
+artifact, and does not loosen `readonly_bash` path or command policy.
+
+These agents do not receive unrestricted `bash`, file write/edit tools,
+build/test/install commands, commit/push tools, or GitHub review/comment submission
+tools.
+
+`readonly_bash` enforces policy before execution. At a high level it allows commands
+such as:
+
+- `gh pr view` and `gh pr diff` for the launched PR;
+- scoped `gh api` reads for the launched repository and PR;
+- read-only `git diff`, `git show`, `git log`, `git grep`, `git rev-parse`, `git status`, and `git for-each-ref` for ref inspection/search;
+- bounded file/search commands such as `rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, `pwd`, and `sed`.
+
+It blocks mutating commands, tests/builds, dependency installs, server starts, shell
+chaining/redirection, long-running follow modes, hidden/ignore override flags, unsafe
+`git grep` pager/editor or untracked/ignore-bypass flags, sensitive path reads,
+repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh`
+actions that would create reviews or comments. `git for-each-ref` is allowed only as
+read-only ref inspection; escape/output flags such as `--git-dir`, `--work-tree`,
+`--output`, `--shell`, `--perl`, `--python`, and `--tcl` remain blocked.
+
+### YAML submission is the completion path
+
+The walkthrough is populated only through `submit_pr_walkthrough_yaml`. The agent
+must submit exactly one YAML document matching the PR walkthrough schema. A final
+chat answer is never treated as completion.
+
+The agent prompt includes the schema as a fenced `yaml` block for readability. That
+fence is documentation only: the `submit_pr_walkthrough_yaml` tool argument must be
+raw YAML with no Markdown fences, backticks, blockquotes, commentary, or extra YAML
+documents.
+
+The gateway validates:
+
+- YAML syntax and single-document shape;
+- required fields, enum values, size limits, and cross-field target consistency;
+- authoritative PR identity against the launched target;
+- hunk/file references against the stored launch-time analysis bundle where possible.
+
+On validation failure, the job moves to `validation_failed`, the panel remains
+unpopulated, and the tool returns field-level retry feedback such as `path` plus
+`message`. The agent can fix the YAML and call the tool again. If the stored bundle
+is missing, corrupt, or unusable, submission fails deterministically with retryable
+`PR_WALKTHROUGH_BUNDLE_MISSING`; Bobbit does not silently re-fetch the PR at submit
+time. On success, Bobbit maps the YAML into the renderable payload, persists it,
+marks the job `ready`, and broadcasts the update. Further `submit_pr_walkthrough_yaml`
+calls are rejected once the job is `ready`; the published payload is immutable for
+that job.
+
+### Target scoping and canonicalization
+
+GitHub PR targets are canonicalized so repeated launches focus the same job instead
+of duplicating work:
+
+- Full PR URL: `github:<owner>/<repo>#<number>` for github.com, or `github:<host>/<owner>/<repo>#<number>` for a trusted enterprise host.
+- Number-only launch: Bobbit infers `<owner>/<repo>` from the launching session's GitHub `origin` remote and then uses the same canonical key (host-qualified for non-github.com remotes).
+
+The host is included in the canonical key for non-github.com hosts so two trusted
+enterprise hosts sharing the same owner/repo/PR number do not collide into one job;
+github.com keeps its legacy unqualified key. See
+[Enterprise host identity and token scoping](#enterprise-host-identity-and-token-scoping).
+
+A number-only target fails with an actionable error when the session worktree has no
+GitHub `origin` remote. Passing a full PR URL avoids that dependency.
+
+The agent tool runtime receives scoped environment variables for the launched GitHub
+target, including provider, owner, repo, and number. `readonly_bash` uses those
+values to reject cross-repo and cross-PR GitHub reads. The submit tool also receives a
+per-job submit proof; only its hash is persisted.
+
+### Local changesets and the compatibility resolver
+
+Agent-hosted walkthroughs currently support GitHub PRs only. The
+`POST /api/pr-walkthrough/resolve` compatibility resolver remains relevant for:
+
+- fixtures and development compatibility;
+- local SHA-pair walkthroughs;
+- restoring already-persisted walkthrough payloads by `changesetId`.
+
+Local walkthroughs can produce review drafts and export previews, but they cannot
+submit to GitHub because there is no provider review target. The pack panel itself
+recomputes the changeset live through the pack's `bundle` route rather than relying on
+a standalone pathname route.
+
+### API summary
+
+The walkthrough API is internal to Bobbit but useful for tests and integrations:
+
+- `POST /api/pr-walkthrough/launch` — agent-side route that resolves and persists the analysis bundle for a GitHub PR target and records the walkthrough job. Returns the job, `changesetId`, status, and whether the job was newly created. **No built-in UI surface calls this route any more**; the pack panel drives the current session's agent via `host.session.postMessage` instead.
 - `GET /api/internal/pr-walkthrough/bundle` / `POST /api/internal/pr-walkthrough/bundle` — internal endpoint used only by `read_pr_walkthrough_bundle`; requires scoped session/job access and returns bounded manifest/file reads from the persisted launch bundle. `/api/internal/pr-walkthrough/analysis-bundle` is the compatibility alias.
 - `POST /api/internal/pr-walkthrough/submit-yaml` — internal tool endpoint used only by `submit_pr_walkthrough_yaml`; requires scoped session access and submit proof and maps against the stored launch bundle.
 - `POST /api/pr-walkthrough/resolve` — compatibility resolver for fixture/local/direct walkthrough payloads. Stores the resolved payload.
 - `POST /api/pr-walkthrough/<changeset-id>/export/preview` — build a provider review preview from a draft.
 - `POST /api/pr-walkthrough/<changeset-id>/export/submit` — submit a provider review only when `confirm: true` and export is available.
 
-Important launch fields:
+The pack viewer's own data (the live `bundle` recompute and the `publish` card
+persistence) is served by the pack's `lib/routes.mjs` over the pack-namespaced
+`host.store`, reached via `host.callRoute` — **not** by any of the routes above. The
+former bespoke viewer-feed routes (`GET /api/pr-walkthrough/jobs/:id`, `/session/:id`,
+`/:id`) were **deleted**.
 
-- `sessionId` — launching session; required for child ownership, cwd/model inheritance, and number-only PR scoping.
-- `prUrl` — full GitHub PR URL.
-- `prNumber` — GitHub PR number; requires a GitHub `origin` remote in the launching session cwd.
-- `owner`, `repo` — optional explicit GitHub target fields when a URL is not supplied.
-- `cwd` — explicit repository path, mainly for tests or integrations.
-- `baseSha`, `headSha` — local SHA hints. Agent-hosted local changesets are currently rejected; compatibility resolver paths can still use SHA pairs.
-
-## Credentials and configuration
+## Target scoping notes for credentials and configuration
 
 - `GITHUB_TOKEN` / `GH_TOKEN` — used for github.com API requests and required for review submission to github.com.
 - `BOBBIT_GITHUB_API_BASE_URL` — overrides the GitHub API base URL, useful for GitHub Enterprise or tests.
 - `BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER` — optional module path for compatibility resolver synthesis.
 
-For compatibility resolver model synthesis without a custom adapter, Bobbit uses the selected session model when available, then the default review model, then the default session model. The session-hosted GitHub flow instead relies on the child walkthrough agent and validated YAML submission.
+For compatibility resolver model synthesis without a custom adapter, Bobbit uses the
+selected session model when available, then the default review model, then the default
+session model. The agent-hosted GitHub flow instead relies on the walkthrough agent and
+validated YAML submission.
 
 ### Trusted GitHub hosts
 
-A walkthrough fetches PR metadata and diffs over the network, so Bobbit only talks to an allowlist of trusted hosts. The allowlist is the **only** source for extra hosts; the former `BOBBIT_GITHUB_TRUSTED_HOSTS` env var is no longer read anywhere.
+A walkthrough fetches PR metadata and diffs over the network, so Bobbit only talks to
+an allowlist of trusted hosts. The allowlist is the **only** source for extra hosts;
+the former `BOBBIT_GITHUB_TRUSTED_HOSTS` env var is no longer read anywhere.
 
 - **Always-trusted baseline.** `DEFAULT_TRUSTED_HOSTS` in `src/shared/pr-walkthrough/url-safety.ts` (`github.com`, `www.github.com`, `api.github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`) is trusted regardless of settings and cannot be removed. The managed list only adds **extra** hosts on top — typically GitHub Enterprise hosts.
-- **Where it lives.** The extra hosts are managed in **System → General → Trusted GitHub hosts** and persisted in the server-side global preferences store under the key `githubTrustedHosts: string[]` — the same store behind `GET`/`PUT /api/preferences` that holds `skillsCatalogBudget`. Storing it server-side (rather than per-browser) means the allowlist is shared across clients and is readable by the server code that performs the fetches.
-- **Live per request.** The server reads `githubTrustedHosts` from the preferences store on each launch/resolve, not at boot, so adding a host takes effect for the immediate retry **without a server restart**.
+- **Where it lives.** The extra hosts are managed in **System → General → Trusted GitHub hosts** and persisted in the server-side global preferences store under the key `githubTrustedHosts: string[]` — the same store behind `GET`/`PUT /api/preferences`. Storing it server-side (rather than per-browser) means the allowlist is shared across clients and is readable by the server code that performs the fetches.
+- **Live per request.** The server reads `githubTrustedHosts` from the preferences store on each launch/resolve, not at boot, so adding a host takes effect immediately **without a server restart**.
 - **Normalization and validation on save.** `PUT /api/preferences` runs `normalizeTrustedHosts` over the submitted value. Each entry is lowercased, has any trailing dot stripped, and — if a full URL is pasted — reduced to its host. Entries with a path, whitespace, credentials, a port, or an invalid DNS label are rejected, the list is deduped (first-seen order preserved), and any baseline host is dropped so the managed list shows only true extras. Saving is lossy and never returns a 4xx: the server stores the accepted subset and the UI re-fetches because the `GET` readback is authoritative. An empty or all-invalid list removes the key entirely.
-- **Adding a host from the failed launch.** Launching against an untrusted host surfaces a risk-warning confirmation dialog (see [Untrusted-host launch dialog](#untrusted-host-launch-dialog)) that can add the host and retry without re-entering the PR.
+
+The host trust check is enforced server-side on `/launch` and `/resolve`: a target on a
+host that is neither in the baseline nor the managed allowlist is rejected **before**
+any job is created, returning HTTP `400` with body `{ code: "untrusted_github_host", host }`.
 
 ### Enterprise host identity and token scoping
 
-Trusted non-`github.com` hosts are carried through identity and credentials differently from github.com:
+Trusted non-`github.com` hosts are carried through identity and credentials
+differently from github.com:
 
-- **Changeset / canonical identity includes the host.** For github.com the identity keeps its legacy unqualified shape (`github:<owner>/<repo>#<number>`); for any other trusted host the host is included (`github:<host>/<owner>/<repo>#<number>`). This prevents two trusted hosts that share the same owner/repo/PR number from colliding into the same job, tab, or stored changeset.
+- **Changeset / canonical identity includes the host.** For github.com the identity keeps its legacy unqualified shape (`github:<owner>/<repo>#<number>`); for any other trusted host the host is included (`github:<host>/<owner>/<repo>#<number>`). This prevents two trusted hosts that share the same owner/repo/PR number from colliding into the same job or stored changeset.
 - **Tokens are host-scoped.** The global `GITHUB_TOKEN` / `GH_TOKEN` are github.com credentials and are **never** forwarded to a non-github.com host (that would leak a github.com secret to an enterprise server). Enterprise hosts authenticate only via the host-scoped GitHub CLI token (`gh auth token --hostname <host>`); github.com may still use the env tokens or the unscoped CLI token.
 
 ## Limitations
 
-- Session-hosted walkthrough agents currently support GitHub PRs only.
+- Agent-hosted walkthroughs currently support GitHub PRs only.
 - Number-only launch depends on the launching session worktree having a GitHub `origin` remote.
 - Browser interaction state is local to the browser storage for the tab id; it is not synchronized between browsers or devices.
 - GitHub line-comment export can only submit comments with valid GitHub review anchors. Card-level and unmappable comments remain in the review body/preview.
@@ -505,28 +517,111 @@ Trusted non-`github.com` hosts are carried through identity and credentials diff
 
 ## Troubleshooting
 
-- **`/walkthrough-pr 123` cannot find the repository** — select a session whose worktree has a GitHub `origin` remote, or use the full PR URL.
-- **Local changeset launch is unsupported** — use the standalone/local resolver flow for `baseSha` / `headSha` walkthroughs; session-hosted agents are GitHub-only.
-- **Panel stays empty** — the agent has not successfully called `submit_pr_walkthrough_yaml`; check the child transcript and validation state.
-- **YAML validation failed** — fix the field-level errors returned by the tool and call `submit_pr_walkthrough_yaml` again from the same child session.
-- **`PR_WALKTHROUGH_BUNDLE_MISSING` or unusable bundle** — the launch-time analysis bundle artifact is missing, corrupt, or no longer readable. This is retryable, but submission will not re-fetch the diff; relaunch the walkthrough so Bobbit resolves and persists a fresh bundle before creating a new waiting child.
+- **Cannot find the repository for a number-only target** — select a session whose worktree has a GitHub `origin` remote, or use the full PR URL.
+- **Local changeset is unsupported by the agent** — use the compatibility resolver flow for `baseSha` / `headSha` walkthroughs; agent-hosted walkthroughs are GitHub-only.
+- **Panel stays empty** — the agent has not successfully called `submit_pr_walkthrough_yaml`; check the session transcript and validation state.
+- **YAML validation failed** — fix the field-level errors returned by the tool and call `submit_pr_walkthrough_yaml` again from the same session.
+- **`PR_WALKTHROUGH_BUNDLE_MISSING` or unusable bundle** — the launch-time analysis bundle artifact is missing, corrupt, or no longer readable. This is retryable, but submission will not re-fetch the diff; rerun the walkthrough so Bobbit resolves and persists a fresh bundle.
 - **Private PR fails or shows permission errors** — set `GITHUB_TOKEN` or `GH_TOKEN` with repository read and pull request review permissions, then retry.
 - **Rate limited** — configure a token or wait for GitHub's rate limit reset.
 - **Export button only shows copy/preview** — the walkthrough is local, unauthenticated, missing a GitHub target, or export capability was disabled by the resolver.
 - **Some comments are unmappable** — check whether the comment is card-level, attached to a binary/truncated file, or anchored to a line GitHub cannot review.
-- **Reload loses comments after a PR update** — the card checksum changed, so Bobbit intentionally avoids restoring comments onto a different diff. Re-resolve and review the updated cards.
-- **GitHub Enterprise URL is rejected** — add the host under System → General → Trusted GitHub hosts (or confirm the risk-warning dialog on launch), and configure the matching API base URL.
+- **Reload loses comments after a PR update** — the card checksum changed, so Bobbit intentionally avoids restoring comments onto a different diff. Re-run the walkthrough and review the updated cards.
+- **GitHub Enterprise URL is rejected** — add the host under System → General → Trusted GitHub hosts, and configure the matching API base URL.
+- **The PR-walkthrough viewer is missing entirely** — the built-in first-party pack may be disabled. Re-enable it from the Market built-in section (see [docs/marketplace.md](marketplace.md#built-in-first-party-packs)); a disabled pack removes the launcher, deep-link, and panel by design.
 
 ## Testing notes
 
 Coverage is split across unit, API E2E, and browser E2E tests:
 
-- YAML schema validation and YAML-to-card mapping;
+- YAML schema validation and YAML-to-card mapping (`src/shared/pr-walkthrough/yaml-to-cards.ts`);
 - read-only command policy and walkthrough tool metadata;
-- session child metadata, submit proof restore, job persistence, and duplicate launch behavior;
-- launch API, invalid/valid YAML submission, keeping the child alive after success, and job restore;
+- job persistence, submit-proof restore, and submit/validation behavior;
+- the agent-side launch/resolve/export routes;
 - browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — launcher entrypoint, empty waiting panel, validation retry state, final cards, reload persistence, and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
-- in-app panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
+- panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
-Use these tests as the pinning contract when changing walkthrough launch, resolver compatibility, YAML mapping, persistence, readonly policy, or panel UX.
+Use these tests as the pinning contract when changing the pack viewer, agent-side
+launch/resolver behavior, YAML mapping, persistence, readonly policy, or panel UX.
+
+## Historical (pre-pack-migration) — retained for rationale
+
+> **None of the content in this section is current.** It describes the **deleted**
+> bespoke built-in viewer and its client-driven launch flow, retained only to
+> explain why the current pack model is shaped the way it is. For how the feature
+> works today, see [How it works now](#how-it-works-now-built-in-first-party-pack).
+> The historical design records under `docs/design/` are the fuller source of this
+> rationale: [pr-walkthrough-agent-session.md](design/pr-walkthrough-agent-session.md),
+> [pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md),
+> [side-panel-tab-contract.md](design/side-panel-tab-contract.md), and
+> [walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md).
+
+### Deleted client viewer and routes
+
+The viewer used to be a bespoke client component,
+`src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts` (plus the surrounding dir),
+wired through `src/app/pr-walkthrough.ts`. It rendered in two places: a side panel
+beside chat in a dedicated child session, and a popped-out standalone
+`/walkthrough?session=<id>&tab=<walkthrough-tab-id>` browser tab rendered by
+`standaloneWalkthroughPanel()` in `src/app/render.ts` (with a route-aware
+`workspaceSessionId()` / `route.walkthroughSessionId` session-key helper). It was
+fed by the now-removed viewer routes `GET /api/pr-walkthrough/jobs/:id`,
+`GET /api/pr-walkthrough/session/:id`, and `GET /api/pr-walkthrough/:id`.
+
+All of the above were **deleted**. The viewer is now the built-in pack panel at the
+generic `#/ext/pr-walkthrough` route, fed by the pack's own `bundle`/`publish`
+routes. The header-coercion defensiveness that lived in `PrWalkthroughPanel.ts` now
+lives in `src/shared/pr-walkthrough/yaml-to-cards.ts` and the pack panel
+`market-packs/pr-walkthrough/lib/panel.js`.
+
+### Deleted client launch flow
+
+A walkthrough used to be launched from a built-in UI surface:
+
+- a `/walkthrough-pr <url|number>` **client-side slash intercept** in the composer (with the hint `<GitHub PR URL or #>`), parsed and handled by `src/app/pr-walkthrough.ts`;
+- a Git Status widget **Walkthrough** button that dispatched an `open-pr-walkthrough` event;
+
+both of which routed to `launchPrWalkthroughAgent` → `POST /api/pr-walkthrough/launch`,
+**spawning a dedicated read-only child walkthrough session** beneath the launching
+session (`parentSessionId` + `childKind: "pr-walkthrough"`). The child started in a
+`waiting_for_yaml` state with an empty panel until the agent called
+`submit_pr_walkthrough_yaml`, and re-launching the same PR focused the existing child.
+
+That entire client launch path was deleted. The `/launch` route, the child-session
+model, and `WalkthroughAgentManager` still exist
+([Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained)), but no
+built-in surface calls them. In the current pack model the panel's "Run PR walkthrough"
+action drives the **current** session's agent via `host.session.postMessage` rather than
+spawning a child.
+
+### Deleted child-session sidebar nesting
+
+Because the launch flow spawned a first-class child session, the sidebar nested that
+child under its parent with an expand/collapse chevron, governed by an opt-out
+"first-class parent" expansion model (`collapsedFirstClassParents` in `src/app/state.ts`,
+localStorage key `bobbit-collapsed-first-class-parents`) modeled on the team-lead
+`collapsedTeamLeadSessions` set. This was deliberately distinct from the opt-in
+delegate-parent model so a purposely-launched walkthrough child was visible by default
+while still being collapsible. With the client launch flow deleted, no built-in surface
+creates such a child, so this nesting behavior is no longer exercised by the feature.
+
+### Deleted untrusted-host launch dialog
+
+The deleted client launch flow also surfaced a security-aware confirmation dialog when a
+user launched against a host that was not in the trusted allowlist. Instead of toasting
+the raw `untrusted_github_host` error, it named the host, warned that adding it lets
+Bobbit fetch repository and PR content from that host, and offered **Add & continue**
+(which persisted the host via `PUT /api/preferences` and retried the launch once) or
+**Cancel**. The server-side host trust check on `/launch` and `/resolve` is
+[retained](#trusted-github-hosts); only this client dialog and its one-shot retry were
+removed with the rest of the client launch flow.
+
+### Deleted standalone-tab resize behavior
+
+The bespoke viewer's standalone `/walkthrough?...` browser tab filled the window with no
+panel-level fullscreen/collapse chrome. The corresponding `standaloneWalkthroughPanel()`
+branch and the `workspaceSessionId()` / `route.walkthroughSessionId` helper were deleted.
+The current pack panel renders only at `#/ext/pr-walkthrough` and shares the preview
+panel's user-initiated resize semantics (see
+[Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts)).

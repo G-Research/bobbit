@@ -608,15 +608,18 @@ is not loaded).
 **Launcher kind** (a click is the user gesture; it opens a panel or navigates a route):
 
 ```yaml
-# entrypoints/pr-walkthrough-open.yaml
-id: pr-walkthrough.open
+# entrypoints/viewer-open.yaml
+id: my-pack.open
 kind: composer-slash          # composer-slash | git-widget-button | command-palette
-label: PR Walkthrough         # required for launcher kinds
+label: My Viewer              # required for launcher kinds
 target:
-  route: pr-walkthrough       # OR { panelId: ... }
-  params:
-    jobId: job-litmus-1
+  route: my-pack              # OR { panelId: ... }
 ```
+
+A launcher normally carries **no** static `params` — the panel derives whatever
+it needs from the current session on open. Add `params` only for an
+intentionally-fixed deep-link (e.g. a launcher that always opens the same
+document); never hard-code a per-run identifier like a `jobId`.
 
 **`kind:"route"`** (a deep-linkable route — NO clickable surface; maps a host-global `routeId`
 → panel + URL params):
@@ -633,7 +636,7 @@ paramKeys: [artifactId]       # the only params serialized into / parsed from th
 
 ```js
 // A launcher's click handler (or your own panel button):
-host.ui.navigate({ route: "pr-walkthrough", params: { jobId } });
+host.ui.navigate({ route: "artifacts", params: { artifactId } });
 ```
 
 - **Launcher kinds** register a label that, on click, calls `openPanel` or `navigate`. The
