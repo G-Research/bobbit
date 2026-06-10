@@ -46,7 +46,9 @@ class FakeView implements OrchestrationSessionView {
 		const id = `child-${++this.seq}`;
 		this.delegateCalls.push({ parentSessionId, opts });
 		this.live.set(id, { id, status: "idle", title: opts.title, output: "" });
-		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId });
+		// Persist childKind/readOnly exactly as the real createDelegateSession now
+		// does (findings #1/#2) so restart-rebuild + scoping tests are faithful.
+		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId, childKind: opts.childKind });
 		return { id };
 	}
 	async createSession(cwd: string, _a: any, _g: any, _t: any, opts?: any): Promise<{ id: string }> {
@@ -128,6 +130,36 @@ describe("OrchestrationCore.spawn — allowedTools subtraction (recursion guard)
 		assert.ok(!childTools.includes("team_delegate"), "unrestricted owner's child must not carry team_delegate");
 		assert.ok(!childTools.includes("team_spawn"), "unrestricted owner's child must not carry team_spawn");
 		assert.deepEqual(childTools, ["bash", "read", "write", "read_session"]);
+	});
+
+	it("read-only child: strips mutating tools (write/edit/bash) from an explicit allow-list", async () => {
+		// Finding #1: a read-only child must NOT have a mutating tool REGISTERED.
+		const view = new FakeView();
+		view.owner("owner-1", { allowedTools: ["bash", "bash_bg", "read", "write", "edit", "grep"] });
+		const core = makeCore(view);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", readOnly: true });
+		const tools: string[] = view.delegateCalls[0].opts.allowedTools;
+		assert.deepEqual(tools, ["read", "grep"]);
+		// readOnly marker is persisted/forwarded.
+		assert.equal(view.delegateCalls[0].opts.readOnly, true);
+	});
+
+	it("read-only child: strips mutating tools from a synthesized unrestricted catalogue", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const fullCatalogue = ["bash", "read", "write", "edit", "generate_image", "team_delegate", "read_session"];
+		const core = makeCore(view, undefined, () => fullCatalogue);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", readOnly: true });
+		const tools: string[] = view.delegateCalls[0].opts.allowedTools;
+		assert.deepEqual(tools, ["read", "read_session"]);
+	});
+
+	it("writable (default) child KEEPS mutating tools", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { allowedTools: ["bash", "read", "write", "edit"] });
+		const core = makeCore(view);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x" });
+		assert.deepEqual(view.delegateCalls[0].opts.allowedTools, ["bash", "read", "write", "edit"]);
 	});
 
 	it("falls back to undefined when the owner is unrestricted AND no catalogue is available", async () => {
@@ -277,6 +309,28 @@ describe("OrchestrationCore.rebuildIndexFromPersisted", () => {
 		assert.equal(core.list("owner-2")[0].childKind, "host-agents");
 		// blocking-ness never persisted.
 		assert.equal(core.list("owner-1").every(h => h.blocking === false), true);
+	});
+
+	it("a host-agents child spawned via createDelegateSession survives restart as host-agents (finding #2)", async () => {
+		// host.agents.spawn routes through createDelegateSession (bare) with
+		// childKind="host-agents". That kind MUST be persisted so the rebuilt index
+		// reconstructs it as host-agents — otherwise host.agents.list/read/... stop
+		// seeing it after a restart (and a delegate sibling stays excluded).
+		const view = new FakeView();
+		const core = makeCore(view);
+		view.owner("owner-1");
+		const ha = await core.spawn({ ownerSessionId: "owner-1", instructions: "ha", childKind: "host-agents" });
+		const del = await core.spawn({ ownerSessionId: "owner-1", instructions: "d", childKind: "delegate" });
+		// The persisted record carries the discriminator the real session-manager writes.
+		assert.equal(view.delegateCalls[0].opts.childKind, "host-agents");
+		assert.equal(view.persisted.get(ha.sessionId)?.childKind, "host-agents");
+
+		// Simulate restart: rebuild purely from the persisted fields.
+		core.rebuildIndexFromPersisted([...view.persisted.values()]);
+		const rebuilt = core.list("owner-1");
+		const byKind = new Map(rebuilt.map(h => [h.sessionId, h.childKind]));
+		assert.equal(byKind.get(ha.sessionId), "host-agents");
+		assert.equal(byKind.get(del.sessionId), "delegate");
 	});
 });
 

@@ -88,10 +88,40 @@ test.describe("team_wait — first-settled + status line", () => {
 			expect(result.text).toContain("First idle child");
 			expect(result.text).toContain("Awaited children");
 			expect(result.text).toContain("call team_wait again");
+			// Finding #4: the await-the-rest instruction must enumerate the REMAINING
+			// (non-settled) child ids so a literal re-call awaits only them — not the
+			// already-idle child again (which an omitted child_session_ids would re-return).
+			expect(result.text).toMatch(/child_session_ids: \[[^\]]+\]/);
+			expect(result.text).toContain(busy);
+			expect(result.text).not.toContain(quick + "\""); // quick is settled → not in remaining list ids
 		} finally {
 			await dismiss(parent, busy);
 			await dismiss(parent, quick);
 			await deleteSession(parent);
+		}
+	});
+
+	test("the chunked wait route surfaces a post-headers error in the body (finding #5)", async () => {
+		// The chunked /orchestrate/wait route has ALREADY written 200 headers when an
+		// own-child check fails (NOT_OWN_CHILD), so the failure rides in the body as
+		// `{error}` rather than an HTTP status. The tool wrapper must surface it; here
+		// we pin the server contract that the error field IS present (not an empty wait).
+		const owner = await createSession();
+		const stranger = await createSession();
+		try {
+			const resp = await apiFetch(`/api/sessions/${owner}/orchestrate/wait`, {
+				method: "POST",
+				body: JSON.stringify({ childSessionIds: [stranger], timeout_ms: 5_000 }),
+			});
+			expect(resp.status).toBe(200);
+			const json = await resp.json();
+			expect(typeof json.error).toBe("string");
+			expect(json.error).toMatch(/not owned/i);
+			// And it is NOT a misleading empty "all settled" wait.
+			expect(json.statuses ?? []).toHaveLength(0);
+		} finally {
+			await deleteSession(owner);
+			await deleteSession(stranger);
 		}
 	});
 

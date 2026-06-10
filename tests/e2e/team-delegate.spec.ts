@@ -267,4 +267,88 @@ test.describe("team_delegate — team-lead parity", () => {
 			await deleteGoal(goal.id as string).catch(() => {});
 		}
 	});
+
+	test("a team-lead can prompt + dismiss its own non-blocking team_delegate child via /team/* (finding #6)", async ({ gateway }) => {
+		// A team-lead holds the GOAL-scoped team_prompt/dismiss (from team/extension.ts),
+		// not the own-child variants. Its own team_delegate(non_blocking) child is NOT a
+		// goal team member, so /team/{prompt,dismiss} must FALL BACK to OrchestrationCore.
+		const goal = await createGoal({ title: "Lead own-child orchestration", team: true });
+		let leadId: string | undefined;
+		let childId: string | undefined;
+		try {
+			leadId = await startTeam(goal.id as string);
+			expect(leadId).toBeTruthy();
+			// Non-blocking spawn owned by the lead.
+			const spawn = await orchestrate(leadId!, "spawn", { instructions: "lead non-blocking helper" });
+			expect(spawn.status).toBe(201);
+			childId = spawn.json.childSessionId as string;
+			expect(childId).toBeTruthy();
+
+			// It is NOT a goal team member.
+			const agentsResp = await apiFetch(`/api/goals/${goal.id}/team/agents`);
+			const agents = (await agentsResp.json()).agents ?? [];
+			expect(agents.map((a: any) => a.sessionId)).not.toContain(childId);
+
+			// /team/prompt falls back to the core for the lead's own child.
+			const prompt = await apiFetch(`/api/goals/${goal.id}/team/prompt`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId: childId, message: "follow-up task" }),
+			});
+			expect(prompt.status).toBe(200);
+			expect((await prompt.json()).ok).toBe(true);
+
+			// /team/dismiss falls back too (terminate + archive the own child).
+			const dismiss = await apiFetch(`/api/goals/${goal.id}/team/dismiss`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId: childId }),
+			});
+			expect(dismiss.status).toBe(200);
+			expect((await dismiss.json()).ok).toBe(true);
+			childId = undefined;
+		} finally {
+			if (leadId && childId) await orchestrate(leadId, "dismiss", { childSessionId: childId }).catch(() => {});
+			await teardownTeam(goal.id as string).catch(() => {});
+			await deleteGoal(goal.id as string).catch(() => {});
+		}
+	});
+});
+
+test.describe("team_delegate — read-only child enforcement (finding #1)", () => {
+	test("a read_only child does NOT register mutating tools; a writable child does", async ({ gateway }) => {
+		const parent = await createSession();
+		let roId: string | undefined;
+		let rwId: string | undefined;
+		try {
+			const ro = await orchestrate(parent, "spawn", { instructions: "read-only helper", read_only: true });
+			expect(ro.status).toBe(201);
+			roId = ro.json.childSessionId as string;
+			const rw = await orchestrate(parent, "spawn", { instructions: "writable helper" });
+			expect(rw.status).toBe(201);
+			rwId = rw.json.childSessionId as string;
+
+			const toolsOf = (id: string): string[] =>
+				gateway.sessionManager.getSession(id)?.allowedTools
+				?? gateway.sessionManager.getPersistedSession(id)?.allowedTools
+				?? [];
+
+			// Read-only child: mutating tools are NEVER registered (allow-list gating).
+			const roTools = toolsOf(roId);
+			for (const t of ["write", "edit", "bash", "bash_bg"]) {
+				expect(roTools).not.toContain(t);
+			}
+			// …but it keeps read/search tools.
+			expect(roTools).toContain("read");
+			// The read-only marker is persisted on the child session.
+			expect(Boolean(gateway.sessionManager.getPersistedSession(roId)?.readOnly)).toBe(true);
+
+			// Writable (default) child: mutating tools ARE registered.
+			const rwTools = toolsOf(rwId);
+			expect(rwTools).toContain("write");
+			expect(rwTools).toContain("edit");
+		} finally {
+			if (roId) await orchestrate(parent, "dismiss", { childSessionId: roId }).catch(() => {});
+			if (rwId) await orchestrate(parent, "dismiss", { childSessionId: rwId }).catch(() => {});
+			await deleteSession(parent);
+		}
+	});
 });

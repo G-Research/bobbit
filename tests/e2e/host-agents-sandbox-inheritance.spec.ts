@@ -77,6 +77,30 @@ test.describe("host.agents — sandbox / credential inheritance (no escalation)"
 		}
 	});
 
+	test("a read-only host.agents child does NOT register mutating tools (finding #1)", async ({ gateway }) => {
+		const owner = await createSession();
+		const host = await buildHost(gateway, owner);
+		let childId: string | undefined;
+		try {
+			const ha = await host.agents.spawn({ instructions: "read-only child", readOnly: true });
+			childId = ha.childSessionId;
+			const childPs = await pollUntil(async () => gateway.sessionManager.getPersistedSession(childId!) ?? null,
+				{ timeoutMs: 5_000, intervalMs: 25, label: "child persisted" });
+			const tools: string[] = gateway.sessionManager.getSession(childId!)?.allowedTools ?? childPs.allowedTools ?? [];
+			// readOnly is enforced via the allow-list (mutating tools never registered)…
+			for (const t of ["write", "edit", "bash", "bash_bg"]) {
+				expect(tools).not.toContain(t);
+			}
+			// …and read/search tools survive.
+			expect(tools).toContain("read");
+			// The read-only marker is persisted on the child.
+			expect(Boolean(childPs.readOnly)).toBe(true);
+		} finally {
+			if (childId) await gateway.orchestrationCore.dismiss(owner, childId).catch(() => {});
+			await deleteSession(owner);
+		}
+	});
+
 	test("the host carries orchestration verbs ONLY — no token / raw transport", async ({ gateway }) => {
 		const owner = await createSession();
 		try {

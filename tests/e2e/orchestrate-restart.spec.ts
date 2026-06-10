@@ -163,4 +163,45 @@ test.describe("orchestration restart survival", () => {
 			await deleteSession(parent).catch(() => {});
 		}
 	});
+
+	// Finding #3: the generalized boot-reap must cover EVERY child linked by
+	// parentSessionId+childKind (not only delegateOf and not only pr-walkthrough).
+	// A full-lifecycle host-agents child has parentSessionId+childKind but NO
+	// delegateOf, so it flows through restoreOneSession's regular path — without
+	// the generalized reap it would be restored as a LIVE ORPHAN when its parent
+	// was archived while the server was down.
+	test("a non-delegate kinded child (parentSessionId+childKind) is boot-reaped when its parent is archived", async ({ gateway }) => {
+		const sm = gateway.sessionManager;
+		const parent = await createSession();
+		const parentProjectId = sm.getPersistedSession(parent)?.projectId;
+		// A kinded child linked by parentSessionId+childKind, NOT delegateOf.
+		const childInfo = await sm.createSession(
+			sm.getSession(parent)?.cwd,
+			undefined, undefined, undefined,
+			{ parentSessionId: parent, childKind: "host-agents", projectId: parentProjectId },
+		);
+		const child = childInfo.id;
+		try {
+			const cps = sm.getPersistedSession(child);
+			expect(cps?.childKind).toBe("host-agents");
+			expect(cps?.delegateOf).toBeFalsy();
+			expect(cps?.parentSessionId).toBe(parent);
+
+			// Archive the parent at the store level (no terminate cascade) so the
+			// child stays LIVE but orphaned — the exact state the boot-reap closes.
+			const projectId = sm.getPersistedSession(parent)?.projectId;
+			sm.getSessionStore(projectId).archive(parent);
+
+			// Drive the per-session boot path restoreSessions() runs for regular
+			// sessions; the generalized reap branch archives the orphan before any
+			// re-spawn and returns early.
+			await (sm as any).restoreOneSession(sm.getPersistedSession(child));
+
+			const stillLive = gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child);
+			expect(stillLive).toBe(false);
+		} finally {
+			await deleteSession(child).catch(() => {});
+			await deleteSession(parent).catch(() => {});
+		}
+	});
 });

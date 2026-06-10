@@ -25,7 +25,7 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
-import { OrchestrationCore, OrchestrationCoreError, type WaitResult } from "./agent/orchestration-core.js";
+import { OrchestrationCore, OrchestrationCoreError, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
@@ -109,8 +109,13 @@ function formatWaitText(result: WaitResult): string {
 	if (result.remaining === 0) {
 		lines.push("All awaited children are settled.");
 	} else {
+		// Enumerate the REMAINING (non-settled) child ids so a literal re-call of
+		// team_wait awaits ONLY them — otherwise an omitted child_session_ids
+		// defaults to ALL tracked children and re-returns the same already-idle
+		// child. The agent should pass exactly these ids on the next call.
+		const remainingIds = result.statuses.filter(s => !isSettledStatus(s.status)).map(s => s.sessionId);
 		lines.push(`Remaining: ${result.remaining} child(ren) not yet settled.`);
-		lines.push("➜ Process this result now, then call team_wait again to await the remaining children.");
+		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	}
 	return lines.join("\n");
 }
@@ -8410,12 +8415,45 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Finding #6 fallback: a team-lead's `team_delegate(non_blocking)` child is NOT a
+	// goal team member, so the goal /team/* routes would reject it — yet the team-lead
+	// holds team_prompt/dismiss/steer/abort (registered goal-scoped via team/extension.ts,
+	// NOT the own-child variants in agent/extension.ts, to avoid double-registration).
+	// When the target is an own child of THIS goal's team-lead (tracked by the shared
+	// OrchestrationCore), route the verb through the core so the documented verbs work
+	// on the lead's own delegate helpers. Goal-member behaviour is unchanged.
+	const teamLeadOwnChildOwner = (goalId: string, targetId: string): string | undefined => {
+		const lead = teamManager.getTeamState(goalId)?.teamLeadSessionId;
+		if (!lead) return undefined;
+		return orchestrationCore.list(lead).some(h => h.sessionId === targetId) ? lead : undefined;
+	};
+	const ocStatusForTeamFallback = (err: unknown): number => {
+		if (err instanceof OrchestrationCoreError) {
+			if (err.code === "NOT_STREAMING") return 409;
+			if (err.code === "NOT_OWN_CHILD" || err.code === "NO_GRANDCHILDREN") return 403;
+			return 400;
+		}
+		return 500;
+	};
+
 	// POST /api/goals/:id/team/dismiss — dismiss a role agent
 	const teamDismissMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/dismiss$/);
 	if (teamDismissMatch && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body?.sessionId) {
 			json({ error: "Missing sessionId" }, 400);
+			return;
+		}
+		// Own-child fallback: dismissRole only knows goal team members; a team-lead's
+		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
+		const owner = teamLeadOwnChildOwner(teamDismissMatch[1], body.sessionId);
+		if (owner) {
+			try {
+				const ok = await orchestrationCore.dismiss(owner, body.sessionId);
+				json({ ok });
+			} catch (err) {
+				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
+			}
 			return;
 		}
 		try {
@@ -8697,6 +8735,16 @@ async function handleApiRoute(
 		// Validate target is a team agent
 		const agents = teamManager.listAgents(goalId);
 		if (!agents.find(a => a.sessionId === body.sessionId)) {
+			const owner = teamLeadOwnChildOwner(goalId, body.sessionId);
+			if (owner) {
+				try {
+					await orchestrationCore.steer(owner, body.sessionId, body.message);
+					json({ ok: true, dispatched: true });
+				} catch (err) {
+					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
+				}
+				return;
+			}
 			json({ error: "Session is not a member of this team" }, 403);
 			return;
 		}
@@ -8732,6 +8780,17 @@ async function handleApiRoute(
 		// Validate target is a team agent
 		const agents = teamManager.listAgents(goalId);
 		if (!agents.find(a => a.sessionId === body.sessionId)) {
+			const owner = teamLeadOwnChildOwner(goalId, body.sessionId);
+			if (owner) {
+				try {
+					await orchestrationCore.abort(owner, body.sessionId);
+					const afterSession = sessionManager.getSession(body.sessionId);
+					json({ ok: true, status: afterSession?.status || "idle" });
+				} catch (err) {
+					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
+				}
+				return;
+			}
 			json({ error: "Session is not a member of this team" }, 403);
 			return;
 		}
@@ -8772,6 +8831,16 @@ async function handleApiRoute(
 			}
 		}
 		if (!allowed) {
+			const owner = teamLeadOwnChildOwner(goalId, body.sessionId);
+			if (owner) {
+				try {
+					const result = await orchestrationCore.prompt(owner, body.sessionId, body.message as string);
+					json({ ok: true, status: result.status });
+				} catch (err) {
+					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
+				}
+				return;
+			}
 			json({
 				error: "Session is not a member of this team and is not a direct-child team-lead",
 				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",

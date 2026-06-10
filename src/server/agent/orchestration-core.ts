@@ -32,6 +32,18 @@
 /** Spawn verbs a child must never inherit (recursion guard, §7). */
 export const SPAWN_VERBS: readonly string[] = ["team_delegate", "team_spawn"];
 
+/**
+ * Tools a `readOnly` child must never inherit (§2.2). A read-only child is
+ * enforced the same way pr-walkthrough enforces it: by RESTRICTING the child's
+ * allow-list so the file/shell-mutating tools are never registered (and so can
+ * never be invoked). The child keeps every read/search tool (`read`, `ls`,
+ * `grep`, `find`, `read_session`, …) but loses raw write/edit/shell access.
+ * Mirrors the intent of WALKTHROUGH_ALLOWED_TOOLS (which swaps `bash` for the
+ * command-policed `readonly_bash`); a generic delegate has no policed shell, so
+ * raw `bash`/`bash_bg` are dropped outright.
+ */
+export const READ_ONLY_DENY_TOOLS: readonly string[] = ["write", "edit", "bash", "bash_bg", "generate_image"];
+
 export type ChildKind = "delegate" | "team" | "pr-walkthrough" | "host-agents" | (string & {});
 export type SpawnLifecycle = "bare" | "full";
 
@@ -201,6 +213,10 @@ export interface OrchestrationSessionView {
 		allowedTools?: string[];
 		initialModel?: string;
 		initialThinkingLevel?: string;
+		/** Persisted so the source discriminator survives restart (§3). Default "delegate". */
+		childKind?: string;
+		/** Persisted read-only marker (§2.2). Tool gating is via `allowedTools`. */
+		readOnly?: boolean;
 	}): Promise<{ id: string }>;
 	createSession(
 		cwd: string,
@@ -284,19 +300,27 @@ export class OrchestrationCore {
 	 * explicit "all-except-spawn-verbs" list rather than `undefined` (which the
 	 * tool-activation layer treats as "all tools", spawn verbs included).
 	 */
-	private childAllowedTools(ownerId: string): string[] | undefined {
+	private childAllowedTools(ownerId: string, readOnly?: boolean): string[] | undefined {
+		// A spawn verb is ALWAYS stripped (recursion guard, §7); a mutating tool is
+		// additionally stripped for a read-only child (§2.2) so it is never even
+		// REGISTERED on the child — the same allow-list mechanism pr-walkthrough uses.
+		const deny = (t: string): boolean =>
+			SPAWN_VERBS.includes(t) || (readOnly === true && READ_ONLY_DENY_TOOLS.includes(t));
 		const explicit = this.deps.sessionManager.getSession(ownerId)?.allowedTools;
 		if (explicit && explicit.length > 0) {
-			return explicit.filter(t => !SPAWN_VERBS.includes(t));
+			return explicit.filter(t => !deny(t));
 		}
 		// Owner is UNRESTRICTED — synthesize an explicit list from the full
-		// effective catalogue so spawn verbs are never registered on the child.
+		// effective catalogue so spawn (and, when read-only, mutating) verbs are
+		// never registered on the child.
 		const effective = this.deps.resolveEffectiveTools?.(ownerId);
 		if (effective && effective.length > 0) {
-			return effective.filter(t => !SPAWN_VERBS.includes(t));
+			return effective.filter(t => !deny(t));
 		}
 		// No catalogue available (e.g. no tool manager) — cannot synthesize a list;
 		// fall back to undefined. assertCanSpawn still blocks recursion at runtime.
+		// (Production always wires resolveEffectiveTools, so a read-only child always
+		// gets an enforced allow-list here.)
 		return undefined;
 	}
 
@@ -316,7 +340,7 @@ export class OrchestrationCore {
 		const childKind: ChildKind = opts.childKind ?? "delegate";
 		const model = opts.model ?? this.deps.resolveSessionModel(opts.ownerSessionId);
 		const thinkingLevel = opts.thinkingLevel ?? this.deps.resolveSessionThinking?.(opts.ownerSessionId);
-		const childAllowed = this.childAllowedTools(opts.ownerSessionId);
+		const childAllowed = this.childAllowedTools(opts.ownerSessionId, opts.readOnly);
 		// readOnly always implies bare (§2.2).
 		const lifecycle: SpawnLifecycle = opts.readOnly ? "bare" : (opts.lifecycle ?? "bare");
 
@@ -335,6 +359,11 @@ export class OrchestrationCore {
 				allowedTools: childAllowed,
 				initialModel: model,
 				initialThinkingLevel: thinkingLevel,
+				// Persist the source discriminator + read-only marker so they survive
+				// restart (§3): rebuildIndexFromPersisted reads childKind to reconstruct
+				// e.g. host-agents children instead of mislabelling them "delegate".
+				childKind,
+				readOnly: opts.readOnly,
 			});
 			childId = child.id;
 		} else {

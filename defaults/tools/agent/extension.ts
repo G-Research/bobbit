@@ -38,6 +38,10 @@ interface DelegateResultEntry {
 interface DelegateRouteResponse {
 	delegates: DelegateResultEntry[];
 	summary?: string;
+	/** Route-level failure surfaced AFTER the chunked 200 headers (e.g. spawn/wait
+	 *  failure). The chunked response cannot change its status code, so the body
+	 *  carries the error; the tool wrapper must surface it instead of an empty result. */
+	error?: string;
 }
 
 /** Child status vocabulary returned by the orchestrate routes (§9). */
@@ -63,6 +67,10 @@ interface WaitRouteResponse {
 	remaining?: number;
 	/** Server-formatted result text (§9) — the SINGLE source of truth for wording. */
 	text?: string;
+	/** Route-level failure surfaced AFTER the chunked 200 headers (e.g.
+	 *  NOT_OWN_CHILD). Carried in the body since the status code is already 200;
+	 *  the tool wrapper must surface it instead of a misleading empty-wait. */
+	error?: string;
 }
 
 interface SpawnedChild {
@@ -348,6 +356,12 @@ const extension: ExtensionFactory = (pi) => {
 				return fail(e?.message ?? String(e));
 			}
 
+			// A route-level failure after the chunked 200 headers (spawn/wait crash)
+			// is carried in the body with no delegates collected — surface it.
+			if (typeof resp?.error === "string" && resp.error && (!Array.isArray(resp?.delegates) || resp.delegates.length === 0)) {
+				return fail(resp.error);
+			}
+
 			const delegates = Array.isArray(resp?.delegates) ? resp.delegates : [];
 			const instrFor = (i: number) =>
 				hasParallel ? firstLine(params.parallel![i].instructions) : firstLine(params.instructions || "");
@@ -416,6 +430,12 @@ const extension: ExtensionFactory = (pi) => {
 				resp = (await orchestrate("POST", "wait", body)) as WaitRouteResponse;
 			} catch (e: any) {
 				return fail(e?.message ?? String(e));
+			}
+			// The chunked /orchestrate/wait route returns HTTP 200 with `{error}` for a
+			// post-headers failure (e.g. NOT_OWN_CHILD). Surface it as a tool error
+			// rather than formatting an empty/misleading "all settled" result.
+			if (typeof resp?.error === "string" && resp.error) {
+				return fail(resp.error);
 			}
 			// Single source of truth for the wording is the SERVER (formatWaitText);
 			// the extension only derives the renderer `details` from the statuses.
@@ -533,8 +553,12 @@ function formatWaitResult(wr: WaitRouteResponse): { text: string; details: Deleg
 		? wr.remaining
 		: statuses.filter((s) => !SETTLED_STATUSES.has(s.status)).length;
 	if (remaining > 0) {
+		// Enumerate the remaining (non-settled) ids so a literal re-call awaits only
+		// those — omitting child_session_ids defaults to ALL tracked children and
+		// would re-return the same already-idle child.
+		const remainingIds = statuses.filter((s) => !SETTLED_STATUSES.has(s.status)).map((s) => s.sessionId);
 		lines.push(`Remaining: ${remaining} child(ren) not yet settled.`);
-		lines.push("➜ Process this result now, then call team_wait again to await the remaining children.");
+		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	} else {
 		lines.push("All awaited children are settled.");
 	}

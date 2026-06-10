@@ -3332,32 +3332,36 @@ export class SessionManager {
 			console.warn(`[session-manager] Skipping session ${ps.id} — project "${ps.projectId}" no longer registered`);
 			return;
 		}
-		// Reap finished/orphaned PR-walkthrough children instead of respawning them.
-		// They are persisted sessions linked by parentSessionId/childKind (not
-		// delegateOf), so without this they would be resurrected as live node
-		// processes on every restart (the session-leak bug).
-		if (ps.childKind === "pr-walkthrough") {
-			let jobStatus: string | undefined;
-			if (ps.walkthroughJobId) {
-				try { jobStatus = new WalkthroughAgentStore(bobbitStateDir()).get(ps.walkthroughJobId)?.status; }
-				catch (err) { console.warn(`[session-manager] Failed to read walkthrough job for ${ps.id}:`, err); }
-			}
-			const parent = ps.parentSessionId ? this.getPersistedSession(ps.parentSessionId) : undefined;
-			// Generalized boot-reap (orchestration-core §5). A thin pr-walkthrough
-			// adapter maps the walkthrough job status to the kind-specific terminal
-			// signal so behaviour stays byte-identical to the old
-			// shouldReapWalkthroughChildOnBoot (missing job record OR ready/error).
+		// Generalized boot-reap for ANY child linked by parentSessionId+childKind
+		// (orchestration-core §5). Such children (pr-walkthrough, host-agents with
+		// lifecycle:"full", and future kinds) are persisted sessions NOT linked by
+		// `delegateOf` — so without this they would be resurrected as live node
+		// processes on every restart (the session-leak bug), and a child whose
+		// parent was archived while the server was down would come back as a LIVE
+		// ORPHAN. (delegateOf-linked children are reaped in restoreSessions()'s
+		// dormant-defer loop using the same helper.) pr-walkthrough additionally
+		// supplies a kind-specific terminal signal (job ready/error/missing) so its
+		// behaviour stays byte-identical to the old shouldReapWalkthroughChildOnBoot.
+		if (ps.childKind && ps.parentSessionId && !ps.delegateOf) {
 			let kindTerminal = false;
 			let kindTerminalReason: string | undefined;
-			if (!ps.walkthroughJobId || !jobStatus) {
-				kindTerminal = true;
-				kindTerminalReason = "walkthrough job record is missing";
-			} else if (jobStatus === "ready" || jobStatus === "error") {
-				kindTerminal = true;
-				kindTerminalReason = `walkthrough job is terminal (${jobStatus})`;
+			if (ps.childKind === "pr-walkthrough") {
+				let jobStatus: string | undefined;
+				if (ps.walkthroughJobId) {
+					try { jobStatus = new WalkthroughAgentStore(bobbitStateDir()).get(ps.walkthroughJobId)?.status; }
+					catch (err) { console.warn(`[session-manager] Failed to read walkthrough job for ${ps.id}:`, err); }
+				}
+				if (!ps.walkthroughJobId || !jobStatus) {
+					kindTerminal = true;
+					kindTerminalReason = "walkthrough job record is missing";
+				} else if (jobStatus === "ready" || jobStatus === "error") {
+					kindTerminal = true;
+					kindTerminalReason = `walkthrough job is terminal (${jobStatus})`;
+				}
 			}
+			const parent = this.getPersistedSession(ps.parentSessionId);
 			const decision = shouldReapChildOnBoot({
-				childKind: "pr-walkthrough",
+				childKind: ps.childKind,
 				ownerSessionId: ps.parentSessionId,
 				ownerExists: !!parent,
 				ownerArchived: parent?.archived === true,
@@ -3365,7 +3369,7 @@ export class SessionManager {
 				kindTerminalReason,
 			});
 			if (decision.reap) {
-				console.log(`[session-manager] Reaping PR-walkthrough child ${ps.id} on boot — ${decision.reason}`);
+				console.log(`[session-manager] Reaping ${ps.childKind} child ${ps.id} on boot — ${decision.reason}`);
 				sessionStore.archive(ps.id);
 				return;
 			}
@@ -4067,6 +4071,20 @@ export class SessionManager {
 		 */
 		initialModel?: string;
 		initialThinkingLevel?: string;
+		/**
+		 * Source discriminator persisted alongside `delegateOf` so it survives a
+		 * restart (orchestration-core §3). Without it, a `host-agents` (or other)
+		 * delegate-style child is rebuilt as `childKind:"delegate"` and the
+		 * source-filtered `host.agents.*` verbs stop seeing it. Default "delegate".
+		 */
+		childKind?: string;
+		/**
+		 * Persisted read-only marker (orchestration-core §2.2). The actual tool
+		 * gating is performed by the caller via the `allowedTools` allow-list
+		 * (mutating tools stripped, mirroring pr-walkthrough); this flag persists
+		 * the intent for restart-rebuild, UI, and cascade parity.
+		 */
+		readOnly?: boolean;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
@@ -4104,6 +4122,11 @@ export class SessionManager {
 			title: titleSummary,
 			cwd: opts.cwd,
 			delegateOf: parentSessionId,
+			// Persist the source discriminator + read-only marker (orchestration-core
+			// §3/§2.2) so a delegate-style child (e.g. host-agents) is rebuilt with
+			// the correct kind on restart and is enumerable by source-filtered verbs.
+			childKind: opts.childKind,
+			readOnly: opts.readOnly,
 			sandboxed: delegateSandboxed || undefined,
 			instructions: opts.instructions,
 			context: opts.context,
