@@ -683,19 +683,14 @@ the §8.5 carve-out and never read by the panel; see §8.3.)
   hidden built-in persistence path. `bundle` reads stored cards when present, else
   returns the deterministic in-worker structural fallback. This is what proves a
   first-party pack owns durable feature state through the Host API.
-- **LLM-card parity (the key migration work).** The deleted built-in viewer showed
-  the agent's LLM-enhanced cards. For the pack viewer to match, the agent's
-  submitted cards must reach the **pack store**. The panel does this client-side:
-  on Load it reads the `submit_pr_walkthrough_yaml` tool call
-  (`host.session.readToolCall`), and `host.callRoute("publish", …)` persists the
-  enhanced cards to the pack `host.store` keyed by changeset id; `bundle` then
-  serves them (else the deterministic in-worker structural fallback). The current
-  litmus `panel.js` reads the tool call as display-only enrichment and the litmus
-  E2E calls `publish` via a test helper — **the migration must wire the panel's
-  read→publish seam** (parse the submitted YAML's cards → `publish`) so the real
-  feature reaches LLM-card parity without a test helper. Persistence is therefore
-  view-time, client-driven, through the caller-pack-scoped Host API. `persistedAt`
-  is stamped once → stable across reloads (the store-rehydration parity proof).
+- **REAL LLM-card parity — production-schema synthesis migration (the key work; user-chosen: full faithful migration).** The litmus pack reads a SIMPLIFIED `{ cards }` YAML and uses a hard-coded `job-litmus-1`; that is NOT production parity. The unchanged `submit_pr_walkthrough_yaml` tool emits the RICH production schema (`pr` + `walkthrough.{context,merge_assessment,design_decisions,review_chunks,omissions_and_followups,audit,display}` — NO top-level `cards`), which the built-in mapped to `PrWalkthroughCard[]` via `validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` (`src/server/pr-walkthrough/walkthrough-yaml-schema.ts`). The pack must run that SAME synthesis. Plan:
+    1. **Extract the synthesis to a PURE shared module** `src/shared/pr-walkthrough/yaml-to-cards.ts` (move `validatePrWalkthroughYaml`, `mapYamlToWalkthroughPayload`, `DiffReferenceMapper`, `flattenDiffBlocks` + helpers). It already imports ONLY from `src/shared/pr-walkthrough/{ids,nav-label,types}.js` (no `node:`/server deps — verified), so the move is clean. Re-export from `walkthrough-yaml-schema.ts` so the AGENT side (`walkthrough-agent-manager.ts`, `tests/pr-walkthrough-yaml-schema.test.ts`) keeps working with NO behavior change (`WalkthroughStorePayload` stays server-side; the shared fn returns the structural `{ changeset, cards, warnings }`).
+    2. **Bundle the shared synthesis into the pack** via a new `build:packs` entry → `market-packs/pr-walkthrough/lib/yaml-to-cards.mjs` (esbuild, self-contained, committed). NO duplication — one source of truth in `src/shared/`, bundled into the pack served tree.
+    3. **Pack `publish` route maps the REAL schema.** The panel passes the RAW submitted YAML text to `host.callRoute("publish", { yaml, jobId })`; the route (confined worker) validates + maps it against the LIVE-computed parsed diff (the same `git` recompute `bundle` does) via the bundled synthesis, and stores `PrWalkthroughCard[]` keyed by the REAL changeset id. `bundle` serves stored cards over the structural fallback (the parity proof).
+    4. **Panel derives the REAL job/changeset from the session**, not `job-litmus-1`: read the `submit_pr_walkthrough_yaml` tool call (`host.session.readToolCall`), compute the changeset id from the submitted doc's `pr` (`changesetIdForGithub`), thread it as the jobId; per-changeset store keys (fixes the shared-literal `job/${jobId}` collision).
+    5. **Launch = drive the CURRENT session's agent via `host.session.postMessage` (pack-expressible).** The built-in git-widget button launched a NEW dedicated child walkthrough agent (`POST /api/pr-walkthrough/launch` → `WalkthroughAgentManager`, a fresh child session) — that specific privilege-minting (spawning a new principal) is the ONLY non-pack-expressible bit, and is NOT needed. Re-express it: the git-widget/composer/palette entrypoints drop the hard-coded `jobId` and navigate to `#/ext/pr-walkthrough`; the panel resolves the job from the current session. When no walkthrough has been submitted for the session yet, the panel shows a **"Run PR walkthrough"** action that, on the user's click (gesture-gated), calls `host.session.postMessage` to direct the CURRENT agent to perform the walkthrough using the kept agent tools (`readonly_bash` / `read_pr_walkthrough_bundle` / `submit_pr_walkthrough_yaml`), optionally threading current branch/PR context. The agent submits the production YAML; the panel then reads that tool call (step 4) → `publish` → renders the synthesized cards. `host.session.postMessage` is a supported Host-API surface (one-time content-bound write permit + `allowedTools` gate + audit, §12); launchers only open the panel (they navigate; the PANEL posts). So the "click → walkthrough happens" UX is preserved, driven by the current session's agent rather than a spawned child.
+    6. **E2E uses the REAL production schema** (not the `{ cards }` test shape): the injected `submit_pr_walkthrough_yaml` tool call carries a valid production `pr`+`walkthrough` document, and the test asserts the synthesized cards (orientation/design/review/audit) render.
+  Persistence stays view-time, client-driven, caller-pack-scoped (no server-side `callRoute`); `persistedAt` stamped once → stable across reloads.
 - **What stays agent-side (unchanged carve-out, §8.5):** model-backed card
   synthesis itself, GitHub PR resolution, and `/export/*` (network + GitHub auth).
   Those are *producer/credential* concerns, not viewer state. The submit tool's
@@ -719,6 +714,19 @@ state is fixed: the bespoke viewer store is deleted, not retained.
 `walkthrough-readonly-policy.ts` **all stay** — they are genuine agent capabilities
 (model-backed synthesis + GitHub network/auth), not contribution surfaces. Only the
 viewer/route/store/deep-link surfaces move to the pack.
+
+**The YAML→cards synthesis is the one thing that MOVES OUT of the agent-only side**
+(§8.4): it is extracted to a PURE `src/shared/pr-walkthrough/yaml-to-cards.ts`,
+imported by the agent side AND bundled into the pack — one source of truth, used by
+both. The `submit_pr_walkthrough_yaml` tool itself is UNCHANGED.
+
+**Launch re-expression (§8.4 step 5):** the built-in `POST /api/pr-walkthrough/launch`
+(spawns a NEW child walkthrough agent) is the lone privilege-minting capability that
+does not move to the pack. The pack instead drives the CURRENT session's agent via
+`host.session.postMessage` (a panel "Run PR walkthrough" action), so the user-facing
+"start a walkthrough" gesture is preserved without spawning a new principal. The
+`/launch` route + `WalkthroughAgentManager` remain for any agent-side/child-session
+launch path that still needs them.
 
 ---
 
@@ -811,6 +819,8 @@ Findings from `tests/fixtures/market-sources/`:
     contain it (not persisted to `marketplace-sources.yaml`; idempotent after a
     re-instantiated store = simulated restart).
   - `MarketplaceSourceStore.add({ url: "builtin:" })` / id `"builtin"` is rejected.
+  - `parseSource` / a re-instantiated store rejects a disk-authored row with `id: "builtin"` or `url: "builtin:"`.
+- **`tests/pr-walkthrough-yaml-schema.test.ts`** (existing, keep green after the extraction): the agent-side `validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` re-exports behave identically post-move to `src/shared/pr-walkthrough/yaml-to-cards.ts` (the extraction is behavior-preserving). Optionally add a focused test that the shared module is import-clean (no `node:`/server deps) so the pack bundle stays loadable.
 
 ### 11.2 Browser E2E (`tests/e2e/ui/*.spec.ts`)
 
@@ -819,7 +829,14 @@ Findings from `tests/fixtures/market-sources/`:
   - The walkthrough works **end-to-end served entirely by the first-party pack**,
     with **NO manual install step** (it is resolved by the §5 band): git-widget
     launcher → panel → `bundle` recomputes the REAL changeset LIVE → diff renders →
-    `publish` persists cards → reload re-reads the same persisted cards.
+    `publish` persists cards → reload re-reads the same persisted cards. The
+    injected `submit_pr_walkthrough_yaml` tool call carries the **REAL production
+    schema** (`pr` + `walkthrough.{design_decisions,review_chunks,audit,display,…}`,
+    NOT a `{ cards }` shortcut), and the test asserts the **synthesized** cards
+    (orientation / design / review / audit) render — proving the pack runs the same
+    YAML→cards synthesis as the deleted built-in (§8.4). A panel **"Run PR
+    walkthrough"** action (`host.session.postMessage` to the current agent) is also
+    exercised for the launch-re-expression (§8.4 step 5).
   - **Disable** from the Market built-in section removes the launcher + the
     `#/ext/pr-walkthrough` deep-link + the contribution; the feature is
     unavailable and the deep-link shows the empty state (no crash).
@@ -899,6 +916,21 @@ independent.
 - **Task F — built-in twin deletion** (§8.3 file list; routes.ts split per §8.4):
   gated on Task E's E2E green. Includes `routing.ts` / `render.ts` /
   `panel-workspace.ts` cleanup and the `ext`-route empty-state check (§7.3).
+- **Task F-syn — production-faithful synthesis migration (§8.4, the user-chosen
+  full migration; the parity keystone).** (1) Extract `validatePrWalkthroughYaml` +
+  `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + `flattenDiffBlocks` +
+  helpers from `src/server/pr-walkthrough/walkthrough-yaml-schema.ts` into a PURE
+  `src/shared/pr-walkthrough/yaml-to-cards.ts`; re-export so the agent side +
+  `tests/pr-walkthrough-yaml-schema.test.ts` stay green unchanged. (2) New
+  `build:packs` entry bundling it → `market-packs/pr-walkthrough/lib/yaml-to-cards.mjs`
+  (committed). (3) Pack `lib/routes.mjs` `publish` validates+maps the RAW production
+  YAML against the live diff via the bundled synthesis; per-real-changeset store
+  keys. (4) `src/panel.js`: pass raw YAML to `publish`, derive the real jobId from
+  the submit tool call, add the **"Run PR walkthrough"** `host.session.postMessage`
+  action (§8.4 step 5). (5) Drop hard-coded `jobId` from the `entrypoints/*.yaml`.
+  (6) Update `tests/e2e/ui/pr-walkthrough-pack.spec.ts` to the production schema +
+  synthesized-card assertions. Depends on the pack existing (Task E) and pairs with
+  Task F (do together — both touch the pack + the deletion).
 - **Task G — item 0 fixture cleanup** (`tests/fixtures/market-sources/README.md`
   + `tests/e2e/ui/marketplace-conflicts.spec.ts`): independent of A–F.
 - **Task H — docs**: update `docs/marketplace.md` (built-in source + disabling
