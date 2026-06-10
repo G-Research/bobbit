@@ -456,7 +456,9 @@ async function handleUninstall(pack: InstalledPackWire): Promise<void> {
 // ============================================================================
 
 function packsForScope(scope: MarketScope): InstalledPackWire[] {
-	return installed.filter((p) => p.scope === scope);
+	// Built-in first-party packs (§7.4) render in their OWN top group and are NOT
+	// in pack_order — exclude them from the per-scope (reorderable) groups.
+	return installed.filter((p) => p.scope === scope && !p.builtin);
 }
 
 function handleDragStart(e: DragEvent, scope: MarketScope, index: number): void {
@@ -654,19 +656,37 @@ function renderSourcesPanel(): TemplateResult {
 function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	const isSelected = selectedSourceId === src.id;
 	const syncing = busy.has(`sync:${src.id}`);
+	// The synthetic built-in source (§4.4/§7.4) is non-removable and resolves its
+	// packs in place — render it as a distinct "Built-in" row, omit the Remove
+	// control entirely, and hide Re-sync (a harmless no-op server-side) to reduce
+	// confusion. It stays clickable so users can browse the shipped packs.
+	const isBuiltin = src.builtin === true;
 	return html`
-		<div class="market-source-row ${isSelected ? "market-source-row--selected" : ""}" data-testid="market-source-row">
+		<div
+			class="market-source-row ${isSelected ? "market-source-row--selected" : ""}"
+			data-testid="market-source-row"
+			data-builtin=${isBuiltin ? "true" : "false"}
+		>
 			<button class="flex-1 min-w-0 text-left" @click=${() => { activeTab = "browse"; loadBrowse(src.id); }} title="Browse packs">
-				<div class="text-sm font-medium truncate">${src.id}</div>
+				<div class="flex items-center gap-1.5">
+					<span class="text-sm font-medium truncate">${src.id}</span>
+					${isBuiltin ? html`<span class="market-builtin-badge" data-testid="market-source-builtin-badge">Built-in</span>` : ""}
+				</div>
 				<div class="text-[11px] text-muted-foreground truncate">${src.url}${src.ref ? html` <span class="opacity-70">@${src.ref}</span>` : ""}</div>
-				${src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
+				${isBuiltin
+					? html`<div class="text-[10px] text-muted-foreground/80">Shipped core features — always available, enable/disable per pack.</div>`
+					: src.lastCommit ? html`<div class="text-[10px] text-muted-foreground/80">commit ${src.lastCommit.slice(0, 7)}</div>` : ""}
 			</button>
-			<button class="market-icon-btn" title="Re-sync" data-testid="market-sync-source" ?disabled=${syncing} @click=${() => handleSyncSource(src.id)}>
-				${icon(RotateCw, "xs", syncing ? "animate-spin" : "")}
-			</button>
-			<button class="market-icon-btn market-icon-btn--danger" title="Remove source" data-testid="market-remove-source" @click=${() => handleRemoveSource(src.id)}>
-				${icon(Trash2, "xs")}
-			</button>
+			${isBuiltin
+				? ""
+				: html`
+					<button class="market-icon-btn" title="Re-sync" data-testid="market-sync-source" ?disabled=${syncing} @click=${() => handleSyncSource(src.id)}>
+						${icon(RotateCw, "xs", syncing ? "animate-spin" : "")}
+					</button>
+					<button class="market-icon-btn market-icon-btn--danger" title="Remove source" data-testid="market-remove-source" @click=${() => handleRemoveSource(src.id)}>
+						${icon(Trash2, "xs")}
+					</button>
+				`}
 		</div>
 	`;
 }
@@ -761,15 +781,70 @@ function conflictsForPack(pack: InstalledPackWire): ConflictWire[] {
 }
 
 function renderInstalledPanel(): TemplateResult {
+	const builtinPacks = installed.filter((p) => p.builtin);
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
+	const isEmpty = builtinPacks.length === 0 && scopesWithPacks.length === 0;
 	return html`
 		<section class="market-panel" data-testid="market-installed-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Installed</h2>
 			${installedError ? html`<div class="market-error" data-testid="market-installed-error">${installedError}</div>` : ""}
-			${scopesWithPacks.length === 0
+			${isEmpty
 				? html`<p class="text-sm text-muted-foreground italic">No packs installed.</p>`
-				: scopesWithPacks.map(renderScopeGroup)}
+				: html`
+					${builtinPacks.length > 0 ? renderBuiltinGroup(builtinPacks) : ""}
+					${scopesWithPacks.map(renderScopeGroup)}
+				`}
 		</section>
+	`;
+}
+
+/** Built-in first-party packs (§7.4) — their own top group. Shipped/core, so the
+ *  cards offer enable/disable toggles only (no Uninstall/Update/reorder). */
+function renderBuiltinGroup(packs: InstalledPackWire[]): TemplateResult {
+	return html`
+		<div class="flex flex-col gap-1.5 mb-3" data-testid="market-builtin-group">
+			<div class="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
+				Built-in (shipped)
+			</div>
+			<div class="text-[10px] text-muted-foreground/80 -mt-0.5">Core features that ship with Bobbit. Disable to remove a feature; re-enable any time.</div>
+			${packs.map(renderBuiltinPackCard)}
+		</div>
+	`;
+}
+
+/** A built-in first-party pack card (§7.4): toggle-only. No Uninstall/Update/
+ *  reorder (not in `pack_order`, no install ledger). When a user-installed pack of
+ *  the same name wins resolution (§6.4), the built-in row is SHADOWED — its server
+ *  activation entry is moot, so the live toggles are suppressed and the winning
+ *  installed row keeps its toggles. */
+function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
+	const isCorrupt = pack.status === "corrupt";
+	// Shadowed when any non-built-in installed pack of the same name exists — the
+	// winner owns the live (server, packName) toggle, so this row must not.
+	const shadowed = installed.some((p) => !p.builtin && p.packName === pack.packName);
+	return html`
+		<div
+			class="market-pack-card"
+			data-testid="market-installed-pack"
+			data-pack-name=${pack.packName}
+			data-scope=${pack.scope}
+			data-builtin="true"
+		>
+			<div class="flex items-start gap-2">
+				<div class="flex-1 min-w-0">
+					<div class="flex items-center gap-2 flex-wrap">
+						<span class="text-sm font-semibold">${pack.packName}</span>
+						<span class="market-builtin-badge" data-testid="market-pack-builtin-badge">Built-in</span>
+						<span class="text-[11px] text-muted-foreground">v${pack.meta?.version || pack.manifest?.version || "?"}</span>
+						${isCorrupt ? html`<span class="market-corrupt" data-testid="market-pack-corrupt">${icon(AlertTriangle, "xs")} corrupt</span>` : ""}
+					</div>
+					${pack.manifest?.description ? html`<div class="text-xs text-muted-foreground mt-0.5">${pack.manifest.description}</div>` : ""}
+					${shadowed
+						? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
+						: renderActivationControls(pack)}
+				</div>
+			</div>
+		</div>
 	`;
 }
 
