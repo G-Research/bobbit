@@ -19,8 +19,9 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { PackManifest, PackMeta, PackScope } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
-import { isValidPackName, readManifest, readMeta, writeMeta } from "./pack-manifest.js";
+import { isValidPackName, isSafeBasename, readManifest, readMeta, writeMeta } from "./pack-manifest.js";
 import { loadPackContributions } from "./pack-contributions.js";
+import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import { parseFrontmatter } from "../skills/slash-skills.js";
 import type { MarketplaceSource, MarketplaceSourceStore } from "./marketplace-source-store.js";
 
@@ -205,14 +206,37 @@ function readYamlMapping(file: string): Record<string, unknown> | null {
  *     `listName` (via {@link loadPackContributions}).
  *
  * Reads ONLY the pack dir — never the runtime-filtered tool/contribution APIs.
+ *
+ * SECURITY: `validateManifest` does NOT guard `contents.roles/tools/skills`
+ * against `..` or path separators (only `contents.entrypoints` is basename-
+ * checked), so a malicious source could declare `roles: ["../../etc/passwd"]`.
+ * Since this helper runs on Browse (no install required) AND on the installed
+ * catalogue, EVERY manifest-declared name turned into a path is guarded with
+ * {@link isSafeBasename} AND a realpath-aware {@link isPackPathWithinRoot}
+ * containment check before any read/readdir. A rejected name simply yields no
+ * description row (best-effort contract preserved).
  */
 export function readPackEntityDescriptions(packDir: string, manifest: PackManifest): PackEntityDescriptions {
 	const out: PackEntityDescriptions = {};
 	const c = manifest.contents;
 
+	// Read a path ONLY if `name` is a safe basename AND the resolved path stays
+	// within `baseDir` (which itself must stay within the pack dir). Returns null
+	// for any unsafe/out-of-bounds name so the caller skips that entity.
+	const safeJoin = (baseDir: string, name: string, ...rest: string[]): string | null => {
+		if (!isSafeBasename(name)) return null;
+		if (!isPackPathWithinRoot(packDir, baseDir)) return null;
+		const resolved = path.join(baseDir, name, ...rest);
+		return isPackPathWithinRoot(baseDir, resolved) ? resolved : null;
+	};
+
 	const roles: Record<string, string> = {};
+	const rolesDir = path.join(packDir, "roles");
 	for (const name of c.roles ?? []) {
-		const data = readYamlMapping(path.join(packDir, "roles", `${name}.yaml`)) ?? readYamlMapping(path.join(packDir, "roles", `${name}.yml`));
+		const yamlPath = safeJoin(rolesDir, `${name}.yaml`);
+		const ymlPath = safeJoin(rolesDir, `${name}.yml`);
+		if (!yamlPath && !ymlPath) continue; // unsafe name — skip entirely
+		const data = (yamlPath ? readYamlMapping(yamlPath) : null) ?? (ymlPath ? readYamlMapping(ymlPath) : null);
 		if (!data) continue;
 		let desc = oneLineDescription(data.description);
 		if (!desc) {
@@ -224,8 +248,10 @@ export function readPackEntityDescriptions(packDir: string, manifest: PackManife
 	if (Object.keys(roles).length) out.roles = roles;
 
 	const tools: Record<string, string> = {};
+	const toolsDir = path.join(packDir, "tools");
 	for (const group of c.tools ?? []) {
-		const dir = path.join(packDir, "tools", group);
+		const dir = safeJoin(toolsDir, group);
+		if (!dir) continue; // unsafe group name — skip
 		let files: string[];
 		try {
 			files = fs.readdirSync(dir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort();
@@ -233,6 +259,8 @@ export function readPackEntityDescriptions(packDir: string, manifest: PackManife
 			continue;
 		}
 		for (const f of files) {
+			// `f` comes from readdir of the (contained) group dir, so it is a real
+			// basename; still join + read defensively.
 			const desc = oneLineDescription(readYamlMapping(path.join(dir, f))?.description);
 			if (desc) { tools[group] = desc; break; }
 		}
@@ -240,9 +268,12 @@ export function readPackEntityDescriptions(packDir: string, manifest: PackManife
 	if (Object.keys(tools).length) out.tools = tools;
 
 	const skills: Record<string, string> = {};
+	const skillsDir = path.join(packDir, "skills");
 	for (const name of c.skills ?? []) {
+		const skillFile = safeJoin(skillsDir, name, "SKILL.md");
+		if (!skillFile) continue; // unsafe name — skip
 		try {
-			const { frontmatter } = parseFrontmatter(fs.readFileSync(path.join(packDir, "skills", name, "SKILL.md"), "utf-8"));
+			const { frontmatter } = parseFrontmatter(fs.readFileSync(skillFile, "utf-8"));
 			const desc = oneLineDescription((frontmatter as Record<string, unknown>)?.description);
 			if (desc) skills[name] = desc;
 		} catch { /* best-effort */ }
