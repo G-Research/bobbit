@@ -1,0 +1,11 @@
+name: dup-panel-id
+description: >-
+  V1-schema HARD-CONFLICT litmus #2 — duplicate panel id WITHIN a pack. Two
+  auto-discovered panels/*.yaml declare the same id; the registry must reject
+  this (panel ids are unique within the owning pack).
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []

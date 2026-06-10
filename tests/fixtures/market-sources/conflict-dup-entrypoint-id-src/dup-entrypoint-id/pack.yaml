@@ -1,0 +1,13 @@
+name: dup-entrypoint-id
+description: >-
+  V1-schema HARD-CONFLICT litmus #3 — duplicate entrypoint id WITHIN a pack. Two
+  entrypoints/*.yaml files (both listed in contents.entrypoints) declare the same
+  id; the registry must reject this (entrypoint ids are unique within the pack).
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints:
+    - first
+    - second

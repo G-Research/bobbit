@@ -1,0 +1,13 @@
+name: dup-routeid-b
+description: >-
+  V1-schema HARD-CONFLICT litmus #4 (pack B of 2) — duplicate host-global
+  routeId ACROSS packs. This pack's kind:"route" entrypoint claims the SAME
+  routeId:"shared-deeplink" as pack dup-routeid-a. The cross-pack collision must
+  register NEITHER + raise a loud error.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints:
+    - deeplink

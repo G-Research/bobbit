@@ -5,10 +5,13 @@
  *
  * CONVENTION (Extension Host Phase 2, Slice D1 parity hardening): a pack's CLIENT
  * contributions (renderers, panels) may now `import` npm deps in their SOURCE
- * (`market-packs/<pack>/src/*.ts`). esbuild bundles each entry into a single,
- * self-contained ESM written to the pack's SERVED location
- * (`market-packs/<pack>/tools/<group>/<entry>.js`) — the marketplace ships the
- * BUILT assets as-is. The built bundles are committed.
+ * (`market-packs/<pack>/src/*`). esbuild bundles each entry into a single,
+ * self-contained ESM written to the pack's SERVED location. Each entry declares
+ * its `out` path RELATIVE TO THE PACK ROOT (V1 schema), so tool renderers may
+ * stay tool-local (`tools/<group>/<entry>.js`) while panels and other shared
+ * bundles emit to the pack's `lib/` dir (`lib/<entry>.js`) — the new home for
+ * shared implementation modules. The marketplace ships the BUILT assets as-is.
+ * The built bundles are committed.
  *
  * Two hard rules make a bundle loadable by the Phase-1/2 client loader, which
  * imports the module via a Blob URL and hands it the host toolkit as a FACTORY
@@ -75,16 +78,33 @@ function pdfWorkerPlugin(workerSource) {
 }
 
 /**
- * Pack manifest: each entry's SOURCE (`src/<in>`) is bundled to its SERVED path
- * (`tools/<group>/<out>`). Extend this when a pack adds bundled contributions.
+ * Pack manifest: each entry's SOURCE (`market-packs/<pack>/src/<in>`) is bundled
+ * to its SERVED path `market-packs/<pack>/<out>`, where `out` is RELATIVE TO THE
+ * PACK ROOT. Tool renderers stay tool-local (`tools/<group>/<entry>.js`); panels
+ * and other shared client bundles emit to `lib/`. Extend this when a pack adds a
+ * bundled contribution.
+ *
+ * NOTE: a pack's hand-authored `.mjs` server modules (e.g. pr-walkthrough's
+ * `lib/routes.mjs`) are NOT bundled — they are committed source served as-is and
+ * are simply relocated to `lib/`; only CLIENT contributions go through esbuild.
  */
 const PACKS = [
 	{
 		pack: "artifacts",
-		group: "artifact_demo",
 		entries: [
-			{ in: "ArtifactRenderer.ts", out: "ArtifactRenderer.js" },
-			{ in: "ArtifactViewerPanel.ts", out: "ArtifactViewerPanel.js" },
+			// renderer stays tool-local (served as a PACK renderer by the tool endpoint).
+			{ in: "ArtifactRenderer.ts", out: "tools/artifact_demo/ArtifactRenderer.js" },
+			// panel bundle emits to the shared lib/ dir (auto-discovered panel entry).
+			{ in: "ArtifactViewerPanel.ts", out: "lib/ArtifactViewerPanel.js" },
+		],
+	},
+	{
+		pack: "pr-walkthrough",
+		entries: [
+			// no-tools pack: the viewer panel bundle emits to lib/ (auto-discovered
+			// from panels/pr-walkthrough-panel.yaml). routes.mjs is hand-authored and
+			// relocated to lib/ — NOT bundled here.
+			{ in: "panel.js", out: "lib/panel.js" },
 		],
 	},
 ];
@@ -93,12 +113,12 @@ async function main() {
 	const workerSource = await bundlePdfWorker();
 	const plugin = pdfWorkerPlugin(workerSource);
 
-	for (const { pack, group, entries } of PACKS) {
-		const srcDir = path.join(projectRoot, "market-packs", pack, "src");
-		const outDir = path.join(projectRoot, "market-packs", pack, "tools", group);
+	for (const { pack, entries } of PACKS) {
+		const packRoot = path.join(projectRoot, "market-packs", pack);
+		const srcDir = path.join(packRoot, "src");
 		for (const entry of entries) {
 			const inFile = path.join(srcDir, entry.in);
-			const outFile = path.join(outDir, entry.out);
+			const outFile = path.join(packRoot, entry.out);
 			await build({
 				entryPoints: [inFile],
 				outfile: outFile,
@@ -117,7 +137,7 @@ async function main() {
 				logLevel: "info",
 			});
 			// eslint-disable-next-line no-console
-			console.log(`[build:packs] ${pack}/${entry.in} → tools/${group}/${entry.out}`);
+			console.log(`[build:packs] ${pack}/src/${entry.in} → ${pack}/${entry.out}`);
 		}
 	}
 }

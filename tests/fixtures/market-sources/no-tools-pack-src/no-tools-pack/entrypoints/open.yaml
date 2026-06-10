@@ -1,0 +1,7 @@
+id: notools.open
+kind: composer-slash
+label: Open No-Tools Viewer
+target:
+  route: notools
+  params:
+    jobId: litmus-1

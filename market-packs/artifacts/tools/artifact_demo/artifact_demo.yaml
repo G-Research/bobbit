@@ -2,39 +2,21 @@ name: artifact_demo
 description: >-
   Litmus tool re-expressing the artifacts built-in as a market pack: an inline
   artifact pill (renderer) that persists its payload to a pack-scoped store and
-  opens a viewer side-panel (panels) that rehydrates by id (stores), plus a
-  deep-linkable route (entrypoints kind:"route") so the viewer reopens from a URL.
+  opens a viewer side-panel that rehydrates by id, plus a deep-linkable route so
+  the viewer reopens from a URL.
 group: Demo
 summary: Demo artifact tool — inline pill + viewer panel + pack store + deep-link route.
-# Phase-2 load-bearing contributions (design docs/design/extension-host-phase2.md §10):
-#  - renderer:    a pre-built ESM module served to the browser + lazily imported
-#                 (the inline pill; re-expresses ArtifactPill.ts + the artifacts
-#                 tool renderer). MUST be `.js` so it is served as a PACK renderer.
-#  - panels:      the `artifacts.viewer` side panel (re-expresses ArtifactElement
-#                 + the per-type artifact components: it dispatches by artifact
-#                 TYPE to real html-in-a-sandboxed-iframe / markdown / svg / image
-#                 / pdf / text rendering). Opened via
-#                 host.ui.openPanel({ panelId: "artifacts.viewer", params }).
-#  - stores:      replaces persistPreviewArtifact/restorePreviewArtifact — the
-#                 payload is persisted via host.store.put(artifactId, payload) and
-#                 rehydrated via host.store.get(artifactId), pack-namespaced.
-#  - entrypoints: a kind:"route" deep-link (routeId "artifacts") mapping the URL
-#                 onto the viewer panel + the artifactId param (no clickable surface).
+# V1 schema: a tool YAML declares ONLY tool-scoped contributions (renderer +
+# actions) — they are the only contributions that depend on a tool call /
+# toolUseId. The pack-scoped surfaces live elsewhere in the pack:
+#  - the viewer panel is auto-discovered from panels/artifacts-viewer.yaml;
+#  - the kind:"route" deep-link is declared in entrypoints/artifacts-deeplink.yaml
+#    and listed in pack.yaml contents.entrypoints;
+#  - the store is implicit (created on first host.store.put, namespaced by the
+#    server-derived packId) — there is no `stores` schema.
 #
-# A pack tool needs NO `provider:` — the renderer/panel/store endpoints resolve
-# the tool's on-disk location via ToolManager.resolveToolLocation(), independent
-# of `provider:` (Phase-1 design §4b).
+# `renderer` resolves relative to THIS yaml and stays inside the pack root (the
+# built bundle is served tool-local here). A pack tool needs NO `provider:` —
+# the renderer endpoint resolves the tool's on-disk location via
+# ToolManager.resolveToolLocation().
 renderer: ArtifactRenderer.js
-stores:
-  - id: artifacts
-panels:
-  - id: artifacts.viewer
-    title: Artifact
-    entry: ArtifactViewerPanel.js
-entrypoints:
-  - id: artifacts.deeplink
-    kind: route
-    routeId: artifacts
-    target:
-      panelId: artifacts.viewer
-    paramKeys: [artifactId]

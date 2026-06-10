@@ -1,0 +1,5 @@
+id: dupb.deeplink
+kind: route
+routeId: shared-deeplink
+target:
+  panelId: dupb.viewer

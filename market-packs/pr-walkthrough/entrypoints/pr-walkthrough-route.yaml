@@ -1,0 +1,13 @@
+id: pr-walkthrough.route
+kind: route
+routeId: pr-walkthrough
+target:
+  panelId: pr-walkthrough.panel
+# The kind:"route" DEEP-LINK: registering routeId:"pr-walkthrough" → the viewer
+# panel, so #/ext/pr-walkthrough?jobId=… resolves through the client pack route
+# registry and reopens the panel rehydrated from host.store.*.
+# jobId rehydrates a persisted job pointer; baseSha/headSha let a deep-link drive
+# a LIVE recompute (design §D2.3) for a freshly-opened PR. The git repo root is
+# SERVER-DERIVED (the session worktree), never a deep-link param — so no `repoDir`
+# key (a caller must not be able to point the route at another repo).
+paramKeys: [jobId, baseSha, headSha]

@@ -1,0 +1,5 @@
+id: dup.entry
+kind: command-palette
+label: Second
+target:
+  route: dup-entry-route-b

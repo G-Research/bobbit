@@ -1,0 +1,9 @@
+id: pr-walkthrough.open
+kind: composer-slash
+label: PR Walkthrough
+# A composer-slash LAUNCHER (the slash menu). Its selection IS the user gesture;
+# it navigates to the deep-link route (no auto-invoke on mount).
+target:
+  route: pr-walkthrough
+  params:
+    jobId: job-litmus-1

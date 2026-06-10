@@ -1,0 +1,5 @@
+id: dup.entry
+kind: command-palette
+label: First
+target:
+  route: dup-entry-route-a
