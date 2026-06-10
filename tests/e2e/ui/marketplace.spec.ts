@@ -48,9 +48,11 @@ interface PackSpec {
 	name: string;
 	version?: string;
 	description?: string;
-	roles?: Array<{ name: string; label?: string }>;
-	tools?: Array<{ group: string; name: string }>;
-	skills?: Array<{ name: string }>;
+	roles?: Array<{ name: string; label?: string; description?: string }>;
+	tools?: Array<{ group: string; name: string; description?: string }>;
+	skills?: Array<{ name: string; description?: string }>;
+	/** Pack-scoped entry points: contents.entrypoints + entrypoints/<listName>.yaml. */
+	entrypoints?: Array<{ listName: string; id?: string; label?: string; description?: string; panelId?: string }>;
 }
 
 let _repoCounter = 0;
@@ -70,6 +72,7 @@ function writePack(repo: string, spec: PackSpec): void {
 	const roles = (spec.roles ?? []).map((r) => r.name);
 	const toolGroups = [...new Set((spec.tools ?? []).map((t) => t.group))];
 	const skills = (spec.skills ?? []).map((s) => s.name);
+	const entrypoints = (spec.entrypoints ?? []).map((e) => e.listName);
 	writeFileSync(
 		join(packDir, "pack.yaml"),
 		`name: ${spec.name}\n` +
@@ -78,27 +81,41 @@ function writePack(repo: string, spec: PackSpec): void {
 			`contents:\n` +
 			`  roles: [${roles.join(", ")}]\n` +
 			`  tools: [${toolGroups.join(", ")}]\n` +
-			`  skills: [${skills.join(", ")}]\n`,
+			`  skills: [${skills.join(", ")}]\n` +
+			`  entrypoints: [${entrypoints.join(", ")}]\n`,
 	);
 	for (const r of spec.roles ?? []) {
 		mkdirSync(join(packDir, "roles"), { recursive: true });
 		writeFileSync(
 			join(packDir, "roles", `${r.name}.yaml`),
-			`name: ${r.name}\nlabel: ${r.label ?? r.name}\naccessory: none\ncreatedAt: 0\nupdatedAt: 0\npromptTemplate: hello from ${r.name}\n`,
+			`name: ${r.name}\nlabel: ${r.label ?? r.name}\naccessory: none\ncreatedAt: 0\nupdatedAt: 0\n` +
+				(r.description ? `description: ${r.description}\n` : "") +
+				`promptTemplate: hello from ${r.name}\n`,
 		);
 	}
 	for (const t of spec.tools ?? []) {
 		mkdirSync(join(packDir, "tools", t.group), { recursive: true });
 		writeFileSync(
 			join(packDir, "tools", t.group, `${t.name}.yaml`),
-			`name: ${t.name}\ndescription: tool ${t.name}\ngroup: ${t.group}\n`,
+			`name: ${t.name}\ndescription: ${t.description ?? `tool ${t.name}`}\ngroup: ${t.group}\n`,
 		);
 	}
 	for (const s of spec.skills ?? []) {
 		mkdirSync(join(packDir, "skills", s.name), { recursive: true });
 		writeFileSync(
 			join(packDir, "skills", s.name, "SKILL.md"),
-			`---\ndescription: skill ${s.name}\n---\n\n# ${s.name}\n\nbody for ${s.name}\n`,
+			`---\ndescription: ${s.description ?? `skill ${s.name}`}\n---\n\n# ${s.name}\n\nbody for ${s.name}\n`,
+		);
+	}
+	for (const e of spec.entrypoints ?? []) {
+		mkdirSync(join(packDir, "entrypoints"), { recursive: true });
+		writeFileSync(
+			join(packDir, "entrypoints", `${e.listName}.yaml`),
+			`id: ${e.id ?? `${e.listName}-id`}\n` +
+				`kind: command-palette\n` +
+				`label: ${e.label ?? e.listName}\n` +
+				(e.description ? `description: ${e.description}\n` : "") +
+				`target:\n  panelId: ${e.panelId ?? `${e.listName}-panel`}\n`,
 		);
 	}
 }
@@ -202,6 +219,11 @@ async function openMarket(page: Page, opts?: { activeProjectId?: string }): Prom
 async function reopenMarketAfterReload(page: Page, projectId: string): Promise<void> {
 	await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 	await setActiveProject(page, projectId);
+	// Land on a NON-market route first so the subsequent navigation to #/market
+	// is a genuine hashchange (setting window.location.hash to the value it
+	// already holds is a no-op and would NOT re-trigger loadMarketplaceData with
+	// the freshly-pinned active project — leaving the Installed list empty).
+	await navigateToHash(page, "#/roles");
 	await navigateToHash(page, "#/market");
 	await goToTab(page, "sources");
 }
@@ -524,9 +546,19 @@ test.describe("Marketplace UI", () => {
 		await expect(installed).toBeVisible({ timeout: 15_000 });
 		await expect(installed).toContainText("v1.0.0");
 
-		// Mutate the upstream pack (bump version) and update → re-sync reflected.
+		// Up to date right after install ⇒ the Update button is hidden (R2).
+		await expect(installed.locator('[data-testid="market-update-pack"]')).toHaveCount(0);
+
+		// Mutate the upstream pack (bump version); reload so the installed list
+		// recomputes update-available state, then the Update button appears and a
+		// click re-syncs upstream (R2).
 		writePack(repo, { name: "upd-pack", version: "2.0.0", roles: [{ name: "upd-role" }] });
-		await installed.locator('[data-testid="market-update-pack"]').click();
+		await page.reload();
+		await reopenMarketAfterReload(page, proj.id);
+		await goToTab(page, "installed");
+		const installedAfterBump = page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first();
+		await expect(installedAfterBump.locator('[data-testid="market-update-pack"]')).toBeVisible({ timeout: 15_000 });
+		await installedAfterBump.locator('[data-testid="market-update-pack"]').click();
 		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="upd-pack"]').first()).toContainText("v2.0.0", { timeout: 15_000 });
 
 		// Role currently resolves on the dedicated project scope.
@@ -654,5 +686,166 @@ test.describe("Marketplace UI", () => {
 		const orderRes = await apiFetch(`/api/marketplace/pack-order?scope=project&projectId=${pid}`);
 		const order = ((await orderRes.json()).order as string[]).filter((n) => n === "conf-a" || n === "conf-b");
 		expect(order).toEqual(["conf-b", "conf-a"]);
+	});
+
+	// ==================================================================
+	// MARKETPLACE UI POLISH (R1–R4)
+	// ==================================================================
+
+	// R1 + R2 + R3 (Installed): the Update button is HIDDEN when the installed
+	// pack is up-to-date and SHOWN after the source version is bumped; the legacy
+	// activation-help text is gone; per-entity descriptions (incl. an entry-point
+	// row) render inside the collapsed disclosure. Persists across reload.
+	test("Installed: Update button gates on source version, descriptions disclosure, no activation-help", async ({ page }) => {
+		const repo = makeRepo();
+		writePack(repo, {
+			name: "polish-pack",
+			version: "1.0.0",
+			roles: [{ name: "polish-role", description: "a polished role" }],
+			tools: [{ group: "polishgroup", name: "polish-tool", description: "a polished tool" }],
+			skills: [{ name: "polish-skill", description: "a polished skill" }],
+			entrypoints: [{ listName: "polish-ep", label: "Polish EP", description: "a polished entry point" }],
+		});
+		const proj = await makeDedicatedProject("polish");
+
+		await openMarket(page, { activeProjectId: proj.id });
+		await registerSource(page, repo);
+		await selectInstallScopeProject(page, proj.id);
+		await page.locator('[data-testid="market-browse-pack"][data-pack-name="polish-pack"]').locator('[data-testid="market-install-pack"]').click();
+
+		await goToTab(page, "installed");
+		const card = page.locator('[data-testid="market-installed-pack"][data-pack-name="polish-pack"]').first();
+		await expect(card).toBeVisible({ timeout: 15_000 });
+
+		// R2 — up-to-date ⇒ no Update button. R1 — activation-help gone everywhere.
+		await expect(card.locator('[data-testid="market-update-pack"]')).toHaveCount(0);
+		await expect(page.locator('[data-testid="market-activation-help"]')).toHaveCount(0);
+		// Uninstall stays always-available.
+		await expect(card.locator('[data-testid="market-uninstall-pack"]')).toBeVisible();
+
+		// R3 — the activation disclosure renders per-entity descriptions (incl. the
+		// entry point). The catalogue + descriptions load async, so poll for the
+		// disclosure, expand it, then assert the entry-point row.
+		const details = card.locator('[data-testid="market-entity-details-polish-pack"]');
+		await expect(details).toBeVisible({ timeout: 15_000 });
+		await details.locator("summary").click();
+		await expect(card.locator('[data-testid="market-entity-desc-entrypoint-polish-ep"]')).toBeVisible();
+		await expect(card.locator('[data-testid="market-entity-desc-entrypoint-polish-ep"]')).toContainText("a polished entry point");
+		await expect(card.locator('[data-testid="market-entity-desc-role-polish-role"]')).toContainText("a polished role");
+		await expect(card.locator('[data-testid="market-entity-desc-tool-polishgroup"]')).toContainText("a polished tool");
+		await expect(card.locator('[data-testid="market-entity-desc-skill-polish-skill"]')).toContainText("a polished skill");
+
+		// Bump the upstream version, reload, and the Update button appears (R2).
+		writePack(repo, {
+			name: "polish-pack",
+			version: "2.0.0",
+			roles: [{ name: "polish-role", description: "a polished role" }],
+			tools: [{ group: "polishgroup", name: "polish-tool", description: "a polished tool" }],
+			skills: [{ name: "polish-skill", description: "a polished skill" }],
+			entrypoints: [{ listName: "polish-ep", label: "Polish EP", description: "a polished entry point" }],
+		});
+		await page.reload();
+		await reopenMarketAfterReload(page, proj.id);
+		await goToTab(page, "installed");
+		const card2 = page.locator('[data-testid="market-installed-pack"][data-pack-name="polish-pack"]').first();
+		await expect(card2).toBeVisible({ timeout: 15_000 });
+		await expect(card2.locator('[data-testid="market-update-pack"]')).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator('[data-testid="market-activation-help"]')).toHaveCount(0);
+	});
+
+	// R2 — when the originating source is removed, the installed card shows the
+	// "Source not found" lozenge in place of the Update button (no update button).
+	test("Installed: shows 'Source not found' lozenge when the source is removed", async ({ page }) => {
+		const repo = makeRepo();
+		writePack(repo, { name: "orphan-pack", version: "1.0.0", roles: [{ name: "orphan-role" }] });
+		const proj = await makeDedicatedProject("orphan");
+
+		await openMarket(page, { activeProjectId: proj.id });
+		await registerSource(page, repo);
+		await selectInstallScopeProject(page, proj.id);
+		await page.locator('[data-testid="market-browse-pack"][data-pack-name="orphan-pack"]').locator('[data-testid="market-install-pack"]').click();
+		await goToTab(page, "installed");
+		await expect(page.locator('[data-testid="market-installed-pack"][data-pack-name="orphan-pack"]').first()).toBeVisible({ timeout: 15_000 });
+
+		// Remove the originating source (so the install can no longer be checked).
+		const srcRes = await apiFetch("/api/marketplace/sources");
+		for (const s of ((await srcRes.json()).sources ?? []) as Array<{ id: string }>) {
+			await apiFetch(`/api/marketplace/sources/${encodeURIComponent(s.id)}`, { method: "DELETE" });
+		}
+
+		await page.reload();
+		await reopenMarketAfterReload(page, proj.id);
+		await goToTab(page, "installed");
+		const card = page.locator('[data-testid="market-installed-pack"][data-pack-name="orphan-pack"]').first();
+		await expect(card).toBeVisible({ timeout: 15_000 });
+		await expect(card.locator('[data-testid="market-source-unknown"]')).toBeVisible();
+		await expect(card.locator('[data-testid="market-update-pack"]')).toHaveCount(0);
+		await expect(card.locator('[data-testid="market-uninstall-pack"]')).toBeVisible();
+	});
+
+	// R3 (Browse) — descriptions render for an UNINSTALLED source pack inside the
+	// disclosure, INCLUDING an entry-point row (and role/tool/skill rows).
+	test("Browse: per-entity descriptions render for an uninstalled pack (incl. entry point)", async ({ page }) => {
+		const repo = makeRepo();
+		writePack(repo, {
+			name: "desc-pack",
+			roles: [{ name: "desc-role", description: "browse role desc" }],
+			tools: [{ group: "descgroup", name: "desc-tool", description: "browse tool desc" }],
+			skills: [{ name: "desc-skill", description: "browse skill desc" }],
+			entrypoints: [{ listName: "desc-ep", label: "Desc EP", description: "browse entry point desc" }],
+		});
+
+		await openMarket(page);
+		await registerSource(page, repo);
+		const card = page.locator('[data-testid="market-browse-pack"][data-pack-name="desc-pack"]');
+		await expect(card).toBeVisible({ timeout: 15_000 });
+		// Not installed ⇒ Install button present, no installed indicator.
+		await expect(card.locator('[data-testid="market-install-pack"]')).toBeVisible();
+
+		const details = card.locator('[data-testid="market-entity-details-desc-pack"]');
+		await expect(details).toBeVisible({ timeout: 15_000 });
+		await details.locator("summary").click();
+		await expect(card.locator('[data-testid="market-entity-desc-entrypoint-desc-ep"]')).toContainText("browse entry point desc");
+		await expect(card.locator('[data-testid="market-entity-desc-role-desc-role"]')).toContainText("browse role desc");
+		await expect(card.locator('[data-testid="market-entity-desc-tool-descgroup"]')).toContainText("browse tool desc");
+		await expect(card.locator('[data-testid="market-entity-desc-skill-desc-skill"]')).toContainText("browse skill desc");
+	});
+
+	// R4 — Browse shows "Installed" for an installed up-to-date pack and an
+	// "Update" button when the source is ahead; respects project identity (a pack
+	// installed in project A is NOT shown installed when the picker targets B).
+	test("Browse: Installed / Update indicators respect install scope + project identity", async ({ page }) => {
+		const repo = makeRepo();
+		writePack(repo, { name: "browse-state-pack", version: "1.0.0", roles: [{ name: "bs-role" }] });
+		const projA = await makeDedicatedProject("bsa");
+		const projB = await makeDedicatedProject("bsb");
+
+		await openMarket(page, { activeProjectId: projA.id });
+		await registerSource(page, repo);
+		await selectInstallScopeProject(page, projA.id);
+		const browseCard = page.locator('[data-testid="market-browse-pack"][data-pack-name="browse-state-pack"]');
+		await browseCard.locator('[data-testid="market-install-pack"]').click();
+
+		// Installed at project A's scope, up to date ⇒ "Installed" indicator (no
+		// install button) while the picker still targets project A.
+		await expect(browseCard.locator('[data-testid="market-browse-installed"]')).toBeVisible({ timeout: 15_000 });
+		await expect(browseCard.locator('[data-testid="market-install-pack"]')).toHaveCount(0);
+
+		// R4 project identity — point the picker at project B: NOT installed there,
+		// so the Install button returns and the installed indicator disappears.
+		await selectInstallScopeProject(page, projB.id);
+		await expect(browseCard.locator('[data-testid="market-install-pack"]')).toBeVisible({ timeout: 15_000 });
+		await expect(browseCard.locator('[data-testid="market-browse-installed"]')).toHaveCount(0);
+		await expect(browseCard.locator('[data-testid="market-browse-update-pack"]')).toHaveCount(0);
+
+		// Bump the source version; back on project A the Browse card offers Update.
+		writePack(repo, { name: "browse-state-pack", version: "2.0.0", roles: [{ name: "bs-role" }] });
+		await page.reload();
+		await reopenMarketAfterReload(page, projA.id);
+		await goToTab(page, "browse");
+		await selectInstallScopeProject(page, projA.id);
+		const browseCard2 = page.locator('[data-testid="market-browse-pack"][data-pack-name="browse-state-pack"]');
+		await expect(browseCard2.locator('[data-testid="market-browse-update-pack"]')).toBeVisible({ timeout: 15_000 });
+		await expect(browseCard2.locator('[data-testid="market-install-pack"]')).toHaveCount(0);
 	});
 });
