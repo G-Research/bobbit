@@ -395,9 +395,22 @@ built-in band (step 2+ > step 1b), so:
   so only one `pr-walkthrough` contribution set is registered — the user pack's.
   The built-in pack's contributions are shadowed out, exactly like a server pack
   shadowing a global one. No token collision: there is one winner per `packId`.
-- **Activation** for `(server, pr-walkthrough)` (§7) applies to whichever entry
-  wins; disabling targets the feature by name regardless of provider, which is the
-  intended semantics.
+- **Activation binds to the WINNER's OWN scope** (the existing
+  `PackActivationProvider` contract — activation resolves by the winning entry's
+  scope). The built-in pack's own activation entry is `(server, packName)`. A
+  user override therefore behaves per its scope:
+  - **server-scope override** → keyed `(server, packName)`, the SAME entry as the
+    built-in. One activation entry governs the feature; the user pack is the
+    winner. (This is the only same-name case where built-in + override share an
+    activation key.)
+  - **global-user / project-scope override** → keyed `(global-user|project,
+    packName)` — its OWN normal per-scope activation, entirely separate from the
+    built-in's `(server, packName)` entry. The winning row toggles its own scope's
+    state; the built-in's server entry is irrelevant while shadowed.
+  The unifying rule for the Market UI (§7.4): **the winning row always owns the
+  toggle and writes activation to its actual scope; the built-in row's
+  server-scoped toggle is suppressed (shadowed) whenever ANY higher-scope provider
+  of the same name wins.** See §6.4 for the row model and §7.4 for the UI.
 
 ### 6.4 API identity / provenance disambiguation (same-name built-in + user install)
 
@@ -426,16 +439,23 @@ kind** rather than another entry in the install ledger:
   The UI shows an Uninstall button only on `!row.builtin` rows.
 - **Update.** Same rule (§4.4): updates the ledger entry when one exists; rejects
   when the name resolves only to the built-in band.
-- **Activation is single-feature, keyed `(server, packName)`** (one
-  `pack_activation` entry per name+scope) and applies to the **resolved winner**.
-  To avoid a leaky abstraction where toggling a *shadowed* built-in row silently
-  affects the override, the UI makes activation **row-specific by suppression**
-  (§7.4): when a user override wins, the built-in row is rendered **shadowed** —
-  its toggle is **disabled/hidden** with "shadowed by an installed pack" copy — and
-  the **active toggle lives on the winning (override) row**. With no override, the
-  built-in row carries the live toggle. So exactly one row ever owns the toggle
-  (the winner), the `(server, packName)` activation entry it writes is
-  unambiguous, and surface tokens bind to the single registered winner (§6.3).
+- **Activation is row-specific, keyed by the winning row's OWN scope** (§6.3).
+  Each row's toggle reads/writes `(row.scope, packName)`: the built-in row's is
+  `(server, packName)`; an installed override row's is `(its-scope, packName)`.
+  To avoid a leaky abstraction where toggling a *shadowed* built-in row appears to
+  do nothing (its server entry is moot while a higher-scope override wins), the UI
+  **suppresses the built-in row's toggle whenever any higher-scope provider of the
+  same name wins** (rendered **shadowed**, toggle disabled, copy "Shadowed by an
+  installed pack — manage activation on the installed copy"); the **live toggle is
+  on the winning row**, writing its own scope's `pack_activation`. With no
+  override, the built-in row owns the live `(server, packName)` toggle. So exactly
+  one row ever owns a live toggle (the winner), each writes to its own scope's
+  state (consistent with `PackActivationProvider`), and surface tokens bind to the
+  single registered winner (§6.3). **Scope of same-name testing (this goal):** the
+  E2E covers the **server-scope** override (the shared-key case, the highest-risk
+  one); project/global-user same-name overrides follow normal per-scope activation
+  and are documented here but not separately E2E-covered (they are ordinary
+  per-scope packs that happen to share a name — no new mechanism).
 
 ---
 
