@@ -124,7 +124,12 @@ const HUNK_HEADER = "@@ -2,3 +2,3 @@ export class SyncWorker {";
  *  review_chunks,omissions_and_followups,audit,display}` schema — NOT a `{cards}`
  *  shortcut). The pack's publish route validates + maps it (against the LIVE git
  *  diff) into PrWalkthroughCard[] via the SAME synthesis the deleted built-in ran.
- *  YAML is a superset of JSON, so the pack/route `yaml` parser reads this. */
+ *  YAML is a superset of JSON, so the pack/route `yaml` parser reads this.
+ *
+ *  The `pr.base_sha`/`pr.head_sha` carry the REAL session-worktree SHAs (the
+ *  bare-launcher dogfood path supplies NO URL SHA params, so the panel MUST read
+ *  these from the submitted YAML to drive the LIVE recompute). Call AFTER
+ *  setupSessionGitRepo so the module-level SHAs are populated. */
 function submitYaml(): string {
 	const doc = {
 		schema_version: 1,
@@ -135,8 +140,8 @@ function submitYaml(): string {
 			number: 4242,
 			title: PR_TITLE,
 			url: "https://github.com/SuuBro/bobbit/pull/4242",
-			base_sha: "abc1234",
-			head_sha: "def5678",
+			base_sha: baseSha,
+			head_sha: headSha,
 			original_description: { body: "## Why\nTransient network failures dropped sync jobs.", source: "gh_api", fetched_at: "2026-01-01T00:00:00Z" },
 			stats: { files_changed: 1, additions: 1, deletions: 1 },
 		},
@@ -341,14 +346,20 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		const sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
 		expect(sid, "a session must be selected").toBeTruthy();
 		await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
-		await seedSubmitToolCall(gateway, sid!);
 
-		// Initialise the SESSION WORKTREE as a git repo (the route diffs against the
-		// worker's server-derived process.cwd(), never a caller path).
+		// Initialise the SESSION WORKTREE as a git repo FIRST (the route diffs against
+		// the worker's server-derived process.cwd(), never a caller path). This sets
+		// the REAL baseSha/headSha that the submitted YAML's pr.base_sha/head_sha must
+		// carry — the bare-launcher dogfood path has no URL SHA params, so the panel
+		// reads them from the YAML to drive the LIVE recompute.
 		const ps = gateway.sessionManager?.getPersistedSession(sid!) as { cwd?: string; worktreePath?: string } | undefined;
 		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
 		expect(sessionWorktree, "the session must have a resolvable working dir").toBeTruthy();
 		setupSessionGitRepo(sessionWorktree!);
+
+		// Seed the submit_pr_walkthrough_yaml tool call AFTER the repo exists so the
+		// YAML's pr.base_sha/head_sha are the REAL session-worktree SHAs.
+		await seedSubmitToolCall(gateway, sid!);
 
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
 
@@ -361,11 +372,12 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible();
 		expect(bundlePosts, "panel must NOT auto-invoke callRoute on mount").toHaveLength(0);
 
-		// ── Step 3: LIVE RECOMPUTE + PANEL PUBLISH — navigate the deep-link with base/
-		// head, then Load → the panel publishes the agent's cards (read→publish seam)
+		// ── Step 3: LIVE RECOMPUTE + PANEL PUBLISH via the BARE LAUNCHER (no URL SHA
+		// params — the real dogfood). The panel is already mounted at the bare
+		// #/ext/pr-walkthrough from the launcher; Load reads the submitted YAML, extracts
+		// pr.base_sha/head_sha from it, publishes the agent's cards (read→publish seam)
 		// and reads the live bundle; the bundle serves the persisted LLM cards. ──
-		await page.evaluate((h) => { window.location.hash = h; }, liveDeepLink());
-		await expect.poll(async () => (await page.evaluate(() => window.location.hash)).startsWith(`#/ext/${PACK}?`), { timeout: 10_000 }).toBe(true);
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
 		const load1 = page.locator('[data-testid="prw-load"]').first();
 		await expect(load1).toBeVisible({ timeout: 15_000 });
 		const liveResp = page.waitForResponse(
@@ -399,6 +411,23 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		const persistedAt1 = (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
 		expect(persistedAt1, "stored cards must carry a persistedAt").toBeTruthy();
 
+		// ── Step 3-leak (Bug 2): PER-SESSION ISOLATION. Within the SAME page load (no
+		// reload), open the panel in a SECOND session. The module-level panel state is
+		// keyed by the BOUND session id, so session B must NOT see session A's rendered
+		// bundle and MUST offer Load/Run for its own (absent) submission. ──
+		await createSessionViaUI(page);
+		const sidB = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+		expect(sidB, "a second session must be selected").toBeTruthy();
+		expect(sidB).not.toBe(sid);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
+		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
+		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
+		// No leaked bundle: session A's rendered walkthrough must NOT appear here.
+		await expect(page.locator('[data-testid="prw-bundle"]')).toHaveCount(0);
+		await expect(page.locator('[data-testid="prw-title"]')).toHaveCount(0);
+		// Session B is offered Load/Run for its OWN submission.
+		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible({ timeout: 10_000 });
+
 		// ── Step 3b: PATH-TRAVERSAL PROBE — a caller-supplied repoDir cannot exfiltrate
 		// another repo's diff (the route ignores it; the outside SHAs fail closed). ──
 		const attack = await callBundleRoute(sid!, { baseSha: outsideBaseSha, headSha: outsideHeadSha, repoDir: outsideRepoDir! });
@@ -406,14 +435,21 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(attack.text).not.toContain(OUTSIDE_SECRET_FILE);
 		expect(attack.status, `repoDir traversal must NOT return other-repo data (got ${attack.status})`).not.toBe(200);
 
-		// ── reload re-reads the SAME persisted cards (store-rehydration parity). ──
+		// ── reload re-reads the SAME persisted cards (store-rehydration parity) — still
+		// via the BARE launcher (no URL SHA params); the panel re-extracts the SHAs from
+		// the submitted YAML and the publish/bundle recompute the SAME changeset id, so
+		// the persisted record (persistedAt) is stable across the reload. ──
 		const token = await readE2ETokenAsync();
 		const reopenAndLoad = async (): Promise<string | undefined> => {
 			await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-			await page.evaluate((h) => { window.location.hash = h; }, liveDeepLink());
-			await expect.poll(async () => (await page.evaluate(() => window.location.hash)).startsWith(`#/ext/${PACK}?`), { timeout: 10_000 }).toBe(true);
+			// The agent CLI may resume into a fresh transcript on respawn, so re-assert the
+			// seeded submit tool call (idempotent) — the bare-launcher reload re-reads the
+			// YAML to re-derive the jobId + SHAs that find the SAME persisted store record.
+			await seedSubmitToolCall(gateway, sid!);
+			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
 			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
 			const loadBtn = page.locator('[data-testid="prw-load"]').first();
 			await expect(loadBtn).toBeVisible({ timeout: 20_000 });
