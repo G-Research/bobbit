@@ -150,6 +150,93 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 		expect(callsC.some((u: string) => /\/api\/ext\/contributions\?projectId=C$/.test(u))).toBe(true);
 	});
 
+	test("two packs share a panel id — a caller's packId opens ITS pack's panel; an ambiguous bare panelId no-ops", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// pack_a + pack_b BOTH declare a pack-local panel id "viewer".
+		await page.evaluate(async () => {
+			(window as any).__setContributions([
+				{ packId: "pack_a", packName: "pack_a", panels: [{ id: "viewer", title: "A" }], entrypoints: [], routeNames: [] },
+				{ packId: "pack_b", packName: "pack_b", panels: [{ id: "viewer", title: "B" }], entrypoints: [], routeNames: [] },
+			]);
+			await (window as any).__reconcile("SHARED");
+		});
+
+		// A caller (e.g. a tool renderer) carrying pack_a's packId opens pack_a's panel.
+		const aCalls = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__open("viewer", "pack_a");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(aCalls.some((u: string) => u.includes("/api/ext/packs/pack_a/panels/viewer"))).toBe(true);
+		expect(aCalls.some((u: string) => u.includes("/api/ext/packs/pack_b/panels/viewer"))).toBe(false);
+
+		// pack_b's caller opens pack_b's panel — no cross-resolution.
+		const bCalls = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__open("viewer", "pack_b");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(bCalls.some((u: string) => u.includes("/api/ext/packs/pack_b/panels/viewer"))).toBe(true);
+		expect(bCalls.some((u: string) => u.includes("/api/ext/packs/pack_a/panels/viewer"))).toBe(false);
+
+		// A bare panelId with NO caller packId is AMBIGUOUS (two packs) → no-op (no fetch).
+		const ambiguous = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__openByPanelId("viewer");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(ambiguous.some((u: string) => u.includes("/panels/"))).toBe(false);
+	});
+
+	test("pack update invalidates the cached panel module — a forced re-register re-imports fresh bytes", async ({ page }) => {
+		await gotoAndWait(page);
+
+		await page.evaluate(async () => { await (window as any).__reconcile("UPD"); });
+
+		// First open loads + caches the module (one /panels/ fetch).
+		const first = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__open("demo.panel");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(first.filter((u: string) => u.includes("/panels/")).length).toBe(1);
+
+		// A second open WITHOUT a mutation reuses the cached module — NO re-fetch.
+		const cached = await page.evaluate(async () => {
+			(window as any).__clearCalls();
+			(window as any).__open("demo.panel");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(cached.some((u: string) => u.includes("/panels/"))).toBe(false);
+
+		// A benign re-register (same project, no force) must NOT drop the cache.
+		const benign = await page.evaluate(async () => {
+			(window as any).__register("UPD");
+			(window as any).__clearCalls();
+			(window as any).__open("demo.panel");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(benign.some((u: string) => u.includes("/panels/"))).toBe(false);
+
+		// A FORCED re-register (the install/update/reinstall mutation path) drops the
+		// cached module so the next open re-imports fresh bytes (one new /panels/ fetch).
+		const afterUpdate = await page.evaluate(async () => {
+			(window as any).__registerForce("UPD");
+			(window as any).__clearCalls();
+			(window as any).__open("demo.panel");
+			await (window as any).__flush();
+			return (window as any).__calls();
+		});
+		expect(afterUpdate.filter((u: string) => u.includes("/panels/")).length).toBe(1);
+	});
+
 	test("uninstall reconcile drops the panel — a later openPackPanel no-ops (no stale fetch)", async ({ page }) => {
 		await gotoAndWait(page);
 

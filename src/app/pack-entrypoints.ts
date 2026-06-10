@@ -12,7 +12,9 @@
 // `renderer-registry.ts` generation-guarded chokepoint — it does NOT fork it.
 // It copies the `applyRegistration` contract (capture generation before any
 // await, drop superseded applies, reconcile-on-uninstall, project-scoped,
-// reload-safe) into TWO of its own maps: a launcher map (keyed by entrypoint id)
+// reload-safe) into TWO of its own maps: a launcher map (keyed by the COMPOUND
+// `{packId, entrypointId}` launcher key — entrypoint ids are only PACK-unique, so
+// two packs may validly share a launcher id and BOTH must stay addressable)
 // and a deep-link route map (keyed by `routeId`). The route map is the
 // reload-safe surface `getRouteFromHash` (routing.ts) restores `#/ext/<routeId>`
 // against; `navigateToTarget` serializes a structured `RouteTarget` onto it so
@@ -78,8 +80,12 @@ export interface PackRouteEntry {
 }
 
 /** A registered launcher (the owning pack + project, so reconcile can drop a
- *  pack's launchers precisely). */
+ *  pack's launchers precisely). `key` is the COMPOUND `{packId, id}` launcher key
+ *  the registry is addressed by — entrypoint ids are only PACK-unique, so two
+ *  packs may validly declare the same launcher id and BOTH must be addressable.
+ *  Surfaces dispatch with `key` (never the bare `id`). */
 interface RegisteredLauncher {
+	key: string;
 	id: string;
 	packId: string;
 	kind: LauncherKind;
@@ -88,7 +94,20 @@ interface RegisteredLauncher {
 	projectId?: string;
 }
 
-/** entrypoint id → launcher. Reconciled from /api/ext/contributions metadata. */
+/** Compound launcher key — entrypoint ids are only pack-unique, so a launcher is
+ *  addressed by `{packId, id}`. The NUL separator can never appear in either
+ *  segment (mirrors `pack-panels.ts::panelKey`). Surfaces thread THIS key (not the
+ *  bare id) into dispatch + `data-entrypoint-id`, so same-id launchers from two
+ *  packs do not collide. NUL is DOM-attribute-safe but mangled inside a CSS
+ *  selector — match it in JS (`dataset.entrypointId === key`), never via
+ *  `[data-entrypoint-id='…']`. */
+export function launcherKey(packId: string, id: string): string {
+	return `${packId}\u0000${id}`;
+}
+
+/** compound `{packId, id}` key → launcher. Reconciled from /api/ext/contributions
+ *  metadata. Keyed by the compound key (NOT the bare id) so same-id launchers
+ *  from different packs coexist. */
 const launchers = new Map<string, RegisteredLauncher>();
 /** routeId → deep-link route entry (at most ONE pack owns a routeId). */
 const routes = new Map<string, PackRouteEntry>();
@@ -145,7 +164,9 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 			if (ep.kind !== "composer-slash" && ep.kind !== "git-widget-button" && ep.kind !== "command-palette") continue;
 			if (typeof ep.label !== "string" || !ep.label) continue;
 			if (!isPanelTarget(ep.target) && !(ep.target && typeof (ep.target as RouteTarget).route === "string")) continue;
-			nextLaunchers.set(ep.id, {
+			const key = launcherKey(ep.packId, ep.id);
+			nextLaunchers.set(key, {
+				key,
 				id: ep.id,
 				packId: ep.packId,
 				kind: ep.kind,
@@ -186,14 +207,29 @@ export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher
  * dispatch chokepoint a surface calls on a genuine user click — a PanelTarget
  * opens its panel (PACK-RELATIVE, resolved against the launcher's own packId); a
  * RouteTarget navigates (deep-link). NEVER call this on mount; invocation is the
- * user gesture (v1 §5 v). A no-op for an unknown id.
+ * user gesture (v1 §5 v).
+ *
+ * `keyOrId` is the COMPOUND launcher key ({@link launcherKey}) the surfaces
+ * thread — entrypoint ids are only pack-unique, so two packs may share a launcher
+ * id and must both be addressable. As a NARROW convenience for id-only callers
+ * (e.g. the `__bobbitRunPackLauncher` E2E hook) a bare id is also accepted IFF it
+ * resolves UNAMBIGUOUSLY to exactly one launcher; an ambiguous bare id (two packs)
+ * is a no-op so the caller must use the compound key. A no-op for an unknown key.
  */
-export function runLauncherEntrypoint(id: string): void {
-	const l = launchers.get(id);
+export function runLauncherEntrypoint(keyOrId: string): void {
+	let l = launchers.get(keyOrId);
 	if (!l) {
-		// eslint-disable-next-line no-console
-		console.warn(`[pack-entrypoints] runLauncherEntrypoint: no launcher "${id}"`);
-		return;
+		// Narrow fallback: a bare id that matches exactly ONE launcher resolves it.
+		const byId = [...launchers.values()].filter((x) => x.id === keyOrId);
+		if (byId.length === 1) {
+			l = byId[0];
+		} else {
+			// eslint-disable-next-line no-console
+			console.warn(
+				`[pack-entrypoints] runLauncherEntrypoint: no unambiguous launcher "${keyOrId}"`,
+			);
+			return;
+		}
 	}
 	if (isPanelTarget(l.target)) {
 		openPackPanel(l.target, l.packId);

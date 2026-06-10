@@ -77,7 +77,12 @@ async function sessionWriteContentHash(role: string, text: string): Promise<stri
 // surfaces are PACK-bound (no carrier tool). The server mints the matching
 // server-derived surface token from whichever shape it receives.
 export type SurfaceRef =
-	| { kind: "tool"; tool: string }
+	// A TOOL-bound surface. `packId` is the structural packId of the renderer's
+	// OWN pack (threaded from /api/tools via `packIdForTool`); it is NOT sent to the
+	// server (the server derives the trusted packId from the `tool`) — it exists
+	// purely so `host.ui.openPanel({panelId})` resolves the panel WITHIN the
+	// renderer's pack (panel ids are pack-local). Absent for a built-in renderer.
+	| { kind: "tool"; tool: string; packId?: string }
 	| { kind: "pack"; packId: string; contributionKind: "panel" | "entrypoint" | "route"; contributionId: string };
 
 // Pack schema V1 §8.4: give pack PANELS a host API bound to the active session +
@@ -310,12 +315,13 @@ export function getHostApi(
 		} as HostApi["session"],
 		ui: {
 			// Slice B4: open (or focus) a pack-contributed side panel via the client
-			// pack-panel registry (lazy Blob-URL import + mount). PACK-RELATIVE: a
-			// pack-bound surface (panel) supplies its authoritative packId so the
-			// {packId, panelId} lookup is exact; a tool-renderer surface has no
-			// structural packId client-side, so openPackPanel falls back to a unique
-			// panel-id resolution (pack schema V1 §8.1).
-			openPanel: (target) => openPackPanel(target, surface?.kind === "pack" ? surface.packId : undefined),
+			// pack-panel registry (lazy Blob-URL import + mount). PACK-RELATIVE: BOTH a
+			// pack-bound surface (panel/entrypoint) AND a tool-renderer surface supply
+			// their owning structural `packId` (the latter threaded from /api/tools via
+			// `packIdForTool`), so the {packId, panelId} lookup is EXACT and a tool
+			// renderer always opens ITS pack's panel even when another installed pack
+			// declares the same pack-local panel id (pack schema V1 §8.1).
+			openPanel: (target) => openPackPanel(target, surface?.packId),
 			// Slice C1: navigate the SPA to a pack-contributed deep-link route by
 			// STRUCTURED target. `navigateToTarget` resolves `target.route` through the
 			// client pack-route registry, filters params to the route's declared

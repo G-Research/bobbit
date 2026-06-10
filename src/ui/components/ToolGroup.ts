@@ -16,6 +16,7 @@ import { renderTool } from "../tools/index.js";
 import { isSkippedToolResult, TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
 import { state as appState } from "../../app/state.js";
 import { getHostApi } from "../../app/host-api.js";
+import { packIdForTool } from "../../app/pack-renderers.js";
 
 /** Icon lookup by tool name — mirrors individual renderers */
 const TOOL_ICONS: Record<string, any> = {
@@ -178,7 +179,7 @@ export class ToolGroup extends LitElement {
 									toolCallInput: (tc as any).input,
 									sessionId: sessionIdCtx,
 									packTool: tc.name,
-									host: getHostApi(sessionIdCtx, tc.id, { kind: "tool", tool: tc.name }),
+									host: getHostApi(sessionIdCtx, tc.id, { kind: "tool", tool: tc.name, packId: packIdForTool(tc.name) }),
 								});
 								if (renderResult.isCustom) {
 									return renderResult.content;

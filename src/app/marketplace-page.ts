@@ -185,8 +185,13 @@ export async function reconcileRenderersForActiveSession(): Promise<void> {
 	// (pack schema V1 §8.1/§8.2). Force re-register directly from the freshly-fetched
 	// metadata (the dedupe guard would skip an unchanged project); uninstall reconcile
 	// drops removed panels/entrypoints/routes so a stale deep-link no longer resolves.
+	// `invalidateLoaded` drops cached panel MODULES for surviving panels too: a
+	// same-project UPDATE/reinstall re-registers the same {packId, panelId} behind the
+	// same serving URL with fresh bytes, so without forcing it the stale module would
+	// keep serving until a full reload (this path runs ONLY on real pack mutations /
+	// activation toggles, never on a benign session-switch reconcile).
 	const packs = await fetchContributions(projectId);
-	registerPackPanels(panelInfosFromContributions(packs), projectId);
+	registerPackPanels(panelInfosFromContributions(packs), projectId, { invalidateLoaded: true });
 	registerPackEntrypoints(entrypointInfosFromContributions(packs), projectId);
 }
 

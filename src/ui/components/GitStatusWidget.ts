@@ -963,7 +963,9 @@ export class GitStatusWidget extends LitElement {
         let gitButtons: Array<{ id: string; label: string }> = [];
         let hasPaletteCommands = false;
         try {
-            gitButtons = listLauncherEntrypoints('git-widget-button').map((l) => ({ id: l.id, label: l.label }));
+            // `id` carries the COMPOUND launcher key (packId+entrypointId) so two packs
+            // declaring the same launcher id stay distinct + individually dispatchable.
+            gitButtons = listLauncherEntrypoints('git-widget-button').map((l) => ({ id: l.key, label: l.label }));
             hasPaletteCommands = listLauncherEntrypoints('command-palette').length > 0;
         } catch { /* non-fatal */ }
         if (gitButtons.length === 0 && !hasPaletteCommands) return nothing;

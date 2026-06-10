@@ -192,6 +192,53 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 		expect(out.launchers).toEqual([]);
 	});
 
+	test("two packs declaring the SAME launcher id are BOTH addressable by their compound key (no collision)", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// pack_a + pack_b each declare a `command-palette` launcher with the SAME id
+		// "open" targeting their OWN panel — panel/entrypoint ids are pack-local.
+		const entries = await page.evaluate(async () => {
+			(window as any).__setContributions([
+				{ packId: "pack_a", packName: "pack_a", panels: [{ id: "viewer" }], routeNames: [], entrypoints: [{ id: "open", kind: "command-palette", label: "Open A", target: { panelId: "viewer" }, listName: "open" }] },
+				{ packId: "pack_b", packName: "pack_b", panels: [{ id: "viewer" }], routeNames: [], entrypoints: [{ id: "open", kind: "command-palette", label: "Open B", target: { panelId: "viewer" }, listName: "open" }] },
+			]);
+			await (window as any).__reconcile("COLLIDE");
+			// Register both packs' panels together so a panel-target launcher resolves +
+			// fetches (registerPackPanels replaces the whole registry per call).
+			(window as any).__registerPanels([
+				{ packId: "pack_a", panelId: "viewer" },
+				{ packId: "pack_b", panelId: "viewer" },
+			], "COLLIDE");
+			return (window as any).__launcherEntries("command-palette");
+		});
+		// BOTH launchers survive — neither overwrote the other.
+		expect(entries.length).toBe(2);
+		const keys = entries.map((e: any) => e.key).sort();
+		const keyA = await page.evaluate(() => (window as any).__launcherKey("pack_a", "open"));
+		const keyB = await page.evaluate(() => (window as any).__launcherKey("pack_b", "open"));
+		expect(keys).toEqual([keyA, keyB].sort());
+
+		// Running pack_a's launcher by its compound key opens pack_a's panel.
+		const aCalls = await page.evaluate(async (key: string) => {
+			(window as any).__clearCalls();
+			(window as any).__runLauncher(key);
+			await (window as any).__flush();
+			return (window as any).__calls();
+		}, keyA);
+		expect(aCalls.some((u: string) => u.includes("/api/ext/packs/pack_a/panels/viewer"))).toBe(true);
+		expect(aCalls.some((u: string) => u.includes("/api/ext/packs/pack_b/panels/viewer"))).toBe(false);
+
+		// Running pack_b's launcher by its compound key opens pack_b's panel.
+		const bCalls = await page.evaluate(async (key: string) => {
+			(window as any).__clearCalls();
+			(window as any).__runLauncher(key);
+			await (window as any).__flush();
+			return (window as any).__calls();
+		}, keyB);
+		expect(bCalls.some((u: string) => u.includes("/api/ext/packs/pack_b/panels/viewer"))).toBe(true);
+		expect(bCalls.some((u: string) => u.includes("/api/ext/packs/pack_a/panels/viewer"))).toBe(false);
+	});
+
 	test("duplicate routeId across packs is rejected — registered by NEITHER (lookupPackRoute undefined)", async ({ page }) => {
 		await gotoAndWait(page);
 		const entry = await page.evaluate(async () => {

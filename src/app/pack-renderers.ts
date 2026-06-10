@@ -32,6 +32,10 @@ const HOST_TOOLKIT = { html, nothing, renderHeader };
 export interface PackRendererToolInfo {
 	name: string;
 	rendererKind?: string;
+	/** Structural packId of the winning pack that contributed this tool. Threaded
+	 *  into the renderer's host so `host.ui.openPanel({panelId})` resolves the panel
+	 *  within the renderer's OWN pack (pack schema V1 — panel ids are pack-local). */
+	packId?: string;
 }
 
 /** Names currently registered as pack renderers by {@link registerPackRenderers}.
@@ -39,6 +43,19 @@ export interface PackRendererToolInfo {
  *  no longer `rendererKind:"pack"` in the fresh metadata (uninstall, or a
  *  precedence change) is unregistered, restoring the displaced built-in. */
 let packRegistered = new Set<string>();
+
+/** Tool name → owning structural `packId`, rebuilt on every reconcile from
+ *  /api/tools. Panel ids are PACK-local, so a tool renderer's `host.ui.openPanel`
+ *  must resolve within its OWN pack; {@link packIdForTool} supplies that packId to
+ *  the surface ref the tool renderer binds (see Messages.ts / ToolGroup.ts). */
+let toolPackIds = new Map<string, string>();
+
+/** The structural `packId` that contributed `toolName` (a pack renderer tool), or
+ *  `undefined` for a built-in / unknown tool. Used to bind the tool renderer's
+ *  Host API to its own pack so `openPanel({panelId})` is pack-scoped. */
+export function packIdForTool(toolName: string): string | undefined {
+	return toolPackIds.get(toolName);
+}
 
 /**
  * Idempotent: register a lazy loader for every pack tool that ships a renderer.
@@ -58,9 +75,11 @@ export function registerPackRenderers(
 	projectId?: string,
 ): void {
 	const next = new Set<string>();
+	const nextPackIds = new Map<string, string>();
 	for (const t of tools) {
 		if (t.rendererKind !== "pack") continue;
 		next.add(t.name);
+		if (typeof t.packId === "string" && t.packId) nextPackIds.set(t.name, t.packId);
 		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 		registerLazyToolRenderer(
 			t.name,
@@ -90,6 +109,9 @@ export function registerPackRenderers(
 		if (!next.has(name)) unregisterPackRenderer(name);
 	}
 	packRegistered = next;
+	// Rebuild the tool→packId map from the fresh metadata (drops uninstalled tools'
+	// entries) so `packIdForTool` always reflects the current winning providers.
+	toolPackIds = nextPackIds;
 }
 
 /** Sentinel: no reconcile has run yet. Distinct from `undefined` (reconciled
