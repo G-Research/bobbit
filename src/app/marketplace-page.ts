@@ -782,19 +782,23 @@ function conflictsForPack(pack: InstalledPackWire): ConflictWire[] {
 	);
 }
 
-/** §6.4/§7.4 — derive the built-in row's shadow state from RESOLVER winner state
- *  (`/api/packs/conflicts`), NOT a name-match heuristic. The built-in entry's
- *  PackEntry id is `builtin-pack:<name>` (see `builtin-packs.ts`); a same-name
- *  user install is `market:<scope>:<name>`. The built-in row is shadowed ONLY
- *  when a same-name pack actually WINS over the built-in entry — i.e. the built-in
- *  `builtin-pack:<name>` appears as a SHADOWED entry of a conflict whose winner is
- *  some other (same-name) pack. A corrupt install (excluded from resolution) never
- *  becomes a winner, so it never suppresses the built-in toggle. With no winning
- *  override, the built-in row owns the live (server, packName) toggle. */
+/** §6.4/§7.4 — is the built-in row shadowed by a same-name user install?
+ *
+ *  The built-in band sits BELOW every user scope band, and the resolver /
+ *  contribution registry collapse to ONE winning pack per packId by list position
+ *  — so a same-name pack installed at ANY user scope (server/global-user/project)
+ *  ALWAYS wins over the built-in, regardless of which entity kinds it ships. We
+ *  therefore detect the shadow by the presence of a non-corrupt same-name install,
+ *  NOT via `/api/packs/conflicts`: that endpoint only reports role/tool/skill
+ *  conflicts, so an ENTRYPOINT/panel/route-only pack (e.g. `pr-walkthrough`, whose
+ *  `contents.roles/tools/skills` are all empty) would never appear there and the
+ *  built-in row would wrongly stay live (the winner-owns-the-toggle rule broken).
+ *  A `corrupt` install is excluded from resolution, so it never wins and never
+ *  suppresses the built-in toggle. With no non-corrupt same-name install, the
+ *  built-in row owns the live (server, packName) toggle. */
 function builtinRowShadowed(packName: string): boolean {
-	const builtinId = `builtin-pack:${packName}`;
-	return conflicts.some(
-		(c) => c.winner.packEntryId !== builtinId && c.shadowed.some((s) => s.packEntryId === builtinId),
+	return installed.some(
+		(p) => !p.builtin && p.packName === packName && p.status !== "corrupt",
 	);
 }
 
