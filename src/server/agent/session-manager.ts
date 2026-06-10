@@ -146,12 +146,12 @@ export function isUserVisibleActivity(event: any): boolean {
 /**
  * Build a user-visible system-prefix explaining that the previous turn
  * errored. Injected in front of the user's new text when SessionManager
- * implicitly unsticks a wedged session — orients the model to ignore the
- * incomplete last turn.
+ * implicitly unsticks a wedged session — orients the model to recover and
+ * continue without redoing completed work.
  */
 function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
 	const snippet = (errMsg || "unknown error").slice(0, 200);
-	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
+	return `[SYSTEM: previous turn failed with: ${snippet}. Your previous turn was interrupted. Pick up where you left off — re-check state first and avoid redoing completed work.]\n\n${userText}`;
 }
 
 /**

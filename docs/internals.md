@@ -2703,7 +2703,7 @@ When an agent turn ends with `stopReason: "error"` (malformed tool_use JSON, pro
 
 ### Design
 
-**Process, don't retry.** A new prompt or steer arriving at a wedged session is treated as fresh intent. `SessionManager` clears the error flag, prepends a short `[SYSTEM: previous turn failed with: <snippet>. Ignore the incomplete last turn and handle the following.]` stub (via `buildErrorRecoveryPrefix`), and dispatches the new message. The failed turn is **not** re-attempted - the sender gets to decide what happens next, not the stuck turn. The explicit UI Retry button still exists for the "please re-attempt that turn" case; implicit unstick is strictly additive.
+**Process, don't retry.** A new prompt or steer arriving at a wedged session is treated as fresh intent. `SessionManager` clears the error flag, prepends a short `[SYSTEM: previous turn failed with: <snippet>. Your previous turn was interrupted. Pick up where you left off — re-check state first and avoid redoing completed work.]` stub (via `buildErrorRecoveryPrefix`), and dispatches the new message. The failed turn is **not** re-attempted - the sender gets to decide what happens next, not the stuck turn. The explicit UI Retry button still exists for the "please re-attempt that turn" case; implicit unstick is strictly additive.
 
 The broken assistant message (with a malformed `tool_use` block and no matching `tool_result`) stays in transcript history. Providers tolerate this as long as the next message is regular user text, not a `tool_result`; the system-prefix keeps the model oriented.
 

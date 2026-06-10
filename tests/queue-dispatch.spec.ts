@@ -4,10 +4,10 @@ import type { QueuedMessage } from "../src/server/ws/protocol.ts";
 
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const MAX_RECOVER_DRAIN_RETRIES = 2;
-const SYSTEM_PREFIX_RE = /^\[SYSTEM: previous turn failed with: .+\. Ignore the incomplete last turn and handle the following\.\]\n\n/;
+const SYSTEM_PREFIX_RE = /^\[SYSTEM: previous turn failed with: .+\. Your previous turn was interrupted\. Pick up where you left off — re-check state first and avoid redoing completed work\.\]\n\n/;
 function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
 	const snippet = (errMsg || "unknown error").slice(0, 200);
-	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
+	return `[SYSTEM: previous turn failed with: ${snippet}. Your previous turn was interrupted. Pick up where you left off — re-check state first and avoid redoing completed work.]\n\n${userText}`;
 }
 
 /**
