@@ -125,8 +125,11 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 		// Let Lit re-render.
 		await page.waitForTimeout(100);
 
+		// The overlay is portaled to document.body (so its `position: fixed`
+		// escapes the chat message-list's `content-visibility` containing block),
+		// so query the body class directly rather than within the host element.
 		const bodyText = await page
-			.locator("verification-output-modal .verif-output-body")
+			.locator(".verif-output-body")
 			.innerText();
 
 		const occurrences = bodyText.split(LINE.trim()).length - 1;
@@ -134,6 +137,91 @@ test.describe("Verification log Nx duplication (reproducing)", () => {
 			occurrences,
 			`Expected 1 occurrence, got ${occurrences} — verification line duplicated by document-level event fan-out`,
 		).toBe(1);
+	});
+
+	test("VerificationOutputModal portals its overlay to document.body so fixed positioning escapes a contained ancestor", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// Mount the modal inside an ancestor that establishes a containing block
+		// for fixed descendants (this is what the chat message-list does via
+		// `content-visibility: auto`). If the overlay rendered in light DOM it
+		// would be clipped to this box instead of the viewport.
+		const result = await page.evaluate(
+			(args) => {
+				const contained = document.createElement("div");
+				contained.style.cssText =
+					"position:absolute;left:100px;top:100px;width:200px;height:150px;contain:layout paint;overflow:hidden;";
+				document.getElementById("container")!.appendChild(contained);
+
+				const el = document.createElement("verification-output-modal") as any;
+				el.goalId = args.goalId;
+				el.gateId = args.gateId;
+				el.signalId = args.signalId;
+				el.stepIndex = args.stepIndex;
+				el.stepName = "Run tests";
+				el.stepType = "command";
+				el.open = true;
+				contained.appendChild(el);
+				return { containedInHost: el.querySelector(".verif-output-backdrop") != null };
+			},
+			{ goalId: GOAL_ID, gateId: GATE_ID, signalId: SIGNAL_ID, stepIndex: STEP_INDEX },
+		);
+
+		await page.waitForTimeout(50);
+
+		// The overlay must NOT live inside the host element (which sits inside the
+		// contained ancestor) — it must be portaled to document.body.
+		expect(result.containedInHost, "overlay should not render in the host's light DOM").toBe(false);
+
+		const backdrop = page.locator(".verif-output-backdrop");
+		await expect(backdrop).toBeVisible();
+
+		// The portal lives directly under document.body.
+		const parentIsBody = await backdrop.evaluate(
+			(el) => el.parentElement?.parentElement === document.body,
+		);
+		expect(parentIsBody, "portal should be appended to document.body").toBe(true);
+
+		// Because it escaped the 200×150 contained ancestor (which sat at left=100),
+		// the fixed overlay should originate at the viewport origin and span far
+		// wider than the contained box.
+		const box = await backdrop.boundingBox();
+		expect(box, "backdrop should have a bounding box").not.toBeNull();
+		// < 100 proves the overlay is not resolved against the contained box
+		// (which sat at left=100); it tracks the viewport instead.
+		expect(box!.x).toBeLessThan(50);
+		expect(box!.width).toBeGreaterThan(300);
+
+		// Wire up a `close` listener on the host (mirrors how GateVerificationLive
+		// consumes the event) so we can assert the close affordances actually fire
+		// it. Regression guard: the portal must render with `host: this` so the
+		// template's @click handlers dispatch `close` on the component, not the
+		// portal DOM node.
+		await page.evaluate(() => {
+			const el = document.querySelector("verification-output-modal") as any;
+			(window as any).__closeCount = 0;
+			el.addEventListener("close", () => { (window as any).__closeCount++; });
+		});
+
+		// Clicking the ✕ button dispatches `close` on the host element.
+		await page.locator(".verif-output-backdrop button[title='Close']").click();
+		expect(await page.evaluate(() => (window as any).__closeCount)).toBe(1);
+
+		// Clicking the backdrop itself (target === backdrop) also dispatches
+		// `close`. Trigger it directly on the element so the assertion doesn't
+		// depend on the fixture reproducing Tailwind's flex/inset layout.
+		await page.evaluate(() => {
+			(document.querySelector(".verif-output-backdrop") as HTMLElement).click();
+		});
+		expect(await page.evaluate(() => (window as any).__closeCount)).toBe(2);
+
+		// Closing (open=false) removes the portal from the DOM.
+		await page.evaluate(() => {
+			const el = document.querySelector("verification-output-modal") as any;
+			el.open = false;
+		});
+		await page.waitForTimeout(50);
+		await expect(page.locator(".verif-output-backdrop")).toHaveCount(0);
 	});
 
 	test("GateVerificationLive accumulates streamed line exactly once when same event is dispatched 6×", async ({ page }) => {

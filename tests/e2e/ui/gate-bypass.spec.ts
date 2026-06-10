@@ -22,6 +22,7 @@ import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const FAILED_GATE_ID = "implementation";
 const FAILED_GATE_NAME = "Implementation";
+const RTM_GATE_ID = "ready-to-merge";
 const WHY = "Verification step requires hardware we do not have in CI; manually verified on staging.";
 const WHO = "Jamie (overseer)";
 const RED_RGB = "rgb(220, 38, 38)"; // #dc2626
@@ -42,7 +43,7 @@ interface MockState {
 /** Mock /gates (non-summary + summary view), /verifications/active, and the
  *  /bypass endpoint for a goal. The closure-held `state` survives reloads so
  *  the bypassed gate persists. Returns captured bypass POST bodies. */
-async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassCalls: Array<Record<string, unknown>> }> {
+async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassCalls: Array<Record<string, unknown>>; resetCalls: string[] }> {
 	const state: MockState = {
 		gates: [
 			{ gateId: "design-doc", name: "Design Doc", status: "passed" },
@@ -51,6 +52,7 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		],
 	};
 	const bypassCalls: Array<Record<string, unknown>> = [];
+	const resetCalls: string[] = [];
 
 	const summaryBody = () => {
 		const passed = state.gates.filter(g => g.status === "passed").length;
@@ -93,6 +95,7 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 	const gatesRe = new RegExp(`/api/goals/${goalId}/gates(?:\\?.*)?$`);
 	const activeRe = new RegExp(`/api/goals/${goalId}/verifications/active(?:\\?.*)?$`);
 	const bypassRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/bypass$`);
+	const resetRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/reset$`);
 
 	await page.route(gatesRe, async (route: Route) => {
 		if (route.request().method() !== "GET") return route.fallback();
@@ -141,7 +144,27 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		});
 	});
 
-	return { bypassCalls };
+	await page.route(resetRe, async (route: Route) => {
+		if (route.request().method() !== "POST") return route.fallback();
+		const gateId = decodeURIComponent(route.request().url().replace(/\?.*$/, "").split("/").slice(-2, -1)[0]);
+		const gate = state.gates.find(g => g.gateId === gateId);
+		if (!gate) {
+			await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: `Unknown gate: ${gateId}` }) });
+			return;
+		}
+		resetCalls.push(gateId);
+		gate.status = "pending";
+		delete gate.whyBypassed;
+		delete gate.whoAmI;
+		delete gate.bypassedAt;
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({ ok: true, gateId, affectedGateIds: [gateId], changedGateIds: [gateId], unchangedGateIds: [], teamLeadNotified: true }),
+		});
+	});
+
+	return { bypassCalls, resetCalls };
 }
 
 async function openSession(page: Page, sessionId: string): Promise<void> {
@@ -170,7 +193,7 @@ test.describe("gate bypass (human-only override)", () => {
 		const goalId = goal.id;
 		let sessionId: string | undefined;
 		try {
-			const { bypassCalls } = await installBypassMocks(page, goalId);
+			const { bypassCalls, resetCalls } = await installBypassMocks(page, goalId);
 			sessionId = await createSession({ goalId });
 
 			await openApp(page);
@@ -231,8 +254,10 @@ test.describe("gate bypass (human-only override)", () => {
 			// Bypass button no longer shown on the bypassed row.
 			await expect(failedRow.locator('[data-testid="goal-widget-gate-bypass"]')).toHaveCount(0);
 
-			// Confirm-completion button now appears (gating).
-			await expect(page.locator("[data-testid='goal-widget-confirm-completion']")).toBeVisible({ timeout: 5_000 });
+			// Confirm-completion must NOT appear yet: "Ready to Merge" is still pending,
+			// so there is outstanding work and the goal is not completable. (Mirrors the
+			// server rule — completion requires every gate passed or bypassed.)
+			await expect(page.locator("[data-testid='goal-widget-confirm-completion']")).toHaveCount(0);
 
 			// Header pill badge: red, trailing `!`, numerator counts the bypassed gate.
 			// design-doc passed (1) + implementation bypassed (1) = 2 of 3.
@@ -255,9 +280,79 @@ test.describe("gate bypass (human-only override)", () => {
 
 			await pillAfter.click();
 			await expect(page.locator("[data-testid='goal-widget-gates']")).toBeVisible({ timeout: 5_000 });
-			await expect(page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${FAILED_GATE_ID}"]`))
-				.toHaveAttribute("data-gate-status", "bypassed", { timeout: 10_000 });
-			await expect(page.locator("[data-testid='goal-widget-confirm-completion']")).toBeVisible({ timeout: 5_000 });
+			const bypassedRow = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${FAILED_GATE_ID}"]`);
+			await expect(bypassedRow).toHaveAttribute("data-gate-status", "bypassed", { timeout: 10_000 });
+
+			// The goal-status dropdown closes after a confirm-dialog interaction, so
+			// (re)open it on demand before reaching into the gate row.
+			const ensureGatesOpen = async () => {
+				if (await bypassedRow.isVisible().catch(() => false)) return;
+				await pillAfter.click();
+				await expect(page.locator("[data-testid='goal-widget-gates']")).toBeVisible({ timeout: 5_000 });
+			};
+			const confirmCompletion = page.locator("[data-testid='goal-widget-confirm-completion']");
+
+			// Still hidden after reload: "Ready to Merge" remains pending, so there is
+			// outstanding work and the goal is not yet completable.
+			await expect(confirmCompletion).toHaveCount(0);
+
+			// Resolve the last outstanding gate by bypassing it too — now every gate is
+			// passed or bypassed, so the human completion override becomes available.
+			await ensureGatesOpen();
+			const rtmRow = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${RTM_GATE_ID}"]`);
+			await rtmRow.locator('[data-testid="goal-widget-gate-bypass"]').evaluate((el) => (el as HTMLElement).click());
+			await page.locator("[data-testid='goal-widget-bypass-why']").fill(WHY);
+			await page.locator("[data-testid='goal-widget-bypass-who']").fill(WHO);
+			const rtmBypassResp = page.waitForResponse((r) =>
+				r.request().method() === "POST"
+				&& r.url().includes(`/api/goals/${goalId}/gates/${RTM_GATE_ID}/bypass`),
+				{ timeout: 10_000 },
+			);
+			await page.locator("[data-testid='goal-widget-bypass-confirm']").click();
+			expect((await rtmBypassResp).status()).toBe(200);
+			await expect(rtmRow).toHaveAttribute("data-gate-status", "bypassed", { timeout: 10_000 });
+
+			// All gates resolved (1 passed, 2 bypassed) → confirm-completion appears.
+			await ensureGatesOpen();
+			await expect(confirmCompletion).toBeVisible({ timeout: 5_000 });
+
+			// A bypassed gate offers a "Remove bypass" (reset) button to undo the override.
+			const removeBypassBtn = bypassedRow.locator('[data-testid="goal-widget-gate-reset"]');
+			await expect(removeBypassBtn).toBeVisible();
+			await expect(removeBypassBtn).toContainText(/Remove bypass/i);
+
+			// Opening the confirm dialog must not call the API; cancel leaves it bypassed.
+			// Use evaluate-click: the widget polls and re-renders the dropdown, so a
+			// Playwright actionability click can race the element detaching.
+			await removeBypassBtn.evaluate((el) => (el as HTMLElement).click());
+			const removeDialogTitle = page.getByText(new RegExp(`Remove bypass on .*${FAILED_GATE_NAME}`, "i")).first();
+			await expect(removeDialogTitle).toBeVisible({ timeout: 5_000 });
+			expect(resetCalls.length, "opening confirmation must not call reset API").toBe(0);
+			await page.getByRole("button", { name: "Cancel" }).last().click();
+			await expect(removeDialogTitle).toBeHidden({ timeout: 5_000 });
+			await ensureGatesOpen();
+			await expect(bypassedRow).toHaveAttribute("data-gate-status", "bypassed", { timeout: 5_000 });
+
+			// Confirming removes the bypass and returns the gate to pending.
+			await ensureGatesOpen();
+			await expect(removeBypassBtn).toBeVisible({ timeout: 5_000 });
+			await removeBypassBtn.evaluate((el) => (el as HTMLElement).click());
+			await expect(removeDialogTitle).toBeVisible({ timeout: 5_000 });
+			const resetResponse = page.waitForResponse((r) =>
+				r.request().method() === "POST"
+				&& r.url().includes(`/api/goals/${goalId}/gates/${FAILED_GATE_ID}/reset`),
+				{ timeout: 10_000 },
+			);
+			await page.getByRole("button", { name: /^Remove bypass$/ }).last().click();
+			expect((await resetResponse).status()).toBe(200);
+			expect(resetCalls).toContain(FAILED_GATE_ID);
+
+			// Implementation returns to pending. "Ready to Merge" is still bypassed, but
+			// because Implementation is no longer resolved the completion override is
+			// withdrawn again — the button must disappear.
+			await ensureGatesOpen();
+			await expect(bypassedRow).not.toHaveAttribute("data-gate-status", "bypassed", { timeout: 10_000 });
+			await expect(confirmCompletion).toHaveCount(0, { timeout: 5_000 });
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });

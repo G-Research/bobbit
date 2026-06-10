@@ -613,10 +613,13 @@ export class GoalStatusWidget extends LitElement {
 		if (this._resetLoading.has(gate.id)) return;
 		const { confirmAction } = await import("../../app/dialogs-lazy.js");
 		this._dropdownEl?.classList.add("goal-status-confirming");
+		const isBypassed = gate.status === "bypassed";
 		const confirmed = await confirmAction(
-			`Reset “${gate.name}”?`,
-			"This will clear the passed state for this gate and downstream dependent gates. Historical signals and content will be preserved. The team lead will be notified that downstream work may need to be revisited.",
-			"Reset",
+			isBypassed ? `Remove bypass on “${gate.name}”?` : `Reset “${gate.name}”?`,
+			isBypassed
+				? "This will remove the human bypass and return this gate (and downstream dependent gates) to pending, so it must be verified again. Historical signals and content will be preserved. The team lead will be notified that downstream work may need to be revisited."
+				: "This will clear the passed state for this gate and downstream dependent gates. Historical signals and content will be preserved. The team lead will be notified that downstream work may need to be revisited.",
+			isBypassed ? "Remove bypass" : "Reset",
 			true,
 		);
 		this._dropdownEl?.classList.remove("goal-status-confirming");
@@ -730,6 +733,13 @@ export class GoalStatusWidget extends LitElement {
 	private _renderDropdownContent(): TemplateResult {
 		const live = this._awaitingSignoffs;
 		const anyBypassed = this._gates.some(g => g.status === "bypassed");
+		// Completion is only possible once EVERY gate is resolved (passed or
+		// bypassed) — mirrors the server rule in team-manager.completeTeam(). A
+		// still-pending/failed/running gate means there is outstanding work, so the
+		// human "Confirm completion" override must not be offered yet.
+		const allGatesResolved = this._gates.length > 0
+			&& this._gates.every(g => !this._activeGateIds.has(g.id) && (g.status === "passed" || g.status === "bypassed"));
+		const canConfirmCompletion = anyBypassed && allGatesResolved;
 		return html`
 			<div class="flex items-center justify-between gap-2 mb-2 text-foreground font-medium text-sm">
 				<div class="flex items-center gap-1.5 min-w-0">
@@ -738,7 +748,7 @@ export class GoalStatusWidget extends LitElement {
 					${renderGateProgressBadge(this.goalId)}
 				</div>
 				<div class="flex items-center gap-1.5 shrink-0">
-					${anyBypassed ? html`
+					${canConfirmCompletion ? html`
 						<button
 							class="goal-widget-button goal-widget-button-bypass"
 							?disabled=${this._confirmCompletionLoading}
@@ -755,7 +765,7 @@ export class GoalStatusWidget extends LitElement {
 					>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
 				</div>
 			</div>
-			${anyBypassed && this._confirmCompletionError ? html`<div class="goal-widget-gate-error mb-2" data-testid="goal-widget-confirm-completion-error">${this._confirmCompletionError}</div>` : nothing}
+			${canConfirmCompletion && this._confirmCompletionError ? html`<div class="goal-widget-gate-error mb-2" data-testid="goal-widget-confirm-completion-error">${this._confirmCompletionError}</div>` : nothing}
 
 			<div class="border-t border-border mb-2"></div>
 
@@ -807,6 +817,18 @@ export class GoalStatusWidget extends LitElement {
 							@click=${(e: MouseEvent) => { e.stopPropagation(); void this._resetGate(gate); }}
 							data-testid="goal-widget-gate-reset"
 						>${resetting ? icon(Loader2, "xs", "animate-spin") : icon(RotateCcw, "xs")}<span>${resetting ? "Resetting…" : "Reset"}</span></button>
+					</div>
+				` : nothing}
+				${effectiveStatus === "bypassed" ? html`
+					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
+						<button
+							type="button"
+							class="goal-widget-button goal-widget-button-reset goal-widget-gate-action"
+							?disabled=${resetting}
+							@click=${(e: MouseEvent) => { e.stopPropagation(); void this._resetGate(gate); }}
+							data-testid="goal-widget-gate-reset"
+							title="Remove the bypass and return this gate to pending"
+						>${resetting ? icon(Loader2, "xs", "animate-spin") : icon(RotateCcw, "xs")}<span>${resetting ? "Removing…" : "Remove bypass"}</span></button>
 					</div>
 				` : nothing}
 				${canBypass && !formOpen ? html`

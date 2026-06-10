@@ -3,7 +3,7 @@
  * from a command verification step. Dark terminal-style, monospace font,
  * auto-scrolls to bottom unless user scrolled up.
  */
-import { LitElement, html, nothing, type TemplateResult } from "lit";
+import { LitElement, html, nothing, render as litRender, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
@@ -42,6 +42,11 @@ export class VerificationOutputModal extends LitElement {
 	 * Live events with `seq` <= this are treated as duplicates. */
 	private _bootstrapSeqHighWater = -1;
 	private _abortCtrl?: AbortController;
+	/** Overlay is portaled to document.body so its `position: fixed` is
+	 * relative to the viewport. The chat message-list applies
+	 * `content-visibility: auto` (⇒ `contain`), which would otherwise make an
+	 * ancestor the containing block and clip the modal into the message box. */
+	private _portalEl: HTMLDivElement | null = null;
 
 	override createRenderRoot() { return this; }
 
@@ -60,6 +65,27 @@ export class VerificationOutputModal extends LitElement {
 		this._abortCtrl = undefined;
 		this._seenEvents.clear();
 		this._seenEventsOrder.length = 0;
+		this._removePortal();
+	}
+
+	private _renderPortal() {
+		if (!this._portalEl) {
+			this._portalEl = document.createElement("div");
+			document.body.appendChild(this._portalEl);
+		}
+		// Pass `host: this` so `@click`/`@scroll` handlers are invoked with `this`
+		// bound to the component (not the portal DOM node). Without it, _close()
+		// would dispatch the "close" event on the wrong element and the parent's
+		// @close listener (and backdrop-click close) would never fire.
+		litRender(this._overlayTemplate(), this._portalEl, { host: this });
+	}
+
+	private _removePortal() {
+		if (this._portalEl) {
+			litRender(nothing, this._portalEl);
+			this._portalEl.remove();
+			this._portalEl = null;
+		}
 	}
 
 	private _markEventSeen(key: string): boolean {
@@ -95,9 +121,15 @@ export class VerificationOutputModal extends LitElement {
 				// Bootstrap from API only when we don't already have content.
 				this._fetchBootstrapOutput();
 			}
-			this.requestUpdate();
+			this._renderPortal();
 			// Auto-scroll after render
 			requestAnimationFrame(() => this._scrollToBottom());
+		} else if (changed.has("open") && !this.open) {
+			this._removePortal();
+		} else if (this.open && this._portalEl) {
+			// State changed while open (streamed chunks, completion) — the overlay
+			// lives outside Lit's render tree, so re-render the portal manually.
+			this._renderPortal();
 		}
 	}
 
@@ -162,7 +194,7 @@ export class VerificationOutputModal extends LitElement {
 	}
 
 	private _scrollToBottom() {
-		const el = this.querySelector(".verif-output-body");
+		const el = this._portalEl?.querySelector(".verif-output-body");
 		if (el) {
 			el.scrollTop = el.scrollHeight;
 		}
@@ -177,8 +209,12 @@ export class VerificationOutputModal extends LitElement {
 			this._close();
 		}
 	}
+	// Host element renders nothing — the overlay is portaled to document.body.
+	override render(): typeof nothing {
+		return nothing;
+	}
 
-	override render(): TemplateResult | typeof nothing {
+	private _overlayTemplate(): TemplateResult | typeof nothing {
 		if (!this.open) return nothing;
 
 		return html`
