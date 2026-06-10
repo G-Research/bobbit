@@ -48,10 +48,17 @@ function submitProofHash(jobId: string, childSessionId: string, proof: string): 
 function makeSessionManager() {
 	const sessions = new Map<string, any>();
 	const prompts: string[] = [];
+	const terminated: string[] = [];
 	sessions.set("parent", { id: "parent", cwd: tempDir, status: "idle", projectId: "project-1", sandboxed: false });
 	return {
 		sessions,
 		prompts,
+		terminated,
+		async terminateSession(id: string) {
+			this.terminated.push(id);
+			this.sessions.delete(id);
+			return true;
+		},
 		async createSession(cwd: string, _agentArgs?: string[], _goalId?: string, _assistantType?: string, opts?: Record<string, unknown>) {
 			const id = String(opts?.sessionId ?? "child");
 			const listeners: Array<(event: unknown) => void> = [];
@@ -685,7 +692,7 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(stored?.changeset.headSha, fixture.headSha);
 	});
 
-	it("internal submit accepts valid YAML with the real schema mapper and keeps the child session alive", async () => {
+	it("internal submit accepts valid YAML with the real schema mapper and terminates the child session", async () => {
 		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
@@ -694,12 +701,24 @@ describe("WalkthroughAgentManager", () => {
 		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, true);
 		assert.equal(result.status, "ready");
-		assert.equal(sessionManager.sessions.get(launch.childSessionId).status, "idle");
+		assert.ok(sessionManager.terminated.includes(launch.childSessionId), "submitting a walkthrough must terminate the child session");
 		const job = manager.getJob(launch.jobId);
 		assert.equal(job?.status, "ready");
 		assert.ok(job?.submittedAt);
 		assert.ok(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")));
 		assert.deepEqual(result.warnings.filter(warning => warning.code === "yaml-fallback-mapper"), []);
+	});
+
+	it("submitting valid YAML terminates the walkthrough child session", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
+		assert.equal(result.ok, true);
+		assert.equal(result.status, "ready");
+		assert.ok(sessionManager.terminated.includes(launch.childSessionId), "submitting a walkthrough must terminate the child session");
 	});
 
 	it("valid YAML submission maps relevant hunks to resolved diff blocks", async () => {
