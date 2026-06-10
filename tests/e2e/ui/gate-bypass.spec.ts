@@ -43,7 +43,7 @@ interface MockState {
 /** Mock /gates (non-summary + summary view), /verifications/active, and the
  *  /bypass endpoint for a goal. The closure-held `state` survives reloads so
  *  the bypassed gate persists. Returns captured bypass POST bodies. */
-async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassCalls: Array<Record<string, unknown>>; resetCalls: string[] }> {
+async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassCalls: Array<Record<string, unknown>>; resetCalls: string[]; completeCalls: Array<Record<string, unknown>> }> {
 	const state: MockState = {
 		gates: [
 			{ gateId: "design-doc", name: "Design Doc", status: "passed" },
@@ -53,6 +53,7 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 	};
 	const bypassCalls: Array<Record<string, unknown>> = [];
 	const resetCalls: string[] = [];
+	const completeCalls: Array<Record<string, unknown>> = [];
 
 	const summaryBody = () => {
 		const passed = state.gates.filter(g => g.status === "passed").length;
@@ -96,6 +97,7 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 	const activeRe = new RegExp(`/api/goals/${goalId}/verifications/active(?:\\?.*)?$`);
 	const bypassRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/bypass$`);
 	const resetRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/reset$`);
+	const completeRe = new RegExp(`/api/goals/${goalId}/(?:team|swarm)/complete$`);
 
 	await page.route(gatesRe, async (route: Route) => {
 		if (route.request().method() !== "GET") return route.fallback();
@@ -164,7 +166,15 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		});
 	});
 
-	return { bypassCalls, resetCalls };
+	await page.route(completeRe, async (route: Route) => {
+		if (route.request().method() !== "POST") return route.fallback();
+		let body: Record<string, unknown> = {};
+		try { body = JSON.parse(route.request().postData() || "{}"); } catch { /* ignore */ }
+		completeCalls.push(body);
+		await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+	});
+
+	return { bypassCalls, resetCalls, completeCalls };
 }
 
 async function openSession(page: Page, sessionId: string): Promise<void> {
@@ -193,7 +203,7 @@ test.describe("gate bypass (human-only override)", () => {
 		const goalId = goal.id;
 		let sessionId: string | undefined;
 		try {
-			const { bypassCalls, resetCalls } = await installBypassMocks(page, goalId);
+			const { bypassCalls, resetCalls, completeCalls } = await installBypassMocks(page, goalId);
 			sessionId = await createSession({ goalId });
 
 			await openApp(page);
@@ -332,6 +342,26 @@ test.describe("gate bypass (human-only override)", () => {
 			// All gates resolved (1 passed, 2 bypassed) → confirm-completion appears.
 			await ensureGatesOpen();
 			await expect(confirmCompletion).toBeVisible({ timeout: 5_000 });
+
+			// Clicking it confirms via dialog, POSTs the human override, and gives
+			// visible feedback: the button is replaced by a "Completed" indicator.
+			await confirmCompletion.evaluate((el) => (el as HTMLElement).click());
+			const completeDialogTitle = page.getByText(/Complete goal despite bypassed/i).first();
+			await expect(completeDialogTitle).toBeVisible({ timeout: 5_000 });
+			const completeResp = page.waitForResponse((r) =>
+				r.request().method() === "POST"
+				&& /\/(?:team|swarm)\/complete$/.test(r.url().replace(/\?.*$/, "")),
+				{ timeout: 10_000 },
+			);
+			await page.getByRole("button", { name: /^Complete$/ }).last().click();
+			expect((await completeResp).status()).toBe(200);
+			expect(completeCalls.length).toBeGreaterThan(0);
+			expect(completeCalls[0]).toMatchObject({ confirmBypassedGates: true });
+
+			// Feedback: the override is replaced by a "Completed" indicator.
+			await ensureGatesOpen();
+			await expect(page.locator("[data-testid='goal-widget-completed']")).toBeVisible({ timeout: 5_000 });
+			await expect(confirmCompletion).toHaveCount(0);
 
 			// A bypassed gate offers a "Remove bypass" (reset) button to undo the override.
 			const removeBypassBtn = bypassedRow.locator('[data-testid="goal-widget-gate-reset"]');

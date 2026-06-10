@@ -33,6 +33,7 @@ import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
+import { state as appState } from "../../app/state.js";
 
 type GateStatus = "pending" | "passed" | "failed" | "running" | "bypassed";
 
@@ -84,6 +85,9 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _bypassErrors: Map<string, string> = new Map();
 	@state() private _confirmCompletionLoading = false;
 	@state() private _confirmCompletionError = "";
+	/** Set true once this goal has been completed (locally or per app state) so
+	 * the widget gives immediate feedback and stops offering the override. */
+	@state() private _completed = false;
 	@state() private _closing = false;
 
 	private _ws: WebSocket | null = null;
@@ -173,6 +177,7 @@ export class GoalStatusWidget extends LitElement {
 			this._bypassErrors = new Map();
 			this._confirmCompletionLoading = false;
 			this._confirmCompletionError = "";
+			this._completed = false;
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -180,7 +185,7 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors") || changed.has("_bypassing") || changed.has("_bypassWhy") || changed.has("_bypassWho") || changed.has("_bypassLoading") || changed.has("_bypassErrors") || changed.has("_confirmCompletionLoading") || changed.has("_confirmCompletionError") || changed.has("_completed")) {
 			this._syncDropdown();
 		}
 	}
@@ -720,6 +725,10 @@ export class GoalStatusWidget extends LitElement {
 				this._confirmCompletionError = "Unable to complete goal";
 				return;
 			}
+			// Reflect completion immediately: the gates themselves don't change, so
+			// without this the button would persist and the click would look like a
+			// no-op. Swaps the override for a “Completed” indicator.
+			this._completed = true;
 			await Promise.all([this._refreshGates(), this._refreshActive()]);
 		} catch (err) {
 			this._confirmCompletionError = err instanceof Error ? err.message : "Unable to complete goal";
@@ -739,7 +748,12 @@ export class GoalStatusWidget extends LitElement {
 		// human "Confirm completion" override must not be offered yet.
 		const allGatesResolved = this._gates.length > 0
 			&& this._gates.every(g => !this._activeGateIds.has(g.id) && (g.status === "passed" || g.status === "bypassed"));
-		const canConfirmCompletion = anyBypassed && allGatesResolved;
+		// The goal is complete once the server marks it so (or we just completed it
+		// locally). A completed goal must not keep offering the override — instead we
+		// surface a clear “completed” indicator so clicking the button has visible
+		// feedback rather than appearing to do nothing.
+		const goalComplete = this._completed || appState.goals.find(g => g.id === this.goalId)?.state === "complete";
+		const canConfirmCompletion = anyBypassed && allGatesResolved && !goalComplete;
 		return html`
 			<div class="flex items-center justify-between gap-2 mb-2 text-foreground font-medium text-sm">
 				<div class="flex items-center gap-1.5 min-w-0">
@@ -756,6 +770,8 @@ export class GoalStatusWidget extends LitElement {
 							data-testid="goal-widget-confirm-completion"
 							title="Confirm completion despite bypassed gate(s)"
 						>${this._confirmCompletionLoading ? icon(Loader2, "xs", "animate-spin") : icon(CheckCircle2, "xs")}<span>${this._confirmCompletionLoading ? "Completing…" : "Confirm completion"}</span></button>
+					` : goalComplete ? html`
+						<span class="goal-widget-completed" data-testid="goal-widget-completed" title="This goal has been marked complete">${icon(CheckCircle2, "xs")}<span>Completed</span></span>
 					` : nothing}
 					<button
 						class="goal-widget-button goal-widget-button-neutral"
@@ -1081,6 +1097,15 @@ export class GoalStatusWidget extends LitElement {
 				background: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 12%, transparent);
 				border-color: color-mix(in oklch, var(--warning, var(--negative, #dc2626)) 55%, var(--border));
 				color: var(--warning, var(--negative, var(--destructive, #dc2626)));
+			}
+			.goal-widget-completed {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				font-size: 12px;
+				font-weight: 600;
+				color: var(--positive, #22c55e);
+				white-space: nowrap;
 			}
 			.goal-widget-bypass-caption {
 				font-size: 11px;
