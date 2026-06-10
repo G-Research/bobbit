@@ -426,13 +426,16 @@ kind** rather than another entry in the install ledger:
   The UI shows an Uninstall button only on `!row.builtin` rows.
 - **Update.** Same rule (§4.4): updates the ledger entry when one exists; rejects
   when the name resolves only to the built-in band.
-- **Activation.** Keyed `(server, packName)` regardless of provider (one
-  `pack_activation` entry per name+scope). It applies to the resolved winner — if a
-  user override exists, toggling disables the override's entries; with no override
-  it disables the built-in pack's. This is the intended "disable the feature by
-  name" semantics, and is stated explicitly so the toggle's effect is predictable
-  in the override case. Surface tokens bind to the single registered winner (§6.3),
-  so there is no token ambiguity.
+- **Activation is single-feature, keyed `(server, packName)`** (one
+  `pack_activation` entry per name+scope) and applies to the **resolved winner**.
+  To avoid a leaky abstraction where toggling a *shadowed* built-in row silently
+  affects the override, the UI makes activation **row-specific by suppression**
+  (§7.4): when a user override wins, the built-in row is rendered **shadowed** —
+  its toggle is **disabled/hidden** with "shadowed by an installed pack" copy — and
+  the **active toggle lives on the winning (override) row**. With no override, the
+  built-in row carries the live toggle. So exactly one row ever owns the toggle
+  (the winner), the `(server, packName)` activation entry it writes is
+  unambiguous, and surface tokens bind to the single registered winner (§6.3).
 
 ---
 
@@ -509,6 +512,14 @@ capability.
 - **Installed tab**: built-in packs appear flagged `builtin: true` with the #734
   enable/disable **toggle**, but **no Uninstall button** (gate `handleUninstall` /
   the Uninstall control on `!pack.builtin`).
+- **Shadowed built-in row (same-name override, §6.4).** When a user-installed pack
+  of the same name wins resolution, the built-in row is marked **shadowed**: its
+  activation toggle is **disabled** with explanatory copy ("Shadowed by an
+  installed pack — manage activation on the installed copy"), and the live toggle
+  is shown on the winning installed row instead. The Market UI derives "is this row
+  the winner?" from `/api/packs/conflicts` (the shadow already surfaced there) so
+  exactly one row owns the `(server, packName)` toggle. With no override, the
+  built-in row owns the toggle.
 - Reuse the existing #734 activation toggle UI + `getPackActivation` /
   `setPackActivation` calls (`src/app/api.ts`).
 
@@ -623,19 +634,36 @@ unambiguous:
   (bundle / analysis-bundle / job + session reads). The pack's `lib/routes.mjs`
   (`bundle` LIVE git recompute + `publish` persist to `host.store`) is the sole
   provider of that surface (§8.2 parity table).
-- **Submit→publish bridge (required).** The agent tool `submit_pr_walkthrough_yaml`
-  is the *producer* of LLM cards. Its persistence is rewired so the cards land in
-  the **pack-scoped `host.store`** — it calls the pack's `publish` route (the
-  submit-time persistence seam named in `pr-walkthrough-pack-deletion.md`) instead
-  of `walkthrough-store`. The internal `submit-yaml` write route to
-  `walkthrough-store` is removed with the store. The tool stays an agent tool
-  (model-backed synthesis + the agent's credentials are unchanged); only its
-  *persistence sink* moves to the pack store, which is exactly what proves a
-  first-party pack can own durable feature state through the Host API.
+- **Persistence seam = CLIENT-side `host.callRoute` from the panel (no server-side
+  bridge).** This respects the Host API boundary: there is **no** server-side
+  `ctx.host.callRoute`, and `host.callRoute` is a **client-side, caller-pack-scoped**
+  surface (`docs/extension-host-authoring.md`). So the persistence flow is exactly
+  the litmus pack's existing model (and the deletion plan's): the agent tool
+  `submit_pr_walkthrough_yaml` **stays completely unchanged** — it just emits its
+  YAML as a normal tool call. The pack **panel** (`lib/panel.js`, running on the UI
+  thread with a pack-bound surface token) then:
+  1. reads the submitted YAML via `host.session.readToolCall(submit_pr_walkthrough_yaml)`;
+  2. recomputes the structural changeset via `host.callRoute("bundle")` (LIVE git
+     in the confined worker);
+  3. persists the LLM-enhanced cards via `host.callRoute("publish")`, which writes
+     to the **pack-scoped `host.store`** (the `publish` route runs in the confined
+     worker under the pack identity derived from the panel's surface token).
+  Persistence therefore happens **at view time, client-driven**, through the
+  caller-pack-scoped Host API — no agent-tool route call, no new dispatcher API, no
+  hidden built-in persistence path. `bundle` reads stored cards when present, else
+  returns the deterministic in-worker structural fallback. This is what proves a
+  first-party pack owns durable feature state through the Host API.
+- **Deleted:** `walkthrough-store.ts` AND the bespoke server submit-time
+  persistence route (`/api/internal/pr-walkthrough/submit-yaml` → `walkthrough-store`).
+  The pack store + the panel's `publish` call replace them entirely. (Parity note:
+  built-in persistence was server-side at submit time; the pack persists at
+  view time when the panel opens — the litmus E2E's `publish`→reload→re-read path
+  already proves viewer-level parity, with `persistedAt` stable across reloads.)
 - **What stays agent-side (unchanged carve-out, §8.5):** model-backed card
   synthesis itself, GitHub PR resolution, and `/export/*` (network + GitHub auth).
-  Those are *producer/credential* concerns, not viewer state, and never read or
-  write the viewer store except via the `publish` seam above.
+  Those are *producer/credential* concerns, not viewer state. The submit tool's
+  responsibility ends at emitting the YAML tool call; it never reads or writes the
+  viewer store.
 
 **Gating.** Deletion of `walkthrough-store.ts` + the viewer-feed routes is gated on
 the mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) being green while the
@@ -767,10 +795,12 @@ Findings from `tests/fixtures/market-sources/`:
     /api/marketplace/update { scope: "server", packName: "pr-walkthrough" }` (no
     user install) → 400/403. The built-in browse rows render as provided/toggleable,
     never with an Install button.
-  - **Same-name override (§6.4):** installing a user pack named `pr-walkthrough`
-    at server scope yields TWO distinct Market rows (built-in + installed); the
-    installed row is uninstallable and the built-in row is not; after uninstalling
-    the override the built-in pack is the winner again.
+  - **Same-name override (§6.4, §7.4):** installing a user pack named
+    `pr-walkthrough` at server scope yields TWO distinct Market rows (built-in +
+    installed); the installed row is uninstallable and owns the live activation
+    toggle, while the built-in row is non-uninstallable and its toggle is disabled
+    ("shadowed"); after uninstalling the override the built-in pack is the winner
+    again and re-owns the toggle.
 - **`tests/e2e/ui/marketplace-conflicts.spec.ts`** (new, item 0): the conflict /
   no-tools / panel-only fixture assertions from §10.
 
