@@ -214,6 +214,14 @@ export class TeamManager {
 	/** Per-worker-session pending idle-notify timer (5s debounce); cancelled if the worker resumes. */
 	private pendingIdleNotify = new Map<string, ReturnType<typeof setTimeout>>();
 
+	/**
+	 * Effective worker-idle nudge debounce (ms). Defaults to the static
+	 * constant; exposed as an instance field so in-process tests can shrink it
+	 * to a negligible value and assert via fast polling instead of waiting out
+	 * the real 5s window. Production never reassigns this.
+	 */
+	private workerIdleNudgeDebounceMs = TeamManager.WORKER_IDLE_NUDGE_DEBOUNCE_MS;
+
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
 
@@ -1297,7 +1305,7 @@ export class TeamManager {
 					this.notifyTeamLead(goalId, sessionId, role, agentId).catch((err) => {
 						console.error("[team-manager] Failed to notify team lead:", err);
 					});
-				}, TeamManager.WORKER_IDLE_NUDGE_DEBOUNCE_MS);
+				}, this.workerIdleNudgeDebounceMs);
 				this.pendingIdleNotify.set(sessionId, timer);
 			} else if (event.type === "agent_start") {
 				// Worker resumed — cancel any pending idle nudge.
