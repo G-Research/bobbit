@@ -2513,6 +2513,9 @@ export interface PackManifest {
 		roles: string[];
 		tools: string[];
 		skills: string[];
+		/** Entrypoint `listName` basenames (pack-schema-v1 §1.2). Optional on the
+		 *  client wire — present on browse/installed payloads that declare them. */
+		entrypoints?: string[];
 	};
 }
 
@@ -2536,9 +2539,21 @@ export interface MarketplaceSource {
 	lastCommit?: string;
 }
 
+/** One-line per-entity descriptions sourced from the pack dir (R3). Keyed by the
+ *  same identity the toggles/chips use: roles/skills by name, tools by GROUP
+ *  name, entrypoints by `listName`. MUST stay in sync with the server type of
+ *  the same name (`src/server/agent/marketplace-install.ts`). */
+export interface PackEntityDescriptions {
+	roles?: Record<string, string>;
+	tools?: Record<string, string>;
+	skills?: Record<string, string>;
+	entrypoints?: Record<string, string>;
+}
+
 export interface BrowsePackWire extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
+	descriptions?: PackEntityDescriptions;
 }
 
 export interface InstalledPackWire {
@@ -2547,6 +2562,13 @@ export interface InstalledPackWire {
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";
+	/** True iff the source's latest manifest version differs from the installed
+	 *  version AND the source could be checked. MUST stay in sync with the server
+	 *  `InstalledPackWire` (`src/server/agent/marketplace-install.ts`). */
+	updateAvailable: boolean;
+	/** `"unknown"` when the source can't be checked (removed / never-synced / no
+	 *  version data) — disambiguates "up to date" from "source unknown". */
+	sourceStatus: "ok" | "unknown";
 }
 
 export interface ConflictPackRef {
@@ -2678,6 +2700,8 @@ export interface PackActivationCatalogue {
 	tools: string[];
 	skills: string[];
 	entrypoints: Array<{ listName: string; label?: string }>;
+	/** One-line per-entity descriptions for the activation disclosure (R3). */
+	descriptions?: PackEntityDescriptions;
 }
 
 /** GET/PUT /api/marketplace/pack-activation response (§6.7). */
