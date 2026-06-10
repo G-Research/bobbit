@@ -139,6 +139,12 @@ test.describe("gate verification resume after restart", () => {
 				return origEnqueue(sid, msg, opts);
 			};
 
+			// Shrink the worker-idle nudge debounce to a negligible value so the
+			// nudge fires almost immediately and we can assert via fast polling
+			// instead of waiting out the real 5s window. (The 5s timing itself is
+			// covered deterministically by the unit tests using a logical clock.)
+			(teamManager as any).workerIdleNudgeDebounceMs = 20;
+
 			try {
 				// Fire agent_end on the reviewer's RPC bridge. With the fix,
 				// no listener is wired for reviewer agents → no nudge.
@@ -148,19 +154,22 @@ test.describe("gate verification resume after restart", () => {
 					try { cb({ type: "agent_end" }); } catch { /* non-fatal */ }
 				}
 
-				// Fire agent_end on the worker. Listener is wired → nudge fires.
+				// Fire agent_end on the worker. Listener is wired → nudge fires
+				// after the (shrunk-to-20ms) idle debounce, since no agent_start
+				// arrives within the window to cancel it.
 				const workerSession = sm.getSession(workerId);
 				expect(workerSession, "worker session live").toBeTruthy();
 				for (const cb of [...workerSession.rpcClient.eventListeners]) {
 					try { cb({ type: "agent_end" }); } catch { /* non-fatal */ }
 				}
 
-				// Wait until the worker nudge propagates (notifyTeamLead is async
-				// because it awaits resolveTasksForSession). Reviewer nudges
-				// would land on the same path so observing the worker nudge
-				// implies the reviewer's chance has passed too.
+				// Poll until the worker nudge propagates (debounce ~20ms + the async
+				// notifyTeamLead path). The ceiling is just a safety bound — the
+				// condition resolves as soon as the nudge lands. Reviewer nudges
+				// would land on the same path, so observing the worker nudge implies
+				// the reviewer's chance has passed too.
 				await waitForCondition(() => workerNudgeCount === 1, {
-					timeoutMs: 5_000,
+					timeoutMs: 2_000,
 					message: "worker agent_end nudge",
 				});
 
