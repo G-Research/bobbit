@@ -12,6 +12,18 @@ v1 shape. The §3/§6 prose **status notes** below are flipped to "IMPLEMENTED" 
 plan a coder executed lives in [extension-host-phase2.md](extension-host-phase2.md); this
 doc remains the contract + the *why*.
 
+> **⚠️ Superseded on-disk schema (read this first).** The contribution-point *contract* (the
+> Host API, the security model, the isolation model) is unchanged, but the **on-disk schema
+> and some internal addressing were rationalised in pack-schema V1**. The per-tool
+> `panels:`/`routes:`/`stores:`/`entrypoints:` keys shown throughout §2/§3 **no longer exist** —
+> those contributions moved to pack-scoped files (`panels/<panel>.yaml`,
+> `entrypoints/<ep>.yaml`), the top-level `pack.yaml` `routes:` block, and an implicit store.
+> Surface binding generalised from tool-only to **tool-or-pack**, the panel endpoint became
+> **pack-addressed** (`GET /api/ext/packs/:packId/panels/:panelId`), and the `RouteRegistry`
+> builds off **pack-level routes**. The authoritative V1 schema + addressing contract is
+> **[pack-schema-v1-rationalisation.md](pack-schema-v1-rationalisation.md)** — read this doc's
+> §2/§3 examples through it. The §-by-§ relocations are summarised at the top of §2 below.
+
 This is the authoritative design for the *Extension Host* goal. It is the source of
 truth a coder implements Phase 1 from with no further architectural decisions. It also
 freezes the contribution-point manifest, the full Host API, and proves (on paper) that
@@ -128,6 +140,24 @@ that gates tool calls at the agent layer. §5 closes both.
 
 ## 2. Contribution-point manifest schema
 
+> **⚠️ Superseded by pack-schema V1 — relocation map.** This section was authored when *all*
+> contributions were declared on the tool YAML. Under V1 only `renderer:` + `actions:` remain
+> on the tool YAML; the rest moved to where their runtime scope already is:
+>
+> | Pre-V1 (this section) | V1 (current) |
+> |---|---|
+> | `panels:` on a tool YAML | one `panels/<panel>.yaml` per panel, **auto-discovered** (not in `contents`) |
+> | `entrypoints:` on a tool YAML | one `entrypoints/<ep>.yaml` per entrypoint, basenames in `contents.entrypoints` |
+> | `routes:` on a tool YAML | top-level `routes: { module, names }` on `pack.yaml` |
+> | `stores:` on a tool YAML | **removed** — stores are implicit, namespaced by the server-derived `packId` |
+> | path-bearing fields rejected `..` at parse; root = group dir | `..` allowed; resolved path must stay in the **pack root** |
+> | panel ids host-unique; `GET /api/tools/:tool/panel/:panelId` | panel ids **pack-local**; `GET /api/ext/packs/:packId/panels/:panelId` |
+> | `ToolInfo` carried `panels`/`routeNames`/`entrypoints`/`storeIds` | `/api/tools` is tool-scoped only (`rendererKind`/`hasActions`/`actionNames`); pack-scoped metadata moved to `GET /api/ext/contributions` |
+> | surface token always bound a `tool` | tool-OR-pack binding; pack-bound tokens carry `contributionId` (`panel:`/`entrypoint:`/`route:`) and **no** `tool` |
+>
+> The contribution *semantics*, Host API, guards, and isolation below are still accurate.
+> See [pack-schema-v1-rationalisation.md](pack-schema-v1-rationalisation.md) for the contract.
+
 ### 2.1 Where it lives
 
 Contributions are declared in the **tool YAML** (`tools/<group>/<tool>.yaml`) — the same
@@ -141,7 +171,7 @@ never rejects) exactly as in Phase 1.
 |---|---|---|
 | `renderer:` | **load-bearing (P1)** | For **pack** tools it is the on-disk path (relative to the tool's group dir) of a pre-built ESM renderer module. For builtins it stays display-only metadata. |
 | `actions:` | **load-bearing (P1)** | Relative path to the server actions module (default `actions.js`) **and/or** an inline allowlist of action names. |
-| `panels:` | **IMPLEMENTED (P2)** | Persistent side-panel component contributions (artifacts / PR-walkthrough viewer). Parsed by `parsePanels` → `{ id; title?; entry }[]`; served bearer-only by `GET /api/tools/:tool/panel/:panelId`; mounted via `host.ui.openPanel`. |
+| `panels:` | **IMPLEMENTED (P2)** | Persistent side-panel component contributions (artifacts / PR-walkthrough viewer). *(V1: moved to auto-discovered `panels/<panel>.yaml`; served bearer-only by the pack-addressed `GET /api/ext/packs/:packId/panels/:panelId`.)* Mounted via `host.ui.openPanel`. |
 | `entrypoints:` | **IMPLEMENTED (P2)** | Non-chat launchers (composer slash-commands, git-widget buttons, command palette) **and** `kind:"route"` deep-link routes. Parsed by `parseEntrypoints`; launchers click → `host.ui.openPanel`/`navigate`; routes populate the client pack-route registry. |
 | `routes:` | **IMPLEMENTED (P2)** | The pack's OWN gateway endpoints, reached via `host.callRoute`. Parsed by `parseRoutes` → `{ module?; names? }`; dispatched by `RouteDispatcher` keyed off the server-resolved `packId` (see §3.2). |
 | `stores:` | **IMPLEMENTED (P2)** | Ownership-scoped server-side persistence behind `host.store.*`; keys namespaced by the server-resolved `packId` (cross-pack reads rejected). Parsed by `parseStores`. |
