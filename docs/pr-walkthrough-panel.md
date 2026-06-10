@@ -90,12 +90,13 @@ This third model fixed two chevron bugs. Previously `renderSessionRow` force-exp
 
 All three sets are pruned for archived session IDs in `resetArchivedExpandState()` so explicit per-session choices don't leak back when a session is archived and its ID is later reused.
 
-The same ready walkthrough can be reviewed in:
-
-- the child session side panel beside chat (with user-initiated fullscreen /
-  collapse via the shared preview-panel toolbar — see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
-- the standalone `/walkthrough?...` route opened from the toolbar's
-  open-in-new-tab control (no panel-level resize chrome — it fills the window).
+A ready walkthrough is reviewed in the **pack panel** opened at
+`#/ext/pr-walkthrough` (via `host.ui.navigate`/`openPanel`). The panel supports
+user-initiated fullscreen / collapse via the shared preview-panel toolbar — see
+[Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts). *(Historical:
+the deleted bespoke viewer offered a child-session side panel beside chat and a
+standalone `/walkthrough?...` browser tab; both surfaces are gone — there is no
+child session and no standalone pathname route.)*
 
 ### Untrusted-host launch dialog
 
@@ -136,27 +137,13 @@ is a different control — it collapses/expands the review rail *within* the
 walkthrough, not the window-level panel. It works on every surface and is
 unaffected by the panel-level sizing logic.
 
-### Standalone `/walkthrough` route has no panel-level chrome
-
-A popped-out standalone walkthrough (opened with the toolbar's open-in-new-tab
-control) IS the whole browser window — there is no adjacent chat pane to hide —
-so "fullscreen", "collapse", and "expand" are meaningless there. The standalone
-branch (`standaloneWalkthroughPanel()` in `src/app/render.ts`) renders no
-panel-level fullscreen/collapse/expand chrome and does not read
-`state.previewPanelFullscreen` or the collapse flag; the walkthrough simply
-fills the window. The component's internal rail toggle still works.
-
-### Single-source-of-truth session key (never bare `activeSessionId()`)
-
-The in-app shortcut/detection gate (`hasActiveWalkthroughPanel()` in
-`src/app/main.ts`), the collapse `localStorage` key, and the `canFullscreen`
-predicate all key off **`workspaceSessionId()`** (in `src/app/render.ts`) rather
-than a bare `activeSessionId()`. `workspaceSessionId()` is route-aware: on the
-standalone `/walkthrough` route `activeSessionId()` is `undefined`, so it falls
-back to the walkthrough's owning session id carried in the URL
-(`route.walkthroughSessionId`). This keeps the standalone branch's lazy payload
-restore reading the same session key the panel tab is stored under, so the
-walkthrough hydrates correctly even with no connected session.
+> *(Historical: the deleted bespoke viewer also offered a popped-out standalone
+> `/walkthrough?...` browser tab — rendered by `standaloneWalkthroughPanel()` in
+> `src/app/render.ts` — which filled the window with no panel-level
+> fullscreen/collapse chrome, plus a route-aware `workspaceSessionId()` /
+> `route.walkthroughSessionId` session-key helper. That route, its panel branch,
+> and the helper are all **deleted**; the pack panel renders only at
+> `#/ext/pr-walkthrough`.)*
 
 ### Pinning tests
 
@@ -257,12 +244,16 @@ The child tool runtime receives scoped environment variables for the launched Gi
 
 Session-hosted walkthrough agents currently support GitHub PRs only. Launching an agent for a local `baseSha` / `headSha` changeset returns `LOCAL_WALKTHROUGH_AGENT_UNSUPPORTED` and tells the caller to use the standalone local walkthrough resolver.
 
-The existing standalone/local resolver behavior remains relevant for:
+The existing local resolver behavior remains relevant for:
 
 - fixtures and development compatibility;
 - local SHA-pair walkthroughs;
-- restoring already-persisted walkthrough payloads by `changesetId`;
-- the standalone `/walkthrough?...` route for an existing tab.
+- restoring already-persisted walkthrough payloads by `changesetId`.
+
+The pack panel itself recomputes the changeset LIVE through the pack's own
+`lib/routes.mjs` `bundle` route (`git`-backed) rather than relying on a standalone
+pathname route. *(Historical: the deleted bespoke viewer relied on a standalone
+`/walkthrough?...` route to re-open an existing tab; that route is gone.)*
 
 Local walkthroughs can produce review drafts and export previews, but they cannot submit to GitHub because there is no provider review target.
 
@@ -407,7 +398,7 @@ across reloads. *(Historical: the deleted bespoke viewer restored via
 
 When a PR walkthrough child session is restored, Bobbit rotates the submit proof and rehydrates the tool environment with `BOBBIT_SESSION_ID`, `BOBBIT_WALKTHROUGH_JOB_ID`, `BOBBIT_WALKTHROUGH_SUBMIT_PROOF`, and target-scoping variables. Restored waiting sessions retain scoped `read_pr_walkthrough_bundle` access for their own job and can continue to use `submit_pr_walkthrough_yaml` without persisting the raw proof.
 
-Because side panel, fullscreen, and standalone route all refer to the same tab id and persistence key, comments and decisions survive tab switching, wide review, standalone routing, and reload. Browser-local interaction state is not shared across browsers or devices.
+Because fullscreen, collapse, and reload all refer to the same tab id and persistence key, comments and decisions survive tab switching, wide review, and reload. Browser-local interaction state is not shared across browsers or devices.
 
 ## GitHub export
 
@@ -534,8 +525,8 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 - read-only command policy and walkthrough tool metadata;
 - session child metadata, submit proof restore, job persistence, and duplicate launch behavior;
 - launch API, invalid/valid YAML submission, keeping the child alive after success, and job restore;
-- browser behavior for child session launch/focus, empty waiting panel, validation retry state, final cards, reload persistence, standalone route, and explicit export confirmation;
-- in-app panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, and the standalone route having no panel-level resize chrome while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
+- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — launcher entrypoint, empty waiting panel, validation retry state, final cards, reload persistence, and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
+- in-app panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
 Use these tests as the pinning contract when changing walkthrough launch, resolver compatibility, YAML mapping, persistence, readonly policy, or panel UX.

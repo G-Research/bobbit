@@ -785,8 +785,8 @@ pr-walkthrough/
 
 | Built-in piece | Pack contribution |
 |---|---|
-| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`), opened via `host.ui.openPanel({ panelId, params:{ jobId } })` |
-| `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`), reached via `host.callRoute("bundle", { query: { jobId } })` — **never** a raw fetch |
+| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`), opened via `host.ui.openPanel({ panelId })` — entrypoints carry **no** hard-coded `jobId`; the panel derives the real job + base/head SHAs from the **current session's** submitted YAML |
+| `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`), reached via `host.callRoute("bundle", …)` (the route resolves the session's own job; the caller does not pass a `jobId`) — **never** a raw fetch |
 | `walkthrough-store.ts` state | **implicit store** → `host.store.*`, pack-scoped |
 | Deep-link + launchers | four `entrypoints/*.yaml` — three launchers (composer-slash, git-widget-button, command-palette) **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) |
 | Bespoke transcript access | `host.session.readToolCall(toolUseId)` (own-session, via the adapter) |
@@ -801,9 +801,11 @@ Two non-obvious decisions worth copying:
 2. **Pack-level route resolution is opener-independent.** The panel calls
    `host.callRoute("bundle", …)`; the server resolves the route **module** through the
    pack-level `RouteRegistry` (keyed by `packId`), so the panel-originated call reliably reaches
-   the pack's routes without the route and opener sharing a tool. (The LLM card synthesis is kept
-   agent-tool-side and read back from the store — a design choice, not a credential restriction;
-   see `docs/design/pr-walkthrough-pack-deletion.md`.)
+   the pack's routes without the route and opener sharing a tool. (The agent still produces the
+   walkthrough **YAML** via `submit_pr_walkthrough_yaml`; the YAML→cards synthesis was extracted to
+   the shared module `src/shared/pr-walkthrough/yaml-to-cards.ts` and **bundled into the pack's
+   `publish` route**, so the pack maps the agent's YAML to review cards itself.
+   See `docs/design/pr-walkthrough-pack-deletion.md`.)
 
 Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
 launcher → panel renders from `callRoute` + store → `readToolCall` → deep-link → disable/re-enable).
