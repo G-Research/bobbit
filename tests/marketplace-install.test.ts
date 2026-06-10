@@ -25,6 +25,8 @@ const {
 	localSourcePath,
 	copyDirVerbatim,
 	isInstalledPackDir,
+	packUpdateAvailable,
+	readPackEntityDescriptions,
 } = installMod;
 const { MarketplaceSourceStore, deriveSourceId, isValidSourceId } = await import(
 	"../src/server/agent/marketplace-source-store.ts"
@@ -409,6 +411,159 @@ describe("#7 corrupt-guard + listInstalled", () => {
 		// A pack_order naming an absent pack drops it; on-disk-but-unlisted appended first.
 		const partial = inst.listInstalled([{ scope: "server", packOrder: ["ghost", "alpha"] }]);
 		assert.deepEqual(partial.map((p: any) => p.packName), ["beta", "gamma", "alpha"]);
+	});
+});
+
+// ── R2 update-available signals (version-based) ──────────────────
+
+describe("R2 packUpdateAvailable (pure version comparison)", () => {
+	it("returns true only when source version differs and is non-empty", () => {
+		assert.equal(packUpdateAvailable("1.0.0", "2.0.0"), true);
+		assert.equal(packUpdateAvailable("1.0.0", "1.0.0"), false);
+		// String inequality — any difference counts (not semver-aware).
+		assert.equal(packUpdateAvailable("2.0.0", "1.0.0"), true);
+		assert.equal(packUpdateAvailable("1.0.0", "1.0.1-beta"), true);
+		// Empty/absent source version ⇒ no update (treated as unknown upstream).
+		assert.equal(packUpdateAvailable("1.0.0", ""), false);
+	});
+});
+
+describe("R2 listInstalled computes updateAvailable + sourceStatus (no network sync)", () => {
+	let root: string;
+	let repo: string;
+	let store: any;
+	let inst: any;
+	let packOrder: any;
+
+	beforeEach(() => {
+		root = fs.mkdtempSync(path.join(TMP, "srcstate-"));
+		repo = path.join(root, "repo");
+		makeSourceRepo(repo, { version: "1.0.0" });
+		store = new MarketplaceSourceStore(path.join(root, "cfg"));
+		store.add({ url: repo });
+		inst = makeInstaller({ sourceStore: store, cacheRoot: path.join(root, "cache"), serverBase: root, globalUserBase: root });
+		packOrder = new ProjectConfigStore(path.join(root, ".bobbit", "config"));
+	});
+
+	function sourceId() { return store.list()[0].id; }
+	function row() {
+		return inst.listInstalled([{ scope: "server" }]).find((p: any) => p.packName === "research-pack");
+	}
+
+	it("freshly installed pack is up-to-date (sourceStatus ok, no update)", () => {
+		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
+		const r = row();
+		assert.equal(r.sourceStatus, "ok");
+		assert.equal(r.updateAvailable, false);
+	});
+
+	it("flags updateAvailable when the source's manifest version is bumped", () => {
+		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
+		// Bump the upstream version WITHOUT updating the installed copy.
+		makeSourceRepo(repo, { version: "2.0.0" });
+		const r = row();
+		assert.equal(r.sourceStatus, "ok");
+		assert.equal(r.updateAvailable, true);
+	});
+
+	it("reports sourceStatus unknown when the source is no longer registered", () => {
+		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
+		store.remove(sourceId());
+		const r = row();
+		assert.equal(r.sourceStatus, "unknown");
+		assert.equal(r.updateAvailable, false);
+	});
+
+	it("reports sourceStatus unknown when the local source dir no longer exists", () => {
+		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
+		fs.rmSync(repo, { recursive: true, force: true });
+		const r = row();
+		assert.equal(r.sourceStatus, "unknown");
+		assert.equal(r.updateAvailable, false);
+	});
+});
+
+// ── R3 per-entity descriptions sourced from the pack dir ─────────
+
+describe("R3 readPackEntityDescriptions (roles/tools/skills/entrypoints)", () => {
+	it("sources one-line descriptions for all four kinds from the pack dir", () => {
+		const root = fs.mkdtempSync(path.join(TMP, "descr-"));
+		const dir = path.join(root, "kit");
+		w(path.join(dir, "pack.yaml"),
+			"name: kit\ndescription: kit\nversion: 1.0.0\ncontents:\n" +
+			"  roles: [r-desc, r-label, r-bare]\n" +
+			"  tools: [grp]\n" +
+			"  skills: [sk]\n" +
+			"  entrypoints: [ep]\n");
+		// role with explicit description
+		w(path.join(dir, "roles", "r-desc.yaml"), "name: r-desc\nlabel: R Desc\ndescription: explicit role description\n");
+		// role with only a (differing) label → label is used
+		w(path.join(dir, "roles", "r-label.yaml"), "name: r-label\nlabel: Friendly Label\n");
+		// role whose label equals its name → omitted (no row)
+		w(path.join(dir, "roles", "r-bare.yaml"), "name: r-bare\nlabel: r-bare\n");
+		// representative tool yaml in the group dir
+		w(path.join(dir, "tools", "grp", "thing.yaml"), "name: thing\ndescription: a grouped tool\ngroup: grp\n");
+		// skill frontmatter
+		w(path.join(dir, "skills", "sk", "SKILL.md"), "---\ndescription: skill one-liner\n---\n# sk\nbody\n");
+		// entrypoint with a description
+		w(path.join(dir, "entrypoints", "ep.yaml"),
+			"id: ep-id\nkind: command-palette\nlabel: EP Label\ndescription: entry point desc\ntarget:\n  panelId: some-panel\n");
+
+		const manifest = readManifest(dir)!;
+		const d = readPackEntityDescriptions(dir, manifest);
+		assert.equal(d.roles!["r-desc"], "explicit role description");
+		assert.equal(d.roles!["r-label"], "Friendly Label");
+		assert.equal(d.roles!["r-bare"], undefined); // label == name ⇒ omitted
+		assert.equal(d.tools!["grp"], "a grouped tool");
+		assert.equal(d.skills!["sk"], "skill one-liner");
+		assert.equal(d.entrypoints!["ep"], "entry point desc");
+	});
+
+	// SECURITY — manifest-declared entity names are path-joined into the pack dir,
+	// but validateManifest does NOT guard roles/tools/skills against `..` or path
+	// separators. A traversal name must NOT cause a read/readdir OUTSIDE the pack
+	// dir (exploitable on Browse alone). Each unsafe name simply yields no row.
+	it("does NOT read outside the pack dir for traversal names (roles/tools/skills)", () => {
+		const root = fs.mkdtempSync(path.join(TMP, "descr-evil-"));
+		// A secret file OUTSIDE the pack dir whose contents must never leak.
+		w(path.join(root, "secret.yaml"), "description: TOP SECRET should never appear\nlabel: SECRET\n");
+		w(path.join(root, "secret", "SKILL.md"), "---\ndescription: TOP SECRET skill leak\n---\nbody\n");
+		const dir = path.join(root, "pack");
+		// Manifest declares traversal names for all three kinds. These bypass
+		// validateManifest (which only basename-guards entrypoints), so the helper
+		// itself must reject them. The `.yaml`/SKILL.md targets are crafted so a
+		// naive path.join would resolve onto the external secret files above.
+		w(path.join(dir, "pack.yaml"),
+			"name: evilpack\ndescription: evil\nversion: 1.0.0\ncontents:\n" +
+			"  roles: ['../secret']\n" +
+			"  tools: ['../../x', '..']\n" +
+			"  skills: ['../secret']\n");
+		const manifest = readManifest(dir)!;
+		// Sanity: the manifest parsed and kept the traversal names verbatim.
+		assert.deepEqual(manifest.contents.roles, ["../secret"]);
+
+		let d: any;
+		assert.doesNotThrow(() => { d = readPackEntityDescriptions(dir, manifest); });
+		// No description rows for any traversal name; nothing leaked from outside.
+		assert.equal(d.roles, undefined);
+		assert.equal(d.tools, undefined);
+		assert.equal(d.skills, undefined);
+		const serialized = JSON.stringify(d);
+		assert.ok(!serialized.includes("TOP SECRET"), `must not leak external file contents; got ${serialized}`);
+	});
+
+	it("collapses whitespace and omits kinds with no usable descriptions", () => {
+		const root = fs.mkdtempSync(path.join(TMP, "descr2-"));
+		const dir = path.join(root, "kit2");
+		w(path.join(dir, "pack.yaml"),
+			"name: kit2\ndescription: kit2\nversion: 1.0.0\ncontents:\n  roles: [r]\n  tools: []\n  skills: []\n");
+		w(path.join(dir, "roles", "r.yaml"), "name: r\nlabel: r\ndescription: \"line one\\n  line two\"\n");
+		const manifest = readManifest(dir)!;
+		const d = readPackEntityDescriptions(dir, manifest);
+		assert.equal(d.roles!["r"], "line one line two");
+		assert.equal(d.tools, undefined);
+		assert.equal(d.skills, undefined);
+		assert.equal(d.entrypoints, undefined);
 	});
 });
 

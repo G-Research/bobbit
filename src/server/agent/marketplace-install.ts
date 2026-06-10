@@ -16,9 +16,13 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 import type { PackManifest, PackMeta, PackScope } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
-import { isValidPackName, readManifest, readMeta, writeMeta } from "./pack-manifest.js";
+import { isValidPackName, isSafeBasename, readManifest, readMeta, writeMeta } from "./pack-manifest.js";
+import { loadPackContributions } from "./pack-contributions.js";
+import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { parseFrontmatter } from "../skills/slash-skills.js";
 import type { MarketplaceSource, MarketplaceSourceStore } from "./marketplace-source-store.js";
 
 /** Install scopes — builtin is never an install target. */
@@ -33,10 +37,28 @@ export interface PackOrderStore {
 	setPackOrder(scope: PackOrderScope, order: string[]): void;
 }
 
+/**
+ * One-line, per-entity descriptions sourced from a pack dir, keyed by the same
+ * identity the activation catalogue / entity chips use (roles/skills by name,
+ * tools by GROUP name, entrypoints by `listName`). Best-effort: a kind is
+ * omitted entirely when no entity in it has a usable description, and an
+ * individual entity is omitted when its description is missing/empty. This is
+ * the SAME authoritative pack-dir source the activation catalogue reads from —
+ * never `/api/tools` or `/api/ext/contributions`.
+ */
+export interface PackEntityDescriptions {
+	roles?: Record<string, string>;
+	tools?: Record<string, string>;
+	skills?: Record<string, string>;
+	entrypoints?: Record<string, string>;
+}
+
 /** Browse-payload pack shape (manifest + dirName + executable-code flag). */
 export interface BrowsePack extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
+	/** One-line per-entity descriptions for the Browse disclosure (R3). */
+	descriptions?: PackEntityDescriptions;
 }
 
 /** Installed-pack listing row for the REST layer. */
@@ -46,6 +68,12 @@ export interface InstalledPackWire {
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";
+	/** True iff the source's latest manifest version differs from the installed
+	 *  `meta.version` AND the source could be checked from the local cache. */
+	updateAvailable: boolean;
+	/** `"unknown"` when the source can't be checked (removed / never-synced / no
+	 *  version data) — disambiguates "up to date" from "source unknown". */
+	sourceStatus: "ok" | "unknown";
 }
 
 /** Coded error so the REST layer can map to HTTP statuses. */
@@ -133,6 +161,135 @@ export function findSourcePackByName(root: string, packName: string): { dir: str
 		if (manifest && manifest.name === packName) return { dir, manifest };
 	}
 	return null;
+}
+
+/**
+ * Pure version-based change detection (exported for unit tests). A pack is
+ * considered to have an update available iff the source's latest manifest
+ * version differs from the installed version (string inequality — the confirmed
+ * change-detection rule). Empty/absent source version ⇒ no update.
+ */
+export function packUpdateAvailable(installedVersion: string, sourceVersion: string): boolean {
+	if (!sourceVersion) return false;
+	return sourceVersion !== installedVersion;
+}
+
+/** Collapse whitespace + trim to a single line; `undefined` when empty/non-string. */
+function oneLineDescription(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const t = value.replace(/\s+/g, " ").trim();
+	return t.length > 0 ? t : undefined;
+}
+
+/** Read a YAML mapping file best-effort; `null` on any error / non-mapping. */
+function readYamlMapping(file: string): Record<string, unknown> | null {
+	try {
+		const data = parseYaml(fs.readFileSync(file, "utf-8"));
+		return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Best-effort one-line descriptions per declared entity, sourced from the pack
+ * dir (the manifest stays the authoritative list of WHICH entities exist). Used
+ * by BOTH the Installed activation catalogue and the Browse payload (R3) so the
+ * disclosure can show descriptions for installed AND uninstalled packs.
+ *
+ *   - Roles: `roles/<name>.yaml|.yml` `description`, else `label` when it differs
+ *     from the name, else omitted.
+ *   - Tools: representative `tools/<group>/*.yaml|.yml` `description` (keyed by
+ *     GROUP name — the manifest declares tools at group granularity).
+ *   - Skills: `skills/<name>/SKILL.md` frontmatter `description`.
+ *   - Entry points: entrypoint YAML `description`, else its `label`, keyed by
+ *     `listName` (via {@link loadPackContributions}).
+ *
+ * Reads ONLY the pack dir — never the runtime-filtered tool/contribution APIs.
+ *
+ * SECURITY: `validateManifest` does NOT guard `contents.roles/tools/skills`
+ * against `..` or path separators (only `contents.entrypoints` is basename-
+ * checked), so a malicious source could declare `roles: ["../../etc/passwd"]`.
+ * Since this helper runs on Browse (no install required) AND on the installed
+ * catalogue, EVERY manifest-declared name turned into a path is guarded with
+ * {@link isSafeBasename} AND a realpath-aware {@link isPackPathWithinRoot}
+ * containment check before any read/readdir. A rejected name simply yields no
+ * description row (best-effort contract preserved).
+ */
+export function readPackEntityDescriptions(packDir: string, manifest: PackManifest): PackEntityDescriptions {
+	const out: PackEntityDescriptions = {};
+	const c = manifest.contents;
+
+	// Read a path ONLY if `name` is a safe basename AND the resolved path stays
+	// within `baseDir` (which itself must stay within the pack dir). Returns null
+	// for any unsafe/out-of-bounds name so the caller skips that entity.
+	const safeJoin = (baseDir: string, name: string, ...rest: string[]): string | null => {
+		if (!isSafeBasename(name)) return null;
+		if (!isPackPathWithinRoot(packDir, baseDir)) return null;
+		const resolved = path.join(baseDir, name, ...rest);
+		return isPackPathWithinRoot(baseDir, resolved) ? resolved : null;
+	};
+
+	const roles: Record<string, string> = {};
+	const rolesDir = path.join(packDir, "roles");
+	for (const name of c.roles ?? []) {
+		const yamlPath = safeJoin(rolesDir, `${name}.yaml`);
+		const ymlPath = safeJoin(rolesDir, `${name}.yml`);
+		if (!yamlPath && !ymlPath) continue; // unsafe name — skip entirely
+		const data = (yamlPath ? readYamlMapping(yamlPath) : null) ?? (ymlPath ? readYamlMapping(ymlPath) : null);
+		if (!data) continue;
+		let desc = oneLineDescription(data.description);
+		if (!desc) {
+			const label = oneLineDescription(data.label);
+			if (label && label !== name) desc = label;
+		}
+		if (desc) roles[name] = desc;
+	}
+	if (Object.keys(roles).length) out.roles = roles;
+
+	const tools: Record<string, string> = {};
+	const toolsDir = path.join(packDir, "tools");
+	for (const group of c.tools ?? []) {
+		const dir = safeJoin(toolsDir, group);
+		if (!dir) continue; // unsafe group name — skip
+		let files: string[];
+		try {
+			files = fs.readdirSync(dir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort();
+		} catch {
+			continue;
+		}
+		for (const f of files) {
+			// `f` comes from readdir of the (contained) group dir, so it is a real
+			// basename; still join + read defensively.
+			const desc = oneLineDescription(readYamlMapping(path.join(dir, f))?.description);
+			if (desc) { tools[group] = desc; break; }
+		}
+	}
+	if (Object.keys(tools).length) out.tools = tools;
+
+	const skills: Record<string, string> = {};
+	const skillsDir = path.join(packDir, "skills");
+	for (const name of c.skills ?? []) {
+		const skillFile = safeJoin(skillsDir, name, "SKILL.md");
+		if (!skillFile) continue; // unsafe name — skip
+		try {
+			const { frontmatter } = parseFrontmatter(fs.readFileSync(skillFile, "utf-8"));
+			const desc = oneLineDescription((frontmatter as Record<string, unknown>)?.description);
+			if (desc) skills[name] = desc;
+		} catch { /* best-effort */ }
+	}
+	if (Object.keys(skills).length) out.skills = skills;
+
+	const entrypoints: Record<string, string> = {};
+	try {
+		for (const ep of loadPackContributions(packDir, manifest).entrypoints) {
+			const desc = oneLineDescription(readYamlMapping(ep.sourceFile)?.description) ?? oneLineDescription(ep.label);
+			if (desc) entrypoints[ep.listName] = desc;
+		}
+	} catch { /* best-effort — labels/descriptions are optional */ }
+	if (Object.keys(entrypoints).length) out.entrypoints = entrypoints;
+
+	return out;
 }
 
 /** Copy a directory subtree verbatim, skipping any `.git` directory. */
@@ -273,9 +430,38 @@ export class MarketplaceInstaller {
 			const dir = path.join(root, d.name);
 			const manifest = readManifest(dir);
 			if (!manifest) continue; // dir without a valid pack.yaml ⇒ not a pack
-			packs.push({ ...manifest, dirName: d.name, hasTools: manifest.contents.tools.length > 0 });
+			packs.push({
+				...manifest,
+				dirName: d.name,
+				hasTools: manifest.contents.tools.length > 0,
+				descriptions: readPackEntityDescriptions(dir, manifest),
+			});
 		}
 		return packs;
+	}
+
+	/**
+	 * Compute the source-update state for an installed pack WITHOUT any network
+	 * sync (R2). Resolves the source's readable root from the EXISTING local
+	 * cache only: a local-dir source is read at `localSourcePath(url)` if it
+	 * exists; a git source is read at `cacheDirFor(source.id)` if already cloned.
+	 * `syncSource()` is NEVER called here. Any miss (source removed, never
+	 * synced, root absent, pack not found, no version) ⇒ `sourceStatus:"unknown"`.
+	 */
+	private computeSourceState(meta: PackMeta): { updateAvailable: boolean; sourceStatus: "ok" | "unknown" } {
+		const unknown = { updateAvailable: false, sourceStatus: "unknown" as const };
+		if (!meta.sourceUrl || !meta.packName) return unknown;
+		const source = this.opts.sourceStore.getByUrl(meta.sourceUrl);
+		if (!source) return unknown;
+		const root = isLocalDirSource(source.url) ? localSourcePath(source.url) : this.cacheDirFor(source.id);
+		try {
+			if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return unknown;
+		} catch {
+			return unknown;
+		}
+		const found = findSourcePackByName(root, meta.packName);
+		if (!found || !found.manifest.version) return unknown;
+		return { updateAvailable: packUpdateAvailable(meta.version, found.manifest.version), sourceStatus: "ok" };
 	}
 
 	// ── install / uninstall / update ─────────────────────────────
@@ -347,7 +533,7 @@ export class MarketplaceInstaller {
 		}
 
 		this.appendOrder(ctx, packName);
-		return { scope, packName, manifest, meta, status: "ok" };
+		return { scope, packName, manifest, meta, status: "ok", ...this.computeSourceState(meta) };
 	}
 
 	/** Uninstall: delete the dir, drop from pack_order. */
@@ -417,7 +603,7 @@ export class MarketplaceInstaller {
 			fs.rmSync(backup, { recursive: true, force: true });
 			throw err;
 		}
-		return { scope, packName, manifest, meta, status: "ok" };
+		return { scope, packName, manifest, meta, status: "ok", ...this.computeSourceState(meta) };
 	}
 
 	// ── listing ──────────────────────────────────────────────────
@@ -458,15 +644,18 @@ export class MarketplaceInstaller {
 				const manifest = readManifest(dir);
 				const meta = readMeta(dir);
 				if (manifest && meta) {
-					rows.set(d.name, { scope: c.scope, packName: d.name, manifest, meta, status: "ok" });
+					rows.set(d.name, { scope: c.scope, packName: d.name, manifest, meta, status: "ok", ...this.computeSourceState(meta) });
 				} else if (manifest || meta) {
 					// Partial / corrupt install — surface so the UI can offer cleanup.
+					// Corrupt rows never offer an update and report an unknown source.
 					rows.set(d.name, {
 						scope: c.scope,
 						packName: d.name,
 						manifest: manifest ?? synthManifest(d.name, meta),
 						meta: meta ?? synthMeta(d.name, c.scope, manifest),
 						status: "corrupt",
+						updateAvailable: false,
+						sourceStatus: "unknown",
 					});
 				}
 			}

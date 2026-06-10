@@ -613,11 +613,11 @@ New endpoints (added in `server.ts::handleApiRoute`). Responses reuse existing c
 | `POST /api/marketplace/sources` | Add a source `{ url, ref? }` → syncs + returns the created source. |
 | `DELETE /api/marketplace/sources/:id` | Remove a source (and its cache dir). |
 | `POST /api/marketplace/sources/:id/sync` | Re-sync (re-clone/fetch); returns updated `lastCommit`. |
-| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: Array<PackManifest & { dirName, hasTools }> }`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. |
+| `GET /api/marketplace/sources/:id/packs` | Browse: `{ packs: Array<PackManifest & { dirName, hasTools, descriptions? }> }`. `hasTools` is informational (declared-entity rendering); it no longer drives a per-pack install gate. `descriptions?` carries optional one-line per-entity copy (§9.1/§10.4 R3). |
 | `POST /api/marketplace/install` | Body `{ sourceId, packName, scope, projectId? }` → installs; returns `.pack-meta.yaml`. |
 | `POST /api/marketplace/update` | Body `{ scope, packName, projectId? }` → updates; returns new meta. |
 | `DELETE /api/marketplace/installed` | Body `{ scope, packName, projectId? }` → uninstall. |
-| `GET /api/marketplace/installed?projectId=` | List installed packs across all scopes with provenance (`PackMeta[]` + manifest + scope). |
+| `GET /api/marketplace/installed?projectId=` | List installed packs across all scopes with provenance (`PackMeta` + manifest + scope), plus `updateAvailable` + `sourceStatus` (sync-free update gating) per row (§9.1/§10.4 R2). |
 | `GET /api/packs/conflicts?projectId=` | List `(type, name, winner, shadowed[])` conflicts for the resolved list. |
 
 - `scope` ∈ `"global-user" | "server" | "project"`; `projectId` required when `scope === "project"`.
@@ -635,13 +635,36 @@ All responses are JSON. `scope` values use the wire form `"global-user" | "serve
 // Shared wire types
 interface SourceWire { id: string; url: string; ref?: string; addedAt: string;
                        lastSyncedAt?: string; lastCommit?: string; }
-interface BrowsePackWire extends PackManifest { dirName: string; hasTools: boolean; }
+// One-line, per-entity descriptions sourced from the pack DIR (not the runtime
+// APIs), keyed by the same identity the toggles/chips use: roles/skills by name,
+// tools by GROUP name, entrypoints by `listName`. Best-effort — a kind is
+// omitted when no entity in it has a usable description, an entity is omitted
+// when its description is missing/empty. Carried on BOTH wire shapes so the
+// "Show details" disclosure works for installed AND not-yet-installed packs.
+interface PackEntityDescriptions {
+  roles?:       Record<string, string>;
+  tools?:       Record<string, string>;
+  skills?:      Record<string, string>;
+  entrypoints?: Record<string, string>;
+}
+interface BrowsePackWire extends PackManifest {
+  dirName: string;
+  hasTools: boolean;
+  descriptions?: PackEntityDescriptions;   // §10.4 R3
+}
 interface InstalledPackWire {
   scope: "global-user" | "server" | "project";
   packName: string;
   manifest: PackManifest;          // from pack.yaml
   meta: PackMeta;                  // from .pack-meta.yaml
   status: "ok" | "corrupt";        // corrupt = missing/invalid meta (§8.1 guard)
+  // §10.4 R2 — update gating, computed WITHOUT a network sync (reads the
+  // existing local cache only; see `MarketplaceInstaller.listInstalled`).
+  updateAvailable: boolean;        // true iff source's latest manifest version
+                                   //   differs from installed meta.version AND
+                                   //   the source could be checked.
+  sourceStatus: "ok" | "unknown";  // "unknown" = source removed / never-synced /
+                                   //   no version data ⇒ render "Source not found".
 }
 interface ConflictWire {
   type: "roles" | "tools" | "skills";
@@ -666,6 +689,8 @@ interface ConflictWire {
 
 - **No per-pack install gate.** Trust is handled once at the source-add boundary via a blanket warning + "Why?" disclosure (§10.2); the client POSTs `install` directly with no executable-code confirmation. The server never required a confirmation flag, and install of any pack is unrestricted. `hasTools` in the browse payload is now informational only.
 - **Reload/cache behavior:** install/update/uninstall invalidate the affected scope's resolver cache (and the `slash-skills.ts` TTL cache) synchronously before returning, so a subsequent `GET /api/roles|tools|skills` reflects the change immediately (no client reload required). `pack_order` mutations do the same.
+- **Update detection is sync-free (§10.4 R2).** `GET /api/marketplace/installed` enriches each row with `updateAvailable` + `sourceStatus`, but **never triggers a `git fetch`** — it reads only the *existing* local source cache (a git source's already-cloned cache dir, or a local-dir source read in place). The list endpoint is hit on every Market-page open, so a network sync per pack would be slow and could fail offline; the cheap local-cache read is good enough because explicit "Re-sync" / Update already refresh the cache when the user wants live data. A miss (source unregistered, never synced, cache absent, pack not found, or no source version) yields `sourceStatus: "unknown"` rather than a false "up to date", letting the UI disambiguate the two.
+- **Browse descriptions:** `GET /api/marketplace/sources/:id/packs` adds an optional `descriptions` map per pack (§10.4 R3), read from the synced source's pack dir.
 - **Idempotency / concurrency:** install is rejected (`409`) if `dest` exists; the atomic-rename (§8.1) makes concurrent installs of the same `(scope, packName)` safe — the loser sees `EEXIST`/`409`.
 
 ### 9.2 `pack-order` contract (the sole conflict-resolution wire path)
@@ -720,6 +745,39 @@ Reuse config-page conventions (`config-scope.ts`: `renderConfigScopeRow`, `rende
 ### 10.3 Config-page integration
 
 Roles (`#/roles`), Tools (`#/tools`), Skills (`#/skills`) pages need no structural change — they already render `origin`/`overrides` badges and scope rows. They will now show market-pack-originated entities with the pack as origin (badge value per §5.2). Optionally show the pack name in a tooltip on the badge.
+
+### 10.4 Marketplace UI polish
+
+A follow-up pass (`goal/marketplace-ui-b94dadf1`) tightened the Market surface for readability and to surface install/update state honestly. Theme tokens only — no hardcoded palette, no `:root` overrides (see the `marketplace.css` header). All affordances preserve the existing data-testids and add new ones for the new controls. The four requirement areas (R1–R4):
+
+**R1 — Standalone activation help removed.** The explanatory paragraph that used to render below the activation toggles (`.market-activation-help`) was deleted. *Why:* the toggles are self-explanatory once the per-entity descriptions (R3) are available; the paragraph was noise that competed with the pack provenance and action buttons for vertical space.
+
+**R2 — Update button gating + "Source not found" lozenge.** `renderInstalledPackCard()` previously always rendered an **Update** button. It is now gated on `updateAvailable`:
+- `updateAvailable: true` → render **Update** (`data-testid="market-update-pack"`).
+- else `sourceStatus: "unknown"` → render a muted/warning **"Source not found"** lozenge (`data-testid="market-source-unknown"`) in place of Update, with a tooltip explaining the source is unregistered or unsynced so updates can't be checked.
+- else (up to date, source ok) → render neither.
+- **Uninstall stays always available** regardless of source state — a user must always be able to remove an installed pack even if its source is gone.
+
+  *Why the `updateAvailable` / `sourceStatus` split:* a single boolean can't distinguish "confirmed up to date" from "we couldn't check". Showing nothing in the unknown case would imply the pack is current; showing a stale Update button would be misleading. The two-field contract (§9.1) lets the UI render the honest third state. **Change detection is version-based:** the source's latest **manifest version** is compared (string inequality) against the installed `meta.version` — not commit SHAs or file diffs — which is cheap, deterministic, and matches the semver the publisher advertises. Computed server-side in `MarketplaceInstaller.listInstalled()` via `computeSourceState()`, reading the local cache only (no `git fetch`; see §9.1).
+
+**R3 — Per-entity one-line descriptions in a collapsed disclosure.** Each declared role / tool / skill / entry point can now show a one-line description, sourced from the pack dir by `readPackEntityDescriptions()`:
+- Roles: `roles/<name>.yaml` `description` (falling back to `label` when it differs from the name).
+- Tools: a representative `tools/<group>/*.yaml` `description` (keyed by **group** name — the manifest declares tools at group granularity).
+- Skills: `skills/<name>/SKILL.md` frontmatter `description`.
+- Entry points: the entrypoint YAML `description` (falling back to its `label`), keyed by `listName`.
+
+Descriptions are carried on **both** `PackActivationCatalogue` (Installed list) and `BrowsePackWire` (Browse card) and rendered identically by a shared `renderEntityDetails()` helper inside a `<details>` disclosure labelled **"Show details"** (`data-testid="market-entity-details-<packName>"`), **collapsed by default**. *Why collapsed:* the entity-name chips and toggles stay the at-a-glance default; descriptions are progressive disclosure for users who want detail, so a pack with many entities doesn't produce a wall of text. Rows with no description are omitted; the disclosure is omitted entirely when no row would render (graceful degradation).
+
+This is read from the **same authoritative pack dir** the activation catalogue reads from — never `/api/tools` or `/api/ext/contributions` — preserving the invariant that the catalogue is the UNFILTERED source for toggles (§9, pack-schema-v1 §9). **Path-traversal safety:** `validateManifest` does not guard `contents.roles/tools/skills` names against `..` or path separators, and this helper runs on **Browse** (before any install), so every manifest-declared name is validated with `isSafeBasename` + a realpath-aware containment check (`isPackPathWithinRoot`) before any filesystem read. A rejected name simply yields no description row.
+
+**R4 — Browse install-state indicators.** `renderBrowsePackCard()` now cross-references the installed list to reflect what's already installed *at the currently-selected install scope* (including project identity — see finding #2):
+- not installed → **Install** button (`data-testid="market-install-pack"`, unchanged).
+- installed but behind the source's latest (same version comparison as R2) → **Update** button.
+- installed and current → an **"Installed"** lozenge (`data-testid="market-browse-installed"`).
+
+`installedMatchForBrowse()` resolves the match by pack name within the selected scope; for project scope it only matches when the Installed list was loaded for that same project, avoiding a wrong-project false positive. *Why:* without this, Browse always offered "Install" even for packs already present, leading to confusing `409 already installed` errors; surfacing state up front guides the user to the correct action.
+
+**Scope/project-focus discipline (finding #2, unchanged):** install/update/uninstall and the Installed-list query all address the **same project** the install targeted (`focusProjectId`), so the indicators and actions never drift to the active/first project.
 
 ---
 

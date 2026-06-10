@@ -191,6 +191,8 @@ export class TeamManager {
 	private static readonly IDLE_NUDGE_DELAY_MS = 600_000;
 	private static readonly MAX_IDLE_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
 	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
+	/** Debounce before nudging the lead that a worker went idle; cancelled if the worker resumes. */
+	private static readonly WORKER_IDLE_NUDGE_DEBOUNCE_MS = 5_000;
 	/** Maximum delay between no-workers nudges (ms). Caps the exponential backoff. */
 	private static readonly MAX_NO_WORKERS_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
 	/**
@@ -208,6 +210,17 @@ export class TeamManager {
 
 	/** Track last notification time per worker session to debounce rapid agent_end events. */
 	private lastNotifyTime = new Map<string, number>();
+
+	/** Per-worker-session pending idle-notify timer (5s debounce); cancelled if the worker resumes. */
+	private pendingIdleNotify = new Map<string, ReturnType<typeof setTimeout>>();
+
+	/**
+	 * Effective worker-idle nudge debounce (ms). Defaults to the static
+	 * constant; exposed as an instance field so in-process tests can shrink it
+	 * to a negligible value and assert via fast polling instead of waiting out
+	 * the real 5s window. Production never reassigns this.
+	 */
+	private workerIdleNudgeDebounceMs = TeamManager.WORKER_IDLE_NUDGE_DEBOUNCE_MS;
 
 	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
 	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
@@ -889,13 +902,9 @@ export class TeamManager {
 				if (!workerSession || workerSession.status === "terminated") continue;
 				const { role, sessionId } = agent;
 				const agentId = `${role}-${sessionId.slice(0, 8)}`;
-				const unsubscribe = workerSession.rpcClient.onEvent((event: any) => {
-					if (event.type !== "agent_end") return;
-					this.notifyTeamLead(goalId, sessionId, role, agentId).catch((err) => {
-						console.error("[team-manager] Failed to notify team lead:", err);
-					});
-				});
-				agent.unsubscribeEvent = unsubscribe;
+				agent.unsubscribeEvent = this.subscribeWorkerEvents(
+					goalId, sessionId, role, agentId, workerSession.rpcClient,
+				);
 			}
 		}
 		// boot-respawn for sessionless in-progress goals — Boot-respawn for sessionless in-progress goals.
@@ -1261,6 +1270,52 @@ export class TeamManager {
 		}, delay);
 
 		this.idleNudgeTimers.set(goalId, timer);
+	}
+
+	/**
+	 * Subscribe to a worker session's RPC events to nudge the team lead when the
+	 * worker goes idle. Mirrors the team-lead idle-nudge pattern: `agent_end`
+	 * starts a one-shot 5s timer that fires `notifyTeamLead`; an `agent_start`
+	 * within that window cancels it (the worker only blipped — e.g. a flaky tool
+	 * call — and is not actually done). A single shared `pendingIdleNotify` map
+	 * (keyed by worker sessionId) guarantees a worker never has two pending
+	 * timers: we always clear-before-set.
+	 */
+	private subscribeWorkerEvents(
+		goalId: string,
+		sessionId: string,
+		role: string,
+		agentId: string,
+		rpcClient: { onEvent: (cb: (event: any) => void) => () => void },
+		opts?: { broadcastFinished?: boolean; roleName?: string },
+	): () => void {
+		return rpcClient.onEvent((event: any) => {
+			if (event.type === "agent_end") {
+				if (opts?.broadcastFinished) {
+					// Broadcast team agent finished event
+					this.config.broadcastToGoal?.(goalId, {
+						type: "team_agent_finished", goalId, sessionId, role, name: opts.roleName,
+					});
+				}
+				// Clear-before-set so a worker never has two pending timers.
+				const existing = this.pendingIdleNotify.get(sessionId);
+				if (existing) clearTimeout(existing);
+				const timer = setTimeout(() => {
+					this.pendingIdleNotify.delete(sessionId);
+					this.notifyTeamLead(goalId, sessionId, role, agentId).catch((err) => {
+						console.error("[team-manager] Failed to notify team lead:", err);
+					});
+				}, this.workerIdleNudgeDebounceMs);
+				this.pendingIdleNotify.set(sessionId, timer);
+			} else if (event.type === "agent_start") {
+				// Worker resumed — cancel any pending idle nudge.
+				const existing = this.pendingIdleNotify.get(sessionId);
+				if (existing) {
+					clearTimeout(existing);
+					this.pendingIdleNotify.delete(sessionId);
+				}
+			}
+		});
 	}
 
 	/**
@@ -1768,17 +1823,10 @@ export class TeamManager {
 			});
 
 			// Subscribe to worker events to steer the team lead when the worker goes idle
-			const unsubscribe = session.rpcClient.onEvent((event: any) => {
-				if (event.type !== "agent_end") return;
-				// Broadcast team agent finished event
-				this.config.broadcastToGoal?.(goalId, {
-					type: "team_agent_finished", goalId, sessionId: session.id, role, name: roleName,
-				});
-				this.notifyTeamLead(goalId, session.id, role, agentId).catch((err) => {
-					console.error("[team-manager] Failed to notify team lead:", err);
-				});
-			});
-			agent.unsubscribeEvent = unsubscribe;
+			agent.unsubscribeEvent = this.subscribeWorkerEvents(
+				goalId, session.id, role, agentId, session.rpcClient,
+				{ broadcastFinished: true, roleName },
+			);
 
 			console.log(
 				`[team-manager] Spawned ${role} agent (${session.id}) for goal "${goal.title}" — cwd: ${agentCwd}`,
@@ -1984,6 +2032,13 @@ export class TeamManager {
 		entry.agents.splice(agentIndex, 1);
 		this.sessionToGoal.delete(sessionId);
 		this.lastNotifyTime.delete(sessionId);
+		// Cancel any pending idle-notify timer so no nudge fires against the
+		// torn-down session.
+		const pending = this.pendingIdleNotify.get(sessionId);
+		if (pending) {
+			clearTimeout(pending);
+			this.pendingIdleNotify.delete(sessionId);
+		}
 		this.persistEntry(goalId);
 
 		// If no workers remain and team lead is idle, restart timers so the
@@ -2092,7 +2147,7 @@ export class TeamManager {
 	 * Complete a team: dismiss all role agents but keep the team lead alive.
 	 * The team lead remains active to await further instructions.
 	 */
-	async completeTeam(goalId: string): Promise<void> {
+	async completeTeam(goalId: string, opts?: { allowBypassedGates?: boolean }): Promise<void> {
 		const entry = this.teams.get(goalId);
 		if (!entry) {
 			throw new Error(`No active team for goal: ${goalId}`);
@@ -2110,10 +2165,18 @@ export class TeamManager {
 
 		if (goal?.workflow && completeGateStore && (!skipReqs || !skipReqs.includes("workflow"))) {
 			const gateStates = completeGateStore.getGatesForGoal(goalId);
-			const passedIds = new Set(gateStates.filter(g => g.status === "passed").map(g => g.gateId));
-			const failedGates = goal.workflow.gates.filter(g => !passedIds.has(g.id));
+			const statusById = new Map(gateStates.map(g => [g.gateId, g.status]));
+			const isResolved = (id: string) => statusById.get(id) === "passed" || statusById.get(id) === "bypassed";
+			const failedGates = goal.workflow.gates.filter(g => !isResolved(g.id));
 			if (failedGates.length > 0) {
 				throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
+			}
+			// Bypassed gates satisfy dependency ordering but still require explicit
+			// human confirmation before the goal can be completed. An agent calling
+			// team_complete (no opts) hits this distinct error and cannot auto-finish.
+			const bypassedGates = goal.workflow.gates.filter(g => statusById.get(g.id) === "bypassed");
+			if (bypassedGates.length > 0 && !opts?.allowBypassedGates) {
+				throw new Error(`Cannot complete: ${bypassedGates.length} gate(s) were bypassed and require human confirmation`);
 			}
 		}
 

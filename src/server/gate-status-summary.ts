@@ -19,6 +19,10 @@ export interface GateStatusSummaryGate {
 
 export interface GateStatusSummary {
 	passed: number;
+	/** Count of gates forced past verification via human bypass. */
+	bypassed: number;
+	/** Alias of `bypassed` (spec references both names). */
+	bypassedCount: number;
 	total: number;
 	verifying: boolean;
 	verifyingCount: number;
@@ -89,8 +93,11 @@ export function buildGateStatusSummary(input: GateStatusSummaryInput): GateStatu
 	const runningGateIds = summaryGates.filter(gate => gate.running).map(gate => gate.gateId);
 	const awaitingSignoffCount = summaryGates.reduce((sum, gate) => sum + gate.awaitingSignoffCount, 0);
 
+	const bypassed = summaryGates.filter(gate => gate.status === "bypassed").length;
 	return {
 		passed: summaryGates.filter(gate => gate.status === "passed").length,
+		bypassed,
+		bypassedCount: bypassed,
 		total: summaryGates.length,
 		verifying: runningGateIds.length > 0,
 		verifyingCount: runningGateIds.length,

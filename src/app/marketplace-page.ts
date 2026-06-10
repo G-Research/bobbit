@@ -46,6 +46,7 @@ import {
 	type MarketplaceSource,
 	type MarketScope,
 	type PackActivationResponse,
+	type PackEntityDescriptions,
 } from "./api.js";
 
 // ============================================================================
@@ -597,6 +598,56 @@ function entityChips(pack: BrowsePackWire | InstalledPackWire): TemplateResult {
 	return html`<div class="flex flex-wrap gap-1">${chips}</div>`;
 }
 
+/** Declared-entity name lists for the description disclosure, across all four
+ *  kinds. Entry points carry an optional display `label`. */
+interface EntityNameLists {
+	roles: string[];
+	tools: string[];
+	skills: string[];
+	entrypoints: Array<{ listName: string; label?: string }>;
+}
+
+/** Shared collapsed "Show details" disclosure (R3) — one row per declared
+ *  entity that HAS a one-line description, across roles/tools/skills/entry
+ *  points. Used by BOTH the Installed activation list and the Browse pack card.
+ *  Rows with no description are omitted; the disclosure is omitted entirely when
+ *  no row would render. Tools are keyed by GROUP name; entrypoints by `listName`
+ *  (kind `entrypoint`). */
+function renderEntityDetails(packName: string, descriptions: PackEntityDescriptions | undefined, entities: EntityNameLists): TemplateResult {
+	if (!descriptions) return html``;
+	const rows: TemplateResult[] = [];
+	const pushRows = (
+		kind: "role" | "tool" | "skill" | "entrypoint",
+		map: Record<string, string> | undefined,
+		names: string[],
+		labelFor?: (n: string) => string,
+	): void => {
+		if (!map) return;
+		for (const name of names) {
+			const desc = map[name];
+			if (!desc) continue;
+			rows.push(html`
+				<div class="market-entity-desc" data-testid="market-entity-desc-${kind}-${name}">
+					<span class="market-entity-desc-name">${labelFor ? labelFor(name) : name}</span>
+					<span class="market-entity-desc-text">${desc}</span>
+				</div>
+			`);
+		}
+	};
+	pushRows("role", descriptions.roles, entities.roles);
+	pushRows("tool", descriptions.tools, entities.tools);
+	pushRows("skill", descriptions.skills, entities.skills);
+	const epLabel = new Map(entities.entrypoints.map((e) => [e.listName, e.label || e.listName]));
+	pushRows("entrypoint", descriptions.entrypoints, entities.entrypoints.map((e) => e.listName), (n) => epLabel.get(n) || n);
+	if (rows.length === 0) return html``;
+	return html`
+		<details class="market-entity-details" data-testid="market-entity-details-${packName}">
+			<summary>Show details</summary>
+			<div class="market-entity-desc-list">${rows}</div>
+		</details>
+	`;
+}
+
 function renderSourcesPanel(): TemplateResult {
 	return html`
 		<section class="market-panel" data-testid="market-sources-panel">
@@ -747,8 +798,49 @@ function renderBrowsePanel(): TemplateResult {
 	`;
 }
 
+/** Find the installed copy of a browse pack AT THE CURRENTLY-SELECTED install
+ *  scope (R4). For project scope the Installed list must be loaded for the
+ *  picked project — if `installProjectId` and `currentProjectId()` diverge we
+ *  treat the pack as not-installed for that project (avoids a wrong-project
+ *  false positive; preserves finding #2). */
+function installedMatchForBrowse(pack: BrowsePackWire): InstalledPackWire | undefined {
+	if (installScope === "project") {
+		if (!installProjectId || installProjectId !== currentProjectId()) return undefined;
+		return installed.find((p) => p.scope === "project" && p.packName === pack.name);
+	}
+	return installed.find((p) => p.scope === installScope && p.packName === pack.name);
+}
+
 function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 	const installing = busy.has(`install:${pack.dirName}`);
+	const match = installedMatchForBrowse(pack);
+	let action: TemplateResult;
+	if (pack.builtin) {
+		// Built-in (first-party) packs are resolved in place — provided, not
+		// installable; manage them from the Installed tab's toggles (§4.4/§7.4).
+		action = html`<span class="market-builtin-badge shrink-0" data-testid="market-browse-provided" title="Shipped with Bobbit — manage it from the Installed tab's toggles">Provided (built-in)</span>`;
+	} else if (!match) {
+		action = html`
+			<button
+				class="market-btn market-btn--primary shrink-0"
+				data-testid="market-install-pack"
+				?disabled=${installing}
+				@click=${() => handleInstall(pack)}
+			>${icon(Download, "xs")} ${installing ? "Installing…" : "Install"}</button>`;
+	} else if (pack.version !== match.meta.version) {
+		// Installed but behind the source's latest version → offer an update.
+		const isBusy = busy.has(`${match.scope}:${match.packName}`);
+		action = html`
+			<button
+				class="market-btn shrink-0"
+				data-testid="market-browse-update-pack"
+				?disabled=${isBusy}
+				@click=${() => handleUpdate(match)}
+			>${icon(RotateCw, "xs", isBusy ? "animate-spin" : "")} Update</button>`;
+	} else {
+		action = html`<span class="market-lozenge shrink-0" data-testid="market-browse-installed">${icon(Package, "xs")} Installed</span>`;
+	}
+	const entrypointNames = (pack.contents?.entrypoints ?? []).map((listName) => ({ listName }));
 	return html`
 		<div class="market-pack-card" data-testid="market-browse-pack" data-pack-name=${pack.name}>
 			<div class="flex items-start justify-between gap-3">
@@ -759,15 +851,14 @@ function renderBrowsePackCard(pack: BrowsePackWire): TemplateResult {
 					</div>
 					<div class="text-xs text-muted-foreground mt-0.5">${pack.description}</div>
 					<div class="mt-1.5">${entityChips(pack)}</div>
+					${renderEntityDetails(pack.name, pack.descriptions, {
+						roles: pack.contents?.roles ?? [],
+						tools: pack.contents?.tools ?? [],
+						skills: pack.contents?.skills ?? [],
+						entrypoints: entrypointNames,
+					})}
 				</div>
-				${pack.builtin
-					? html`<span class="market-builtin-badge shrink-0" data-testid="market-browse-provided" title="Shipped with Bobbit — manage it from the Installed tab's toggles">Provided (built-in)</span>`
-					: html`<button
-							class="market-btn market-btn--primary shrink-0"
-							data-testid="market-install-pack"
-							?disabled=${installing}
-							@click=${() => handleInstall(pack)}
-						>${icon(Download, "xs")} ${installing ? "Installing…" : "Install"}</button>`}
+				${action}
 			</div>
 		</div>
 	`;
@@ -920,7 +1011,11 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 						<button class="market-icon-btn" data-testid="market-move-down" title="Move down (higher precedence)" ?disabled=${index === total - 1} @click=${() => movePack(scope, pack.packName, 1)}>${icon(ChevronDown, "xs")}</button>
 					</div>
 					<div class="flex items-center gap-1">
-						<button class="market-btn" data-testid="market-update-pack" ?disabled=${isBusy} @click=${() => handleUpdate(pack)}>${icon(RotateCw, "xs", isBusy ? "animate-spin" : "")} Update</button>
+						${pack.updateAvailable
+							? html`<button class="market-btn" data-testid="market-update-pack" ?disabled=${isBusy} @click=${() => handleUpdate(pack)}>${icon(RotateCw, "xs", isBusy ? "animate-spin" : "")} Update</button>`
+							: pack.sourceStatus === "unknown"
+								? html`<span class="market-lozenge market-lozenge--warning" data-testid="market-source-unknown" title="The originating source is not registered or has not been synced — can't check for updates">${icon(AlertTriangle, "xs")} Source not found</span>`
+								: ""}
 						<button class="market-btn market-btn--danger" data-testid="market-uninstall-pack" ?disabled=${isBusy} @click=${() => handleUninstall(pack)}>${icon(Trash2, "xs")} Uninstall</button>
 					</div>
 				</div>
@@ -996,9 +1091,12 @@ function renderActivationControls(pack: InstalledPackWire): TemplateResult {
 		<div class="market-activation" data-testid="market-activation-${pack.packName}">
 			<div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mt-2">Activation</div>
 			${groups}
-			<div class="market-activation-help text-[10px] text-muted-foreground/90" data-testid="market-activation-help">
-				Disable an entry point to hide its launcher and deep-link. A tool that opens the same panel is unaffected unless you disable the tool itself. Disabling a tool, role, or skill removes it from its resolved list (a shadowed lower-priority entity may reappear). Panels and routes are support surfaces and stay available while the pack is installed.
-			</div>
+			${renderEntityDetails(pack.packName, cat.descriptions, {
+				roles: cat.roles,
+				tools: cat.tools,
+				skills: cat.skills,
+				entrypoints: cat.entrypoints,
+			})}
 		</div>
 	`;
 }

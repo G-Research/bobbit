@@ -1204,6 +1204,17 @@ const teamLoading = new Set<string>();
 export function renderGateProgressBadge(goalId: string): TemplateResult | string {
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
+	const bypassed = gs.bypassed ?? 0;
+	if (bypassed > 0) {
+		// A human forced ≥1 gate past verification. The numerator counts the
+		// bypassed gate(s) so a fully-resolved goal reads (N/N), but the whole
+		// badge turns red with a trailing `!` to make clear this is NOT a clean
+		// pass. Static (no wave/verify animation) by design.
+		const numerator = gs.passed + bypassed;
+		const bypassStyle = `font-size:0.75em;color:#dc2626;font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
+		const title = `${numerator} of ${gs.total} gates resolved — ${bypassed} bypassed (NOT a clean pass)`;
+		return html`<span class="shrink-0" style="${bypassStyle}" title="${title}">(${numerator}/${gs.total})!</span>`;
+	}
 	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !isChildSession(s));
 	const hasTeam = goalAgents.some(s => s.role === "team-lead" && s.status !== "terminated");
 	const anyAgentWorking = goalAgents.some(s => s.status === "streaming" || s.status === "busy" || s.isCompacting);
@@ -1241,10 +1252,14 @@ export function renderGateProgressBadge(goalId: string): TemplateResult | string
  * palette used by `renderGateProgressBadge` — green for passed, red for
  * failed, blue for running, muted-foreground for pending.
  */
-export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "running"): TemplateResult {
+export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "running" | "bypassed"): TemplateResult {
 	switch (status) {
 		case "passed":
 			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-label="passed"><polyline points="20 6 9 17 4 12"/></svg>`;
+		case "bypassed":
+			// Warning/exclamation triangle in red — a human forced this gate past
+			// verification; it is NOT a clean pass.
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-label="bypassed"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
 		case "failed":
 			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#c47070" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-label="failed"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
 		case "running":

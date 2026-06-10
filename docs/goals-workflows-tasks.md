@@ -199,22 +199,24 @@ This serves two purposes:
 
 ### Gate states
 
-Each gate has a status: `pending`, `passed`, or `failed`.
+Each gate has a status: `pending`, `passed`, `failed`, or `bypassed`.
 
 - **`pending`** — initial state; the gate has not been signaled, or was reset after an upstream re-signal or explicit reset.
 - **`passed`** — the gate was signaled and all verification steps succeeded (or no verification was defined).
 - **`failed`** — the gate was signaled but verification failed.
+- **`bypassed`** — a human overseer forced the gate past verification without the work passing. It is deliberately a distinct state from `passed` so the override is auditable and visually obvious. See [Human gate bypass](#human-gate-bypass).
 
 When a previously-passed gate is re-signaled, all transitive downstream gates are cascade-reset to `pending`.
 
-### Viewing and resetting passed gates
+### Per-gate actions in the goal status widget
 
-The chat-header `<goal-status-widget>` is the compact workflow surface for the current goal. Its popover lists every gate, but only `passed` rows show gate actions:
+The chat-header `<goal-status-widget>` is the compact workflow surface for the current goal. Its popover lists every gate. The actions shown on a row depend on its status:
 
-- **View** — opens the goal dashboard Gates tab for that gate and expands the gate detail section.
-- **Reset** — asks for confirmation, then clears the selected gate and downstream dependent gates back to `pending`.
+- **View** (`passed` rows only) — opens the goal dashboard Gates tab for that gate and expands the gate detail section.
+- **Reset** (`passed` rows only) — asks for confirmation, then clears the selected gate and downstream dependent gates back to `pending`.
+- **Bypass** (`pending` and `failed` rows only) — the human-only override that forces the gate to the `bypassed` state. It is never shown on `passed`, `running`, or already-`bypassed` rows. See [Human gate bypass](#human-gate-bypass).
 
-Pending, running, and failed rows do not show these actions. This keeps the popover focused on completed approvals that can be inspected or invalidated.
+So `passed` rows show View/Reset, `pending`/`failed` rows show Bypass, and `running` rows show no actions. This keeps View/Reset focused on completed approvals that can be inspected or invalidated, while exposing the bypass override only where it is meaningful.
 
 #### Dashboard focus route
 
@@ -273,6 +275,61 @@ Coverage lives in:
 - [`tests/gate-store-logic.test.ts`](../tests/gate-store-logic.test.ts) — gate-store reset and dependency behavior.
 - [`tests/e2e/gate-reset-api.spec.ts`](../tests/e2e/gate-reset-api.spec.ts) — DAG invalidation, idempotency, preserved history/content, active verification cancellation, sandbox denial, team lead notification.
 - [`tests/e2e/ui/goal-status-widget.spec.ts`](../tests/e2e/ui/goal-status-widget.spec.ts) — passed-gate View/Reset controls, dashboard focus route reload/back behavior, confirmation guard, widget/sidebar/dashboard refresh, and team lead message visibility.
+
+### Human gate bypass
+
+A gate can be **bypassed**: a human overseer forces it past verification when an agent reports that a verification step is genuinely impossible to satisfy (for example, a check that cannot pass in the current environment, or a requirement that has been overtaken by a deliberate scope decision). Bypass exists so a goal is not permanently stuck behind a gate that no amount of agent work can clear — while keeping the escape hatch firmly in human hands.
+
+#### Why this is human-only, and how that is enforced
+
+The whole point of a gate is to stop low-quality or unverified work from flowing downstream. If an agent could clear its own gate, the gate would be worthless. Bypass is therefore an **honesty-system override reserved for the human overseer** — consistent with the rest of the gate UI, which trusts the gateway token rather than modeling per-user identity.
+
+This is defended in two layers, in order of importance:
+
+1. **Non-advertisement (primary).** The bypass capability is *never* exposed to agents. There is no MCP/agent tool for it, and it is never mentioned in any agent-facing prompt, tool description, or injected context. An agent has no way to learn the capability exists from inside its own context.
+2. **Runtime guard (backstop).** The bypass endpoint requires `isInitiatedByHuman: true` in the request body and refuses anything else with a 400 explaining that bypass is for human use only. Sandbox-scoped agent tokens are rejected with 403 before the guard is even reached.
+
+Because there is no identity model yet, the endpoint does not (and cannot) cryptographically prove a human sent the request. The trust model is honesty plus non-discoverability, not authentication. This is intentional and matches the existing reset / sign-off endpoints.
+
+#### What a bypass records
+
+Bypass is auditable like any other gate event. `POST /api/goals/:id/gates/:gateId/bypass` appends a **synthetic audit signal** to the gate's signal history (`sessionId: "human-bypass"`, `metadata.bypass: "true"`) capturing:
+
+- **`whyBypassed`** — required free-text justification, persisted verbatim;
+- **`whoAmI`** — required free-text label naming who performed the bypass (not verified — honesty system);
+- **`bypassedAt`** — server timestamp.
+
+The gate status is then set to `bypassed`, persisted, and a `gate_status_changed` event is broadcast on the goal WebSocket. The team lead session, if live, is notified with a system-origin message naming the gate, the `whoAmI` label, the reason, and a reminder that the goal still needs explicit human confirmation before it can complete. See [rest-api.md — Gate bypass endpoint](rest-api.md#gate-bypass-endpoint) for the full request/response contract and error matrix.
+
+#### Dependency vs. completion semantics
+
+A bypassed gate is treated differently depending on what is being decided:
+
+- **Downstream dependency ordering — satisfied.** A bypassed upstream gate unblocks its dependents exactly as a passed gate would, so the rest of the workflow can proceed. Without this, bypassing one stuck gate would still leave everything behind it blocked, defeating the purpose.
+- **Downstream context injection — NOT injected.** Only `passed` gates with `injectDownstream` inject their content into downstream agents' prompts. A bypassed gate has no verified content to stand behind, so nothing is injected. Dependents proceed, but they do not receive bypassed-gate content as trusted upstream context.
+- **Goal completion — still blocked until a human confirms.** `team_complete` (the agent/MCP path) refuses to finish a goal that has any bypassed gate, with a distinct error (`Cannot complete: N gate(s) were bypassed and require human confirmation`). An agent therefore cannot auto-finish a goal that was only resolved via a human override.
+
+#### Confirming completion despite bypassed gates
+
+The explicit human path to finish such a goal is `POST /api/goals/:id/team/complete` with `{ confirmBypassedGates: true }`. This reuses the completion route's options (`completeTeam({ allowBypassedGates: true })`) rather than adding a separate endpoint. Like bypass itself, this confirmation is human-only: sandbox-scoped tokens are rejected with 403, so an agent cannot confirm its way past a bypass. In the UI a **Confirm completion** button appears only when bypassed gates exist.
+
+#### Resetting a bypassed gate
+
+Bypass is reversible. Resetting a bypassed gate (via the reset endpoint or the widget's Reset action) returns it to `pending` and clears it from the downstream/completion calculus, just like resetting a passed gate. The bypass audit signal remains in history for the record.
+
+#### UI differentiation
+
+The override is made visually unmistakable so a bypass is never mistaken for a clean pass:
+
+- **Bypass button** — the `<goal-status-widget>` popover shows a destructive-styled **Bypass** action only on gates that have *not* yet passed (pending/failed rows). It is never offered on a passed or already-bypassed gate. Clicking it opens an inline form collecting `whyBypassed` (multi-line) and `whoAmI` (text), then calls the endpoint with `isInitiatedByHuman: true`; endpoint errors surface inline like the reset error row.
+- **Per-gate icon** — a bypassed gate renders a red warning/exclamation triangle (distinct from the green check used for passed), with the `whoAmI` and `whyBypassed` available on the row.
+- **Differentiated progress badge** — `renderGateProgressBadge` (the chat-header pill and the sidebar goal badge both call it) counts bypassed gates *toward the numerator* so a fully-resolved-via-bypass goal still reads `(4/4)`, **but turns the whole badge red and appends a trailing `!`** (e.g. red `(4/4)!`) to signal this is not a clean pass. The dropdown's header badge inherits the same treatment. The badge reads `bypassed` / `bypassedCount` from the cached `GateStatusSummary`.
+
+#### Coverage
+
+- [`tests/gate-dependency-enforcement.test.ts`](../tests/gate-dependency-enforcement.test.ts) — a bypassed upstream gate unblocks dependents like a passed one.
+- [`tests/e2e/gate-bypass-api.spec.ts`](../tests/e2e/gate-bypass-api.spec.ts) — endpoint happy path, audit-signal persistence, broadcast, guard/validation errors, sandbox denial, reset-to-pending, and completion gating.
+- [`tests/e2e/ui/gate-bypass.spec.ts`](../tests/e2e/ui/gate-bypass.spec.ts) — Bypass button visibility, why/who form submission, bypassed row state, red `(N/N)!` badge, and persistence across reload.
 
 ### Signaling a gate
 
@@ -667,9 +724,14 @@ Here's the typical flow for a team goal with a workflow:
    gate_signal(gate_id="implementation")
    → Verification runs (npm run check + LLM review) → gate status: passed
 
-8. Process continues through the DAG until all gates pass
+8. Process continues through the DAG until every gate is passed (or human-bypassed —
+   a bypassed gate satisfies downstream dependency ordering like a passed one, but
+   completion still requires explicit human confirmation; see step 9)
 
-9. team_complete() — server verifies all workflow gates have passed
+9. team_complete() — server verifies all workflow gates have passed.
+   (If any gate was human-bypassed, team_complete is refused; a human must
+   confirm via POST /api/goals/:id/team/complete { confirmBypassedGates: true }.
+   See "Human gate bypass" above.)
 ```
 
 ## REST API reference

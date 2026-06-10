@@ -956,7 +956,7 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 export interface GateStatusSummaryGate {
 	gateId: string;
 	name?: string;
-	status: "pending" | "passed" | "failed";
+	status: "pending" | "passed" | "failed" | "bypassed";
 	effectiveStatus: "pending" | "passed" | "failed" | "running";
 	running: boolean;
 	awaitingSignoffCount: number;
@@ -968,6 +968,10 @@ export interface GateStatusSummaryGate {
 
 export interface GateStatusSummary {
 	passed: number;
+	/** Count of gates a human forced past verification. Distinct from passed. */
+	bypassed: number;
+	/** Alias for `bypassed` — server emits both names. */
+	bypassedCount: number;
 	total: number;
 	verifying: boolean;
 	verifyingCount: number;
@@ -980,6 +984,8 @@ export interface GateStatusSummary {
 function emptyGateStatusSummary(): GateStatusSummary {
 	return {
 		passed: 0,
+		bypassed: 0,
+		bypassedCount: 0,
 		total: 0,
 		verifying: false,
 		verifyingCount: 0,
@@ -994,8 +1000,13 @@ function normalizeGateStatusSummary(data: any): GateStatusSummary {
 	const raw = data?.summary && typeof data.summary === "object" ? data.summary : data;
 	const awaitingSignoffCount = typeof raw?.awaitingSignoffCount === "number" ? raw.awaitingSignoffCount : 0;
 	const runningGateIds = Array.isArray(raw?.runningGateIds) ? raw.runningGateIds.filter((id: unknown): id is string => typeof id === "string") : [];
+	const bypassed = typeof raw?.bypassed === "number"
+		? raw.bypassed
+		: (typeof raw?.bypassedCount === "number" ? raw.bypassedCount : 0);
 	return {
 		passed: typeof raw?.passed === "number" ? raw.passed : 0,
+		bypassed,
+		bypassedCount: bypassed,
 		total: typeof raw?.total === "number" ? raw.total : (Array.isArray(data?.gates) ? data.gates.length : 0),
 		verifying: typeof raw?.verifying === "boolean" ? raw.verifying : runningGateIds.length > 0,
 		verifyingCount: typeof raw?.verifyingCount === "number" ? raw.verifyingCount : runningGateIds.length,
@@ -1020,6 +1031,7 @@ function applyGateStatusSummary(goalId: string, summary: GateStatusSummary): boo
 	const prev = state.gateStatusCache.get(goalId);
 	const next = {
 		passed: summary.passed,
+		bypassed: summary.bypassed,
 		total: summary.total,
 		verifying: summary.verifying,
 		verifyingCount: summary.verifyingCount,
@@ -1030,6 +1042,7 @@ function applyGateStatusSummary(goalId: string, summary: GateStatusSummary): boo
 	};
 	if (!prev
 		|| prev.passed !== next.passed
+		|| prev.bypassed !== next.bypassed
 		|| prev.total !== next.total
 		|| prev.verifying !== next.verifying
 		|| prev.verifyingCount !== next.verifyingCount
@@ -1481,10 +1494,11 @@ export async function getTeamState(goalId: string): Promise<any | null> {
 	}
 }
 
-export async function completeTeam(goalId: string): Promise<boolean> {
+export async function completeTeam(goalId: string, opts?: { confirmBypassedGates?: boolean }): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/complete`, {
 			method: "POST",
+			body: JSON.stringify({ confirmBypassedGates: opts?.confirmBypassedGates === true }),
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		await refreshSessions();
@@ -2513,6 +2527,9 @@ export interface PackManifest {
 		roles: string[];
 		tools: string[];
 		skills: string[];
+		/** Entrypoint `listName` basenames (pack-schema-v1 §1.2). Optional on the
+		 *  client wire — present on browse/installed payloads that declare them. */
+		entrypoints?: string[];
 	};
 }
 
@@ -2538,6 +2555,17 @@ export interface MarketplaceSource {
 	builtin?: boolean;
 }
 
+/** One-line per-entity descriptions sourced from the pack dir (R3). Keyed by the
+ *  same identity the toggles/chips use: roles/skills by name, tools by GROUP
+ *  name, entrypoints by `listName`. MUST stay in sync with the server type of
+ *  the same name (`src/server/agent/marketplace-install.ts`). */
+export interface PackEntityDescriptions {
+	roles?: Record<string, string>;
+	tools?: Record<string, string>;
+	skills?: Record<string, string>;
+	entrypoints?: Record<string, string>;
+}
+
 export interface BrowsePackWire extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
@@ -2545,6 +2573,7 @@ export interface BrowsePackWire extends PackManifest {
 	builtin?: boolean;
 	/** Response-only: resolved in place (not copy-installed). */
 	provided?: boolean;
+	descriptions?: PackEntityDescriptions;
 }
 
 export interface InstalledPackWire {
@@ -2555,6 +2584,13 @@ export interface InstalledPackWire {
 	status: "ok" | "corrupt";
 	/** Response-only: a built-in first-party pack row (no install ledger entry). */
 	builtin?: boolean;
+	/** True iff the source's latest manifest version differs from the installed
+	 *  version AND the source could be checked. MUST stay in sync with the server
+	 *  `InstalledPackWire` (`src/server/agent/marketplace-install.ts`). */
+	updateAvailable: boolean;
+	/** `"unknown"` when the source can't be checked (removed / never-synced / no
+	 *  version data) — disambiguates "up to date" from "source unknown". */
+	sourceStatus: "ok" | "unknown";
 }
 
 export interface ConflictPackRef {
@@ -2686,6 +2722,8 @@ export interface PackActivationCatalogue {
 	tools: string[];
 	skills: string[];
 	entrypoints: Array<{ listName: string; label?: string }>;
+	/** One-line per-entity descriptions for the activation disclosure (R3). */
+	descriptions?: PackEntityDescriptions;
 }
 
 /** GET/PUT /api/marketplace/pack-activation response (§6.7). */

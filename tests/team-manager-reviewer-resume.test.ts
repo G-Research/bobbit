@@ -115,7 +115,11 @@ function makeFakeSession(id: string, status = "idle") {
 }
 
 describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
-	it("does NOT fire notifyTeamLead for a persisted reviewer agent on agent_end after restart", async () => {
+	it("does NOT fire notifyTeamLead for a persisted reviewer agent on agent_end after restart", async (t) => {
+		// The worker idle nudge is debounced 5s (agent_end schedules a one-shot
+		// timer cancelled by agent_start). Use fake timers to advance past that
+		// window deterministically instead of waiting in real time.
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
 		clearTeamStore();
 		const goals = new Map<string, any>();
 		goals.set("goal-1", createMockGoal());
@@ -165,9 +169,9 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 		// Fire agent_end on the reviewer first. With the fix, no listener is
 		// attached for reviewer agents → no enqueuePrompt / deliverLiveSteer call.
 		reviewer.fire({ type: "agent_end" });
-		// And no listener even fires notifyTeamLead — but defensive guard is
-		// also covered by the direct call below.
-		await new Promise((r) => setTimeout(r, 10));
+		// Advance past the 5s worker idle-nudge debounce window. Reviewers attach
+		// no listener, so nothing should fire for them.
+		t.mock.timers.tick(6_000);
 
 		assert.equal(
 			sm.enqueuePrompt.mock.callCount(), 0,
@@ -178,13 +182,16 @@ describe("TeamManager reviewer resume — Bug 1 (spurious nudges)", () => {
 			"reviewer agent_end after restart must NOT deliver a steer to the team lead",
 		);
 
-		// Now fire agent_end on the worker — this MUST trigger a nudge.
+		// Now fire agent_end on the worker — this MUST trigger a nudge once the
+		// 5s idle-nudge debounce window elapses.
 		worker.fire({ type: "agent_end" });
-		await new Promise((r) => setTimeout(r, 10));
+		t.mock.timers.tick(6_000);
 
 		const totalNudges =
 			sm.enqueuePrompt.mock.callCount() + sm.deliverLiveSteer.mock.callCount();
 		assert.equal(totalNudges, 1, "worker agent_end must trigger exactly one team-lead nudge");
+
+		t.mock.timers.reset();
 	});
 
 	it("notifyTeamLead defensive guard skips reviewer agents (back-compat for entries missing kind)", async () => {

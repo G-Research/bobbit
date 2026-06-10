@@ -234,7 +234,7 @@ import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId } from "./agent/marketplace-source-store.js";
 import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
-import { MarketplaceInstaller, MarketplaceError, type InstallScope, type PackOrderStore } from "./agent/marketplace-install.js";
+import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 
@@ -6390,6 +6390,10 @@ async function handleApiRoute(
 					meta: e.meta,
 					status: "ok" as const,
 					builtin: true,
+					// Built-in packs ship with the app: no upstream source to check, never
+					// "update available" (they update with the app upgrade, §4.2).
+					updateAvailable: false,
+					sourceStatus: "ok" as const,
 				}));
 				json({ installed: [...builtinRows, ...installer.listInstalled(allContexts(projectId))] });
 			} catch (err) { jsonError(500, err); }
@@ -6439,7 +6443,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string }> } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string }>; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6466,6 +6470,10 @@ async function handleApiRoute(
 					const label = labelByListName.get(listName);
 					return label !== undefined ? { listName, label } : { listName };
 				}),
+				// One-line per-entity descriptions for the activation disclosure (R3).
+				// Read from the SAME installed pack dir as the catalogue above — never
+				// from the runtime-filtered /api/tools or /api/ext/contributions.
+				descriptions: readPackEntityDescriptions(entry.path, entry.manifest),
 			};
 		};
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "GET") {
@@ -7320,7 +7328,21 @@ async function handleApiRoute(
 		// Enrich with workflow gate definitions
 		const enriched = gates.map(g => {
 			const def = goal.workflow?.gates.find(wg => wg.id === g.gateId);
-			return { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
+			const base = { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
+			// Surface human-bypass audit fields as canonical top-level fields so the
+			// UI does not have to couple to internal signal shape.
+			if (g.status === "bypassed") {
+				const bypassSignal = gateStore.getLatestBypassSignal(g);
+				if (bypassSignal?.metadata) {
+					return {
+						...base,
+						whyBypassed: bypassSignal.metadata.whyBypassed,
+						whoAmI: bypassSignal.metadata.whoAmI,
+						bypassedAt: bypassSignal.metadata.bypassedAt,
+					};
+				}
+			}
+			return base;
 		});
 		if (url.searchParams.get("view") === "summary") {
 			const summary = buildGateStatusSummary({
@@ -7631,6 +7653,83 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/goals/:goalId/gates/:gateId/bypass — human-only gate bypass.
+	// NOT advertised to agents: no MCP tool, no prompt/doc mention. The
+	// isInitiatedByHuman guard is the runtime backstop. Modeled on the reset
+	// endpoint above.
+	const gateBypassMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/bypass$/);
+	if (gateBypassMatch && req.method === "POST") {
+		if (sandboxScope) {
+			json({ error: "Forbidden: sandbox token cannot bypass gates" }, 403);
+			return;
+		}
+
+		const [, goalId, gateId] = gateBypassMatch;
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (goal.state === "shelved") { json({ error: "Goal is shelved" }, 409); return; }
+		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+
+		const gateBypassCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateBypassCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateBypassCtx.gateStore;
+		const bypassGateDef = goal.workflow.gates.find(g => g.id === gateId);
+		if (!bypassGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+
+		const bypassBody = await readBody(req);
+		if (bypassBody?.isInitiatedByHuman !== true) {
+			json({ error: "This method is currently intended for human use only. Bypassing a gate as an agent is not acting in the best interest of the outcome." }, 400);
+			return;
+		}
+		const whyBypassed = bypassBody?.whyBypassed;
+		const whoAmI = bypassBody?.whoAmI;
+		if (typeof whyBypassed !== "string" || !whyBypassed.trim()) { json({ error: "whyBypassed is required" }, 400); return; }
+		if (typeof whoAmI !== "string" || !whoAmI.trim()) { json({ error: "whoAmI is required" }, 400); return; }
+
+		try {
+			await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId]);
+		} catch (err) {
+			console.error(`[api] Error cancelling verifications for bypassed gate ${gateId}:`, err);
+		}
+
+		const bypassSignal = gateStore.bypassGate(goalId, gateId, { whyBypassed, whoAmI });
+		const bypassedAt = bypassSignal.metadata?.bypassedAt ?? String(bypassSignal.timestamp);
+
+		broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId, status: "bypassed" });
+
+		let teamLeadNotified = false;
+		try {
+			const notification = [
+				`Gate bypassed: ${bypassGateDef.name || gateId}`,
+				"",
+				`This gate was forced past verification by a human overseer (${whoAmI}).`,
+				"",
+				"Reason:",
+				whyBypassed,
+				"",
+				"The bypassed gate now counts as satisfied for dependency ordering, but the goal still requires explicit human confirmation before it can be completed.",
+			].join("\n");
+			const team = teamManager.getTeamState(goalId);
+			if (team?.teamLeadSessionId) {
+				const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
+				if (teamLeadSession && teamLeadSession.status !== "terminated") {
+					if (teamLeadSession.status === "streaming") {
+						await sessionManager.deliverLiveSteer(team.teamLeadSessionId, notification, { source: "system" });
+					} else {
+						await sessionManager.enqueuePrompt(team.teamLeadSessionId, notification, { isSteered: true, source: "system" });
+					}
+					teamLeadNotified = true;
+				}
+			}
+		} catch (err) {
+			console.error(`[api] Failed to notify team lead for gate bypass ${goalId}/${gateId}:`, err);
+		}
+
+		json({ ok: true, gateId, status: "bypassed", whyBypassed, whoAmI, bypassedAt, teamLeadNotified });
+		return;
+	}
+
 	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate
 	const gateSignalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signal$/);
 	if (gateSignalMatch && req.method === "POST") {
@@ -7655,7 +7754,8 @@ async function handleApiRoute(
 		// Validate dependencies are met
 		for (const depId of gateDef.dependsOn) {
 			const depGate = gateStore.getGate(goalId, depId);
-			if (!depGate || depGate.status !== "passed") {
+			// A bypassed upstream gate counts as satisfied (like passed).
+			if (!depGate || (depGate.status !== "passed" && depGate.status !== "bypassed")) {
 				const depDef = goal.workflow.gates.find(g => g.id === depId);
 				json({ error: `Upstream gate "${depDef?.name || depId}" has not passed yet` }, 409);
 				return;
@@ -8700,8 +8800,18 @@ async function handleApiRoute(
 			}, 409);
 			return;
 		}
+		const completeBody = await readBody(req);
+		const confirmBypassedGates = completeBody?.confirmBypassedGates === true;
+		// Bypassed-gate confirmation is a HUMAN-only override. A sandbox-scoped
+		// agent token must not be able to confirm completion past bypassed gates
+		// by hitting this REST endpoint directly — that would defeat the
+		// human-in-the-loop trust boundary the bypass feature enforces.
+		if (confirmBypassedGates && sandboxScope) {
+			json({ error: "Forbidden: sandbox token cannot confirm completion of bypassed gates" }, 403);
+			return;
+		}
 		try {
-			await teamManager.completeTeam(goalId);
+			await teamManager.completeTeam(goalId, { allowBypassedGates: confirmBypassedGates });
 			json({ ok: true });
 		} catch (err) {
 			jsonError(400, err);
