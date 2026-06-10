@@ -14,6 +14,10 @@ const { createAnalysisBundleFromParsedDiff } = await import("../src/server/pr-wa
 const { evaluateWalkthroughReadonlyCommand } = await import("../src/server/pr-walkthrough/walkthrough-readonly-policy.ts");
 const { handlePrWalkthroughApiRoute } = await import("../src/server/pr-walkthrough/routes.ts");
 const { getWalkthrough } = await import("../src/server/pr-walkthrough/walkthrough-store.ts");
+const { shouldReapWalkthroughChildOnBoot } = await import("../src/server/pr-walkthrough/walkthrough-reap.ts");
+const { SessionManager } = await import("../src/server/agent/session-manager.ts");
+const { SessionStore } = await import("../src/server/agent/session-store.ts");
+const { PromptQueue } = await import("../src/server/agent/prompt-queue.ts");
 
 type MockResponse = {
 	status?: number;
@@ -48,10 +52,17 @@ function submitProofHash(jobId: string, childSessionId: string, proof: string): 
 function makeSessionManager() {
 	const sessions = new Map<string, any>();
 	const prompts: string[] = [];
+	const terminated: string[] = [];
 	sessions.set("parent", { id: "parent", cwd: tempDir, status: "idle", projectId: "project-1", sandboxed: false });
 	return {
 		sessions,
 		prompts,
+		terminated,
+		async terminateSession(id: string) {
+			this.terminated.push(id);
+			this.sessions.delete(id);
+			return true;
+		},
 		async createSession(cwd: string, _agentArgs?: string[], _goalId?: string, _assistantType?: string, opts?: Record<string, unknown>) {
 			const id = String(opts?.sessionId ?? "child");
 			const listeners: Array<(event: unknown) => void> = [];
@@ -584,12 +595,12 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(job?.status, "error");
 		assert.equal(job?.error?.code, "AGENT_RUNTIME_FAILED");
 		assert.match(job?.error?.message ?? "", /model stream crashed/);
-		assert.ok(sessionManager.sessions.has(launch.childSessionId), "child session is preserved for diagnostics");
+		assert.equal(sessionManager.prompts.length, promptCountAfterLaunch + 1, "runtime error notice is enqueued before the child is torn down");
+		// Terminal error: the child process is torn down (after the error notice is
+		// enqueued) so the failed walkthrough does not leak or respawn on restart.
+		assert.ok(sessionManager.terminated.includes(launch.childSessionId), "terminal runtime failure terminates the child session");
+		assert.equal(sessionManager.sessions.has(launch.childSessionId), false, "terminated child is removed from the live session map");
 		assert.ok(events.some(event => (event as any).job?.error?.code === "AGENT_RUNTIME_FAILED"));
-
-		sessionManager.sessions.get(launch.childSessionId).emit({ type: "agent_end" });
-		await new Promise(resolve => setTimeout(resolve, 0));
-		assert.equal(sessionManager.prompts.length, promptCountAfterLaunch + 1, "runtime error notice is sent but idle reminder is not");
 	});
 
 	it("retry after pre-child createSession failure creates a fresh child job", async () => {
@@ -643,11 +654,13 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
-		const first = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
+		// Capture the proof before the first (successful) submit terminates the child.
+		const proof = submitProof(sessionManager, launch.childSessionId);
+		const first = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: proof });
 		assert.equal(first.ok, true);
 		const publishedAt = manager.getJob(launch.jobId)?.payloadUpdatedAt;
 		await assert.rejects(
-			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
+			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: proof }),
 			/already accepted a YAML submission/,
 		);
 		const job = manager.getJob(launch.jobId);
@@ -685,7 +698,7 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(stored?.changeset.headSha, fixture.headSha);
 	});
 
-	it("internal submit accepts valid YAML with the real schema mapper and keeps the child session alive", async () => {
+	it("internal submit accepts valid YAML with the real schema mapper and terminates the child session", async () => {
 		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
@@ -694,12 +707,49 @@ describe("WalkthroughAgentManager", () => {
 		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, true);
 		assert.equal(result.status, "ready");
-		assert.equal(sessionManager.sessions.get(launch.childSessionId).status, "idle");
+		assert.ok(sessionManager.terminated.includes(launch.childSessionId), "submitting a walkthrough must terminate the child session");
 		const job = manager.getJob(launch.jobId);
 		assert.equal(job?.status, "ready");
 		assert.ok(job?.submittedAt);
 		assert.ok(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")));
 		assert.deepEqual(result.warnings.filter(warning => warning.code === "yaml-fallback-mapper"), []);
+	});
+
+	it("submitting valid YAML terminates the walkthrough child session", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
+		assert.equal(result.ok, true);
+		assert.equal(result.status, "ready");
+		assert.ok(sessionManager.terminated.includes(launch.childSessionId), "submitting a walkthrough must terminate the child session");
+	});
+
+	it("terminal runtime failure terminates the walkthrough child session", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		sessionManager.sessions.get(launch.childSessionId).emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "model stream crashed" } });
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		assert.equal(manager.getJob(launch.jobId)?.status, "error");
+		assert.ok(sessionManager.terminated.includes(launch.childSessionId), "a terminal runtime failure must terminate the child session");
+	});
+
+	it("non-terminal validation failures do NOT terminate the walkthrough child session", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: "schema_version: 1\n", submissionProof: submitProof(sessionManager, launch.childSessionId) });
+		assert.equal(result.ok, false);
+		assert.equal(result.status, "validation_failed");
+		assert.equal(sessionManager.terminated.includes(launch.childSessionId), false, "validation_failed is non-terminal — the agent retries in the same live session");
 	});
 
 	it("valid YAML submission maps relevant hunks to resolved diff blocks", async () => {
@@ -798,6 +848,11 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(job?.status, "error");
 		assert.equal(job?.error?.code, "PR_WALKTHROUGH_BUNDLE_MISSING");
 		assert.equal(job?.error?.retryable, true);
+		// Terminal error: a mapping/diff-resolution failure flips the job to status:"error"
+		// (reapable on boot), so the live child must be torn down too — otherwise the
+		// process leaks until the next restart.
+		assert.ok(sessionManager.terminated.includes("child-no-bundle-metadata"), "a terminal mapping error must terminate the child session");
+		assert.equal(sessionManager.sessions.has("child-no-bundle-metadata"), false, "terminated child is removed from the live session map");
 	});
 
 	it("internal submit validates YAML identity against the launch target", async () => {
@@ -955,5 +1010,155 @@ describe("WalkthroughAgentManager", () => {
 			() => manager.submitYaml({ sessionId: "other-session", jobId: launch.jobId, yaml: validYaml(), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
 			/error|not allowed/i,
 		);
+	});
+});
+
+describe("SessionManager.terminateSession cascade to pr-walkthrough children", () => {
+	let stateRoot = "";
+	let prevBobbitDir: string | undefined;
+	const managers: any[] = [];
+
+	beforeEach(() => {
+		stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "prw-cascade-"));
+		prevBobbitDir = process.env.BOBBIT_DIR;
+		process.env.BOBBIT_DIR = stateRoot;
+	});
+
+	afterEach(() => {
+		while (managers.length > 0) {
+			const m = managers.pop();
+			if (m?._statusHeartbeatTimer) { clearInterval(m._statusHeartbeatTimer); m._statusHeartbeatTimer = null; }
+			m?.sessions?.clear?.();
+		}
+		if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+		else process.env.BOBBIT_DIR = prevBobbitDir;
+		fs.rmSync(stateRoot, { recursive: true, force: true });
+	});
+
+	function makeInfo(store: InstanceType<typeof SessionStore>, id: string, extra: Record<string, any>): any {
+		const persisted = {
+			id,
+			title: id,
+			cwd: stateRoot,
+			agentSessionFile: "",
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			...extra,
+		};
+		store.put(persisted as any);
+		return {
+			id,
+			title: id,
+			cwd: stateRoot,
+			status: "idle",
+			statusVersion: 0,
+			createdAt: persisted.createdAt,
+			lastActivity: persisted.lastActivity,
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			rpcClient: { getState: async () => ({ success: true }), stop: async () => {}, onEvent: () => () => {} },
+			unsubscribe: () => {},
+			...extra,
+		};
+	}
+
+	it("terminating the parent cascades to its in-memory pr-walkthrough child", async () => {
+		const store = new SessionStore(stateRoot);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+
+		manager.sessions.set("parent", makeInfo(store, "parent", {}));
+		manager.sessions.set("prw-child", makeInfo(store, "prw-child", { childKind: "pr-walkthrough", parentSessionId: "parent" }));
+
+		await manager.terminateSession("parent");
+
+		assert.equal(manager.sessions.has("parent"), false, "parent must be terminated");
+		assert.equal(manager.sessions.has("prw-child"), false, "pr-walkthrough child must be cascade-terminated");
+		assert.equal(store.get("prw-child")?.archived, true, "cascade-terminated child must be archived (not respawned on boot)");
+	});
+
+	it("archives a persisted-but-not-in-memory pr-walkthrough child when its parent is terminated", async () => {
+		const store = new SessionStore(stateRoot);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+
+		manager.sessions.set("parent", makeInfo(store, "parent", {}));
+		// child exists only in the store (dormant), not in the in-memory map
+		store.put({ id: "prw-dormant", title: "prw-dormant", cwd: stateRoot, agentSessionFile: "", createdAt: Date.now(), lastActivity: Date.now(), childKind: "pr-walkthrough", parentSessionId: "parent" } as any);
+
+		await manager.terminateSession("parent");
+
+		assert.equal(store.get("prw-dormant")?.archived, true, "persisted-only pr-walkthrough child must be archived with its parent");
+	});
+
+	it("terminating a sandboxed pr-walkthrough child does NOT remove the shared parent worktree", async () => {
+		const store = new SessionStore(stateRoot);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+
+		const removed: string[] = [];
+		const sandbox = { removeWorktree: async (name: string) => { removed.push(name); } };
+		manager.sandboxManager = { get: () => sandbox };
+
+		// prw child is sandboxed and shares the parent's /workspace-wt/<name> cwd.
+		manager.sessions.set("prw-child", makeInfo(store, "prw-child", {
+			childKind: "pr-walkthrough",
+			parentSessionId: "parent",
+			sandboxed: true,
+			projectId: "project-1",
+			cwd: "/workspace-wt/shared-branch",
+		}));
+
+		await manager.terminateSession("prw-child");
+
+		assert.equal(manager.sessions.has("prw-child"), false, "prw child must still be terminated");
+		assert.deepEqual(removed, [], "terminating a prw child must NOT remove the parent's shared sandbox worktree");
+	});
+});
+
+describe("shouldReapWalkthroughChildOnBoot", () => {
+	const liveParent = { parentExists: true, parentArchived: false };
+
+	it("reaps a terminal (ready) walkthrough job", () => {
+		const decision = shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: "parent", jobStatus: "ready", ...liveParent });
+		assert.equal(decision.reap, true);
+		assert.match(decision.reason ?? "", /terminal/);
+	});
+
+	it("reaps a terminal (error) walkthrough job", () => {
+		const decision = shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: "parent", jobStatus: "error", ...liveParent });
+		assert.equal(decision.reap, true);
+		assert.match(decision.reason ?? "", /terminal/);
+	});
+
+	it("reaps when the walkthrough job record is missing", () => {
+		assert.equal(shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: "parent", jobStatus: undefined, ...liveParent }).reap, true);
+		assert.equal(shouldReapWalkthroughChildOnBoot({ walkthroughJobId: undefined, parentSessionId: "parent", jobStatus: "waiting_for_yaml", ...liveParent }).reap, true);
+	});
+
+	it("reaps an orphan whose parent no longer exists", () => {
+		const decision = shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: "parent", jobStatus: "waiting_for_yaml", parentExists: false, parentArchived: false });
+		assert.equal(decision.reap, true);
+		assert.match(decision.reason ?? "", /parent/);
+	});
+
+	it("reaps an orphan whose parent is archived", () => {
+		const decision = shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: "parent", jobStatus: "validation_failed", parentExists: true, parentArchived: true });
+		assert.equal(decision.reap, true);
+		assert.match(decision.reason ?? "", /archived/);
+	});
+
+	it("reaps when no parent session id is recorded", () => {
+		assert.equal(shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: undefined, jobStatus: "waiting_for_yaml", parentExists: false, parentArchived: false }).reap, true);
+	});
+
+	it("does NOT reap an in-flight walkthrough with a live, non-archived parent", () => {
+		for (const jobStatus of ["starting", "waiting_for_yaml", "validation_failed"]) {
+			const decision = shouldReapWalkthroughChildOnBoot({ walkthroughJobId: "job-1", parentSessionId: "parent", jobStatus, ...liveParent });
+			assert.equal(decision.reap, false, `in-flight ${jobStatus} with a live parent must restore`);
+		}
 	});
 });
