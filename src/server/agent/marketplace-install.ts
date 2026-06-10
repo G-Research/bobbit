@@ -501,7 +501,7 @@ function synthManifest(name: string, meta: PackMeta | null): PackManifest {
 		name,
 		description: "(corrupt install — missing pack.yaml)",
 		version: meta?.version ?? "0.0.0",
-		contents: { roles: [], tools: [], skills: [] },
+		contents: { roles: [], tools: [], skills: [], entrypoints: [] },
 	};
 }
 

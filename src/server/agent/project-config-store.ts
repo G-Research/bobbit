@@ -198,6 +198,7 @@ const MIGRATED_KEYS = new Set([
 	"config_directories",
 	"sandbox_tokens",
 	"pack_order",
+	"pack_activation",
 ]);
 
 /**
@@ -211,6 +212,22 @@ const PACK_ORDER_SCOPES: ReadonlySet<string> = new Set(["server", "global-user",
 /** A scope→ordered-pack-name-list map persisted as a native-YAML field. */
 export type PackOrderMap = Partial<Record<PackOrderScope, string[]>>;
 
+/** Disabled (de-activated) user-facing entity refs by kind, for one pack at one
+ *  scope (pack-schema-v1 §6.7). Absent kind ⇒ all enabled. Entrypoints are keyed
+ *  by `listName` (the contents.entrypoints[] basename), so one toggle disables
+ *  both the launcher id and the deep-link routeId derived from that file. */
+export interface DisabledRefs {
+	roles?: string[];
+	tools?: string[];
+	skills?: string[];
+	entrypoints?: string[];
+}
+
+/** scope → packName → disabled entity refs by kind. Default (absent) = all enabled. */
+export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
+
+const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints"] as const;
+
 function normalizePackOrder(raw: unknown): { value: PackOrderMap; ok: boolean } {
 	if (!isPlainObject(raw)) return { value: {}, ok: false };
 	const out: PackOrderMap = {};
@@ -219,6 +236,34 @@ function normalizePackOrder(raw: unknown): { value: PackOrderMap; ok: boolean } 
 		if (!Array.isArray(v)) continue;
 		const names = v.filter((x): x is string => typeof x === "string");
 		out[k as PackOrderScope] = names;
+	}
+	return { value: out, ok: true };
+}
+
+function normalizeDisabledRefs(raw: unknown): DisabledRefs {
+	const out: DisabledRefs = {};
+	if (!isPlainObject(raw)) return out;
+	for (const kind of ACTIVATION_KINDS) {
+		const v = raw[kind];
+		if (!Array.isArray(v)) continue;
+		const names = v.filter((x): x is string => typeof x === "string");
+		if (names.length > 0) out[kind] = names;
+	}
+	return out;
+}
+
+function normalizePackActivation(raw: unknown): { value: PackActivationMap; ok: boolean } {
+	if (!isPlainObject(raw)) return { value: {}, ok: false };
+	const out: PackActivationMap = {};
+	for (const [scope, byPack] of Object.entries(raw)) {
+		if (!PACK_ORDER_SCOPES.has(scope)) continue;
+		if (!isPlainObject(byPack)) continue;
+		const scopeMap: Record<string, DisabledRefs> = {};
+		for (const [packName, refs] of Object.entries(byPack)) {
+			const norm = normalizeDisabledRefs(refs);
+			if (Object.keys(norm).length > 0) scopeMap[packName] = norm;
+		}
+		if (Object.keys(scopeMap).length > 0) out[scope as PackOrderScope] = scopeMap;
 	}
 	return { value: out, ok: true };
 }
@@ -303,11 +348,13 @@ export class ProjectConfigStore {
 	private configDirectories: ConfigDirectoryEntry[] = [];
 	private sandboxTokens: SandboxTokenEntry[] = [];
 	private packOrder: PackOrderMap = {};
+	private packActivation: PackActivationMap = {};
 	/** Track whether each migrated field was explicitly present on disk. */
 	private present = {
 		config_directories: false,
 		sandbox_tokens: false,
 		pack_order: false,
+		pack_activation: false,
 	};
 	/** Set when load() found legacy (string-encoded) shapes — triggers next save() to rewrite native. */
 	private dirty = false;
@@ -333,10 +380,12 @@ export class ProjectConfigStore {
 		this.configDirectories = [];
 		this.sandboxTokens = [];
 		this.packOrder = {};
+		this.packActivation = {};
 		this.present = {
 			config_directories: false,
 			sandbox_tokens: false,
 			pack_order: false,
+			pack_activation: false,
 		};
 
 		try {
@@ -462,6 +511,36 @@ export class ProjectConfigStore {
 				}
 			}
 		}
+
+		// pack_activation — scoped map { scope: { packName: DisabledRefs } }
+		if (raw.pack_activation !== undefined && raw.pack_activation !== null) {
+			const v = raw.pack_activation;
+			if (typeof v === "string") {
+				if (v.length > 0) {
+					try {
+						const parsed = JSON.parse(v);
+						const norm = normalizePackActivation(parsed);
+						if (norm.ok) {
+							this.packActivation = norm.value;
+							this.present.pack_activation = true;
+							this.dirty = true;
+						} else {
+							console.warn("[project-config-store] Failed to parse pack_activation, treating as default");
+						}
+					} catch (err) {
+						console.warn("[project-config-store] Failed to parse pack_activation, treating as default:", err);
+					}
+				}
+			} else {
+				const norm = normalizePackActivation(v);
+				if (norm.ok) {
+					this.packActivation = norm.value;
+					this.present.pack_activation = true;
+				} else {
+					console.warn("[project-config-store] Failed to parse pack_activation, treating as default");
+				}
+			}
+		}
 	}
 
 	private save(): void {
@@ -501,6 +580,9 @@ export class ProjectConfigStore {
 			if (this.present.pack_order || this.packOrderNonEmpty()) {
 				out.pack_order = this.serializePackOrder();
 			}
+			if (this.present.pack_activation || this.packActivationNonEmpty()) {
+				out.pack_activation = this.serializePackActivation();
+			}
 			// Clear dirty flag — file is now in native form.
 			this.dirty = false;
 
@@ -530,6 +612,9 @@ export class ProjectConfigStore {
 		if (this.present.pack_order || this.packOrderNonEmpty()) {
 			out.pack_order = JSON.stringify(this.serializePackOrder());
 		}
+		if (this.present.pack_activation || this.packActivationNonEmpty()) {
+			out.pack_activation = JSON.stringify(this.serializePackActivation());
+		}
 		return out;
 	}
 
@@ -542,6 +627,30 @@ export class ProjectConfigStore {
 		const out: Record<string, string[]> = {};
 		for (const [k, v] of Object.entries(this.packOrder)) {
 			if (Array.isArray(v)) out[k] = [...v];
+		}
+		return out;
+	}
+
+	private packActivationNonEmpty(): boolean {
+		return Object.values(this.packActivation).some(
+			(byPack) => byPack && Object.keys(byPack).length > 0,
+		);
+	}
+
+	private serializePackActivation(): Record<string, Record<string, DisabledRefs>> {
+		const out: Record<string, Record<string, DisabledRefs>> = {};
+		for (const [scope, byPack] of Object.entries(this.packActivation)) {
+			if (!byPack) continue;
+			const scopeOut: Record<string, DisabledRefs> = {};
+			for (const [packName, refs] of Object.entries(byPack)) {
+				const o: DisabledRefs = {};
+				for (const kind of ACTIVATION_KINDS) {
+					const arr = refs[kind];
+					if (Array.isArray(arr) && arr.length > 0) o[kind] = [...arr];
+				}
+				if (Object.keys(o).length > 0) scopeOut[packName] = o;
+			}
+			if (Object.keys(scopeOut).length > 0) out[scope] = scopeOut;
 		}
 		return out;
 	}
@@ -620,6 +729,22 @@ export class ProjectConfigStore {
 				}
 				break;
 			}
+			case "pack_activation": {
+				try {
+					const parsed = JSON.parse(value);
+					const norm = normalizePackActivation(parsed);
+					if (norm.ok) {
+						this.packActivation = norm.value;
+						this.present.pack_activation = true;
+						this.save();
+					} else {
+						throw new Error("Invalid pack_activation shape");
+					}
+				} catch (err) {
+					throw new Error(`Failed to parse pack_activation as JSON: ${(err as Error).message}`);
+				}
+				break;
+			}
 		}
 	}
 
@@ -636,6 +761,10 @@ export class ProjectConfigStore {
 			case "pack_order":
 				this.packOrder = {};
 				this.present.pack_order = false;
+				break;
+			case "pack_activation":
+				this.packActivation = {};
+				this.present.pack_activation = false;
 				break;
 		}
 		this.save();
@@ -715,6 +844,53 @@ export class ProjectConfigStore {
 		const out: PackOrderMap = {};
 		for (const [k, v] of Object.entries(this.packOrder)) {
 			if (Array.isArray(v)) out[k as PackOrderScope] = [...v];
+		}
+		return out;
+	}
+
+	// ── Pack activation overrides (pack-schema-v1 §6.7) ──────────────
+
+	/** Read the disabled-entity refs for a pack at a scope (defensive copy).
+	 *  Missing ⇒ {} (all enabled). */
+	getPackActivation(scope: PackOrderScope, packName: string): DisabledRefs {
+		const refs = this.packActivation[scope]?.[packName];
+		if (!refs) return {};
+		const out: DisabledRefs = {};
+		for (const kind of ACTIVATION_KINDS) {
+			const arr = refs[kind];
+			if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
+		}
+		return out;
+	}
+
+	/** Replace the disabled-entity refs for a pack at a scope. An all-empty
+	 *  `disabled` clears the pack's override. Persists immediately. */
+	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
+		const norm = normalizeDisabledRefs(disabled);
+		const scopeMap = { ...(this.packActivation[scope] ?? {}) };
+		if (Object.keys(norm).length === 0) {
+			delete scopeMap[packName];
+		} else {
+			scopeMap[packName] = norm;
+		}
+		const next = { ...this.packActivation };
+		if (Object.keys(scopeMap).length === 0) delete next[scope];
+		else next[scope] = scopeMap;
+		this.packActivation = next;
+		this.present.pack_activation = this.packActivationNonEmpty();
+		this.save();
+	}
+
+	/** Full scoped activation map (defensive copy). */
+	getPackActivationMap(): PackActivationMap {
+		const out: PackActivationMap = {};
+		for (const [scope, byPack] of Object.entries(this.packActivation)) {
+			if (!byPack) continue;
+			const scopeOut: Record<string, DisabledRefs> = {};
+			for (const packName of Object.keys(byPack)) {
+				scopeOut[packName] = this.getPackActivation(scope as PackOrderScope, packName);
+			}
+			out[scope as PackOrderScope] = scopeOut;
 		}
 		return out;
 	}

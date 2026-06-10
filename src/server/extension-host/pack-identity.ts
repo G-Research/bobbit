@@ -15,7 +15,9 @@
 // installs and identical for every tool the pack contributes. NEVER read from
 // request args/body.
 
+import path from "node:path";
 import { isMarketPackBaseDir } from "../agent/tool-contributions.js";
+import { packIdFromRoot } from "../agent/pack-contributions.js";
 import type { ActionToolLocationResolver } from "./action-dispatcher.js";
 
 export interface PackIdentity {
@@ -76,4 +78,28 @@ export function resolvePackIdentityForTool(
 ): PackIdentity {
 	const loc = resolver.resolveToolLocation(tool);
 	return resolvePackIdentity(loc, tool);
+}
+
+/**
+ * The pack root dir for a winning TOOL contribution's `baseDir` (= the `tools/`
+ * parent). `baseDir` is `<...>/market-packs/<name>/tools`; the pack root is its
+ * parent `<...>/market-packs/<name>` (pack-schema-v1 §2.3).
+ */
+export function packRootFromToolsBaseDir(baseDir: string): string {
+	return path.dirname(baseDir);
+}
+
+/**
+ * Pack-bound identity from a pack root + an explicit contribution id (no carrier
+ * tool). Used when the surface is a panel/entrypoint/route (pack-schema-v1 §4.2).
+ * `packId` is derived structurally from the `market-packs/<name>` path segment
+ * (never from request input). `contributionId` is the caller-provided prefixed id
+ * (`panel:<id>` | `entrypoint:<id>` | `route:<name>`), echoed verbatim.
+ */
+export function resolvePackContributionIdentity(
+	packRoot: string,
+	contributionId: string,
+): PackIdentity {
+	const packId = packIdFromRoot(packRoot);
+	return { packId, contributionId, isPack: packId.length > 0 };
 }

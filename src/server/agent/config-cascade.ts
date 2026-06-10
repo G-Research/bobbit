@@ -57,6 +57,20 @@ export interface MarketPackProvider {
 	marketEntries(scope: "server" | "global-user" | "project", projectId?: string): PackEntry[];
 }
 
+/**
+ * Supplies the per-scope pack-activation disabled-entity refs so the cascade can
+ * drop disabled roles/tools BEFORE precedence merge (pack-schema-v1 §7). Injected
+ * (server.ts wires it to the pack_activation store) so {@link ConfigCascade} stays
+ * decoupled from store wiring. Omitted ⇒ no activation filtering.
+ */
+export interface PackActivationProvider {
+	disabled(
+		scope: "server" | "global-user" | "project",
+		projectId: string | undefined,
+		packName: string,
+	): { roles?: string[]; tools?: string[]; skills?: string[]; entrypoints?: string[] };
+}
+
 export interface ResolvedPolicy {
 	policy: GrantPolicy;
 	origin: ConfigOrigin;
@@ -108,6 +122,13 @@ export class ConfigCascade {
 	/** Late-bind the market-pack provider (server.ts wires it after fs/store setup). */
 	setMarketPackProvider(provider: MarketPackProvider): void {
 		this.marketPackProvider = provider;
+	}
+
+	private packActivationProvider?: PackActivationProvider;
+
+	/** Late-bind the pack-activation provider (server.ts wires it after store setup). */
+	setPackActivationProvider(provider: PackActivationProvider): void {
+		this.packActivationProvider = provider;
 	}
 
 	/** Override the global-user scope base (tests; defaults to `os.homedir()`). */
@@ -362,7 +383,21 @@ export class ConfigCascade {
 			}
 		}
 
-		return new PackResolver(entries, loaders).resolve<T>(type);
+		// Activation filtering (§7): drop disabled market-pack entities BEFORE merge
+		// so a lower-priority shadow can win. Non-market entries are never filtered.
+		const provider = this.packActivationProvider;
+		const filter = provider
+			? (entry: PackEntry, t: import("./pack-types.js").EntityType, name: string): boolean => {
+				if (entry.kind !== "market" || !entry.manifest) return true;
+				if (t !== "roles" && t !== "tools" && t !== "skills") return true;
+				const scope = entry.scope;
+				if (scope !== "server" && scope !== "global-user" && scope !== "project") return true;
+				const disabled = provider.disabled(scope, projectId, entry.manifest.name);
+				const list = disabled[t];
+				return !list || !list.includes(name);
+			}
+			: undefined;
+		return new PackResolver(entries, loaders, filter).resolve<T>(type);
 	}
 }
 

@@ -4,7 +4,7 @@
  *
  * The lexical `path.relative` check alone follows a symlink that is lexically
  * inside the group dir but points outside the pack, disclosing/importing
- * arbitrary host files. `isPackPathWithinGroup` adds an `fs.realpathSync`
+ * arbitrary host files. `isPackPathWithinRoot` adds an `fs.realpathSync`
  * containment check on top of the lexical one.
  *
  * Pinned invariants:
@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { isPackPathWithinGroup } from "../src/server/extension-host/path-guard.ts";
+import { isPackPathWithinRoot } from "../src/server/extension-host/path-guard.ts";
 
 let tmp: string;
 
@@ -44,13 +44,13 @@ function trySymlink(target: string, linkPath: string): boolean {
 	}
 }
 
-describe("isPackPathWithinGroup", () => {
+describe("isPackPathWithinRoot", () => {
 	it("allows a normal in-pack file", () => {
 		const group = path.join(tmp, "case-ok", "group");
 		fs.mkdirSync(group, { recursive: true });
 		const file = path.join(group, "renderer.js");
 		fs.writeFileSync(file, "export default 1;");
-		assert.equal(isPackPathWithinGroup(group, file), true);
+		assert.equal(isPackPathWithinRoot(group, file), true);
 	});
 
 	it("allows an in-pack file inside a subdirectory", () => {
@@ -58,14 +58,14 @@ describe("isPackPathWithinGroup", () => {
 		fs.mkdirSync(path.join(group, "sub"), { recursive: true });
 		const file = path.join(group, "sub", "panel.js");
 		fs.writeFileSync(file, "export default 1;");
-		assert.equal(isPackPathWithinGroup(group, file), true);
+		assert.equal(isPackPathWithinRoot(group, file), true);
 	});
 
 	it("rejects a lexically-escaping path", () => {
 		const group = path.join(tmp, "case-lex", "group");
 		fs.mkdirSync(group, { recursive: true });
 		const outside = path.resolve(group, "..", "secret.js");
-		assert.equal(isPackPathWithinGroup(group, outside), false);
+		assert.equal(isPackPathWithinRoot(group, outside), false);
 	});
 
 	it("rejects a symlink that escapes the group dir", () => {
@@ -82,7 +82,7 @@ describe("isPackPathWithinGroup", () => {
 			return;
 		}
 		// Lexical check passes (link is inside group), but realpath escapes → reject.
-		assert.equal(isPackPathWithinGroup(group, link), false);
+		assert.equal(isPackPathWithinRoot(group, link), false);
 	});
 
 	it("allows a symlink that stays within the group dir", () => {
@@ -92,19 +92,19 @@ describe("isPackPathWithinGroup", () => {
 		fs.writeFileSync(real, "export default 1;");
 		const link = path.join(group, "alias.js");
 		if (!trySymlink(real, link)) return;
-		assert.equal(isPackPathWithinGroup(group, link), true);
+		assert.equal(isPackPathWithinRoot(group, link), true);
 	});
 
 	it("tolerates a missing target (ENOENT) so the caller's not-found path runs", () => {
 		const group = path.join(tmp, "case-missing", "group");
 		fs.mkdirSync(group, { recursive: true });
 		const missing = path.join(group, "does-not-exist.js");
-		assert.equal(isPackPathWithinGroup(group, missing), true);
+		assert.equal(isPackPathWithinRoot(group, missing), true);
 	});
 
 	it("rejects when the group root itself is missing", () => {
 		const group = path.join(tmp, "case-no-group", "group");
 		const file = path.join(group, "renderer.js");
-		assert.equal(isPackPathWithinGroup(group, file), false);
+		assert.equal(isPackPathWithinRoot(group, file), false);
 	});
 });

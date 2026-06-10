@@ -30,7 +30,7 @@
 //   load + validate the entry module). Without this, a pack module could
 //   `import`/`require` a file OUTSIDE its own pack via a `../` walk, an absolute
 //   path, a symlink escape, or a bare specifier that resolves into an ancestor
-//   `node_modules`. Containment reuses the SHARED `isPackPathWithinGroup` path-guard
+//   `node_modules`. Containment reuses the SHARED `isPackPathWithinRoot` path-guard
 //   helper so the lexical + realpath checks stay byte-consistent with the HTTP
 //   entry-serving endpoints.
 //
@@ -46,7 +46,7 @@ import { fileURLToPath } from "node:url";
  *  ESM facade is created during the worker's static-import phase — that would
  *  pre-build the `node:fs` facade BEFORE the bootstrap can wrap it for fs
  *  relative-path rebasing. The bootstrap loads path-guard AFTER applying the
- *  session-dir wraps and passes its `isPackPathWithinGroup` here. */
+ *  session-dir wraps and passes its `isPackPathWithinRoot` here. */
 type PackPathGuard = (groupAbs: string, fileAbs: string) => boolean;
 
 /** The configuration passed by the bootstrap before installing the hook. */

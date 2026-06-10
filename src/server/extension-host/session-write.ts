@@ -81,8 +81,15 @@ export interface SessionPostAudit {
 }
 
 export interface SessionPostInput {
-	/** The pack's contributing tool name (proves pack ownership via allowedTools). */
-	tool: string;
+	/** The pack's contributing tool name (proves pack ownership via allowedTools)
+	 *  for a TOOL-bound surface. ABSENT for a PACK-bound surface (panel/entrypoint/
+	 *  route, pack-schema-v1 §4.5) — which skips the allowedTools gate and relies on
+	 *  the pre-resolved {@link packId} (installed + active + own-session already
+	 *  proved by the surface-token validation). */
+	tool?: string;
+	/** SERVER-derived packId for a PACK-bound surface (no carrier tool). When
+	 *  present, the allowedTools gate + tool→pack resolution are skipped. */
+	packId?: string;
 	/**
 	 * The TRUSTED, server-authenticated bound session id. This is the WS
 	 * connection's OWN session, resolved server-side from the authenticated
@@ -149,8 +156,8 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	// is never silent. Successful posts are audited at the end.
 	const reject = (status: number, error: string, ctx?: { packId?: string; role?: "user" | "system"; resumeTurn?: boolean }): SessionPostResult => {
 		input.audit({
-			tool: input.tool,
-			packId: ctx?.packId ?? "",
+			tool: input.tool ?? input.packId ?? "",
+			packId: ctx?.packId ?? input.packId ?? "",
 			sessionId: typeof input.sessionId === "string" ? input.sessionId : "",
 			role: ctx?.role ?? (input.role === "system" ? "system" : "user"),
 			resumeTurn: ctx?.resumeTurn ?? (input.resumeTurn !== false),
@@ -167,13 +174,26 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	//    gates is: the session resolves, and the pack's `tool` ∈ allowedTools. (No
 	//    toolUseId-ownership — driving a turn acts on no specific prior tool call,
 	//    and panels/entrypoints have no toolUseId. §2a / Fix B.)
-	const guard = authorizeScopedRequest({
-		tool: input.tool,
-		headerSessionId: input.sessionId,
-		bodySessionId: input.sessionId,
-		resolveSession: input.resolveSession,
-	});
-	if (!guard.ok) return reject(guard.status, guard.error);
+	// TOOL-bound: gate the pack's `tool` ∈ allowedTools (+ session resolve). The
+	// session is the TRUSTED WS-bound session, so body===header holds trivially.
+	// PACK-bound (no tool): skip allowedTools (§4.5 — the surface-token validation
+	// already proved installed + active + own-session); only resolve the session.
+	let guardSessionId: string;
+	if (input.tool !== undefined) {
+		const guard = authorizeScopedRequest({
+			tool: input.tool,
+			headerSessionId: input.sessionId,
+			bodySessionId: input.sessionId,
+			resolveSession: input.resolveSession,
+		});
+		if (!guard.ok) return reject(guard.status, guard.error);
+		guardSessionId = guard.sessionId;
+	} else {
+		if (typeof input.sessionId !== "string" || !input.sessionId || !input.resolveSession(input.sessionId)) {
+			return reject(403, "unknown session");
+		}
+		guardSessionId = input.sessionId;
+	}
 
 	// 2. Validate the message: role ∈ {user, system} + non-empty text.
 	if (input.role !== "user" && input.role !== "system") {
@@ -185,11 +205,14 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	}
 	const text = input.text;
 
-	// 3. SERVER-derive the pack identity from the proven `tool`; reject a non-pack
-	//    caller (session messaging is a pack-only capability).
-	const ident = input.resolvePackIdentity(input.tool);
+	// 3. SERVER-derive the pack identity. TOOL-bound: from the proven `tool`.
+	//    PACK-bound: from the pre-resolved {@link packId} (already validated against
+	//    the pack-contribution registry by the surface-token resolution).
+	const ident = input.tool !== undefined
+		? input.resolvePackIdentity(input.tool)
+		: { isPack: !!input.packId, packId: input.packId ?? "" };
 	if (!ident.isPack || !ident.packId) {
-		return reject(403, "session messaging is available only to market-pack tools", { role });
+		return reject(403, "session messaging is available only to market-pack contributions", { role });
 	}
 
 	// 3b. REQUIRE a server-minted, one-time, content-bound write permit. The
@@ -202,9 +225,9 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	}
 	const contentHash = computeContentHash(role, text);
 	const permitOk = input.consumePermit(input.nonce, {
-		sessionId: guard.sessionId,
+		sessionId: guardSessionId,
 		packId: ident.packId,
-		tool: input.tool,
+		tool: input.tool ?? "",
 		contentHash,
 	});
 	if (!permitOk) {
@@ -216,9 +239,9 @@ export async function handleSessionPost(input: SessionPostInput): Promise<Sessio
 	//    "system" is framed as a system directive (NOT delivered as raw user text).
 	const resume = input.resumeTurn !== false;
 	const deliveredText = formatSessionMessage(role, text);
-	const base = { tool: input.tool, packId: ident.packId, sessionId: guard.sessionId, role, resumeTurn: resume };
+	const base = { tool: input.tool ?? ident.packId, packId: ident.packId, sessionId: guardSessionId, role, resumeTurn: resume };
 	try {
-		await input.post(guard.sessionId, deliveredText, { role, resume });
+		await input.post(guardSessionId, deliveredText, { role, resume });
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		input.audit({ ...base, ms: clock() - start, outcome: "error", error: message });
