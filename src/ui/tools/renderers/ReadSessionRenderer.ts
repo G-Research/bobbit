@@ -12,6 +12,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { History, ExternalLink } from "lucide";
 import { renderCollapsibleHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import { renderSessionLink } from "./delegate-cards.js";
 
 interface ReadSessionParams {
 	session_id: string;
@@ -237,7 +238,7 @@ export class ReadSessionRenderer implements ToolRenderer<ReadSessionParams, Read
 				content: html`
 					<div>
 						${renderCollapsibleHeader(state, History,
-							html`read_session <span class="font-mono text-xs">${sidShort}</span> — <span class="text-destructive text-xs">error</span>`,
+							html`read_session <span class="font-mono text-xs">${sidShort}</span> — <span class="text-destructive text-xs">error</span> ${sid ? renderSessionLink(sid) : ""}`,
 							contentRef, chevronRef, true)}
 						<div ${ref(contentRef)} class="max-h-[2000px] mt-3 overflow-hidden transition-all duration-300">
 							<div class="text-xs font-mono text-destructive whitespace-pre-wrap">${txt}</div>
@@ -266,9 +267,9 @@ export class ReadSessionRenderer implements ToolRenderer<ReadSessionParams, Read
 			content: html`
 				<div>
 					${renderCollapsibleHeader(state, History,
-						html`read_session <span class="font-mono text-xs">${sidShort}</span> — ${summaryFragment}`,
-						contentRef, chevronRef, true)}
-					<div ${ref(contentRef)} class="max-h-[2000px] mt-3 overflow-hidden transition-all duration-300">
+						html`read_session <span class="font-mono text-xs">${sidShort}</span> — ${summaryFragment} ${sid ? renderSessionLink(sid) : ""}`,
+						contentRef, chevronRef, false)}
+					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 						<div class="space-y-1">
 							${messages.length === 0
 								? html`<div class="text-xs text-muted-foreground italic">No messages in window.</div>`

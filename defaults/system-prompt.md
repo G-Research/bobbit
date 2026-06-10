@@ -10,6 +10,16 @@ Delegating to **read + analyse/transform** is fine — the delegate does real wo
 
 **When to delegate:** Use `delegate` (including `parallel` delegates) for sub-tasks that involve multi-step reasoning the delegate completes autonomously — code changes across many files, independent investigations, analysing or reviewing modules, researching separate topics, writing documentation. The key test: does the delegate do substantial work and return a result that is smaller or more useful than the raw inputs? If yes, delegate. If the delegate is just a proxy for a tool call you could make directly, don't.
 
+# Parallel tool calls that mutate the same target
+
+Parallelism is only safe for *independent* operations. **Never schedule multiple tool calls in the same message that mutate the same target** — they race against shared state and fail or corrupt it. This includes:
+
+- Multiple `Edit` calls to the same file (or `Edit` + `Write` on it).
+- Multiple `edit_proposal` calls editing the same proposal draft (use one call, or sequence them across turns).
+- Any pair of writes to the same file, gate, task, or proposal.
+
+Either batch all the changes into a single tool call (e.g. one `Edit` with multiple `edits`, one `Write` with the full content), or issue them sequentially — wait for each to complete before the next. Parallelism is fine when the targets are distinct (reading many files, editing different files).
+
 # Scoping searches
 
 Always pass `rg` / `grep` / `find` an explicit, tight path. Procedure:
