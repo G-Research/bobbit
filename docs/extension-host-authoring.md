@@ -43,8 +43,9 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
 
-Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events),
-available to any surface that holds a `host`.
+Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
+and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
+that hold a `host`.
 
 **Why this layout.** Several of these contributions are already **pack-scoped** at runtime:
 a `panelId` is opened through the Host API by any surface in the pack, routes resolve through
@@ -332,6 +333,8 @@ The server-side `ctx.host` carries:
 - `ctx.host.store.{get,put,list}` — pack-namespaced persistence, scoped to the
   **server-derived** `packId` (you never pass an id).
 - `ctx.host.session.{readTranscript,readToolCall}` — own-session reads through the adapter.
+- `ctx.host.agents.{spawn,prompt,dismiss,list,read,status}` — launch + orchestrate child
+  agents owned by the bound session (poll-based, ambient). See [`host.agents`](#hostagents--launch-and-orchestrate-child-agents).
 
 There is deliberately **no** `ctx.host.callRoute` or `ctx.host.ui` server-side: a server
 handler reaches its own pack's route by calling the function directly, and a server module has
@@ -421,7 +424,8 @@ if (host.capabilities.has("callRoute")) { /* true on a current host */ }
 ```
 
 A current host reports all client flags `true` — `{ invokeAction, requestRender, callRoute,
-session, ui, store }`. `host.version` (`HOST_API_VERSION`, `1`) and `host.contractVersion`
+session, ui, store }`. The **server-side** capabilities are `{ session, store, agents }` (a
+current host reports all three `true`). `host.version` (`HOST_API_VERSION`, `1`) and `host.contractVersion`
 (`HOST_CONTRACT_VERSION`) identify the contract revision. All capabilities are purely additive
 (no signature churn), so code written against `capabilities` stays forward/backward-compatible.
 
@@ -676,6 +680,86 @@ await host.session.postMessage({ role: "user", text: "re-run the tests", resumeT
   content-bound, server-minted permit — captured/replayed/forged/tampered frames are rejected.
 - **Cross-session posting is impossible** — the target is the WS connection's own session.
 
+### `host.agents` — launch and orchestrate child agents
+
+`host.agents` lets a **server-side** pack handler launch and orchestrate **child agents** —
+new, properly-scoped principals owned by the bound session — through the sanctioned
+in-process path. It is the pack-facing entry point to the shared `OrchestrationCore` that
+also backs the agent-facing `team_*` tools (see [docs/orchestration.md](orchestration.md)).
+
+It is **ambient**, like `host.session` / `host.store`: there is no manifest declaration and
+no consent line. Feature-detect with `ctx.host.capabilities.agents` (or
+`ctx.host.capabilities.has("agents")`), never member presence.
+
+```js
+// actions.mjs / routes.mjs — server-side handler
+export const actions = {
+  review: async (ctx, args) => {
+    const { childSessionId } = await ctx.host.agents.spawn({
+      instructions: "Review the diff in the current worktree and report risks.",
+      readOnly: true,                 // read-only child; always bare context
+      // model/thinkingLevel default to the bound session's current values
+    });
+
+    // POLL — there is NO blocking wait (see below).
+    let s = await ctx.host.agents.status(childSessionId);
+    while (s.status !== "idle" && s.status !== "terminated") {
+      await new Promise((r) => setTimeout(r, 1000));
+      s = await ctx.host.agents.status(childSessionId);
+    }
+
+    const transcript = await ctx.host.agents.read(childSessionId);
+    await ctx.host.agents.dismiss(childSessionId);   // terminate + archive
+    return { transcript };
+  },
+};
+```
+
+The six verbs:
+
+| Verb | What it does |
+|---|---|
+| `spawn(opts)` | Launch a child owned by the bound session. `opts`: `instructions` (required), `role?`, `model?`, `thinkingLevel?`, `readOnly?`, `context?`, `lifecycle?` (`"bare"` default / `"full"`). Returns `{ childSessionId }`. |
+| `prompt(childSessionId, message)` | Run-if-idle / queue a follow-up prompt. |
+| `status(childSessionId)` | Poll the child's live status (`idle` / `streaming` / `queued` / `preparing` / `terminated`). |
+| `list()` | List the bound session's `host.agents` children. |
+| `read(childSessionId, opts?)` | Read the child's transcript / output. |
+| `dismiss(childSessionId)` | Terminate + archive the child. |
+
+#### Poll-based — there is no blocking `wait`
+
+The worker tier terminates a handler call on timeout, so a handler **cannot** long-block
+waiting for a child. Instead it `spawn`s, then **polls** `status` / `list` / `read` — across
+multiple worker calls if the work outlives one call's timeout budget. (This is the one place
+the pack surface deliberately differs from the agent-tool `team_wait`, which *can* block.)
+
+#### Scoping — own children only, by source discriminator
+
+Every `host.agents` child is minted with `childKind === "host-agents"`, and **every verb
+filters to the bound session's children with that kind**. So a pack handler sees **only the
+children it spawned through `host.agents`** — never the session's `delegate` (agent-tool) or
+`team` children, and never any foreign session. There is **no parameter** to target the user
+or another session; the method simply does not exist (mirroring how `host.session` is
+own-session-only and has no foreign `postMessage`). Because the discriminator lives in the
+already-persisted `childKind`, scoping survives a restart with no new registry.
+
+> **Known simplification:** two packs sharing one bound session both see all `host-agents`
+> children of that session (the filter is per-session, not per-pack). This may be refined
+> later; it is not addressed now.
+
+#### Invariants
+
+- **No grandchildren.** `host.agents.spawn` is **denied for a bound child session** (it calls
+  the same core recursion guard the agent tools use) — a child cannot spawn its own children.
+- **Sandbox/credential inheritance — the one hard invariant.** The child inherits the bound
+  session's sandbox and credential scope and **cannot exceed it**. The pack receives
+  orchestration **verbs**, not transport: no token, no raw `fetch`, no privilege escalation.
+
+`host.agents` is exercised by a deterministic, **no-LLM fixture pack** (its child runs a
+canned scripted transcript), so the spawn→prompt→poll→read→dismiss test is non-flaky and
+stays in the e2e phase. The API may be amended later when a real consumer (the PR-walkthrough
+migration) lands.
+
 ## Activation controls (Market UI)
 
 On the Market installed-pack surface you can toggle a pack's **user-facing entities** per
@@ -828,8 +912,9 @@ Two pieces of the migration are worth understanding when authoring your own ambi
 
 - **Launch re-expression — drive the current agent, don't mint a new principal.** The deleted
   built-in git-widget button launched a *new dedicated child walkthrough agent* (a fresh session
-  with its own `allowedTools`). Spawning a new principal is **not pack-expressible by design** — a
-  pack acts within the calling session's authority. So the pack re-expresses launch differently:
+  with its own `allowedTools`). When the pack was first written, spawning a new principal was **not
+  pack-expressible** — a pack acted only within the calling session's authority. So the pack
+  re-expresses launch differently:
   the entrypoints just open the panel (`host.ui.navigate` to `#/ext/pr-walkthrough`), and the panel
   offers a gesture-gated **"Run PR walkthrough"** button that calls `host.session.postMessage` to
   direct the **current** session's agent to run the walkthrough using the retained agent tools
@@ -839,6 +924,12 @@ Two pieces of the migration are worth understanding when authoring your own ambi
   escape hatch. The panel implements a small state machine (`no-submission` → `posting` → `waiting`
   → `publishing` → `rendered`, with timeout/refusal/missing-tool error states) so the launch flow is
   resilient, not just the happy path — see `market-packs/pr-walkthrough/src/panel.js`.
+
+  > **Update:** principal-minting is **now** pack-expressible via the ambient
+  > [`host.agents`](#hostagents--launch-and-orchestrate-child-agents) capability — a handler can
+  > spawn a real, sandbox-inherited read-only child reviewer instead of driving the user's own
+  > agent. The PR-walkthrough pack has **not yet** been migrated onto it (a separate follow-up
+  > goal); the `postMessage`-driven flow described above is what ships today.
 - **Shared synthesis, one source of truth, bundled into the pack.** The viewer must turn the
   submitted production YAML into the same cards the deleted built-in produced. That synthesis
   (`validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + helpers)

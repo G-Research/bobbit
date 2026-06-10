@@ -28,6 +28,15 @@ A team is a group of agent sessions working together on a goal, coordinated by a
 - **Role agents**: Spawned by the team lead with a specific role (coder, reviewer, tester, or custom). Each gets its own git worktree and role-specific system prompt with restricted tool access.
 - **Lifecycle**: Start → spawn role agents → agents work on tasks → complete (dismiss agents, keep lead) or teardown (dismiss all).
 
+### Child agents (`team_delegate`)
+
+Any session — goal or not — can launch a **child agent** with `team_delegate` (the rename of the
+old `delegate` tool). The child runs in the parent's worktree with no conversation context, either
+blocking one-shot or detached and orchestrated via `team_wait` / `team_prompt` / `team_steer` /
+`team_dismiss`. Children inherit the parent's current model, survive gateway restarts, and are
+cascade-archived with their parent. Packs reach the same machinery via the ambient `host.agents`
+capability. See [orchestration.md](orchestration.md) for the full surface and guarantees.
+
 ## Tasks
 
 Tasks are work items within a goal, managed via REST API or WebSocket commands.

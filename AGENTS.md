@@ -39,7 +39,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 ## Testing
 
 - **UI-only changes** → `test:unit`. **Server changes** → `test:unit` + `test:e2e`. **Session lifecycle / sandbox / worktree / restart** → also `test:manual`.
-- **Test types**: unit·node (`tests/*.test.ts` via node:test), unit·browser (`tests/*.spec.ts`, file:// fixtures), API E2E (`tests/e2e/*.spec.ts`, in-process gateway), browser E2E (`tests/e2e/ui/*.spec.ts`, spawned gateway). **Phase invariant**: every test except `tests/manual-integration/**` runs in exactly one of unit/e2e, pinned by `tests/test-phase-invariant.test.ts`. See [docs/testing-strategy.md](docs/testing-strategy.md).
+- **Test types**: unit·node (`*.test.ts`), unit·browser (`*.spec.ts`, file://), API E2E (`tests/e2e/*.spec.ts`), browser E2E (`tests/e2e/ui/*.spec.ts`). Each test runs in exactly one phase, pinned by `tests/test-phase-invariant.test.ts`. See [docs/testing-strategy.md](docs/testing-strategy.md).
 - Tests run in isolation — never read/write `.bobbit/` directly; use the isolated dir from `e2e-setup.ts`.
 - **Never start background servers from bash** (`node server.js &`) — pipes hang the agent. Use `bash_bg`.
 - Prefer `file://` fixtures for new tests; use E2E only when you need a real server.

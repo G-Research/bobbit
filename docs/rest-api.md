@@ -266,6 +266,25 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead). Body `{ confirmBypassedGates?: boolean }` — the agent/MCP path is refused while any gate is `bypassed`; a human confirms with `confirmBypassedGates: true` (403 for sandbox tokens). See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
+### Orchestration routes (child agents)
+
+These back the `team_delegate` / `team_wait` / own-children `team_*` agent tools. `:id` is the
+**owner** session; the route resolves the authenticated caller as that owner and enforces that a
+target `childSessionId` belongs to the owner (own-children scoping is server-enforced, not
+client-trusted). All call the shared `OrchestrationCore` in-process. See
+[orchestration.md](orchestration.md).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/sessions/:id/orchestrate/children` | List the owner's tracked child agents |
+| `POST` | `/api/sessions/:id/orchestrate/spawn` | Non-blocking spawn (single or `parallel`); child inherits the owner's current model unless overridden |
+| `POST` | `/api/sessions/:id/orchestrate/delegate` | Blocking one-shot: spawn → wait for **all** → auto-dismiss; drop-in `delegate` parity. Always 2xx; per-child `status` carries success/timeout/failure |
+| `POST` | `/api/sessions/:id/orchestrate/prompt` | Run-if-idle / queue a prompt to an owned child (`{ childSessionId, message }`) |
+| `POST` | `/api/sessions/:id/orchestrate/steer` | Mid-turn steer an owned child (`409` if the child is not streaming) |
+| `POST` | `/api/sessions/:id/orchestrate/abort` | Force-abort an owned child |
+| `POST` | `/api/sessions/:id/orchestrate/wait` | Wait for the **first** awaited child to settle (chunked heartbeat, like `/wait`) |
+| `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child |
+
 ### Tasks
 
 | Method | Path | Description |
