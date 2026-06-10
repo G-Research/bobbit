@@ -245,6 +245,7 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
 | `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to `pending`; preserves signal history. See [Gate reset endpoint](#gate-reset-endpoint). |
+| `POST` | `/api/goals/:id/gates/:gateId/bypass` | **Human-only.** Force a not-yet-passed gate to `bypassed` (`{ whyBypassed, whoAmI, isInitiatedByHuman: true }`); persists a synthetic audit signal. Never advertised to agents. See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 | `POST` | `/api/goals/:id/gates/:gateId/signoff` | Resolve a parked `human-signoff` step (`{ signalId, stepName, decision: "pass"\|"fail", feedback? }`); idempotent 409 on already-resolved steps. See [Sign-off endpoint](#sign-off-endpoint). |
 
@@ -262,7 +263,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/abort` | Force-abort a stuck team agent (`{ sessionId }`) |
 | `POST` | `/api/goals/:id/team/prompt` | Send prompt to a team agent, queued if busy (`{ sessionId, message }`) |
 | `GET` | `/api/goals/:id/team/agents` | List agents for a team goal. `?include=archived` also returns archived agents with `teamLeadSessionId`, `teamGoalId`, and `delegateOf` fields |
-| `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead) |
+| `POST` | `/api/goals/:id/team/complete` | Complete a team (dismiss agents, keep team lead). Body `{ confirmBypassedGates?: boolean }` — the agent/MCP path is refused while any gate is `bypassed`; a human confirms with `confirmBypassedGates: true` (403 for sandbox tokens). See [Gate bypass endpoint](#gate-bypass-endpoint). |
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
 ### Tasks
@@ -815,6 +816,8 @@ Returns the server-authoritative gate progress summary for counters and status c
 ```json
 {
   "passed": 0,
+  "bypassed": 0,
+  "bypassedCount": 0,
   "total": 1,
   "verifying": true,
   "verifyingCount": 1,
@@ -836,7 +839,7 @@ Returns the server-authoritative gate progress summary for counters and status c
 }
 ```
 
-Goal-wide fields: `passed`, `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and `gates`. Per-gate fields: `gateId`, `name`, stored `status`, `effectiveStatus` (`running` while an active verification overlays stored state), `running`, `awaitingSignoffCount`, `dependsOn`, and `signalCount`. Conditional fields: `updatedAt` (if signaled) and `failedSteps` (if failed — names of non-passed, non-skipped verification steps). The top-level fields preserve existing consumers; `summary` is the canonical grouped shape used by newer clients.
+Goal-wide fields: `passed`, `bypassed` (count of gates a human forced past verification; `bypassedCount` is an emitted alias for the same value), `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and `gates`. `bypassed` is reported separately from `passed` so the badge can count bypassed gates toward the numerator while still flagging the goal as not-clean (red `(N/N)!`) — see [Human gate bypass](goals-workflows-tasks.md#human-gate-bypass). Per-gate fields: `gateId`, `name`, stored `status` (now includes `bypassed`), `effectiveStatus` (`running` while an active verification overlays stored state), `running`, `awaitingSignoffCount`, `dependsOn`, and `signalCount`. Conditional fields: `updatedAt` (if signaled) and `failedSteps` (if failed — names of non-passed, non-skipped verification steps). The top-level fields preserve existing consumers; `summary` is the canonical grouped shape used by newer clients.
 
 **`GET /api/goals/:id/gates/:gateId?view=summary`**
 
@@ -970,6 +973,52 @@ Notes:
 - Sandboxed agent tokens are forbidden from this route.
 
 Errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate; 409 when the goal is archived.
+
+### Gate bypass endpoint
+
+**`POST /api/goals/:id/gates/:gateId/bypass`** — a **human-only** override that forces a not-yet-passed gate to the distinct `bypassed` status when a verification step is genuinely impossible to satisfy. Modeled on the reset endpoint. This capability is **never advertised to agents**: there is no MCP/agent tool for it and it is absent from all agent-facing prompts and docs. The `isInitiatedByHuman` flag is the runtime backstop; non-discoverability is the primary defense. Full design and UI behavior: [goals-workflows-tasks.md — Human gate bypass](goals-workflows-tasks.md#human-gate-bypass).
+
+Request body:
+
+```json
+{
+  "whyBypassed": "The integration suite needs a vendor sandbox we can't provision here; verified manually instead.",
+  "whoAmI": "Jane (release owner)",
+  "isInitiatedByHuman": true
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `whyBypassed` | yes | Non-empty justification, persisted verbatim in the audit signal. |
+| `whoAmI` | yes | Non-empty free-text label naming who bypassed. Not verified — honesty system. |
+| `isInitiatedByHuman` | yes | Must be exactly `true`. Anything else is refused (see below). |
+
+On success the gate status becomes `bypassed`, a synthetic audit signal (`sessionId: "human-bypass"`, `metadata.bypass: "true"`, plus `whyBypassed` / `whoAmI` / `bypassedAt`) is appended to the gate's signal history, any stale running verification for the gate is cancelled, a `gate_status_changed` event is broadcast on the goal WebSocket, and the live team lead (if any) is notified.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "gateId": "agent-qa",
+  "status": "bypassed",
+  "whyBypassed": "...",
+  "whoAmI": "Jane (release owner)",
+  "bypassedAt": "1739812345678",
+  "teamLeadNotified": true
+}
+```
+
+Errors:
+
+- **400** when `isInitiatedByHuman !== true`, with the guard message: *"This method is currently intended for human use only. Bypassing a gate as an agent is not acting in the best interest of the outcome."* This is the default response an agent gets if it ever stumbles onto the route.
+- **400** when `whyBypassed` or `whoAmI` is missing or blank; **400** when the goal has no workflow.
+- **403** for sandbox-scoped tokens (checked before the body is read).
+- **404** for unknown goal or unknown gate.
+- **409** when the goal is archived or shelved.
+
+**Downstream and completion semantics.** A bypassed gate satisfies dependency ordering for downstream gates (it unblocks dependents exactly like a passed gate), but it does **not** inject content into downstream agents — only `passed` gates with `injectDownstream` do that. The goal still cannot be completed by the agent path while a bypassed gate exists: `POST /api/goals/:id/team/complete` refuses with `Cannot complete: N gate(s) were bypassed and require human confirmation` unless called with `{ confirmBypassedGates: true }`, which is itself rejected with 403 for sandbox tokens. Resetting a bypassed gate returns it to `pending`.
 
 ### Gate inspect endpoint
 
