@@ -1,18 +1,19 @@
 /**
- * Unit tests for the Slice C1 client pack-entrypoint registry — launcher surfaces
- * + deep-linkable client routes + `host.ui.navigate` resolution (design
- * extension-host-phase2.md §7 / §7 C1.1a). Pins the generation-guarded,
+ * Unit tests for the client pack-entrypoint registry — launcher surfaces +
+ * deep-linkable client routes + `host.ui.navigate` resolution (pack schema V1
+ * §8.2; design pack-schema-v1-rationalisation.md). Pins the generation-guarded,
  * project-scoped, reload-safe registry (the entrypoint analogue of
  * pack-renderers/pack-panels-reconcile.spec.ts), using a THIRD-PARTY pack fixture
  * (not the litmus packs) so the surface is proven reusable, not hardcoded:
- *   - reconcile re-drives registration scoped to the active project; dedupes;
+ *   - reconcile re-drives registration scoped to the active project (from
+ *     /api/ext/contributions, NOT /api/tools); dedupes;
  *   - `navigate(RouteTarget)` maps a STRUCTURED target → #/ext/<routeId>?<params>
  *     (params filtered to declared paramKeys; the pack never bakes a hash string);
  *   - getRouteFromHash parses #/ext/<routeId> back to a structured ext route;
  *   - reload restoration: a deep-link → lookupPackRoute → openPackPanel (serves
- *     the bearer-only /panel/ endpoint);
+ *     the pack-addressed bearer-only /panels/ endpoint);
  *   - uninstall reconcile drops the route + launchers (a later navigate no-ops);
- *   - duplicate routeId across tools/packs is rejected (lookupPackRoute undefined);
+ *   - duplicate routeId across packs is rejected (lookupPackRoute undefined);
  *   - NO auto-invoke on mount (reconcile alone touches no panel endpoint + no hash).
  *
  * Pattern mirrors pack-panels-reconcile.spec.ts: esbuild bundles the entry once, a
@@ -63,19 +64,19 @@ async function gotoAndWait(page: any) {
 	await page.evaluate(() => (window as any).__clearHash());
 }
 
-test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
+test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 	test("reconcile scopes to the project + dedupes; NO auto-invoke on mount", async ({ page }) => {
 		await gotoAndWait(page);
 
-		// Reconcile for A fetches /api/tools scoped to A — and touches NO /panel/
-		// endpoint and sets NO hash (no auto-invoke/navigation on mount).
+		// Reconcile for A fetches /api/ext/contributions scoped to A — and touches NO
+		// /panels/ endpoint and sets NO hash (no auto-invoke/navigation on mount).
 		const res = await page.evaluate(async () => {
 			(window as any).__clearCalls();
 			await (window as any).__reconcile("A");
 			return { calls: (window as any).__calls(), hash: (window as any).__hash() };
 		});
-		expect(res.calls.some((u: string) => /\/api\/tools\?projectId=A$/.test(u))).toBe(true);
-		expect(res.calls.some((u: string) => u.includes("/panel/"))).toBe(false);
+		expect(res.calls.some((u: string) => /\/api\/ext\/contributions\?projectId=A$/.test(u))).toBe(true);
+		expect(res.calls.some((u: string) => u.includes("/panels/"))).toBe(false);
 		expect(res.hash).toBe("");
 
 		// Redundant reconcile for the SAME project is deduped — no re-fetch.
@@ -84,7 +85,7 @@ test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
 			await (window as any).__reconcile("A");
 			return (window as any).__calls();
 		});
-		expect(again.some((u: string) => u.includes("/api/tools"))).toBe(false);
+		expect(again.some((u: string) => u.includes("/api/ext/contributions"))).toBe(false);
 	});
 
 	test("lookupPackRoute resolves a third-party routeId after registration", async ({ page }) => {
@@ -96,7 +97,7 @@ test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
 		expect(entry).not.toBeNull();
 		expect(entry.targetPanelId).toBe("thirdparty.viewer");
 		expect(entry.paramKeys).toEqual(["itemId"]);
-		expect(entry.tool).toBe("thirdparty_pack_tool");
+		expect(entry.packId).toBe("thirdparty_pack");
 	});
 
 	test("navigate(RouteTarget) maps to #/ext/<routeId>?<params> (paramKeys-filtered; no baked URL) + getRouteFromHash parses it back", async ({ page }) => {
@@ -133,8 +134,8 @@ test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
 	test("launcher dispatch: a panel launcher opens the panel; a route launcher deep-links (user gesture only)", async ({ page }) => {
 		await gotoAndWait(page);
 
-		// Panel-target launcher → openPackPanel → /panel/ fetch (the panel is registered
-		// in B4's separate pack-panel registry).
+		// Panel-target launcher → openPackPanel → /panels/ fetch (the panel is registered
+		// in the separate pack-panel registry; the launcher's packId scopes the lookup).
 		const panelCalls = await page.evaluate(async () => {
 			await (window as any).__reconcile("A");
 			(window as any).__registerPanel("A");
@@ -143,7 +144,7 @@ test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
 			await (window as any).__flush();
 			return (window as any).__calls();
 		});
-		expect(panelCalls.some((u: string) => u.includes("/api/tools/thirdparty_pack_tool/panel/thirdparty.viewer"))).toBe(true);
+		expect(panelCalls.some((u: string) => u.includes("/api/ext/packs/thirdparty_pack/panels/thirdparty.viewer"))).toBe(true);
 
 		// Route-target launcher → navigate → #/ext hash.
 		const hash = await page.evaluate(async () => {
@@ -169,10 +170,10 @@ test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
 
 		await page.evaluate(async () => { await (window as any).__reconcile("A"); });
 
-		// Uninstall: fresh metadata for A declares no entrypoints. Force a re-fetch
-		// (A→D→A) so the dedupe guard does not skip the uninstall re-drive.
+		// Uninstall: fresh metadata for A declares no packs/entrypoints. Force a
+		// re-fetch (A→D→A) so the dedupe guard does not skip the uninstall re-drive.
 		await page.evaluate(async () => {
-			(window as any).__setTools([{ name: "thirdparty_pack_tool" }]);
+			(window as any).__setContributions([]);
 			await (window as any).__reconcile("D");
 			await (window as any).__reconcile("A");
 		});
@@ -187,16 +188,16 @@ test.describe("pack-entrypoints registry (extension-host-phase2 §7)", () => {
 		});
 		expect(out.before).toBeNull();
 		expect(out.hash).toBe("");
-		expect(out.calls.some((u: string) => u.includes("/panel/"))).toBe(false);
+		expect(out.calls.some((u: string) => u.includes("/panels/"))).toBe(false);
 		expect(out.launchers).toEqual([]);
 	});
 
-	test("duplicate routeId across tools is rejected — registered by NEITHER (lookupPackRoute undefined)", async ({ page }) => {
+	test("duplicate routeId across packs is rejected — registered by NEITHER (lookupPackRoute undefined)", async ({ page }) => {
 		await gotoAndWait(page);
 		const entry = await page.evaluate(async () => {
-			(window as any).__setTools([
-				{ name: "pack_a", entrypoints: [{ id: "a.route", kind: "route", routeId: "dup.route", target: { panelId: "a.viewer" }, paramKeys: [] }] },
-				{ name: "pack_b", entrypoints: [{ id: "b.route", kind: "route", routeId: "dup.route", target: { panelId: "b.viewer" }, paramKeys: [] }] },
+			(window as any).__setContributions([
+				{ packId: "pack_a", packName: "pack_a", panels: [], routeNames: [], entrypoints: [{ id: "a.route", kind: "route", routeId: "dup.route", target: { panelId: "a.viewer" }, paramKeys: [], listName: "a-route" }] },
+				{ packId: "pack_b", packName: "pack_b", panels: [], routeNames: [], entrypoints: [{ id: "b.route", kind: "route", routeId: "dup.route", target: { panelId: "b.viewer" }, paramKeys: [], listName: "b-route" }] },
 			]);
 			// Force a fresh project so the reconcile applies the new metadata.
 			await (window as any).__reconcile("DUP");

@@ -1,24 +1,24 @@
 // Test entry — exercises `reconcilePackEntrypointsForProject` + `registerPackEntrypoints`
-// + `lookupPackRoute` + `navigateToTarget` + `runLauncherEntrypoint` (Slice C1;
-// design docs/design/extension-host-phase2.md §7 / §7 C1.1a). Mirrors
+// + `lookupPackRoute` + `navigateToTarget` + `runLauncherEntrypoint` (pack schema
+// V1 §8.2; design docs/design/pack-schema-v1-rationalisation.md). Mirrors
 // pack-panels-reconcile-entry.ts: stub `window.fetch` to record every request URL
-// and serve fake /api/tools metadata, then drive the helpers via window globals
-// under a file:// fixture. Uses a THIRD-PARTY pack fixture (not the litmus packs)
-// to prove the surface is reusable, not hardcoded. Pins:
-//   1. reconcile fetches /api/tools scoped to the project id; dedupes unchanged.
-//   2. lookupPackRoute resolves a registered routeId → its target panel + paramKeys.
+// and serve fake /api/ext/contributions metadata, then drive the helpers via window
+// globals under a file:// fixture. Uses a THIRD-PARTY pack fixture (not the litmus
+// packs) to prove the surface is reusable, not hardcoded. Pins:
+//   1. reconcile fetches /api/ext/contributions scoped to the project id; dedupes.
+//   2. lookupPackRoute resolves a registered routeId → its target panel + paramKeys + packId.
 //   3. navigateToTarget maps a structured RouteTarget → #/ext/<routeId>?<params>
 //      (params filtered to declared paramKeys; pack never builds the URL), and
 //      getRouteFromHash parses it back to { view:"ext", extRouteId, extParams }.
 //   4. reload restoration: a #/ext/<routeId> deep-link → lookupPackRoute →
-//      openPackPanel serves the bearer-only /panel/ endpoint.
+//      openPackPanel serves the pack-addressed bearer-only /panels/ endpoint.
 //   5. uninstall reconcile drops the route + launchers (a later navigate no-ops).
-//   6. duplicate routeId across tools/packs is rejected (lookupPackRoute undefined).
-//   7. NO auto-invoke on mount: reconcile alone hits no /panel/ endpoint + no hash.
+//   6. duplicate routeId across packs is rejected (lookupPackRoute undefined).
+//   7. NO auto-invoke on mount: reconcile alone hits no /panels/ endpoint + no hash.
 import {
 	registerPackEntrypoints,
 	reconcilePackEntrypointsForProject,
-	entrypointInfosFromTools,
+	entrypointInfosFromContributions,
 	lookupPackRoute,
 	navigateToTarget,
 	runLauncherEntrypoint,
@@ -34,28 +34,32 @@ type EntrypointWire = {
 	routeId?: string;
 	target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
+	listName: string;
 };
-type ToolWire = { name: string; entrypoints?: EntrypointWire[] };
+type PackWire = { packId: string; packName: string; panels: Array<{ id: string; title?: string }>; entrypoints: EntrypointWire[]; routeNames: string[] };
 
 const fetchCalls: string[] = [];
 
 // THIRD-PARTY pack (not artifacts / pr-walkthrough): a deep-link route + a panel
 // launcher + a route launcher. Proves the surface is generic.
-const THIRDPARTY_TOOLS: ToolWire[] = [
+const THIRDPARTY_PACKS: PackWire[] = [
 	{
-		name: "thirdparty_pack_tool",
+		packId: "thirdparty_pack",
+		packName: "thirdparty_pack",
+		panels: [{ id: "thirdparty.viewer" }],
+		routeNames: [],
 		entrypoints: [
-			{ id: "tp.route", kind: "route", routeId: "thirdparty.route", target: { panelId: "thirdparty.viewer" }, paramKeys: ["itemId"] },
-			{ id: "tp.slash", kind: "composer-slash", label: "Open Third-Party", target: { panelId: "thirdparty.viewer" } },
-			{ id: "tp.navlaunch", kind: "command-palette", label: "Deep-link TP", target: { route: "thirdparty.route" } },
-			{ id: "tp.gitbtn", kind: "git-widget-button", label: "TP Button", target: { panelId: "thirdparty.viewer" } },
+			{ id: "tp.route", kind: "route", routeId: "thirdparty.route", target: { panelId: "thirdparty.viewer" }, paramKeys: ["itemId"], listName: "tp-route" },
+			{ id: "tp.slash", kind: "composer-slash", label: "Open Third-Party", target: { panelId: "thirdparty.viewer" }, listName: "tp-slash" },
+			{ id: "tp.navlaunch", kind: "command-palette", label: "Deep-link TP", target: { route: "thirdparty.route" }, listName: "tp-navlaunch" },
+			{ id: "tp.gitbtn", kind: "git-widget-button", label: "TP Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-gitbtn" },
 		],
 	},
 ];
 
-let toolsResponse: ToolWire[] = THIRDPARTY_TOOLS;
+let contributions: PackWire[] = THIRDPARTY_PACKS;
 
-const toolsDelayByProject = new Map<string, number>();
+const contribDelayByProject = new Map<string, number>();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const PANEL_MODULE = "export default function(){ return { render(){ return ''; } }; }";
@@ -63,36 +67,36 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 (window as any).fetch = async (input: any): Promise<Response> => {
 	const url = typeof input === "string" ? input : (input && input.url) || String(input);
 	fetchCalls.push(url);
-	if (url.includes("/panel/")) {
+	if (url.includes("/panels/")) {
 		return new Response(PANEL_MODULE, { status: 200, headers: { "Content-Type": "text/javascript" } });
 	}
 	const m = /[?&]projectId=([^&]*)/.exec(url);
 	const pid = m ? decodeURIComponent(m[1]) : "";
-	const delay = toolsDelayByProject.get(pid) ?? 0;
+	const delay = contribDelayByProject.get(pid) ?? 0;
 	if (delay > 0) await sleep(delay);
-	return new Response(JSON.stringify({ tools: toolsResponse }), {
+	return new Response(JSON.stringify({ packs: contributions }), {
 		status: 200,
 		headers: { "Content-Type": "application/json" },
 	});
 };
 
-(window as any).__setTools = (t: ToolWire[]) => { toolsResponse = t; };
-(window as any).__thirdparty = () => THIRDPARTY_TOOLS;
-(window as any).__setToolsDelay = (pid: string, ms: number) => { toolsDelayByProject.set(pid, ms); };
+(window as any).__setContributions = (c: PackWire[]) => { contributions = c; };
+(window as any).__thirdparty = () => THIRDPARTY_PACKS;
+(window as any).__setContribDelay = (pid: string, ms: number) => { contribDelayByProject.set(pid, ms); };
 (window as any).__calls = (): string[] => fetchCalls.slice();
 (window as any).__clearCalls = () => { fetchCalls.length = 0; };
 (window as any).__reconcile = (pid?: string): Promise<void> => reconcilePackEntrypointsForProject(pid);
 (window as any).__startReconcile = (pid?: string): Promise<void> => reconcilePackEntrypointsForProject(pid);
 // Register directly from the current metadata (bypassing the dedupe guard) — the
 // marketplace install/uninstall path.
-(window as any).__register = (pid?: string) => registerPackEntrypoints(entrypointInfosFromTools(toolsResponse as any), pid);
+(window as any).__register = (pid?: string) => registerPackEntrypoints(entrypointInfosFromContributions(contributions as any), pid);
 (window as any).__lookup = (routeId: string) => lookupPackRoute(routeId) ?? null;
 (window as any).__navigate = (route: string, params?: Record<string, unknown>) => navigateToTarget({ route, params });
 // Register the third-party panel in the (separate) pack-panel registry so a panel-
-// target launcher's openPackPanel actually resolves + fetches the /panel/ endpoint
-// (panel registration is B4's registry, distinct from the entrypoint registry).
+// target launcher's openPackPanel actually resolves + fetches the /panels/ endpoint
+// (panel registration is a distinct registry from the entrypoint registry).
 (window as any).__registerPanel = (pid?: string) =>
-	registerPackPanels([{ panelId: "thirdparty.viewer", tool: "thirdparty_pack_tool" }], pid);
+	registerPackPanels([{ packId: "thirdparty_pack", panelId: "thirdparty.viewer" }], pid);
 (window as any).__runLauncher = (id: string) => runLauncherEntrypoint(id);
 (window as any).__launchers = (kind?: any) => listLauncherEntrypoints(kind).map((l) => l.id);
 (window as any).__route = () => getRouteFromHash();

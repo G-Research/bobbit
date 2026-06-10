@@ -178,7 +178,7 @@ export class ToolGroup extends LitElement {
 									toolCallInput: (tc as any).input,
 									sessionId: sessionIdCtx,
 									packTool: tc.name,
-									host: getHostApi(sessionIdCtx, tc.id, tc.name),
+									host: getHostApi(sessionIdCtx, tc.id, { kind: "tool", tool: tc.name }),
 								});
 								if (renderResult.isCustom) {
 									return renderResult.content;

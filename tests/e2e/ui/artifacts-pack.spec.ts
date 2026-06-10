@@ -6,8 +6,10 @@
  * REAL behavioral parity across MULTIPLE artifact TYPES (not a text-only demo):
  *
  *   1. Install the `artifacts` pack (local-dir source) at SERVER scope →
- *      /api/tools lists `artifact_demo` with rendererKind:"pack", the
- *      `artifacts.viewer` panel, the `artifacts` store id, and the route entrypoint.
+ *      /api/tools lists `artifact_demo` with rendererKind:"pack" (tool-scoped),
+ *      and /api/ext/contributions carries the pack-scoped `artifacts.viewer` panel
+ *      + the `kind:"route"` entrypoint (pack schema V1 §6.1/§6.4). Stores are
+ *      implicit (no `storeIds` wire field) — the namespace is the pack id.
  *   2. Live sessions whose transcripts contain `artifact_demo` tool calls render
  *      the PACK renderer (the inline pill) for FOUR distinct types — and NO store
  *      POST fires before any click (security control §5 v: no auto-invoke on mount).
@@ -114,16 +116,30 @@ async function cleanup(): Promise<void> {
 interface ArtifactToolMeta {
 	name: string;
 	rendererKind?: string;
-	storeIds?: string[];
-	panels?: { id: string; title?: string }[];
-	entrypoints?: Array<{ id: string; kind: string; routeId?: string; paramKeys?: string[] }>;
 }
 
-/** Fetch the server-scope tool list (no projectId → server ToolManager). */
+interface PackContributionsMeta {
+	packId: string;
+	packName: string;
+	panels: { id: string; title?: string }[];
+	entrypoints: Array<{ id: string; kind: string; routeId?: string; paramKeys?: string[]; listName: string }>;
+	routeNames: string[];
+}
+
+/** Fetch the server-scope tool list (no projectId → server ToolManager). Pack
+ *  schema V1 §6.1: /api/tools carries ONLY tool-scoped fields (renderer/actions). */
 async function listTools(): Promise<ArtifactToolMeta[]> {
 	const res = await apiFetch("/api/tools");
 	expect(res.ok).toBe(true);
 	return (await res.json()).tools as ArtifactToolMeta[];
+}
+
+/** Fetch the server-scope pack-contribution metadata (panels/entrypoints/routes
+ *  moved here off the tool YAML — pack schema V1 §6.4). */
+async function listContributions(): Promise<PackContributionsMeta[]> {
+	const res = await apiFetch("/api/ext/contributions");
+	expect(res.ok).toBe(true);
+	return (await res.json()).packs as PackContributionsMeta[];
 }
 
 test.afterEach(async () => {
@@ -139,14 +155,18 @@ test.describe("Extension Host Phase 2 — artifacts-as-pack litmus (D1)", () => 
 		// registerPackRenderers()/Panels()/Entrypoints() bootstrap sees the pack. ──
 		await installArtifactsPack();
 
-		// ── Step 2: /api/tools lists artifact_demo with all Phase-2 contributions. ──
+		// ── Step 2: /api/tools lists artifact_demo with the tool-scoped renderer;
+		// /api/ext/contributions carries the pack-scoped panel + route entrypoint. ──
 		const tools = await listTools();
 		const meta = tools.find((t) => t.name === TOOL);
 		expect(meta, "artifact_demo must be listed after install").toBeTruthy();
 		expect(meta?.rendererKind).toBe("pack");
-		expect(meta?.storeIds).toContain("artifacts");
-		expect(meta?.panels?.some((p) => p.id === "artifacts.viewer"), "artifacts.viewer panel must be declared").toBe(true);
-		const routeEp = meta?.entrypoints?.find((e) => e.kind === "route");
+
+		const contributions = await listContributions();
+		const packMeta = contributions.find((p) => p.packId === PACK);
+		expect(packMeta, "the artifacts pack must appear in /api/ext/contributions").toBeTruthy();
+		expect(packMeta?.panels?.some((p) => p.id === "artifacts.viewer"), "artifacts.viewer panel must be declared").toBe(true);
+		const routeEp = packMeta?.entrypoints?.find((e) => e.kind === "route");
 		expect(routeEp?.routeId, "a kind:route entrypoint with routeId 'artifacts' must be declared").toBe("artifacts");
 		expect(routeEp?.paramKeys).toContain("artifactId");
 
