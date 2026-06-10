@@ -45,6 +45,16 @@
 
 import { execFile } from "node:child_process";
 
+// PRODUCTION-FAITHFUL SYNTHESIS (design built-in-first-party-packs §8.4): the pack
+// runs the SAME YAML→cards synthesis as the deleted built-in via the pure shared
+// module, bundled (with its `yaml` dep) to the sibling lib/yaml-to-cards.mjs by
+// build:packs. The `publish` route validates + maps the RAW submitted production
+// YAML (pr + walkthrough.{…}, NOT a `{cards}` shortcut) against the LIVE-computed
+// diff blocks, so the pack reaches REAL parity with the built-in viewer. This is a
+// pack-root-confined relative import (the routes module graph is allowed to import
+// sibling pack files in the confined worker).
+import { mapYamlToWalkthroughPayload, validatePrWalkthroughYaml } from "./yaml-to-cards.mjs";
+
 const STORE_SCHEMA_VERSION = 1;
 const GIT_MAX_BUFFER = 20 * 1024 * 1024;
 
@@ -58,7 +68,10 @@ function b64url(value) {
 }
 
 function normalizeJobId(value) {
-	return typeof value === "string" && value.trim() ? value.trim() : "job-litmus-1";
+	// No more shared litmus literal: the panel derives the REAL jobId from the
+	// submitted doc's `pr` (changesetIdForGithub). The neutral fallback is only used
+	// when a bare deep-link carries no jobId AND no persisted pointer exists.
+	return typeof value === "string" && value.trim() ? value.trim() : "pr-walkthrough";
 }
 
 function strOf(value) {
@@ -127,52 +140,94 @@ export const routes = {
 		};
 	},
 
-	// Submit-time persistence seam (re-expresses storeWalkthrough). The agent tool
-	// (with real git/fs/network + MODEL credentials) COMPUTES the LLM-enhanced cards
-	// and hands them here. We persist:
-	//   • the LLM cards keyed by the changeset id (read back by `bundle`), and
-	//   • a job pointer { changesetId, baseSha, headSha } so a jobId-only
-	//     deep-link can recompute the same changeset live (against the session
-	//     worktree — the repo root is never persisted/caller-supplied).
+	// Submit-time persistence seam — PRODUCTION-FAITHFUL synthesis (design §8.4).
+	// The agent's submit_pr_walkthrough_yaml emits the RICH production YAML (pr +
+	// walkthrough.{context,merge_assessment,design_decisions,review_chunks,…}); the
+	// panel hands that RAW yaml text here as `{ yaml, jobId, baseSha, headSha }`. This
+	// route (confined worker, ambient git/fs) then runs the SAME synthesis the deleted
+	// built-in ran:
+	//   1. RECOMPUTE the LIVE changeset (`git`) against the session worktree — both to
+	//      key the store per-real-changeset AND to feed real diff blocks to the mapper.
+	//   2. validate + map the YAML → PrWalkthroughCard[] via the bundled shared module
+	//      (DiffReferenceMapper resolves relevant_hunks/anchors against the live diff).
+	//   3. persist the synthesized cards keyed by the LIVE changeset id (the same key
+	//      `bundle` recomputes), plus a job pointer { changesetId, baseSha, headSha } so
+	//      a jobId-only deep-link can rehydrate the base/head. No `repoDir` is ever
+	//      persisted (the git root is the server-derived session worktree).
 	// `persistedAt` is stamped ONCE per changeset (a re-publish keeps the original
-	// stamp) so the bundle route returns a stable timestamp across reloads —
-	// the store-rehydration parity proof.
+	// stamp) so `bundle` returns a stable timestamp across reloads — the
+	// store-rehydration parity proof. An invalid YAML returns a structured schema
+	// error (the panel surfaces it; nothing is persisted).
 	publish: async (ctx, req) => {
 		const body = (req && req.body) || {};
 		const jobId = normalizeJobId(body.jobId);
-		const changesetId = strOf(body.changesetId)
-			|| (strOf(body.baseSha) && strOf(body.headSha) ? changesetIdForLocal(body.baseSha, body.headSha) : undefined)
+		let baseSha = strOf(body.baseSha);
+		let headSha = strOf(body.headSha);
+
+		// Rehydrate base/head from the job pointer when a re-publish omits them.
+		if (!baseSha || !headSha) {
+			const job = await ctx.host.store.get(jobKey(jobId));
+			if (job && typeof job === "object") {
+				baseSha = baseSha || strOf(job.baseSha);
+				headSha = headSha || strOf(job.headSha);
+			}
+		}
+
+		// LIVE changeset recompute against the session worktree (server-derived cwd).
+		// Provides BOTH the per-real-changeset store key and the parsed diff blocks the
+		// synthesis maps relevant_hunks / suggested-comment anchors against.
+		let live;
+		if (baseSha && headSha) {
+			live = await resolveLocalChangeset(workerCwd(), baseSha, headSha);
+		}
+		const changesetId = (live && live.changesetId)
+			|| strOf(body.changesetId)
+			|| (baseSha && headSha ? changesetIdForLocal(baseSha, headSha) : undefined)
 			|| jobId;
 
-		// Job pointer — lets a jobId-only deep-link rehydrate the base/head. We do NOT
-		// persist a `repoDir`: the git working dir is always the session worktree
-		// (server-derived), never a stored/caller-supplied path.
-		const jobPointer = {
+		// Job pointer — lets a jobId-only deep-link rehydrate base/head. NEVER a repoDir.
+		await ctx.host.store.put(jobKey(jobId), {
 			schemaVersion: STORE_SCHEMA_VERSION,
 			jobId,
 			changesetId,
-			baseSha: strOf(body.baseSha),
-			headSha: strOf(body.headSha),
-		};
-		await ctx.host.store.put(jobKey(jobId), jobPointer);
+			baseSha,
+			headSha,
+		});
 
-		// LLM cards (if provided) keyed by changeset id, persistedAt stamped once.
-		let persistedAt;
-		if (Array.isArray(body.cards) && body.cards.length > 0) {
-			const existing = await ctx.host.store.get(cardsKey(changesetId));
-			persistedAt = typeof body.persistedAt === "number"
-				? body.persistedAt
-				: (existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now());
-			await ctx.host.store.put(cardsKey(changesetId), {
-				schemaVersion: STORE_SCHEMA_VERSION,
-				changesetId,
-				cards: body.cards,
-				warnings: Array.isArray(body.warnings) ? body.warnings : [],
-				persistedAt,
-			});
+		// Validate + map the RAW production YAML through the SHARED synthesis.
+		const yamlText = strOf(body.yaml);
+		if (!yamlText) {
+			const keys = await ctx.host.store.list("");
+			return { ok: true, jobId, changesetId, persistedAt: undefined, cardCount: 0, keys };
 		}
+		const validation = validatePrWalkthroughYaml(yamlText);
+		if (!validation.ok) {
+			// Structured schema error — the panel renders the validation message; we
+			// persist NOTHING (the bundle then falls back to the structural cards).
+			return { ok: false, error: "YAML_SCHEMA_INVALID", summary: validation.summary, jobId, changesetId };
+		}
+		const parsedDiff = live
+			? { diffBlocks: live.blocks, changeset: live.changeset, warnings: live.warnings }
+			: {};
+		const result = mapYamlToWalkthroughPayload(validation.document, parsedDiff);
+		const cards = Array.isArray(result.cards) ? result.cards : [];
+		const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+
+		// Persist synthesized cards keyed by the LIVE changeset id; persistedAt once.
+		const existing = await ctx.host.store.get(cardsKey(changesetId));
+		const persistedAt = typeof body.persistedAt === "number"
+			? body.persistedAt
+			: (existing && typeof existing.persistedAt === "number" ? existing.persistedAt : Date.now());
+		await ctx.host.store.put(cardsKey(changesetId), {
+			schemaVersion: STORE_SCHEMA_VERSION,
+			changesetId,
+			cards,
+			warnings,
+			persistedAt,
+		});
+
 		const keys = await ctx.host.store.list("");
-		return { ok: true, jobId, changesetId, persistedAt, keys };
+		return { ok: true, jobId, changesetId, persistedAt, cardCount: cards.length, keys };
 	},
 };
 
@@ -216,7 +271,9 @@ async function resolveLocalChangeset(cwd, baseSha, headSha) {
 		deletions: stats.deletions,
 	};
 	const cards = synthesizeFallbackCards(changeset, blocks, warnings);
-	return { changesetId: changesetIdForLocal(fullBase, fullHead), changeset, cards, warnings };
+	// `blocks` is exposed so the `publish` route can feed the LIVE parsed diff into
+	// the shared YAML→cards synthesis (real DiffReferenceMapper hunk/anchor mapping).
+	return { changesetId: changesetIdForLocal(fullBase, fullHead), changeset, cards, warnings, blocks };
 }
 
 function git(cwd, args) {
