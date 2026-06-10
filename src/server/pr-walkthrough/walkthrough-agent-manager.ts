@@ -372,6 +372,9 @@ export class WalkthroughAgentManager {
 			const typed = classifyDiffResolutionError(error);
 			const updated = this.store.update(job.jobId, { status: "error", error: typed }) ?? job;
 			this.broadcastJob(updated);
+			// Terminal error (mapping/diff-resolution failure): tear down the child so the
+			// failed walkthrough is not respawned on the next restart.
+			await this.terminateChild(updated.childSessionId);
 			throw routeError(statusForJobError(typed), typed.message, { code: typed.code, retryable: typed.retryable, job: publicJob(updated) });
 		}
 		const stored = saveWalkthrough(payload, this.stateDir);

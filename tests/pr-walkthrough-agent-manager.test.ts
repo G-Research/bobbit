@@ -848,6 +848,11 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(job?.status, "error");
 		assert.equal(job?.error?.code, "PR_WALKTHROUGH_BUNDLE_MISSING");
 		assert.equal(job?.error?.retryable, true);
+		// Terminal error: a mapping/diff-resolution failure flips the job to status:"error"
+		// (reapable on boot), so the live child must be torn down too — otherwise the
+		// process leaks until the next restart.
+		assert.ok(sessionManager.terminated.includes("child-no-bundle-metadata"), "a terminal mapping error must terminate the child session");
+		assert.equal(sessionManager.sessions.has("child-no-bundle-metadata"), false, "terminated child is removed from the live session map");
 	});
 
 	it("internal submit validates YAML identity against the launch target", async () => {
