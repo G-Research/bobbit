@@ -17,12 +17,15 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { parseCustomDirectories as parseCustomDirsFromConfig, type ProjectConfigReader } from "../agent/config-directories.js";
 import { buildPackList } from "../agent/pack-list.js";
+import { resolveBuiltinPacksDir } from "../agent/builtin-packs.js";
 import { PackResolver, SkillLoader, type ActivationFilter } from "../agent/pack-resolver.js";
 import type { PackEntry, LoadedEntity, ResolvedEntity } from "../agent/pack-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** The builtin pack root (dist/server/defaults). Its skills/ subtree is the builtin-file skill source. */
 const BUILTINS_DIR = path.join(__dirname, "..", "defaults");
+/** The first-party pack band root (dist/server/builtin-packs/market-packs). */
+const BUILTIN_PACKS_DIR = resolveBuiltinPacksDir();
 
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
@@ -340,6 +343,7 @@ function buildSkillPackList(
 	// store. Without it, fall back to `cwd` for every scope (back-compat).
 	const list = buildPackList({
 		builtinsDir: BUILTINS_DIR,
+		builtinPacksDir: BUILTIN_PACKS_DIR,
 		serverBase: marketContext?.serverBase ?? cwd,
 		globalUserBase: marketContext?.globalUserBase ?? os.homedir(),
 		projectBase: marketContext?.projectBase ?? cwd,

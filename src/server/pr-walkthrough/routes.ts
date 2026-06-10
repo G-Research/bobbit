@@ -209,30 +209,11 @@ export async function handlePrWalkthroughApiRoute(
 			return true;
 		}
 
-		const jobMatch = url.pathname.match(/^\/api\/pr-walkthrough\/jobs\/([^/]+)$/);
-		if (jobMatch && req.method === "GET") {
-			const manager = getWalkthroughAgentManager(deps);
-			const job = manager.getJob(decodeURIComponent(jobMatch[1]));
-			if (!job) {
-				fail(404, "PR walkthrough job not found", { code: "JOB_NOT_FOUND" });
-				return true;
-			}
-			json({ job });
-			return true;
-		}
-
-		const sessionMatch = url.pathname.match(/^\/api\/pr-walkthrough\/session\/([^/]+)$/);
-		if (sessionMatch && req.method === "GET") {
-			const manager = getWalkthroughAgentManager(deps);
-			const job = manager.getJobForSession(decodeURIComponent(sessionMatch[1]));
-			if (!job) {
-				fail(404, "PR walkthrough session job not found", { code: "JOB_NOT_FOUND" });
-				return true;
-			}
-			json({ job });
-			return true;
-		}
-
+		// VIEWER-FEED routes deleted (built-in viewer removed): GET
+		// /api/pr-walkthrough/jobs/:id, /session/:id, and the generic /:id no longer
+		// exist — the pr-walkthrough first-party pack serves the viewer surface via its
+		// own host.callRoute("bundle"|"publish") routes. launch/resolve/export + the
+		// internal bundle/analysis-bundle/submit-yaml routes stay (agent toolchain).
 		if (url.pathname === "/api/pr-walkthrough/resolve" && req.method === "POST") {
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {
@@ -282,18 +263,6 @@ export async function handlePrWalkthroughApiRoute(
 			}
 			const result = await submitExport(changesetId, stored.payload, body);
 			json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
-			return true;
-		}
-
-		const getMatch = url.pathname.match(/^\/api\/pr-walkthrough\/(.+)$/);
-		if (getMatch && req.method === "GET") {
-			const changesetId = decodeURIComponent(getMatch[1]);
-			const stored = await loadWalkthrough(changesetId);
-			if (!stored) {
-				fail(404, `Walkthrough not found: ${changesetId}`);
-				return true;
-			}
-			json({ ...stored.payload, updatedAt: stored.updatedAt, schemaVersion: stored.schemaVersion });
 			return true;
 		}
 

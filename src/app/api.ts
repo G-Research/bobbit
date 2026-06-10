@@ -2551,6 +2551,8 @@ export interface MarketplaceSource {
 	addedAt: string;
 	lastSyncedAt?: string;
 	lastCommit?: string;
+	/** Response-only: marks the synthetic, non-removable built-in source (§4.4). */
+	builtin?: boolean;
 }
 
 /** One-line per-entity descriptions sourced from the pack dir (R3). Keyed by the
@@ -2567,6 +2569,10 @@ export interface PackEntityDescriptions {
 export interface BrowsePackWire extends PackManifest {
 	dirName: string;
 	hasTools: boolean;
+	/** Response-only: shipped first-party pack (built-in source). */
+	builtin?: boolean;
+	/** Response-only: resolved in place (not copy-installed). */
+	provided?: boolean;
 	descriptions?: PackEntityDescriptions;
 }
 
@@ -2576,6 +2582,8 @@ export interface InstalledPackWire {
 	manifest: PackManifest;
 	meta: PackMeta;
 	status: "ok" | "corrupt";
+	/** Response-only: a built-in first-party pack row (no install ledger entry). */
+	builtin?: boolean;
 	/** True iff the source's latest manifest version differs from the installed
 	 *  version AND the source could be checked. MUST stay in sync with the server
 	 *  `InstalledPackWire` (`src/server/agent/marketplace-install.ts`). */

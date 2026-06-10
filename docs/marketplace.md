@@ -216,6 +216,42 @@ Both install and resolution derive these paths from one helper (`scopePaths()` i
 
 The source registry persists separately to `<server-cwd>/.bobbit/config/marketplace-sources.yaml`, and git clones are cached under `<server-cwd>/.bobbit/state/marketplace-cache/<source-id>/`.
 
+## Built-in (first-party) packs
+
+Bobbit ships some of its own features **as packs** rather than as bespoke built-in code. This **dogfoods the pack API**: a real shipped feature is delivered through the same `PackResolver` + Host API + activation system as any third-party pack, so the extension surface is exercised by production code and not just by tests. It also lets users **disable shipped features they don't want** from the Market UI, using the same per-entity activation toggles as installed packs. The first feature migrated this way is **`pr-walkthrough`** — see [docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the full design and rationale, and [the Extension Host authoring guide](extension-host-authoring.md#first-party-packs-dogfood-the-host-api) for how the pack re-expresses it.
+
+The shipped packs live in the repo at `market-packs/<name>/`, are built by `npm run build:packs`, and are copied into `dist/server/builtin-packs/market-packs/<name>/` by `scripts/copy-builtin-packs.mjs` (an explicit allowlist — *not* every dir under `market-packs/`). At runtime they are located relative to the server module dir (`resolveBuiltinPacksDir()` in `src/server/agent/builtin-packs.ts`, overridable via `BOBBIT_BUILTIN_PACKS_DIR` for tests).
+
+### Resolve-in-place, not copy-install
+
+Built-in packs are **resolved in place**, never copied into a scope's `market-packs/`. `buildPackList()` adds a dedicated **built-in first-party band** (`builtinFirstPartyPackEntries()`) that resolves each shipped pack directly from the dist tree. The band sits **above the monolithic builtin defaults and below every user scope band**:
+
+```
+builtin-defaults  <  built-in-first-party  <  server-installed  <  global-user  <  project
+```
+
+This was chosen over a copy-install model (auto-copy each pack into a scope on startup) because copy-install fights the user: re-installing a pack the user removed would need a persisted "opted-out" ledger, plus bespoke update-on-upgrade logic to refresh stale copies. With resolve-in-place, **"installed" just means present + active by default**, the only opt-out is *disable* (below), updates ride the app upgrade for free, and the user's `market-packs/` dirs stay purely user-owned. See [the design doc §2](design/built-in-first-party-packs.md) for the rejected alternative in full.
+
+Because the shipped dir contains a literal `market-packs` path segment, the security-critical pack-identity derivation (`derivePackId` / `packIdFromRoot` / `isMarketPackBaseDir`) yields a stable, correct `packId` with **zero changes to the identity code** — a built-in pack's identity is its dir name exactly like any market pack.
+
+### The synthetic "builtin" source
+
+The Market **Sources** tab shows a distinct, labelled **Built-in** section. It is backed by a *synthetic* source (`id: "builtin"`, `url: "builtin:"`) that is **never persisted** to `marketplace-sources.yaml` — `GET /api/marketplace/sources` composes it into the response at read time, so it is automatically idempotent across restarts and can never be duplicated or shadowed by a disk-authored row (`MarketplaceSourceStore` strips/rejects any `builtin` field or reserved id/url). Consequences:
+
+- **The built-in source cannot be removed.** `DELETE /api/marketplace/sources/builtin` → **403**; the UI omits the Remove control. Re-sync is a no-op (the dir ships with the app).
+- **Its packs cannot be copy-installed or updated.** `POST /api/marketplace/install` with `sourceId: "builtin"` → **403**, and `POST /api/marketplace/update` for a built-in pack name with no real user install → **403** ("built-in packs update with the app; nothing to update"). Browse rows render as *Provided (built-in)*, never with an Install button.
+
+### Disabling a shipped feature
+
+Built-in packs appear in the **Installed** tab in their own *Built-in (shipped)* group, flagged `builtin: true`, with **enable/disable toggles only — no Uninstall and no Update**. Disabling reuses the [#734 activation-override system](#activation-controls) verbatim: it writes `pack_activation` under the **`server` scope** (a shipped feature is a server-wide admin decision, so disabling applies across projects) and removes exactly the toggled user-facing entries (roles/tools/skills/entrypoints) from resolution. Panels and routes stay as support surfaces for whatever remains enabled. Because the migrated feature's old built-in code is **deleted** (the pack is the sole provider), disabling its pack makes the feature genuinely unavailable — the deep-link degrades to an empty "feature unavailable" state, never a crash. Toggling invalidates resolver caches synchronously, so the change takes effect with no restart/reload, and the disabled state **persists across reload and restart** (it lives in server config).
+
+### Same-name user override (shadowing)
+
+If a user installs a pack with the **same name** as a built-in one, both render as **two distinct Market rows** (built-in rows are keyed `builtin:<name>`, installed rows `<scope>:<name>`). The user install wins resolution (it sits higher in the list), so:
+
+- The installed row is uninstallable and **owns the live activation toggle**; uninstalling it simply re-exposes the built-in pack as the winner again.
+- The built-in row is non-uninstallable and its toggle is **disabled and marked *shadowed*** ("Shadowed by an installed pack — manage activation on the installed copy"), so exactly one row ever owns a live toggle.
+
 ## Authoring a pack
 
 ### Source-repo layout

@@ -1110,3 +1110,40 @@ details.wf-proposal-workflow .wf-proposal-gates {
 .pr-conflict-pulse {
 	animation: pr-conflict-pulse 1.5s ease-in-out infinite;
 }
+
+/* Disabled `#/ext/<routeId>` deep-link empty state (built-in-first-party-packs
+ * §7.3). A centered, dismissible card surfaced when a bookmarked extension
+ * deep-link resolves to no registered route (pack disabled/uninstalled). */
+.ext-unavailable-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 1.5rem;
+	background: color-mix(in oklch, var(--background) 70%, transparent);
+}
+.ext-unavailable-card {
+	max-width: 24rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	padding: 1.25rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius, 0.5rem);
+	background: var(--card);
+	color: var(--card-foreground, var(--foreground));
+	box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 18%, transparent);
+}
+.ext-unavailable-title {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-weight: 600;
+	font-size: 0.95rem;
+}
+.ext-unavailable-body {
+	font-size: 0.85rem;
+	color: var(--muted-foreground);
+}

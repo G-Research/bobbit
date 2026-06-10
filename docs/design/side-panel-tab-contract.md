@@ -5,6 +5,19 @@ Companion to [`preview-architecture.md`](../preview-architecture.md) (v3 mount,
 SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-widgets.md)
 (historical preview tab UX).
 
+> **Current model — PR walkthrough is no longer a bespoke side-panel tab.** The
+> PR-walkthrough viewer now ships as a built-in first-party **pack**
+> (`market-packs/pr-walkthrough/`) rendered through the **generic `ext` route**
+> at `#/ext/pr-walkthrough`, not as a `walkthrough:<changeset-id>` side-pane tab
+> kind. The bespoke `walkthrough:` tab id, the slash/Git-Status/PR-link tab-upsert
+> paths, the standalone `/walkthrough?...` route, `src/app/pr-walkthrough.ts`, and
+> `tests/e2e/ui/pr-walkthrough-panel.spec.ts` are all **deleted**. The
+> walkthrough-specific rows below are retained as **historical** context for the
+> tab contract; see
+> [docs/marketplace.md § Built-in (first-party) packs](../marketplace.md#built-in-first-party-packs)
+> and [docs/design/pr-walkthrough-pack-deletion.md](./pr-walkthrough-pack-deletion.md)
+> for the pack model.
+
 ---
 
 ## 1. Why this exists
@@ -69,7 +82,7 @@ Valid side-pane tab ids (sources of truth in
 | `proposal:<type>` | Active proposal of `<type>` (`goal`, `project`, `role`, `tool`, `staff`). |
 | `proposal:<type>:rev:<N>` | Historical proposal revision. |
 | `review:<encoded-title>` | Review document by title. |
-| `walkthrough:<changeset-id>` | PR / changeset walkthrough. `<changeset-id>` is encoded and derived from the changeset source, e.g. PR number, URL slug, or SHA pair. |
+| ~~`walkthrough:<changeset-id>`~~ *(historical — deleted)* | Former PR / changeset walkthrough tab kind. **Removed**: the walkthrough viewer is now the built-in pack at the generic `#/ext/pr-walkthrough` route, not a bespoke side-pane tab id. |
 | `inbox` | Staff-agent inbox. Pinned, no close button, no drag handle. |
 
 `isSidePanelTabId(id)` is the single guard the rest of the app uses.
@@ -269,15 +282,16 @@ close cleanly on their own and never touch the active slot.
 the session's `reviewDocuments` map. Closing a review tab fires the
 existing review-close behaviour.
 
-**Walkthrough tabs** use `walkthrough:<changeset-id>` and render the PR /
-changeset review surface for that changeset. Slash-command, Git Status
-Widget, and PR-link metadata launch paths upsert the matching tab and take
-focus; reopening the same changeset updates that tab instead of duplicating
-it. The same tab can render in the side panel, fullscreen/wide surface, or
-standalone `/walkthrough?...` route. The walkthrough component persists its
-card decisions, comments, diff mode, and audit state by tab id, so separate
-changesets keep independent review state inside the shared side-panel
-workspace.
+**Walkthrough tabs** *(historical — deleted)*. The PR/changeset walkthrough
+formerly used a `walkthrough:<changeset-id>` side-pane tab kind: slash-command,
+Git Status Widget, and PR-link metadata launch paths upserted the matching tab
+and took focus, with the same tab rendering in the side panel, fullscreen/wide
+surface, or a standalone `/walkthrough?...` route. **That tab kind, those launch
+paths, and the standalone route are removed.** The walkthrough viewer now ships
+as the built-in first-party pack at the generic `#/ext/pr-walkthrough` route; a
+pack entrypoint opens the pack panel and the pack persists its review state
+through its own pack-namespaced `host.store`. See
+[docs/design/pr-walkthrough-pack-deletion.md](./pr-walkthrough-pack-deletion.md).
 
 **Inbox** is special. For staff-agent sessions it is an always-present,
 pinned side-pane tab:
@@ -403,6 +417,12 @@ preview tabs:
 
 ## 8. Cross-kind harmony
 
+> *(Historical: the `walkthrough` references in this section describe the
+> deleted `walkthrough:<changeset-id>` side-pane tab kind. The walkthrough viewer
+> is now the built-in pack at `#/ext/pr-walkthrough` and is no longer a side-pane
+> tab; the harmony invariants still hold for preview, proposal, review, and inbox
+> tabs.)*
+
 The point of the contract is that preview, proposal, review, walkthrough,
 and inbox tabs all share the same model:
 
@@ -433,8 +453,8 @@ So:
 |---|---|
 | [`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) | Tab id grammar, normalization, persistence, version ledger, pinned ordering, `nextActivePanelTabId`, `reorderSidePanelTab`. |
 | [`src/app/preview-panel.ts`](../../src/app/preview-panel.ts) | `selectHtmlPreviewTab` (upsert / split / collapse), SSE bootstrap and live update, older-version-rehydration guard. |
-| [`src/app/pr-walkthrough.ts`](../../src/app/pr-walkthrough.ts) | Slash-command parsing, changeset-derived walkthrough tab id / title, tab upsert, and active-id selection. |
-| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos for active tab), mobile pane bar with pinned Chat pill, SortableJS attach (`ensurePanelSortable`) + X-axis lock raF loop, render suppression during drag, `_proposalOverride` for editable historical proposal tabs, walkthrough panel content, active-content lookup by id only. |
+| ~~`src/app/pr-walkthrough.ts`~~ *(deleted)* | Former owner of slash-command parsing, changeset-derived walkthrough tab id / title, tab upsert, and active-id selection. **Removed** with the bespoke walkthrough tab kind; the viewer is now the built-in pack at `#/ext/pr-walkthrough`. |
+| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos for active tab), mobile pane bar with pinned Chat pill, SortableJS attach (`ensurePanelSortable`) + X-axis lock raF loop, render suppression during drag, `_proposalOverride` for editable historical proposal tabs, active-content lookup by id only. *(The deleted walkthrough panel branch no longer renders here.)* |
 | [`src/ui/tools/renderers/PreviewRenderer.ts`](../../src/ui/tools/renderers/PreviewRenderer.ts) | Tool-card Open button; chooses between artifact restore, source remount, and recorded-entry select; computes collapse-to-current before invoking `selectHtmlPreviewTab`. |
 | [`src/server/preview/artifacts.ts`](../../src/server/preview/artifacts.ts) | `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash`, `sweepOrphanArtifacts`. |
 | [`src/server/server.ts`](../../src/server/server.ts) (`/api/preview/mount`, `/api/preview/artifacts/:id/restore`, SSE) | Capture artifact on mount; include `artifactId` in mount responses, SSE bootstrap, and live events. |
@@ -499,7 +519,10 @@ preview regression coverage stays green:
 - [`tests/e2e/ui/preview-happy-path.spec.ts`](../../tests/e2e/ui/preview-happy-path.spec.ts)
 - [`tests/e2e/ui/preview-new-tab.spec.ts`](../../tests/e2e/ui/preview-new-tab.spec.ts)
 - [`tests/e2e/ui/preview-refresh.spec.ts`](../../tests/e2e/ui/preview-refresh.spec.ts)
-- [`tests/e2e/ui/pr-walkthrough-panel.spec.ts`](../../tests/e2e/ui/pr-walkthrough-panel.spec.ts)
+
+*(The former `tests/e2e/ui/pr-walkthrough-panel.spec.ts` was deleted with the
+bespoke walkthrough tab; the pack-served viewer is now pinned by
+`tests/e2e/ui/pr-walkthrough-pack.spec.ts`.)*
 
 The v3 snapshot block stays pinned by
 [`tests/e2e/preview-token-cost.spec.ts`](../../tests/e2e/preview-token-cost.spec.ts).

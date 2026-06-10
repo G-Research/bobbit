@@ -408,10 +408,17 @@ export function renderPackPanelContent(packId: string, panelId: string, params?:
 			// supplied via the injected factory (host-api self-registers) to avoid an
 			// import cycle; when unset (unit fixtures) the panel renders with
 			// host === undefined.
+			const sessionId = currentSessionIdForPanel();
 			const host = panelHostFactory
-				? panelHostFactory(currentSessionIdForPanel(), packId, panelId)
+				? panelHostFactory(sessionId, packId, panelId)
 				: undefined;
-			return panel.render(params, host);
+			// Thread the BOUND session id into the render params under a reserved key so
+			// a panel can scope its module-level state PER SESSION (the panel module is a
+			// single page-lived instance shared across sessions). Injected fresh each
+			// render — NOT persisted to the panel-workspace tab — so it always reflects
+			// the CURRENT session. Panels that ignore it are unaffected.
+			const renderParams = sessionId ? { ...(params ?? {}), __sessionId: sessionId } : params;
+			return panel.render(renderParams, host);
 		} catch (err) {
 			// eslint-disable-next-line no-console
 			console.error(`[pack-panels] render failed for "${packId}/${panelId}":`, err);

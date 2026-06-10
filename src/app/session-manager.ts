@@ -34,13 +34,6 @@ import { clearProposalAnnotations } from "../ui/components/review/proposal-annot
 import { restorePersistedReviewDocuments } from "./review-sources.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 
-function restorePrWalkthroughPanelIfNeeded(sessionId: string, sessionData: { walkthroughJobId?: string; childKind?: string } | undefined): void {
-	if (!sessionData?.walkthroughJobId && sessionData?.childKind !== "pr-walkthrough") return;
-	void import("./pr-walkthrough.js").then(({ restorePrWalkthroughJobForSession }) => {
-		restorePrWalkthroughJobForSession(state, sessionId);
-	}).catch(() => { /* older server or walkthrough module unavailable */ });
-}
-
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
 async function invalidateProjectScopeConfig(projectId: string): Promise<void> {
@@ -1078,7 +1071,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// without this, clicking "Create Goal" in the proposal form after switching
 		// away and back to a goal-assistant session fails with "Select a project…".
 		state.previewProjectId = sessionData?.projectId || "";
-		restorePrWalkthroughPanelIfNeeded(sessionId, sessionData);
 		state.previewTitleEdited = false;
 		state.previewSpecEdited = false;
 		state.previewCwdEdited = false;
@@ -1874,7 +1866,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.assistantTab = "chat";
 		state.assistantHasProposal = false;
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
-		restorePrWalkthroughPanelIfNeeded(sessionId, sessionData);
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";

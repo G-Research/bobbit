@@ -31,6 +31,13 @@ All packs here use the **V1 on-disk schema** (see
 | `conflict-dup-entrypoint-id-src` | `dup-entrypoint-id` | HARD CONFLICT: two `entrypoints/*.yaml` with the same `id`. |
 | `conflict-dup-routeid-src` | `dup-routeid-a`, `dup-routeid-b` | HARD CONFLICT: two packs claiming the same host-global `routeId` — install both, register neither. |
 
-Server-unit fixtures for the parser/registry live separately under
-`tests/fixtures/pack-schema-v1/**` (owned by the server lane); these sources are
-the marketplace-install + E2E-install fixtures.
+These `*-src/` sources are the **marketplace-install + E2E** fixtures, consumed by
+`tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, and
+`marketplace-conflicts.spec.ts` (the latter installs every conflict / orphan /
+panel-only source above and asserts install-vs-registration surfacing via
+`GET /api/ext/contributions`).
+
+The **loader/parser unit** fixtures are NOT on disk: `tests/pack-contributions.test.ts`
+synthesises packs in inline temp dirs (`fs.mkdtempSync`) and drives
+`loadPackContributions` directly. (There is no `tests/fixtures/pack-schema-v1/**`
+directory — that reference was stale.)
