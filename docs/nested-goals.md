@@ -133,7 +133,8 @@ archived)**, layered by their `dependsOnPlanIds` dependency edges. It is sourced
 from `GET /api/goals/:id/descendants` — deliberately **independent of the
 sidebar's archived filter**, so archived nodes still appear in the graph.
 
-- **Per-node gate status**: pending / running / passed / failed.
+- **Per-node gate status**: pending / running / passed / failed / bypassed (a
+  human-overseer override; see [Human gate bypass](goals-workflows-tasks.md#human-gate-bypass)).
 - **Archived distinction**: archived nodes are dimmed/dashed and carry a
   `data-testid="plan-node-archived-pill"` badge.
 - **Merge / conflict state** per child.

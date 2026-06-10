@@ -118,7 +118,7 @@ client + WS state**. The detailed UX requirements these must satisfy:
   child's plan recursively (depth cap 3); overflow collapses to a
   "Show N more…" affordance. `plan-live-only-toggle` (`data-testid`) defaults
   to inclusive (shows archived, dimmed/dashed with `plan-node-archived-pill`).
-  Per-node gate status pending/running/passed/failed; merge/conflict state per
+  Per-node gate status pending/running/passed/failed/bypassed; merge/conflict state per
   child. Source DAG from `GET /descendants` (live + archived), not the
   archived-filtered sidebar list.
 - **Sidebar:** children nest under their spawning team-lead

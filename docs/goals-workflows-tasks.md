@@ -208,14 +208,15 @@ Each gate has a status: `pending`, `passed`, `failed`, or `bypassed`.
 
 When a previously-passed gate is re-signaled, all transitive downstream gates are cascade-reset to `pending`.
 
-### Viewing and resetting passed gates
+### Per-gate actions in the goal status widget
 
-The chat-header `<goal-status-widget>` is the compact workflow surface for the current goal. Its popover lists every gate, but only `passed` rows show gate actions:
+The chat-header `<goal-status-widget>` is the compact workflow surface for the current goal. Its popover lists every gate. The actions shown on a row depend on its status:
 
-- **View** — opens the goal dashboard Gates tab for that gate and expands the gate detail section.
-- **Reset** — asks for confirmation, then clears the selected gate and downstream dependent gates back to `pending`.
+- **View** (`passed` rows only) — opens the goal dashboard Gates tab for that gate and expands the gate detail section.
+- **Reset** (`passed` rows only) — asks for confirmation, then clears the selected gate and downstream dependent gates back to `pending`.
+- **Bypass** (`pending` and `failed` rows only) — the human-only override that forces the gate to the `bypassed` state. It is never shown on `passed`, `running`, or already-`bypassed` rows. See [Human gate bypass](#human-gate-bypass).
 
-Pending, running, and failed rows do not show these actions. This keeps the popover focused on completed approvals that can be inspected or invalidated.
+So `passed` rows show View/Reset, `pending`/`failed` rows show Bypass, and `running` rows show no actions. This keeps View/Reset focused on completed approvals that can be inspected or invalidated, while exposing the bypass override only where it is meaningful.
 
 #### Dashboard focus route
 
@@ -723,7 +724,9 @@ Here's the typical flow for a team goal with a workflow:
    gate_signal(gate_id="implementation")
    → Verification runs (npm run check + LLM review) → gate status: passed
 
-8. Process continues through the DAG until all gates pass
+8. Process continues through the DAG until every gate is passed (or human-bypassed —
+   a bypassed gate satisfies downstream dependency ordering like a passed one, but
+   completion still requires explicit human confirmation; see step 9)
 
 9. team_complete() — server verifies all workflow gates have passed.
    (If any gate was human-bypassed, team_complete is refused; a human must
