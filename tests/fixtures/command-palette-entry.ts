@@ -14,10 +14,10 @@ import { openCommandPalette } from "../../src/ui/components/CommandPalette.js";
 function register(): void {
 	registerPackEntrypoints(
 		[
-			{ id: "tp.route", tool: "tp", kind: "route", routeId: "demo.route", target: { panelId: "demo.viewer" }, paramKeys: ["itemId"] },
-			{ id: "cp.nav", tool: "tp", kind: "command-palette", label: "Open Demo (palette)", target: { route: "demo.route", params: { itemId: "x1" } } },
-			{ id: "cp.other", tool: "tp", kind: "command-palette", label: "Second Command", target: { route: "demo.route", params: { itemId: "x2" } } },
-			{ id: "gw.nav", tool: "tp", kind: "git-widget-button", label: "Demo Git Button", target: { route: "demo.route", params: { itemId: "g1" } } },
+			{ id: "tp.route", packId: "tp", kind: "route", routeId: "demo.route", target: { panelId: "demo.viewer" }, paramKeys: ["itemId"] },
+			{ id: "cp.nav", packId: "tp", kind: "command-palette", label: "Open Demo (palette)", target: { route: "demo.route", params: { itemId: "x1" } } },
+			{ id: "cp.other", packId: "tp", kind: "command-palette", label: "Second Command", target: { route: "demo.route", params: { itemId: "x2" } } },
+			{ id: "gw.nav", packId: "tp", kind: "git-widget-button", label: "Demo Git Button", target: { route: "demo.route", params: { itemId: "g1" } } },
 		],
 		"proj1",
 	);
