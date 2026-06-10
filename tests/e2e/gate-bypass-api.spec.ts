@@ -316,6 +316,44 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		}
 	});
 
+	test("sandbox-scoped token cannot confirm completion of bypassed gates", async ({ gateway }) => {
+		const wf = workflowId("gate-bypass-sandbox-complete");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Bypass Sandbox Complete ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: true, autoStartTeam: false });
+		const goalId = goal.id;
+		let teamLeadId: string | undefined;
+		try {
+			await waitForGoalSetupReady(goalId);
+			teamLeadId = await startTeam(goalId);
+			expect((await bypassGate(goalId, "root", HUMAN)).status).toBe(200);
+
+			const projectId = (goal.projectId as string | undefined) || await defaultProjectId();
+			const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
+			gateway.sessionManager.sandboxTokenStore.addGoal(projectId, goalId);
+
+			// A sandbox-scoped agent must NOT be able to confirm completion past
+			// bypassed gates — the human-confirm override is rejected with 403.
+			const res = await fetch(`${base()}/api/goals/${goalId}/team/complete`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${sandboxToken}` },
+				body: JSON.stringify({ confirmBypassedGates: true }),
+			});
+			expect(res.status).toBe(403);
+			const body = await res.json();
+			expect(String(body.error)).toContain("sandbox token cannot confirm completion");
+
+			// Gate stays bypassed (no completion happened).
+			const after = await apiFetch(`/api/goals/${goalId}/gates/root`);
+			expect((await after.json()).status).toBe("bypassed");
+		} finally {
+			if (teamLeadId) await teardownTeam(goalId).catch(() => {});
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
 	test("completion gating: agent team_complete blocked by bypassed gate; human confirm path succeeds", async () => {
 		const wf = workflowId("gate-bypass-complete");
 		await createWorkflow(wf, [

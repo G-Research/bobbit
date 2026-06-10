@@ -8710,6 +8710,14 @@ async function handleApiRoute(
 		}
 		const completeBody = await readBody(req);
 		const confirmBypassedGates = completeBody?.confirmBypassedGates === true;
+		// Bypassed-gate confirmation is a HUMAN-only override. A sandbox-scoped
+		// agent token must not be able to confirm completion past bypassed gates
+		// by hitting this REST endpoint directly — that would defeat the
+		// human-in-the-loop trust boundary the bypass feature enforces.
+		if (confirmBypassedGates && sandboxScope) {
+			json({ error: "Forbidden: sandbox token cannot confirm completion of bypassed gates" }, 403);
+			return;
+		}
 		try {
 			await teamManager.completeTeam(goalId, { allowBypassedGates: confirmBypassedGates });
 			json({ ok: true });
