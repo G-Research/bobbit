@@ -837,7 +837,13 @@ GET  /api/marketplace/pack-activation?scope=<scope>&projectId=<id>&packName=<nam
            roles:       string[],   // = installed pack manifest.contents.roles
            tools:       string[],   // = manifest.contents.tools
            skills:      string[],   // = manifest.contents.skills
-           entrypoints: Array<{ listName: string; label?: string }>  // = contents.entrypoints (+ display label from the entrypoint file)
+           entrypoints: Array<{ listName: string; label?: string }>,  // = contents.entrypoints (+ display label from the entrypoint file)
+           descriptions?: {         // OPTIONAL one-line per-entity descriptions for the
+             roles?:       Record<string, string>,   //   "Show details" disclosure (pack-based-marketplace §10.4 R3).
+             tools?:       Record<string, string>,   //   Read from the SAME installed pack dir as the
+             skills?:      Record<string, string>,   //   catalogue above — keyed by name (roles/skills),
+             entrypoints?: Record<string, string>    //   GROUP name (tools), or listName (entrypoints).
+           }
          },
          disabled: DisabledRefs   // current overrides (default {} = all enabled)
        }
@@ -861,6 +867,14 @@ follow-up `GET` after a toggle. The entrypoint `label` is a display convenience 
 
 Normalisation on PUT: drop refs for entities the pack does not declare (best-effort, validated against
 the same manifest `contents` catalogue), persist, invalidate caches.
+
+The optional **`catalogue.descriptions`** map carries one-line, per-entity descriptions read from the
+installed pack dir (role/tool YAML, skill SKILL.md frontmatter, entrypoint metadata) by
+`readPackEntityDescriptions()`. The Market UI renders them in a collapsed "Show details" disclosure next
+to the toggles. It is read from the **same** authoritative pack dir as the catalogue — never the
+runtime-filtered `/api/tools` or `/api/ext/contributions` — and every manifest-declared name is
+path-validated before any filesystem read. See [pack-based-marketplace.md §10.4 (R3)](pack-based-marketplace.md)
+for the full UI behaviour and rationale.
 
 ---
 
