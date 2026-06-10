@@ -147,7 +147,7 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	});
 
-	test("POST resolve returns real local diff cards and GET returns persisted state", async () => {
+	test("POST resolve returns real local diff cards", async () => {
 		const fixture = makeGitFixture();
 		try {
 			const result = await resolveLocal(fixture);
@@ -156,13 +156,6 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.changeset.filesChanged).toBe(2);
 			expect(result.cards.length).toBeGreaterThanOrEqual(2);
 			expect(result.cards.flatMap((card: any) => card.diffBlocks).some((block: any) => block.filePath === "src/feature.ts")).toBe(true);
-
-			const getResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}`);
-			expect(getResp.status).toBe(200);
-			const persisted = await getResp.json();
-			expect(persisted.changesetId).toBe(result.changesetId);
-			expect(persisted.schemaVersion).toBe(1);
-			expect(persisted.cards.length).toBe(result.cards.length);
 		} finally {
 			fixture.cleanup();
 		}
@@ -205,7 +198,7 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	});
 
-	test("invalid refs and missing persisted walkthroughs return structured errors", async () => {
+	test("invalid refs return structured errors", async () => {
 		const fixture = makeGitFixture();
 		try {
 			const invalidResp = await apiFetch("/api/pr-walkthrough/resolve", {
@@ -214,10 +207,6 @@ test.describe("PR walkthrough REST API", () => {
 			});
 			expect(invalidResp.status).toBe(400);
 			expect((await invalidResp.json()).error).toContain("Invalid baseSha");
-
-			const missingResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent("missing..walkthrough")}`);
-			expect(missingResp.status).toBe(404);
-			expect((await missingResp.json()).error).toContain("Walkthrough not found");
 		} finally {
 			fixture.cleanup();
 		}

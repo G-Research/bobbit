@@ -94,7 +94,7 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 
 ## PR Walkthrough Panel
 
-The PR walkthrough panel is a guided pull-request or changeset review surface. For GitHub PRs, `/walkthrough-pr <url|number>` launches or focuses a read-only child walkthrough agent session; that child owns the waiting panel and publishes cards only through validated `submit_pr_walkthrough_yaml`. The child session is terminated once the walkthrough reaches a terminal state (successful submission or non-recoverable error) — it is not kept alive for follow-up chat. Ready walkthroughs can be reviewed in the side panel, fullscreen/wide mode, or a standalone `/walkthrough?...` route. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
+The PR walkthrough panel is a guided pull-request or changeset review surface. It ships as a **built-in first-party pack** (`market-packs/pr-walkthrough/`) that is auto-resolved active-by-default — there is no manual install. A pack entrypoint (git-widget button / composer-slash / command palette) opens the pack panel at the generic extension route `#/ext/pr-walkthrough`; the panel's "Run PR walkthrough" action uses `host.session.postMessage` to drive the **current** session's agent. The agent publishes cards only through validated `submit_pr_walkthrough_yaml`. Disabling the pack from the Market built-in section makes the feature unavailable (the deep-link degrades to an empty state). See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract, and [built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the pack model.
 
 ## Assistant Registry
 

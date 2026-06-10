@@ -14,9 +14,8 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "./ui-helpers.js";
 
-const PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='walkthrough']";
 const tid = (id: string) => `[data-testid="${id}"]`;
 
 async function resetTrustedHosts(): Promise<void> {
@@ -101,95 +100,9 @@ test.describe("Trusted GitHub hosts — settings", () => {
 	});
 });
 
-const ENTERPRISE_PR_URL = "https://ghe.example.com/owner/repo/pull/5";
-const ENTERPRISE_HOST = "ghe.example.com";
-
-/**
- * Intercept the launch endpoint: the first call returns the server's untrusted-host
- * 400 (no job created); subsequent calls (the post-confirm retry) succeed.
- */
-async function installUntrustedThenTrustedLaunchRoute(page: Page): Promise<{ launchCalls: () => number }> {
-	let calls = 0;
-	await page.route("**/api/pr-walkthrough/launch", async (route) => {
-		if (route.request().method() !== "POST") {
-			await route.fallback();
-			return;
-		}
-		calls += 1;
-		if (calls === 1) {
-			await route.fulfill({
-				status: 400,
-				contentType: "application/json",
-				body: JSON.stringify({
-					error: `Untrusted GitHub PR host: ${ENTERPRISE_HOST}`,
-					message: `Untrusted GitHub PR host: ${ENTERPRISE_HOST}`,
-					code: "untrusted_github_host",
-					host: ENTERPRISE_HOST,
-				}),
-			});
-			return;
-		}
-		const changesetId = `github:${ENTERPRISE_HOST}/owner/repo#5:abc1234`;
-		await route.fulfill({
-			status: 201,
-			contentType: "application/json",
-			body: JSON.stringify({
-				jobId: `job-${Date.now()}`,
-				childSessionId: `child-${Date.now()}`,
-				changesetId,
-				status: "waiting_for_yaml",
-				tabId: `walkthrough:${encodeURIComponent(changesetId)}`,
-				created: true,
-			}),
-		});
-	});
-	return { launchCalls: () => calls };
-}
-
-async function launchEnterpriseWalkthrough(page: Page): Promise<void> {
-	await openApp(page);
-	await createSessionViaUI(page);
-	await sendMessage(page, `/walkthrough-pr ${ENTERPRISE_PR_URL}`);
-}
-
-test.describe("Trusted GitHub hosts — untrusted launch dialog", () => {
-	test("confirming the risk dialog adds the host and the launch proceeds", async ({ page }) => {
-		await resetTrustedHosts();
-		try {
-			const { launchCalls } = await installUntrustedThenTrustedLaunchRoute(page);
-			await launchEnterpriseWalkthrough(page);
-
-			// The risk dialog names the host and warns about the consequences.
-			const dialogText = page.getByText(new RegExp(`${ENTERPRISE_HOST}[\\s\\S]*not in your trusted GitHub hosts`, "i")).first();
-			await expect(dialogText).toBeVisible({ timeout: 10_000 });
-			const addBtn = page.getByRole("button", { name: "Add & continue" });
-			await expect(addBtn).toBeVisible();
-
-			// Confirm → host persisted + launch retried.
-			await addBtn.click();
-			await expect.poll(launchCalls, { timeout: 10_000, message: "launch should be retried after confirm" }).toBe(2);
-			await expect.poll(readTrustedHosts, { timeout: 10_000 }).toContain(ENTERPRISE_HOST);
-		} finally {
-			await resetTrustedHosts();
-		}
-	});
-
-	test("cancelling the risk dialog aborts without a walkthrough tab", async ({ page }) => {
-		await resetTrustedHosts();
-		try {
-			const { launchCalls } = await installUntrustedThenTrustedLaunchRoute(page);
-			await launchEnterpriseWalkthrough(page);
-
-			const cancelBtn = page.getByRole("button", { name: "Cancel" });
-			await expect(cancelBtn).toBeVisible({ timeout: 10_000 });
-			await cancelBtn.click();
-
-			// No retry, no persisted host, no walkthrough panel tab.
-			await expect(page.locator(PANEL_TAB_SELECTOR)).toHaveCount(0);
-			expect(launchCalls()).toBe(1);
-			expect(await readTrustedHosts()).not.toContain(ENTERPRISE_HOST);
-		} finally {
-			await resetTrustedHosts();
-		}
-	});
-});
+// NOTE: the untrusted-launch risk-dialog tests were removed with the built-in
+// PR-walkthrough viewer/launcher deletion. The launch flow no longer has a
+// client launcher (`/walkthrough-pr`); the first-party pack provides the
+// entrypoints, and the server `/api/pr-walkthrough/launch` route + its trusted-
+// host enforcement are covered by tests/e2e/pr-walkthrough-api.spec.ts. The
+// trusted-hosts SETTINGS surface (above) is unaffected and still verified here.

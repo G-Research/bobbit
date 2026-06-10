@@ -26,14 +26,9 @@ interface SlashSkillInfo {
 	entrypointId?: string;
 }
 
-const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [
-	{
-		name: "walkthrough-pr",
-		argumentHint: "<GitHub PR URL or #>",
-		description: "Launch a guided PR walkthrough child session.",
-		source: "built-in",
-	},
-];
+// The PR-walkthrough launcher is now provided by the first-party pack's
+// composer-slash entrypoint (not a built-in slash command).
+const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [];
 
 function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
 	const names = new Set(skills.map((skill) => skill.name.toLowerCase()));
