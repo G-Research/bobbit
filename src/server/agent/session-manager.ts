@@ -3674,6 +3674,10 @@ export class SessionManager {
 			const promptPath = this.assemblePrompt(ps.id, {
 				baseSystemPromptPath: this.systemPromptPath,
 				cwd: ps.cwd,
+				// Mirror the spawn path (session-setup.ts::_resolvePrompt mode ===
+				// "delegate") so AGENTS.md / project config dirs are readable for
+				// sandbox or multi-repo delegates whose cwd is container-internal.
+				projectRoot: ps.repoPath,
 				goalSpec: taskSpec,
 				goalTitle: "Delegate Task",
 				goalState: "active",

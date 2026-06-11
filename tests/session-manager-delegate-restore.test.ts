@@ -106,9 +106,10 @@ describe("delegate restore — source guards", () => {
 		assert.ok(delegateBranchIdx > 0, "restoreSession must have an `else if (ps.delegateOf && !ps.goalId)` branch");
 
 		// The delegate branch builds the task spec from instructions + context.
-		const branchWindow = window.slice(delegateBranchIdx, delegateBranchIdx + 800);
+		const branchWindow = window.slice(delegateBranchIdx, delegateBranchIdx + 1200);
 		assert.match(branchWindow, /let taskSpec = ps\.instructions \|\| ""/);
 		assert.match(branchWindow, /for \(const \[key, value\] of Object\.entries\(ps\.context\)\)/);
+		assert.match(branchWindow, /projectRoot: ps\.repoPath/);
 		assert.match(branchWindow, /goalSpec: taskSpec/);
 
 		// It must precede the goal/role else branch (which resolves goal?.spec).

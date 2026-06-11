@@ -184,13 +184,16 @@ test.describe("orchestration restart survival", () => {
 			// dormant === true → isSessionLive false).
 			expect(sm.isSessionLive(child)).toBe(true);
 
-			// TASK INTACT — the rebuilt system prompt must carry the original
-			// instructions. Accessor: restoreSession() writes the reassembled prompt
-			// to <prompts-dir>/<id>.md and records it on bridgeOptions.systemPromptPath;
-			// the in-process mock bridge preserves `options`, so we read the actual
-			// assembled prompt file the restored agent would receive. Fallback (in case
-			// the accessor shape changes): the durable instructions/context fields the
-			// fix persists on the session record (getPersistedSession).
+			// TASK INTACT — two STRICT, independent pins (no OR-fallback, so a broken
+			// prompt rebuild can't be masked by the durable field, and vice versa):
+			//
+			//  (a) PROMPT REBUILD — restoreSession() writes the reassembled prompt to
+			//      <prompts-dir>/<id>.md and records it on bridgeOptions.systemPromptPath;
+			//      the in-process mock bridge preserves `options`, so we read the actual
+			//      assembled prompt file the restored agent would receive. The marker must
+			//      be present here — proving the prompt was genuinely rebuilt from the task.
+			//  (b) DURABLE FIELD — the persisted `instructions` field on the session
+			//      record must carry the marker — proving the task survived to disk.
 			const restored = sm.sessions.get(child);
 			const promptPath = (restored?.rpcClient as any)?.options?.systemPromptPath as string | undefined;
 			let promptText = "";
@@ -198,8 +201,8 @@ test.describe("orchestration restart survival", () => {
 				try { promptText = readFileSync(promptPath, "utf-8"); } catch { /* file gone */ }
 			}
 			const ps = sm.getPersistedSession(child) as any;
-			const durableTask = `${ps?.instructions ?? ""}\n${ps?.context ?? ""}`;
-			expect(`${promptText}\n${durableTask}`).toContain("restart-live-survivor-MARKER");
+			expect(promptText).toContain("restart-live-survivor-MARKER");
+			expect(`${ps?.instructions ?? ""}`).toContain("restart-live-survivor-MARKER");
 		} finally {
 			await deleteSession(child).catch(() => {});
 			await deleteSession(parent).catch(() => {});
