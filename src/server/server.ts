@@ -9084,17 +9084,25 @@ async function handleApiRoute(
 			}
 			const terminated = await sessionManager.terminateSession(id);
 			if (!terminated) {
-				// Session not in memory — check if it's a dormant store entry (e.g. completed delegate)
-				if (purge) {
-					// Archive it first so purge can find it, then purge
-					await sessionManager.storeArchive(id);
-					const purged = await sessionManager.purgeArchivedSession(id);
-					if (purged) {
-						json({ ok: true });
-						return;
-					}
+				// Session not live. It may still exist as a dormant / store-only entry
+				// (e.g. a completed delegate parent, or a parent that went dormant after
+				// a restart). Archiving such a parent MUST still cascade-reap its children
+				// (design §6 — the "parent dormant/not-live" path), so route it through the
+				// cascade-archive seam regardless of `purge` rather than 404-ing without
+				// archiving. `terminateSession` already cascades for the live case.
+				const persisted = sessionManager.getPersistedSession(id);
+				if (!persisted) {
+					// Truly unknown — not live, not in any store.
+					json({ error: "Session not found" }, 404);
+					return;
 				}
-				json({ error: "Session not found" }, 404);
+				// storeArchive → archiveWithCascade → cascadeReapOwner(children) then archive,
+				// so the dormant parent's live children are reaped before it is archived.
+				await sessionManager.storeArchive(id);
+				if (purge) {
+					await sessionManager.purgeArchivedSession(id);
+				}
+				json({ ok: true });
 				return;
 			}
 			// If purge requested, also purge the now-archived session immediately
