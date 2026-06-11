@@ -41,7 +41,7 @@ class FakeView implements OrchestrationSessionView {
 
 	owner(id: string, opts?: Partial<FakeSession> & Partial<PersistedSessionLike>): void {
 		this.live.set(id, { id, status: "idle", cwd: `/cwd/${id}`, allowedTools: opts?.allowedTools, title: opts?.title });
-		this.persisted.set(id, { id, title: opts?.title, delegateOf: opts?.delegateOf, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, archived: opts?.archived });
+		this.persisted.set(id, { id, title: opts?.title, delegateOf: opts?.delegateOf, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, archived: opts?.archived, sandboxed: opts?.sandboxed, projectId: opts?.projectId, cwd: opts?.cwd ?? `/cwd/${id}` });
 	}
 
 	async createDelegateSession(parentSessionId: string, opts: any): Promise<{ id: string }> {
@@ -57,7 +57,7 @@ class FakeView implements OrchestrationSessionView {
 		const id = `child-${++this.seq}`;
 		this.createSessionCalls.push({ cwd, opts });
 		this.live.set(id, { id, status: "idle" });
-		this.persisted.set(id, { id, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind });
+		this.persisted.set(id, { id, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, sandboxed: opts?.sandboxed, projectId: opts?.projectId, cwd });
 		return { id };
 	}
 	async enqueuePrompt(sessionId: string, text: string, opts?: any): Promise<{ status: string }> {
@@ -109,6 +109,37 @@ describe("OrchestrationCore.spawn — model inheritance", () => {
 		const core = makeCore(view, "anthropic/claude-x");
 		await core.spawn({ ownerSessionId: "owner-1", instructions: "do it", model: "openai/gpt-z" });
 		assert.equal(view.delegateCalls[0].opts.initialModel, "openai/gpt-z");
+	});
+});
+
+describe("OrchestrationCore.spawn — sandbox/credential inheritance (no escalation, §8.3)", () => {
+	it("full-lifecycle child inherits the owner's sandbox + project scope via createSession", async () => {
+		// HIGH: the createSession (lifecycle:"full") path historically passed
+		// NEITHER `sandboxed` NOR `projectId`, so a child of a sandboxed /
+		// project-scoped owner could be created OUTSIDE that scope. Pin that the
+		// owner's persisted scope is threaded verbatim into createSession.
+		const view = new FakeView();
+		view.owner("owner-1", { sandboxed: true, projectId: "proj-A", cwd: "/host/validated/owner-1" });
+		const core = makeCore(view, "anthropic/claude-x");
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", lifecycle: "full" });
+		assert.equal(view.delegateCalls.length, 0, "lifecycle:full must NOT take the bare delegate path");
+		assert.equal(view.createSessionCalls.length, 1);
+		const { cwd, opts } = view.createSessionCalls[0];
+		assert.equal(opts.sandboxed, true, "child must inherit the owner's sandbox flag");
+		assert.equal(opts.projectId, "proj-A", "child must inherit the owner's project scope");
+		// Sandboxed shared-cwd uses the owner's VALIDATED persisted host cwd, never a
+		// container-internal path.
+		assert.equal(cwd, "/host/validated/owner-1");
+	});
+
+	it("full-lifecycle child of an UNSANDBOXED owner is not sandboxed and inherits its project", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { projectId: "proj-B" });
+		const core = makeCore(view, "anthropic/claude-x");
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", lifecycle: "full" });
+		const { opts } = view.createSessionCalls[0];
+		assert.equal(opts.sandboxed, undefined, "unsandboxed owner ⇒ child sandboxed flag stays falsy");
+		assert.equal(opts.projectId, "proj-B");
 	});
 });
 

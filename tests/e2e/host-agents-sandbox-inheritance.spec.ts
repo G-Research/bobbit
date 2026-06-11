@@ -77,6 +77,33 @@ test.describe("host.agents — sandbox / credential inheritance (no escalation)"
 		}
 	});
 
+	test("a FULL-lifecycle host.agents child also inherits the owner's sandbox + project scope (no escalation)", async ({ gateway }) => {
+		// HIGH: the createSession (lifecycle:"full") spawn path historically threaded
+		// NEITHER `sandboxed` NOR `projectId`, so a full-lifecycle child of a
+		// sandboxed / project-scoped owner could be created OUTSIDE that scope.
+		// Driving a real Docker-sandboxed owner here is impractical (test:manual);
+		// the SANDBOXED case is pinned at the unit level (orchestration-core.test.ts).
+		// This e2e pins, through the REAL stack, that the full path threads the
+		// owner's scope verbatim and never widens it.
+		const owner = await createSession();
+		const host = await buildHost(gateway, owner);
+		let childId: string | undefined;
+		try {
+			const ownerPs = gateway.sessionManager.getPersistedSession(owner);
+			const ha = await host.agents.spawn({ instructions: "full-lifecycle child", lifecycle: "full" });
+			childId = ha.childSessionId;
+			const childPs = await pollUntil(async () => gateway.sessionManager.getPersistedSession(childId!) ?? null,
+				{ timeoutMs: 5_000, intervalMs: 25, label: "child persisted" });
+			// Linkage + scope inheritance: the child cannot exceed the owner's reach.
+			expect(childPs.parentSessionId).toBe(owner);
+			expect(Boolean(childPs.sandboxed)).toBe(Boolean(ownerPs?.sandboxed));
+			expect(childPs.projectId).toBe(ownerPs?.projectId);
+		} finally {
+			if (childId) await gateway.orchestrationCore.dismiss(owner, childId).catch(() => {});
+			await deleteSession(owner);
+		}
+	});
+
 	test("a read-only host.agents child does NOT register mutating tools (finding #1)", async ({ gateway }) => {
 		const owner = await createSession();
 		const host = await buildHost(gateway, owner);

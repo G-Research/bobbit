@@ -190,6 +190,18 @@ export interface PersistedSessionLike {
 	parentSessionId?: string;
 	childKind?: string;
 	archived?: boolean;
+	/**
+	 * Owner sandbox + project (credential) scope — the ONE hard invariant
+	 * (sandbox/credential inheritance, §8.3). The full-lifecycle `createSession`
+	 * spawn path threads these from the OWNER so a child can never run outside
+	 * the owner's sandbox or reach a project the owner cannot. The bare path
+	 * inherits the same scope inside `createDelegateSession`. Read from the
+	 * persisted owner record — never widened by a per-call option.
+	 */
+	sandboxed?: boolean;
+	projectId?: string;
+	/** Owner's validated host-side cwd (never trust a container-internal cwd). */
+	cwd?: string;
 }
 
 /** Live session fields the core reads (structural subset of SessionInfo). */
@@ -391,13 +403,31 @@ export class OrchestrationCore {
 			childId = child.id;
 		} else {
 			// Full lifecycle and/or sub-branch worktree → createSession path.
+			//
+			// SANDBOX / CREDENTIAL INHERITANCE (the one hard invariant, §8.3).
+			// Unlike `createDelegateSession` (the bare path, which reads the parent
+			// record and propagates sandbox + project scope itself), `createSession`
+			// derives `projectId` only from its own opts/goalId and `sandboxed` only
+			// from `opts.sandboxed` — it does NOT infer either from `parentSessionId`.
+			// So we MUST thread the OWNER's persisted sandbox + project scope here, or
+			// a `lifecycle:"full"` child (host.agents or team_delegate) from a
+			// sandboxed / project-scoped owner could be created OUTSIDE that scope — a
+			// privilege escalation. This inherits the owner's scope verbatim and never
+			// widens it (there is no per-call option that could).
+			const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
+			const ownerSandboxed = ownerPs?.sandboxed === true;
 			const worktreeOpts = opts.worktree?.mode === "sub-branch"
 				? { repoPath: opts.worktree.repoPath }
 				: undefined;
 			const goalId = opts.worktree?.mode === "sub-branch" ? opts.worktree.goalId : undefined;
 			const cwd = opts.worktree?.mode === "sub-branch"
 				? opts.worktree.cwd
-				: (this.resolveOwnerCwd(opts.ownerSessionId) ?? process.cwd());
+				// Shared-cwd: when the owner is sandboxed prefer its VALIDATED persisted
+				// host-side cwd (mirrors createDelegateSession — never trust a
+				// container-internal cwd); otherwise the live owner cwd.
+				: (ownerSandboxed ? ownerPs?.cwd : undefined)
+					?? this.resolveOwnerCwd(opts.ownerSessionId)
+					?? process.cwd();
 			const createOpts: Record<string, unknown> = {
 				parentSessionId: opts.ownerSessionId,
 				childKind,
@@ -407,6 +437,11 @@ export class OrchestrationCore {
 				initialThinkingLevel: thinkingLevel,
 				roleName: opts.role,
 				worktreeOpts,
+				// Inherit the owner's sandbox + project scope (never exceed it). For the
+				// sub-branch (goal) path `projectId` may be undefined here — createSession
+				// then falls back to deriving it from `goalId`.
+				sandboxed: ownerSandboxed || undefined,
+				projectId: ownerPs?.projectId,
 			};
 			if (opts.worktree?.mode === "sub-branch") {
 				createOpts.sandboxBranch = opts.worktree.branch;
