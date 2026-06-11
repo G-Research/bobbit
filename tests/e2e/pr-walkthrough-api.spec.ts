@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession } from "./e2e-setup.js";
+import { apiFetch, deleteSession } from "./e2e-setup.js";
 
 type GitFixture = {
 	cwd: string;
@@ -111,41 +111,10 @@ test.describe("PR walkthrough REST API", () => {
 		} catch { /* best-effort */ }
 	});
 
-	test("POST launch creates a real child walkthrough session through production route wiring", async () => {
-		const fixture = makeGitFixture();
-		try {
-			const parentSessionId = await createSession();
-			createdSessionIds.push(parentSessionId);
-			const launchBody = { sessionId: parentSessionId, cwd: fixture.cwd, prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha };
-			const launchResp = await apiFetch("/api/pr-walkthrough/launch", {
-				method: "POST",
-				body: JSON.stringify(launchBody),
-			});
-			expect(launchResp.status).toBe(201);
-			const launch = await launchResp.json();
-			if (launch.childSessionId) createdSessionIds.push(launch.childSessionId);
-			expect(launch.status).toBe("waiting_for_yaml");
-			expect(launch.job.parentSessionId).toBe(parentSessionId);
-			expect(launch.job.childSessionId).toBe(launch.childSessionId);
-			expect(launch.job.target.canonicalKey).toBe("github:acme/widgets#42");
-
-			const sessionResp = await apiFetch(`/api/sessions/${encodeURIComponent(launch.childSessionId)}`);
-			expect(sessionResp.status).toBe(200);
-			const session = await sessionResp.json();
-			expect(session.parentSessionId).toBe(parentSessionId);
-			expect(session.childKind).toBe("pr-walkthrough");
-			expect(session.readOnly).toBe(true);
-
-			const duplicateResp = await apiFetch("/api/pr-walkthrough/launch", {
-				method: "POST",
-				body: JSON.stringify(launchBody),
-			});
-			expect(duplicateResp.status).toBe(200);
-			expect((await duplicateResp.json()).childSessionId).toBe(launch.childSessionId);
-		} finally {
-			fixture.cleanup();
-		}
-	});
+	// NOTE: the legacy `POST /api/pr-walkthrough/launch` test was removed with the
+	// WalkthroughAgentManager launcher (host.agents reviewer migration, design
+	// Decision F Phase 3). The reviewer is now minted via the pack `run` route +
+	// host.agents.spawn; that flow is covered by the host-agents API/browser E2Es.
 
 	test("POST resolve returns real local diff cards", async () => {
 		const fixture = makeGitFixture();
