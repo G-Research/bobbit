@@ -627,7 +627,12 @@ export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
 }
 function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRole(plan.roleName) : undefined;
+	// Resolve the role cascade-first (pack-shipped roles like `pr-reviewer` live in
+	// the config cascade, NOT the in-memory RoleManager). Resolving via roleManager
+	// alone returns `undefined` for a pack role, which makes the guard fall through
+	// to group defaults (e.g. `PR Walkthrough: never`) and reject every reviewer
+	// tool call. `lookupRole` mirrors the cascade-first pattern used elsewhere.
+	const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : undefined;
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const mcpExtPaths = ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined)

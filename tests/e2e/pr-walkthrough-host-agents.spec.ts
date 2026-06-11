@@ -32,7 +32,7 @@
  *   • Scope: the pack drives only its own reviewer child.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -245,6 +245,34 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 
 	function reviewerSecret(gateway: any, childSessionId: string): string {
 		return gateway.sessionManager.sessionSecretStore.getOrCreateSecret(childSessionId);
+	}
+
+	/**
+	 * Inspect the ACTUAL tool-guard extension(s) the gateway generated for a
+	 * spawned child and return the set of tool names the guard hard-blocks (its
+	 * `neverPolicies` keys). The guard file paths are the `--extension` args the
+	 * gateway pushed onto the child's RpcBridge in `session-setup`
+	 * (`_resolveToolActivation` → `writeToolGuardExtension`). Reading them back is
+	 * the most faithful observation of the bug: pre-fix the three walkthrough
+	 * tools were stamped into `neverPolicies` (every call → "not permitted for
+	 * this role"); the fix resolves the pack role so they are not.
+	 */
+	function childGuardNeverNames(gateway: any, childSessionId: string): { neverNames: Set<string>; guardFiles: number } {
+		const args: string[] = (gateway.sessionManager.getSession(childSessionId)?.rpcClient as any)?.options?.args ?? [];
+		const neverNames = new Set<string>();
+		let guardFiles = 0;
+		for (let i = 0; i < args.length - 1; i++) {
+			if (args[i] !== "--extension") continue;
+			const p = args[i + 1];
+			if (typeof p !== "string" || !/tool-guard/.test(p)) continue;
+			let code: string;
+			try { code = readFileSync(p, "utf-8"); } catch { continue; }
+			guardFiles++;
+			const m = code.match(/const neverPolicies = (\{.*?\});/s);
+			if (!m) continue;
+			for (const k of Object.keys(JSON.parse(m[1]))) neverNames.add(k);
+		}
+		return { neverNames, guardFiles };
 	}
 
 	// ── Row: Run mints a NEW read-only reviewer; owner agent NOT driven. ──
@@ -685,6 +713,100 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(stillLive).toBe(false);
 		} finally {
 			await deleteSession(child).catch(() => {});
+		}
+	});
+
+	// ── Row A2 + A3: the spawned reviewer's GUARD does not block the three tools,
+	//    and its prompt carries the YAML schema (role-resolution bug fix). ──
+	// The reported regression was that the reviewer child held the three tools in
+	// its allowlist (spawn-path resolveRoleAllowedTools was already cascade-aware)
+	// but every CALL was hard-blocked by the generated tool GUARD — because
+	// session-setup resolved the pack-shipped `pr-reviewer` role via roleManager
+	// only (→ undefined → `PR Walkthrough: never` group default → all three tools
+	// in the guard's neverPolicies). A one-tool check would not pin the class: the
+	// bug blocked readonly_bash / submit even when bundle worked. So we assert the
+	// guard blocks NONE of the three, AND that the schema reached the prompt.
+	test("the spawned reviewer's guard blocks none of the three tools and its prompt carries the YAML schema", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			// A2: read the ACTUAL guard(s) the gateway generated for this child.
+			const { neverNames, guardFiles } = childGuardNeverNames(gateway, child);
+			// A guard WAS generated (the reviewer denies every non-walkthrough tool,
+			// so the guard exists and is real) — and proves the default-deny still
+			// bites the tools the reviewer must NOT have.
+			expect(guardFiles, "a tool-guard extension must be generated for the reviewer").toBeGreaterThan(0);
+			expect(neverNames.has("write"), "the read-only reviewer's guard must still hard-block `write`").toBe(true);
+			// The three walkthrough tools must NOT be hard-blocked (the bug).
+			for (const t of REVIEWER_TOOLS) {
+				expect(neverNames.has(t), `guard must NOT hard-block ${t} ("not permitted for this role")`).toBe(false);
+			}
+
+			// A3: the reviewer's system prompt carries the submit_pr_walkthrough_yaml
+			// schema (so it does not have to "learn the schema from validation
+			// feedback"). The spawn path threads only `roleName`, so the pack role's
+			// promptTemplate is resolved cascade-first in createSession.
+			const parts = gateway.sessionManager.getPromptParts(child);
+			const rolePrompt = String(parts?.rolePrompt ?? "");
+			expect(rolePrompt).toContain("schema_version");
+			expect(rolePrompt).toContain("merge_assessment");
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	// ── Row A4: a reviewer surviving a gateway restart keeps its tools. ──
+	// The restore / force-respawn paths resolve the session role via
+	// `resolveSessionRole`, which the fix makes cascade-aware + projectId-scoped.
+	// Without the projectId the pack role is lost (roleManager has no `pr-reviewer`)
+	// and the regenerated guard re-blocks the three tools. This pins the restore
+	// path's resolution against the gateway's REAL group-policy store.
+	test("a restored reviewer re-resolves the pack role (cascade + projectId) and keeps its three tools", async ({ gateway }) => {
+		const { resolveGrantPolicy } = await import("../../dist/server/agent/tool-activation.js");
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			const ps = gateway.sessionManager.getPersistedSession(child);
+			const sm: any = gateway.sessionManager;
+			const groupPolicyStore = sm.groupPolicyStore;
+
+			// The restore path now calls resolveSessionRole(ps.role, ps.assistantType, ps.projectId).
+			const restoredRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, ps?.projectId);
+			expect(restoredRole?.name).toBe("pr-reviewer");
+			expect(restoredRole?.toolPolicies?.["PR Walkthrough"]).toBe("allow");
+
+			// The PRE-FIX call shape (no projectId) loses the pack role entirely —
+			// roleManager has no `pr-reviewer`, so the guard would re-block the trio.
+			const preFixRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, undefined);
+			expect(preFixRole).toBeUndefined();
+
+			// The restore prompt path resolves the role's promptTemplate via
+			// resolveRolePromptTemplate, which is now pack-aware — so a restored reviewer
+			// keeps its YAML schema too (not just its tools).
+			const restoredTemplate = String(sm.resolveRolePromptTemplate(ps?.role, ps?.projectId) ?? "");
+			expect(restoredTemplate).toContain("schema_version");
+			expect(restoredTemplate).toContain("merge_assessment");
+
+			// The restored allowlist (persisted) still carries the three tools, and the
+			// regenerated guard (driven by resolveGrantPolicy over the restored role)
+			// grants them — while the pre-fix undefined role would resolve them to never.
+			for (const t of REVIEWER_TOOLS) {
+				expect((ps?.allowedTools ?? []).includes(t), `restored allowlist must keep ${t}`).toBe(true);
+				expect(resolveGrantPolicy(t, "PR Walkthrough", restoredRole, undefined, groupPolicyStore)).toBe("allow");
+				expect(resolveGrantPolicy(t, "PR Walkthrough", preFixRole, undefined, groupPolicyStore)).toBe("never");
+			}
+		} finally {
+			fixture.cleanup();
 		}
 	});
 
