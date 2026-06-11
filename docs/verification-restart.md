@@ -158,9 +158,16 @@ explicitly out of scope (see below).
 
 ## Out of scope
 
-- **Reviewer / agent-QA session resume.** Already handled by
-  `_tryResumeFromSession` and the team-store reviewer rebinding path; see
-  [internals.md — Reviewer `kind` & restart resume](internals.md#reviewer-kind--restart-resume).
+- **Reviewer / agent-QA session resume.** Out of scope for *this* document's
+  two-layer command-step design — but covered separately: the reviewer agent
+  is revived by `restoreSession` and re-driven by `_tryResumeFromSession`,
+  which waits for the cold agent to become ready, re-prompts with a generous
+  timeout, and routes restart-induced RPC failures to a `pending` re-signal
+  rather than a hard gate failure. See
+  [internals.md — Reviewer `kind` & restart resume](internals.md#reviewer-kind--restart-resume)
+  for the team-store rebinding and
+  [internals.md — Cold-reviewer resume: readiness wait + restart-interrupt routing](internals.md#cold-reviewer-resume-readiness-wait--restart-interrupt-routing)
+  for the resume robustness fix.
 - **Host machine reboot.** Only same-host gateway restarts are covered. A
   reboot will lose all detached children regardless of the wrapper.
 - **Mid-stream WS subscribers across the restart.** File content is
