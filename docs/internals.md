@@ -549,7 +549,7 @@ The **multi-repo invariant** - every configured repo is checked out as a sibling
 
 Free-form `{ run }` steps that need a different working directory use `cd ... && ...` inside the `run` string. This keeps the schema small and the working-dir rule unambiguous: it is structurally derived from the component, or it is the per-branch container root.
 
-`llm-review` and `agent-qa` step shapes are unchanged - they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`) which are substituted by the gate runner before execution. `agent-qa` additionally carries an optional `component:` field that selects which component's `config:` map the `/qa-test` skill reads (and which workspace to start). When omitted, the verification harness falls back to the first component whose `config.qa_start_command` is set, then to a name-match against the project, then to `components[0]`.
+`llm-review` and `agent-qa` step shapes are unchanged - they keep their `prompt:` body and runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`; `{{master}}` is still accepted as a legacy alias) which are substituted by the gate runner before execution. `agent-qa` additionally carries an optional `component:` field that selects which component's `config:` map the `/qa-test` skill reads (and which workspace to start). When omitted, the verification harness falls back to the first component whose `config.qa_start_command` is set, then to a name-match against the project, then to `components[0]`.
 
 The workflow validator (`workflow-validator.ts`) rejects, at load time:
 
