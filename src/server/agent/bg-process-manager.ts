@@ -33,6 +33,15 @@ const STATUS_POLL_MS = 150;
 const PROJECTION_DEBOUNCE_MS = 300;
 /** Grace period after an explicit kill before we mark `terminalReason="killed"`. */
 const KILL_GRACE_MS = 1500;
+/**
+ * Bounded retries for re-reading the pidfile on HOST restore. Host records are
+ * persisted right after spawn but the wrapper writes the pidfile asynchronously,
+ * so a crash in the create→pidfile window can leave a valid persisted processPid
+ * + a still-running process with no pidfile yet; the wrapper writes it
+ * near-immediately, so a short retry window reliably observes it.
+ */
+const RESTORE_PIDFILE_RETRIES = 5;
+const RESTORE_PIDFILE_RETRY_MS = 20;
 /** Container-internal base path for docker spool/status/pid source files. */
 const CONTAINER_BG_ROOT = "/tmp/bobbit-bg";
 
@@ -603,6 +612,14 @@ export class BgProcessManager {
 		try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* ignore */ }
 	}
 
+	/** Non-blocking delay for the bounded host-restore pidfile retry (Fix MEDIUM). */
+	private sleep(ms: number): Promise<void> {
+		return new Promise((res) => {
+			const t = setTimeout(res, ms);
+			if (typeof (t as any).unref === "function") (t as any).unref();
+		});
+	}
+
 	private resolveDockerProcessPid(sessionId: string, bg: BgProcess, attempt = 0): void {
 		if (bg.status !== "running" || !bg.containerId) return;
 		const parsed = this.readPidFile(bg);
@@ -724,6 +741,12 @@ export class BgProcessManager {
 	/** Poll the status file; reconcile exit (normal) or detect a killed-without-status terminal state. */
 	private checkStatus(sessionId: string, bg: BgProcess): void {
 		if (bg.status !== "running") return;
+		// The durable status file is ALWAYS preferred. A fast-exiting process — even a
+		// killed one (a kill-by-signal still produces a REAL 128+N exit code) — writes
+		// its real exit code here, and reconcileExit() stops the timers afterward. So we
+		// must read+parse the status file FIRST on every check and finalize with the real
+		// code whenever it is present (the polling cadence is itself the partial-write
+		// retry: a half-written status simply fails the regex and is re-read next tick).
 		const status = this.readStatus(bg);
 		if (status != null) {
 			const m = status.trim().match(/^-?\d+$/);
@@ -731,7 +754,14 @@ export class BgProcessManager {
 		}
 		if (bg._killIntent != null) {
 			const alive = bg.paths.inContainer ? this.isContainerProcAlive(bg) : this.env.isHostPidAlive(bg.processPid);
-			if (!alive || Date.now() - bg._killIntent > KILL_GRACE_MS) {
+			// Fix (HIGH) — kill/status race: only fall back to killed/null once the process
+			// is DEAD *and* the grace window has elapsed since the kill intent *and* there
+			// is still no valid status file (checked above). The previous `!alive || …`
+			// short-circuit finalized a killed process the instant liveness went false —
+			// racing, and permanently discarding, the real exit code written to the status
+			// file milliseconds later (reconcileExit stops the watcher). Requiring BOTH
+			// dead AND grace-elapsed gives the durable status write time to land.
+			if (!alive && Date.now() - bg._killIntent > KILL_GRACE_MS) {
 				this.reconcileExit(sessionId, bg, null, "killed");
 			}
 		}
@@ -954,27 +984,40 @@ export class BgProcessManager {
 
 		const alive = bg.paths.inContainer ? this.isContainerProcAlive(bg) : this.env.isHostPidAlive(bg.processPid);
 		if (alive) {
-			// Pid-reuse guard: re-read pidfile nonce.
-			const pf = this.readPidFile(bg);
-			if (pf && pf.nonce === bg.nonce) {
-				// ALIVE → re-attach. Rebuild the buffer byte-aligned (Fix 3) then resume
-				// tailing + watcher.
-				this.restoreLoadOutput(bg);
-				this.writeProjection(bg);
-				this.store(sessionId)?.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
-				this.startTailers(sessionId, bg);
-				this.startStatusWatcher(sessionId, bg);
-				// Fix 1: a kill was requested before the restart and the process is STILL
-				// alive → re-issue the kill (re-arms the SIGTERM→SIGKILL escalation) and
-				// keep streaming until it dies + its status is read. Without this a
-				// SIGTERM-ignoring process would keep running after a restart.
-				if (bg.killRequested) this.kill(sessionId, bg.id);
+			// Pid-reuse guard: re-read the pidfile nonce. The wrapper writes the pidfile
+			// asynchronously right after spawn, so a crash in the create→pidfile window can
+			// leave a valid persisted processPid + a still-running process but NO pidfile
+			// yet (Fix MEDIUM — host restore race). RETRY reading it over a short bounded
+			// window (the wrapper writes it near-immediately) before deciding anything.
+			let pf = this.readPidFile(bg);
+			for (let i = 0; pf == null && i < RESTORE_PIDFILE_RETRIES; i++) {
+				await this.sleep(RESTORE_PIDFILE_RETRY_MS);
+				pf = this.readPidFile(bg);
+			}
+			if (pf && pf.nonce !== bg.nonce) {
+				// pid reused / foreign — the pidfile is PRESENT but its nonce MISMATCHES, so
+				// our process is gone and the pid was reused (true pid-reuse). Keep the
+				// retained projection; killed if a kill was requested, else lost.
+				this.loadProjection(bg);
+				this.markLostOrKilled(sessionId, bg);
 				return;
 			}
-			// pid reused / foreign — the original process is gone (no status). Keep the
-			// retained projection; if a kill was requested it's "killed", else lost.
-			this.loadProjection(bg);
-			this.markLostOrKilled(sessionId, bg);
+			// Re-attach. EITHER the pidfile nonce MATCHES, OR the pidfile is still absent
+			// after the retries but our persisted processPid is ALIVE — the process WE
+			// spawned is still running and we hold its pid, so re-attaching is correct and
+			// fabricates nothing (a not-yet-written pidfile must not be mistaken for an
+			// unrecoverable process). Rebuild the buffer byte-aligned (Fix 3), then resume
+			// tailing + watcher.
+			this.restoreLoadOutput(bg);
+			this.writeProjection(bg);
+			this.store(sessionId)?.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
+			this.startTailers(sessionId, bg);
+			this.startStatusWatcher(sessionId, bg);
+			// Fix 1: a kill was requested before the restart and the process is STILL
+			// alive → re-issue the kill (re-arms the SIGTERM→SIGKILL escalation) and
+			// keep streaming until it dies + its status is read. Without this a
+			// SIGTERM-ignoring process would keep running after a restart.
+			if (bg.killRequested) this.kill(sessionId, bg.id);
 			return;
 		}
 		// Not alive AND no status anywhere. Keep the retained projection; a process the

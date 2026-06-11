@@ -325,6 +325,36 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		h.mgr.cleanup(S);
 	});
 
+	it("Fix MEDIUM: ALIVE host process whose pidfile is NOT yet written → RE-ATTACHES (not unrecoverable)", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S);
+		// Persisted right after spawn; the gateway crashed in the create→pidfile window,
+		// so the process is still running with a valid persisted processPid but NO pidfile.
+		fs.writeFileSync(rec.outSpool, "still-running\n");
+		await h.mgr.restoreSession(S);
+		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
+		assert.equal(p.status, "running", "re-attached the still-running process, NOT marked unrecoverable");
+		const logs = h.mgr.getLogs(S, rec.id)!;
+		assert.ok(logs.log.some(l => l.text === "still-running"), "spool tail streamed after re-attach");
+		// A status watcher is now active: the eventual real exit code is captured.
+		assert.ok(h.specs.length >= 1, "tailers re-attached");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix MEDIUM: ALIVE host process, pidfile written late mid-retry → RE-ATTACHES with matching nonce", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S);
+		fs.writeFileSync(rec.outSpool, "live\n");
+		// The wrapper writes the pidfile shortly after restore begins (within the retry window).
+		setTimeout(() => { try { fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n"); } catch { /* ignore */ } }, 25);
+		await h.mgr.restoreSession(S);
+		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
+		assert.equal(p.status, "running", "re-attached after the pidfile appeared mid-retry");
+		h.mgr.cleanup(S);
+	});
+
 	it("lost (dead, no status) → unrecoverable, exitCode null, never fabricated", async () => {
 		const h = makeHarness({ env: { isHostPidAlive: () => false } });
 		const S = freshSession();
@@ -508,17 +538,44 @@ describe("BgProcessManager — kill terminal states", () => {
 		assert.equal(p.terminalReason, "normal");
 	});
 
-	it("hard kill, no status → terminalReason killed, exitCode null (known, not fabricated)", () => {
+	it("Fix (HIGH): hard kill with NO status within the grace window → killed/null only AFTER the grace window", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "Date"] });
 		const killCalls: any[] = [];
 		const h = makeHarness({ env: { isHostPidAlive: () => false, killHostTree: (pid, sig) => killCalls.push([pid, sig]) } });
 		const S = freshSession();
 		const info = h.mgr.create(S, "loop.sh", h.stateDir);
 		assert.equal(h.mgr.kill(S, info.id), true);
+		// Must NOT finalize immediately just because liveness is false — the wrapper's
+		// real status code could still land. Stays running through the grace window.
+		assert.equal(h.mgr.list(S).find(x => x.id === info.id)!.status, "running", "not finalized before grace window");
+		// No status ever appears → once the grace window elapses the watcher marks it
+		// killed/null (a KNOWN outcome — the user asked to kill it — not a fabrication).
+		t.mock.timers.tick(2000);
 		const p = h.mgr.list(S).find(x => x.id === info.id)!;
 		assert.equal(p.status, "exited");
 		assert.equal(p.exitCode, null);
 		assert.equal(p.terminalReason, "killed");
 		assert.ok(killCalls.length >= 1, "host kill issued");
+	});
+
+	it("Fix (HIGH): killed process whose status lands AFTER liveness goes false → REAL exit code captured (not killed/null)", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+		const h = makeHarness({ env: { isHostPidAlive: () => false } }); // dead the instant we check
+		const S = freshSession();
+		const info = h.mgr.create(S, "loop.sh", h.stateDir);
+		const rec = h.store().get(S, info.id)!;
+		assert.equal(h.mgr.kill(S, info.id), true);
+		// Liveness is already false but there is no status yet — the OLD `!alive || …`
+		// short-circuit would have finalized killed/null here, discarding the real code.
+		assert.equal(h.mgr.list(S).find(x => x.id === info.id)!.status, "running", "no premature killed/null");
+		// The wrapper writes the REAL (signal-derived) exit code milliseconds later,
+		// still inside the grace window. The status file is always preferred.
+		fs.writeFileSync(rec.statusSnapshot, "143\n"); // 128 + SIGTERM(15) — a REAL exit code
+		t.mock.timers.tick(200); // status watcher polls and reads it
+		const p = h.mgr.list(S).find(x => x.id === info.id)!;
+		assert.equal(p.status, "exited");
+		assert.equal(p.exitCode, 143, "real exit code captured, NOT killed/null");
+		assert.equal(p.terminalReason, "normal");
 	});
 
 	it("user `exit N` inside command → status file carries N → normal/N (not killed)", () => {
