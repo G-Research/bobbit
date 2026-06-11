@@ -30,6 +30,7 @@ class FakeView implements OrchestrationSessionView {
 	persisted = new Map<string, PersistedSessionLike>();
 	prompts: Array<{ sessionId: string; text: string }> = [];
 	terminated: string[] = [];
+	createSessionCalls: Array<{ cwd: string; opts: any }> = [];
 	private seq = 0;
 
 	owner(id: string, opts?: Partial<PersistedSessionLike> & { allowedTools?: string[] }): void {
@@ -42,7 +43,13 @@ class FakeView implements OrchestrationSessionView {
 		this.persisted.set(id, { id, delegateOf: parentSessionId, title: opts.title });
 		return { id };
 	}
-	async createSession(): Promise<{ id: string }> { return { id: `child-${++this.seq}` }; }
+	async createSession(cwd: string, _a: unknown, _g: unknown, _t: unknown, opts?: any): Promise<{ id: string }> {
+		const id = `child-${++this.seq}`;
+		this.createSessionCalls.push({ cwd, opts });
+		this.live.set(id, { id, status: "idle" });
+		this.persisted.set(id, { id, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind });
+		return { id };
+	}
 	async enqueuePrompt(sessionId: string, text: string): Promise<{ status: string }> {
 		this.prompts.push({ sessionId, text });
 		return { status: "running" };
@@ -130,6 +137,62 @@ describe("host.agents — source-filtered scoping (childKind === \"host-agents\"
 		const host1 = makeHost("owner-1", core, view);
 		assert.deepEqual(await host1.agents.list(), []);
 		await assert.rejects(host1.agents.read(foreign.sessionId), /not a host\.agents child/);
+	});
+});
+
+describe("host.agents.spawn — role-carrying read-only reviewer (Decision A, pr-walkthrough migration)", () => {
+	const REVIEWER_TOOLS = ["readonly_bash", "read_pr_walkthrough_bundle", "submit_pr_walkthrough_yaml"];
+	function makeReviewerCore(view: FakeView): OrchestrationCore {
+		return new OrchestrationCore({
+			sessionManager: view,
+			resolveSessionModel: () => "anthropic/x",
+			resolveRoleAllowedTools: (r) => (r === "pr-reviewer" ? REVIEWER_TOOLS : undefined),
+			audit: () => {},
+		});
+	}
+
+	it("forwards role/readOnly/lifecycle/deferInitialPrompt and stays source-filtered as host-agents", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeReviewerCore(view);
+		const host = makeHost("owner-1", core, view);
+
+		const { childSessionId } = await host.agents.spawn({
+			instructions: "kickoff",
+			role: "pr-reviewer",
+			readOnly: true,
+			lifecycle: "full",
+			deferInitialPrompt: true,
+		});
+
+		// Full lifecycle path (createSession), role threaded, read-only, child-kind host-agents.
+		assert.equal(view.createSessionCalls.length, 1);
+		const opts = view.createSessionCalls[0].opts;
+		assert.equal(opts.roleName, "pr-reviewer");
+		assert.equal(opts.readOnly, true);
+		assert.equal(opts.childKind, "host-agents");
+		// Tools come from the ROLE, never the owner; read-only deny + spawn verbs filtered (none here).
+		assert.deepEqual(opts.allowedTools, REVIEWER_TOOLS);
+		// deferInitialPrompt → no kickoff enqueued; the launcher prompts later.
+		assert.equal(view.prompts.filter(p => p.sessionId === childSessionId).length, 0);
+
+		// Still visible to host.agents (source-filtered), siblings invisible.
+		const del = await core.spawn({ ownerSessionId: "owner-1", instructions: "d", childKind: "delegate" });
+		const listed = await host.agents.list();
+		assert.deepEqual(listed.map(c => c.childSessionId), [childSessionId]);
+		await assert.rejects(host.agents.prompt(del.sessionId, "hi"), /not a host\.agents child/);
+	});
+
+	it("an explicit follow-up prompt starts the deferred reviewer", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeReviewerCore(view);
+		const host = makeHost("owner-1", core, view);
+		const { childSessionId } = await host.agents.spawn({ instructions: "k", role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true });
+		await host.agents.prompt(childSessionId, "start now");
+		const kickoffs = view.prompts.filter(p => p.sessionId === childSessionId);
+		assert.equal(kickoffs.length, 1);
+		assert.equal(kickoffs[0].text, "start now");
 	});
 });
 

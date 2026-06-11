@@ -64,6 +64,10 @@ export interface ServerHostAgentsApi {
 		readOnly?: boolean;
 		context?: Record<string, string>;
 		lifecycle?: "bare" | "full";
+		/** When `true` with `lifecycle:"full"`, create the visible child but do NOT
+		 *  enqueue `instructions` — the caller starts it later via `prompt`. Lets a
+		 *  launcher write its binding before the child's first tool call (Decision A.5). */
+		deferInitialPrompt?: boolean;
 	}): Promise<{ childSessionId: string }>;
 	/** Run-if-idle / queue a follow-up prompt to an owned host.agents child. */
 	prompt(childSessionId: string, message: string): Promise<{ status: "dispatched" | "queued" }>;
@@ -285,6 +289,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 				readOnly: spawnOpts.readOnly,
 				context: spawnOpts.context,
 				lifecycle: spawnOpts.lifecycle,
+				deferInitialPrompt: spawnOpts.deferInitialPrompt,
 				childKind: HOST_AGENTS_KIND,
 			});
 			return { childSessionId: handle.sessionId };
