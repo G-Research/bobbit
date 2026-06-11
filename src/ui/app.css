@@ -3481,8 +3481,8 @@ html {
 	100% { content: ""; }
 }
 @keyframes blob-text-pulse {
-	0%, 100% { opacity: 0.45; transform: translateY(0); }
-	50% { opacity: 1; transform: translateY(-2px); }
+	0%, 100% { opacity: 0.45; }
+	50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
