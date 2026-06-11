@@ -17,6 +17,7 @@ The workstreams (each doc owns its *content* — tasks, contracts, acceptance; t
 | **MC** Mission Control | [mission-control.md](mission-control.md) | [mission-control-implementation-plan.md](mission-control-implementation-plan.md) |
 | **AI** autoimprovement | [autoimprovement.md](autoimprovement.md) | [autoimprovement-implementation-plan.md](autoimprovement-implementation-plan.md) |
 | **GA** gap-analysis easy wins | [harness-gap-analysis.md](harness-gap-analysis.md) | [gap-easy-wins-implementation-plan.md](gap-easy-wins-implementation-plan.md) |
+| **CI** code intelligence | [code-intelligence.md](code-intelligence.md) | [code-intelligence-implementation-plan.md](code-intelligence-implementation-plan.md) |
 
 **An implementer agent receives exactly one goal ID and reads: the execution-authority doc's
 goal section → the contracts it cites → §1 below. Nothing else is required.**
@@ -52,7 +53,9 @@ goal section → the contracts it cites → §1 below. Nothing else is required.
    | `goal-trigger-dispatcher.ts` push triggers (`gate_failed`/`session_errored`) | GA-R2 · MC-P4 · AI-P1 | land once in GA-R2 |
    | `activity-store.ts` / `recordActivity()` | MC-P3 · MC-P2 · AI-P5 | land in MC-P3; earlier callers stub |
    | `auxiliary.*` model-slot config | AI-P2 · GA-R4 · CE-G6.1 | one shape ([per-role-model-overrides.md](per-role-model-overrides.md)); first lander defines it |
-   | `verification-harness.ts` | CE-G3.3 · CE-G5.2 | sequence per CE doc |
+   | `verification-harness.ts` | CE-G3.3 · CE-G5.2 (CI-2's gate-consumption is a recorded follow-up, NOT in CI-2) | sequence per CE doc |
+   | tool-activation in `session-setup.ts` | CI-1/2/3 · EP G1.4 · CS | confine to named functions; rebase order per wave |
+   | EP G8 capability registry | CI-7 consumes | CI ships a local shim until G8 merges; swap PR after |
 5. **Tracking discipline.** Tick the §4 row **in the merging PR**; update the owning doc's
    `Status:` line when a workstream's parent goal completes. The orchestrating session
    treats merged-but-unticked as a bug.
@@ -110,14 +113,17 @@ flowchart TD
     CS: R3 → R7 → R4 → R8‖R9 · SN: T5 (the big one), T8, T9
     PB: P2a (after SN-T2/T3) → P2b → P2d
     CE: post-G1.0 lanes (G2, G7; BENCH-gated G4/G5 wait for G0.3)
-    EP: G1.4 → G1.5 → G1.6 · MC: P2a → P2b, P3 · AI: P1"]
+    EP: G1.4 → G1.5 → G1.6 · MC: P2a → P2b, P3 · AI: P1
+    CI: CI-1 (ast tools) · CI-2 (diagnostics)"]
     W4["WAVE 4 — features on the spines
     SN: T6, T7 · PB: P2c (after SN-T5) → P3
     CS: waves 2–4 (D*, P*, T*) · EP: G2 → G3
-    MC: P4a → P4b · AI: P2a → P2b · GA: R4, R5 (R5 prefers EP G1.6)"]
+    MC: P4a → P4b · AI: P2a → P2b · GA: R4, R5 (R5 prefers EP G1.6)
+    CI: CI-3 (LSP supervisor) → CI-5 (repo map)"]
     W5["WAVE 5 — the loop closes
     AI: P3a → P3b → P4 → P5 → P6 · MC: P5
-    EP: G4…G9 · CE: remaining BENCH-gated goals"]
+    EP: G4…G9 · CE: remaining BENCH-gated goals
+    CI: CI-4 (language packs) · CI-6 (services chip + graphify viz) · CI-7 (capability swap + BENCH)"]
     W0 --> W1 --> W2 --> W3 --> W4 --> W5
 ```
 
@@ -198,6 +204,8 @@ T8 (S, independent) → T9 (S, independent). T2/T3/T5/T7 gate PB-P2 (§1.4).
 - **GA**: [ ] R2 · [ ] R3 · [ ] R4 · [ ] R5 · [ ] R6 · [ ] R9
 - **MC**: [ ] P0 · [ ] P1 · [ ] P2a · [ ] P2b · [ ] P3 · [ ] P4a · [ ] P4b · [ ] P5
 - **AI**: [ ] P1 · [ ] P2a · [ ] P2b · [ ] P3a · [ ] P3b · [ ] P4 · [ ] P5 · [ ] P6
+- **CI**: [ ] CI-1 · [ ] CI-2 · [ ] CI-3 · [ ] CI-4 · [ ] CI-5 · [ ] CI-6 · [ ] CI-7 ·
+  language-pack cards: [ ] lsp-go · [ ] lsp-rust · [ ] lsp-csharp · [ ] lsp-fsharp · [ ] lsp-jvm · [ ] lsp-clangd · [ ] lsp-kotlin
 
 ## §5 Prerequisite fix (before any lane)
 
