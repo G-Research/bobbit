@@ -278,9 +278,21 @@ export const routes = {
 		const parent = strOf(ctx && ctx.sessionId);
 		if (!parent) return { ok: false, retryable: false, error: "missing bound session", code: "NO_SESSION" };
 
+		// When the body carries NO usable explicit target (the primary launch path:
+		// every shipped launcher navigates to a bare #/ext/pr-walkthrough, so onRun
+		// posts an empty runBody), resolve the current branch's open GitHub PR from
+		// the SERVER-DERIVED worker cwd via gh/git. An explicit target in the body
+		// always wins (deep-links / tests); only resolve-from-branch when absent.
+		let targetInput = body;
+		if (!hasExplicitTarget(body)) {
+			const resolved = await resolveCurrentBranchTarget(workerCwd());
+			if (!resolved.ok) return resolved;
+			targetInput = resolved.target;
+		}
+
 		let target;
 		try {
-			target = await canonicalizeTarget(body, workerCwd());
+			target = await canonicalizeTarget(targetInput, workerCwd());
 		} catch (e) {
 			return { ok: false, retryable: false, error: messageOf(e), code: "INVALID_TARGET" };
 		}
@@ -396,6 +408,18 @@ async function resolveLocalChangeset(cwd, baseSha, headSha) {
 function git(cwd, args) {
 	return new Promise((resolve, reject) => {
 		execFile("git", args, { cwd, maxBuffer: GIT_MAX_BUFFER }, (err, stdout) => {
+			if (err) reject(err);
+			else resolve(typeof stdout === "string" ? stdout : String(stdout));
+		});
+	});
+}
+
+// `gh` (GitHub CLI) runs in the SERVER-DERIVED worker cwd, same ambient model as
+// `git` — never a caller-supplied dir. Rejects (non-zero exit) when there is no
+// open PR for the current branch, which the caller maps to a NO_PR result.
+function gh(cwd, args) {
+	return new Promise((resolve, reject) => {
+		execFile("gh", args, { cwd, maxBuffer: GIT_MAX_BUFFER }, (err, stdout) => {
 			if (err) reject(err);
 			else resolve(typeof stdout === "string" ? stdout : String(stdout));
 		});
@@ -723,6 +747,89 @@ function buildKickoffPrompt(target) {
 		"Treat the persisted bundle as authoritative for PR body, SHAs, stats, files, hunks, warnings, and limits.",
 		"Populate the panel only by calling submit_pr_walkthrough_yaml with valid YAML. Stay available after success.",
 	].filter(Boolean).join("\n");
+}
+
+// Whether the run body carries a target the caller chose explicitly (a deep-link
+// or test). When false, the run route resolves the current branch's open GitHub
+// PR instead (the primary launch path). A bare prUrl/prNumber or a baseSha+headSha
+// pair counts as explicit; an empty body does not.
+function hasExplicitTarget(body) {
+	if (!body || typeof body !== "object") return false;
+	if (strOf(body.prUrl)) return true;
+	if (numberValue(body.prNumber) !== undefined) return true;
+	if (strOf(body.baseSha) && strOf(body.headSha)) return true;
+	return false;
+}
+
+// Resolve the current branch's open GitHub PR from the SERVER-DERIVED worker cwd
+// (never caller-supplied — same confinement as bundle's git cwd). Uses `gh` for the
+// PR metadata + `git` for the SHAs, then hands the assembled fields to
+// canonicalizeTarget (the caller) to build the github canonical target/changeset.
+// Returns { ok:false, code:"NO_PR" } when the branch has no open GitHub PR so the
+// panel can surface a clear "open a PR first" message. The walkthrough is
+// GitHub-PR-only; local base/head targets are not resolved here.
+async function resolveCurrentBranchTarget(cwd) {
+	const noPr = {
+		ok: false,
+		retryable: false,
+		error: "No open GitHub PR for the current branch. Open a PR, then run the walkthrough.",
+		code: "NO_PR",
+	};
+
+	let pr;
+	try {
+		const out = await gh(cwd, ["pr", "view", "--json", "number,url,headRefOid,baseRefName,headRefName"]);
+		pr = JSON.parse(String(out).trim());
+	} catch {
+		return noPr; // gh non-zero / no PR for branch / gh unavailable
+	}
+	if (!pr || typeof pr !== "object" || !Number.isInteger(pr.number)) return noPr;
+
+	// owner/repo from `gh repo view`, falling back to the origin remote.
+	let owner;
+	let repo;
+	try {
+		const repoOut = await gh(cwd, ["repo", "view", "--json", "owner,name"]);
+		const repoJson = JSON.parse(String(repoOut).trim());
+		owner = repoJson && repoJson.owner ? strOf(repoJson.owner.login) : undefined;
+		repo = repoJson ? strOf(repoJson.name) : undefined;
+	} catch { /* fall back to origin remote below */ }
+	if (!owner || !repo) {
+		const inferred = await inferGithubRepository(cwd);
+		if (inferred) {
+			owner = owner || inferred.owner;
+			repo = repo || inferred.repo;
+		}
+	}
+
+	// headSha: the PR head commit (headRefOid), else the worktree HEAD.
+	let headSha = strOf(pr.headRefOid);
+	if (!headSha) {
+		headSha = await git(cwd, ["rev-parse", "HEAD"]).then((s) => s.trim()).catch(() => undefined);
+	}
+	// baseSha: the PR base branch tip — prefer origin/<base>, else the local ref,
+	// else the merge-base with HEAD.
+	let baseSha;
+	const baseRef = strOf(pr.baseRefName);
+	if (baseRef) {
+		baseSha = await git(cwd, ["rev-parse", `origin/${baseRef}`]).then((s) => s.trim()).catch(() => undefined);
+		if (!baseSha) baseSha = await git(cwd, ["rev-parse", baseRef]).then((s) => s.trim()).catch(() => undefined);
+		if (!baseSha && headSha) {
+			baseSha = await git(cwd, ["merge-base", `origin/${baseRef}`, "HEAD"]).then((s) => s.trim()).catch(() => undefined);
+		}
+	}
+
+	return {
+		ok: true,
+		target: {
+			owner,
+			repo,
+			prNumber: pr.number,
+			prUrl: strOf(pr.url),
+			baseSha,
+			headSha,
+		},
+	};
 }
 
 // Ported PURE target canonicalization (canonicalizeTarget from

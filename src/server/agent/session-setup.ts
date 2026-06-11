@@ -431,6 +431,23 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	}
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;
+
+	// Generic role-accessory application. When a session is created with a
+	// role (roleName/role) that resolves to a Role carrying an `accessory`, and
+	// the caller did NOT explicitly pass one, surface the role's accessory so it
+	// renders in the sidebar. This is how a role-carrying spawn that only threads
+	// `roleName` (e.g. the host.agents `pr-reviewer` reviewer child) gets its
+	// `review` accessory without the spawn caller plumbing it. Generic — not
+	// pr-walkthrough-specific; "none" is treated as "no accessory".
+	if (!plan.accessory || plan.accessory === "none") {
+		const roleName = plan.roleName ?? plan.role;
+		if (roleName) {
+			const resolvedRole = lookupRole(roleName, plan, ctx);
+			if (resolvedRole?.accessory && resolvedRole.accessory !== "none") {
+				plan.accessory = resolvedRole.accessory;
+			}
+		}
+	}
 }
 
 /** Look up a role by name, preferring the cascade-resolved version when available. */
@@ -932,6 +949,13 @@ export async function executeWorktreeAsync(
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
+	// resolveTools may have applied the role's accessory (generic role-accessory
+	// application); mirror it onto the live worktree session so the sidebar
+	// renders it (the early placeholder persist predates accessory resolution).
+	if (plan.accessory && session.accessory !== plan.accessory) {
+		session.accessory = plan.accessory;
+		ctx.store.update(session.id, { accessory: plan.accessory });
+	}
 	if (plan.bridgeOptions.initialModel) session.spawnPinnedModel = plan.bridgeOptions.initialModel;
 	if (plan.bridgeOptions.initialThinkingLevel) session.spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 

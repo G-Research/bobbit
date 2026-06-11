@@ -26,8 +26,11 @@
  *      (validate + map against the live diff) and persists PrWalkthroughCard[]; the
  *      real git diff renders, the SYNTHESIZED cards (orientation/design/review/audit
  *      nav rail) show with the PR title + suggested comment; a reload re-reads them.
- *   3a. RUN — the "Run PR walkthrough" action posts to the current agent (the launch
- *      re-expression, §8.4 step 5).
+ *   3a. RUN — the "Run PR walkthrough" action calls the `run` route, which mints a
+ *      SEPARATE read-only reviewer child via host.agents.spawn (the user's own agent
+ *      is NEVER driven). The harness has no real `gh`, so a bare Run resolves the
+ *      current branch's PR and finds none → the panel surfaces the NO_PR message
+ *      (GAP 3: bare launch → resolveCurrentBranchTarget → NO_PR).
  *   3b. PATH-TRAVERSAL PROBE — a caller-supplied `repoDir` cannot exfiltrate another
  *      repo's diff (the route ignores it and runs in the session worktree).
  *   4. DISABLE/RE-ENABLE — toggling the pack's entrypoints off in the Market
@@ -531,17 +534,18 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 
-		// ── Step 3a: RUN PR WALKTHROUGH — the launch re-expression (§8.4 step 5). The
-		// panel posts to the CURRENT agent via host.session.postMessage (gesture-gated)
-		// instead of spawning a child agent. A no-tools pack may post (the pack-bound
-		// surface token already proved installed+active+own-session), so the click drives
-		// the state machine into posting → waiting (the seeded agent produces no NEW
-		// submission, so we assert the in-flight waiting state, not a full round-trip). ──
+		// ── Step 3a: RUN PR WALKTHROUGH — the migrated launch (host.agents reviewer
+		// migration). The panel calls the `run` route (NOT host.session.postMessage),
+		// which mints a SEPARATE read-only reviewer child — the user's own agent is
+		// never driven. With no params the route resolves the current branch's GitHub
+		// PR; the harness has no real `gh` / open PR, so it returns NO_PR and the panel
+		// surfaces the "No open GitHub PR" message (GAP 3). This proves the gesture-gated
+		// route launch is wired and the NO_PR path renders a clear message. ──
 		const runBtn = page.locator('[data-testid="prw-run"]').first();
 		await expect(runBtn, "Run is offered when a session surface is present").toBeVisible({ timeout: 10_000 });
 		await runBtn.click();
-		await expect(page.locator('[data-testid="prw-run-status"]').first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-run-status"]').first()).toContainText(/agent/i);
+		await expect(page.locator('[data-testid="prw-error"]').first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator('[data-testid="prw-error"]').first()).toContainText(/No open GitHub PR/i);
 
 		// ── Step 5: NON-REMOVABLE — built-in source + pack cannot be removed/uninstalled. ──
 		// Built-in pack card has no Uninstall control.
