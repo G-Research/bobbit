@@ -9,7 +9,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import type { SandboxScope } from "../auth/sandbox-token.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
-import { safeExternalUrl, normalizeTrustedHosts } from "../../shared/pr-walkthrough/url-safety.js";
+import { safeExternalUrl, normalizeTrustedHosts, isTrustedExternalHost } from "../../shared/pr-walkthrough/url-safety.js";
 import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import type { WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
@@ -182,6 +182,9 @@ export async function handlePrWalkthroughApiRoute(
 				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
 				return true;
 			}
+			// FINDING 1 — trusted-host gate (restores assertTrustedGithubTarget) BEFORE
+			// any diff resolution, incl. the with-SHA local-recompute path.
+			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
 			json(await resolveAndReadBindingBundle(deps, binding, authSessionId, {
 				mode: input.mode,
 				path: input.path,
@@ -218,6 +221,10 @@ export async function handlePrWalkthroughApiRoute(
 				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
 				return true;
 			}
+			// FINDING 1 — trusted-host gate (restores assertTrustedGithubTarget): an
+			// untrusted-host PR can never have a walkthrough published. Applied BEFORE
+			// validation/persistence so nothing is published for an untrusted host.
+			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
 			const already = await store.get(PRW_PACK_ID, prwSubmittedKey(binding.jobId));
 			if (already || PRW_TERMINAL_STATUSES.has(binding.status ?? "")) {
 				fail(409, "This PR walkthrough has already accepted a YAML submission.", { code: "WALKTHROUGH_ALREADY_READY", retryable: false });
@@ -1001,6 +1008,55 @@ function verifyCallerSession(
 		return undefined;
 	}
 	return sessionId;
+}
+
+/**
+ * FINDING 1 — trusted-host gate for a binding-routed reviewer. Restores the
+ * legacy launcher's `assertTrustedGithubTarget` chokepoint (which rejected
+ * untrusted GitHub enterprise hosts BEFORE any diff was resolved). The pack
+ * `run` route runs in the CONFINED extension-host worker and CANNOT read gateway
+ * preferences (`githubTrustedHosts`), so this enforcement must live SERVER-SIDE,
+ * at the two binding-routed routes that DO have `deps.preferencesStore`. It is
+ * applied to ALL github targets — INCLUDING the with-SHA local-recompute path in
+ * `resolveDiffForBindingTarget`, which otherwise bypasses the github-adapter's
+ * own trust check (the gap this finding closes). A reviewer child may already
+ * have been spawned for an untrusted host (the worker can't pre-check prefs);
+ * that is HARMLESS — bundle + submit both 403 here, resolving/publishing NOTHING,
+ * and the child is reaped on cleanup. Returns false (and writes the 403) when the
+ * target's host is not trusted. `github.com`/`www.github.com` are the
+ * default-trusted baseline (via `isTrustedExternalHost`); enterprise hosts come
+ * only from the `githubTrustedHosts` preference.
+ */
+function assertTrustedBindingTarget(
+	binding: PrWalkthroughBinding,
+	deps: PrWalkthroughRouteDeps,
+	fail: (status: number, message: string, extra?: Record<string, unknown>) => void,
+): boolean {
+	// Only github targets reach an external host; local targets recompute from the
+	// session worktree and have no host to trust.
+	if (binding.target?.provider !== "github") return true;
+	const host = bindingTargetHost(binding.target);
+	const trustedHosts = normalizeTrustedHosts(deps.preferencesStore?.get("githubTrustedHosts"));
+	if (host && isTrustedExternalHost(host, trustedHosts)) return true;
+	fail(403, `Untrusted GitHub PR host: ${host ?? "unknown"}`, { code: "untrusted_github_host", host, retryable: false });
+	return false;
+}
+
+/**
+ * Derive the GitHub host from a binding target: prefer the canonical `host` field
+ * (the pack `run` route's `canonicalizeTarget` sets it on every github target);
+ * fall back to parsing `prUrl` when an older persisted binding lacks it.
+ */
+function bindingTargetHost(target: PrWalkthroughTarget): string | undefined {
+	if (typeof target.host === "string" && target.host.trim()) {
+		return target.host.trim().replace(/\.$/, "").toLowerCase();
+	}
+	if (typeof target.prUrl === "string" && target.prUrl.trim()) {
+		try {
+			return new URL(target.prUrl.trim()).hostname.replace(/\.$/, "").toLowerCase();
+		} catch { return undefined; }
+	}
+	return undefined;
 }
 
 /**

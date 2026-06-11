@@ -399,7 +399,12 @@ export class OrchestrationCore {
 		// broader tools. The owner-derived fallback below is reached ONLY for
 		// role-LESS delegate/team spawns.
 		if (role) {
-			const roleTools = this.deps.resolveRoleAllowedTools?.(role);
+			// Thread the OWNER's projectId so a project-scoped/custom role resolves via
+			// the owner's project cascade (mirrors the full-lifecycle path which reads
+			// `ownerPs?.projectId`); otherwise a role that only exists in the owner's
+			// project would fail closed with ROLE_TOOLS_UNRESOLVED.
+			const projectId = this.deps.sessionManager.getPersistedSession(ownerId)?.projectId;
+			const roleTools = this.deps.resolveRoleAllowedTools?.(role, projectId);
 			if (!roleTools || roleTools.length === 0) {
 				throw new OrchestrationCoreError(
 					`Cannot resolve tool grants for role ${role}`, "ROLE_TOOLS_UNRESOLVED");

@@ -388,6 +388,67 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
+	// ── Row: an UNTRUSTED GitHub host is rejected on bundle + submit (FINDING 1). ──
+	// Restores the legacy launcher's trusted-host chokepoint. The pack `run` route
+	// (confined worker) cannot read `githubTrustedHosts`, so the rejection is enforced
+	// SERVER-SIDE at the binding-routed bundle + submit-yaml paths — INCLUDING the
+	// with-SHA local-recompute path that previously bypassed the github-adapter check.
+	// Seeding the binding directly is the most deterministic exercise of the chokepoint.
+	test("an untrusted GitHub host 403s on both bundle and submit-yaml (nothing resolved/published)", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		// A real session so it has a resolvable X-Bobbit-Session-Secret.
+		const reviewer = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(reviewer);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		const jobId = "prw-untrusted-host-test";
+		try {
+			// GitHub PR on an UNTRUSTED enterprise host, WITH base/head SHAs (the
+			// local-recompute path that previously skipped the trusted-host check).
+			await getPackStore().put(PACK_ID, `binding/${reviewer}`, {
+				jobId,
+				parentSessionId: owner,
+				baseSha: fixture.baseSha,
+				headSha: fixture.headSha,
+				target: {
+					provider: "github",
+					prUrl: "https://github.example.com/acme/widgets/pull/42",
+					owner: "acme",
+					repo: "widgets",
+					number: 42,
+					host: "github.example.com",
+					baseSha: fixture.baseSha,
+					headSha: fixture.headSha,
+					canonicalKey: "github:github.example.com/acme/widgets#42",
+				},
+			});
+			const secret = reviewerSecret(gateway, reviewer);
+
+			// bundle → 403 untrusted_github_host (nothing resolved).
+			const bundle = await apiFetch("/api/internal/pr-walkthrough/bundle", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": secret },
+				body: JSON.stringify({ mode: "manifest" }),
+			});
+			expect(bundle.status).toBe(403);
+			expect((await bundle.json()).code).toBe("untrusted_github_host");
+
+			// submit-yaml → 403 untrusted_github_host (nothing published).
+			const submit = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": secret },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submit.status).toBe(403);
+			expect((await submit.json()).code).toBe("untrusted_github_host");
+			// No submitted marker landed for the untrusted job.
+			expect(await getPackStore().get(PACK_ID, `submitted/${jobId}`)).toBeFalsy();
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	// ── Row: a LOCAL launch target is rejected by `run` BEFORE any spawn. ──
 	// The walkthrough is GitHub-PR-only: the production YAML schema requires
 	// `pr.provider: "github"` (PROVIDERS = {github}) and submit-yaml enforces
