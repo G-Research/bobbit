@@ -846,4 +846,142 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			fixture.cleanup();
 		}
 	});
+
+	// ── Row D2: status + recover authorize from the CHILD side of the binding. ──
+	// Area D moves the walkthrough pane INTO the reviewer child session. To let the
+	// child-session pane resolve its own state, `status` authorizes EITHER bound
+	// principal (isOwner || isChild) and `recover` self-resolves binding/<child> →
+	// submitted YAML. Right-job routing is preserved: the caller must STILL match the
+	// binding's jobId AND be one of the two named principals — a foreign session (the
+	// owner of neither) is rejected exactly as before. NOTE: a reviewer child cannot
+	// resolve its OWN agent status through host.agents (it owns no children), so a
+	// child-self `status` BEFORE submit would mark the binding terminal as a side
+	// effect; production polls with the OWNER host, so we exercise the child side via
+	// the submitted-marker short-circuit (which precedes the agent-status check) — the
+	// strongest faithful proof the child principal is authorized.
+	test("status + recover authorize from the child side (isChild) with right-job routing preserved", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		// A real, independent session that is NEITHER the bound owner NOR the bound child.
+		const foreign = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(foreign);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			// Right-job routing: the child self with the WRONG jobId is rejected as a
+			// binding mismatch (the caller must match the binding's jobId). This returns
+			// BEFORE any agent-status read, so it has no side effect on the binding.
+			const childWrongJob = await invokeRoute(gateway, child, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: "prw-not-the-bound-job" },
+			}, fixture.cwd);
+			expect(childWrongJob.phase).toBe("error");
+			expect(childWrongJob.error).toMatch(/unknown or mismatched binding/);
+			expect(childWrongJob.yaml).toBeUndefined();
+
+			// A FOREIGN session (neither the bound owner nor the bound child) with the
+			// CORRECT jobId is still rejected — isOwner=false AND isChild=false. Also
+			// side-effect-free (returns before the agent-status read).
+			const foreignStatus = await invokeRoute(gateway, foreign, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(foreignStatus.phase).toBe("error");
+			expect(foreignStatus.error).toMatch(/unknown or mismatched binding/);
+			expect(foreignStatus.yaml).toBeUndefined();
+
+			// A real submit routes to the bound jobId and server-dismisses the reviewer.
+			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submitResp.status).toBe(200);
+
+			// CHILD SELF (ctx.sessionId === childSessionId) is AUTHORIZED: with the
+			// submitted marker present the route short-circuits to phase:submitted BEFORE
+			// the agent-status check, returning the bound job's YAML. This is the
+			// definitive proof the isChild branch authorizes the child principal.
+			const childAfter = await invokeRoute(gateway, child, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(childAfter.phase).toBe("submitted");
+			expect(childAfter.yaml).toBe(yaml);
+
+			// recover from the CHILD self-resolves its OWN binding/<child> → submitted YAML
+			// (no owner-scoped last/<owner> pointer needed). Keyed by ctx.sessionId=child.
+			const childRecover = await invokeRoute(gateway, child, "recover", { method: "POST", body: {} }, fixture.cwd);
+			expect(childRecover.found).toBe(true);
+			expect(childRecover.jobId).toBe(started.jobId);
+			expect(childRecover.yaml).toBe(yaml);
+
+			// recover from a FOREIGN session resolves NOTHING (no binding/<foreign>, no
+			// last/<foreign> pointer) — found:false. The child's submitted YAML never
+			// leaks to an unrelated caller.
+			const foreignRecover = await invokeRoute(gateway, foreign, "recover", { method: "POST", body: {} }, fixture.cwd);
+			expect(foreignRecover.found).toBe(false);
+			expect(foreignRecover.yaml).toBeUndefined();
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	// ── Row D5: a reviewer dismissed on submit stays VIEWABLE (archived, not hard-
+	//    deleted) and its pane data is recoverable. ──
+	// The pane now lives WITH the reviewer child session and must render its ready
+	// cards AFTER submit — but submit server-dismisses the reviewer (terminal-
+	// synchronous reap). The reap must ARCHIVE the session (reap worktree + mark
+	// terminal) WITHOUT removing it from the sidebar, else the child pane has nowhere
+	// to render. The pane's data (binding + submitted YAML) persists in the pack store
+	// regardless of the agent lifecycle, so `recover` re-resolves it after dismissal.
+	test("a reviewer dismissed on submit stays viewable (archived) and its pane data is recoverable", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submitResp.status).toBe(200);
+
+			// Submit server-dismisses the reviewer (terminal-synchronous reap).
+			await pollUntil(() => {
+				const live = gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child);
+				return live ? null : true;
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer dismissed on submit" });
+
+			// The dismissed reviewer is ARCHIVED, not hard-deleted: its session record is
+			// still retrievable, so the sidebar keeps it selectable/viewable and the child
+			// pane has a host view to render into.
+			await pollUntil(() => {
+				const a = gateway.sessionManager.getArchivedSession(child);
+				return a ? a : null;
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer archived (not hard-deleted)" });
+			const archived = gateway.sessionManager.getArchivedSession(child);
+			expect(archived, "the dismissed reviewer must remain a viewable (archived) session").toBeTruthy();
+			expect(archived?.childTerminal).toBe(true);
+			// The session record was NOT hard-deleted (getPersistedSession resolves it too).
+			expect(gateway.sessionManager.getPersistedSession(child)).toBeTruthy();
+
+			// Its pane data is recoverable from the child side even after the agent is
+			// gone: recover self-resolves binding/<child> → the persisted submitted YAML.
+			const childRecover = await invokeRoute(gateway, child, "recover", { method: "POST", body: {} }, fixture.cwd);
+			expect(childRecover.found).toBe(true);
+			expect(childRecover.yaml).toBe(yaml);
+		} finally {
+			fixture.cleanup();
+		}
+	});
 });
