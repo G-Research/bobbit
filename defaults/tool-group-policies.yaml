@@ -30,3 +30,12 @@ Skills: allow
 # agents from a worker session — where the tool wouldn't work anyway because
 # the team extension is only loaded for the team-lead session.
 Team: never
+# PR Walkthrough group: the three host.agents reviewer tools (readonly_bash,
+# read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml). Default `never` so they
+# are stripped from EVERY non-reviewer session's allowedTools — "only the reviewer
+# submits" falls out of tool-granting with NO secret (PR-walkthrough host.agents
+# migration, design Decision C). The pack-shipped `pr-reviewer` role re-grants the
+# whole group via `toolPolicies: { "PR Walkthrough": allow }`, which beats this
+# group default (resolveGrantPolicy step 2 > step 4). Pinned by
+# tests/pr-walkthrough-role-tools-policy.test.ts.
+PR Walkthrough: never

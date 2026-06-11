@@ -222,15 +222,6 @@ function readAnalysisBundleArtifacts(): Array<Record<string, any>> {
 		.filter((value): value is Record<string, any> => value?.kind === "pr_walkthrough_analysis_bundle");
 }
 
-function removeAnalysisBundleArtifacts(): void {
-	for (const file of jsonFilesUnder(tempDir)) {
-		try {
-			const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-			if (parsed?.kind === "pr_walkthrough_analysis_bundle") fs.rmSync(file, { force: true });
-		} catch { /* ignore non-bundle JSON */ }
-	}
-}
-
 async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
 	const res = makeResponse();
 	const handled = await handlePrWalkthroughApiRoute(new URL(`http://localhost${pathname}`), { method, headers } as any, res as any, {
@@ -799,21 +790,15 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(stored?.changeset.headSha, fixture.headSha);
 	});
 
-	it("missing stored analysis bundle returns a deterministic retryable submission error instead of re-resolving diff data", async () => {
-		const fixture = createGitDiffFixture();
-		const sessionManager = makeSessionManager();
-		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
-		const proof = submitProof(sessionManager, launch.body.childSessionId);
-		removeAnalysisBundleArtifacts();
-
-		const result = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
-
-		assert.notEqual(result.status, 200, "missing bundle must not be silently recovered by submit-time GitHub/local diff resolution");
-		assert.equal(result.body.code, "PR_WALKTHROUGH_BUNDLE_MISSING");
-		assert.equal(result.body.retryable, true);
-		assert.match(result.body.message, /bundle/i);
-	});
+	// NOTE (host.agents reviewer migration, design Decision C / §7): the SUBMIT-YAML
+	// *route* no longer delegates to manager.submitYaml + the submit-proof secret — it
+	// resolves the job from the pack-store binding keyed by the verified
+	// X-Bobbit-Session-Secret caller. The former route-level proof tests (missing
+	// stored bundle, structured manager-error passthrough, proof-required submit,
+	// sandbox-scope-before-proof) pinned the DELETED proof contract and are superseded
+	// by the new binding API E2E (tests/e2e/pr-walkthrough-host-agents.spec.ts, later
+	// wave). The manager.submitYaml UNIT tests below still exercise the legacy manager
+	// method directly (kept until the launcher is deleted in a later wave).
 
 	it("github submit without analysis bundle metadata fails before custom or submit-time diff fallback", async () => {
 		const sessionManager = makeSessionManager();
@@ -865,35 +850,6 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(result.ok, false);
 		assert.equal(result.status, "validation_failed");
 		assert.match(result.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n"), /pr number 42|URL https:\/\/github\.com\/acme\/widgets\/pull\/42/);
-	});
-
-	it("route preserves structured error extras from manager failures", async () => {
-		const manager = new WalkthroughAgentManager({
-			defaultCwd: tempDir,
-			stateDir: tempDir,
-			store: new WalkthroughAgentStore(tempDir),
-			validateYaml: () => { throw Object.assign(new Error("already ready"), { status: 409, extra: { code: "WALKTHROUGH_ALREADY_READY", retryable: false, job: { jobId: "job-1" } } }); },
-		});
-		const store = (manager as any).store as WalkthroughAgentStore;
-		const proof = "scoped-proof";
-		store.create({
-			jobId: "job-1",
-			parentSessionId: "parent",
-			childSessionId: "child",
-			cwd: tempDir,
-			target: { provider: "github", canonicalKey: "github:acme/widgets#42", owner: "acme", repo: "widgets", number: 42 },
-			changesetId: "github:acme/widgets#42",
-			tabId: "walkthrough:github:acme/widgets#42",
-			status: "waiting_for_yaml",
-			title: "PR #42 Walkthrough",
-			submissionProofHash: submitProofHash("job-1", "child", proof),
-		});
-
-		const result = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: "child", jobId: "job-1", yaml: validYaml() }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
-		assert.equal(result.status, 409);
-		assert.equal(result.body.code, "WALKTHROUGH_ALREADY_READY");
-		assert.equal(result.body.retryable, false);
-		assert.equal(result.body.job.jobId, "job-1");
 	});
 
 	it("route rejects local agent launches with a structured error", async () => {
@@ -966,39 +922,9 @@ describe("WalkthroughAgentManager", () => {
 		const goneSession = await callRoute(manager, "GET", `/api/pr-walkthrough/session/${encodeURIComponent(launch.body.childSessionId)}`);
 		assert.equal(goneSession.status, 405);
 		assert.equal(manager.getJob(launch.body.jobId)?.childSessionId, launch.body.childSessionId);
-		const proof = submitProof(sessionManager, launch.body.childSessionId);
-
-		const missingProof = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: "schema_version: 1\n" });
-		assert.equal(missingProof.status, 403);
-		assert.equal(missingProof.body.code, "WALKTHROUGH_SUBMIT_PROOF_REQUIRED");
-		assert.equal(manager.getJob(launch.body.jobId)?.status, "waiting_for_yaml");
-
-		const invalid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: "schema_version: 1\n" }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
-		assert.equal(invalid.status, 200);
-		assert.equal(invalid.body.ok, false);
-
-		const valid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
-		assert.equal(valid.status, 200);
-		assert.equal(valid.body.ok, true);
-	});
-
-	it("sandbox submit-yaml rejects child sessions outside the caller scope", async () => {
-		const fixture = createGitDiffFixture();
-		const sessionManager = makeSessionManager();
-		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
-
-		const result = await callRoute(
-			manager,
-			"POST",
-			"/api/internal/pr-walkthrough/submit-yaml",
-			{ sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml() },
-			{ sandboxScope: { projectId: "project-1", sessionIds: new Set(["other-session"]), goalIds: new Set() } },
-		);
-
-		assert.equal(result.status, 403);
-		assert.equal(result.body.code, "SANDBOX_SESSION_OUT_OF_SCOPE");
-		assert.equal(manager.getJob(launch.body.jobId)?.status, "waiting_for_yaml");
+		// The submit-yaml proof contract was migrated to the binding+session-secret
+		// route (design Decision C); proof-based submit assertions are superseded by the
+		// new binding API E2E and removed here.
 	});
 
 	it("submit-yaml rejects a different child session for the same job", async () => {

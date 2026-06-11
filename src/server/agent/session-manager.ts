@@ -214,6 +214,11 @@ export interface SessionInfo {
 	childKind?: string;
 	/** Whether the session should be treated as read-only by clients/tools. */
 	readOnly?: boolean;
+	/** Generic persisted terminal marker for a child session (orchestration-core
+	 *  Decision E). Stamped by `markChildTerminal`; drives the generic boot-reap. */
+	childTerminal?: boolean;
+	/** Epoch ms when `childTerminal` was stamped. */
+	terminalAt?: number;
 	/** PR walkthrough job metadata for session-hosted walkthrough children. */
 	walkthroughJobId?: string;
 	walkthroughChangesetId?: string;
@@ -3359,6 +3364,15 @@ export class SessionManager {
 		if (ps.childKind && ps.parentSessionId && !ps.delegateOf) {
 			let kindTerminal = false;
 			let kindTerminalReason: string | undefined;
+			// GENERIC persisted terminal marker (orchestration-core Decision E /
+			// Findings 3–4): any child stamped `childTerminal:true` by completing
+			// server-side code is reapable on boot, with ZERO pack/kind knowledge here.
+			// host-agents reviewers (e.g. pr-walkthrough's host.agents reviewer) rely on
+			// this; the legacy `pr-walkthrough` job-store branch below stays for now.
+			if (ps.childTerminal === true) {
+				kindTerminal = true;
+				kindTerminalReason = "child session marked terminal";
+			}
 			if (ps.childKind === "pr-walkthrough") {
 				let jobStatus: string | undefined;
 				if (ps.walkthroughJobId) {
@@ -5056,7 +5070,7 @@ export class SessionManager {
 	}
 
 	/** Update session metadata fields and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): boolean {
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) {
 			// Store-only session (dormant/delegate) — update store directly
@@ -5086,11 +5100,37 @@ export class SessionManager {
 		if (updates.parentSessionId !== undefined) session.parentSessionId = updates.parentSessionId;
 		if (updates.childKind !== undefined) session.childKind = updates.childKind;
 		if (updates.readOnly !== undefined) session.readOnly = updates.readOnly;
+		if (updates.childTerminal !== undefined) session.childTerminal = updates.childTerminal;
+		if (updates.terminalAt !== undefined) session.terminalAt = updates.terminalAt;
 		if (updates.walkthroughJobId !== undefined) session.walkthroughJobId = updates.walkthroughJobId;
 		if (updates.walkthroughChangesetId !== undefined) session.walkthroughChangesetId = updates.walkthroughChangesetId;
 		if (updates.walkthroughTargetKey !== undefined) session.walkthroughTargetKey = updates.walkthroughTargetKey;
 		this.resolveStoreForSession(id).update(id, updates);
 		return true;
+	}
+
+	/**
+	 * Stamp the GENERIC persisted terminal marker on a child session
+	 * (`childTerminal:true` + `terminalAt`), so the generic boot-reap
+	 * (`shouldReapChildOnBoot` reading `PersistedSessionLike.childTerminal`)
+	 * removes it after a restart even if a dismiss never ran (orchestration-core
+	 * Decision E / Findings 3–4). Idempotent; carries NO pack/kind knowledge.
+	 * Implements `OrchestrationSessionView.markChildTerminal` and is also called
+	 * by the pr-walkthrough submit-yaml route before its terminal-synchronous
+	 * dismiss. Routes through `updateSessionMeta` for a live/dormant session and
+	 * `updateArchivedMeta` for an archived one.
+	 */
+	markChildTerminal(childSessionId: string): void {
+		const updates = { childTerminal: true, terminalAt: Date.now() };
+		if (this.sessions.has(childSessionId)) {
+			this.updateSessionMeta(childSessionId, updates);
+			return;
+		}
+		// Not live: try the archived path; if it is not archived (dormant store-only),
+		// fall back to updateSessionMeta's store-only branch.
+		if (!this.updateArchivedMeta(childSessionId, updates)) {
+			this.updateSessionMeta(childSessionId, updates);
+		}
 	}
 
 	// ── Draft storage ──────────────────────────────────────────────
@@ -5726,7 +5766,7 @@ export class SessionManager {
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
-	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): boolean {
+	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): boolean {
 		const store = this.resolveStoreForId(id);
 		if (!store) return false;
 		const ps = store.get(id);

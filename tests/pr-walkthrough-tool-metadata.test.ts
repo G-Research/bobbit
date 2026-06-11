@@ -48,20 +48,28 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(text, /YAML/);
 	});
 
-	it("extension registers only in walkthrough-scoped sessions and posts scoped YAML payloads", () => {
+	it("extension registers in any session and posts session-secret-authenticated YAML payloads (no proof secret)", () => {
+		// host.agents reviewer migration (design Decision C): the env-gate + submit-proof
+		// secret are GONE. Registration ≠ activation — the boundary is the pr-reviewer role
+		// grant + the default-deny `PR Walkthrough` tool group. The tools register whenever
+		// a session id is present; the server resolves the jobId from the pack-store binding
+		// keyed by the verified X-Bobbit-Session-Secret caller.
 		const source = readToolText("extension.ts");
 		assert.match(source, /const sessionId = process\.env\.BOBBIT_SESSION_ID/);
-		assert.match(source, /const jobId = process\.env\.BOBBIT_WALKTHROUGH_JOB_ID/);
-		assert.match(source, /const submissionProof = process\.env\.BOBBIT_WALKTHROUGH_SUBMIT_PROOF/);
+		assert.match(source, /const sessionSecret = process\.env\.BOBBIT_SESSION_SECRET/);
 		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_OWNER/);
 		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_REPO/);
 		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_NUMBER/);
-		assert.match(source, /if \(!sessionId \|\| !jobId \|\| !submissionProof\) return/);
+		assert.match(source, /if \(!sessionId\) return/);
 		assert.match(source, /name:\s*"readonly_bash"/);
 		assert.match(source, /name:\s*"submit_pr_walkthrough_yaml"/);
 		assert.match(source, /\/api\/internal\/pr-walkthrough\/submit-yaml/);
-		assert.match(source, /X-Bobbit-Walkthrough-Submit-Proof/);
-		assert.match(source, /JSON\.stringify\(\{ sessionId, jobId, yaml \}\)/);
+		assert.match(source, /"X-Bobbit-Session-Secret": sessionSecret/);
+		assert.match(source, /JSON\.stringify\(\{ yaml \}\)/);
+		// The submit-proof secret must be entirely gone from the tool.
+		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_JOB_ID/);
+		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_SUBMIT_PROOF/);
+		assert.doesNotMatch(source, /X-Bobbit-Walkthrough-Submit-Proof/);
 	});
 
 	it("readonly_bash extension calls the central policy and returns bounded inline output", () => {

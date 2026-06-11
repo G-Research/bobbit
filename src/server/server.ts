@@ -1196,6 +1196,19 @@ export function createGateway(config: GatewayConfig) {
 			if (!role) return undefined;
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
 		},
+		// Resolve a ROLE's effective tool grants for role-carrying spawns
+		// (orchestration-core Decision A.2 — FAIL CLOSED). Resolves pack-contributed
+		// roles (e.g. the pr-walkthrough pack's `pr-reviewer`) via the config cascade
+		// FIRST — the same source session-setup uses (session-setup.ts:441) — then
+		// falls back to roleManager so EVERY built-in role still resolves (backward
+		// compat: a role-carrying team_delegate spawn must not fail closed). Mirrors
+		// the resolveEffectiveTools grant pipeline above.
+		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
+			const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleName)?.item;
+			const role = cascadeRole ?? roleManager.getRole(roleName);
+			if (!role) return undefined;
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
 
@@ -2475,6 +2488,13 @@ async function handleApiRoute(
 		},
 		preferencesStore,
 		sandboxScope,
+		// host.agents reviewer migration (design Decisions C/D/E): the binding-routed
+		// submit-yaml/bundle paths resolve the jobId from the pack-store binding keyed
+		// by the verified caller session id, and submit-yaml server-dismisses the
+		// reviewer child on terminal (terminal-synchronous reap).
+		orchestrationCore,
+		packStore: getPackStore(),
+		sessionSecretStore: sessionManager.sessionSecretStore,
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────

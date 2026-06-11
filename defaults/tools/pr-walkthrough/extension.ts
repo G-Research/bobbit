@@ -157,10 +157,15 @@ function formatGatewayResponse(data: unknown): string {
 }
 
 const extension: ExtensionFactory = (pi) => {
+	// host.agents reviewer migration (design Decision C): the boundary is now the
+	// pr-reviewer role grant + the default-deny `PR Walkthrough` tool group — NOT an
+	// env-gated secret. Register the tools whenever a session id is present
+	// (registration ≠ activation; allowedTools gates who can actually call them). The
+	// server resolves the job binding from the verified caller session secret, so no
+	// per-job env var or submission-proof env is read here any more.
 	const sessionId = process.env.BOBBIT_SESSION_ID;
-	const jobId = process.env.BOBBIT_WALKTHROUGH_JOB_ID;
-	const submissionProof = process.env.BOBBIT_WALKTHROUGH_SUBMIT_PROOF;
-	if (!sessionId || !jobId || !submissionProof) return;
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
+	if (!sessionId) return;
 
 	pi.registerTool({
 		name: "readonly_bash",
@@ -309,8 +314,10 @@ const extension: ExtensionFactory = (pi) => {
 			try {
 				const response = await fetch(`${baseUrl}/api/internal/pr-walkthrough/bundle`, {
 					method: "POST",
-					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-					body: JSON.stringify({ ...readArgs, sessionId, jobId }),
+					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Bobbit-Session-Secret": sessionSecret ?? "" },
+					// No jobId/sessionId in the body — the server resolves both from the
+					// pack-store binding keyed by the verified caller session secret.
+					body: JSON.stringify({ ...readArgs }),
 				});
 				const text = await response.text();
 				let data: unknown = text;
@@ -342,8 +349,9 @@ const extension: ExtensionFactory = (pi) => {
 			try {
 				const response = await fetch(`${baseUrl}/api/internal/pr-walkthrough/submit-yaml`, {
 					method: "POST",
-					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Bobbit-Walkthrough-Submit-Proof": submissionProof },
-					body: JSON.stringify({ sessionId, jobId, yaml }),
+					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Bobbit-Session-Secret": sessionSecret ?? "" },
+					// No jobId — the server resolves it from the binding by the verified session.
+					body: JSON.stringify({ yaml }),
 				});
 				const text = await response.text();
 				let data: unknown = text;

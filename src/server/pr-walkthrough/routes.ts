@@ -12,8 +12,27 @@ import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "
 import { safeExternalUrl, normalizeTrustedHosts } from "../../shared/pr-walkthrough/url-safety.js";
 import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
-import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
-import type { ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
+import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
+import { WalkthroughAnalysisBundleStore, createAnalysisBundleFromParsedDiff, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
+import { resolveGithubPr } from "./github-adapter.js";
+import { resolveLocalChangeset } from "./git-changeset.js";
+import { validatePrWalkthroughYaml, type WalkthroughParsedDiffForYamlMapping } from "./walkthrough-yaml-schema.js";
+import type { PrWalkthroughJobRecord, PrWalkthroughTarget } from "./walkthrough-agent-store.js";
+import { getPackStore, type PackStore } from "../extension-host/pack-store.js";
+import type { OrchestrationCore } from "../agent/orchestration-core.js";
+import type { SessionSecretStore } from "../auth/session-secret.js";
+
+// ── host.agents reviewer migration (design Decisions C/D/E) ──
+// The pack-store packId for the builtin pr-walkthrough pack. The submit-yaml +
+// bundle SERVER routes reach the pack-scoped store with this constant id (the same
+// store `ctx.host.store` delegates to in the confined worker). If the builtin
+// pack's server-derived id ever diverges from its directory name this lookup
+// breaks — see design Risk #2.
+const PRW_PACK_ID = "pr-walkthrough";
+// Single source for the terminal binding statuses (mirrors lib/routes.mjs).
+const PRW_TERMINAL_STATUSES = new Set(["submitted", "ready", "error"]);
+const prwBindingKey = (childSessionId: string): string => `binding/${childSessionId}`;
+const prwSubmittedKey = (jobId: string): string => `submitted/${jobId}`;
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -105,6 +124,16 @@ export type PrWalkthroughRouteDeps = {
 	walkthroughAgentManager?: WalkthroughAgentManager;
 	preflightGithubLaunch?: WalkthroughAgentManagerDeps["preflightGithubLaunch"];
 	sandboxScope?: SandboxScope;
+	// ── host.agents reviewer migration (design Decisions C/D/E) ──
+	/** OrchestrationCore — submit-yaml server-dismisses the reviewer child on terminal
+	 *  (terminal-synchronous reap, Decision E). */
+	orchestrationCore?: OrchestrationCore;
+	/** Pack-scoped KV store (process singleton) holding the `binding/`+`submitted/`
+	 *  reviewer routing keys written by the pack `run` route. */
+	packStore?: PackStore;
+	/** Resolves the authentic caller session id from `X-Bobbit-Session-Secret`
+	 *  (Decision C — REQUIRED for the binding-routed submit-yaml/bundle paths). */
+	sessionSecretStore?: SessionSecretStore;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -170,30 +199,86 @@ export async function handlePrWalkthroughApiRoute(
 		if (isInternalBundleRoute && (req.method === "GET" || req.method === "POST")) {
 			const body = req.method === "POST" ? await deps.readBody(req) : undefined;
 			const input = bundleReadRequestFrom(url, body);
-			if (deps.sandboxScope && (!input.sessionId || !deps.sandboxScope.sessionIds.has(input.sessionId))) {
+			// Authoritative caller session id from the REQUIRED session secret (Decision C).
+			const authSessionId = verifyCallerSession(req, deps, fail);
+			if (!authSessionId) return true;
+			if (deps.sandboxScope && !deps.sandboxScope.sessionIds.has(authSessionId)) {
 				fail(403, "Forbidden: PR walkthrough bundle read session is outside sandbox scope", { code: "SANDBOX_SESSION_OUT_OF_SCOPE" });
 				return true;
 			}
-			const manager = getWalkthroughAgentManager(deps);
-			json(manager.readBundle(input));
+			const store = deps.packStore ?? getPackStore();
+			const binding = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, prwBindingKey(authSessionId));
+			if (!binding || typeof binding !== "object") {
+				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
+				return true;
+			}
+			json(await resolveAndReadBindingBundle(deps, binding, authSessionId, {
+				mode: input.mode,
+				path: input.path,
+				index: input.index,
+				offset: input.offset,
+				limit: input.limit,
+				hunkOffset: input.hunkOffset,
+				hunkLimit: input.hunkLimit,
+			}));
 			return true;
 		}
 
-		if (url.pathname === "/api/internal/pr-walkthrough/submit-yaml" && req.method === "POST") {
+		if (isInternalSubmitRoute && req.method === "POST") {
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {
 				fail(400, "Invalid YAML submit request");
 				return true;
 			}
-			const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
-			if (deps.sandboxScope && (!sessionId || !deps.sandboxScope.sessionIds.has(sessionId))) {
+			if (typeof body.yaml !== "string") {
+				fail(400, "Missing required field: yaml", { code: "INVALID_SUBMIT_REQUEST" });
+				return true;
+			}
+			// Authoritative caller session id from the REQUIRED session secret (Decision C);
+			// the server resolves the jobId from the binding, NOT from the request body.
+			const authSessionId = verifyCallerSession(req, deps, fail);
+			if (!authSessionId) return true;
+			if (deps.sandboxScope && !deps.sandboxScope.sessionIds.has(authSessionId)) {
 				fail(403, "Forbidden: PR walkthrough YAML submit session is outside sandbox scope", { code: "SANDBOX_SESSION_OUT_OF_SCOPE" });
 				return true;
 			}
-			const manager = getWalkthroughAgentManager(deps);
-			const submissionProof = headerValue(req, "x-bobbit-walkthrough-submit-proof");
-			const result = await manager.submitYaml({ ...(body as SubmitWalkthroughYamlRequest), submissionProof });
-			json(result);
+			const store = deps.packStore ?? getPackStore();
+			const binding = await store.get<PrWalkthroughBinding>(PRW_PACK_ID, prwBindingKey(authSessionId));
+			if (!binding || typeof binding !== "object") {
+				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
+				return true;
+			}
+			const already = await store.get(PRW_PACK_ID, prwSubmittedKey(binding.jobId));
+			if (already || PRW_TERMINAL_STATUSES.has(binding.status ?? "")) {
+				fail(409, "This PR walkthrough has already accepted a YAML submission.", { code: "WALKTHROUGH_ALREADY_READY", retryable: false });
+				return true;
+			}
+			// Validate the YAML SHAPE only (full synthesis stays in the pack publish route).
+			// On invalid, persist nothing and return a structured schema error.
+			const validation = validatePrWalkthroughYaml(body.yaml, { target: binding.target });
+			if (!validation.ok) {
+				json({ ok: false, status: "validation_failed", retryable: true, validation: validation.summary });
+				return true;
+			}
+			await store.put(PRW_PACK_ID, prwSubmittedKey(binding.jobId), {
+				yaml: body.yaml,
+				baseSha: binding.baseSha,
+				headSha: binding.headSha,
+				submittedAt: Date.now(),
+			});
+			await store.put(PRW_PACK_ID, prwBindingKey(authSessionId), { ...binding, status: "submitted" });
+			// Stamp the GENERIC persisted terminal marker BEFORE dismiss, so a restart
+			// between here and the dismiss still lets the generic boot-reap remove the
+			// reviewer (Decision E / Findings 3–4).
+			try { deps.sessionManager?.updateSessionMeta?.(authSessionId, { childTerminal: true, terminalAt: Date.now() }); }
+			catch (err) { console.warn(`[pr-walkthrough] failed to stamp terminal marker for ${authSessionId}:`, err); }
+			// Terminal-synchronous reap: server-dismiss the reviewer without waiting for a
+			// panel poll (Decision E). Best-effort — the boot-reap is the backstop.
+			if (deps.orchestrationCore && binding.parentSessionId) {
+				try { await deps.orchestrationCore.dismiss(binding.parentSessionId, authSessionId); }
+				catch (err) { console.warn(`[pr-walkthrough] failed to dismiss reviewer ${authSessionId}:`, err); }
+			}
+			json({ ok: true, status: "submitted", jobId: binding.jobId });
 			return true;
 		}
 
@@ -920,6 +1005,146 @@ function bundleReadRequestFrom(url: URL, body: unknown): ReadPrWalkthroughBundle
 		limit: numberValue(record.limit) ?? numberValue(url.searchParams.get("limit")),
 		hunkOffset: numberValue(record.hunkOffset) ?? numberValue(url.searchParams.get("hunkOffset")),
 		hunkLimit: numberValue(record.hunkLimit) ?? numberValue(url.searchParams.get("hunkLimit")),
+	};
+}
+
+// ── host.agents reviewer migration helpers (design Decisions C/D/E) ──────────
+
+/** The pack-store binding the `run` route writes under `binding/<childSessionId>`. */
+type PrWalkthroughBinding = {
+	jobId: string;
+	changesetId?: string;
+	baseSha?: string;
+	headSha?: string;
+	parentSessionId?: string;
+	canonicalKey?: string;
+	target: PrWalkthroughTarget;
+	status?: string;
+	kickedOff?: boolean;
+};
+
+/**
+ * Resolve the AUTHENTIC caller session id from the REQUIRED `X-Bobbit-Session-Secret`
+ * header (Decision C). Routing/correctness, not a security boundary (single-user trust
+ * domain) — but REQUIRED for the binding-routed submit-yaml/bundle paths: every
+ * reviewer child always carries BOBBIT_SESSION_SECRET, so a missing/unresolved secret
+ * hard-fails 403 (it does NOT degrade to a weaker check). The `sandboxScope.sessionIds`
+ * check at each call site remains an ADDITIONAL floor. Writes the 403 and returns
+ * undefined on failure.
+ */
+function verifyCallerSession(
+	req: http.IncomingMessage,
+	deps: PrWalkthroughRouteDeps,
+	fail: (status: number, message: string, extra?: Record<string, unknown>) => void,
+): string | undefined {
+	const secret = headerValue(req, "x-bobbit-session-secret");
+	const sessionId = deps.sessionSecretStore?.resolveSessionIdBySecret(secret);
+	if (!sessionId) {
+		fail(403, "Forbidden: a valid X-Bobbit-Session-Secret is required for PR walkthrough tool routes", { code: "WALKTHROUGH_SESSION_SECRET_REQUIRED", retryable: false });
+		return undefined;
+	}
+	return sessionId;
+}
+
+/**
+ * Lazily resolve the analysis bundle for a reviewer binding from its TARGET via the
+ * EXISTING server pipeline (github-adapter for GitHub PRs, git-changeset for local),
+ * cache it in WalkthroughAnalysisBundleStore keyed by jobId, then serve the requested
+ * read mode — byte-identical to what read_pr_walkthrough_bundle returned under the
+ * legacy launcher. Standalone so it survives the later deletion of
+ * walkthrough-agent-manager (design §6 / Decision D). The git cwd is the SESSION
+ * worktree (server-derived), never caller-supplied; trusted-host/credential logic
+ * stays server-side here (why bundle resolution cannot move into the confined worker).
+ */
+async function resolveAndReadBindingBundle(
+	deps: PrWalkthroughRouteDeps,
+	binding: PrWalkthroughBinding,
+	sessionId: string,
+	readReq: Omit<ReadPrWalkthroughBundleRequest, "sessionId" | "jobId">,
+): Promise<Record<string, unknown>> {
+	const stateDir = deps.stateDir ?? bobbitStateDir();
+	const bundleStore = new WalkthroughAnalysisBundleStore(stateDir);
+	const jobLike = {
+		jobId: binding.jobId,
+		childSessionId: sessionId,
+		changesetId: binding.changesetId ?? binding.jobId,
+		target: binding.target,
+		title: titleForWalkthroughTarget(binding.target),
+		cwd: "",
+	} as unknown as PrWalkthroughJobRecord;
+	// Resolve + cache lazily on first read; subsequent reads hit the cached bundle.
+	if (!bundleStore.load(binding.jobId)) {
+		const cwd = await resolveBindingCwd(deps, sessionId);
+		jobLike.cwd = cwd;
+		const parsedDiff = await resolveDiffForBindingTarget(binding.target, cwd, deps);
+		const bundle = createAnalysisBundleFromParsedDiff(jobLike, parsedDiff);
+		bundleStore.save(binding.jobId, bundle);
+	}
+	return bundleStore.read(jobLike, readReq);
+}
+
+async function resolveBindingCwd(deps: PrWalkthroughRouteDeps, sessionId: string): Promise<string> {
+	if (deps.resolveSessionCwd) {
+		const resolved = await deps.resolveSessionCwd(sessionId);
+		if (typeof resolved === "string" && resolved.trim()) return resolved.trim();
+	}
+	return deps.defaultCwd;
+}
+
+function titleForWalkthroughTarget(target: PrWalkthroughTarget): string {
+	return target.provider === "github" && target.number !== undefined ? `PR #${target.number} Walkthrough` : "Changeset Walkthrough";
+}
+
+/**
+ * Resolve the parsed diff for a binding target via the EXISTING server pipeline
+ * (mirrors WalkthroughAgentManager.resolveLaunchDiffForBundle so the bundle is
+ * byte-stable). GitHub targets with launch-time SHAs recompute locally and wrap the
+ * GitHub metadata; GitHub targets without SHAs go through resolveGithubPr; local
+ * targets recompute via resolveLocalChangeset.
+ */
+async function resolveDiffForBindingTarget(
+	target: PrWalkthroughTarget,
+	cwd: string,
+	deps: PrWalkthroughRouteDeps,
+): Promise<WalkthroughParsedDiffForYamlMapping> {
+	const trustedHosts = normalizeTrustedHosts(deps.preferencesStore?.get("githubTrustedHosts"));
+	if (target.provider === "local") {
+		if (!target.baseSha || !target.headSha) throw new Error("Local PR walkthrough bundle requires baseSha and headSha.");
+		const resolved = await resolveLocalChangeset({ cwd, baseSha: target.baseSha, headSha: target.headSha });
+		return {
+			changeset: resolved.changeset,
+			files: resolved.files,
+			warnings: resolved.warnings,
+			limits: resolved.limits as WalkthroughParsedDiffForYamlMapping["limits"],
+			export: { provider: "local", available: false, reason: "Local changesets can be previewed but not submitted to GitHub." },
+		};
+	}
+	if (target.baseSha && target.headSha) {
+		const resolved = await resolveLocalChangeset({ cwd, baseSha: target.baseSha, headSha: target.headSha });
+		return {
+			changeset: {
+				...resolved.changeset,
+				provider: "github",
+				externalUrl: target.prUrl,
+				prUrl: target.prUrl,
+				prNumber: target.number,
+				prBody: "",
+			},
+			files: resolved.files,
+			warnings: resolved.warnings,
+			limits: resolved.limits as WalkthroughParsedDiffForYamlMapping["limits"],
+			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires launch-time GitHub metadata; preview is available." },
+		};
+	}
+	if (typeof deps.preflightGithubLaunch === "function") {
+		await deps.preflightGithubLaunch({ jobId: "", target } as unknown as PrWalkthroughJobRecord);
+	}
+	const resolved = await resolveGithubPr({ cwd, prUrl: target.prUrl, prNumber: target.number, trustedHosts });
+	return {
+		changeset: resolved.changeset as WalkthroughParsedDiffForYamlMapping["changeset"],
+		files: resolved.files as unknown as WalkthroughParsedDiffForYamlMapping["files"],
+		warnings: resolved.warnings,
+		export: resolved.export as unknown as WalkthroughParsedDiffForYamlMapping["export"],
 	};
 }
 
