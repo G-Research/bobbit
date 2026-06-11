@@ -45,9 +45,22 @@ plus the **Host-API addition** that makes that possible.
 ### Non-negotiable constraints (carried from the migration doc)
 
 - Primary branch `master`; LF endings; co-author trailer on commits.
-- `lib/panel.js` is **bundled** from `src/panel.js` via `npm run build:packs`
-  (esbuild) — edit `src/panel.js`, rebuild, **commit both**. `lib/routes.mjs` is
-  **hand-authored** (NOT bundled) and edited directly. There is no `src/routes.mjs`.
+- **Build-artifact handling (reconciled with the goal spec's wording).** The goal
+  spec calls `lib/panel.js` / `lib/routes.mjs` "hand-mirrored bundles of `src/` …
+  (no esbuild)". That parenthetical is imprecise; the **source of truth is
+  `scripts/build-market-packs.mjs`** (`PACKS["pr-walkthrough"]`), which shows two
+  distinct cases:
+  - **`lib/panel.js` IS esbuild-bundled** from `src/panel.js`
+    (`{ in: "panel.js", out: "lib/panel.js" }`) by `npm run build:packs`. Edit
+    `src/panel.js`, run `npm run build:packs`, and **commit both** `src/panel.js`
+    and the regenerated `lib/panel.js`. Do **not** hand-edit `lib/panel.js`.
+  - **`lib/routes.mjs` is HAND-AUTHORED, NOT bundled** — it is committed source
+    served as-is (the build script only *relocates* it to `lib/`, with the comment
+    "a pack's hand-authored `.mjs` server modules … are NOT bundled"). Edit
+    `lib/routes.mjs` directly. There is no `src/routes.mjs`.
+  So the spec's "hand-mirror" intuition is literally true for `routes.mjs` but NOT
+  for `panel.js` (which must be regenerated via esbuild). CI runs `build:packs` in
+  `build`, so a forgotten rebuild is caught, but the committed artifacts must match.
 - Do **not** weaken the security model: the `PR Walkthrough` group stays
   default-deny for every other role; only `pr-reviewer` re-grants it; no
   submit-proof secret is reintroduced.
@@ -516,7 +529,7 @@ under the `ui` capability).
 | # | Acceptance criterion | Test (new / extended) | Phase |
 |---|---|---|---|
 | A1 | The generated tool **guard** for `pr-reviewer` contains **no `never`** entry for `readonly_bash` / `read_pr_walkthrough_bundle` / `submit_pr_walkthrough_yaml` | **New unit**: drive `writeToolGuardExtension` (or assert via `resolveGrantPolicy` over the cascade-resolved `pr-reviewer` role + `groupPolicyStore`) and assert none of the three resolve to `never`. Complements the existing `tests/pr-walkthrough-role-tools-policy.test.ts` (which proves the *role* policy; this proves the *guard generation* path that was bugged). | unit·node |
-| A2 | A spawned reviewer child can actually **call** the three tools (not merely hold them) | **Extend** `tests/e2e/pr-walkthrough-host-agents.spec.ts`: after `run`, assert the child's guard does not block — drive a `read_pr_walkthrough_bundle` through the real endpoint with the child secret and assert it is **not** rejected as "not permitted for this role". | E2E·api |
+| A2 | A spawned reviewer child can actually **call** ALL THREE tools (not merely hold them) | **Extend** `tests/e2e/pr-walkthrough-host-agents.spec.ts`: after `run`, assert the child's guard does not block **any** of the three. Drive each through its real path with the child secret and assert **none** is rejected as "not permitted for this role": (i) `read_pr_walkthrough_bundle` (bundle endpoint); (ii) `readonly_bash` (a read-only `git`/`gh` command admitted by `walkthrough-readonly-policy.ts`); (iii) `submit_pr_walkthrough_yaml` (submit-yaml endpoint with a minimal valid YAML → routed to the bound job, not a role-permission rejection). Covering all three is mandatory: the reported failure class was that `readonly_bash`/`submit_pr_walkthrough_yaml` could stay blocked even when `read_pr_walkthrough_bundle` worked, so a one-tool E2E would not pin the regression. Where calling the real tool has side effects, the assertion is specifically that the failure (if any) is NOT a guard "not permitted for this role" rejection. | E2E·api |
 | A3 | The YAML schema is present in the reviewer's prompt | **Extend** the same E2E: read the reviewer child's system prompt (prompt-sections API / persisted snapshot) and assert it contains `submit_pr_walkthrough_yaml` schema markers (`schema_version`, `merge_assessment`). | E2E·api |
 | A4 | Reviewer survives a gateway restart with its tools | **New/extend** restart test: spawn reviewer → simulate restart → assert `resolveSessionRole(ps.role, …, ps.projectId)` resolves the cascade role and the restored allowlist + guard still grant the three tools. | E2E·api |
 | B1 | git-widget click → child auto-spawns with **no** second click | **New browser E2E** (`tests/e2e/ui/pr-walkthrough-pack.spec.ts` extension): click the git-widget launcher → assert a reviewer child appears with the `review` accessory and `run` fired exactly once (no Run-button click). | E2E·browser |
