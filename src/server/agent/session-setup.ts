@@ -671,6 +671,10 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		nonInteractive: plan.nonInteractive,
 		sandboxed: plan.sandboxed,
 		delegateOf: plan.delegateOf,
+		// Durable delegate task — restored into the system prompt on reboot so the
+		// delegate comes back live with its task intact (mirrors a worker's goal spec).
+		instructions: plan.instructions,
+		context: plan.context,
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,

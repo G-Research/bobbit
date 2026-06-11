@@ -3198,26 +3198,26 @@ export class SessionManager {
 		const regular = persisted.filter(ps => !ps.delegateOf);
 		const delegates = persisted.filter(ps => !!ps.delegateOf);
 
-		console.log(`[session-manager] Restoring ${regular.length} session(s), deferring ${delegates.length} delegate(s)...`);
-
-		// Restore regular sessions in parallel (batched concurrency)
-		const CONCURRENCY = 5;
-		for (let i = 0; i < regular.length; i += CONCURRENCY) {
-			const batch = regular.slice(i, i + CONCURRENCY);
-			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
-		}
-
-		// Delegate sessions: dormant entries only — restored on-demand via addClient()
+		// Delegate boot-reap (orchestration-core §5): archive an orphaned delegate
+		// child (owner gone/archived) BEFORE dispatch. This reap MUST stay in
+		// restoreSessions() — the orphan-reap wiring test stubs restoreOneSession to
+		// a no-op and still expects the orphan archived, so it cannot move into the
+		// per-session path. Survivors are NOT deferred as dormant husks anymore:
+		// they ride the SAME live-restore path workers use (restoreOneSession →
+		// restoreSession), so a delegate comes back as a live process with its task
+		// rebuilt from the durable instructions/context fields, and the parent's
+		// team_wait re-attaches to a live child and collects a real result. A delegate
+		// that was mid-turn is re-driven by the shared wasStreaming boot-resume nudge
+		// in restoreSession() — no delegate-specific registry.
+		const delegateSurvivors: PersistedSession[] = [];
 		for (const ps of delegates) {
 			if (!ps.agentSessionFile) {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
-			// Generalized boot-reap (orchestration-core §5): reap an orphaned
-			// delegate child whose owner session is gone or archived. This closes
-			// the orphan-delegate gap — delegates were previously NEVER boot-reaped
-			// (only pr-walkthrough children were). A child whose owner is restoring
-			// (exists, not archived) is kept dormant and re-collectable via team_wait.
+			// Reap an orphaned delegate child whose owner session is gone or archived.
+			// A child whose owner is restoring (exists, not archived) survives and is
+			// restored live below.
 			const owner = ps.delegateOf ? this.getPersistedSession(ps.delegateOf) : undefined;
 			const reap = shouldReapChildOnBoot({
 				childKind: ps.childKind ?? "delegate",
@@ -3230,11 +3230,17 @@ export class SessionManager {
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
-			// Existence check deferred to addClient() revive — add as dormant unconditionally
-			// (the file is in the agent's coordinate system; checking it here would require
-			// async docker exec for sandbox sessions, and the file may not be needed until
-			// the user opens the session)
-			this.addDormantSession(ps);
+			delegateSurvivors.push(ps);
+		}
+
+		const liveRestore = [...regular, ...delegateSurvivors];
+		console.log(`[session-manager] Restoring ${regular.length} session(s) + ${delegateSurvivors.length} delegate(s) live...`);
+
+		// Restore regular + surviving delegate sessions in parallel (batched concurrency)
+		const CONCURRENCY = 5;
+		for (let i = 0; i < liveRestore.length; i += CONCURRENCY) {
+			const batch = liveRestore.slice(i, i + CONCURRENCY);
+			await Promise.all(batch.map(ps => this.restoreOneSession(ps)));
 		}
 
 		// OrchestrationCore (§3/§4): rebuild the in-memory child index from the
@@ -3648,6 +3654,28 @@ export class SessionManager {
 				cwd: ps.cwd,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
+				goalState: "active",
+				allowedTools: restoredAllowedNames,
+				projectConfigStore: this.projectConfigStore,
+			});
+			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
+		} else if (ps.delegateOf && !ps.goalId) {
+			// Delegate restore: rebuild the system prompt from the durable task fields
+			// (instructions + context) — the delegate's equivalent of a worker's goal
+			// spec. Mirrors session-setup.ts::_resolvePrompt mode === "delegate" so a
+			// revived delegate carries its original task, not an empty goal/role prompt.
+			let taskSpec = ps.instructions || "";
+			if (ps.context && Object.keys(ps.context).length > 0) {
+				taskSpec += "\n\n## Context";
+				for (const [key, value] of Object.entries(ps.context)) {
+					taskSpec += `\n- **${key}**: ${value}`;
+				}
+			}
+			const promptPath = this.assemblePrompt(ps.id, {
+				baseSystemPromptPath: this.systemPromptPath,
+				cwd: ps.cwd,
+				goalSpec: taskSpec,
+				goalTitle: "Delegate Task",
 				goalState: "active",
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,

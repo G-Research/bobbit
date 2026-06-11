@@ -181,6 +181,28 @@ describe("SessionStore", () => {
 			assert.equal(restored.delegateOf, undefined);
 		});
 
+		it("round-trips durable delegate task fields (instructions + context) through disk", () => {
+			// Delegate restart survival: the delegate's task (instructions + context) is
+			// its durable equivalent of a worker's goal spec. It must survive a reboot so
+			// restoreSession() can rebuild the system prompt from it.
+			const ctx = { role: "helper", deadline: "eod" };
+			const store1 = freshStore();
+			store1.put(makeSession({
+				id: "delegate-1",
+				delegateOf: "owner-1",
+				instructions: "restart-live-survivor-MARKER helper task",
+				context: ctx,
+			}));
+			store1.flush();
+
+			// New store instance reads from the same on-disk file (a real reboot).
+			const store2 = freshStore();
+			const restored = store2.get("delegate-1")!;
+			assert.equal(restored.delegateOf, "owner-1");
+			assert.equal(restored.instructions, "restart-live-survivor-MARKER helper task");
+			assert.deepEqual(restored.context, ctx);
+		});
+
 		it("updates goalId and taskId", () => {
 			const store = freshStore();
 			store.put(makeSession());
