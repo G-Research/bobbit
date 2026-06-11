@@ -25,6 +25,9 @@ import {
 	// New classifier for provider overload / rate-limit / quota-throttle.
 	// Used by SessionManager to pick the unbounded backoff policy.
 	isProviderBackoffError,
+	// Classifier for restart-induced resume errors (cold-agent RPC timeout, agent
+	// process not yet up) that must leave the gate pending, not failed.
+	isRestartInterruptError,
 } from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -892,5 +895,33 @@ describe("isCommandStepSkippable", () => {
 		// patterns count as unresolved templates.
 		assert.equal(isCommandStepSkippable("find . -exec echo {} \\;"), null);
 		assert.equal(isCommandStepSkippable("awk '{print $1}'"), null);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isRestartInterruptError — classify resume-path thrown errors
+// ---------------------------------------------------------------------------
+
+describe("isRestartInterruptError", () => {
+	it("treats cold-agent RPC timeouts as restart-interrupts (not real failures)", () => {
+		// The exact message RpcBridge.sendCommand rejects with on the 30s default.
+		assert.equal(isRestartInterruptError("Command timed out: prompt"), true);
+		assert.equal(isRestartInterruptError("Command timed out: get_state"), true);
+		// Generic "timed out" phrasings.
+		assert.equal(isRestartInterruptError("operation timed out"), true);
+	});
+
+	it("treats agent-not-ready / process-gone errors as restart-interrupts", () => {
+		assert.equal(isRestartInterruptError("Agent did not become ready within 90000ms"), true);
+		assert.equal(isRestartInterruptError("reviewer agent not ready"), true);
+		assert.equal(isRestartInterruptError("Agent process exited during initialization"), true);
+		assert.equal(isRestartInterruptError("Agent process not running"), true);
+		assert.equal(isRestartInterruptError("child process exited"), true);
+	});
+
+	it("returns false for genuine, non-restart failures and empty input", () => {
+		assert.equal(isRestartInterruptError(""), false);
+		assert.equal(isRestartInterruptError("Review found a real bug: missing null check"), false);
+		assert.equal(isRestartInterruptError("TypeError: cannot read property foo of undefined"), false);
 	});
 });
