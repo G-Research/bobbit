@@ -3443,18 +3443,18 @@ html {
 	color: var(--bobbit-sprite-main);
 	filter: hue-rotate(var(--bobbit-hue-rotate, 0deg));
 }
-/* Busy — Mexican wave: each letter rises and falls in sequence, looping. */
-.bobbit-blob-text--busy > span {
-	animation: blob-text-wave 1.1s ease-in-out infinite;
+/* Busy — animated ellipsis: the word holds still while a trailing run of dots
+   cycles "" → "." → ".." → "..." on a steps() clock. The pseudo-element
+   reserves a fixed 1.4em so dots appearing/disappearing never reflow the
+   surrounding chat layout. */
+.bobbit-blob-text--busy::after {
+	content: "";
+	display: inline-block;
+	width: 1.4em;
+	text-align: left;
+	white-space: pre;
+	animation: blob-text-dots 1.4s steps(1) infinite;
 }
-.bobbit-blob-text--busy > span:nth-child(1) { animation-delay: 0s; }
-.bobbit-blob-text--busy > span:nth-child(2) { animation-delay: 0.08s; }
-.bobbit-blob-text--busy > span:nth-child(3) { animation-delay: 0.16s; }
-.bobbit-blob-text--busy > span:nth-child(4) { animation-delay: 0.24s; }
-.bobbit-blob-text--busy > span:nth-child(5) { animation-delay: 0.32s; }
-.bobbit-blob-text--busy > span:nth-child(6) { animation-delay: 0.40s; }
-.bobbit-blob-text--busy > span:nth-child(7) { animation-delay: 0.48s; }
-.bobbit-blob-text--busy > span:nth-child(8) { animation-delay: 0.56s; }
 
 /* Compacting — reverse (right→left) pulse: the highlight sweeps across the
    letters from the last to the first (reverse per-letter delays). "Compacting"
@@ -3473,9 +3473,12 @@ html {
 .bobbit-blob-text--compacting > span:nth-child(2)  { animation-delay: 0.64s; }
 .bobbit-blob-text--compacting > span:nth-child(1)  { animation-delay: 0.72s; }
 
-@keyframes blob-text-wave {
-	0%, 60%, 100% { transform: translateY(0); }
-	30% { transform: translateY(-6px); }
+@keyframes blob-text-dots {
+	0%   { content: ""; }
+	25%  { content: "."; }
+	50%  { content: ".."; }
+	75%  { content: "..."; }
+	100% { content: ""; }
 }
 @keyframes blob-text-pulse {
 	0%, 100% { opacity: 0.45; transform: translateY(0); }
@@ -3484,6 +3487,7 @@ html {
 
 @media (prefers-reduced-motion: reduce) {
 	.bobbit-blob-text > span { animation: none !important; opacity: 1; transform: none; }
+	.bobbit-blob-text--busy::after { animation: none !important; content: "..."; }
 }
 
 /* Idle state — sitting still, offset left, eyes looking around */
