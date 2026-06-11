@@ -102,6 +102,17 @@ export interface BgPaths {
 export type SpawnFn = (command: string, cwd: string, containerId: string | undefined, paths: BgPaths) => ChildProcess;
 
 /**
+ * POSIX single-quote a string for safe interpolation into an `sh -c` script:
+ * wrap in single quotes and replace each embedded `'` with `'\''`. Used for
+ * EVERY interpolated path and the nonce so a project path containing a single
+ * quote (legal on POSIX) cannot break out of the redirection/trimmer/status
+ * commands. See review Fix 5.
+ */
+function shQuote(s: string): string {
+	return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Build the POSIX host wrapper (Git Bash on Windows, `/bin/sh` elsewhere).
  * Isolated subshell `( <command> )` so a user `exit N` is contained and the
  * wrapper still captures the real `code=$?`; a wrapper-owned background trimmer
@@ -139,22 +150,32 @@ function buildPosixWrapper(
 	o: { outSpool: string; errSpool: string; status: string; pid: string; nonce: string; mkdir: boolean },
 ): string {
 	const lines: string[] = [];
-	if (o.mkdir) lines.push(`mkdir -p '${path.posix.dirname(o.outSpool)}'`);
-	lines.push(`printf '%s\\n%s\\n' "$$" '${o.nonce}' > '${o.pid}'`);
+	const qOut = shQuote(o.outSpool);
+	const qErr = shQuote(o.errSpool);
+	if (o.mkdir) lines.push(`mkdir -p ${shQuote(path.posix.dirname(o.outSpool))}`);
+	lines.push(`printf '%s\\n%s\\n' "$$" ${shQuote(o.nonce)} > ${shQuote(o.pid)}`);
 	// wrapper-owned trimmer: bounds each spool to KEEP_BYTES, restart-independent.
 	lines.push(
 		`( while kill -0 "$$" 2>/dev/null; do ` +
-		`for f in '${o.outSpool}' '${o.errSpool}'; do ` +
+		`for f in ${qOut} ${qErr}; do ` +
 		`if [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null || echo 0)" -gt ${MAX_LOG_BYTES} ]; then ` +
 		`tail -c ${KEEP_BYTES} "$f" > "$f.trim" 2>/dev/null && cat "$f.trim" > "$f" && rm -f "$f.trim"; ` +
 		`fi; done; sleep 5; done ) &`,
 	);
 	lines.push(`trimmer=$!`);
 	// isolated subshell so user `exit N` only exits the subshell.
-	lines.push(`( ${command} ) >> '${o.outSpool}' 2>> '${o.errSpool}'`);
+	lines.push(`( ${command} ) >> ${qOut} 2>> ${qErr}`);
 	lines.push(`code=$?`);
 	lines.push(`kill "$trimmer" 2>/dev/null`);
-	lines.push(`printf '%s\\n' "$code" > '${o.status}'`);
+	// Final SYNCHRONOUS trim (Fix 1): a fast chatty burst can exit before the 5s
+	// trimmer pass, leaving the spool over cap until restart. Trim each spool to
+	// KEEP_BYTES in place (same-inode copytruncate, never mv) BEFORE the status
+	// write so the on-disk spool is bounded the instant the command finishes.
+	lines.push(
+		`for f in ${qOut} ${qErr}; do ` +
+		`tail -c ${KEEP_BYTES} "$f" > "$f.trim" 2>/dev/null && cat "$f.trim" > "$f" && rm -f "$f.trim"; done`,
+	);
+	lines.push(`printf '%s\\n' "$code" > ${shQuote(o.status)}`);
 	lines.push(`exit "$code"`);
 	return lines.join("\n");
 }
@@ -238,10 +259,17 @@ export class PollTailer implements Tailer {
 			try {
 				const fd = fs.openSync(this.file, "r");
 				try {
-					const len = size - this.offset;
+					// Bounded read (Fix 2): never allocate more than the cap per tick.
+					// A high-volume burst could otherwise exhaust gateway memory (a
+					// sandboxed command DoSing the host). If the delta exceeds the cap,
+					// seek to `size - cap` (older bytes are beyond the retained window)
+					// and read only the last cap bytes, advancing the offset to size.
+					let from = this.offset;
+					if (size - from > MAX_LOG_BYTES) from = size - MAX_LOG_BYTES;
+					const len = size - from;
 					const buf = Buffer.alloc(len);
-					const read = fs.readSync(fd, buf, 0, len, this.offset);
-					this.offset += read;
+					const read = fs.readSync(fd, buf, 0, len, from);
+					this.offset = from + read;
 					if (read > 0) this.onChunk(this.stream, buf.subarray(0, read).toString("utf-8"), this.offset);
 				} finally { fs.closeSync(fd); }
 			} catch { /* transient */ }
@@ -270,7 +298,7 @@ class DockerTailer implements Tailer {
 		this.offset = startOffset;
 		// Probe size for §6.2 rebase before following.
 		try {
-			const r = spawnSync("docker", ["exec", this.containerId, "sh", "-c", `wc -c < '${this.spool}' 2>/dev/null || echo 0`], { encoding: "utf-8" });
+			const r = spawnSync("docker", ["exec", this.containerId, "sh", "-c", `wc -c < ${shQuote(this.spool)} 2>/dev/null || echo 0`], { encoding: "utf-8" });
 			const size = parseInt((r.stdout || "0").trim(), 10) || 0;
 			if (size < this.offset) this.offset = 0;
 		} catch { /* ignore */ }
@@ -288,9 +316,14 @@ class DockerTailer implements Tailer {
 	}
 }
 
-/** Serialised on-disk size of one projection line: "<ts>\t<tag(3)>\t<text>\n". */
+/**
+ * Serialised on-disk BYTE size of one projection line: "<ts>\t<tag(3)>\t<text>\n".
+ * Uses {@link Buffer.byteLength} for the text (Fix 3) so multibyte output cannot
+ * blow past the 512KB BYTE cap (JS string `.length` counts UTF-16 code units).
+ * `ts` is ASCII digits; `\t<tag(3)>\t` is 5 ASCII bytes; trailing `\n` is 1.
+ */
 function projectedLineSize(ts: number, text: string): number {
-	return String(ts).length + 5 + text.length + 1;
+	return String(ts).length + 5 + Buffer.byteLength(text, "utf8") + 1;
 }
 
 const defaultTailerFactory: TailerFactory = (spec: TailerSpec) => {
@@ -677,11 +710,19 @@ export class BgProcessManager {
 	private readSpoolFrom(bg: BgProcess, stream: "stdout" | "stderr", fromOffset: number): { text: string; newOffset: number } | null {
 		if (bg.paths.inContainer && bg.containerId) {
 			const spool = stream === "stdout" ? bg.paths.containerOutSpool! : bg.paths.containerErrSpool!;
-			const sz = this.env.dockerCli(["exec", bg.containerId, "sh", "-c", `wc -c < '${spool}' 2>/dev/null || echo 0`]);
+			const sz = this.env.dockerCli(["exec", bg.containerId, "sh", "-c", `wc -c < ${shQuote(spool)} 2>/dev/null || echo 0`]);
+			// docker exec itself failing (non-zero) means the container is gone /
+			// unreadable → null so restore falls back to the host projection (Fix 4).
+			if (sz.code !== 0) return null;
 			const size = parseInt((sz.stdout || "0").trim(), 10) || 0;
 			let off = fromOffset;
 			if (size < off) off = 0; // §6.2 rebase
-			const r = this.env.dockerCli(["exec", bg.containerId, "sh", "-c", `tail -c +${off + 1} '${spool}' 2>/dev/null`]);
+			if (size <= off) return { text: "", newOffset: size };
+			// Bounded read (Fix 2): never pull an unbounded `tail -c +<off>` payload
+			// through spawnSync. Read at most the last cap bytes; `tail -c <want>`
+			// returns exactly the delta when it is ≤cap, else skips older bytes.
+			const want = Math.min(size - off, MAX_LOG_BYTES);
+			const r = this.env.dockerCli(["exec", bg.containerId, "sh", "-c", `tail -c ${want} ${shQuote(spool)} 2>/dev/null`]);
 			return { text: r.code === 0 ? r.stdout : "", newOffset: size };
 		}
 		const file = stream === "stdout" ? bg.paths.outSpool : bg.paths.errSpool;
@@ -690,6 +731,9 @@ export class BgProcessManager {
 		let off = fromOffset;
 		if (size < off) off = 0; // §6.2 rebase
 		if (size <= off) return { text: "", newOffset: size };
+		// Bounded read (Fix 2): cap the allocation at MAX_LOG_BYTES; skip older
+		// bytes beyond the retained window and advance the offset to size.
+		if (size - off > MAX_LOG_BYTES) off = size - MAX_LOG_BYTES;
 		try {
 			const fd = fs.openSync(file, "r");
 			try {
@@ -753,11 +797,11 @@ export class BgProcessManager {
 	private async restoreOne(sessionId: string, rec: PersistedBgProcess): Promise<void> {
 		const bg = this.rehydrate(rec);
 		this.processes.get(sessionId)!.set(rec.id, bg);
-		// Always load the HOST projection first — retained output survives churn.
-		this.loadProjection(bg);
 
 		if (rec.status === "exited" || rec.status === "unrecoverable") {
-			// Terminal already — nothing to do (client re-fetches via GET on reconnect).
+			// Terminal already — the durable projection is the sole output source
+			// (spools were deleted on exit). Client re-fetches via GET on reconnect.
+			this.loadProjection(bg);
 			return;
 		}
 
@@ -765,8 +809,9 @@ export class BgProcessManager {
 		const status = this.readStatus(bg);
 		const statusMatch = status?.trim().match(/^-?\d+$/);
 		if (statusMatch) {
-			// COMPLETED during downtime — real code available.
-			this.reattachReadTail(bg); // capture any tail before the final flush
+			// COMPLETED during downtime — real code available. Rebuild output from the
+			// final spool (projection fallback), then reconcile with the real code.
+			this.restoreLoadOutput(bg);
 			this.reconcileExit(sessionId, bg, parseInt(statusMatch[0], 10), "normal");
 			return;
 		}
@@ -776,28 +821,45 @@ export class BgProcessManager {
 			// Pid-reuse guard: re-read pidfile nonce.
 			const pf = this.readPidFile(bg);
 			if (pf && pf.nonce === bg.nonce) {
-				// ALIVE → re-attach: rebase offsets, read retained tail, resume tailing + watcher.
-				this.reattachReadTail(bg);
+				// ALIVE → re-attach. Rebuild the buffer from a SINGLE source (Fix 4) to
+				// avoid duplicating overlapping lines, then resume tailing + watcher.
+				this.restoreLoadOutput(bg);
 				this.writeProjection(bg);
 				this.store(sessionId)?.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
 				this.startTailers(sessionId, bg);
 				this.startStatusWatcher(sessionId, bg);
 				return;
 			}
-			// pid reused / foreign — UNRECOVERABLE (never fabricate a code).
+			// pid reused / foreign — UNRECOVERABLE (never fabricate a code); keep retained projection.
+			this.loadProjection(bg);
 			this.markUnrecoverable(sessionId, bg);
 			return;
 		}
-		// Not alive AND no status anywhere → UNRECOVERABLE.
+		// Not alive AND no status anywhere → UNRECOVERABLE; keep retained projection.
+		this.loadProjection(bg);
 		this.markUnrecoverable(sessionId, bg);
 	}
 
-	/** Read the bounded spool tail from the (rebased) persisted offsets into the buffer. */
-	private reattachReadTail(bg: BgProcess): void {
+	/**
+	 * Rebuild the in-memory buffer from a SINGLE source on restore (Fix 4) so
+	 * already-retained lines are never duplicated. PREFER the bounded spool tail
+	 * (it holds retained + any downtime output, ≤cap) read whole from offset 0
+	 * (we rebuild from scratch); FALL BACK to the host projection only when the
+	 * spool is gone/unreadable (container recreated, completed-during-downtime
+	 * with spools deleted). Never loads both.
+	 */
+	private restoreLoadOutput(bg: BgProcess): void {
+		const tails: Partial<Record<"stdout" | "stderr", { text: string; newOffset: number }>> = {};
+		let anyReadable = false;
 		for (const stream of ["stdout", "stderr"] as const) {
-			const from = stream === "stdout" ? bg.outOffset : bg.errOffset;
-			const tail = this.readSpoolFrom(bg, stream, from);
-			if (!tail) continue;
+			const tail = this.readSpoolFrom(bg, stream, 0);
+			if (tail) { tails[stream] = tail; anyReadable = true; }
+		}
+		if (!anyReadable) { this.loadProjection(bg); return; }
+		bg.log = []; bg.stdout = []; bg.stderr = []; bg._logBytes = 0;
+		for (const stream of ["stdout", "stderr"] as const) {
+			const tail = tails[stream];
+			if (!tail) { if (stream === "stdout") bg.outOffset = 0; else bg.errOffset = 0; continue; }
 			if (tail.text) {
 				const ts = Date.now();
 				for (const line of tail.text.split("\n")) {

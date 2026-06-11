@@ -57,6 +57,25 @@ function appendBounded(spool: string, chunk: Buffer, keep: number): void {
 	}
 }
 
+/** Synchronously trim a spool in place (same inode) to the last `keep` bytes. */
+function trimToCap(spool: string, keep: number): void {
+	try {
+		const size = fs.statSync(spool).size;
+		if (size > keep) {
+			const fd = fs.openSync(spool, "r");
+			try {
+				const buf = Buffer.alloc(keep);
+				const read = fs.readSync(fd, buf, 0, keep, size - keep);
+				fs.writeFileSync(spool, buf.subarray(0, read));
+			} finally {
+				fs.closeSync(fd);
+			}
+		}
+	} catch {
+		// Best-effort — spool is an explicitly lossy last-N ring.
+	}
+}
+
 /**
  * Run the user command, spooling output and capturing the real exit code.
  * @param spawnImpl injectable spawn (tests pass a fake EventEmitter-backed child).
@@ -82,6 +101,11 @@ export function runBgRunner(
 		try { fs.writeFileSync(opts.statusFile, `${code}\n`); } catch { /* ignore */ }
 	};
 	child.on("exit", (code, signal) => {
+		// Final SYNCHRONOUS trim (Fix 1) before the status write: a fast chatty
+		// burst can exit before any append-time trim leaves the spool bounded, so
+		// guarantee ≤maxBytes on disk the instant the command finishes.
+		trimToCap(opts.outSpool, keep);
+		trimToCap(opts.errSpool, keep);
 		// Real exit code; if killed by signal, encode as 128+signo (POSIX convention).
 		const n = typeof code === "number" ? code : (signal ? 128 : 1);
 		writeStatus(n);

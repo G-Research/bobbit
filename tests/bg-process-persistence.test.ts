@@ -123,6 +123,37 @@ describe("BgProcessManager — wrapper builders (POSIX only)", () => {
 		assert.doesNotMatch(w, /cmd(\.exe)?/i);
 	});
 
+	it("Fix 1: emits a final synchronous spool trim BEFORE the status write", () => {
+		const w = buildHostWrapper("echo hi", paths);
+		// A `for f in <out> <err>; do tail -c <cap> ... done` trim line must exist.
+		assert.match(w, /for f in '\/state\/bg-3\.out\.spool' '\/state\/bg-3\.err\.spool'; do tail -c 524288 "\$f" > "\$f\.trim"/);
+		// And it must come AFTER `code=$?`/trimmer-kill and BEFORE the status write.
+		const trimIdx = w.indexOf("for f in '/state/bg-3.out.spool' '/state/bg-3.err.spool'; do tail -c 524288");
+		const statusIdx = w.indexOf("printf '%s\\n' \"$code\" > '/state/bg-3.status'");
+		const codeIdx = w.indexOf("code=$?");
+		assert.ok(trimIdx > codeIdx && trimIdx >= 0, "final trim after code=$?");
+		assert.ok(statusIdx > trimIdx, "status write comes after the final trim");
+		// Same-inode copytruncate, never mv (pinned for the final trim too).
+		assert.doesNotMatch(w, /\bmv\b/);
+	});
+
+	it("Fix 5: shell-quotes paths/nonce so an embedded single quote cannot break out", () => {
+		const qpaths = {
+			logFile: "/sta'te/bg-3.log", statusSnapshot: "/sta'te/bg-3.status",
+			outSpool: "/sta'te/bg-3.out.spool", errSpool: "/sta'te/bg-3.err.spool",
+			pidFile: "/sta'te/bg-3.pid", nonce: "NON'CE", inContainer: false,
+		};
+		const w = buildHostWrapper("echo hi", qpaths);
+		// Each embedded ' is escaped as '\'' — the literal path bytes are preserved
+		// inside a re-opened single-quoted string, with no unbalanced quote.
+		assert.match(w, /'\/sta'\\''te\/bg-3\.out\.spool'/);
+		assert.match(w, /'NON'\\''CE'/);
+		// The naive (buggy) interpolation `'<path>'` would let the embedded quote
+		// close the string — assert that unescaped breakout form never appears.
+		assert.ok(!w.includes("'/sta'te"), "no unescaped single-quote breakout in paths");
+		assert.ok(!w.includes("'NON'CE'"), "no unescaped single-quote breakout in nonce");
+	});
+
 	it("buildDockerWrapper is the same POSIX wrapper plus mkdir -p of the container dir", () => {
 		const dpaths = {
 			...paths,
@@ -287,6 +318,26 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		const exited = h.sent.find(m => m.type === "bg_process_exited");
 		assert.equal(exited.exitCode, null);
 		assert.equal(exited.terminalReason, "unrecoverable");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 4: ALIVE restore with non-empty projection + overlapping spool tail → no duplicated lines", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S);
+		// Host projection already holds retained output (what the gateway saw pre-restart).
+		fs.writeFileSync(rec.logFile, `${Date.now()}\tout\tretained-1\n${Date.now()}\tout\tretained-2\n`);
+		// The live spool still holds the SAME retained tail PLUS downtime output.
+		fs.writeFileSync(rec.outSpool, "retained-1\nretained-2\ndowntime-3\n");
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+
+		await h.mgr.restoreSession(S);
+		const texts = h.mgr.getLogs(S, rec.id)!.log.map(l => l.text);
+		// Overlapping retained lines appear exactly once (single source of truth).
+		assert.equal(texts.filter(t => t === "retained-1").length, 1, "retained-1 not duplicated");
+		assert.equal(texts.filter(t => t === "retained-2").length, 1, "retained-2 not duplicated");
+		// Downtime output produced while the gateway was down is included.
+		assert.ok(texts.includes("downtime-3"), "downtime output present");
 		h.mgr.cleanup(S);
 	});
 
@@ -470,6 +521,25 @@ describe("BgProcessManager — disk caps", () => {
 		assert.ok(lineCount <= 5000, `≤5000 lines (got ${lineCount})`);
 		h.mgr.cleanup(S);
 	});
+
+	it("Fix 3: combined projection stays ≤ BYTE cap with multibyte output", () => {
+		const h = makeHarness();
+		const S = freshSession();
+		const info = h.mgr.create(S, "chatty.sh", h.stateDir);
+		const spec = h.specs[0];
+		let off = 0;
+		// Each '★' is 3 UTF-8 bytes — JS string .length would undercount the byte size.
+		for (let i = 0; i < 8000; i++) {
+			const line = `${"★".repeat(200)}\n`;
+			off += Buffer.byteLength(line, "utf8");
+			spec.onChunk("stdout", line, off);
+		}
+		h.mgr.flush(S);
+		const rec = h.store().get(S, info.id)!;
+		const stat = fs.statSync(rec.logFile);
+		assert.ok(stat.size <= MAX_LOG_BYTES, `multibyte projection ${stat.size} ≤ ${MAX_LOG_BYTES} bytes`);
+		h.mgr.cleanup(S);
+	});
 });
 
 describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
@@ -497,6 +567,25 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 		assert.equal(fs.statSync(file).size, 0, "spool truncated to 0 after consume + over cap");
 		tailer.stop();
 	});
+
+	it("Fix 2: a delta larger than the cap reads only the last cap bytes (bounded allocation)", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-poll-"));
+		const file = path.join(dir, "x.spool");
+		const head = Buffer.alloc(1000, 0x41); // 'A' — older bytes beyond the window
+		const tail = Buffer.alloc(MAX_LOG_BYTES, 0x42); // 'B' — the last cap bytes
+		fs.writeFileSync(file, Buffer.concat([head, tail]));
+		const size = fs.statSync(file).size;
+		let received = "";
+		let lastOffset = -1;
+		const tailer = new PollTailer(file, "stdout", (_s, text, off) => { received += text; lastOffset = off; });
+		tailer.start(0);
+		t.mock.timers.tick(200);
+		assert.equal(received.length, MAX_LOG_BYTES, "read exactly the last cap bytes, not the whole delta");
+		assert.ok(!received.includes("A"), "older bytes beyond the retained window were skipped");
+		assert.equal(lastOffset, size, "offset advanced to size");
+		tailer.stop();
+	});
 });
 
 describe("bg-runner helper — bounded ring + real exit code", () => {
@@ -520,5 +609,27 @@ describe("bg-runner helper — bounded ring + real exit code", () => {
 		// real exit code on child exit.
 		child.emit("exit", 7, null);
 		assert.equal(fs.readFileSync(opts.statusFile, "utf-8"), "7\n");
+	});
+
+	it("Fix 1: trims an oversize spool to ≤ maxBytes on child exit (before the status write)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runner-"));
+		const child = new EventEmitter() as any;
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		const opts = {
+			shell: "/bin/sh", shellArgs: ["-c"], command: "x",
+			outSpool: path.join(dir, "o.spool"), errSpool: path.join(dir, "e.spool"),
+			statusFile: path.join(dir, "s.status"), pidFile: path.join(dir, "p.pid"),
+			nonce: "RUN-NONCE", maxBytes: 1024,
+		};
+		runBgRunner(opts, () => child);
+		// A burst lands on disk over cap (modelling fast writes that beat per-append
+		// trimming); the exit-time trim must bound each spool before the status write.
+		fs.writeFileSync(opts.outSpool, Buffer.alloc(5000, 0x61));
+		fs.writeFileSync(opts.errSpool, Buffer.alloc(5000, 0x62));
+		child.emit("exit", 0, null);
+		assert.ok(fs.statSync(opts.outSpool).size <= 1024, "stdout spool trimmed to ≤ cap on exit");
+		assert.ok(fs.statSync(opts.errSpool).size <= 1024, "stderr spool trimmed to ≤ cap on exit");
+		assert.equal(fs.readFileSync(opts.statusFile, "utf-8"), "0\n");
 	});
 });
