@@ -604,13 +604,59 @@ export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
 
 - **Host (default factory):** `fs.watch` + read from offset, or a simple poll loop
   (`fs.read` from offset every ~200ms) for portability on Windows where `fs.watch` is flaky.
-  **Chosen: poll loop** (200ms) reading `fs.statSync(spool).size`; if larger than offset, read the
-  delta, split into lines, invoke `onChunk`, advance offset. Treat ENOENT as "not yet created".
-  The same loop performs spool copytruncate when the spool exceeds the cap (§8).
-- **Docker:** spawn `docker exec <cid> tail -c +<offset+1> -F <containerOutSpool>` /
-  `<containerErrSpool>` and read its stdout pipe; `onChunk` advances offset by bytes received and the
-  gateway **mirrors** the bytes into the HOST `<bgId>.log` projection. `stop()` kills the `tail`
-  exec. On restart this same mechanism resumes from the persisted offset — that **is** the re-attach.
+  **Chosen: poll loop** (200ms) reading `fs.statSync(spool).size`. Apply the **truncation
+  detection / offset rebase** rule (§6.2) on every tick: if `size < offset` (the child-owned
+  trimmer or a gateway copytruncate shrank the spool below the persisted offset) → **rebase the
+  read offset to `0`** and read the current bounded spool from the start; else if `size > offset`
+  → read the delta; else no-op. Split into lines, invoke `onChunk`, advance offset. Treat ENOENT as
+  "not yet created". The same loop performs spool copytruncate when the spool exceeds the cap (§8),
+  resetting its own offset to `0` after truncating.
+- **Docker:** do **not** blindly launch `tail -c +<offset+1> -F` with a possibly-stale offset.
+  First **probe the container spool size** — `docker exec <cid> wc -c < <containerOutSpool>` (or
+  `stat`) — and apply the §6.2 rebase rule: if the probed size `< persistedOffset` (the
+  in-container trimmer copytruncated the spool below the offset) → **normalize the offset to `0`**
+  so the bounded current file is read from the beginning. Then launch the follower from the
+  **normalized** offset: `docker exec <cid> tail -c +<normalizedOffset+1> -F <containerOutSpool>` /
+  `<containerErrSpool>` (so a normalized `0` becomes `tail -c +1 -F`, i.e. the whole current file)
+  and read its stdout pipe; `onChunk` advances offset by bytes received and the gateway **mirrors**
+  the bytes into the HOST `<bgId>.log` projection. `stop()` kills the `tail` exec. The `-F` flag
+  additionally keeps the follower attached across any *subsequent* in-container copytruncate. On
+  restart this same probe-then-rebase-then-follow mechanism resumes correctly from the persisted
+  (or normalized) offset — that **is** the re-attach.
+
+### 6.2 Truncation detection / offset rebase (every tail tick + restore)
+
+The persisted `outOffset`/`errOffset` are byte positions into the **spools**, but the spools are
+copytruncated in place by the child-owned trimmer (POSIX wrapper or Node helper ring, §4.1/§4.1.1/§8)
+and by the gateway's secondary copytruncate — **while the gateway is up OR down**. After a truncation
+the spool shrinks, so a persisted offset can end up **greater than the current spool size**. A naive
+"read only when `size > offset`" host poll, or a docker `tail -c +<offset+1> -F` launched with the
+stale offset, would then **miss the retained tail** and stall — streaming nothing until the spool
+organically grows back past the stale offset — breaking the "continues streaming after restart"
+criterion.
+
+**Rule (applied on every tail tick and once at restore, for BOTH host and docker):** before reading,
+`stat`/`wc -c` the spool size. **If `size < persistedOffset` (or the spool's inode/identity changed),
+treat the spool as having been copytruncated:**
+
+1. **reset the read offset to `0`** and read the current bounded spool from the beginning (it is
+   ≤ the cap by construction, §8);
+2. feed those bytes through the normal projection/append path (`appendLog()` → capped `log[]` →
+   atomic projection rewrite) — the in-memory cap + the projection's full-rewrite dedupe absorb any
+   overlap with already-projected content (see the note below);
+3. **persist the reset offset** (`store.update(outOffset/errOffset = newPosition)`);
+4. continue tailing from the new position.
+
+If `size == offset` → no-op; if `size > offset` → read the delta as normal.
+
+> **Interaction with the projection (no duplication persisted).** The gateway rewrites the HOST
+> projection `<bgId>.log` as a **full rewrite** (tmp + rename) from the capped in-memory `log[]`
+> buffer — it never *appends* to the projection. So even though a rebased read from offset `0`
+> re-feeds bytes that were already projected before the truncation, the in-memory cap trims the
+> combined buffer to the last 512KB / 5000 lines and the subsequent full rewrite simply serialises
+> that capped buffer. No duplicate lines are persisted to disk; at worst a small, already-seen tail
+> is re-projected in memory and harmlessly re-broadcast (the pill's `_fetchedUpTo` dedupe absorbs
+> it). This is why reading a rebased spool from the beginning is always safe.
 
 The tailer feeds the existing in-memory `appendLog()` / `bg.stdout`/`bg.stderr` arrays (already
 capped, interleaved into `log[]`) and the existing `bg_process_output` WS broadcast — so the API
@@ -672,10 +718,18 @@ if status == "running":
     case ALIVE (nonce matches):
         # re-attach (host spawn, or docker whose container still resolves + wrapper alive)
         rehydrate record (status stays "running", terminalReason stays null)
-        read bounded tail (last 512KB/5000 lines) of BOTH spools from persistedOffsets -> capped
-          log[] buffer -> rewrite HOST combined projection; then copytruncate both spools (§8)
-          (docker: read the container spools via docker exec; mirror into the HOST projection)
-        start tailers from new offsets       -> resumes live streaming (docker: mirror to host)
+        # (1) host projection tail ALREADY loaded above -> retained output shown immediately
+        # (2) REBASE each spool offset per §6.2 BEFORE reading: stat/wc -c the spool size; if it is
+        #     < persistedOffset (or inode/identity changed) the child-owned trimmer copytruncated it
+        #     during downtime -> reset that offset to 0 and read the bounded current spool from the
+        #     start (it is <= cap); else read the delta from persistedOffset.
+        read bounded tail (last 512KB/5000 lines) of BOTH spools from the REBASED offsets -> capped
+          log[] buffer -> rewrite HOST combined projection (full rewrite, so re-fed bytes after a
+          rebase persist no duplicates — §6.2); persist the rebased offsets; then copytruncate both
+          spools (§8) (docker: probe + rebase via docker exec wc -c, read the container spools,
+          mirror into the HOST projection)
+        start tailers from the rebased offsets -> resumes live streaming (no stall even if the spool
+                                                was truncated below the old offset; docker: mirror to host)
         start status watcher                 -> captures eventual real exit code (-> terminalReason="normal",
                                                 mirrored to the HOST status snapshot for docker)
     case COMPLETED_DURING_DOWNTIME:   # not alive, but a real exit code is available
@@ -1013,6 +1067,20 @@ Dismiss: delete HOST <bgId>.log + <bgId>.status; best-effort docker exec rm -f t
   detached child — the **wrapper-owned trimmer** on the POSIX path or the **Node bg-runner helper
   ring** on Windows-without-Git-Bash — plus the **gateway copytruncate** (secondary). Every host path
   writes a bounded spool; none is ever unbounded.
+- **copytruncate offset rebase (no-stall guarantee).** Because the child-owned trimmer (and the
+  gateway's secondary copytruncate) shrink the spool **while the gateway is up OR down**, a
+  persisted `outOffset`/`errOffset` can become **greater than the current spool size**. A naive
+  "read only when `size > offset`" host poll, or a docker `tail -c +<offset+1> -F` launched with the
+  stale offset, would then **miss the retained tail and stall** — never streaming until the spool
+  organically grew back past the stale offset — breaking the "continues streaming after restart"
+  criterion. Mitigation (§6.2, applied on **every** host/docker tail tick **and** at restore):
+  before reading, `stat`/`wc -c` the spool; if `size < persistedOffset` (or the inode/identity
+  changed) **rebase the offset to `0`** and read the bounded current spool from the beginning
+  (host: read-from-0; docker: probe with `wc -c` then launch `tail -c +1 -F`), persist the reset
+  offset, then continue. The HOST projection is loaded first so the retained tail is shown
+  immediately regardless; the full-rewrite projection (never append) means re-feeding already-seen
+  bytes after a rebase persists **no duplicates**. Net guarantee: a copytruncate during downtime or
+  mid-run can never stall the stream nor lose the retained tail.
 - **Windows process-group kill.** `taskkill /pid <processPid> /T /F` kills the wrapper shell **and** its
   child tree (`/T`), so a force-killed host process **may not write a status file**. Handling:
   `kill()` records an intent-to-kill timestamp; the watcher, seeing the `processPid` gone with no
@@ -1163,6 +1231,15 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   (write > cap bytes to a fake spool, run the trim step) and asserts the spool ends ≤ `<KEEP>` and
   the **inode is unchanged** (in-place truncate, not rename) — i.e. spools stay capped independently
   of the gateway, modelling the downtime case.
+- **copytruncate offset rebase — restore + tail, no stall (§6.2):** with a fake spool file and a
+  persisted `outOffset` **greater than** the current (child-trimmer-copytruncated) spool size,
+  `restoreSession()` (and a subsequent live tail tick) must **rebase the offset to `0`**, read the
+  **retained tail** of the bounded current spool from the beginning, and then stream **new** bytes
+  appended afterward — assert no stall (the retained tail and the new bytes are both projected /
+  broadcast) and that the persisted offset is reset to the new position. Cover **both** the host
+  poll path (`size < offset` branch) and the docker path (fake `wc -c` smaller than the persisted
+  offset → `tail -c +1 -F` launched from the normalized `0`). Assert the projection full-rewrite
+  persists **no duplicate** lines despite re-feeding already-seen bytes from offset 0.
 - **Wrapper builders (POSIX only):** `buildHostWrapper` and `buildDockerWrapper` produce the exact
   POSIX strings — pidfile (`printf '%s\n%s\n' "$$" "<nonce>"`), the wrapper-owned trimmer loop, the
   user command in an **isolated subshell** `( <command> )`, **append** (`>>`) to both spools, the
@@ -1196,9 +1273,18 @@ Pattern from `tests/e2e/ui/settings.spec.ts`, spawned-gateway harness:
 5. **Kill** flow: start another long-runner, Kill it, assert it becomes an **exited** pill that
    **survives a restart** until dismissed.
 
+6. **copytruncate + restart streaming (§6.2):** start a **chatty** long-runner that emits enough
+   output to trigger the child-owned trimmer copytruncate (spool shrinks below the persisted
+   offset), confirm the pill is streaming, **restart the spawned gateway**, and assert the pill is
+   restored and **still streaming** afterward — i.e. the stale offset does not stall the stream
+   (offset rebases to `0`, the retained tail shows, new lines keep arriving). (Docker variant noted
+   for `test:manual` below.)
+
 Keep `tests/e2e/bg-process-sandbox-guard.spec.ts` green (the `sandboxed && !containerId` guard is
-unchanged). Docker re-attach is covered by `test:manual` (extend
-`sandbox-recovery-docker.spec.ts`).
+unchanged). Docker re-attach — including the **copytruncate offset rebase after restart** (a chatty
+in-container process whose spool the in-container trimmer copytruncated, then a gateway restart still
+resumes streaming via probe + `tail -c +1 -F` from the normalized offset) — is covered by
+`test:manual` (extend `sandbox-recovery-docker.spec.ts`).
 
 ### Commands
 
