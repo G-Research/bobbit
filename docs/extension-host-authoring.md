@@ -530,6 +530,45 @@ panels from `GET /api/ext/contributions` (pack-scoped), not `/api/tools`.
 `host.ui.openPanel({ panelId })` stays **pack-relative** — the caller surface's bound `packId`
 resolves `panelId` → `{packId, panelId}` before fetching bytes.
 
+**Open a panel in a chosen session's view (`PanelTarget.sessionId`, contract v2).** By default
+`openPanel` mounts/focuses the tab in the **currently-active** session. A pack that has just
+created another session (e.g. a spawned child agent) can open the panel **in that session's
+view** by passing its id:
+
+```js
+// CONTRACT v2: open the pane in a chosen session, selecting it so the sidebar +
+// main view follow. Feature-detect; fall back to the active view on a v1 host.
+const target = { panelId: "pr-walkthrough.panel", params: {} };
+if (host.contractVersion >= 2) target.sessionId = childSessionId;
+host.ui.openPanel(target);
+```
+
+When `sessionId` is present the platform performs a **real session switch** to that session and
+mounts the tab **under it** instead of the active one. The switch is the *canonical*
+`connectToSession(sessionId, false)` path — the exact same full switch the sidebar drives (cache
+the outgoing panel, disconnect, set the hash route, update accessory/hue + localStorage, render,
+async-hydrate) — so the sidebar highlight, hash route, and main view all follow the pane. This is
+**not** a bare `selectedSessionId` assignment: a bare assignment skips the hash route and
+hydration, so the main view never actually follows. The platform reaches `connectToSession`
+through an **injected switcher hook** (`setSessionSwitcher` in `src/app/pack-panels.ts`, which
+`session-manager.ts` self-registers at bootstrap) rather than a static import, so the navigation
+logic lives entirely in the platform and the pack never touches navigation/router state —
+preserving pack purity. When the switcher is unset (unit fixtures that never load
+`session-manager`) it falls back to the v1 bare `selectedSessionId` assignment so the tab still
+keys under the target session. The field is **purely additive**: omitting it is the v1 behaviour,
+and packs that never set it are unaffected.
+
+This addition bumped **`HOST_CONTRACT_VERSION` 1 → 2** (the data/addressing-contract version;
+`HOST_API_VERSION` stays `1` because no method signature changed). Adding an optional field is
+additive, but the version bump lets a pack **feature-detect field support** via
+`host.contractVersion >= 2` and degrade gracefully (open in the active view) on an older host.
+No new capability flag is added — `openPanel` already lives under the `ui` capability.
+This capability was added so the PR-walkthrough pack could move its pane into a freshly
+spawned reviewer-child session; see
+[docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md) for the
+motivating design and [docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md#the-pane-lives-with-the-reviewer-child)
+for how the pack consumes it.
+
 **Panel conventions (enforced — identical to renderer rules):** theme tokens only; preserve any
 embedded iframe `sandbox` attribute (untrusted/LLM content goes in a `sandbox`ed iframe);
 **no auto-invoke / navigation on mount**.
@@ -921,12 +960,12 @@ pr-walkthrough/
 
 | Built-in piece | Pack contribution |
 |---|---|
-| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`), opened via `host.ui.openPanel({ panelId })` — entrypoints carry **no** hard-coded `jobId`; the panel launches via the `run` route and polls `status` (see below) |
+| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`; the panel launches via the `run` route and polls `status` (see below). After `run` returns the child id it opens the pane **in the reviewer child's session view** via the contract-v2 `host.ui.openPanel({ panelId, sessionId: childSessionId })` (a real session switch — see [`PanelTarget.sessionId`](#panels--persistent-side-panels-hostuiopenpanel)), feature-detected with `host.contractVersion >= 2` and falling back to the active view on a v1 host |
 | Launch — a real isolated reviewer | the `run` route calls **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, toolEnv })`** to mint a visible read-only child — NOT `host.session.postMessage`; the user's own agent is never driven |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — also holds the `binding/`, `reviewer/`, `submitted/`, and `last/` routing keys for the reviewer child |
 | Deep-link + launchers | four `entrypoints/*.yaml` — three launchers (composer-slash, git-widget-button, command-palette) **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) |
-| Reload recovery | the `recover` route reads the owner-scoped `last/<sessionId>` pointer + persisted YAML so the **Load walkthrough** gesture re-renders cards (the reviewer's submit call lives in the dismissed child, not the owner transcript); `host.session.readToolCall` remains a legacy fallback |
+| Reload recovery | the `recover` route returns the persisted YAML so the **Load walkthrough** gesture re-renders cards (the reviewer's submit call lives in the dismissed child, not the owner transcript). It authorizes from **either bound principal**: it checks a **child self-recover** branch **first** — when the caller is the reviewer child it resolves from its own `binding/<childSessionId>` — and otherwise falls back to the owner-scoped `last/<sessionId>` pointer; `host.session.readToolCall` remains a legacy fallback |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
 Two non-obvious decisions worth copying:

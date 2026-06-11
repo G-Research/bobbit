@@ -23,7 +23,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const { resolveGrantPolicy, computeEffectiveAllowedTools } = await import("../src/server/agent/tool-activation.ts");
+const { resolveGrantPolicy, computeEffectiveAllowedTools, computeToolPolicies } = await import("../src/server/agent/tool-activation.ts");
+const { generateToolGuardExtension } = await import("../src/server/agent/tool-guard-extension.ts");
 import type { GrantPolicy, GroupPolicyProvider } from "../src/server/agent/tool-activation.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -149,6 +150,76 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 	// the runtime `mcp__<server>` key. The pr-reviewer role's WILDCARD `mcp__: never`
 	// must deny every MCP server at once, so the resolved set stays EXACTLY the three
 	// walkthrough tools even with a fake MCP server present.
+	// A1 (guard-GENERATION path — the path that was actually bugged). The existing
+	// assertions above prove the *role policy* (`resolveGrantPolicy`). This block
+	// proves the downstream artefact the bug corrupted: the generated tool GUARD.
+	//
+	// Root cause recap: `session-setup._resolveToolActivation` resolved the role via
+	// `roleManager.getRole` only → `undefined` for the pack-shipped `pr-reviewer`
+	// → `computeToolPolicies` fell through to the `PR Walkthrough: never` group
+	// default → the three tools were stamped into the guard's `neverPolicies` map
+	// → every reviewer tool call was hard-blocked ("not permitted for this role").
+	//
+	// GIVEN the cascade-resolved `pr-reviewer` role (what the fixed `lookupRole`
+	// returns), `computeToolPolicies` / `generateToolGuardExtension` must produce a
+	// guard with NO `never` entry for the three tools. The contrast case (role
+	// undefined — the bug) is asserted too, so this test pins the exact regression.
+	describe("A1 — generated tool GUARD does not block the reviewer tools", () => {
+		// Minimal ToolManager exposing the three walkthrough tools (+ a representative
+		// mutating tool). The tool YAMLs declare no grantPolicy, so getToolByName
+		// returns undefined — faithfully reproducing the runtime cascade.
+		const guardToolManager = {
+			getAvailableTools: () => [
+				...PR_WALKTHROUGH_TOOLS.map(name => ({ name, group: PR_WALKTHROUGH_GROUP })),
+				{ name: "write", group: "File System" },
+			],
+			getToolByName: () => undefined,
+		} as unknown as Parameters<typeof computeToolPolicies>[0];
+
+		/** Names the generated guard would hard-block (its `neverPolicies` keys). */
+		function guardNeverNames(role: { toolPolicies?: Record<string, GrantPolicy> } | undefined): string[] {
+			const policies = computeToolPolicies(guardToolManager, undefined, role, groupPolicyStore);
+			const code = generateToolGuardExtension("prw-guard-test", policies, []);
+			// Extract the embedded `const neverPolicies = {…};` object literal and read its keys.
+			const m = code.match(/const neverPolicies = (\{.*?\});/s);
+			assert.ok(m, "generated guard must embed a neverPolicies map");
+			return Object.keys(JSON.parse(m![1]));
+		}
+
+		it("the resolved pr-reviewer role stamps NO `never` guard entry for any of the three tools", () => {
+			const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+			const policies = computeToolPolicies(guardToolManager, undefined, reviewer, groupPolicyStore);
+			for (const tool of PR_WALKTHROUGH_TOOLS) {
+				assert.notEqual(
+					policies[tool]?.policy,
+					"never",
+					`guard policy for ${tool} must not be \`never\` for the resolved pr-reviewer role`,
+				);
+			}
+			const neverNames = guardNeverNames(reviewer);
+			for (const tool of PR_WALKTHROUGH_TOOLS) {
+				assert.ok(
+					!neverNames.includes(tool),
+					`generated guard must NOT hard-block ${tool} (found it in neverPolicies)`,
+				);
+			}
+		});
+
+		it("REGRESSION GUARD: an UNRESOLVED role (the bug) DOES stamp `never` for all three", () => {
+			// This is exactly what `_resolveToolActivation` produced before the fix
+			// (effectiveRole === undefined). If the guard generation ever stopped
+			// honouring the group default-deny, the fix above would be a no-op and this
+			// assertion catches it.
+			const neverNames = guardNeverNames(undefined);
+			for (const tool of PR_WALKTHROUGH_TOOLS) {
+				assert.ok(
+					neverNames.includes(tool),
+					`without a resolved role the group default-deny must hard-block ${tool}`,
+				);
+			}
+		});
+	});
+
 	it("pr-reviewer resolves to EXACTLY the three walkthrough tools even with an MCP server configured", () => {
 		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
 		const fixedTools = enumerateFixedTools();

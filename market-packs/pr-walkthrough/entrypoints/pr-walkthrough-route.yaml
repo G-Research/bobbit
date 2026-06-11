@@ -10,4 +10,8 @@ target:
 # a LIVE recompute (design §D2.3) for a freshly-opened PR. The git repo root is
 # SERVER-DERIVED (the session worktree), never a deep-link param — so no `repoDir`
 # key (a caller must not be able to point the route at another repo).
-paramKeys: [jobId, baseSha, headSha]
+# `autorun` (Area B) is set ONLY by the git-widget launcher's target params (the
+# widget click IS the user gesture); the bare deep-link and the open/palette
+# launchers omit it, so they still land on the manual-Run panel. paramKeys gate
+# which query params survive navigateToTarget's filter AND the reload-restore filter.
+paramKeys: [jobId, baseSha, headSha, autorun]

@@ -18,7 +18,11 @@ import {
 	reconcilePackPanelsForProject,
 	panelInfosFromContributions,
 	openPackPanel,
+	setSessionSwitcher,
 } from "../../src/app/pack-panels.js";
+import { state } from "../../src/app/state.js";
+import { panelTabsForSession, activePanelTabIdForSession } from "../../src/app/panel-workspace.js";
+import { HOST_CONTRACT_VERSION } from "../../src/shared/extension-host/host-api.js";
 
 type PackWire = { packId: string; packName: string; panels: Array<{ id: string; title?: string }>; entrypoints: unknown[]; routeNames: string[] };
 
@@ -72,6 +76,35 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 // pass the packId explicitly here to exercise the exact {packId, panelId} lookup.
 (window as any).__open = (panelId: string, packId?: string) => { openPackPanel({ panelId }, packId ?? "demo_pack"); };
 (window as any).__openByPanelId = (panelId: string) => { openPackPanel({ panelId }); };
+// CONTRACT v2: open the panel in a CHOSEN session's view (PanelTarget.sessionId).
+(window as any).__openInSession = (panelId: string, sessionId: string, packId?: string) => {
+	openPackPanel({ panelId, sessionId }, packId ?? "demo_pack");
+};
+// Install a STUB session switcher (the production hook is `connectToSession`,
+// wired by session-manager). Records the target it was asked to switch to AND
+// simulates the real switch's synchronous `selectSession` phase by setting
+// `state.selectedSessionId` — so the test can assert openPackPanel delegates to
+// the REAL switch path (not a bare assignment that skips it).
+let lastSwitchTarget: string | undefined;
+(window as any).__installSwitcherStub = () => {
+	lastSwitchTarget = undefined;
+	setSessionSwitcher((sid: string) => {
+		lastSwitchTarget = sid;
+		(state as unknown as { selectedSessionId?: string }).selectedSessionId = sid;
+	});
+};
+(window as any).__lastSwitchTarget = (): string | undefined => lastSwitchTarget;
+(window as any).__selectedSessionId = (): string | undefined =>
+	(state as unknown as { selectedSessionId?: string }).selectedSessionId;
+(window as any).__setSelectedSessionId = (sid: string | undefined) => {
+	(state as unknown as { selectedSessionId?: string }).selectedSessionId = sid;
+};
+// The pack-panel tab ids mounted under a given session (after openPackPanel).
+(window as any).__tabIdsForSession = (sid: string | undefined): string[] =>
+	panelTabsForSession(state, sid).map((t) => t?.id);
+(window as any).__activeTabIdForSession = (sid: string | undefined): string | undefined =>
+	activePanelTabIdForSession(state, sid);
+(window as any).__contractVersion = (): number => HOST_CONTRACT_VERSION;
 (window as any).__flush = async (): Promise<void> => { await new Promise((r) => setTimeout(r, 30)); };
 
 (window as any).__ready = true;

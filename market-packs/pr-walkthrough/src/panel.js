@@ -34,7 +34,16 @@ import { parse as parseYaml } from "yaml";
 import { changesetIdForGithub } from "../../../src/shared/pr-walkthrough/ids.ts";
 
 const SUBMIT_TOOL = "submit_pr_walkthrough_yaml";
-const RUN_TIMEOUT_MS = 120_000;
+// The panel id contributed by panels/pr-walkthrough-panel.yaml. Used by the Area D
+// `host.ui.openPanel({ panelId, sessionId })` navigation that moves the pane into
+// the reviewer child session's view (Host-API contract v2).
+const PANEL_ID = "pr-walkthrough.panel";
+// Area C — poll-loop robustness. A long-but-PROGRESSING reviewer must never be
+// turned into an error by a short clock: only a route-confirmed terminal child
+// (phase:"error") or the absolute hard cap ends the loop. After SLOW_HINT_MS we
+// surface a non-error "still reviewing" hint and KEEP polling.
+const HARD_CAP_MS = 30 * 60_000; // absolute backstop (30 min)
+const SLOW_HINT_MS = 120_000; // after this, show the "still reviewing" hint
 const POLL_INTERVAL_MS = 1_500;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -296,8 +305,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			// change for the new `run` flow is that the YAML now arrives from the `status`
 			// route (a separate reviewer session) instead of `host.session.readToolCall`.
 			// The optional baseSha/headSha overrides let the `run` flow pass the binding's
-			// SHAs (the Load path passes none and keeps its prior fallback chain).
-			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride) => {
+			// SHAs (the Load path passes none and keeps its prior fallback chain). The
+			// optional `targetKey` lets the Run flow publish under the CHILD session key
+			// (Area D) so the rendered cards land in the reviewer child's pane; the Load
+			// path omits it and writes under the current session's `paramKey`.
+			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride, targetKey = paramKey) => {
 				const yamlText = rawYamlOf(toolCall);
 				const ref = deriveJobRef(yamlText, paramJobId);
 				const jobId = ref.jobId;
@@ -318,7 +330,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						const detail = result.summary && Array.isArray(result.summary.errors) && result.summary.errors[0]
 							? `${result.summary.errors[0].path}: ${result.summary.errors[0].message}`
 							: (result.error || "validation failed");
-						byJob.set(paramKey, { status: "error", error: `Walkthrough YAML invalid — ${detail}`, jobId });
+						byJob.set(targetKey, { status: "error", error: `Walkthrough YAML invalid — ${detail}`, jobId });
 						return;
 					}
 				}
@@ -327,7 +339,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (effHeadSha) query.headSha = effHeadSha;
 				const bundle = await host.callRoute("bundle", { query });
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
-				byJob.set(paramKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId });
+				byJob.set(targetKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId });
 			};
 
 			const onLoad = async () => {
@@ -400,43 +412,169 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				const jobId = started.jobId;
 				const startBaseSha = started.baseSha;
 				const startHeadSha = started.headSha;
-				const deadline = Date.now() + RUN_TIMEOUT_MS;
-				while (Date.now() < deadline) {
+
+				// ── Area D: re-key the pane to the reviewer CHILD session ───────────────
+				// The running/poll state moves under the CHILD session key so the pane
+				// lives WITH the reviewer child (pending → ready beside that child's chat),
+				// not the owner. The owner's own entry is cleared to idle so the owner pane
+				// stops showing the launch state. The poll loop keeps using the OWNER host
+				// (status stays parent-authorized — no new race) but writes its
+				// publishing/rendered/error state under the CHILD key. On reload the child
+				// pane (__sessionId === childKey) finds byJob empty and its Load gesture
+				// calls `recover`, which self-resolves from binding/<child> (routes.mjs).
+				const childKey = childSessionId || paramKey;
+				byJob.set(childKey, { status: "running", jobId });
+				// Keep the owner's autorunConsumed flag set so navigating back to the owner
+				// session never re-arms the one-shot autorun (idempotency would dedupe it,
+				// but a re-trigger loop is undesirable). The owner pane shows idle actions.
+				if (childKey !== paramKey) byJob.set(paramKey, { status: "idle", autorunConsumed: true });
+				// Navigate the UI to the child session's pane via the Host API (contract
+				// v2 added PanelTarget.sessionId). Feature-detect: on an older host this is
+				// skipped (graceful fallback) and the child pane renders on next select.
+				if (childSessionId && host.contractVersion >= 2 && host.ui && host.ui.openPanel) {
+					try { host.ui.openPanel({ panelId: PANEL_ID, sessionId: childSessionId, params: {} }); }
+					catch { /* navigation is best-effort; pane still renders on select */ }
+				}
+				if (host.requestRender) host.requestRender();
+
+				// ── Area C: poll WHILE the child is alive ───────────────────────────────
+				// Only phase:"submitted" (publish) or phase:"error" (route-confirmed
+				// terminal-without-submit) END the loop. A long-but-progressing reviewer
+				// (phase:"running") is NEVER errored by the clock; past SLOW_HINT_MS we set
+				// a non-error "still reviewing" hint and keep polling. Only the absolute
+				// HARD_CAP_MS while STILL running surfaces an error (rare).
+				const startedAt = Date.now();
+				while (Date.now() - startedAt < HARD_CAP_MS) {
 					// The user took another action (Load/re-Run) — abandon this poll loop.
-					const cur = byJob.get(paramKey);
+					const cur = byJob.get(childKey);
 					if (!cur || cur.status !== "running") return;
 					let st;
 					try {
 						st = await host.callRoute("status", { method: "POST", body: { childSessionId, jobId } });
 					} catch { st = undefined; }
 					if (st && st.phase === "submitted") {
-						byJob.set(paramKey, { status: "publishing" });
+						byJob.set(childKey, { status: "publishing", jobId });
 						if (host.requestRender) host.requestRender();
 						try {
-							await publishAndLoad({ input: { yaml: st.yaml } }, st.baseSha ?? startBaseSha, st.headSha ?? startHeadSha);
+							await publishAndLoad({ input: { yaml: st.yaml } }, st.baseSha ?? startBaseSha, st.headSha ?? startHeadSha, childKey);
+						} catch (e) {
+							byJob.set(childKey, { status: "error", error: e && e.message ? e.message : String(e) });
+						}
+						if (host.requestRender) host.requestRender();
+						return;
+					}
+					if (st && st.phase === "error") {
+						byJob.set(childKey, { status: "error", error: st.error || "The reviewer failed — try again." });
+						if (host.requestRender) host.requestRender();
+						return;
+					}
+					// phase:"running" (or a transient status fetch failure) — keep polling.
+					// After SLOW_HINT_MS surface a non-error "still reviewing" hint WITHOUT
+					// leaving the running state (the child is alive).
+					if (Date.now() - startedAt > SLOW_HINT_MS) {
+						const c = byJob.get(childKey);
+						if (c && c.status === "running" && !c.slow) {
+							byJob.set(childKey, { ...c, status: "running", slow: true });
+							if (host.requestRender) host.requestRender();
+						}
+					}
+					await sleep(POLL_INTERVAL_MS);
+				}
+				// Hit the absolute cap while STILL running — the only "ran too long"
+				// outcome, and it is rare. Surface a retry, not a silent failure.
+				byJob.set(childKey, { status: "error", error: "The reviewer is taking unusually long — check its session, or run again." });
+				if (host.requestRender) host.requestRender();
+			};
+
+			// ── Area B autorun — the SAFE, durable one-shot machinery (Finding 3). ────
+			// The git-widget entrypoint carries `autorun: true`; its CLICK is the user
+			// gesture, so auto-invoking on mount is NOT a passive auto-invoke. But the
+			// in-memory consumed flag is LOST on a browser reload while the deep-link
+			// still carries autorun=true, so a naive mount-autorun would re-fire `run`
+			// on every reload — spawning a SECOND reviewer after the first
+			// submitted/was dismissed, and (because openPanel now switches the view to
+			// the reviewer child) even firing from the child's OWN session. So:
+			//   1. If a completed walkthrough already exists for this view, LOAD it
+			//      (recover → found) instead of spawning.
+			//   2. NEVER autorun from a reviewer-child session (binding/<self> exists).
+			//   3. Record a DURABLE consumed marker in host.store so a reload does not
+			//      re-fire even within the brief idle window. (The in-memory flag still
+			//      guards same-page re-renders.)
+			//   4. The run route's reviewerKey idempotency stays the final backstop.
+			// Keyed by the BOUND session id so a reload consults the same marker; absent
+			// in non-DOM fixtures with no bound session.
+			const autorunMarkerKey = boundSessionId ? `autorun-consumed/${boundSessionId}` : undefined;
+			const markAutorunConsumed = async () => {
+				if (host && host.store && autorunMarkerKey) {
+					try { await host.store.put(autorunMarkerKey, { consumedAt: Date.now() }); } catch { /* best-effort */ }
+				}
+			};
+			const maybeAutorun = async () => {
+				try {
+					// (3) Durable consumed marker — a reload re-arms the in-memory flag, so
+					// consult the persisted marker FIRST and bail if autorun already fired.
+					if (host.store && autorunMarkerKey) {
+						let consumed;
+						try { consumed = await host.store.get(autorunMarkerKey); } catch { consumed = undefined; }
+						if (consumed) return;
+					}
+					// (2) Never autorun from a reviewer-child session: the pane was moved
+					// INTO the child by openPanel, so a reload there must not spawn a fresh
+					// reviewer. Only a bound reviewer child has a binding/<self> key.
+					if (host.store && boundSessionId) {
+						let selfBinding;
+						try { selfBinding = await host.store.get(`binding/${boundSessionId}`); } catch { selfBinding = undefined; }
+						if (selfBinding && typeof selfBinding === "object") {
+							await markAutorunConsumed(); // never reconsider; the child recovers via Load
+							return;
+						}
+					}
+					// (1) A completed walkthrough already exists for this view → LOAD it
+					// (idempotent publish) instead of spawning a duplicate reviewer.
+					let recovered;
+					if (host.callRoute) {
+						try { recovered = await host.callRoute("recover", { method: "POST", body: {} }); }
+						catch { recovered = undefined; }
+					}
+					await markAutorunConsumed();
+					if (recovered && recovered.found && recovered.yaml) {
+						byJob.set(paramKey, { status: "loading" });
+						if (host.requestRender) host.requestRender();
+						try {
+							await publishAndLoad({ input: { yaml: recovered.yaml } }, recovered.baseSha, recovered.headSha);
 						} catch (e) {
 							byJob.set(paramKey, { status: "error", error: e && e.message ? e.message : String(e) });
 						}
 						if (host.requestRender) host.requestRender();
 						return;
 					}
-					if (st && st.phase === "error") {
-						byJob.set(paramKey, { status: "error", error: st.error || "The reviewer failed — try again." });
-						if (host.requestRender) host.requestRender();
-						return;
-					}
-					await sleep(POLL_INTERVAL_MS);
-				}
-				byJob.set(paramKey, { status: "error", error: "The reviewer didn't produce a walkthrough — try again." });
-				if (host.requestRender) host.requestRender();
+					// (4) No completed walkthrough → spawn the reviewer (run-route
+					// reviewerKey idempotency is the final backstop against a duplicate).
+					await onRun();
+				} catch { /* autorun is best-effort; the manual Run affordance remains */ }
 			};
 
 			const statusText = status === "loading" ? "Loading…"
-				: status === "running" ? "Reviewing the PR…"
+				: status === "running" ? (entry.slow ? "Still reviewing the PR (this can take a few minutes)…" : "Reviewing the PR…")
 					: status === "publishing" ? "Publishing the walkthrough…"
 						: undefined;
 
 			const showActions = !entry.bundle && !busy;
+
+			// ── Area B: one-click auto-run from the git widget (durable one-shot) ─────
+			// The git-widget click is the user gesture, so this is NOT a passive-mount
+			// auto-invoke. The in-memory `autorunConsumed` flag guards same-page
+			// re-renders; the DURABLE store marker + the recover/child-session checks in
+			// `maybeAutorun` make it safe across a browser reload (see Finding 3 above).
+			// Query params arrive as strings, so accept both "true" and boolean true. The
+			// manual Run button stays for the deep-link / no-autorun case.
+			const wantsAutorun = params && (params.autorun === true || params.autorun === "true");
+			if (wantsAutorun && status === "idle" && !entry.bundle && !entry.autorunConsumed && hasSession && !busy) {
+				// Synchronous in-memory guard prevents a same-page re-render from
+				// re-entering while the async checks in maybeAutorun run.
+				byJob.set(paramKey, { ...entry, autorunConsumed: true });
+				queueMicrotask(() => { void maybeAutorun(); }); // after render
+			}
 
 			return html`
 				<div class="p-3" data-testid="prw-panel-root" data-prw-job=${displayJob}>

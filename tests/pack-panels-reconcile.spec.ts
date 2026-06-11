@@ -262,4 +262,70 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 		});
 		expect(calls.some((u: string) => u.includes("/panels/"))).toBe(false);
 	});
+
+	// CONTRACT v2 (design pr-walkthrough-restore-ux.md §3 D.3, test-plan row D4):
+	// `PanelTarget.sessionId` opens the panel in the CHOSEN session's view by driving
+	// the REAL session switch (`connectToSession` — the canonical full switch the
+	// sidebar uses, NOT a bare `selectedSessionId` assignment that skips the hash
+	// route + hydration) and mounting the tab under it — without regressing the
+	// default (no `sessionId`) active-session behaviour.
+	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion === 2)", async ({ page }) => {
+		await gotoAndWait(page);
+
+		// The additive field bumped the data/addressing contract 1→2.
+		const cv = await page.evaluate(() => (window as any).__contractVersion());
+		expect(cv).toBe(2);
+
+		// Register demo.panel for a project, install the switcher stub (the production
+		// hook is `connectToSession`), and start from an "owner" session view.
+		await page.evaluate(async () => {
+			await (window as any).__reconcile("D4");
+			(window as any).__installSwitcherStub();
+			(window as any).__setSelectedSessionId("owner-session");
+		});
+
+		// Open the panel TARGETING the child session.
+		const result = await page.evaluate(async () => {
+			(window as any).__openInSession("demo.panel", "child-session");
+			await (window as any).__flush();
+			return {
+				switchTarget: (window as any).__lastSwitchTarget(),
+				selected: (window as any).__selectedSessionId(),
+				childTabs: (window as any).__tabIdsForSession("child-session"),
+				childActive: (window as any).__activeTabIdForSession("child-session"),
+				ownerTabs: (window as any).__tabIdsForSession("owner-session"),
+			};
+		});
+
+		const expectedTabId = "pack:demo_pack:demo.panel";
+		// (a) the REAL switch path was invoked for the child session — openPackPanel
+		//     delegated to the canonical switcher, not a bare selectedSessionId set.
+		expect(result.switchTarget).toBe("child-session");
+		// (b) the chosen session is now selected (sidebar + main view follow on render).
+		expect(result.selected).toBe("child-session");
+		// (c) the tab is mounted + focused under the CHILD session, not the owner.
+		expect(result.childTabs).toContain(expectedTabId);
+		expect(result.childActive).toBe(expectedTabId);
+		expect(result.ownerTabs).not.toContain(expectedTabId);
+	});
+
+	test("default open (no PanelTarget.sessionId) mounts under the active session — v1 behaviour unchanged", async ({ page }) => {
+		await gotoAndWait(page);
+
+		const result = await page.evaluate(async () => {
+			await (window as any).__reconcile("D4B");
+			(window as any).__setSelectedSessionId("active-session");
+			(window as any).__open("demo.panel"); // no sessionId in the target
+			await (window as any).__flush();
+			return {
+				selected: (window as any).__selectedSessionId(),
+				activeTabs: (window as any).__tabIdsForSession("active-session"),
+			};
+		});
+
+		// No session retargeting: selection is untouched and the tab mounts under the
+		// active session exactly as before.
+		expect(result.selected).toBe("active-session");
+		expect(result.activeTabs).toContain("pack:demo_pack:demo.panel");
+	});
 });

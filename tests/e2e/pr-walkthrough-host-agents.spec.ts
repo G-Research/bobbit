@@ -32,7 +32,7 @@
  *   • Scope: the pack drives only its own reviewer child.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -245,6 +245,34 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 
 	function reviewerSecret(gateway: any, childSessionId: string): string {
 		return gateway.sessionManager.sessionSecretStore.getOrCreateSecret(childSessionId);
+	}
+
+	/**
+	 * Inspect the ACTUAL tool-guard extension(s) the gateway generated for a
+	 * spawned child and return the set of tool names the guard hard-blocks (its
+	 * `neverPolicies` keys). The guard file paths are the `--extension` args the
+	 * gateway pushed onto the child's RpcBridge in `session-setup`
+	 * (`_resolveToolActivation` → `writeToolGuardExtension`). Reading them back is
+	 * the most faithful observation of the bug: pre-fix the three walkthrough
+	 * tools were stamped into `neverPolicies` (every call → "not permitted for
+	 * this role"); the fix resolves the pack role so they are not.
+	 */
+	function childGuardNeverNames(gateway: any, childSessionId: string): { neverNames: Set<string>; guardFiles: number } {
+		const args: string[] = (gateway.sessionManager.getSession(childSessionId)?.rpcClient as any)?.options?.args ?? [];
+		const neverNames = new Set<string>();
+		let guardFiles = 0;
+		for (let i = 0; i < args.length - 1; i++) {
+			if (args[i] !== "--extension") continue;
+			const p = args[i + 1];
+			if (typeof p !== "string" || !/tool-guard/.test(p)) continue;
+			let code: string;
+			try { code = readFileSync(p, "utf-8"); } catch { continue; }
+			guardFiles++;
+			const m = code.match(/const neverPolicies = (\{.*?\});/s);
+			if (!m) continue;
+			for (const k of Object.keys(JSON.parse(m[1]))) neverNames.add(k);
+		}
+		return { neverNames, guardFiles };
 	}
 
 	// ── Row: Run mints a NEW read-only reviewer; owner agent NOT driven. ──
@@ -688,6 +716,100 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
+	// ── Row A2 + A3: the spawned reviewer's GUARD does not block the three tools,
+	//    and its prompt carries the YAML schema (role-resolution bug fix). ──
+	// The reported regression was that the reviewer child held the three tools in
+	// its allowlist (spawn-path resolveRoleAllowedTools was already cascade-aware)
+	// but every CALL was hard-blocked by the generated tool GUARD — because
+	// session-setup resolved the pack-shipped `pr-reviewer` role via roleManager
+	// only (→ undefined → `PR Walkthrough: never` group default → all three tools
+	// in the guard's neverPolicies). A one-tool check would not pin the class: the
+	// bug blocked readonly_bash / submit even when bundle worked. So we assert the
+	// guard blocks NONE of the three, AND that the schema reached the prompt.
+	test("the spawned reviewer's guard blocks none of the three tools and its prompt carries the YAML schema", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			// A2: read the ACTUAL guard(s) the gateway generated for this child.
+			const { neverNames, guardFiles } = childGuardNeverNames(gateway, child);
+			// A guard WAS generated (the reviewer denies every non-walkthrough tool,
+			// so the guard exists and is real) — and proves the default-deny still
+			// bites the tools the reviewer must NOT have.
+			expect(guardFiles, "a tool-guard extension must be generated for the reviewer").toBeGreaterThan(0);
+			expect(neverNames.has("write"), "the read-only reviewer's guard must still hard-block `write`").toBe(true);
+			// The three walkthrough tools must NOT be hard-blocked (the bug).
+			for (const t of REVIEWER_TOOLS) {
+				expect(neverNames.has(t), `guard must NOT hard-block ${t} ("not permitted for this role")`).toBe(false);
+			}
+
+			// A3: the reviewer's system prompt carries the submit_pr_walkthrough_yaml
+			// schema (so it does not have to "learn the schema from validation
+			// feedback"). The spawn path threads only `roleName`, so the pack role's
+			// promptTemplate is resolved cascade-first in createSession.
+			const parts = gateway.sessionManager.getPromptParts(child);
+			const rolePrompt = String(parts?.rolePrompt ?? "");
+			expect(rolePrompt).toContain("schema_version");
+			expect(rolePrompt).toContain("merge_assessment");
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	// ── Row A4: a reviewer surviving a gateway restart keeps its tools. ──
+	// The restore / force-respawn paths resolve the session role via
+	// `resolveSessionRole`, which the fix makes cascade-aware + projectId-scoped.
+	// Without the projectId the pack role is lost (roleManager has no `pr-reviewer`)
+	// and the regenerated guard re-blocks the three tools. This pins the restore
+	// path's resolution against the gateway's REAL group-policy store.
+	test("a restored reviewer re-resolves the pack role (cascade + projectId) and keeps its three tools", async ({ gateway }) => {
+		const { resolveGrantPolicy } = await import("../../dist/server/agent/tool-activation.js");
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			const ps = gateway.sessionManager.getPersistedSession(child);
+			const sm: any = gateway.sessionManager;
+			const groupPolicyStore = sm.groupPolicyStore;
+
+			// The restore path now calls resolveSessionRole(ps.role, ps.assistantType, ps.projectId).
+			const restoredRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, ps?.projectId);
+			expect(restoredRole?.name).toBe("pr-reviewer");
+			expect(restoredRole?.toolPolicies?.["PR Walkthrough"]).toBe("allow");
+
+			// The PRE-FIX call shape (no projectId) loses the pack role entirely —
+			// roleManager has no `pr-reviewer`, so the guard would re-block the trio.
+			const preFixRole = sm.resolveSessionRole(ps?.role, ps?.assistantType, undefined);
+			expect(preFixRole).toBeUndefined();
+
+			// The restore prompt path resolves the role's promptTemplate via
+			// resolveRolePromptTemplate, which is now pack-aware — so a restored reviewer
+			// keeps its YAML schema too (not just its tools).
+			const restoredTemplate = String(sm.resolveRolePromptTemplate(ps?.role, ps?.projectId) ?? "");
+			expect(restoredTemplate).toContain("schema_version");
+			expect(restoredTemplate).toContain("merge_assessment");
+
+			// The restored allowlist (persisted) still carries the three tools, and the
+			// regenerated guard (driven by resolveGrantPolicy over the restored role)
+			// grants them — while the pre-fix undefined role would resolve them to never.
+			for (const t of REVIEWER_TOOLS) {
+				expect((ps?.allowedTools ?? []).includes(t), `restored allowlist must keep ${t}`).toBe(true);
+				expect(resolveGrantPolicy(t, "PR Walkthrough", restoredRole, undefined, groupPolicyStore)).toBe("allow");
+				expect(resolveGrantPolicy(t, "PR Walkthrough", preFixRole, undefined, groupPolicyStore)).toBe("never");
+			}
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	// ── Row: Scope — the pack drives only its own reviewer child. ──
 	test("the run/status routes see only the reviewer they spawned, not sibling delegate children", async ({ gateway }) => {
 		const fixture = makeGitFixture();
@@ -721,6 +843,162 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(st.phase).toBe("error");
 		} finally {
 			if (delegateChild) await gateway.orchestrationCore.dismiss(owner, delegateChild).catch(() => {});
+			fixture.cleanup();
+		}
+	});
+
+	// ── Row D2: status + recover authorize from the CHILD side of the binding. ──
+	// Area D moves the walkthrough pane INTO the reviewer child session. To let the
+	// child-session pane resolve its own state, `status` authorizes EITHER bound
+	// principal (isOwner || isChild) and `recover` self-resolves binding/<child> →
+	// submitted YAML. Right-job routing is preserved: the caller must STILL match the
+	// binding's jobId AND be one of the two named principals — a foreign session (the
+	// owner of neither) is rejected exactly as before. FINDING 2: a reviewer child
+	// cannot resolve its OWN agent status through host.agents (it owns no children),
+	// so the route NO LONGER calls host.agents.status for the child-self caller — it
+	// derives the phase PURELY from the submitted marker. So a child-self `status`
+	// BEFORE submit now returns phase:"running" with NO side effect (the LIVE binding
+	// is never mis-marked terminal), and AFTER submit returns the bound job's YAML via
+	// the submitted-marker short-circuit. Both are exercised below.
+	test("status + recover authorize from the child side (isChild) with right-job routing preserved", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		// A real, independent session that is NEITHER the bound owner NOR the bound child.
+		const foreign = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(foreign);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			// Right-job routing: the child self with the WRONG jobId is rejected as a
+			// binding mismatch (the caller must match the binding's jobId). This returns
+			// BEFORE any agent-status read, so it has no side effect on the binding.
+			const childWrongJob = await invokeRoute(gateway, child, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: "prw-not-the-bound-job" },
+			}, fixture.cwd);
+			expect(childWrongJob.phase).toBe("error");
+			expect(childWrongJob.error).toMatch(/unknown or mismatched binding/);
+			expect(childWrongJob.yaml).toBeUndefined();
+
+			// A FOREIGN session (neither the bound owner nor the bound child) with the
+			// CORRECT jobId is still rejected — isOwner=false AND isChild=false. Also
+			// side-effect-free (returns before the agent-status read).
+			const foreignStatus = await invokeRoute(gateway, foreign, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(foreignStatus.phase).toBe("error");
+			expect(foreignStatus.error).toMatch(/unknown or mismatched binding/);
+			expect(foreignStatus.yaml).toBeUndefined();
+
+			// FINDING 2 — CHILD SELF with the CORRECT jobId, BEFORE submit. The child
+			// cannot read its own agent status through host.agents (owner-only), so the
+			// route derives the phase PURELY from the submitted marker: with none yet it
+			// returns phase:"running" (NOT the pre-fix terminal-error a denied
+			// host.agents.status would have produced), and it does NOT mutate the binding
+			// to error — the reviewer is alive.
+			const childBeforeSubmit = await invokeRoute(gateway, child, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(childBeforeSubmit.phase).toBe("running");
+			expect(childBeforeSubmit.yaml).toBeUndefined();
+			expect(childBeforeSubmit.error).toBeUndefined();
+			// The child-self poll left the binding intact (NOT marked error / terminated).
+			const bindingAfterChildPoll = await getPackStore().get(PACK_ID, `binding/${child}`);
+			expect(bindingAfterChildPoll?.status).not.toBe("error");
+
+			// A real submit routes to the bound jobId and server-dismisses the reviewer.
+			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submitResp.status).toBe(200);
+
+			// CHILD SELF (ctx.sessionId === childSessionId) is AUTHORIZED: with the
+			// submitted marker present the route short-circuits to phase:submitted BEFORE
+			// the agent-status check, returning the bound job's YAML. This is the
+			// definitive proof the isChild branch authorizes the child principal.
+			const childAfter = await invokeRoute(gateway, child, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(childAfter.phase).toBe("submitted");
+			expect(childAfter.yaml).toBe(yaml);
+
+			// recover from the CHILD self-resolves its OWN binding/<child> → submitted YAML
+			// (no owner-scoped last/<owner> pointer needed). Keyed by ctx.sessionId=child.
+			const childRecover = await invokeRoute(gateway, child, "recover", { method: "POST", body: {} }, fixture.cwd);
+			expect(childRecover.found).toBe(true);
+			expect(childRecover.jobId).toBe(started.jobId);
+			expect(childRecover.yaml).toBe(yaml);
+
+			// recover from a FOREIGN session resolves NOTHING (no binding/<foreign>, no
+			// last/<foreign> pointer) — found:false. The child's submitted YAML never
+			// leaks to an unrelated caller.
+			const foreignRecover = await invokeRoute(gateway, foreign, "recover", { method: "POST", body: {} }, fixture.cwd);
+			expect(foreignRecover.found).toBe(false);
+			expect(foreignRecover.yaml).toBeUndefined();
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	// ── Row D5: a reviewer dismissed on submit stays VIEWABLE (archived, not hard-
+	//    deleted) and its pane data is recoverable. ──
+	// The pane now lives WITH the reviewer child session and must render its ready
+	// cards AFTER submit — but submit server-dismisses the reviewer (terminal-
+	// synchronous reap). The reap must ARCHIVE the session (reap worktree + mark
+	// terminal) WITHOUT removing it from the sidebar, else the child pane has nowhere
+	// to render. The pane's data (binding + submitted YAML) persists in the pack store
+	// regardless of the agent lifecycle, so `recover` re-resolves it after dismissal.
+	test("a reviewer dismissed on submit stays viewable (archived) and its pane data is recoverable", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submitResp.status).toBe(200);
+
+			// Submit server-dismisses the reviewer (terminal-synchronous reap).
+			await pollUntil(() => {
+				const live = gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child);
+				return live ? null : true;
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer dismissed on submit" });
+
+			// The dismissed reviewer is ARCHIVED, not hard-deleted: its session record is
+			// still retrievable, so the sidebar keeps it selectable/viewable and the child
+			// pane has a host view to render into.
+			await pollUntil(() => {
+				const a = gateway.sessionManager.getArchivedSession(child);
+				return a ? a : null;
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer archived (not hard-deleted)" });
+			const archived = gateway.sessionManager.getArchivedSession(child);
+			expect(archived, "the dismissed reviewer must remain a viewable (archived) session").toBeTruthy();
+			expect(archived?.childTerminal).toBe(true);
+			// The session record was NOT hard-deleted (getPersistedSession resolves it too).
+			expect(gateway.sessionManager.getPersistedSession(child)).toBeTruthy();
+
+			// Its pane data is recoverable from the child side even after the agent is
+			// gone: recover self-resolves binding/<child> → the persisted submitted YAML.
+			const childRecover = await invokeRoute(gateway, child, "recover", { method: "POST", body: {} }, fixture.cwd);
+			expect(childRecover.found).toBe(true);
+			expect(childRecover.yaml).toBe(yaml);
+		} finally {
 			fixture.cleanup();
 		}
 	});

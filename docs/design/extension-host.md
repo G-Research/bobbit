@@ -358,8 +358,12 @@ export const HOST_API_VERSION = 1 as const;
  *  Kept distinct from HOST_API_VERSION so the surface and the data model can evolve
  *  independently; packs may read it to feature-detect contract-shape additions. The
  *  internal→contract adapter (§3, Phase 2) is the single place Bobbit's internal types
- *  are mapped onto these versioned shapes. */
-export const HOST_CONTRACT_VERSION = 1 as const;
+ *  are mapped onto these versioned shapes.
+ *
+ *  v2 (additive): added the optional `PanelTarget.sessionId` field (open/focus a panel
+ *  in a CHOSEN session's view). Purely additive — packs that don't read it are
+ *  unaffected; packs that rely on it feature-detect via `host.contractVersion >= 2`. */
+export const HOST_CONTRACT_VERSION = 2 as const;
 
 /**
  * The single, versioned, capability-scoped object through which ALL extension code
@@ -514,7 +518,14 @@ export interface HostStoreApi {
 }
 
 // ── Structured UI addressing (frozen; no hash strings) ──
-export interface PanelTarget { panelId: string; params?: Record<string, unknown>; }
+export interface PanelTarget {
+	panelId: string;
+	params?: Record<string, unknown>;
+	/** CONTRACT v2: open/focus the panel in THIS session's view (selecting it via the
+	 *  canonical session-switch if needed), instead of the currently-active session.
+	 *  Omitted ⇒ active session (v1 behaviour). Feature-detect via contractVersion >= 2. */
+	sessionId?: string;
+}
 export interface RouteTarget { route: string; params?: Record<string, unknown>; }
 
 // ── Host-API-OWNED data contracts (versioned by HOST_CONTRACT_VERSION) ──

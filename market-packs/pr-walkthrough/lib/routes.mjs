@@ -344,11 +344,22 @@ export const routes = {
 
 	// ── status ───────────────────────────────────────────────────────────────────
 	// BINDING-AUTHORITATIVE poll. Input { childSessionId, jobId }. Loads the binding
-	// FIRST and verifies jobId + parentSessionId===ctx.sessionId before reading
-	// anything else (no probing an arbitrary job's submitted marker). Completion is
-	// the pack-store submitted-YAML marker, NOT the agent's idle status. Returns
-	//   { phase:"running", agentStatus } | { phase:"submitted", yaml, baseSha, headSha }
+	// FIRST and verifies jobId + (parentSessionId===ctx.sessionId OR the caller IS
+	// the bound child) before reading anything else (no probing an arbitrary job's
+	// submitted marker). Completion is the pack-store submitted-YAML marker, NOT the
+	// agent's idle status. Returns
+	//   { phase:"running", agentStatus? } | { phase:"submitted", yaml, baseSha, headSha }
 	//   | { phase:"error", agentStatus?, error }.
+	//
+	// FINDING 2 — the CHILD-SELF poll. The server host API only permits
+	// host.agents.status for children OWNED by the bound session. When the reviewer
+	// CHILD polls its OWN pane (ctx.sessionId === childSessionId, i.e. isChild &&
+	// !isOwner), `ctx.host.agents.status(childSessionId)` is DENIED — caught here as
+	// "terminated" — which would mark the LIVE reviewer's binding `error` and return
+	// phase:"error" even though the reviewer is alive. So for the child-self caller we
+	// do NOT call host.agents.status: the phase is derived PURELY from the submitted
+	// marker (submitted if present, else running). The OWNER path is unchanged (it
+	// still uses host.agents.status to detect terminated-without-submit → error).
 	status: async (ctx, req) => {
 		const body = (req && req.body) || {};
 		const childSessionId = strOf(body.childSessionId);
@@ -359,23 +370,40 @@ export const routes = {
 		}
 
 		// Verify the caller owns the bound job; on mismatch read NOTHING else.
+		// Area D: authorize EITHER bound principal — the bound owner (parent) OR the
+		// reviewer child polling its OWN pane (ctx.sessionId === childSessionId). Right-
+		// job routing is preserved: the caller must still match the binding's jobId AND
+		// be one of the two named principals; a foreign session is still rejected.
 		const binding = await store.get(bindingKey(childSessionId));
+		const isOwner = !!binding && typeof binding === "object" && binding.parentSessionId === ctx.sessionId;
+		const isChild = childSessionId === ctx.sessionId;
 		if (!binding || typeof binding !== "object"
 			|| binding.jobId !== jobId
-			|| binding.parentSessionId !== ctx.sessionId) {
+			|| !(isOwner || isChild)) {
 			return { phase: "error", error: "unknown or mismatched binding" };
 		}
 
 		const submitted = await store.get(submittedKey(binding.jobId));
-		let agentStatus = "preparing";
-		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
-		catch { agentStatus = "terminated"; }
 
+		// Submitted marker wins for EITHER principal — the reviewer produced its
+		// walkthrough. Redundant safety net: submit-yaml already server-dismisses it.
 		if (submitted && typeof submitted === "object") {
-			// Redundant safety net — submit-yaml already server-dismisses the reviewer.
 			try { await ctx.host.agents.dismiss(childSessionId); } catch { /* idempotent */ }
 			return { phase: "submitted", yaml: submitted.yaml, baseSha: submitted.baseSha, headSha: submitted.headSha };
 		}
+
+		// FINDING 2 — CHILD-SELF poll: derive the phase PURELY from the submitted
+		// marker (handled above ⇒ here it is absent ⇒ running). A reviewer child cannot
+		// read its OWN agent status through host.agents (owner-only), so calling it
+		// would be denied, mis-read as terminated, and wrongly error the LIVE binding.
+		if (isChild && !isOwner) {
+			return { phase: "running" };
+		}
+
+		// OWNER path (unchanged): detect a reviewer that terminated WITHOUT submitting.
+		let agentStatus = "preparing";
+		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
+		catch { agentStatus = "terminated"; }
 		if (agentStatus === "terminated") {
 			// Errored without submitting: mark the binding terminal and dismiss (the
 			// PRIMARY cleanup driver on this path; dismiss stamps the generic
@@ -392,14 +420,37 @@ export const routes = {
 	// submitted YAML reaches the panel only via the in-memory poll loop; on browser
 	// reload `byJob` is empty and the submit tool call lives in the (dismissed)
 	// reviewer child, NOT the owner transcript — so the legacy owner-transcript scan
-	// recovers nothing. This route reads the OWNER-SCOPED `last/<ctx.sessionId>`
+	// recovers nothing. Area D adds a CHILD self-recover branch FIRST: when the
+	// reviewer CHILD's pane re-renders after a reload, it resolves the submitted YAML
+	// from its OWN binding/<childSessionId> (the pane lives with the child session
+	// now). The owner branch then reads the OWNER-SCOPED `last/<ctx.sessionId>`
 	// pointer (written server-side by submit-yaml) and returns the persisted YAML so
 	// the panel's "Load walkthrough" gesture can re-render the cards (idempotent
-	// publish). Owner-scoped by ctx.sessionId; never auto-invoked.
+	// publish). Either branch is keyed by ctx.sessionId; never auto-invoked.
 	recover: async (ctx, _req) => {
-		const owner = strOf(ctx && ctx.sessionId);
-		if (!owner) return { found: false };
+		const me = strOf(ctx && ctx.sessionId);
+		if (!me) return { found: false };
 		const store = ctx.host.store;
+		// Area D — CHILD self-recover (checked FIRST). When the reviewer child's pane
+		// re-renders after a reload, it recovers from its OWN binding/<childSessionId>
+		// (no new store key): read the submitted YAML keyed by that binding's jobId.
+		// Authorization-correct — only the bound child can resolve its own binding/<me>,
+		// and the submitted YAML is keyed by that binding's verified jobId.
+		const selfBinding = await store.get(bindingKey(me));
+		if (selfBinding && typeof selfBinding === "object" && strOf(selfBinding.jobId)) {
+			const submitted = await store.get(submittedKey(selfBinding.jobId));
+			if (submitted && typeof submitted === "object" && strOf(submitted.yaml)) {
+				return {
+					found: true,
+					jobId: selfBinding.jobId,
+					yaml: submitted.yaml,
+					baseSha: submitted.baseSha ?? selfBinding.baseSha,
+					headSha: submitted.headSha ?? selfBinding.headSha,
+				};
+			}
+		}
+		// OWNER recover (unchanged): the owner-scoped last/<owner> pointer.
+		const owner = me;
 		const pointer = await store.get(lastKey(owner));
 		if (!pointer || typeof pointer !== "object" || !strOf(pointer.jobId)) {
 			return { found: false };
