@@ -1,0 +1,138 @@
+name: team_delegate
+description: "Spawn a child agent in your worktree; blocks until done, non_blocking to detach"
+summary: "Launch a child agent in your worktree (blocking one-shot, or non_blocking + orchestrated)"
+params: [instructions, parallel?, context?, role?, model?, thinking_level?, read_only?, non_blocking?, timeout_minutes?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Agent
+renderer: src/ui/tools/renderers/DelegateRenderer.ts
+docs: |-
+  Instructions must be self-contained — the child has NO conversation context. Use `parallel` for concurrent children; blocking mode waits for all. The child inherits your current model and a copy of your allowed tools MINUS every spawn verb (it cannot spawn grandchildren). 10min default blocking timeout. Never delegate to gather information — use parallel `read`/`grep`/`bash` calls instead, which are near-instant and return into your context directly.
+detail_docs: >-
+  ## Purpose
+
+
+  Launch a **child agent** (a new, properly-scoped principal) to execute a task.
+  The child runs in **your worktree** (shares your `cwd`) and receives **only the
+  instructions you provide** — it has no access to the current conversation,
+  messages, or context.
+
+
+  The child inherits your **current model** (override with `model`) and a copy of
+  your allowed tools **minus every spawn verb** (`team_delegate`, `team_spawn`) —
+  so it can do whatever you can except spawn its own children (no grandchildren,
+  at any depth). A `read_only` child additionally loses every mutating tool
+  (write/edit and other file-changing tools).
+
+
+  ## Two modes
+
+
+  ### Blocking one-shot (default)
+
+  `team_delegate(instructions=...)` spawns the child, waits for it to finish, then
+  auto-dismisses it (archived under "show archived"). Its final output is returned
+  as the tool result. This is the drop-in replacement for the old `delegate` tool.
+  Use `parallel` to spawn several children at once — blocking mode waits for **all**
+  of them and returns each child's output plus a summary.
+
+
+  ### Non-blocking (`non_blocking: true`)
+
+  Spawns the child and returns immediately with its session id. The child keeps
+  running; orchestrate it with `team_wait` (collect results), `team_prompt` (follow
+  up / re-task), `team_steer` (mid-turn redirect), or `team_dismiss` (stop). This
+  enables interactive, long-lived helpers.
+
+
+  ## Parameters
+
+
+  | Name | Type | Description |
+
+  |------|------|-------------|
+
+  | `instructions` | string | Task for a single child. Required unless `parallel`. Must be self-contained. |
+
+  | `parallel` | array | `{ instructions, context? }[]` — spawn N children concurrently. |
+
+  | `context` | object | Key-value context passed to the child (file paths, errors, config). |
+
+  | `role` | string | Optional role to inject into the child. |
+
+  | `model` | string | Child model. Default: **inherit your current model**. |
+
+  | `thinking_level` | string | Child thinking level. Default: inherit yours. |
+
+  | `read_only` | boolean | Spawn a read-only child (cannot edit files). |
+
+  | `non_blocking` | boolean | Detach instead of blocking; orchestrate via `team_wait`. |
+
+  | `timeout_minutes` | number | Blocking-mode timeout. Default **10**. |
+
+
+  ## Cost
+
+
+  Each child spawns a full agent process with its own system prompt (~15K+ tokens)
+  and tool definitions. A child that reads one file costs thousands of input tokens
+  just to boot — the same `read` call inline costs zero overhead. **Delegate only
+  when the *work* (analysis, code changes, multi-step investigation) justifies the
+  startup cost.** If the result is just file contents or grep output, do it inline
+  with parallel `read`/`grep`/`bash` calls.
+
+
+  ## When to Use
+
+
+  - **Context isolation** — the child must NOT see the current conversation (e.g.
+  independent code review, unbiased analysis).
+
+  - **Independent multi-step work** — its own read → analyze → write → verify chain
+  where the intermediate steps are not useful to you.
+
+  - **Mass parallelism with real work** — 3+ independent sub-tasks, each multiple
+  tool calls and reasoning.
+
+
+  ## When NOT to Use
+
+
+  - **Gathering information** — never delegate to read files, grep, run a command,
+  or fetch a URL. Launch parallel `read`/`grep`/`bash` calls instead — they run
+  concurrently, return instantly, and add results directly to your context.
+
+  - **Single tasks with no isolation/parallelism need** — do them inline. "Complex"
+  or "long" are NOT reasons to delegate.
+
+  - **Tasks needing your conversation context** — children have none; include
+  everything they need in `instructions` and `context`.
+
+
+  ## Notes / Gotchas
+
+
+  - **⚠️ Shared worktree (especially `non_blocking` mode).** A `team_delegate`
+  child runs in **your** worktree (`cwd`). In **blocking** mode this is bounded —
+  the child finishes before you continue, so the window for a conflicting edit is
+  short. In **`non_blocking`** mode the child shares your files for an open-ended
+  lifetime: concurrent edits are **last-write-wins and there is no locking**. Only
+  use `non_blocking` for children that touch files you are **not** editing.
+
+  - **No grandchildren.** A child has every spawn verb (`team_delegate`,
+  `team_spawn`) stripped from its tools — it cannot spawn its own children.
+
+  - **Model inheritance.** The child uses your current model unless you pass
+  `model`. (The old `delegate` tool silently dropped to the system default — this
+  no longer happens.)
+
+  - **Instructions must be self-contained** — the child sees ONLY `instructions`
+  and `context`. Include all file paths, requirements, and prior decisions.
+
+  - **Provide `instructions` or `parallel`, not both** — one must be present at
+  runtime.
+
+  - **Blocking children survive restart.** If the gateway restarts mid-delegation,
+  the child survives and you are reminded to collect it via `team_wait` — the
+  blocking call does not transparently resume.

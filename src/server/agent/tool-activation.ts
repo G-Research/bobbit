@@ -88,6 +88,51 @@ const guardCodeCache = new Map<string, string>();
 const guardFileCache = new Map<string, string>();
 
 /**
+ * Renamed/removed tool keys → their replacement. A user/project tool-policy or
+ * saved role under `.bobbit/config` may still reference an old name (the
+ * `delegate` → `team_delegate` hard cut, Orchestration Core sub-goal A). The
+ * key is silently stripped at resolution; we emit a one-time warning per
+ * distinct stale key so users know to update their config. We do NOT auto-
+ * rewrite user files.
+ */
+const LEGACY_TOOL_KEY_RENAMES: Record<string, string> = {
+	delegate: "team_delegate",
+};
+/** Stale tool keys we have already warned about (dedupe across resolution calls). */
+const warnedLegacyToolKeys = new Set<string>();
+
+/**
+ * Warn once per process when a resolved role's `toolPolicies` still references a
+ * tool key that has been renamed/removed and is no longer a known tool. Points
+ * the user at the replacement. Implemented here — the single place every
+ * resolved role's policy keys pass through against the known-tool set.
+ */
+function warnLegacyToolPolicyKeys(
+	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	knownToolNames: Set<string>,
+): void {
+	const policies = role?.toolPolicies;
+	if (!policies) return;
+	for (const key of Object.keys(policies)) {
+		const replacement = LEGACY_TOOL_KEY_RENAMES[key];
+		if (!replacement) continue;
+		// Only warn if the old key is genuinely unknown now (it was renamed away).
+		if (knownToolNames.has(key)) continue;
+		if (warnedLegacyToolKeys.has(key)) continue;
+		warnedLegacyToolKeys.add(key);
+		console.warn(
+			`[tool-activation] tool-policy references unknown tool "${key}" — it was renamed to "${replacement}". ` +
+			`Update your .bobbit/config role/tool-policy to "${replacement}"; the "${key}" key is ignored.`,
+		);
+	}
+}
+
+/** Test-only: reset the one-time legacy-key warning dedupe set. */
+export function __resetLegacyToolKeyWarningsForTesting(): void {
+	warnedLegacyToolKeys.clear();
+}
+
+/**
  * Normalize old grant policy values to the new simplified set.
  * - `always-allow` → `allow`
  * - `ask-once` / `always-ask` → `ask`
@@ -347,6 +392,10 @@ export function computeEffectiveAllowedTools(
 ): EffectiveTool[] {
 	const availableTools = toolManager.getAvailableTools();
 	const mcpInfos = mcpManager?.getToolInfos() ?? [];
+
+	// One-time migration warning for renamed/removed tool keys (e.g. `delegate`
+	// → `team_delegate`) still referenced by a user/project role policy.
+	warnLegacyToolPolicyKeys(role, new Set(availableTools.map(t => t.name)));
 
 	// Content-based fingerprint: same inputs → same cache key → same output.
 	const cacheKey = hashKey({

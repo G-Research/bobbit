@@ -466,3 +466,84 @@ describe("ModuleHost — host-API proxy (the ONLY capability over the MessagePor
 		}
 	});
 });
+
+describe("ModuleHost — host.agents proxy (Sub-goal C)", () => {
+	it("the six host.agents verbs are marshalled to (and serviced by) the parent's LIVE host", async () => {
+		const calls: string[] = [];
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: false, agents: true, has: (n: string) => n === "agents" },
+			store: { get: async () => null, put: async () => {}, list: async () => [] },
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
+			agents: {
+				spawn: async (o: { instructions: string }) => { calls.push(`spawn:${o.instructions}`); return { childSessionId: "child-1" }; },
+				prompt: async (id: string, m: string) => { calls.push(`prompt:${id}:${m}`); return { status: "dispatched" }; },
+				dismiss: async (id: string) => { calls.push(`dismiss:${id}`); return true; },
+				list: async () => { calls.push("list"); return [{ childSessionId: "child-1", status: "idle", childKind: "host-agents" }]; },
+				read: async (id: string) => { calls.push(`read:${id}`); return { output: "OK" }; },
+				status: async (id: string) => { calls.push(`status:${id}`); return { status: "idle" }; },
+			},
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "owner-1", toolUseId: "tu", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { drive: async (ctx) => {` +
+				` const hasAgents = ctx.host.capabilities.has("agents");` +
+				` const { childSessionId } = await ctx.host.agents.spawn({ instructions: "go" });` +
+				` const p = await ctx.host.agents.prompt(childSessionId, "more");` +
+				` const s = await ctx.host.agents.status(childSessionId);` +
+				` const l = await ctx.host.agents.list();` +
+				` const r = await ctx.host.agents.read(childSessionId);` +
+				` const d = await ctx.host.agents.dismiss(childSessionId);` +
+				` return { hasAgents, childSessionId, promptStatus: p.status, status: s.status, listLen: l.length, read: r, dismissed: d, hasWait: typeof ctx.host.agents.wait };` +
+				` } };`,
+			);
+			const result = (await mh.invoke(req(url, "drive", ctx))) as Record<string, unknown>;
+			assert.equal(result.hasAgents, true, "capabilities.agents crosses the proxy");
+			assert.equal(result.childSessionId, "child-1");
+			assert.equal(result.promptStatus, "dispatched");
+			assert.equal(result.status, "idle");
+			assert.equal(result.listLen, 1);
+			assert.deepEqual(result.read, { output: "OK" });
+			assert.equal(result.dismissed, true);
+			// No blocking `wait` is proxied (poll-based only).
+			assert.equal(result.hasWait, "undefined");
+			assert.deepEqual(calls, ["spawn:go", "prompt:child-1:more", "status:child-1", "list", "read:child-1", "dismiss:child-1"]);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a host.agents method the parent allowlist rejects surfaces as an error to the handler", async () => {
+		// The parent host's PROXYABLE allowlist gates every host.<ns>.<method>. A method
+		// the parent host does not expose (here `spawn` throws) is surfaced to the pack,
+		// never crashing the parent.
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: false, agents: true, has: () => true },
+			store: { get: async () => null, put: async () => {}, list: async () => [] },
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
+			agents: {
+				spawn: async () => { throw new Error("host.agents.spawn is not permitted for a child session"); },
+				prompt: async () => ({ status: "dispatched" }), dismiss: async () => true,
+				list: async () => [], read: async () => ({}), status: async () => ({ status: "idle" }),
+			},
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "child-session", toolUseId: "tu", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { trySpawn: async (ctx) => {` +
+				` try { await ctx.host.agents.spawn({ instructions: "x" }); return "no-throw"; }` +
+				` catch (e) { return "caught:" + e.message; } } };`,
+			);
+			const result = await mh.invoke(req(url, "trySpawn", ctx));
+			assert.equal(result, "caught:host.agents.spawn is not permitted for a child session");
+		} finally {
+			mh.dispose();
+		}
+	});
+});

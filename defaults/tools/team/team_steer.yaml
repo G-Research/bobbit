@@ -5,7 +5,10 @@ params: [session_id, message]
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: Team
+# Reclassified Team→Agent (Orchestration Core sub-goal A) — own-children
+# orchestration verb; allow-by-default, server-side own-children scoping.
+# See tests/role-team-tools-policy.test.ts.
+group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
   The agent sees it as a user message interleaved with its current work. Use sparingly — prefer letting agents finish their turn first.
@@ -31,8 +34,9 @@ detail_docs: >-
 
   |------|------|----------|-------------|
 
-  | `session_id` | string | **Yes** | Session ID of the agent to steer (from
-  `team_list`). |
+  | `session_id` | string | **Yes** | Session ID of the agent to steer — a team
+  agent (from `team_list`) or your own `team_delegate` child (id from
+  `team_wait` / a `non_blocking` spawn). |
 
   | `message` | string | **Yes** | Steering instruction to inject. Should be
   clear and directive — tell the agent exactly what to do differently. |
@@ -95,11 +99,13 @@ detail_docs: >-
   ## Notes / Gotchas
 
 
-  - **Team lead only** — only team lead sessions can steer agents.
+  - **Works on your own agents/children** — a team lead steers its team agents;
+  any owner steers its own `team_delegate` children. Own-child scoping is
+  enforced server-side; you cannot steer a foreign session.
 
-  - **Agent must be active** — steering an idle agent fails with an error. Check
-  `team_list` status first and confirm the agent's status is `streaming` before
-  steering.
+  - **Agent must be active** — steering an idle agent fails with an error.
+  Confirm the target's status is `streaming` before steering (via `team_list`
+  for team agents, or the child's status for `team_delegate` children).
 
   - **Injected as system message** — the steer message has high priority in the
   agent's context. The agent should see and respond to it promptly.

@@ -43,6 +43,14 @@ framing is retained for the rationale, but is now historical).
 > "Run PR walkthrough" action in the panel. So "sole provider" holds for the
 > migrated viewer + contribution + user-facing launch-gesture surface; the agent
 > lifecycle (`/launch` et al.) is the explicit carve-out, kept agent-side.
+>
+> **SUPERSEDED:** "privilege-minting → not pack-expressible" no longer holds.
+> Child-agent launch is now pack-expressible via the shipped ambient `host.agents`
+> capability (sandbox-inherited child agents through `OrchestrationCore`). Migrating
+> this pack onto `host.agents` — a real read-only child reviewer replacing the
+> `postMessage` gesture — is a separate follow-up goal. See
+> [docs/orchestration.md](../orchestration.md) and
+> [docs/marketplace.md](../marketplace.md).
 
 This document originally recorded the exact paths a parity-proven deletion PR would
 remove once the pack had shipped and burned in; that deletion has now been executed.

@@ -1,11 +1,18 @@
 name: team_prompt
-description: "Queued or immediate follow-up to a team agent (own team OR a direct-child goal's team-lead). Other scopes: use goal_pause / goal_archive_child."
+description: "Queued or immediate follow-up to a team agent, your own team_delegate child, or a direct-child goal's team-lead."
 summary: "Send prompt to a team agent"
 params: [session_id, message, workflowGateId?, inputGateIds?]
 provider:
   type: bobbit-extension
   extension: extension.ts
-group: Team
+# Reclassified Team→Agent (Orchestration Core sub-goal A): this verb also
+# operates over a NON-goal agent's OWN child agents (registered by
+# defaults/tools/agent/extension.ts for non-team-leads). Agent is allow-by-
+# default so both team-leads and non-goal owners can use it; the REAL
+# own-children scoping is enforced server-side by the /orchestrate/* routes
+# (orchestrationCore.list(ownerId)). Goal-only verbs (team_spawn/complete/list)
+# stay group: Team. Pinned by tests/role-team-tools-policy.test.ts.
+group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
   Send a follow-up user message to an existing agent. Use for additional tasks after initial work completes, or to provide feedback/corrections. Supports `workflowGateId`/`inputGateIds` for context injection.
@@ -66,6 +73,16 @@ detail_docs: >-
   longer need.
 
 
+  ## Your own `team_delegate` children
+
+
+  `team_prompt` also queues/sends to a **non-goal owner's OWN `team_delegate`
+  child** (the non-goal verb is registered by `defaults/tools/agent/extension.ts`
+  and routed through `/orchestrate/*`). Own-child scoping is enforced server-side
+  — you can only prompt children you spawned. Same run-if-idle / queue-if-busy
+  semantics as for team agents.
+
+
   ## Direct-child team-leads
 
 
@@ -77,8 +94,9 @@ detail_docs: >-
 
   Scope is **direct children only** — grandchildren and arbitrary descendants
   return 403 `NOT_TEAM_MEMBER_OR_DIRECT_CHILD`. The asymmetry with `team_steer`
-  / `team_abort` / `team_dismiss` (still caller-team-only) is intentional:
-  destructive operations on a subgoal go through `goal_pause` /
+  / `team_abort` / `team_dismiss` (which act on your own team agents and your
+  own `team_delegate` children, but never on a child goal's team) is
+  intentional: destructive operations on a subgoal go through `goal_pause` /
   `goal_archive_child`, not direct session manipulation.
 
 
@@ -119,7 +137,9 @@ detail_docs: >-
   ## Notes / Gotchas
 
 
-  - **Team lead only** — only team lead sessions can prompt agents.
+  - **Who can prompt** — a team lead prompts its team agents (and a direct-child
+  goal's team-lead); any owner (goal or non-goal) can prompt its own
+  `team_delegate` children. Server-enforced scoping applies in both cases.
 
   - **Queued if busy** — if the agent is mid-turn, the prompt is queued and
   delivered automatically when the turn ends. The agent will process it as its

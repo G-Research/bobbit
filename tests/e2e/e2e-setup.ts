@@ -564,17 +564,77 @@ async function withChildrenAuthzCookie(path: string, method: string, headers: Re
 	return cookie ? { ...headers, Cookie: cookie } : headers;
 }
 
+/**
+ * `/api/sessions/:id/orchestrate/*` routes (Orchestration Core) require the
+ * caller to authenticate AS the owner via the unforgeable per-session secret
+ * (see session-secret.ts). In production the agent subprocess sends its
+ * BOBBIT_SESSION_SECRET; an in-process E2E test acts as the owner by resolving
+ * the owner's secret from the gateway's SessionSecretStore. The in-process
+ * harness registers the store here so apiFetch can auto-inject the header for
+ * orchestrate paths. A test exercising the foreign-owner DENY path supplies its
+ * own `X-Bobbit-Session-Secret` (a different session's secret), which suppresses
+ * auto-injection so the 403 is genuinely observed.
+ */
+let _orchestrateSecretStore: { getOrCreateSecret(id: string): string } | undefined;
+export function registerOrchestrateSecretStore(store: unknown): void {
+	_orchestrateSecretStore = store && typeof (store as any).getOrCreateSecret === "function"
+		? (store as { getOrCreateSecret(id: string): string })
+		: undefined;
+}
+const ORCHESTRATE_PATH = /^\/api\/sessions\/([^/]+)\/orchestrate\//;
+function maybeInjectOrchestrateSecret(path: string, headers: Record<string, string>): Record<string, string> {
+	const m = ORCHESTRATE_PATH.exec(path.split("?")[0]);
+	if (!m || !_orchestrateSecretStore) return headers;
+	// Respect an explicit secret (foreign-owner deny-path tests).
+	if (Object.keys(headers).some((k) => k.toLowerCase() === "x-bobbit-session-secret")) return headers;
+	return { ...headers, "X-Bobbit-Session-Secret": _orchestrateSecretStore.getOrCreateSecret(decodeURIComponent(m[1])) };
+}
+
+/**
+ * The goal `/team/{prompt,steer,abort,dismiss}` OWN-CHILD fallback (H3) requires
+ * the AUTHENTIC caller — resolved from the per-session secret — to BE the
+ * team-lead owner before it orchestrates the lead's PRIVATE team_delegate child
+ * (mirrors `/orchestrate/*`). In production the team-lead's agent process sends
+ * its BOBBIT_SESSION_SECRET (team/extension.ts). An in-process E2E test acts as
+ * the team-lead by resolving the goal's team-lead session id and injecting its
+ * secret. A test exercising the FOREIGN-caller DENY path supplies its OWN
+ * secret (suppresses injection); the NO-secret DENY path uses `rawApiFetch`
+ * (which bypasses all injectors). Goal-MEMBER `/team/*` calls are unaffected —
+ * the server ignores the secret on the normal path.
+ */
+let _teamLeadResolver: ((goalId: string) => string | undefined) | undefined;
+let _teamLeadSecretStore: { getOrCreateSecret(id: string): string } | undefined;
+export function registerTeamLeadSecretSource(
+	resolver: ((goalId: string) => string | undefined) | undefined,
+	store?: unknown,
+): void {
+	_teamLeadResolver = resolver;
+	_teamLeadSecretStore = store && typeof (store as any).getOrCreateSecret === "function"
+		? (store as { getOrCreateSecret(id: string): string })
+		: undefined;
+}
+const TEAM_OWNCHILD_PATH = /^\/api\/goals\/([^/]+)\/(?:team|swarm)\/(?:prompt|steer|abort|dismiss)$/;
+function maybeInjectTeamLeadSecret(path: string, headers: Record<string, string>): Record<string, string> {
+	const m = TEAM_OWNCHILD_PATH.exec(path.split("?")[0]);
+	if (!m || !_teamLeadResolver || !_teamLeadSecretStore) return headers;
+	// Respect an explicit secret (foreign-caller deny-path tests).
+	if (Object.keys(headers).some((k) => k.toLowerCase() === "x-bobbit-session-secret")) return headers;
+	const lead = _teamLeadResolver(decodeURIComponent(m[1]));
+	if (!lead) return headers;
+	return { ...headers, "X-Bobbit-Session-Secret": _teamLeadSecretStore.getOrCreateSecret(lead) };
+}
+
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	const injected = maybeInjectAcceptCanonical(path, await maybeInjectProjectId(path, opts));
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
 	const finalPath = await maybeInjectProjectIdQuery(path, method);
-	const authedHeaders = await withChildrenAuthzCookie(finalPath, method, {
+	const authedHeaders = maybeInjectTeamLeadSecret(finalPath, maybeInjectOrchestrateSecret(finalPath, await withChildrenAuthzCookie(finalPath, method, {
 		"Content-Type": "application/json",
 		Authorization: `Bearer ${token()}`,
 		...(injected.headers as Record<string, string> || {}),
-	});
+	})));
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
 			const resp = await fetch(`${base()}${finalPath}`, {

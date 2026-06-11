@@ -24,7 +24,7 @@ const MODIFIED_YAMLS = [
 	"config/tools/shell/bash.yaml",
 	"config/tools/filesystem/read.yaml",
 	"config/tools/filesystem/edit.yaml",
-	"config/tools/agent/delegate.yaml",
+	"config/tools/agent/team_delegate.yaml",
 ];
 
 const yamlBackups = new Map<string, string>();
@@ -118,7 +118,7 @@ test.describe("GET /api/tools — extended response", () => {
 		const names = tools.map((t: any) => t.name);
 
 		// Core tools that should always be present
-		for (const expected of ["read", "write", "edit", "bash", "web_search", "web_fetch", "delegate"]) {
+		for (const expected of ["read", "write", "edit", "bash", "web_search", "web_fetch", "team_delegate"]) {
 			expect(names).toContain(expected);
 		}
 	});
@@ -265,19 +265,19 @@ test.describe("PUT /api/tools/:name — update metadata", () => {
 
 	test("partial update preserves other custom fields", async () => {
 		// Set both description and docs
-		await apiFetch("/api/tools/delegate", {
+		await apiFetch("/api/tools/team_delegate", {
 			method: "PUT",
 			body: JSON.stringify({ description: "Custom delegate", docs: "Delegate docs" }),
 		});
 
 		// Update only description
-		await apiFetch("/api/tools/delegate", {
+		await apiFetch("/api/tools/team_delegate", {
 			method: "PUT",
 			body: JSON.stringify({ description: "Updated delegate" }),
 		});
 
 		// Docs should still be there
-		const getResp = await apiFetch("/api/tools/delegate");
+		const getResp = await apiFetch("/api/tools/team_delegate");
 		const tool = await getResp.json();
 		expect(tool.description).toBe("Updated delegate");
 		expect(tool.docs).toBe("Delegate docs");

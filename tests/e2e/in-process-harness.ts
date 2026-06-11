@@ -54,6 +54,8 @@ export interface GatewayInfo {
 	sessionManager: any;  // Exposed for sandbox security tests
 	bgProcessManager: any;  // Exposed for bg-wait abort tests
 	teamManager: any;     // Exposed for pause-cascade supervisor-respawn tests
+	orchestrationCore: any; // Exposed for orchestration restart-survival tests
+	projectContextManager: any; // Exposed for restart-survival (persisted-session list)
 }
 
 function readHarnessToken(info: GatewayInfo): string {
@@ -297,11 +299,34 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			sessionManager: gw.sessionManager,
 			bgProcessManager: gw.bgProcessManager,
 			teamManager: (gw as any).teamManager,
+			orchestrationCore: (gw as any).orchestrationCore,
+			projectContextManager: (gw as any).projectContextManager,
 		};
+
+		// Orchestration routes require caller→owner auth via the per-session
+		// secret. Register this gateway's SessionSecretStore so apiFetch can
+		// auto-inject the owner's secret for `/orchestrate/*` paths.
+		try {
+			const { registerOrchestrateSecretStore, registerTeamLeadSecretSource } = await import("./e2e-setup.js");
+			registerOrchestrateSecretStore((gw as any).sessionManager?.sessionSecretStore);
+			// H3: the goal /team/{prompt,steer,abort,dismiss} own-child fallback
+			// authenticates the caller as the team-lead via the per-session secret.
+			// Mirror production (team/extension.ts sends BOBBIT_SESSION_SECRET) so
+			// the legitimate team-lead path works in tests without an explicit header.
+			registerTeamLeadSecretSource(
+				(goalId: string) => (gw as any).teamManager?.getTeamState?.(goalId)?.teamLeadSessionId,
+				(gw as any).sessionManager?.sessionSecretStore,
+			);
+		} catch { /* best-effort */ }
 
 		await use(info);
 
 		// Teardown — use existing shutdown() for proper cleanup
+		try {
+			const { registerOrchestrateSecretStore, registerTeamLeadSecretSource } = await import("./e2e-setup.js");
+			registerOrchestrateSecretStore(undefined);
+			registerTeamLeadSecretSource(undefined);
+		} catch { /* best-effort */ }
 		await gw.shutdown();
 		// Bounded-retry cleanup — see gateway-harness.ts for rationale.
 		await awaitableRm(bobbitDir, {

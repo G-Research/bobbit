@@ -60,7 +60,7 @@ provider:
   type: bobbit-extension
   extension: extension.ts    # Path relative to .bobbit/config/tools/<group>/
 \`\`\`
-Bobbit extensions: .bobbit/config/tools/agent/extension.ts (delegate), .bobbit/config/tools/browser/extension.ts (browser_* tools), .bobbit/config/tools/web/extension.ts (web_search + web_fetch), .bobbit/config/tools/tasks/extension.ts (task_* + gate_* tools), .bobbit/config/tools/team/extension.ts (team_* tools), .bobbit/config/tools/shell/extension.ts (bash_bg)
+Bobbit extensions: .bobbit/config/tools/agent/extension.ts (team_delegate, team_wait, read_session), .bobbit/config/tools/browser/extension.ts (browser_* tools), .bobbit/config/tools/web/extension.ts (web_search + web_fetch), .bobbit/config/tools/tasks/extension.ts (task_* + gate_* tools), .bobbit/config/tools/team/extension.ts (team_* tools), .bobbit/config/tools/shell/extension.ts (bash_bg)
 
 ## Role permissions
 
@@ -76,7 +76,7 @@ toolPolicies:
   bash: allow
   web_search: allow
   web_fetch: allow
-  delegate: allow
+  team_delegate: allow
 \`\`\`
 
 Policy values: \`allow\` (immediate execution), \`ask\` (user prompted), \`never\` (tool hidden).
