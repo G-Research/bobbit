@@ -113,24 +113,6 @@ function shQuote(s: string): string {
 }
 
 /**
- * Drop the leading `incoming` lines that duplicate the trailing `existing` lines
- * (bounded longest suffix/prefix overlap). Used on restore (Fix 2) to splice new
- * spool output onto the retained projection without re-adding already-captured
- * lines when the spool is read from a rebased offset 0.
- */
-function dropLeadingOverlap(existing: string[], incoming: string[]): string[] {
-	const maxK = Math.min(existing.length, incoming.length);
-	for (let k = maxK; k >= 1; k--) {
-		let match = true;
-		for (let i = 0; i < k; i++) {
-			if (existing[existing.length - k + i] !== incoming[i]) { match = false; break; }
-		}
-		if (match) return incoming.slice(k);
-	}
-	return incoming;
-}
-
-/**
  * Build the POSIX host wrapper (Git Bash on Windows, `/bin/sh` elsewhere).
  * Isolated subshell `( <command> )` so a user `exit N` is contained and the
  * wrapper still captures the real `code=$?`; a wrapper-owned background trimmer
@@ -251,6 +233,15 @@ export interface TailerSpec {
 	inContainer: boolean;
 	containerId?: string;
 	onChunk: (stream: "stdout" | "stderr", text: string, newOffset: number) => void;
+	/**
+	 * Called when a tailer REBASES its read offset because the spool was
+	 * copytruncated (size dropped below the offset) or the gateway itself
+	 * copytruncated it. The manager persists the reset offset SYNCHRONOUSLY
+	 * (recovery-critical) so a later restore reads the small post-truncation
+	 * spool from the aligned offset and appends cleanly AFTER the projection
+	 * — no content-based dedupe needed (Fix 3 / Fix 4).
+	 */
+	onOffsetReset?: (stream: "stdout" | "stderr", newOffset: number) => void;
 }
 export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
 
@@ -262,6 +253,7 @@ export class PollTailer implements Tailer {
 		private readonly file: string,
 		private readonly stream: "stdout" | "stderr",
 		private readonly onChunk: (stream: "stdout" | "stderr", text: string, newOffset: number) => void,
+		private readonly onOffsetReset?: (stream: "stdout" | "stderr", newOffset: number) => void,
 	) {}
 	start(startOffset: number): void {
 		this.offset = startOffset;
@@ -272,7 +264,13 @@ export class PollTailer implements Tailer {
 	private tick(): void {
 		let size: number;
 		try { size = fs.statSync(this.file).size; } catch { return; /* ENOENT → not yet created */ }
-		if (size < this.offset) this.offset = 0; // §6.2 rebase after copytruncate
+		if (size < this.offset) {
+			// §6.2 rebase after copytruncate (trimmer/gateway shrank the spool below the
+			// offset). Persist the reset synchronously so a restart resumes from the
+			// aligned offset and never re-reads already-projected bytes (Fix 3).
+			this.offset = 0;
+			this.onOffsetReset?.(this.stream, 0);
+		}
 		if (size > this.offset) {
 			try {
 				const fd = fs.openSync(this.file, "r");
@@ -292,9 +290,11 @@ export class PollTailer implements Tailer {
 				} finally { fs.closeSync(fd); }
 			} catch { /* transient */ }
 		}
-		// Gateway secondary copytruncate once consumed and over cap.
+		// Gateway secondary copytruncate once consumed and over cap. Persist the
+		// reset offset SYNCHRONOUSLY (Fix 3) so the next restore is byte-aligned and
+		// reads only post-truncation bytes — no content dedupe needed.
 		if (size > MAX_LOG_BYTES && this.offset >= size) {
-			try { fs.truncateSync(this.file, 0); this.offset = 0; } catch { /* ignore */ }
+			try { fs.truncateSync(this.file, 0); this.offset = 0; this.onOffsetReset?.(this.stream, 0); } catch { /* ignore */ }
 		}
 	}
 	stop(): void {
@@ -302,34 +302,74 @@ export class PollTailer implements Tailer {
 	}
 }
 
+/**
+ * Injectable docker surface for {@link DockerTailer} so the live-tail +
+ * copytruncate-probe logic is unit-testable without real docker / OS processes
+ * (Fix 4). `probeSize` reads the container spool byte size; `follow` launches
+ * the `tail -F` follower from a byte offset.
+ */
+export interface DockerExec {
+	probeSize(containerId: string, spool: string): number;
+	follow(containerId: string, spool: string, fromByteOffset: number): ChildProcess;
+}
+
+export const defaultDockerExec: DockerExec = {
+	probeSize(containerId: string, spool: string): number {
+		try {
+			const r = spawnSync("docker", ["exec", containerId, "sh", "-c", `wc -c < ${shQuote(spool)} 2>/dev/null || echo 0`], { encoding: "utf-8" });
+			return parseInt((r.stdout || "0").trim(), 10) || 0;
+		} catch { return 0; }
+	},
+	follow(containerId: string, spool: string, fromByteOffset: number): ChildProcess {
+		return spawn("docker", ["exec", containerId, "tail", "-c", `+${fromByteOffset + 1}`, "-F", spool], {
+			stdio: ["ignore", "pipe", "ignore"],
+			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+		});
+	},
+};
+
+/** Interval for the live copytruncate probe (Fix 4). */
+const DOCKER_TRUNC_PROBE_MS = 1000;
+
 /** Default docker tailer: `docker exec <cid> tail -c +<off+1> -F <spool>`. */
-class DockerTailer implements Tailer {
+export class DockerTailer implements Tailer {
 	private offset = 0;
 	private child: ChildProcess | null = null;
+	private probeTimer: ReturnType<typeof setInterval> | null = null;
 	constructor(
 		private readonly spool: string,
 		private readonly containerId: string,
 		private readonly stream: "stdout" | "stderr",
 		private readonly onChunk: (stream: "stdout" | "stderr", text: string, newOffset: number) => void,
+		private readonly onOffsetReset?: (stream: "stdout" | "stderr", newOffset: number) => void,
+		private readonly deps: DockerExec = defaultDockerExec,
 	) {}
 	start(startOffset: number): void {
 		this.offset = startOffset;
 		// Probe size for §6.2 rebase before following.
-		try {
-			const r = spawnSync("docker", ["exec", this.containerId, "sh", "-c", `wc -c < ${shQuote(this.spool)} 2>/dev/null || echo 0`], { encoding: "utf-8" });
-			const size = parseInt((r.stdout || "0").trim(), 10) || 0;
-			if (size < this.offset) this.offset = 0;
-		} catch { /* ignore */ }
-		this.child = spawn("docker", ["exec", this.containerId, "tail", "-c", `+${this.offset + 1}`, "-F", this.spool], {
-			stdio: ["ignore", "pipe", "ignore"],
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-		});
+		const size = this.deps.probeSize(this.containerId, this.spool);
+		if (size < this.offset) { this.offset = 0; this.onOffsetReset?.(this.stream, 0); }
+		this.child = this.deps.follow(this.containerId, this.spool, this.offset);
 		this.child.stdout?.on("data", (c: Buffer) => {
 			this.offset += c.length;
 			this.onChunk(this.stream, c.toString("utf-8"), this.offset);
 		});
+		// Fix 4: `tail -F` re-emits post-truncation bytes after an in-container
+		// copytruncate, but `offset += chunk.length` keeps climbing past the (now
+		// smaller) file size — so a later finalFlush/restore would see `size < offset`,
+		// reread from 0 and DUPLICATE already-streamed bytes. Periodically probe the
+		// container spool size; if it dropped below our offset, rebase the offset down
+		// to the current size (the bytes tail -F already streamed) and persist the reset
+		// so offset stays aligned with the file position — no later duplicate.
+		this.probeTimer = setInterval(() => this.probeTruncation(), DOCKER_TRUNC_PROBE_MS);
+		if (typeof (this.probeTimer as any).unref === "function") (this.probeTimer as any).unref();
+	}
+	private probeTruncation(): void {
+		const size = this.deps.probeSize(this.containerId, this.spool);
+		if (size < this.offset) { this.offset = size; this.onOffsetReset?.(this.stream, size); }
 	}
 	stop(): void {
+		if (this.probeTimer) { clearInterval(this.probeTimer); this.probeTimer = null; }
 		if (this.child) { try { this.child.kill("SIGTERM"); } catch { /* ignore */ } this.child = null; }
 	}
 }
@@ -347,13 +387,13 @@ function projectedLineSize(ts: number, text: string): number {
 const defaultTailerFactory: TailerFactory = (spec: TailerSpec) => {
 	if (spec.inContainer && spec.containerId) {
 		return {
-			out: new DockerTailer(spec.outSpool, spec.containerId, "stdout", spec.onChunk),
-			err: new DockerTailer(spec.errSpool, spec.containerId, "stderr", spec.onChunk),
+			out: new DockerTailer(spec.outSpool, spec.containerId, "stdout", spec.onChunk, spec.onOffsetReset),
+			err: new DockerTailer(spec.errSpool, spec.containerId, "stderr", spec.onChunk, spec.onOffsetReset),
 		};
 	}
 	return {
-		out: new PollTailer(spec.outSpool, "stdout", spec.onChunk),
-		err: new PollTailer(spec.errSpool, "stderr", spec.onChunk),
+		out: new PollTailer(spec.outSpool, "stdout", spec.onChunk, spec.onOffsetReset),
+		err: new PollTailer(spec.errSpool, "stderr", spec.onChunk, spec.onOffsetReset),
 	};
 };
 
@@ -391,6 +431,9 @@ export interface BgProcess {
 	paths: BgPaths;
 	outOffset: number;
 	errOffset: number;
+	/** PERSISTED kill intent (Fix 1) — survives restart so a re-attached or lost process honours it. */
+	killRequested: boolean;
+	killRequestedAt: number | null;
 	exited: Promise<void>;
 	// runtime-only
 	_resolveExited: () => void;
@@ -480,6 +523,7 @@ export class BgProcessManager {
 			startTime: Date.now(), endTime: null,
 			cwd, containerId, paths,
 			outOffset: 0, errOffset: 0,
+			killRequested: false, killRequestedAt: null,
 			exited, _resolveExited: resolveExited, _logBytes: 0,
 			_tailers: null, _statusTimer: null, _projectionTimer: null,
 			_killIntent: null, _killEscalate: null,
@@ -581,10 +625,25 @@ export class BgProcessManager {
 			inContainer: bg.paths.inContainer,
 			containerId: bg.containerId,
 			onChunk: (stream, text, newOffset) => this.onChunk(sessionId, bg, stream, text, newOffset),
+			onOffsetReset: (stream, newOffset) => this.onOffsetReset(sessionId, bg, stream, newOffset),
 		};
 		bg._tailers = this.tailerFactory(spec);
 		bg._tailers.out.start(bg.outOffset);
 		bg._tailers.err.start(bg.errOffset);
+	}
+
+	/**
+	 * Persist a tailer-initiated offset reset SYNCHRONOUSLY (Fix 3 / Fix 4). When a
+	 * spool is copytruncated the read offset rebases; recording it immediately keeps
+	 * the next restore byte-aligned (read only post-truncation bytes), so no content-
+	 * based dedupe is needed and no already-projected bytes are re-read.
+	 */
+	private onOffsetReset(sessionId: string, bg: BgProcess, stream: "stdout" | "stderr", newOffset: number): void {
+		if (stream === "stdout") bg.outOffset = newOffset; else bg.errOffset = newOffset;
+		const store = this.store(sessionId);
+		if (!store) return;
+		store.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
+		store.flush(); // force the debounced offset write out now (recovery-critical reset)
 	}
 
 	private onChunk(sessionId: string, bg: BgProcess, stream: "stdout" | "stderr", text: string, newOffset: number): void {
@@ -848,6 +907,16 @@ export class BgProcessManager {
 	}
 
 	private async restoreOne(sessionId: string, rec: PersistedBgProcess): Promise<void> {
+		// Fix 2: restore must be IDEMPOTENT. restoreSession() is also called on LIVE
+		// respawn/restart paths (session-manager.ts) while the gateway is up — so for a
+		// session whose bg process is already attached and streaming, re-running would
+		// spin up a SECOND set of tailers + status watcher + projection writer racing the
+		// same files (duplicate broadcasts, projection corruption). If the process is
+		// already live in-memory with active tailers, SKIP re-attaching it (no tail gap).
+		const existing = this.processes.get(sessionId)?.get(rec.id);
+		if (existing && existing.status === "running" && existing._tailers && existing._statusTimer) {
+			return;
+		}
 		const bg = this.rehydrate(rec);
 		this.processes.get(sessionId)!.set(rec.id, bg);
 
@@ -888,37 +957,83 @@ export class BgProcessManager {
 			// Pid-reuse guard: re-read pidfile nonce.
 			const pf = this.readPidFile(bg);
 			if (pf && pf.nonce === bg.nonce) {
-				// ALIVE → re-attach. Rebuild the buffer from a SINGLE source (Fix 4) to
-				// avoid duplicating overlapping lines, then resume tailing + watcher.
+				// ALIVE → re-attach. Rebuild the buffer byte-aligned (Fix 3) then resume
+				// tailing + watcher.
 				this.restoreLoadOutput(bg);
 				this.writeProjection(bg);
 				this.store(sessionId)?.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
 				this.startTailers(sessionId, bg);
 				this.startStatusWatcher(sessionId, bg);
+				// Fix 1: a kill was requested before the restart and the process is STILL
+				// alive → re-issue the kill (re-arms the SIGTERM→SIGKILL escalation) and
+				// keep streaming until it dies + its status is read. Without this a
+				// SIGTERM-ignoring process would keep running after a restart.
+				if (bg.killRequested) this.kill(sessionId, bg.id);
 				return;
 			}
-			// pid reused / foreign — UNRECOVERABLE (never fabricate a code); keep retained projection.
+			// pid reused / foreign — the original process is gone (no status). Keep the
+			// retained projection; if a kill was requested it's "killed", else lost.
 			this.loadProjection(bg);
-			this.markUnrecoverable(sessionId, bg);
+			this.markLostOrKilled(sessionId, bg);
 			return;
 		}
-		// Not alive AND no status anywhere → UNRECOVERABLE; keep retained projection.
+		// Not alive AND no status anywhere. Keep the retained projection; a process the
+		// user asked to kill that is now dead is "killed" (Fix 1 — not fabrication), else
+		// genuinely lost across the restart → unrecoverable.
 		this.loadProjection(bg);
-		this.markUnrecoverable(sessionId, bg);
+		this.markLostOrKilled(sessionId, bg);
+	}
+
+	/**
+	 * Terminal reconciliation for a `running` record found DEAD with no status file
+	 * on restore. If a kill had been requested (Fix 1) the outcome is `"killed"`
+	 * (the user asked to kill it and it is dead — a known outcome, not a fabricated
+	 * exit code); otherwise it was lost across the restart → `"unrecoverable"`.
+	 * Either way `exitCode` stays null and the retained projection is preserved.
+	 */
+	private markLostOrKilled(sessionId: string, bg: BgProcess): void {
+		if (bg.killRequested) this.markKilled(sessionId, bg);
+		else this.markUnrecoverable(sessionId, bg);
+	}
+
+	private markKilled(sessionId: string, bg: BgProcess): void {
+		if (bg.status !== "running") return;
+		bg.status = "exited";
+		bg.exitCode = null;
+		bg.terminalReason = "killed";
+		bg.endTime = Date.now();
+		this.stopTimers(bg);
+		this.store(sessionId)?.update(sessionId, bg.id, {
+			status: "exited", exitCode: null, terminalReason: "killed", endTime: bg.endTime,
+		});
+		bg._resolveExited();
+		this.broadcast(sessionId, {
+			type: "bg_process_exited", processId: bg.id, exitCode: null, endTime: bg.endTime, terminalReason: "killed",
+		} as any);
 	}
 
 	/**
 	 * Rebuild the in-memory buffer on restore WITHOUT losing the retained
-	 * projection and WITHOUT duplicating already-captured lines (Fix 2).
+	 * projection and WITHOUT dropping genuinely-repeated output (Fix 3).
 	 *
 	 * The HOST projection <bgId>.log is the gateway's authoritative capped mirror
 	 * of everything it consumed pre-restart, so it is loaded FIRST as the retained
 	 * baseline (the spool gets copytruncated to ~0 over cap, so it alone would lose
 	 * the retained tail). We then append ONLY the spool bytes the gateway had not
-	 * yet consumed (from the persisted offset; §6.2-rebased to 0 on copytruncate),
-	 * de-duplicating the boundary so a from-0 read does not re-add lines already in
-	 * the projection while still capturing genuine downtime output beyond it. The
-	 * spool-only rebuild is the FALLBACK used only when the projection is
+	 * yet consumed, starting from the PERSISTED offset:
+	 *   - NORMAL case (gateway recorded the offset; size >= offset): read
+	 *     `[offset..size]` — strictly the bytes appended after what the projection
+	 *     already holds, so the splice is byte-aligned and there is no overlap and
+	 *     NO content-based dedupe (which would wrongly drop legitimately-repeated
+	 *     lines such as a second "ready").
+	 *   - DOWNTIME-TRIM case (the wrapper/Node-helper trimmer copytruncated the
+	 *     spool while the gateway was DOWN, so the offset reset was never recorded;
+	 *     size < persistedOffset): {@link readSpoolFrom} rebases to 0 and reads the
+	 *     whole bounded spool. We append it as-is, accepting a small, rare, COSMETIC
+	 *     boundary duplication. This deliberately prioritises NO DATA LOSS over
+	 *     avoiding a rare duplicate — we never silently drop real output.
+	 *
+	 * The spool-only rebuild is the FALLBACK used only when the projection is
 	 * missing/unreadable (container recreated, completed-during-downtime).
 	 */
 	private restoreLoadOutput(bg: BgProcess): void {
@@ -930,11 +1045,11 @@ export class BgProcessManager {
 			if (!tail) continue; // spool gone/unreadable → projection baseline stands
 			if (tail.text) {
 				const arr = stream === "stdout" ? bg.stdout : bg.stderr;
-				const incoming = tail.text.split("\n").filter(l => l.length > 0);
-				const fresh = dropLeadingOverlap(arr, incoming);
-				for (const line of fresh) {
-					this.appendLog(bg, stream, line, ts);
-					arr.push(line);
+				for (const line of tail.text.split("\n")) {
+					if (line.length > 0) {
+						this.appendLog(bg, stream, line, ts);
+						arr.push(line);
+					}
 				}
 				while (arr.length > MAX_LOG_LINES) arr.shift(); // Fix 3: cap per-stream array after bulk append
 			}
@@ -1007,6 +1122,7 @@ export class BgProcessManager {
 			startTime: rec.startTime, endTime: rec.endTime,
 			cwd: rec.cwd, containerId: rec.containerId, paths,
 			outOffset: rec.outOffset, errOffset: rec.errOffset,
+			killRequested: rec.killRequested ?? false, killRequestedAt: rec.killRequestedAt ?? null,
 			exited, _resolveExited: resolveExited, _logBytes: 0,
 			_tailers: null, _statusTimer: null, _projectionTimer: null,
 			_killIntent: null, _killEscalate: null,
@@ -1021,6 +1137,14 @@ export class BgProcessManager {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg || bg.status !== "running") return false;
 		bg._killIntent = Date.now();
+		// Fix 1: record the kill intent DURABLY (sync flush) before signalling, so a
+		// restart in the kill→exit window re-issues the kill (still-alive) or marks the
+		// process "killed" rather than "unrecoverable" (dead with no status).
+		if (!bg.killRequested) {
+			bg.killRequested = true;
+			bg.killRequestedAt = bg._killIntent;
+			this.store(sessionId)?.update(sessionId, bg.id, { killRequested: true, killRequestedAt: bg.killRequestedAt });
+		}
 		if (bg.paths.inContainer && bg.containerId && bg.processPid > 0) {
 			this.env.dockerCli(["exec", bg.containerId, "kill", "-TERM", `-${bg.processPid}`]);
 			const esc = setTimeout(() => {
@@ -1226,6 +1350,7 @@ export class BgProcessManager {
 			containerStatus: bg.paths.containerStatus, containerPid: bg.paths.containerPid,
 			inContainer: bg.paths.inContainer,
 			outOffset: bg.outOffset, errOffset: bg.errOffset,
+			killRequested: bg.killRequested, killRequestedAt: bg.killRequestedAt ?? undefined,
 		};
 	}
 

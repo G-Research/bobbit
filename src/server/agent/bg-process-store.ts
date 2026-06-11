@@ -45,6 +45,16 @@ export interface PersistedBgProcess {
 	exitCode: number | null;
 	/** why the process reached a terminal state; null while running. Authoritative. */
 	terminalReason: "normal" | "killed" | "unrecoverable" | null;
+	/**
+	 * A user-requested kill was issued for this process (Fix 1). PERSISTED + sync-
+	 * flushed at kill time so the intent survives a restart in the kill→exit window:
+	 * on restore an ALIVE process is re-killed (escalation re-armed) and a DEAD-with-
+	 * no-status process becomes `terminalReason="killed"` (the user asked to kill it),
+	 * NOT `"unrecoverable"`. Default false.
+	 */
+	killRequested: boolean;
+	/** epoch ms of the kill request (Fix 1); undefined when never killed. */
+	killRequestedAt?: number;
 	startTime: number;
 	endTime: number | null;
 	// HOST-owned, gateway-written — ALWAYS host for BOTH host and docker spawns:
@@ -82,6 +92,8 @@ export type UpdatableBgFields = Pick<
 	| "errOffset"
 	| "hostPid"
 	| "processPid"
+	| "killRequested"
+	| "killRequestedAt"
 >;
 
 function bgKey(sessionId: string, id: string): string {

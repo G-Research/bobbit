@@ -20,6 +20,8 @@ import {
 	buildHostWrapper,
 	buildDockerWrapper,
 	PollTailer,
+	DockerTailer,
+	type DockerExec,
 	type BgEnv,
 	type SpawnFn,
 	type TailerFactory,
@@ -338,23 +340,56 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		h.mgr.cleanup(S);
 	});
 
-	it("Fix 4: ALIVE restore with non-empty projection + overlapping spool tail → no duplicated lines", async () => {
+	it("Fix 3: ALIVE restore is byte-aligned (offset past projection) → no duplicated lines", async () => {
 		const h = makeHarness({ env: { isHostPidAlive: () => true } });
 		const S = freshSession();
-		const rec = seedRunningHostRecord(h, S);
-		// Host projection already holds retained output (what the gateway saw pre-restart).
+		// The gateway had consumed "retained-1\nretained-2\n" (22 bytes) into the
+		// projection pre-restart, so the persisted offset is byte-aligned at 22.
+		const rec = seedRunningHostRecord(h, S, { outOffset: 22 });
 		fs.writeFileSync(rec.logFile, `${Date.now()}\tout\tretained-1\n${Date.now()}\tout\tretained-2\n`);
-		// The live spool still holds the SAME retained tail PLUS downtime output.
+		// The live spool holds the consumed bytes PLUS fresh downtime output.
 		fs.writeFileSync(rec.outSpool, "retained-1\nretained-2\ndowntime-3\n");
 		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
 
 		await h.mgr.restoreSession(S);
 		const texts = h.mgr.getLogs(S, rec.id)!.log.map(l => l.text);
-		// Overlapping retained lines appear exactly once (single source of truth).
-		assert.equal(texts.filter(t => t === "retained-1").length, 1, "retained-1 not duplicated");
-		assert.equal(texts.filter(t => t === "retained-2").length, 1, "retained-2 not duplicated");
-		// Downtime output produced while the gateway was down is included.
-		assert.ok(texts.includes("downtime-3"), "downtime output present");
+		// Byte-aligned read appends ONLY the bytes past the offset — no overlap, no dedupe.
+		assert.deepEqual(texts, ["retained-1", "retained-2", "downtime-3"], "byte-aligned splice, no duplicates");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 3: genuinely repeated output across the restore boundary is PRESERVED (not dropped)", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		// Projection holds "line-1\nready\n" (13 bytes) consumed pre-restart — offset 13.
+		const rec = seedRunningHostRecord(h, S, { outOffset: 13 });
+		fs.writeFileSync(rec.logFile, `${Date.now()}\tout\tline-1\n${Date.now()}\tout\tready\n`);
+		// The process then printed "ready" AGAIN (legitimate repeat) and "done". The old
+		// content-based dropLeadingOverlap would WRONGLY drop the second "ready".
+		fs.writeFileSync(rec.outSpool, "line-1\nready\nready\ndone\n");
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+
+		await h.mgr.restoreSession(S);
+		const texts = h.mgr.getLogs(S, rec.id)!.log.map(l => l.text);
+		assert.deepEqual(texts, ["line-1", "ready", "ready", "done"], "repeated 'ready' preserved, nothing dropped");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 2: restoreSession is idempotent — a second restore does not duplicate tailers/broadcasts", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S);
+		fs.writeFileSync(rec.outSpool, "x\n");
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+
+		await h.mgr.restoreSession(S);
+		const tailersAfterFirst = h.specs.length;
+		assert.equal(tailersAfterFirst, 1, "one tailer attach on first restore");
+		assert.equal(h.mgr.list(S).find(p => p.id === rec.id)!.status, "running");
+
+		// Live respawn re-invokes restoreSession while the process is still attached.
+		await h.mgr.restoreSession(S);
+		assert.equal(h.specs.length, tailersAfterFirst, "no second tailer attach (idempotent skip)");
 		h.mgr.cleanup(S);
 	});
 
@@ -401,6 +436,47 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		const texts = h.mgr.getLogs(S, rec.id)!.log.map(l => l.text);
 		assert.deepEqual(texts, ["retained-1", "downtime-a", "downtime-b"], "projection + downtime output, in order");
 		h.mgr.cleanup(S);
+	});
+
+	it("Fix 1: restart with killRequested + ALIVE → re-issues the kill (escalation re-armed)", async () => {
+		const killCalls: any[] = [];
+		const h = makeHarness({ env: { isHostPidAlive: () => true, killHostTree: (pid, sig) => killCalls.push([pid, sig]) } });
+		const S = freshSession();
+		// A kill was requested before the restart; the process is still alive afterward.
+		const rec = seedRunningHostRecord(h, S, { killRequested: true, killRequestedAt: Date.now() - 500 });
+		fs.writeFileSync(rec.outSpool, "still-running\n");
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+
+		await h.mgr.restoreSession(S);
+		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
+		assert.equal(p.status, "running", "re-attached, still running until it dies");
+		assert.ok(killCalls.some(c => c[0] === 4242 && c[1] === "SIGTERM"), "kill re-issued against processPid");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 1: restart with killRequested + DEAD-no-status → terminalReason 'killed' (not unrecoverable)", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => false } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S, { killRequested: true, killRequestedAt: Date.now() - 500 });
+		// No status file (hard-killed before the wrapper could write $?).
+		await h.mgr.restoreSession(S);
+		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
+		assert.equal(p.status, "exited");
+		assert.equal(p.exitCode, null, "no fabricated exit code");
+		assert.equal(p.terminalReason, "killed", "user-requested kill → killed, NOT unrecoverable");
+		const exited = h.sent.find(m => m.type === "bg_process_exited" && m.processId === rec.id);
+		assert.equal(exited.terminalReason, "killed");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 1: kill() persists killRequested so it survives a reload", () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const info = h.mgr.create(S, "loop.sh", h.stateDir);
+		h.mgr.kill(S, info.id);
+		const rec = h.store().get(S, info.id)!;
+		assert.equal(rec.killRequested, true, "killRequested flushed to the store");
+		assert.ok(typeof rec.killRequestedAt === "number", "killRequestedAt recorded");
 	});
 
 	it("Fix 3: per-stream arrays stay ≤ MAX_LOG_LINES after restore bulk append", async () => {
@@ -678,6 +754,51 @@ describe("PollTailer — host poll: rebase + gateway copytruncate", () => {
 		assert.equal(received.length, MAX_LOG_BYTES, "read exactly the last cap bytes, not the whole delta");
 		assert.ok(!received.includes("A"), "older bytes beyond the retained window were skipped");
 		assert.equal(lastOffset, size, "offset advanced to size");
+		tailer.stop();
+	});
+});
+
+describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
+	function fakeChild(): any {
+		const c = new EventEmitter() as any;
+		c.stdout = new EventEmitter();
+		c.kill = () => {};
+		return c;
+	}
+
+	it("rebases the offset DOWN to the current size when the spool is copytruncated mid-tail", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		let size = 0;
+		const child = fakeChild();
+		const deps: DockerExec = { probeSize: () => size, follow: () => child };
+		const resets: number[] = [];
+		const tailer = new DockerTailer("/tmp/s.out.spool", "cid", "stdout",
+			() => {}, (_s, off) => resets.push(off), deps);
+		tailer.start(0);
+		// `tail -F` streams 100 bytes live; our offset climbs to 100.
+		child.stdout.emit("data", Buffer.alloc(100, 0x61));
+		// The in-container trimmer copytruncated the spool to 20 bytes.
+		size = 20;
+		t.mock.timers.tick(1000);
+		// Offset rebased to the current size + persisted, so a later finalFlush/restore
+		// (which rebases-to-0 only when size < offset) won't re-read & DUPLICATE bytes.
+		assert.deepEqual(resets, [20], "offset rebased to the current size on copytruncate");
+		tailer.stop();
+	});
+
+	it("does NOT rebase while the spool only grows", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		let size = 0;
+		const child = fakeChild();
+		const deps: DockerExec = { probeSize: () => size, follow: () => child };
+		const resets: number[] = [];
+		const tailer = new DockerTailer("/tmp/s.out.spool", "cid", "stdout",
+			() => {}, (_s, off) => resets.push(off), deps);
+		tailer.start(0);
+		child.stdout.emit("data", Buffer.alloc(50, 0x61)); // offset 50
+		size = 200; // spool grew
+		t.mock.timers.tick(1000);
+		assert.deepEqual(resets, [], "no rebase while the spool grows");
 		tailer.stop();
 	});
 });
