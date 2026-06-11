@@ -2307,6 +2307,13 @@ export class RemoteAgent {
 		if ("playAgentFinishSound" in prefs) {
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";
+			// Notify the header <bell-toggle> (and Settings checkbox) so they reflect
+			// a change pushed from another tab/client.
+			if (typeof window !== "undefined") {
+				window.dispatchEvent(new CustomEvent("bobbit-play-finish-sound-changed", {
+					detail: { enabled: prefs.playAgentFinishSound !== false },
+				}));
+			}
 		}
 
 		// Apply replaceBobbitWithText — default OFF (only explicit true opts in).

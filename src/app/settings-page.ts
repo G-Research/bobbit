@@ -38,6 +38,7 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
 import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
@@ -2171,6 +2172,14 @@ function projectKeyLabel(key: string): string {
 function loadGeneralSettings() {
 	if (!settingsShowTimestampsLoaded) {
 		settingsShowTimestampsLoaded = true;
+		// Keep the beep checkbox in sync when the header <bell-toggle> (or a
+		// preferences_changed broadcast) flips the preference while Settings is open.
+		if (typeof window !== "undefined") {
+			window.addEventListener(PLAY_FINISH_SOUND_CHANGED, () => {
+				const next = isPlayFinishSoundEnabled();
+				if (next !== settingsPlayFinishSound) { settingsPlayFinishSound = next; renderApp(); }
+			});
+		}
 		(async () => {
 			try {
 				const res = await gatewayFetch("/api/preferences");
@@ -2294,18 +2303,12 @@ async function removeTrustedHost(host: string): Promise<void> {
 }
 
 async function togglePlayFinishSound(): Promise<void> {
-	settingsPlayFinishSound = !settingsPlayFinishSound;
-	// Apply synchronously to the dataset so the gate flips without waiting on
-	// the preferences_changed broadcast — mirrors the runtime path used by the
-	// playNotificationBeep() guard.
-	document.documentElement.dataset.playAgentFinishSound = settingsPlayFinishSound ? "true" : "false";
+	// Route through the shared helper so the dataset, persistence, and the
+	// header <bell-toggle> all stay in sync (it fires PLAY_FINISH_SOUND_CHANGED).
+	const next = !isPlayFinishSoundEnabled();
+	settingsPlayFinishSound = next;
 	renderApp();
-	try {
-		await gatewayFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ playAgentFinishSound: settingsPlayFinishSound }),
-		});
-	} catch {}
+	await setPlayFinishSoundEnabled(next);
 }
 
 async function toggleReplaceBobbitWithText(): Promise<void> {
