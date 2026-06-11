@@ -113,6 +113,24 @@ function shQuote(s: string): string {
 }
 
 /**
+ * Drop the leading `incoming` lines that duplicate the trailing `existing` lines
+ * (bounded longest suffix/prefix overlap). Used on restore (Fix 2) to splice new
+ * spool output onto the retained projection without re-adding already-captured
+ * lines when the spool is read from a rebased offset 0.
+ */
+function dropLeadingOverlap(existing: string[], incoming: string[]): string[] {
+	const maxK = Math.min(existing.length, incoming.length);
+	for (let k = maxK; k >= 1; k--) {
+		let match = true;
+		for (let i = 0; i < k; i++) {
+			if (existing[existing.length - k + i] !== incoming[i]) { match = false; break; }
+		}
+		if (match) return incoming.slice(k);
+	}
+	return incoming;
+}
+
+/**
  * Build the POSIX host wrapper (Git Bash on Windows, `/bin/sh` elsewhere).
  * Isolated subshell `( <command> )` so a user `exit N` is contained and the
  * wrapper still captures the real `code=$?`; a wrapper-owned background trimmer
@@ -470,6 +488,14 @@ export class BgProcessManager {
 		if (!this.processes.has(sessionId)) this.processes.set(sessionId, new Map());
 		this.processes.get(sessionId)!.set(id, bg);
 
+		// Docker (Fix 1a): resolve the in-container processPid SYNCHRONOUSLY before we
+		// persist + broadcast (design §4.0). The host-side child.pid is only the
+		// docker-exec handle; the signalable wrapper pid lives in the container
+		// pidfile. Resolving it up-front means a gateway restart in the old
+		// create→async-resolve window still re-attaches (the persisted record carries
+		// a real processPid) instead of being wrongly marked unrecoverable.
+		if (containerId) this.syncResolveDockerProcessPid(bg);
+
 		// Persist (recovery-critical → synchronous put) BEFORE broadcasting created.
 		store?.put(this.toPersisted(sessionId, bg));
 
@@ -479,8 +505,9 @@ export class BgProcessManager {
 		this.startTailers(sessionId, bg);
 		this.startStatusWatcher(sessionId, bg);
 
-		// Resolve the in-container processPid asynchronously (docker only).
-		if (containerId) this.resolveDockerProcessPid(sessionId, bg);
+		// If the bounded sync read could not get the pid (rare), keep retrying in the
+		// background while alive; Fix-1b additionally recovers it on restore.
+		if (containerId && bg.processPid <= 0) this.resolveDockerProcessPid(sessionId, bg);
 
 		this.broadcast(sessionId, { type: "bg_process_created", process: this.toInfo(bg) } as any);
 		return this.toInfo(bg);
@@ -510,6 +537,26 @@ export class BgProcessManager {
 			pidFile: path.join(dir, `${id}.pid`),
 			nonce, inContainer: false,
 		};
+	}
+
+	/**
+	 * Synchronous bounded retry to read the in-container processPid at create time
+	 * (Fix 1a). The wrapper writes the pidfile near-immediately, so a short retry
+	 * over ~1.6s reliably resolves it; if it genuinely can't be read in the window
+	 * we leave processPid 0 and rely on the live async resolver + Fix-1b on restore.
+	 */
+	private syncResolveDockerProcessPid(bg: BgProcess): void {
+		if (!bg.containerId) return;
+		for (let attempt = 0; attempt < 12; attempt++) {
+			const parsed = this.readPidFile(bg);
+			if (parsed && parsed.nonce === bg.nonce && parsed.pid > 0) { bg.processPid = parsed.pid; return; }
+			if (attempt < 11) this.sleepSync(150);
+		}
+	}
+
+	/** Block the current thread for `ms` (bounded, create-time docker pid resolution only). */
+	private sleepSync(ms: number): void {
+		try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* ignore */ }
 	}
 
 	private resolveDockerProcessPid(sessionId: string, bg: BgProcess, attempt = 0): void {
@@ -585,9 +632,9 @@ export class BgProcessManager {
 		} catch { /* best-effort */ }
 	}
 
-	private loadProjection(bg: BgProcess): void {
+	private loadProjection(bg: BgProcess): boolean {
 		let raw: string;
-		try { raw = fs.readFileSync(bg.paths.logFile, "utf-8"); } catch { return; }
+		try { raw = fs.readFileSync(bg.paths.logFile, "utf-8"); } catch { return false; }
 		bg.log = []; bg.stdout = []; bg.stderr = []; bg._logBytes = 0;
 		for (const line of raw.split("\n")) {
 			if (!line) continue;
@@ -603,6 +650,7 @@ export class BgProcessManager {
 		}
 		while (bg.stdout.length > MAX_LOG_LINES) bg.stdout.shift();
 		while (bg.stderr.length > MAX_LOG_LINES) bg.stderr.shift();
+		return true;
 	}
 
 	// ── status watcher + exit reconciliation ─────────────────────────────────────
@@ -658,12 +706,17 @@ export class BgProcessManager {
 			const tail = this.readSpoolFrom(bg, stream, stream === "stdout" ? bg.outOffset : bg.errOffset);
 			if (tail && tail.text) {
 				const ts = Date.now();
+				const arr = stream === "stdout" ? bg.stdout : bg.stderr;
 				for (const line of tail.text.split("\n")) {
 					if (line.length > 0) {
 						this.appendLog(bg, stream, line, ts);
-						(stream === "stdout" ? bg.stdout : bg.stderr).push(line);
+						arr.push(line);
 					}
 				}
+				// Fix 3: bound the per-stream array after a bulk append (appendLog only
+				// caps the combined log[]; a 512KB window of short lines could otherwise
+				// blow the per-stream MAX_LOG_LINES cap).
+				while (arr.length > MAX_LOG_LINES) arr.shift();
 				if (stream === "stdout") bg.outOffset = tail.newOffset; else bg.errOffset = tail.newOffset;
 			}
 		}
@@ -816,6 +869,20 @@ export class BgProcessManager {
 			return;
 		}
 
+		// Fix 1b: a docker record may have been persisted before its in-container
+		// processPid was resolved (restart in the create→resolve window). If it is
+		// still running with the container alive and the pidfile readable, RE-READ the
+		// in-container pidfile to recover processPid and re-attach — rather than wrongly
+		// marking it unrecoverable. Only a gone container OR an unreadable/empty/foreign
+		// pidfile leaves processPid unresolved (→ unrecoverable below). Never fabricate.
+		if (bg.paths.inContainer && bg.containerId && bg.processPid <= 0) {
+			const pf = this.readPidFile(bg);
+			if (pf && pf.pid > 0 && pf.nonce === bg.nonce) {
+				bg.processPid = pf.pid;
+				this.store(sessionId)?.update(sessionId, bg.id, { processPid: pf.pid });
+			}
+		}
+
 		const alive = bg.paths.inContainer ? this.isContainerProcAlive(bg) : this.env.isHostPidAlive(bg.processPid);
 		if (alive) {
 			// Pid-reuse guard: re-read pidfile nonce.
@@ -841,33 +908,66 @@ export class BgProcessManager {
 	}
 
 	/**
-	 * Rebuild the in-memory buffer from a SINGLE source on restore (Fix 4) so
-	 * already-retained lines are never duplicated. PREFER the bounded spool tail
-	 * (it holds retained + any downtime output, ≤cap) read whole from offset 0
-	 * (we rebuild from scratch); FALL BACK to the host projection only when the
-	 * spool is gone/unreadable (container recreated, completed-during-downtime
-	 * with spools deleted). Never loads both.
+	 * Rebuild the in-memory buffer on restore WITHOUT losing the retained
+	 * projection and WITHOUT duplicating already-captured lines (Fix 2).
+	 *
+	 * The HOST projection <bgId>.log is the gateway's authoritative capped mirror
+	 * of everything it consumed pre-restart, so it is loaded FIRST as the retained
+	 * baseline (the spool gets copytruncated to ~0 over cap, so it alone would lose
+	 * the retained tail). We then append ONLY the spool bytes the gateway had not
+	 * yet consumed (from the persisted offset; §6.2-rebased to 0 on copytruncate),
+	 * de-duplicating the boundary so a from-0 read does not re-add lines already in
+	 * the projection while still capturing genuine downtime output beyond it. The
+	 * spool-only rebuild is the FALLBACK used only when the projection is
+	 * missing/unreadable (container recreated, completed-during-downtime).
 	 */
 	private restoreLoadOutput(bg: BgProcess): void {
+		if (!this.loadProjection(bg)) { this.restoreFromSpoolsOnly(bg); return; }
+		const ts = Date.now();
+		for (const stream of ["stdout", "stderr"] as const) {
+			const off = stream === "stdout" ? bg.outOffset : bg.errOffset;
+			const tail = this.readSpoolFrom(bg, stream, off);
+			if (!tail) continue; // spool gone/unreadable → projection baseline stands
+			if (tail.text) {
+				const arr = stream === "stdout" ? bg.stdout : bg.stderr;
+				const incoming = tail.text.split("\n").filter(l => l.length > 0);
+				const fresh = dropLeadingOverlap(arr, incoming);
+				for (const line of fresh) {
+					this.appendLog(bg, stream, line, ts);
+					arr.push(line);
+				}
+				while (arr.length > MAX_LOG_LINES) arr.shift(); // Fix 3: cap per-stream array after bulk append
+			}
+			if (stream === "stdout") bg.outOffset = tail.newOffset; else bg.errOffset = tail.newOffset;
+		}
+	}
+
+	/**
+	 * Spool-only rebuild FALLBACK (projection missing/unreadable). Reads each spool
+	 * whole from a rebased offset 0 — the spool is then the only output source.
+	 */
+	private restoreFromSpoolsOnly(bg: BgProcess): void {
 		const tails: Partial<Record<"stdout" | "stderr", { text: string; newOffset: number }>> = {};
 		let anyReadable = false;
 		for (const stream of ["stdout", "stderr"] as const) {
 			const tail = this.readSpoolFrom(bg, stream, 0);
 			if (tail) { tails[stream] = tail; anyReadable = true; }
 		}
-		if (!anyReadable) { this.loadProjection(bg); return; }
+		if (!anyReadable) return; // nothing readable anywhere; leave the (empty) buffer
 		bg.log = []; bg.stdout = []; bg.stderr = []; bg._logBytes = 0;
+		const ts = Date.now();
 		for (const stream of ["stdout", "stderr"] as const) {
 			const tail = tails[stream];
 			if (!tail) { if (stream === "stdout") bg.outOffset = 0; else bg.errOffset = 0; continue; }
 			if (tail.text) {
-				const ts = Date.now();
+				const arr = stream === "stdout" ? bg.stdout : bg.stderr;
 				for (const line of tail.text.split("\n")) {
 					if (line.length > 0) {
 						this.appendLog(bg, stream, line, ts);
-						(stream === "stdout" ? bg.stdout : bg.stderr).push(line);
+						arr.push(line);
 					}
 				}
+				while (arr.length > MAX_LOG_LINES) arr.shift(); // Fix 3: cap per-stream array after bulk append
 			}
 			if (stream === "stdout") bg.outOffset = tail.newOffset; else bg.errOffset = tail.newOffset;
 		}

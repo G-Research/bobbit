@@ -233,6 +233,23 @@ describe("BgProcessManager — persistence round-trip", () => {
 		assert.deepEqual(logs.stderr, ["B", "D"]);
 		h2.mgr.cleanup(S);
 	});
+
+	it("Fix 3: per-stream arrays stay ≤ MAX_LOG_LINES after finalFlush bulk append", async () => {
+		const h = makeHarness();
+		const S = freshSession();
+		const info = h.mgr.create(S, "chatty.sh", h.stateDir);
+		const rec = h.store().get(S, info.id)!;
+		// A spool that finalFlush will read whole on exit: > MAX_LOG_LINES short lines.
+		fs.writeFileSync(rec.outSpool, Array.from({ length: 6000 }, (_, i) => `o${i}`).join("\n") + "\n");
+		fs.writeFileSync(rec.errSpool, Array.from({ length: 6000 }, (_, i) => `e${i}`).join("\n") + "\n");
+		fs.writeFileSync(rec.statusSnapshot, "0\n");
+		h.lastChild().emit("exit", 0);
+		await h.mgr.waitForExit(S, info.id, 2000);
+		const logs = h.mgr.getLogs(S, info.id)!;
+		assert.ok(logs.stdout.length <= 5000, `stdout ${logs.stdout.length} ≤ 5000 after finalFlush`);
+		assert.ok(logs.stderr.length <= 5000, `stderr ${logs.stderr.length} ≤ 5000 after finalFlush`);
+		h.mgr.cleanup(S);
+	});
 });
 
 describe("BgProcessManager — re-attach reconciliation", () => {
@@ -355,6 +372,50 @@ describe("BgProcessManager — re-attach reconciliation", () => {
 		assert.equal(updated.outOffset, 9);
 		h.mgr.cleanup(S);
 	});
+
+	it("Fix 2: spool copytruncated to EMPTY but projection non-empty → restored log == projection (no loss)", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		// Gateway consumed up to offset 100 pre-restart; the wrapper trimmer then
+		// copytruncated the spool to empty during downtime.
+		const rec = seedRunningHostRecord(h, S, { outOffset: 100 });
+		fs.writeFileSync(rec.logFile, `${Date.now()}\tout\tretained-1\n${Date.now()}\tout\tretained-2\n`);
+		fs.writeFileSync(rec.outSpool, ""); // copytruncated to empty
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+		await h.mgr.restoreSession(S);
+		const texts = h.mgr.getLogs(S, rec.id)!.log.map(l => l.text);
+		assert.deepEqual(texts, ["retained-1", "retained-2"], "retained projection preserved, nothing lost");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 2: downtime bytes in the spool beyond the projection appear after restore", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S);
+		fs.writeFileSync(rec.logFile, `${Date.now()}\tout\tretained-1\n`);
+		// Spool was copytruncated during downtime and now holds only fresh downtime
+		// output (no overlap with the projection).
+		fs.writeFileSync(rec.outSpool, "downtime-a\ndowntime-b\n");
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+		await h.mgr.restoreSession(S);
+		const texts = h.mgr.getLogs(S, rec.id)!.log.map(l => l.text);
+		assert.deepEqual(texts, ["retained-1", "downtime-a", "downtime-b"], "projection + downtime output, in order");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 3: per-stream arrays stay ≤ MAX_LOG_LINES after restore bulk append", async () => {
+		const h = makeHarness({ env: { isHostPidAlive: () => true } });
+		const S = freshSession();
+		const rec = seedRunningHostRecord(h, S);
+		// No projection → spool-only rebuild path; feed > MAX_LOG_LINES short lines.
+		const lines = Array.from({ length: 6000 }, (_, i) => `o${i}`).join("\n") + "\n";
+		fs.writeFileSync(rec.outSpool, lines);
+		fs.writeFileSync(rec.pidFile, "4242\nNONCE-A\n");
+		await h.mgr.restoreSession(S);
+		const logs = h.mgr.getLogs(S, rec.id)!;
+		assert.ok(logs.stdout.length <= 5000, `stdout ${logs.stdout.length} ≤ 5000 after restore`);
+		h.mgr.cleanup(S);
+	});
 });
 
 describe("BgProcessManager — kill terminal states", () => {
@@ -441,6 +502,39 @@ describe("BgProcessManager — docker", () => {
 		const killGroup = calls.find(a => a.includes("kill") && a.includes("-TERM") && a.includes("-4242"));
 		assert.ok(killGroup, "kill targets negative in-container processPid (group)");
 		assert.ok(!calls.some(a => a.includes("-999") || a.includes("999")), "dead hostPid never signalled");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 1b: processPid:0 record, container alive + pidfile readable → recover pid and re-attach", async () => {
+		const dockerCli = (argv: string[]) => {
+			if (argv[0] === "inspect") return { code: 0, stdout: "true\n" };
+			if (argv.includes("kill") && argv.includes("-0")) return { code: 0, stdout: "" };
+			if (argv.includes("cat") && argv[argv.length - 1].endsWith(".pid")) return { code: 0, stdout: "4242\nNONCE-D\n" };
+			return { code: 0, stdout: "" };
+		};
+		const h = makeHarness({ env: { dockerCli } });
+		const S = freshSession();
+		// Persisted in the create→resolve window: processPid still 0.
+		const rec = seedDockerRecord(h, S, { processPid: 0 });
+		await h.mgr.restoreSession(S);
+		const after = h.mgr.list(S).find(p => p.id === rec.id)!;
+		assert.equal(after.status, "running", "re-attached after recovering the in-container pid");
+		assert.equal(after.pid, 4242, "recovered processPid surfaced");
+		const updated = h.store().get(S, rec.id)!;
+		assert.equal(updated.processPid, 4242, "recovered pid persisted");
+		h.mgr.cleanup(S);
+	});
+
+	it("Fix 1b: processPid:0 record, container gone → unrecoverable (no fabrication)", async () => {
+		const dockerCli = () => ({ code: 1, stdout: "" }); // container gone, pidfile unreadable
+		const h = makeHarness({ env: { dockerCli } });
+		const S = freshSession();
+		const rec = seedDockerRecord(h, S, { processPid: 0 });
+		await h.mgr.restoreSession(S);
+		const p = h.mgr.list(S).find(x => x.id === rec.id)!;
+		assert.equal(p.status, "unrecoverable");
+		assert.equal(p.exitCode, null);
+		assert.equal(p.terminalReason, "unrecoverable");
 		h.mgr.cleanup(S);
 	});
 
