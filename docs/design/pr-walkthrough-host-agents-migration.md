@@ -62,11 +62,11 @@ The reviewer's toolset is granted by a **pack-shipped `pr-reviewer` role** (not 
 
 ### 3.1 Components
 - **Panel** (`src/panel.js`): replaces the `postMessage` launch with `host.callRoute("run", …)`; polls `host.callRoute("status", …)`; on submit, keeps the existing `publishAndLoad` → `host.callRoute("publish")` → `host.callRoute("bundle")` seam.
-- **`run` route** (new, `lib/routes.mjs`, confined worker, has `ctx.host.agents` + `ctx.host.store`): idempotency check → resolve changeset/SHAs → persist launch bundle → `ctx.host.agents.spawn({role:"pr-reviewer", readOnly:true, lifecycle:"full", instructions, context})` → write store bindings → return `{ jobId, childSessionId, changesetId, baseSha, headSha, status }`.
-- **`status` route** (new, `lib/routes.mjs`): input `{ childSessionId, jobId }` → reads `ctx.host.agents.status(childSessionId)` + the pack-store submitted-YAML marker → returns `{ phase:"running"|"submitted"|"error", agentStatus, yaml?, baseSha?, headSha?, error? }`. On terminal it `ctx.host.agents.dismiss(childSessionId)`s the child.
+- **`run` route** (new, `lib/routes.mjs`, confined worker, has `ctx.host.agents` + `ctx.host.store`): idempotency check → resolve changeset/SHAs + canonical target → `ctx.host.agents.spawn({role:"pr-reviewer", readOnly:true, lifecycle:"full", deferInitialPrompt:true, context})` (child visible but NOT started) → write store bindings (the binding carries the target) → `ctx.host.agents.prompt(childSessionId, kickoffPrompt)` (start the reviewer AFTER the binding exists) → return `{ jobId, childSessionId, changesetId, baseSha, headSha, status }`. It does **not** build a launch bundle; the analysis bundle is resolved server-side, lazily, by the `bundle` endpoint (Finding 4 / §6).
+- **`status` route** (new, `lib/routes.mjs`): input `{ childSessionId, jobId }` → reads `ctx.host.agents.status(childSessionId)` + the pack-store submitted-YAML marker → returns `{ phase:"running"|"submitted"|"error", agentStatus, yaml?, baseSha?, headSha?, error? }`. On terminal it `ctx.host.agents.dismiss(childSessionId)`s the child (redundant safety net — submit already server-dismisses, Decision E).
 - **`pr-reviewer` role** (new, `market-packs/pr-walkthrough/roles/pr-reviewer.yaml`): `promptTemplate` = ported `buildRolePrompt` + `REQUIRED_YAML_SCHEMA_PROMPT`; `accessory: review`; `toolPolicies` grant exactly the three walkthrough tools.
 - **Agent tools** (`defaults/tools/pr-walkthrough/extension.ts`): env-gate + proof header removed; `read_pr_walkthrough_bundle` and `submit_pr_walkthrough_yaml` send only `sessionId` (+ session secret), the server resolves `jobId` from the binding.
-- **`submit-yaml` + `bundle` server routes** (`src/server/pr-walkthrough/routes.ts`, kept but rewired): no proof; resolve `jobId` from the pack-store binding keyed by the verified caller `sessionId`; store the raw submitted YAML into the pack store + mark the binding terminal.
+- **`submit-yaml` + `bundle` server routes** (`src/server/pr-walkthrough/routes.ts`, kept but rewired): no proof; resolve `jobId`+`target` from the pack-store binding keyed by the verified caller `sessionId`. `bundle` lazily resolves the analysis bundle from the target via the EXISTING server pipeline and caches it in `WalkthroughAnalysisBundleStore` keyed by `jobId` (kept); `submit-yaml` stores the raw YAML into the pack store, marks the binding terminal, and server-dismisses the reviewer (`orchestrationCore.dismiss`).
 - **`OrchestrationCore`** (`orchestration-core.ts`): two backward-compatible amendments (Decision A).
 
 ### 3.2 Data flow (happy path)
@@ -78,22 +78,27 @@ Panel "Run" click
          2. idempotency: store.get(reviewerKey(parent, canonicalKey))
               ├─ live reviewer exists → return its {jobId, childSessionId, status}
               └─ else continue
-         3. persist launch bundle (live git in worker) → store.put(bundleKey(jobId), …)
-         4. {childSessionId} ← host.agents.spawn({role:"pr-reviewer", readOnly:true,
-                                  lifecycle:"full", instructions: kickoffPrompt, context})
-         5. store.put(bindingKey(childSessionId), {jobId, changesetId, baseSha, headSha,
-                          parentSessionId, canonicalKey, status:"running"})
+         3. {childSessionId} ← host.agents.spawn({role:"pr-reviewer", readOnly:true,
+                                  lifecycle:"full", deferInitialPrompt:true, context})  // visible, NOT started
+         4. store.put(bindingKey(childSessionId), {jobId, changesetId, baseSha, headSha,
+                          parentSessionId, canonicalKey, target, status:"running"})
             store.put(reviewerKey(parent, canonicalKey), {childSessionId, jobId})
+         5. host.agents.prompt(childSessionId, kickoffPrompt)   // start reviewer AFTER binding exists
          6. return {jobId, childSessionId, changesetId, baseSha, headSha, status:"running"}
 
 Reviewer child (separate visible session, "review" accessory, read-only):
   - read_pr_walkthrough_bundle  → POST /api/internal/pr-walkthrough/bundle {sessionId}
-        server resolves jobId ← store.get(bindingKey(sessionId)); reads bundleKey(jobId)
+        server resolves jobId+target ← store.get(bindingKey(sessionId));
+        lazily resolves the analysis bundle from the target via the EXISTING server
+        pipeline (github-adapter for GitHub PRs, git-changeset for local), caches it in
+        WalkthroughAnalysisBundleStore keyed by jobId; returns the SAME shape as today
   - readonly_bash (git/gh, gated by walkthrough-readonly-policy.ts)
   - submit_pr_walkthrough_yaml  → POST /api/internal/pr-walkthrough/submit-yaml {sessionId, yaml}
         server verifies session secret; jobId ← store.get(bindingKey(sessionId));
-        409 if binding.status terminal; else store.put(submittedKey(jobId), {yaml, baseSha, headSha});
-        store.put(bindingKey(sessionId), {…, status:"submitted"})
+        409 if submittedKey(jobId) exists OR binding.status ∈ TERMINAL;
+        else store.put(submittedKey(jobId), {yaml, baseSha, headSha});
+        store.put(bindingKey(sessionId), {…, status:"submitted"});
+        orchestrationCore.dismiss(binding.parentSessionId, sessionId)   // terminal-synchronous reap
 
 Panel poll loop:
   └─ host.callRoute("status", {childSessionId, jobId})
@@ -113,6 +118,8 @@ Panel poll loop:
 
 ### 3.4 Visibility
 The reviewer uses `lifecycle:"full"` → `OrchestrationCore.spawn`'s `createSession` branch (`orchestration-core.ts:333-378`), which threads `parentSessionId`, `childKind`, `roleName`, `readOnly`, and inherits the owner's sandbox + model — exactly the legacy `createSession` shape, so the reviewer is a first-class **visible** child session with the role's `review` accessory (pre-downgrade parity), now with `childKind:"host-agents"`.
+
+**Deliberate `full` vs the spec's `bare` example.** The goal spec sketch showed `lifecycle:"bare"`; this design uses `lifecycle:"full"` deliberately. A visible, role-carrying reviewer session REQUIRES the full lifecycle — `bare`/`createDelegateSession` neither threads `role`/`accessory` nor surfaces a sidebar-visible session. Implementers must NOT treat `bare` as still required; this is an intentional interpretation/amendment of the spec example (Decision A.1).
 
 ### 3.5 Build pipeline (source of truth)
 - `market-packs/pr-walkthrough/src/panel.js` is the SOURCE; `build:packs` (`scripts/build-market-packs.mjs`, `PACKS["pr-walkthrough"]`) bundles it via esbuild to `lib/panel.js`. **Edit `src/panel.js`, then run `npm run build:packs`, and commit BOTH.**
@@ -139,9 +146,9 @@ The reviewer uses `lifecycle:"full"` → `OrchestrationCore.spawn`'s `createSess
    // before: const lifecycle = opts.readOnly ? "bare" : (opts.lifecycle ?? "bare");
    const lifecycle: SpawnLifecycle = opts.lifecycle ?? (opts.readOnly ? "bare" : "bare");
    ```
-   (i.e. `opts.lifecycle` wins when set; otherwise default `"bare"`.) A read-only child with no explicit lifecycle still goes bare — existing `host.agents`/delegate behavior unchanged. The `run` route passes `lifecycle:"full"`.
+   (i.e. `opts.lifecycle` wins when set; otherwise default `"bare"`.) A read-only child with no explicit lifecycle still goes bare — existing `host.agents`/delegate behavior unchanged. The `run` route passes `lifecycle:"full"`. **Deliberate amendment vs the goal-spec example:** the spec sketch showed `lifecycle:"bare"`, but a visible, role-carrying reviewer requires the **full** lifecycle (`createSession`); `bare`/`createDelegateSession` neither threads `role`/`accessory` nor produces a sidebar-visible session. Implementers must NOT treat `bare` as still required (see §3.4).
 
-2. **Role-sourced child tools.** Add an optional dep and use it in `childAllowedTools`:
+2. **Role-sourced child tools (FAIL CLOSED).** Add an optional dep and use it in `childAllowedTools`. A role-carrying spawn is granted the ROLE's tools and **never** falls back to the owner's tools — if the role's grants cannot be resolved, the spawn throws:
    ```ts
    export interface OrchestrationCoreDeps {
      // …
@@ -154,23 +161,29 @@ The reviewer uses `lifecycle:"full"` → `OrchestrationCore.spawn`'s `createSess
    private childAllowedTools(ownerId: string, readOnly?: boolean, role?: string): string[] | undefined {
      const deny = (t: string) =>
        SPAWN_VERBS.includes(t) || (readOnly === true && READ_ONLY_DENY_TOOLS.includes(t));
-     // NEW: a role-carrying spawn is granted the ROLE's tools, not the owner's.
+     // FAIL CLOSED: a role-carrying spawn is granted the ROLE's tools, NEVER the owner's.
      if (role) {
        const roleTools = this.deps.resolveRoleAllowedTools?.(role);
-       if (roleTools && roleTools.length > 0) return roleTools.filter(t => !deny(t));
+       if (!roleTools || roleTools.length === 0) {
+         throw new OrchestrationCoreError(
+           `Cannot resolve tool grants for role ${role}`, "ROLE_TOOLS_UNRESOLVED");
+       }
+       return roleTools.filter(t => !deny(t));
      }
-     // …unchanged owner-derived path (delegate parity)…
+     // …unchanged owner-derived path — reached ONLY for role-LESS delegate/team spawns…
    }
    ```
    Call site in `spawn`: `const childAllowed = this.childAllowedTools(opts.ownerSessionId, opts.readOnly, opts.role);`.
 
-   For `pr-reviewer`, `resolveRoleAllowedTools("pr-reviewer")` returns the three tools (the role's `toolPolicies` grant only those, and the "PR Walkthrough" group is default-deny — see Decision C); none are spawn verbs or in `READ_ONLY_DENY_TOOLS`, so the child gets exactly the three. **No regression:** a delegate with no `role` still inherits owner-minus-spawn-verbs; a role spawn whose resolver yields nothing (tests with no tool manager) falls through to the owner path.
+   For `pr-reviewer`, `resolveRoleAllowedTools("pr-reviewer")` returns the three tools (the role's `toolPolicies` grant only those, and the "PR Walkthrough" group is default-deny — see Decision C); none are spawn verbs or in `READ_ONLY_DENY_TOOLS`, so the child gets exactly the three. **No regression / no isolation hole:** the owner-derived fallback path remains ONLY for role-LESS delegate/team spawns (unchanged) — it is reached exclusively when no `role` is set. A role spawn whose resolver is unavailable or returns empty does **not** silently inherit the owner's broader tools; it throws `ROLE_TOOLS_UNRESOLVED`. Tests exercising role spawns MUST wire `resolveRoleAllowedTools`; the `run` route surfaces `ROLE_TOOLS_UNRESOLVED` as a **retryable** launch error (Decision E).
 
 3. **Production wiring** (`server.ts` `new OrchestrationCore({…})` at `:1175`): add `resolveRoleAllowedTools: (roleName, projectId) => { const role = roleManager.getRole(roleName) ?? configCascade?.resolveRoles(projectId).find(r => r.item.name===roleName)?.item; return role && toolManager ? computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager).map(e=>e.name) : undefined; }`. This mirrors the existing `resolveEffectiveTools` dep already wired there (`server.ts:1197`) and `session-setup.ts:430`.
 
 4. **Accessory.** `createSession` resolves `roleName` → role and applies `role.accessory` (the same path team `reviewer` sessions use to show their accessory). Confirm in implementation that `session-setup` applies `role.accessory`; if not, thread `accessory` from the resolved role there. The `run` route does not pass an accessory; it comes from the role.
 
-`host.agents.spawn`'s public signature is **unchanged** — it already forwards `role`, `readOnly`, `lifecycle`, `context`, `instructions` (`server-host-api.ts:267-289`).
+5. **`deferInitialPrompt` (atomic launch, race-free binding).** Add an optional `deferInitialPrompt?: boolean` to both `OrchestrationCore.spawn` opts and `host.agents.spawn` opts (allowed — `host.agents` is **not** frozen; this is the one optional field it gains). When `true`, the full-lifecycle path creates the visible child but does **not** enqueue `opts.instructions`/auto-kickoff — the caller starts the reviewer explicitly via a follow-up `host.agents.prompt`. This lets the `run` route write the `{childSessionId→jobId}` binding BEFORE the reviewer's first tool call, closing the spawn/binding race: a full-lifecycle spawn otherwise enqueues the kickoff internally, so the reviewer's first `read_pr_walkthrough_bundle` could race ahead of the binding and 403. Sequence (§3.2 / Decision E): spawn(deferInitialPrompt:true) → write `binding/${childSessionId}` + `reviewer/…` → `host.agents.prompt(childSessionId, kickoffPrompt)` → return.
+
+`host.agents.spawn` gains exactly one optional field (`deferInitialPrompt`); it otherwise already forwards `role`, `readOnly`, `lifecycle`, `context`, `instructions` (`server-host-api.ts:267-289`).
 
 ### Decision B — how the pack ships the `pr-reviewer` role
 
@@ -209,37 +222,40 @@ Roles are first-class pack contributions. `RoleLoader` (`pack-resolver.ts:79-90`
 **Binding shape (pack store, packId `pr-walkthrough`).** Keys:
 ```
 bindingKey(childSessionId)        = `binding/${childSessionId}`
-   → { jobId, changesetId, baseSha, headSha, parentSessionId, canonicalKey, status }
-        status ∈ "running" | "submitted" | "ready" | "error"
+   → { jobId, changesetId, baseSha, headSha, parentSessionId, canonicalKey, target, status }
+        status ∈ "running" | "submitted" | "ready" | "error"   // TERMINAL = {submitted, ready, error}
 reviewerKey(parentSessionId, key) = `reviewer/${parentSessionId}/${b64url(canonicalKey)}`
    → { childSessionId, jobId }                 // idempotency index (Decision E)
 submittedKey(jobId)               = `submitted/${jobId}`
    → { yaml, baseSha, headSha, submittedAt }   // raw YAML for the panel poll
-bundleKey(jobId)                  = `launch-bundle/${jobId}`
-   → analysis-bundle (Decision: live-git, §3.2 step 3)
+// NO launch-bundle key — the analysis bundle is resolved server-side (§6, Finding 4).
 ```
-The `run` route writes `bindingKey` + `reviewerKey` at spawn. The store is pack-scoped server-side by the SERVER-derived packId (`server-host-api.ts:170-182`); the pack route never names a packId.
+The `run` route writes `bindingKey` + `reviewerKey` AFTER a successful `deferInitialPrompt` spawn and BEFORE the kickoff `host.agents.prompt` (race-free, Decision A.5 / E). The pack store holds only `binding/`, `reviewer/`, and `submitted/` keys — there is **no** `launch-bundle/` key (the analysis bundle is resolved server-side, §6). The store is pack-scoped server-side by the SERVER-derived packId (`server-host-api.ts:170-182`); the pack route never names a packId.
 
 **The submit-yaml / bundle endpoints reach the pack store (the integration seam).** The submit tool runs in the **reviewer agent process** and calls the gateway over HTTP (`extension.ts` `fetch`), so it cannot use `host.callRoute` (client-only) — submit/bundle **stay server routes** (`src/server/pr-walkthrough/routes.ts`). They reach the pack-scoped store with the **constant builtin packId `"pr-walkthrough"`** via the process-singleton `getPackStore()` (the same store `ctx.host.store` delegates to). Concretely, in `routes.ts`:
 ```ts
 import { getPackStore } from "../extension-host/pack-store.js";
 const PRW_PACK_ID = "pr-walkthrough";
 // submit-yaml handler:
+const TERMINAL = ["submitted", "ready", "error"];        // single source for submit/status/publish/tests
 const sessionId = body.sessionId;                       // child's BOBBIT_SESSION_ID
 verifyCallerSession(req, sessionId);                    // session-secret check, below
 const binding = await getPackStore().get(PRW_PACK_ID, `binding/${sessionId}`);
 if (!binding) fail(403, "caller is not a bound PR-walkthrough reviewer");
-if (binding.status === "ready" || binding.status === "error")
-  fail(409, "this walkthrough already accepted a submission");      // idempotency
+const already = await getPackStore().get(PRW_PACK_ID, `submitted/${binding.jobId}`);
+if (already || TERMINAL.includes(binding.status))
+  fail(409, "this walkthrough already accepted a submission");      // idempotency (no duplicate submits)
 // validate the YAML shape only (full synthesis stays in the pack publish route):
 const validation = validatePrWalkthroughYaml(yaml);
 if (!validation.ok) { /* return structured schema error; persist nothing */ }
 await getPackStore().put(PRW_PACK_ID, `submitted/${binding.jobId}`,
     { yaml, baseSha: binding.baseSha, headSha: binding.headSha, submittedAt: Date.now() });
 await getPackStore().put(PRW_PACK_ID, `binding/${sessionId}`, { ...binding, status: "submitted" });
+// Finding 5: terminal-synchronous reap — close the orphan window server-side, don't wait for the panel poll.
+await orchestrationCore.dismiss(binding.parentSessionId, sessionId);
 json({ ok: true, status: "submitted", jobId: binding.jobId });
 ```
-The `bundle` server endpoint (`read_pr_walkthrough_bundle`) similarly resolves `jobId ← binding/${sessionId}` and reads `launch-bundle/${jobId}` (the run-route-prepared bundle) instead of `WalkthroughAnalysisBundleStore` keyed by an env jobId.
+The `bundle` server endpoint (`read_pr_walkthrough_bundle`) similarly resolves `jobId`+`target ← binding/${sessionId}`, then lazily resolves the analysis bundle from the target via the EXISTING server pipeline (github-adapter for GitHub PRs, git-changeset → `createAnalysisBundleFromParsedDiff` for local) and caches it in `WalkthroughAnalysisBundleStore` keyed by `jobId` — returning the SAME shape as today. `read_pr_walkthrough_bundle` behavior is byte-unchanged; only the env-jobId resolution becomes binding-driven. Trusted-host/credential logic (`preferencesStore` githubTrustedHosts, `GITHUB_TOKEN`) stays SERVER-SIDE here — which is why bundle resolution cannot move into the confined pack worker.
 
 **Caller-session verification (`verifyCallerSession`).** This is *routing/correctness, not a security boundary* (single-user trust domain — goal spec). The child session has `BOBBIT_SESSION_SECRET` in its env (set by `session-manager` for every session). Strengthen the existing `sandboxScope.sessionIds` check (`routes.ts:170-176,205-211`) by additionally verifying the session secret: the tool sends `X-Bobbit-Session-Secret: <BOBBIT_SESSION_SECRET>` and the server validates it via `sessionSecretStore.getOrCreateSecret(sessionId)`. This proves the caller IS `sessionId` (the child can't forge another session's id), so the YAML routes to the job bound to that session. The submit tool already runs under that env; this is a 1-line header add in `extension.ts` + a verification helper in `routes.ts`.
 
@@ -249,6 +265,7 @@ The `bundle` server endpoint (`read_pr_walkthrough_bundle`) similarly resolves `
 
 - **Polling lives in the panel → `status` pack route → `host.agents.status` + pack-store read.** The panel never touches `host.agents` (that's the server host); it only calls pack routes via `host.callRoute`.
 - **Completion signal = the submitted-YAML marker in the pack store** (`submittedKey(jobId)`), NOT the agent's idle status. Rationale: a read-only reviewer can go idle for reasons other than submission; the authoritative "done" signal is the YAML the submit endpoint persisted. The `status` route returns `phase:"submitted"` only when `submittedKey(jobId)` exists.
+- **Dismissal is server-driven, not poll-driven.** The reviewer is dismissed server-synchronously by the submit endpoint (Decision E / §3.2); the `status` route's dismiss on observing `phase:"submitted"`/`"error"` is only a redundant safety net for the rare case where the submit-side dismiss didn't run (e.g. restart between submit and dismiss — covered by the generic terminal boot-reap, Decision E).
 - **Error detection:** `phase:"error"` when `host.agents.status(childSessionId) === "terminated"` AND no `submittedKey`. A timeout in the panel loop (reuse `RUN_TIMEOUT_MS`) surfaces "the reviewer didn't produce a walkthrough — try again."
 - **The read→publish→render seam is kept verbatim:** the panel's existing `publishAndLoad(yamlText)` (`src/panel.js:200-240`) is reused; the only change is that `yamlText` comes from the `status` route response rather than `host.session.readToolCall`.
 
@@ -282,8 +299,10 @@ const onRun = async () => {
 
 - **Canonical target / changeset id.** Reuse `changesetIdForGithub(owner, repo, number, headSha)` from `src/shared/pr-walkthrough/ids.ts` (already imported by `src/panel.js:30` and re-exported by the pack's `yaml-to-cards.mjs`). The `canonicalKey` (idempotency key) is the `github:owner/repo#number` shape from `canonicalizeTarget` (`walkthrough-agent-manager.ts:780-820`) — port that pure helper into `lib/routes.mjs` (or `src/shared/pr-walkthrough/ids.ts`) so the worker can compute it without server imports.
 - **Idempotency (one reviewer per parent+target).** The `run` route reads `reviewerKey(parentSessionId, canonicalKey)`; if it points at a child whose `host.agents.status` is not `terminated`, return that child's `{jobId, childSessionId, status}` (created:false). This replaces `findByParentAndTarget` + `launchKey` dedupe. The parent session id is the bound owner session id (`ctx.sessionId`, available to the route handler as the spawn owner — the worker's `host.agents` is owner-bound).
-- **Retry on transient launch failure.** If `host.agents.spawn` throws, the `run` route returns a structured `{ ok:false, retryable:true, error }`; the panel surfaces a retry. No partial binding is written (write bindings only AFTER a successful spawn).
-- **Dismissal on terminal.** The `status` route calls `host.agents.dismiss(childSessionId)` once it observes `phase:"submitted"` (job done) — or on `phase:"error"`. Dismiss is idempotent (own-child scope).
+- **Atomic launch sequence (race-free binding).** `run` spawns with `deferInitialPrompt:true` (child created + visible but NOT started), writes `binding/${childSessionId}` + `reviewer/…`, THEN calls `host.agents.prompt(childSessionId, kickoffPrompt)`. Because the binding exists before the reviewer's first tool call, the reviewer's initial `read_pr_walkthrough_bundle`/`submit_pr_walkthrough_yaml` can never 403 on a missing binding (Decision A.5, §3.2).
+- **Retry on transient launch failure.** If `host.agents.spawn` throws (including `OrchestrationCoreError("…","ROLE_TOOLS_UNRESOLVED")` when the role's tool grants can't be resolved — Decision A.2), the `run` route returns a structured `{ ok:false, retryable:true, error, code }`; the panel surfaces a retry. No binding is written until AFTER a successful spawn, and the kickoff `host.agents.prompt` runs only AFTER the binding is persisted (§3.2), so a failure leaves no partial state.
+- **Dismissal on terminal (server-synchronous).** The submit-yaml endpoint, after persisting the YAML + marking the binding `submitted`, calls `orchestrationCore.dismiss(binding.parentSessionId, sessionId)` (thread `orchestrationCore` into the submit handler). This closes the orphan window in the happy path WITHOUT waiting for a panel poll. The `status` route's `host.agents.dismiss(childSessionId)` on `phase:"submitted"`/`"error"` becomes a **redundant safety net** (idempotent, own-child scope).
+- **Boot-reap of terminal reviewers (generic rule).** If the gateway restarts after submit but before any dismiss while the parent is still alive, the owner-gone boot reap would NOT remove the terminal reviewer. A small GENERIC rule covers this: for a `childKind:"host-agents"` reviewer child, supply `kindTerminal=true` to `OrchestrationCore.shouldReapChildOnBoot` when its pack-store `binding`/`submitted` marker is terminal (`TERMINAL`). This is the "small generic rule" the spec's Delete section anticipated (job-terminal reap moving into the pack/generic rule) — target-store-driven, minimal, and NOT a re-introduced `WalkthroughAgentStore`/`pr-walkthrough` bespoke branch.
 - **Model inheritance** is native to `OrchestrationCore.spawn` (`orchestration-core.ts:303` `opts.model ?? resolveSessionModel(owner)`) — the reviewer inherits the owner's current model automatically. No per-call model needed.
 
 ### Decision F — deletion order (master stays green)
@@ -293,8 +312,8 @@ Phased so the new path lands + is proven before the legacy path is removed. Part
 **Phase 1 — introduce the new path (legacy still present, both compile):**
 1. `OrchestrationCore` amendments (Decision A) + `server.ts` `resolveRoleAllowedTools` wiring. Add unit coverage to `orchestration-core.test.ts` / `host-agents-scope.test.ts` (role-sourced tools; explicit-full-under-readOnly).
 2. Ship the `pr-reviewer` role file + `pack.yaml` `contents.roles` + default-deny group policy.
-3. Add `run` + `status` to `lib/routes.mjs` + `pack.yaml routes.names`; add the pack-store binding/submitted/launch-bundle keys.
-4. Rewire `routes.ts` submit-yaml + bundle to resolve `jobId` from the binding and read/write the pack store; add `verifyCallerSession`. Keep the legacy manager wiring intact but no longer reached by the new tools (the new tools send no jobId/proof).
+3. Add `run` + `status` to `lib/routes.mjs` + `pack.yaml routes.names`; add the pack-store binding/submitted keys (binding carries the target; **no** launch-bundle key — the bundle is resolved server-side).
+4. Rewire `routes.ts` submit-yaml + bundle to resolve `jobId`(+`target`) from the binding and read/write the pack store; `bundle` lazily resolves the analysis bundle from the target into `WalkthroughAnalysisBundleStore` (kept); thread `orchestrationCore` into submit-yaml for the terminal-synchronous dismiss; add `verifyCallerSession`. Keep the legacy manager wiring intact but no longer reached by the new tools (the new tools send no jobId/proof).
 5. `extension.ts`: drop env-gate + proof header; send session secret.
 
 **Phase 2 — switch the panel:**
@@ -302,7 +321,7 @@ Phased so the new path lands + is proven before the legacy path is removed. Part
 
 **Phase 3 — delete legacy (now unreachable):**
 7. Delete `walkthrough-agent-manager.ts` launch path + `server.ts` wiring (`:242,:1595,:1934,:2461-2466`, the `prWalkthroughAgentManager` param). Keep `routes.ts` `bundle`/`submit-yaml`/`resolve`/`export` surfaces; remove the legacy launch endpoint `/api/pr-walkthrough/launch`.
-8. Delete `walkthrough-reap.ts` + its references; rely on `OrchestrationCore.shouldReapChildOnBoot`.
+8. Delete `walkthrough-reap.ts` + its references; rely on `OrchestrationCore.shouldReapChildOnBoot`, extended with the GENERIC terminal-marker rule (Decision E): a `childKind:"host-agents"` reviewer with a terminal pack-store binding gets `kindTerminal=true`. This is NOT a re-introduced `pr-walkthrough` bespoke branch.
 9. Delete the submit-proof secret entirely from `walkthrough-agent-store.ts` (`createSubmissionProof`/`hashSubmissionProof`/`verifySubmissionProof`/`rotateSubmissionProofForRestoredJob`/`walkthroughTargetEnvForJob`/`submissionProofHash`/`BOBBIT_WALKTHROUGH_SUBMIT_PROOF`).
 10. Remove the `session-manager.ts` `childKind==="pr-walkthrough"` special-cases: boot-reap branch (`:3362-3374`), `restoreWalkthroughSubmitEnv` (`:3491-3499,:3513`), sandbox-worktree skip (`:5620`, the `host-agents` child shares the parent worktree and is read-only, so the existing `!session.delegateOf` guard plus the read-only marker already prevent worktree deletion — verify and drop the `pr-walkthrough` clause). The `walkthroughJobId/walkthroughChangesetId/walkthroughTargetKey` persisted fields become dead — remove the threading (≈20 sites) OR leave the optional fields unused and unwritten (lower-risk: stop writing them in Phase 1, delete the field plumbing in Phase 3).
 
@@ -318,11 +337,11 @@ Phased so the new path lands + is proven before the legacy path is removed. Part
 
 **Group 2 — pack contributions** (`market-packs/pr-walkthrough/`)
 - `roles/pr-reviewer.yaml` (new); `pack.yaml` (`contents.roles`, `routes.names`).
-- `lib/routes.mjs`: add `run` + `status`; port `canonicalizeTarget`/changeset id; live-git launch-bundle persistence; pack-store binding keys. (`bundle`/`publish` byte-stable.)
+- `lib/routes.mjs`: add `run` (spawn `deferInitialPrompt:true` → write binding → `host.agents.prompt` kickoff) + `status`; port `canonicalizeTarget`/changeset id; pack-store binding keys (binding carries the target; **no** launch-bundle key). (`bundle`/`publish` byte-stable.)
 - `src/panel.js` + `lib/panel.js` (rebuilt): Decision D state machine; delete `RUN_PROMPT`/`postMessage`/`postErrorMessage`.
 
 **Group 3 — server PR-walkthrough routes + tools** (`src/server/pr-walkthrough/routes.ts`, `defaults/tools/pr-walkthrough/extension.ts`, group policy seed)
-- `routes.ts`: rewire submit-yaml + bundle to the pack store binding; `verifyCallerSession`; delete `/api/pr-walkthrough/launch`.
+- `routes.ts`: rewire submit-yaml + bundle to the pack store binding; `bundle` lazily resolves the analysis bundle from the binding target into `WalkthroughAnalysisBundleStore` (kept); thread `orchestrationCore` into submit-yaml for the terminal-synchronous dismiss; `verifyCallerSession`; delete `/api/pr-walkthrough/launch`.
 - `extension.ts`: drop env-gate + proof header; send session secret.
 - default `PR Walkthrough` group policy = deny.
 
@@ -335,8 +354,8 @@ Groups 1–3 are independent in Phase 1 (different files). Group 4 is Phase 3 an
 
 ## 6. `WalkthroughAgentStore` / `WalkthroughAnalysisBundleStore` disposition
 
-- `WalkthroughAgentStore` (the `prw-*` job record fs store) existed to hold the job + proof + bundle metadata for the legacy launcher. With routing moved to the pack store, the new path does **not** need it. Decision: **stop using it on the new path**; the pack-store binding (`binding/`, `submitted/`, `launch-bundle/`) is the single source of routing truth. Delete `WalkthroughAgentStore` in Phase 3 (its only remaining readers are the legacy manager + the session-manager boot-reap branch, both deleted). Keep `PrWalkthroughTarget`/`PrWalkthroughJobError` *types* if still referenced by `routes.ts` response shapes; otherwise inline minimal types.
-- `WalkthroughAnalysisBundleStore` SHAPE (`analysisBundleToParsedDiff`, `createAnalysisBundleFromParsedDiff`) is preserved, but the new `launch-bundle/${jobId}` is built by the `run` route via **live git in the worker** (the same `resolveLocalChangeset` helper `lib/routes.mjs` already uses for `bundle`) and stored in the pack store. GitHub PR title/body metadata that the legacy `github-adapter` fetched at launch is instead obtained by the reviewer via `readonly_bash` (`gh pr view`), which the read-only policy already allows and scopes to the launched PR. This removes the launch-time `github-adapter` credential dependency from the launch path. **Risk:** see §8.
+- `WalkthroughAgentStore` (the `prw-*` job record fs store) existed to hold the job + proof + bundle metadata for the legacy launcher. With routing moved to the pack store, the new path does **not** need it. Decision: **stop using it on the new path**; the pack-store binding (`binding/`, `reviewer/`, `submitted/`) is the single source of routing truth. Delete `WalkthroughAgentStore` in Phase 3 (its only remaining readers are the legacy manager + the session-manager boot-reap branch, both deleted). Keep `PrWalkthroughTarget`/`PrWalkthroughJobError` *types* if still referenced by `routes.ts` response shapes; otherwise inline minimal types.
+- `WalkthroughAnalysisBundleStore` and `github-adapter.ts` are **KEPT** (not deleted). The `/api/internal/pr-walkthrough/bundle` server endpoint resolves the analysis bundle **lazily on first read** from the binding's TARGET (owner/repo/number or baseSha/headSha/prUrl) using the EXISTING server pipeline — `github-adapter` for GitHub PRs, `git-changeset` → `createAnalysisBundleFromParsedDiff` for local changesets — caches it in `WalkthroughAnalysisBundleStore` keyed by `jobId`, and returns the SAME shape `read_pr_walkthrough_bundle` returns today. The reviewer's bundle inputs are therefore **byte-stable** and the toolchain does not change. The `run` route does NOT build a launch bundle in the worker (no `launch-bundle/` store key); the binding carries the target so the server endpoint can resolve it. Trusted-host/credential logic (`preferencesStore` githubTrustedHosts, `GITHUB_TOKEN`) stays server-side in the bundle endpoint — this is why the resolution cannot move into the confined pack worker. **Note:** see §8 #1 (a parity note, not a fidelity risk).
 
 ---
 
@@ -349,7 +368,9 @@ Groups 1–3 are independent in Phase 1 (different files). Group 4 is Phase 3 an
 | Read-only enforced (write/commit/disallowed blocked) | **Kept** `tests/pr-walkthrough-readonly-policy.test.ts` (the policy is unchanged). **New** assertion in the spawn test that the reviewer's `allowedTools === [readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml]` (no `write`/`edit`/`bash`). |
 | Submit authz without a secret: only `pr-reviewer` can submit; routed to bound job; cross-job/terminal rejected; no proof in tree | **New** unit: `general` role does NOT resolve `submit_pr_walkthrough_yaml` (group default-deny); `pr-reviewer` does. **New** API E2E: submit with a valid bound session → routed to `binding[sessionId].jobId`; submit with an unbound session → 403; second submit (terminal job) → 409. **New** repo-grep test: no `BOBBIT_WALKTHROUGH_SUBMIT_PROOF` / `x-bobbit-walkthrough-submit-proof` / `submissionProof` token anywhere (mirrors existing "no secret" grep tests). |
 | Idempotency: same PR twice → one reviewer; transient failure retries | **New** API E2E: two `run` calls for the same `canonicalKey` return the same `childSessionId` (created:false on the 2nd); a spawn failure returns `retryable:true` and writes no binding. |
-| Cleanup: archive/terminate owner cascade-reaps reviewer; terminal job dismisses; no orphan after restart | **Kept/extended** the generalized cascade + `shouldReapChildOnBoot` coverage (`orchestration-core.test.ts` / session-manager restart tests): a `childKind:"host-agents"` reviewer is cascade-reaped on owner archive and reaped on boot when owner is gone. **New** assertion that `status` dismisses on submit. |
+| Cleanup: archive/terminate owner cascade-reaps reviewer; terminal job dismisses; no orphan after restart | **Kept/extended** the generalized cascade + `shouldReapChildOnBoot` coverage (`orchestration-core.test.ts` / session-manager restart tests): a `childKind:"host-agents"` reviewer is cascade-reaped on owner archive and reaped on boot when owner is gone. **New** assertion that submit-yaml server-dismisses (and `status` dismiss is a redundant safety net). |
+| No spawn/binding race: immediate `read_pr_walkthrough_bundle` after spawn resolves the binding (no 403) | **New** API E2E: drive a `read_pr_walkthrough_bundle` immediately after `run` returns (before any poll); assert it resolves `binding/${sessionId}` and returns the bundle. The deferred-prompt launch (binding written BEFORE `host.agents.prompt`) guarantees no 403 race. |
+| No orphan reviewer after restart for TERMINAL jobs (parent still alive) | **New** restart test: reviewer submits → binding `submitted` → simulate gateway restart with the parent still alive → assert NO orphan reviewer remains (server-synchronous `orchestrationCore.dismiss` on submit + the generic terminal-marker boot-reap, Decision E). |
 | Scope: pack drives only its own reviewer child | **Kept** `tests/host-agents-scope.test.ts` (source-filtered owner scope) — extend with a `pr-reviewer` child to confirm a sibling delegate/team child is invisible. |
 | `npm run check` + unit + e2e green; full browser E2E | **New/ported** `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (replace the postMessage flow): Run → reviewer child appears in sidebar → submits → panel publishes the same cards → reviewer cleaned up; read-only denial; idempotent re-run. Use the e2e mock agent (canned, non-flaky → e2e phase, never test:manual), as `tests/e2e/host-agents.spec.ts` does. |
 
@@ -361,7 +382,7 @@ Notes:
 
 ## 8. Risks
 
-1. **Launch-bundle fidelity (highest).** Moving bundle prep from the legacy `github-adapter` (launch-time PR title/body/files) to live-git-in-worker + `gh`-via-`readonly_bash` changes what `read_pr_walkthrough_bundle` returns. Final **card** output is unaffected (the pinned synthesis runs in the unchanged `publish` route on the reviewer's YAML), but the reviewer's *inputs* differ. *Mitigation:* the read-only policy already allows `gh pr view`/`gh pr diff` scoped to the launched PR, so PR metadata remains reachable; the launch bundle keeps the `WalkthroughAnalysisBundle` shape. *Fallback if fidelity regresses:* keep a narrow server helper invoked by the `run` route via a server-only seam to pre-resolve the GitHub bundle (retains `github-adapter`), at the cost of one more server↔pack hop.
+1. **Bundle endpoint must preserve `WalkthroughAnalysisBundleStore` semantics (note, not a fidelity risk).** The analysis bundle is resolved server-side from the binding target via the unchanged `github-adapter`/`git-changeset` pipeline and cached in `WalkthroughAnalysisBundleStore` keyed by `jobId`, so `read_pr_walkthrough_bundle` returns the same shape as today — the reviewer's inputs are byte-stable and the toolchain is unchanged. The only requirement is that the `bundle` endpoint preserve the existing store semantics (lazy resolve + cache keyed by `jobId`); pinned by the kept `bundle` parity test (`tests/e2e/pr-walkthrough-api.spec.ts`).
 2. **packId constant in `routes.ts`.** The submit/bundle server routes hardcode `PRW_PACK_ID = "pr-walkthrough"` to reach the pack-scoped store. If the builtin pack's server-derived id ever differs from its directory name, the lookup breaks. *Mitigation:* assert the id via the same `resolvePackIdentityForTool`/`pack-identity` path the route dispatcher uses; pin with a test.
 3. **Group default-deny blast radius.** Setting `PR Walkthrough: deny` as a default group policy could hide the tools from any existing flow that relied on env-gated registration. *Mitigation:* the only consumer is the reviewer (granted via role); add the unit test that `general` lacks submit and that `pr-reviewer` has all three.
 4. **Accessory/visibility assumption.** Decision A relies on `createSession` applying `role.accessory` and rendering a `parentSessionId`+`childKind` child in the sidebar. *Mitigation:* verify in implementation against the team `reviewer` role (which shows `review`); if `accessory` is not auto-applied, thread it in `session-setup` (small, localized).
