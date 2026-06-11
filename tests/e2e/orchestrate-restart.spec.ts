@@ -16,6 +16,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createSession, deleteSession, connectWs, type WsMsg } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 test.describe.configure({ mode: "serial" });
 
@@ -91,6 +92,52 @@ test.describe("orchestration restart survival", () => {
 		} finally {
 			parentWs.close();
 			await deleteSession(parent);
+		}
+	});
+
+	// H1: after a restart, delegate children are re-added DORMANT (status
+	// "terminated" + placeholder RpcBridge). team_wait must collect such a child
+	// from its PERSISTED output immediately — never block on a dead placeholder
+	// until the timeout. We reproduce the dormant state by replacing the live
+	// child entry with a dormant one (exactly what restoreSessions() does for a
+	// delegate after a real reboot), then assert team_wait returns PROMPTLY with
+	// the persisted output rather than `timeout`.
+	test("team_wait collects a restored DORMANT child's persisted output well under the timeout", async ({ gateway }) => {
+		const sm = gateway.sessionManager;
+		const parent = await createSession();
+		const child = await spawnChild(parent, "dormant-collect helper");
+		try {
+			// Let the child run its spawn prompt to completion (mock agent → "OK")
+			// so a persisted transcript with assistant output exists.
+			await pollUntil(async () => sm.getSession(child)?.status === "idle" ? true : null,
+				{ timeoutMs: 15_000, intervalMs: 50, label: "child idle before dormancy" });
+			await pollUntil(async () => (await sm.getSessionOutput(child)).includes("OK") ? true : null,
+				{ timeoutMs: 15_000, intervalMs: 50, label: "child output persisted" });
+
+			// Simulate the restart: re-add the child as DORMANT from its persisted
+			// record (the boot delegate-dormancy path). The index already tracks it.
+			const ps = sm.getPersistedSession(child);
+			expect(ps?.agentSessionFile).toBeTruthy();
+			(sm as any).addDormantSession(ps);
+			expect(sm.isSessionLive(child)).toBe(false);
+
+			// team_wait against the dormant child: returns PROMPTLY (well under the
+			// 15s timeout) with the persisted output, settled as idle — not `timeout`.
+			const started = Date.now();
+			const waitResp = await apiFetch(`/api/sessions/${parent}/orchestrate/wait`, {
+				method: "POST",
+				body: JSON.stringify({ childSessionIds: [child], timeout_ms: 15_000 }),
+			});
+			expect(waitResp.status).toBe(200);
+			const waitJson = await waitResp.json();
+			expect(Date.now() - started).toBeLessThan(5_000);
+			expect(waitJson.firstIdle).toBe(child);
+			expect(waitJson.statuses[0].status).toBe("idle");
+			expect(waitJson.statuses[0].status).not.toBe("timeout");
+			expect(waitJson.outputTail ?? "").toContain("OK");
+		} finally {
+			await deleteSession(child).catch(() => {});
+			await deleteSession(parent).catch(() => {});
 		}
 	});
 

@@ -125,6 +125,38 @@ test.describe("team_wait — first-settled + status line", () => {
 		}
 	});
 
+	// M3: a non-streaming child with pending prompt-queue rows must be reported
+	// `queued` (not `idle`) in the all-children status line. We construct that
+	// state deterministically: an idle child with a row pushed DIRECTLY onto its
+	// prompt queue (no enqueuePrompt → no drain), so it stays idle-with-queue.
+	test("a non-streaming child with a queued prompt is reported `queued`", async ({ gateway }) => {
+		const parent = await createSession();
+		const quick = await spawnChild(parent, "settles first");
+		const queued = await spawnChild(parent, "has queued work");
+		try {
+			// Both children reach idle (mock agent → "OK").
+			for (const c of [quick, queued]) {
+				await pollUntil(async () => (await sessionStatus(c)) === "idle" ? true : null,
+					{ timeoutMs: 15_000, intervalMs: 50, label: `${c} idle` });
+			}
+			// Push a row straight onto `queued`'s prompt queue — does NOT trigger a
+			// drain, so the session stays idle with a non-empty queue.
+			gateway.sessionManager.getSession(queued)!.promptQueue.enqueue("pending follow-up");
+			expect(gateway.sessionManager.getQueuedPromptCount(queued)).toBeGreaterThan(0);
+
+			// policy:first → `quick` (listed first, idle) settles; `queued` is reported
+			// via its LIVE status, which must now be `queued`, not `idle`.
+			const result = await waitFirst(parent, [quick, queued], 15_000);
+			const byId = new Map(result.statuses.map((s: any) => [s.sessionId, s.status]));
+			expect(byId.get(quick)).toBe("idle");
+			expect(byId.get(queued)).toBe("queued");
+		} finally {
+			await dismiss(parent, quick);
+			await dismiss(parent, queued);
+			await deleteSession(parent);
+		}
+	});
+
 	test("already-idle child returns immediately with All-settled wording", async () => {
 		const parent = await createSession();
 		const quick = await spawnChild(parent, "quick helper");

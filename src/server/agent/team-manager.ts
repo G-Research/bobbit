@@ -1825,12 +1825,28 @@ export class TeamManager {
 			this.sessionToGoal.set(session.id, goalId);
 			this.persistEntry(goalId);
 
-			// Route the spawn through OrchestrationCore (goal adapter): register the
-			// worker as a tracked child keyed on the team-lead so it is visible to
-			// the shared orchestration index. Runtime-only and behaviour-preserving
-			// — the goal-scoped worktree/role/gate semantics above are unchanged;
-			// team children are nudged on restart by team-manager (not the core's
-			// reminder, which filters childKind!=="team").
+			// Goal adapter ↔ OrchestrationCore (M2). The team worker's CREATE call
+			// stays here (not routed through OrchestrationCore.spawn) on purpose —
+			// after an honest attempt, routing it through the core would REGRESS goal
+			// semantics that the goal-agnostic core deliberately does not model:
+			//   • Tool set: core.spawn computes the child's allowedTools as the OWNER's
+			//     effective set minus the spawn verbs. A team worker must instead get
+			//     ITS ROLE's default tools (reviewer ≠ team-lead-minus-spawn) — which
+			//     createSession derives from `roleName`. Routing through the core would
+			//     silently hand workers the lead's tool set.
+			//   • Worktree: team-manager PRE-CREATES the sub-branch worktree (with
+			//     subdir-offset / sandbox-container handling) and passes the resolved
+			//     cwd; core.spawn's sub-branch mode instead asks createSession to create
+			//     the worktree (worktreeOpts) — a different, double-creating strategy.
+			//   • Dropped fields: rolePrompt (resolved template text), workflowContext,
+			//     sandboxBaseBranch and `sandboxed` are goal-specific and absent from
+			//     SpawnOpts; the live `session` object (rpcClient.prompt + event
+			//     subscription below) is needed back, not just a ChildHandle.
+			// The core still OWNS tracking/lifecycle/reap for this child via
+			// registerChild: it is keyed on the team-lead in the shared index, so the
+			// unified orchestration verbs, archive cascade-reap and restart rebuild all
+			// cover it. Team children are nudged on restart by team-manager (the core's
+			// reminder filters childKind!=="team").
 			if (entry.teamLeadSessionId) {
 				try {
 					this.config.orchestrationCore?.registerChild({

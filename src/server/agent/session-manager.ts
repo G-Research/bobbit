@@ -246,6 +246,14 @@ export interface SessionInfo {
 	promptQueue: PromptQueue;
 	/** Error message captured when restoreSession() failed; cleared on successful revive. */
 	restoreError?: string;
+	/**
+	 * True for a DORMANT entry (restored delegate/kinded child whose agent process
+	 * is NOT running — placeholder RpcBridge). Used by `isSessionLive` so the
+	 * OrchestrationCore wait path resolves such a child from persisted output
+	 * instead of blocking on a dead client (H1). Cleared once `restoreSession`
+	 * replaces the entry with a live one.
+	 */
+	dormant?: boolean;
 	/** In-flight persistSessionMetadata promise (awaited before terminate) */
 	pendingMetadataPersist?: Promise<void>;
 	/**
@@ -3451,6 +3459,7 @@ export class SessionManager {
 			status: "terminated",
 			statusVersion: 0,
 			restoreError,
+			dormant: true,
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
@@ -4115,6 +4124,16 @@ export class SessionManager {
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
 			? sourceAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
 			: undefined;
+		// H2 — PERSIST the (already-stripped) allow-list so restart/revive preserves
+		// the recursion guard (spawn verbs removed) AND read-only restrictions
+		// (mutating tools removed). persistOnce persists `allowedTools` ONLY from
+		// `plan.sessionScopedAllowedTools`; without this the child's persisted
+		// allowedTools is undefined and a restored child falls back to role defaults
+		// — silently re-enabling team_delegate/team_spawn (grandchildren) and the
+		// mutating tools a read-only child must never carry.
+		const sessionScopedAllowedTools = sourceAllowedTools && sourceAllowedTools.length > 0
+			? [...sourceAllowedTools]
+			: undefined;
 
 		const plan: SessionSetupPlan = {
 			id,
@@ -4131,6 +4150,9 @@ export class SessionManager {
 			instructions: opts.instructions,
 			context: opts.context,
 			effectiveAllowedTools: parentAllowedTools,
+			// Persist the stripped allow-list (H2) so restart preserves the
+			// recursion + read-only restrictions instead of reverting to role defaults.
+			sessionScopedAllowedTools,
 			projectId: parentProjectId,
 			// Model inheritance (§2.2): forward the resolved owner model/thinking
 			// level so a delegate no longer silently drops to the system default.
@@ -4223,33 +4245,85 @@ export class SessionManager {
 	}
 
 	/**
-	 * Get the final assistant output from a session's messages.
+	 * Whether the session has a LIVE (running) agent process. False for a dormant
+	 * restored child (placeholder RpcBridge) or a session no longer tracked. Used
+	 * by OrchestrationCore.wait (H1) to avoid blocking `waitForIdle` on a dead
+	 * client and instead resolve from persisted output.
 	 */
-	async getSessionOutput(sessionId: string): Promise<string> {
+	isSessionLive(sessionId: string): boolean {
 		const session = this.sessions.get(sessionId);
-		if (!session) return "";
+		return !!session && session.dormant !== true;
+	}
 
-		const msgsResp = await session.rpcClient.getMessages();
-		if (!msgsResp.success) return "";
+	/** Pending prompt-queue length — drives OrchestrationCore's `queued` mapping (M3). */
+	getQueuedPromptCount(sessionId: string): number {
+		return this.sessions.get(sessionId)?.promptQueue.length ?? 0;
+	}
 
-		const messages = msgsResp.data?.messages || msgsResp.data;
-		if (!Array.isArray(messages)) return "";
-
-		// Collect text from all assistant messages
+	/**
+	 * Extract concatenated assistant text from a parsed message list (shared by
+	 * the live and persisted-transcript output paths).
+	 */
+	private extractAssistantText(messages: unknown[]): string {
 		const texts: string[] = [];
-		for (const msg of messages) {
-			if (msg.role === "assistant") {
-				const content = msg.content;
-				if (typeof content === "string") {
-					texts.push(content);
-				} else if (Array.isArray(content)) {
-					for (const block of content) {
-						if (block.type === "text" && block.text) texts.push(block.text);
-					}
+		for (const msg of messages as Array<{ role?: string; content?: unknown }>) {
+			if (msg?.role !== "assistant") continue;
+			const content = msg.content;
+			if (typeof content === "string") {
+				texts.push(content);
+			} else if (Array.isArray(content)) {
+				for (const block of content) {
+					if (block?.type === "text" && block.text) texts.push(block.text);
 				}
 			}
 		}
 		return texts.join("\n\n");
+	}
+
+	/**
+	 * Read a (dormant/non-live) session's final assistant output from its PERSISTED
+	 * transcript file. Used as the H1 fallback so a child that completed before a
+	 * restart can still be collected via team_wait without a live process.
+	 */
+	private async getPersistedSessionOutput(sessionId: string): Promise<string> {
+		const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
+		if (!ps?.agentSessionFile) return "";
+		try {
+			const ctx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
+			const content = await sessionFileRead(ctx, ps.agentSessionFile, this.sandboxManager);
+			if (!content) return "";
+			const messages: unknown[] = [];
+			for (const line of content.split(/\r?\n/)) {
+				if (!line.trim()) continue;
+				try {
+					const entry = JSON.parse(line);
+					if (entry.type === "message" && entry.message) messages.push(entry.message);
+				} catch { /* skip malformed line */ }
+			}
+			return this.extractAssistantText(messages);
+		} catch {
+			return "";
+		}
+	}
+
+	/**
+	 * Get the final assistant output from a session's messages. For a dormant /
+	 * non-live session (no running agent process) this reads the PERSISTED
+	 * transcript instead of querying the placeholder RpcBridge (H1).
+	 */
+	async getSessionOutput(sessionId: string): Promise<string> {
+		const session = this.sessions.get(sessionId);
+		if (!session || session.dormant === true) {
+			return this.getPersistedSessionOutput(sessionId);
+		}
+
+		const msgsResp = await session.rpcClient.getMessages();
+		if (!msgsResp.success) return this.getPersistedSessionOutput(sessionId);
+
+		const messages = msgsResp.data?.messages || msgsResp.data;
+		if (!Array.isArray(messages)) return "";
+
+		return this.extractAssistantText(messages);
 	}
 
 	/** Query the agent for its session file and save metadata to disk */

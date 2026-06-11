@@ -25,6 +25,8 @@ interface FakeSession extends OrchestrationSessionLike {
 	output?: string;
 	/** How waitForIdle settles: resolve | reject-timeout | reject-exit | pending. */
 	wait?: "resolve" | "reject-timeout" | "reject-exit" | "pending";
+	/** When false, the session has no live process (dormant restored child, H1). */
+	live?: boolean;
 }
 
 class FakeView implements OrchestrationSessionView {
@@ -77,6 +79,9 @@ class FakeView implements OrchestrationSessionView {
 	getPersistedSession(id: string): PersistedSessionLike | undefined { return this.persisted.get(id); }
 	async terminateSession(id: string): Promise<boolean> { this.terminated.push(id); return true; }
 	async forceAbort(id: string): Promise<void> { this.aborted.push(id); }
+	// A FakeSession is live unless explicitly marked `live:false` (dormant, H1).
+	isSessionLive(id: string): boolean { return (this.live.get(id)?.live ?? true) !== false; }
+	getQueuedPromptCount(id: string): number { return this.live.get(id)?.queuedPromptCount ?? 0; }
 }
 
 function makeCore(view: FakeView, model?: string, resolveEffectiveTools?: (id: string) => string[] | undefined) {
@@ -253,6 +258,59 @@ describe("OrchestrationCore.wait — policy all/first + terminal handling", () =
 		view.owner("owner-1");
 		const core = makeCore(view);
 		await assert.rejects(core.wait("owner-1", ["not-mine"], { policy: "all", timeoutMs: 1 }), /not owned/i);
+	});
+
+	it("H1: a DORMANT child with persisted output settles as idle immediately (never blocks on waitForIdle)", async () => {
+		// A restored dormant child has a placeholder bridge: waitForIdle would block
+		// until timeout. The core must resolve it from persisted output instead.
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view);
+		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a" });
+		const s = view.live.get(a.sessionId)!;
+		s.live = false;            // dormant — no live process
+		s.status = "terminated";   // placeholder status
+		s.output = "completed before restart";
+		s.wait = "pending";        // would hang forever if waitForIdle were used
+
+		// Tiny timeout: if the dormant short-circuit were missing this would reject/hang.
+		const result = await core.wait("owner-1", [a.sessionId], { policy: "all", timeoutMs: 50 });
+		assert.equal(result.statuses[0].status, "idle");
+		assert.equal(result.firstIdle, a.sessionId);
+		assert.equal(result.firstIsTerminal, false);
+		assert.equal(result.remaining, 0);
+		assert.match(result.outputTail ?? "", /completed before restart/);
+	});
+
+	it("H1: a DORMANT child with NO persisted result settles as terminated (not a timeout block)", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view);
+		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a" });
+		const s = view.live.get(a.sessionId)!;
+		s.live = false;
+		s.status = "terminated";
+		s.output = "";
+		s.wait = "pending";
+		const result = await core.wait("owner-1", [a.sessionId], { policy: "all", timeoutMs: 50 });
+		assert.equal(result.statuses[0].status, "terminated");
+		assert.equal(result.remaining, 0);
+	});
+
+	it("M3: a non-streaming child with a non-empty prompt queue is reported `queued`", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view);
+		const settled = await core.spawn({ ownerSessionId: "owner-1", instructions: "settled" });
+		const queued = await core.spawn({ ownerSessionId: "owner-1", instructions: "queued" });
+		// `settled` finishes; `queued` is idle but has pending follow-up work.
+		const s = view.live.get(settled.sessionId)!; s.status = "idle"; s.wait = "resolve";
+		const q = view.live.get(queued.sessionId)!; q.status = "idle"; q.wait = "pending"; q.queuedPromptCount = 2;
+		// policy:first → `settled` (listed first) wins; `queued` is reported via live status.
+		const result = await core.wait("owner-1", [settled.sessionId, queued.sessionId], { policy: "first", timeoutMs: 50 });
+		const byId = new Map(result.statuses.map(x => [x.sessionId, x.status]));
+		assert.equal(byId.get(settled.sessionId), "idle");
+		assert.equal(byId.get(queued.sessionId), "queued");
 	});
 });
 

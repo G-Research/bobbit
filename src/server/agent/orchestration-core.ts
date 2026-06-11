@@ -65,10 +65,20 @@ export function isSettledStatus(s: ChildStatus): boolean {
 /** The raw session status vocabulary used by SessionManager. */
 export type RawSessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
-/** Map a live SessionManager status to the orchestration ChildStatus vocabulary. */
-export function liveStatusToChildStatus(status: RawSessionStatus | string | undefined): ChildStatus {
+/**
+ * Map a live SessionManager status to the orchestration ChildStatus vocabulary.
+ *
+ * `queuedPromptCount` (M3): a NON-streaming child that has pending prompt-queue
+ * rows is reported as `queued` rather than `idle`. `session.status` alone never
+ * surfaces queued follow-up work, so callers thread the child's prompt-queue
+ * length here (see `OrchestrationCore.liveChildStatus`).
+ */
+export function liveStatusToChildStatus(
+	status: RawSessionStatus | string | undefined,
+	opts?: { queuedPromptCount?: number },
+): ChildStatus {
 	switch (status) {
-		case "idle": return "idle";
+		case "idle": return (opts?.queuedPromptCount ?? 0) > 0 ? "queued" : "idle";
 		case "streaming": return "streaming";
 		case "aborting": return "streaming"; // still mid-turn from the caller's POV
 		case "terminated": return "terminated";
@@ -189,6 +199,8 @@ export interface OrchestrationSessionLike {
 	title?: string;
 	cwd?: string;
 	allowedTools?: string[];
+	/** Pending prompt-queue rows — drives the `queued` status mapping (M3). */
+	queuedPromptCount?: number;
 }
 
 export interface ReadTranscriptLike {
@@ -233,6 +245,17 @@ export interface OrchestrationSessionView {
 	getPersistedSession(id: string): PersistedSessionLike | undefined;
 	terminateSession(id: string): Promise<boolean>;
 	forceAbort(id: string, gracePeriodMs?: number): Promise<void>;
+	/**
+	 * Whether the session has a LIVE (running) agent process behind it (H1).
+	 * `false` for a dormant/restored child (placeholder RpcBridge): `waitForIdle`
+	 * on such a child would block on a dead client until timeout, so the core
+	 * resolves it immediately from persisted output instead. Optional: when a
+	 * view does not implement it the core falls back to the live `waitForIdle`
+	 * path (its prior behaviour).
+	 */
+	isSessionLive?(id: string): boolean;
+	/** Pending prompt-queue length for the `queued` status mapping (M3). Optional. */
+	getQueuedPromptCount?(id: string): number;
 }
 
 export interface OrchestrationCoreDeps {
@@ -495,16 +518,44 @@ export class OrchestrationCore {
 		return { output: await this.deps.sessionManager.getSessionOutput(childId) };
 	}
 
-	/** Per-child settle: never rejects — maps a `waitForIdle` rejection to a terminal status (§2.3). */
-	private settle(childId: string, timeoutMs: number): Promise<{ id: string; terminal?: TerminalChildStatus }> {
+	/**
+	 * Per-child settle: never rejects — always resolves to a settled `ChildStatus`
+	 * (idle or terminal, §2.3).
+	 *
+	 * H1 — dormant/restored children: a child re-added DORMANT on restart
+	 * (`addDormantSession`: status "terminated" + placeholder RpcBridge) has no
+	 * live process, so `waitForIdle` would subscribe to a dead client and block
+	 * until `timeoutMs`. Instead, when the session is NOT live we resolve
+	 * IMMEDIATELY from persisted state: a child that completed before the restart
+	 * has persisted transcript output → treated as `idle` (collectable); one with
+	 * no persisted result → `terminated`. Either way there is no full-timeout block,
+	 * so the restart flow (reminder → team_wait → collect) actually collects.
+	 */
+	private async settle(childId: string, timeoutMs: number): Promise<{ id: string; status: ChildStatus }> {
+		const isLive = this.deps.sessionManager.isSessionLive;
+		if (isLive && isLive.call(this.deps.sessionManager, childId) === false) {
+			const out = await this.deps.sessionManager.getSessionOutput(childId).catch(() => "");
+			return { id: childId, status: out.trim().length > 0 ? "idle" : "terminated" };
+		}
 		return this.deps.sessionManager.waitForIdle(childId, timeoutMs)
-			.then(() => ({ id: childId }))
-			.catch((err) => ({ id: childId, terminal: classifyTerminal(err) }));
+			.then(() => ({ id: childId, status: "idle" as ChildStatus }))
+			.catch((err) => ({ id: childId, status: classifyTerminal(err) as ChildStatus }));
 	}
 
 	private childTitle(childId: string): string | undefined {
 		return this.deps.sessionManager.getSession(childId)?.title
 			?? this.deps.sessionManager.getPersistedSession(childId)?.title;
+	}
+
+	/**
+	 * Live (non-settled) status for a child, including the `queued` mapping (M3):
+	 * a non-streaming child with pending prompt-queue rows is reported `queued`.
+	 */
+	private liveChildStatus(childId: string): ChildStatus {
+		const status = this.deps.sessionManager.getSession(childId)?.status;
+		const queuedPromptCount = this.deps.sessionManager.getQueuedPromptCount?.(childId)
+			?? this.deps.sessionManager.getSession(childId)?.queuedPromptCount;
+		return liveStatusToChildStatus(status, { queuedPromptCount });
 	}
 
 	/**
@@ -521,21 +572,22 @@ export class OrchestrationCore {
 		for (const id of childIds) this.requireOwnChild(ownerId, id);
 		this.audit({ event: "wait", ownerSessionId: ownerId, detail: `policy=${opts.policy} n=${childIds.length}` });
 
-		const terminalById = new Map<string, TerminalChildStatus>();
+		const settledStatus = new Map<string, ChildStatus>();
 
 		if (opts.policy === "all") {
 			const settled = await Promise.all(childIds.map(id => this.settle(id, opts.timeoutMs)));
-			for (const s of settled) if (s.terminal) terminalById.set(s.id, s.terminal);
+			for (const s of settled) settledStatus.set(s.id, s.status);
 		} else {
 			// Race: first settled wins. Other settle promises keep running with a
 			// no-op catch already attached (no unhandled rejection).
 			const first = await Promise.race(childIds.map(id => this.settle(id, opts.timeoutMs)));
-			if (first.terminal) terminalById.set(first.id, first.terminal);
+			settledStatus.set(first.id, first.status);
 		}
 
 		const statuses = childIds.map(id => {
-			const terminal = terminalById.get(id);
-			const status: ChildStatus = terminal ?? liveStatusToChildStatus(this.deps.sessionManager.getSession(id)?.status);
+			// A settled child carries its resolved (idle/terminal) status; the rest are
+			// reported with their LIVE status (incl. the M3 `queued` mapping).
+			const status: ChildStatus = settledStatus.get(id) ?? this.liveChildStatus(id);
 			return { sessionId: id, status, title: this.childTitle(id) };
 		});
 
