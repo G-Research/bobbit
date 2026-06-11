@@ -81,6 +81,28 @@ export function setPanelHostFactory(
 	panelHostFactory = fn;
 }
 
+/** Sibling of {@link panelHostFactory} for LAUNCHER entrypoints (pack schema V1
+ *  §8.4). A spawn launcher needs `callRoute` (to call its pack `run` route) +
+ *  `ui.openPanel` (to open the returned child's pane) bound to THE PACK and THE
+ *  ACTIVE (owner) session — so the route's `ctx.sessionId` is the owner and resolves
+ *  the owner branch's PR. host-api.ts self-registers it at bootstrap (binding the
+ *  `{kind:"pack", contributionKind:"entrypoint"}` surface), mirroring
+ *  {@link panelHostFactory}, so pack-panels stays free of a host-api import cycle.
+ *  When unset (unit fixtures) {@link getLauncherHost} returns undefined and the
+ *  spawn dispatch surfaces an inline "unavailable" error rather than throwing.
+ *
+ *  `contributionId` is the launcher's OWN entrypoint id (e.g.
+ *  `pr-walkthrough.git-widget`) — the surface-token mint validates it against the
+ *  pack's registered entrypoints (`getEntrypoint`), so it MUST be a real entrypoint
+ *  id, mirroring how {@link panelHostFactory} threads the panelId. */
+let launcherHostFactory: ((sessionId: string | undefined, packId: string, contributionId: string) => HostApi) | undefined;
+export function setLauncherHostFactory(fn: (sessionId: string | undefined, packId: string, contributionId: string) => HostApi): void {
+	launcherHostFactory = fn;
+}
+export function getLauncherHost(packId: string, contributionId: string): HostApi | undefined {
+	return launcherHostFactory?.(currentSessionIdForPanel(), packId, contributionId);
+}
+
 /** The CANONICAL session-switch entrypoint (`connectToSession(sessionId, false)`
  *  in session-manager.ts — the same path the sidebar uses). Injected once at
  *  bootstrap (session-manager self-registers it) rather than statically imported,

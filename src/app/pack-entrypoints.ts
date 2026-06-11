@@ -34,7 +34,7 @@
 
 import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { setExtRoute } from "./routing.js";
-import { openPackPanel } from "./pack-panels.js";
+import { openPackPanel, getLauncherHost } from "./pack-panels.js";
 import type { PanelTarget, RouteTarget } from "../shared/extension-host/host-api.js";
 
 /** Launcher kinds (a clickable surface) PLUS the routable `route` kind (a
@@ -44,14 +44,25 @@ export type EntrypointKind = "composer-slash" | "git-widget-button" | "command-p
 /** The launcher kinds — those that render a clickable surface. */
 export type LauncherKind = "composer-slash" | "git-widget-button" | "command-palette";
 
-/** A launcher entrypoint: click → openPanel/navigate. NO auto-invoke on mount —
- *  invocation is the user gesture (design §7 C1.3, v1 §5 v). */
+/** A launcher that, on click, calls the owning pack's `route` (POST, empty body),
+ *  then opens `panelId` in the returned `childSessionId` (auto-switching to it).
+ *  Discriminated by `action: "spawn"`. Pack purity: the pack declares ONLY this
+ *  data; the route call + navigation go through the versioned Host API
+ *  (design pr-walkthrough-launch-ux.md §3.1). */
+export interface SpawnLaunchTarget {
+	action: "spawn";
+	route: string;        // pack route name, e.g. "run"
+	panelId: string;      // panel to open in the returned childSessionId
+}
+
+/** A launcher entrypoint: click → openPanel/navigate/spawn. NO auto-invoke on
+ *  mount — invocation is the user gesture (design §7 C1.3, v1 §5 v). */
 export interface LauncherEntrypoint {
 	id: string;
 	packId: string;
 	kind: LauncherKind;
 	label: string;
-	target: PanelTarget | RouteTarget;
+	target: PanelTarget | RouteTarget | SpawnLaunchTarget;
 }
 
 /** A deep-linkable client route: maps a `routeId` → the panel it opens + the
@@ -90,7 +101,7 @@ interface RegisteredLauncher {
 	packId: string;
 	kind: LauncherKind;
 	label: string;
-	target: PanelTarget | RouteTarget;
+	target: PanelTarget | RouteTarget | SpawnLaunchTarget;
 	projectId?: string;
 }
 
@@ -129,8 +140,18 @@ function isRouteEntrypoint(ep: EntrypointInfo): ep is RouteEntrypoint {
 	return ep.kind === "route";
 }
 
+/** A spawn launcher target IFF it carries `action:"spawn"` + string route/panelId.
+ *  Detection MUST run BEFORE {@link isPanelTarget}: a SpawnLaunchTarget also carries
+ *  a `panelId`, so an `action`-first check is what keeps a spawn launcher from being
+ *  mis-routed to `openPackPanel` (design §3.1 / R3). */
+function isSpawnLaunchTarget(t: unknown): t is SpawnLaunchTarget {
+	return !!t && (t as SpawnLaunchTarget).action === "spawn"
+		&& typeof (t as SpawnLaunchTarget).route === "string"
+		&& typeof (t as SpawnLaunchTarget).panelId === "string";
+}
+
 /** A target is a PanelTarget IFF it carries a `panelId`; otherwise a RouteTarget. */
-function isPanelTarget(t: PanelTarget | RouteTarget | undefined): t is PanelTarget {
+function isPanelTarget(t: PanelTarget | RouteTarget | SpawnLaunchTarget | undefined): t is PanelTarget {
 	return !!t && typeof (t as PanelTarget).panelId === "string";
 }
 
@@ -176,7 +197,10 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 		} else {
 			if (ep.kind !== "composer-slash" && ep.kind !== "git-widget-button" && ep.kind !== "command-palette") continue;
 			if (typeof ep.label !== "string" || !ep.label) continue;
-			if (!isPanelTarget(ep.target) && !(ep.target && typeof (ep.target as RouteTarget).route === "string")) continue;
+			// Accept a spawn launcher ({action,route,panelId}) FIRST — it carries a
+			// `panelId` like a PanelTarget but is dispatched via the pack `run` route,
+			// not `openPackPanel`. A RouteTarget carries `route` but no `panelId`.
+			if (!isSpawnLaunchTarget(ep.target) && !isPanelTarget(ep.target) && !(ep.target && typeof (ep.target as RouteTarget).route === "string")) continue;
 			const key = launcherKey(ep.packId, ep.id);
 			nextLaunchers.set(key, {
 				key,
@@ -232,8 +256,17 @@ export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher
  * (e.g. the `__bobbitRunPackLauncher` E2E hook) a bare id is also accepted IFF it
  * resolves UNAMBIGUOUSLY to exactly one launcher; an ambiguous bare id (two packs)
  * is a no-op so the caller must use the compound key. A no-op for an unknown key.
+ *
+ * A SpawnLaunchTarget launcher calls its pack's `route` (POST) and, on `ok:true`,
+ * opens the returned child's panel (auto-switching). The optional `onResult`
+ * callback reports the dispatch outcome so a surface (e.g. GitStatusWidget) can
+ * render a `NO_PR`/failure inline; it is invoked `{ok:true}` for the
+ * panel/route paths too. Callers that pass no callback still spawn + switch on
+ * success (backward-compatible).
  */
-export function runLauncherEntrypoint(keyOrId: string): void {
+export interface LauncherDispatchResult { ok: boolean; error?: string; code?: string; }
+
+export function runLauncherEntrypoint(keyOrId: string, onResult?: (r: LauncherDispatchResult) => void): void {
 	let l = launchers.get(keyOrId);
 	if (!l) {
 		// Narrow fallback: a bare id that matches exactly ONE launcher resolves it.
@@ -248,10 +281,51 @@ export function runLauncherEntrypoint(keyOrId: string): void {
 			return;
 		}
 	}
-	if (isPanelTarget(l.target)) {
-		openPackPanel(l.target, l.packId);
-	} else {
-		navigateToTarget(l.target as RouteTarget);
+	// Spawn launcher FIRST (it also carries a `panelId`, so an `action`-first check
+	// keeps it from being mis-routed to `openPackPanel`; design §3.1 / R3).
+	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult); return; }
+	if (isPanelTarget(l.target)) { openPackPanel(l.target, l.packId); onResult?.({ ok: true }); return; }
+	navigateToTarget(l.target as RouteTarget);
+	onResult?.({ ok: true });
+}
+
+/** Within-gesture double-spawn guard, keyed by compound launcher key (replaces the
+ *  removed server-side `reviewerKey` dedup). A single click cannot double-spawn;
+ *  a deliberate second click (after the first resolves) DOES spawn a fresh
+ *  reviewer (always-fresh, Q4). */
+const inFlightSpawnLaunch = new Set<string>();
+
+/** Dispatch a SpawnLaunchTarget: call the pack `route` (POST, empty body) on the
+ *  active (owner) session via the launcher-bound Host API; on `ok:true` open the
+ *  returned child's panel (which selects + switches). `ok:false` / errors flow back
+ *  through `onResult` so the surface renders them inline — nothing is spawned on the
+ *  owner session and the view never switches on failure. */
+async function runSpawnLauncher(
+	l: RegisteredLauncher,
+	target: SpawnLaunchTarget,
+	onResult?: (r: LauncherDispatchResult) => void,
+): Promise<void> {
+	if (inFlightSpawnLaunch.has(l.key)) return;      // ignore re-entrant click
+	inFlightSpawnLaunch.add(l.key);
+	try {
+		const host = getLauncherHost(l.packId, l.id);
+		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: "PR Walkthrough is unavailable." }); return; }
+		let res: { ok?: boolean; childSessionId?: string; error?: string; code?: string } | undefined;
+		try {
+			res = await host.callRoute(target.route, { method: "POST", body: {} });
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			onResult?.({ ok: false, error: message });
+			return;
+		}
+		if (!res || res.ok === false) { onResult?.({ ok: false, error: res?.error, code: res?.code }); return; }
+		// ok:true → open the panel in the returned child session (selects + switches).
+		if (res.childSessionId && host.ui?.openPanel) {
+			host.ui.openPanel({ panelId: target.panelId, sessionId: res.childSessionId, params: {} });
+		}
+		onResult?.({ ok: true });
+	} finally {
+		inFlightSpawnLaunch.delete(l.key);
 	}
 }
 
@@ -306,7 +380,11 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 				out.push({ id, packId, kind: "route", routeId, target: { panelId, params: target?.params }, paramKeys });
 			} else if (kind === "composer-slash" || kind === "git-widget-button" || kind === "command-palette") {
 				const label = typeof e.label === "string" ? e.label : undefined;
-				const target = e.target as PanelTarget | RouteTarget | undefined;
+				// Pass the launcher target through UNCHANGED — a PanelTarget, a RouteTarget,
+				// OR a SpawnLaunchTarget ({action,route,panelId}). We do not validate the
+				// target internals here (registration does), so the spawn shape survives the
+				// contributions wire.
+				const target = e.target as PanelTarget | RouteTarget | SpawnLaunchTarget | undefined;
 				if (!label || !target) continue;
 				out.push({ id, packId, kind, label, target });
 			}
