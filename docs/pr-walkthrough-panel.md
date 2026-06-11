@@ -149,7 +149,11 @@ not an isolated reviewer. With `host.agents` now able to spawn a real,
 sandbox-inherited child, the walkthrough runs as its own properly-scoped,
 read-only principal again. See
 [docs/design/pr-walkthrough-host-agents-migration.md](design/pr-walkthrough-host-agents-migration.md)
-for the full design record.
+for the full design record, and
+[docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md)
+for the restore-UX design that put the pane back in the child session, added
+one-click auto-run, hardened the poll loop, and added the `PanelTarget.sessionId`
+Host-API capability.
 
 ### The run / status / recover routes
 
@@ -236,7 +240,31 @@ spawn:
 
 The reviewer child gets its tools from the pack-shipped **`pr-reviewer` role**
 (`market-packs/pr-walkthrough/roles/pr-reviewer.yaml`), which resolves to
-**exactly** the three walkthrough tools. The role `allow`s the `PR Walkthrough`
+**exactly** the three walkthrough tools.
+
+**The role must resolve cascade-first.** Because `pr-reviewer` ships *in the pack*,
+it lives in the config cascade, not the in-memory `RoleManager`. Every server path
+that resolves the reviewer's role for a session must therefore consult
+`configCascade.resolveRoles(projectId)` (falling back to `RoleManager` only when no
+project cascade is available) — the same pattern the spawn-time allowlist already
+used. Two paths previously looked the role up in `RoleManager` alone, got
+`undefined`, and fell through to group defaults: the tool-**guard** generation
+(`lookupRole` in `src/server/agent/session-setup.ts`) and the restore/respawn role
+resolution (`resolveSessionRole(projectId)` in
+`src/server/agent/session-manager.ts`). With the `PR Walkthrough` group now
+default-deny, that fall-through hard-blocked all three walkthrough tools, so the
+spawned reviewer held the right allowlist yet was rejected on every call ("Tool X
+is not permitted for this role") — and, resolving the role's `promptTemplate`
+through the same `RoleManager`-only lookup, it never received the submission YAML
+schema. Resolving cascade-first in both paths (and threading the pack role's
+`promptTemplate` into the child's system prompt via `resolveRolePromptTemplate` +
+`createSession`'s `rolePrompt`) is what lets the reviewer actually **call** its
+tools and know the schema. This is pinned by a unit test asserting the generated
+guard carries no `never` entries for the three tools, plus
+`tests/e2e/pr-walkthrough-host-agents.spec.ts`. See
+[docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md) § A.
+
+The role `allow`s the `PR Walkthrough`
 tool group and **denies every other fixed group plus all MCP servers** (an
 `mcp__` wildcard deny), so a read-only reviewer holds no state-mutating or
 orchestration tools. The `PR Walkthrough` group is **default-deny for every other

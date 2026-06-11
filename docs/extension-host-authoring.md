@@ -543,18 +543,31 @@ if (host.contractVersion >= 2) target.sessionId = childSessionId;
 host.ui.openPanel(target);
 ```
 
-When `sessionId` is present the platform **selects** that session (the same `selectedSessionId`
-the normal session-select path drives, so the sidebar highlight + main view follow) and mounts
-the tab **under that session** instead of the active one. The selection lives entirely in the
-platform (`src/app/pack-panels.ts`) — the pack never touches navigation/router state, preserving
-pack purity. The field is **purely additive**: omitting it is the v1 behaviour, and packs that
-never set it are unaffected.
+When `sessionId` is present the platform performs a **real session switch** to that session and
+mounts the tab **under it** instead of the active one. The switch is the *canonical*
+`connectToSession(sessionId, false)` path — the exact same full switch the sidebar drives (cache
+the outgoing panel, disconnect, set the hash route, update accessory/hue + localStorage, render,
+async-hydrate) — so the sidebar highlight, hash route, and main view all follow the pane. This is
+**not** a bare `selectedSessionId` assignment: a bare assignment skips the hash route and
+hydration, so the main view never actually follows. The platform reaches `connectToSession`
+through an **injected switcher hook** (`setSessionSwitcher` in `src/app/pack-panels.ts`, which
+`session-manager.ts` self-registers at bootstrap) rather than a static import, so the navigation
+logic lives entirely in the platform and the pack never touches navigation/router state —
+preserving pack purity. When the switcher is unset (unit fixtures that never load
+`session-manager`) it falls back to the v1 bare `selectedSessionId` assignment so the tab still
+keys under the target session. The field is **purely additive**: omitting it is the v1 behaviour,
+and packs that never set it are unaffected.
 
 This addition bumped **`HOST_CONTRACT_VERSION` 1 → 2** (the data/addressing-contract version;
 `HOST_API_VERSION` stays `1` because no method signature changed). Adding an optional field is
 additive, but the version bump lets a pack **feature-detect field support** via
 `host.contractVersion >= 2` and degrade gracefully (open in the active view) on an older host.
 No new capability flag is added — `openPanel` already lives under the `ui` capability.
+This capability was added so the PR-walkthrough pack could move its pane into a freshly
+spawned reviewer-child session; see
+[docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md) for the
+motivating design and [docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md#the-pane-lives-with-the-reviewer-child)
+for how the pack consumes it.
 
 **Panel conventions (enforced — identical to renderer rules):** theme tokens only; preserve any
 embedded iframe `sandbox` attribute (untrusted/LLM content goes in a `sandbox`ed iframe);
