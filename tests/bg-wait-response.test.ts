@@ -69,6 +69,7 @@ function sampleInfo(): BgProcessInfo {
 		pid: 4242,
 		status: "exited",
 		exitCode: 0,
+		terminalReason: "normal",
 		startTime: 1_000,
 		endTime: 2_000,
 	};
