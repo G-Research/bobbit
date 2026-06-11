@@ -18,13 +18,15 @@ accessory: review
 # default-deny; they are denied here too so the role stays exact even if a
 # project changes those group defaults.
 #
-# Residual: dynamic per-server MCP tool groups (`mcp__<server>`) use runtime
-# group keys that a static role file cannot enumerate; with an MCP server
-# configured the reviewer could additionally resolve that server's meta-tool.
-# All FIXED tool groups (including the `MCP` group → mcp_describe) are denied
-# below, so with no MCP server registered the resolved set is EXACTLY three.
+# Dynamic per-server MCP tool groups (`mcp__<server>`) use runtime group keys a
+# static role file cannot enumerate. The bare `mcp__` WILDCARD key below denies
+# ALL MCP servers at once (it matches every `mcp__<server>` meta-tool), so the
+# reviewer fails CLOSED to the three walkthrough tools even with MCP servers
+# configured. All FIXED tool groups (including the `MCP` group → mcp_describe)
+# are also denied below, so the resolved set is EXACTLY three.
 toolPolicies:
   "PR Walkthrough": allow
+  "mcp__": never
   "Agent": never
   "Ask": never
   "Browser": never

@@ -23,7 +23,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const { resolveGrantPolicy } = await import("../src/server/agent/tool-activation.ts");
+const { resolveGrantPolicy, computeEffectiveAllowedTools } = await import("../src/server/agent/tool-activation.ts");
 import type { GrantPolicy, GroupPolicyProvider } from "../src/server/agent/tool-activation.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -140,6 +140,39 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 			allowed.sort(),
 			[...PR_WALKTHROUGH_TOOLS].sort(),
 			"pr-reviewer must resolve ONLY the three PR Walkthrough tools to a non-never policy",
+		);
+	});
+
+	// FINDING 1 (fail CLOSED against DYNAMIC MCP tools): with ANY MCP server
+	// configured, `computeEffectiveAllowedTools` adds the server's meta-tool plus
+	// `mcp_describe` (both default-allow), and a static role file cannot enumerate
+	// the runtime `mcp__<server>` key. The pr-reviewer role's WILDCARD `mcp__: never`
+	// must deny every MCP server at once, so the resolved set stays EXACTLY the three
+	// walkthrough tools even with a fake MCP server present.
+	it("pr-reviewer resolves to EXACTLY the three walkthrough tools even with an MCP server configured", () => {
+		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+		const fixedTools = enumerateFixedTools();
+
+		// Minimal ToolManager exposing the full fixed tool surface. The tool YAMLs
+		// declare no grantPolicy, so getToolByName returns undefined (the runtime cascade).
+		const toolManager = {
+			getAvailableTools: () => fixedTools.map(t => ({ name: t.name, group: t.group })),
+			getToolByName: () => undefined,
+		} as unknown as Parameters<typeof computeEffectiveAllowedTools>[0];
+
+		// A fake MCP server exposing one per-op tool `mcp__fake__do`. Without the
+		// wildcard deny this surfaces the `mcp_fake` meta-tool + `mcp_describe`.
+		const fakeMcpManager = {
+			getToolInfos: () => [{ name: "mcp__fake__do", serverName: "fake", group: "MCP: fake" }],
+		};
+
+		const effective = computeEffectiveAllowedTools(toolManager, reviewer, groupPolicyStore, fakeMcpManager)
+			.map(t => t.name)
+			.sort();
+		assert.deepEqual(
+			effective,
+			[...PR_WALKTHROUGH_TOOLS].sort(),
+			"pr-reviewer must resolve ONLY the three PR Walkthrough tools (no mcp__/mcp_ tools) with an MCP server configured",
 		);
 	});
 });

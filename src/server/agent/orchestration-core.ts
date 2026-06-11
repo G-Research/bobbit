@@ -111,6 +111,15 @@ export interface SpawnOpts {
 	 *  role-carrying read-only reviewer requires the full lifecycle — Decision A.1). */
 	readOnly?: boolean;
 	context?: Record<string, string>;
+	/**
+	 * NON-SECRET tool-scoping env vars to set on the child process (additive,
+	 * alongside the gateway-set BOBBIT_SESSION_ID/SECRET). Used by tool policies
+	 * that read process env — e.g. the pr-walkthrough reviewer's launched-PR
+	 * `gh` scoping via `BOBBIT_WALKTHROUGH_TARGET_*`. This carries plain metadata
+	 * ONLY; it MUST NOT widen the child's sandbox or project (credential) scope —
+	 * those remain owner-inherited and are derived independently below.
+	 */
+	toolEnv?: Record<string, string>;
 	/** Default "bare"; "full" opt-in (Lifecycle Hub). When set it wins over the
 	 *  readOnly→bare default. */
 	lifecycle?: SpawnLifecycle;
@@ -259,6 +268,8 @@ export interface OrchestrationSessionView {
 		allowedTools?: string[];
 		initialModel?: string;
 		initialThinkingLevel?: string;
+		/** NON-SECRET tool-scoping env vars (additive; never widens sandbox/project scope). */
+		env?: Record<string, string>;
 		/** Persisted so the source discriminator survives restart (§3). Default "delegate". */
 		childKind?: string;
 		/** Persisted read-only marker (§2.2). Tool gating is via `allowedTools`. */
@@ -450,6 +461,8 @@ export class OrchestrationCore {
 				allowedTools: childAllowed,
 				initialModel: model,
 				initialThinkingLevel: thinkingLevel,
+				// NON-SECRET tool-scoping env (additive; never widens sandbox/project scope).
+				env: opts.toolEnv,
 				// Persist the source discriminator + read-only marker so they survive
 				// restart (§3): rebuildIndexFromPersisted reads childKind to reconstruct
 				// e.g. host-agents children instead of mislabelling them "delegate".
@@ -492,6 +505,9 @@ export class OrchestrationCore {
 				initialModel: model,
 				initialThinkingLevel: thinkingLevel,
 				roleName: opts.role,
+				// NON-SECRET tool-scoping env (additive; never widens sandbox/project scope —
+				// sandboxed/projectId below are derived from the OWNER and are not affected).
+				env: opts.toolEnv,
 				worktreeOpts,
 				// Inherit the owner's sandbox + project scope (never exceed it). For the
 				// sub-branch (goal) path `projectId` may be undefined here — createSession

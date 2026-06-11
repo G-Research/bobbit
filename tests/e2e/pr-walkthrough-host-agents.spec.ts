@@ -388,43 +388,30 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
-	// ── REPORTED PRODUCTION GAP (panel happy-path blocker) ──
-	// The pack panel's deep-link route declares paramKeys [jobId, baseSha, headSha]
-	// only, so a panel-launched `run` produces a LOCAL target (provider:"local").
-	// But the production YAML schema requires `pr.provider: "github"` (PROVIDERS =
-	// {github}) and submit-yaml enforces `target.provider === pr.provider`. So a
-	// LOCAL-launched reviewer's submission is ALWAYS rejected on provider mismatch —
-	// the panel Run→submit→cards happy-path cannot complete for a local target.
-	// This documents the repro deterministically; flagged to the team lead.
-	test("a local-target reviewer's submission is rejected (walkthrough is GitHub-PR-only)", async ({ gateway }) => {
+	// ── Row: a LOCAL launch target is rejected by `run` BEFORE any spawn. ──
+	// The walkthrough is GitHub-PR-only: the production YAML schema requires
+	// `pr.provider: "github"` (PROVIDERS = {github}) and submit-yaml enforces
+	// `target.provider === pr.provider`, so a LOCAL-launched reviewer could never
+	// submit. The `run` route therefore rejects a `{baseSha,headSha}`-only (local)
+	// target up front with `code:"LOCAL_UNSUPPORTED"` and spawns NO reviewer child.
+	test("run rejects a local-only target before spawning any reviewer (walkthrough is GitHub-PR-only)", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
-		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
 			// A panel-style LOCAL launch (baseSha/headSha only — no prUrl/owner/repo).
 			const started = await invokeRoute(gateway, owner, "run", {
 				method: "POST",
 				body: { baseSha: fixture.baseSha, headSha: fixture.headSha },
 			}, fixture.cwd);
-			expect(started.ok).toBe(true);
-			const child = started.childSessionId;
-			createdSessionIds.push(child);
+			expect(started.ok).toBe(false);
+			expect(started.code).toBe("LOCAL_UNSUPPORTED");
+			expect(started.retryable).toBe(false);
+			expect(started.childSessionId).toBeUndefined();
 
-			// The bound target is local; submitting the (github-provider) production
-			// YAML is rejected by the schema cross-field check, not accepted.
-			const resp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
-				method: "POST",
-				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
-				body: JSON.stringify({ yaml }),
-			});
-			expect(resp.status).toBe(200); // route returns a structured validation_failed body, not 2xx-accepted
-			const body = await resp.json();
-			expect(body.ok).toBe(false);
-			expect(body.status).toBe("validation_failed");
-			expect(JSON.stringify(body.validation)).toMatch(/provider/i);
-			// Nothing was persisted for the job (the panel would stay empty).
-			expect(await getPackStore().get(PACK_ID, `submitted/${started.jobId}`)).toBeFalsy();
+			// No reviewer child was minted for the owner.
+			const reviewers = gateway.orchestrationCore.list(owner).filter((h: any) => h.childKind === "host-agents");
+			expect(reviewers).toHaveLength(0);
 		} finally {
 			fixture.cleanup();
 		}

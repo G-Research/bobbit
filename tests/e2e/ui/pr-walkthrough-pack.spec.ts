@@ -531,19 +531,20 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 
-		// ── Step 3a: RUN PR WALKTHROUGH — the host.agents reviewer launch (migration
+		// ── Step 3a: RUN PR WALKTHROUGH — the NO-target launch contract (migration
 		// Decision D). The gesture-gated Run NO LONGER drives the user's OWN agent via
-		// host.session.postMessage; it calls the pack `run` route → host.agents.spawn,
-		// minting a SEPARATE, isolated, read-only pr-reviewer child. Re-open the panel on
-		// the SHA-carrying deep-link so Run has a changeset target (the bare launcher has
-		// no SHA params; canonicalizeTarget needs baseSha/headSha or a PR URL). The seeded
-		// reviewer (mock agent) does not submit, so we assert the LAUNCH (a visible read-
-		// only reviewer child + the polling status + the user's agent NOT driven), not a
-		// full submit→cards round-trip. (The local-target submit→cards completion is a
-		// reported gap — see tests/e2e/pr-walkthrough-host-agents.spec.ts; submit-authz +
-		// binding-routing + status are covered there, and YAML→cards parity by Step 3's
-		// Load path above + the unit/schema specs.) ──
-		await page.evaluate((h) => { window.location.hash = h; }, liveDeepLink());
+		// host.session.postMessage; it calls the pack `run` route → host.agents.spawn.
+		// This harness has NO real `gh`/PR and the walkthrough is GitHub-PR-only (a local
+		// SHA-only target is now rejected up front with LOCAL_UNSUPPORTED — see
+		// tests/e2e/pr-walkthrough-host-agents.spec.ts), so a reviewer CANNOT be spawned
+		// through the panel here. Re-open the panel on the BARE launcher hash (no SHA
+		// params) so Run posts an empty body: the route resolves the current branch's
+		// open GitHub PR, finds none, and returns code:"NO_PR". We assert that contract —
+		// the route is called and the panel surfaces the "No open GitHub PR" message via
+		// prw-error, with NO reviewer child minted. (The reviewer-spawn + `review`
+		// accessory + exactly-three-tools assertions live in the API spec, which uses an
+		// explicit github target; YAML→cards parity is covered by Step 3's Load path.) ──
+		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 		const runBtn = page.locator('[data-testid="prw-run"]').first();
@@ -555,30 +556,17 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await runBtn.click();
 		const runRouteResp = await runRoutePost;
 		expect(runRouteResp.status(), `run route failed: ${await runRouteResp.text().catch(() => "")}`).toBe(200);
-		// The panel transitions to its reviewer-polling state ("Reviewing the PR…").
-		await expect(page.locator('[data-testid="prw-run-status"]').first()).toBeVisible({ timeout: 10_000 });
-		// A real, visible, read-only pr-reviewer host-agents child of THIS session is minted.
-		let reviewerChildId: string | undefined;
-		let reviewerReadOnly: boolean | undefined;
-		let reviewerAccessory: string | undefined;
-		await expect.poll(() => {
-			const liveSessions = gateway.sessionManager?.getAllSessionsRaw?.() ?? [];
-			for (const s of liveSessions) {
-				const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
-				if (cps?.parentSessionId === sid && cps?.childKind === "host-agents") {
-					reviewerChildId = s.id;
-					reviewerReadOnly = cps.readOnly;
-					reviewerAccessory = (s as { accessory?: string }).accessory ?? (cps as { accessory?: string }).accessory;
-					return cps.role ?? null;
-				}
-			}
-			return null;
-		}, { timeout: 20_000 }).toBe("pr-reviewer");
-		expect(reviewerReadOnly, "the reviewer child must be read-only").toBe(true);
-		// GAP 1 fix: the reviewer carries the role's `review` accessory (sidebar parity).
-		expect(reviewerAccessory, "the reviewer child must surface the review accessory").toBe("review");
-		// Anti-postMessage: the user's OWN session agent was NOT prompted — the kickoff
-		// ("Review target…") went to the reviewer child, not the session.
+		// No open GitHub PR for the current branch ⇒ the panel surfaces the NO_PR error.
+		const prwError = page.locator('[data-testid="prw-error"]').first();
+		await expect(prwError).toBeVisible({ timeout: 10_000 });
+		await expect(prwError).toContainText(/No open GitHub PR/i);
+		// The user's OWN session agent was NOT driven (anti-postMessage), and NO reviewer
+		// child was minted (the run was rejected before any spawn).
+		const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((s: any) => {
+			const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
+			return cps?.parentSessionId === sid && cps?.childKind === "host-agents";
+		});
+		expect(reviewerSpawned, "a NO_PR launch must not mint a reviewer child").toBe(false);
 		const ownerKickoffSeen = await (async () => {
 			const rpc = gateway.sessionManager?.getSession?.(sid!)?.rpcClient;
 			if (!rpc?.getMessages) return false;
@@ -589,8 +577,6 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			} catch { return false; }
 		})();
 		expect(ownerKickoffSeen, "the user's own agent must NOT receive the reviewer kickoff").toBe(false);
-		// Cleanup: dismiss the reviewer child so it does not outlive the test.
-		if (reviewerChildId) await apiFetch(`/api/sessions/${reviewerChildId}`, { method: "DELETE" }).catch(() => {});
 
 		// ── Step 5: NON-REMOVABLE — built-in source + pack cannot be removed/uninstalled. ──
 		// Built-in pack card has no Uninstall control.

@@ -4094,6 +4094,14 @@ export class SessionManager {
 		 * the intent for restart-rebuild, UI, and cascade parity.
 		 */
 		readOnly?: boolean;
+		/**
+		 * NON-SECRET tool-scoping env vars merged into the child process env
+		 * (additive, alongside the gateway-set BOBBIT_SESSION_ID/SECRET). Used by
+		 * tool policies that read process env (e.g. the pr-walkthrough reviewer's
+		 * launched-PR `gh` scoping via `BOBBIT_WALKTHROUGH_TARGET_*`). Plain metadata
+		 * ONLY — it never widens the child's sandbox or project (credential) scope.
+		 */
+		env?: Record<string, string>;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
@@ -4158,6 +4166,10 @@ export class SessionManager {
 			// level so a delegate no longer silently drops to the system default.
 			initialModel: opts.initialModel,
 			initialThinkingLevel: opts.initialThinkingLevel,
+			// NON-SECRET tool-scoping env (orchestration-core toolEnv). resolveBridgeOptions
+			// spreads plan.env AFTER BOBBIT_SESSION_ID/SECRET, so it is purely additive and
+			// can never widen the inherited sandbox/project scope.
+			env: opts.env,
 			bridgeOptions: { cwd: opts.cwd },
 		};
 

@@ -155,6 +155,39 @@ describe("OrchestrationCore.spawn — sandbox/credential inheritance (no escalat
 	});
 });
 
+describe("OrchestrationCore.spawn — NON-SECRET toolEnv forwarding (Finding 2)", () => {
+	// The pr-walkthrough reviewer needs the launched-PR identity in its process env
+	// (BOBBIT_WALKTHROUGH_TARGET_*) so readonly_bash scopes `gh` to that PR. toolEnv
+	// is plain metadata: it threads to the child's env on BOTH lifecycle paths and
+	// must NOT touch the owner-inherited sandbox/project scope.
+	const toolEnv = {
+		BOBBIT_WALKTHROUGH_TARGET_PROVIDER: "github",
+		BOBBIT_WALKTHROUGH_TARGET_OWNER: "SuuBro",
+		BOBBIT_WALKTHROUGH_TARGET_REPO: "bobbit",
+		BOBBIT_WALKTHROUGH_TARGET_NUMBER: "42",
+	};
+
+	it("forwards toolEnv to the FULL-lifecycle createSession env (the pr-walkthrough path)", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { sandboxed: true, projectId: "proj-A", cwd: "/host/validated/owner-1" });
+		const core = makeCore(view, "anthropic/claude-x");
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", lifecycle: "full", toolEnv });
+		const { opts } = view.createSessionCalls[0];
+		assert.deepEqual(opts.env, toolEnv, "toolEnv must reach the child's createSession env");
+		// toolEnv never widens the owner-inherited sandbox/project scope.
+		assert.equal(opts.sandboxed, true);
+		assert.equal(opts.projectId, "proj-A");
+	});
+
+	it("forwards toolEnv to the BARE delegate env too", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, "anthropic/claude-x");
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", toolEnv });
+		assert.deepEqual(view.delegateCalls[0].opts.env, toolEnv);
+	});
+});
+
 describe("OrchestrationCore.spawn — allowedTools subtraction (recursion guard)", () => {
 	it("strips every spawn verb from the child's allowedTools", async () => {
 		const view = new FakeView();

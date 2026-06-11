@@ -296,6 +296,15 @@ export const routes = {
 		} catch (e) {
 			return { ok: false, retryable: false, error: messageOf(e), code: "INVALID_TARGET" };
 		}
+		// The walkthrough is GitHub-PR-only: the production YAML schema requires
+		// pr.provider "github" and submit-yaml enforces target.provider === pr.provider,
+		// so a LOCAL ({baseSha,headSha}-only) target would spawn a reviewer that can
+		// NEVER submit. Reject it BEFORE any spawn/binding write. (A github target via
+		// prUrl/owner/repo/number — possibly with SHAs — is still accepted, and the
+		// resolve-from-current-branch path above still applies when no target is given.)
+		if (target.provider !== "github") {
+			return { ok: false, retryable: false, error: "PR walkthrough supports GitHub pull requests only.", code: "LOCAL_UNSUPPORTED" };
+		}
 		const canonicalKey = target.canonicalKey;
 		const launchKey = `${parent}\0${canonicalKey}`;
 
@@ -647,6 +656,11 @@ async function launchReviewer(ctx, parent, target, canonicalKey) {
 			deferInitialPrompt: true,
 			instructions: kickoff,
 			context: contextForTarget(target),
+			// NON-SECRET tool-scoping env: restores the legacy launched-PR `gh` scoping
+			// (extension.ts getReadonlyPolicyOptions reads these to reject cross-PR /
+			// cross-repo `gh` reads). Plain metadata only — it never widens the reviewer's
+			// owner-inherited sandbox/credential scope.
+			toolEnv: toolEnvForTarget(target),
 		});
 		childSessionId = spawned && spawned.childSessionId;
 	} catch (e) {
@@ -733,6 +747,22 @@ function contextForTarget(target) {
 	const out = { target: target.canonicalKey };
 	if (target.prUrl) out.prUrl = target.prUrl;
 	return out;
+}
+
+// NON-SECRET tool-scoping env for the reviewer child: the launched-PR identity
+// the readonly_bash policy uses to scope `gh` reads to THIS PR (extension.ts
+// getReadonlyPolicyOptions reads BOBBIT_WALKTHROUGH_TARGET_*). Mirrors the legacy
+// launcher's env exactly. Only emitted for a github target with owner/repo/number
+// (the run route rejects non-github targets before spawn).
+function toolEnvForTarget(target) {
+	if (!target || target.provider !== "github") return undefined;
+	if (!target.owner || !target.repo || target.number === undefined) return undefined;
+	return {
+		BOBBIT_WALKTHROUGH_TARGET_PROVIDER: "github",
+		BOBBIT_WALKTHROUGH_TARGET_OWNER: String(target.owner),
+		BOBBIT_WALKTHROUGH_TARGET_REPO: String(target.repo),
+		BOBBIT_WALKTHROUGH_TARGET_NUMBER: String(target.number),
+	};
 }
 
 // Ported from buildKickoffPrompt (walkthrough-agent-manager.ts) — the PER-TARGET
