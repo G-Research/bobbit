@@ -173,25 +173,51 @@ change is purely internal.
 
 ## Restart survival
 
-Child agents **survive a gateway restart**. Before, a blocking `delegate` child became an
-orphaned dormant session and the parent lost its result. Now:
+Child agents **survive a gateway restart** — including `team_delegate` children, which now
+ride the **same restart path goal-team workers use**. Before, a blocking `delegate` child
+came back as a `terminated` dormant husk (the parent's wait collected nothing) and, even if
+revived, reported *"no task in my system prompt"* — because a delegate's task lived only in
+its spawn-time prompt and delegates were excluded from live restore. Both gaps are fixed by
+giving delegates the two things workers always had: a **durable task** and **live restore**.
 
-1. **Children survive.** On boot the in-memory index is rebuilt from the persisted link.
-   A child is reaped on boot **only** if its parent is gone or archived (a generalized
-   `shouldReapChildOnBoot`, covering delegate, PR-walkthrough, and future kinds). A child
-   whose parent is restoring is never reaped — this closes the old orphan-delegate gap.
-2. **The parent is reminded.** When a restored parent has live children, the core injects
-   a **system reminder** (reusing the boot-resume nudge machinery) enumerating the live
-   children and pointing at `team_wait`. The parent re-collects through the shared wait
-   path.
+1. **Durable task.** A delegate's `instructions` (and `context`) are persisted on the
+   session record (`PersistedSession.instructions` / `.context`, written at spawn by
+   `persistOnce`) — the delegate's equivalent of a worker's `goal.spec`. The task survives
+   the restart instead of evaporating with the dead subprocess.
+2. **Live restore.** `restoreSessions()` no longer defers `delegateOf` children to a dormant
+   placeholder. Surviving delegates flow through the **same** `restoreOneSession` →
+   `restoreSession` live-respawn path workers use, so they come back as real running
+   processes. `restoreSession` has a delegate branch that **rebuilds the system prompt from
+   the persisted `instructions` + `context`**, so a revived delegate carries its original
+   task (not an empty goal/role prompt).
+3. **Re-run + reminded.** The respawned delegate is re-driven by the shared boot-resume
+   drain (the same mechanism that resumes a mid-turn worker). When a restored parent has
+   live children, the core injects a **system reminder** (`remindOwnersWithLiveChildren`)
+   enumerating them and pointing at `team_wait`; the parent re-collects through the shared
+   wait, which now re-attaches to a **live** child and returns a **real** result instead of a
+   `terminated` placeholder.
+4. **Orphans still reaped.** A child is reaped on boot **only** if its parent is gone or
+   archived (the generalized `shouldReapChildOnBoot`, covering delegate, PR-walkthrough, and
+   future kinds). A delegate whose parent is restoring is never reaped; one whose owner is
+   gone is archived before live dispatch, never resurrected as a live orphan.
 
-> **No transparent tool-call resumption — by design.** A blocking `team_delegate` is *spawn
-> a tracked child → call the shared wait → auto-dismiss*, all inside the agent's tool loop.
-> A blocking call is an in-flight long-poll **inside the agent subprocess**; on restart
-> that subprocess dies and the promise is gone. We do **not** splice a synthetic
-> `tool_result` into a turn the new process never issued. Instead the child survives, the
-> parent is reminded, and it re-collects explicitly via `team_wait`. Non-blocking children
-> were already re-promptable; the reminder simply resurfaces them.
+> **Why reuse the worker machinery?** Delegates and workers now share **one** restart path —
+> durable task + live restore + prompt rebuild + re-nudge — with no parallel registry. The
+> earlier "delegates stay dormant" carve-out is what lost work and dropped the task; folding
+> delegates onto the worker path removes the carve-out instead of duplicating it.
+
+> **Idempotency caveat.** Because a survivor re-runs from its durable task, a re-run delegate
+> may **repeat non-idempotent side effects** (re-issue a write, re-create a file). This is
+> **identical to how workers already behave** on restart and is accepted — there is no
+> exactly-once side-effect guarantee.
+
+> **No *synthetic* tool-call resumption — still by design.** A blocking `team_delegate`'s
+> in-flight long-poll lived in the now-dead agent subprocess; on restart the parent is
+> rebuilt from transcript with a `tool_use` and no matching `tool_result`, and we do **not**
+> fabricate one. What changed is the **child side**: instead of staying a dormant husk it
+> survives **live** and **re-runs** its durable task, and the parent re-collects explicitly
+> via `team_wait` (resurfaced by the reminder). Non-blocking children were already
+> re-promptable; the reminder simply resurfaces them.
 
 ---
 

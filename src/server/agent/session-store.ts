@@ -48,6 +48,14 @@ export interface PersistedSession {
 	streamingStartedAt?: number;
 	/** If this session is a delegate, the parent session ID */
 	delegateOf?: string;
+	/**
+	 * Delegate task instructions — the durable equivalent of a worker's goal
+	 * spec. Written once at spawn and rebuilt into the system prompt on restore
+	 * so a delegate survives a gateway restart with its task intact.
+	 */
+	instructions?: string;
+	/** Delegate task context key/value pairs, layered into the prompt on restore. */
+	context?: Record<string, string>;
 	/** First-class parent session ID for visible child sessions (not delegate lifecycle). */
 	parentSessionId?: string;
 	/** Kind discriminator for first-class child sessions, e.g. "pr-walkthrough". */
