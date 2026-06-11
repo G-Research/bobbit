@@ -33,11 +33,6 @@ const PRW_PACK_ID = "pr-walkthrough";
 const PRW_TERMINAL_STATUSES = new Set(["submitted", "ready", "error"]);
 const prwBindingKey = (childSessionId: string): string => `binding/${childSessionId}`;
 const prwSubmittedKey = (jobId: string): string => `submitted/${jobId}`;
-// FINDING 1 — owner-scoped pointer to the owner's most-recent completed walkthrough,
-// written by submit-yaml and read by the pack `recover` route so a browser reload can
-// re-render the persisted cards (the submit tool call now lives in the dismissed
-// reviewer child, not the owner transcript). Keyed by the OWNER (parent) session id.
-const prwLastKey = (parentSessionId: string): string => `last/${parentSessionId}`;
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -130,9 +125,10 @@ export type PrWalkthroughRouteDeps = {
 	 *  trusted-host/credentials before a GitHub fetch). Unused in production today. */
 	preflightGithubLaunch?: (job: PrWalkthroughJobRecord) => Promise<void> | void;
 	sandboxScope?: SandboxScope;
-	// ── host.agents reviewer migration (design Decisions C/D/E) ──
-	/** OrchestrationCore — submit-yaml server-dismisses the reviewer child on terminal
-	 *  (terminal-synchronous reap, Decision E). */
+	// ── host.agents reviewer migration (design Decisions C/D) ──
+	/** OrchestrationCore — retained for other reviewer-lifecycle wiring. The submit-yaml
+	 *  handler NO LONGER reaps the reviewer on terminal (launch-ux design §5.1: the
+	 *  reviewer persists until owner-gone boot-reap or an explicit user terminate). */
 	orchestrationCore?: OrchestrationCore;
 	/** Pack-scoped KV store (process singleton) holding the `binding/`+`submitted/`
 	 *  reviewer routing keys written by the pack `run` route. */
@@ -250,36 +246,17 @@ export async function handlePrWalkthroughApiRoute(
 				submittedAt,
 			});
 			await store.put(PRW_PACK_ID, prwBindingKey(authSessionId), { ...binding, status: "submitted" });
-			// FINDING 1 — reload recovery. The submitted YAML lives in the (now
-			// dismissed) reviewer child, NOT the owner transcript, so the panel's
-			// "Load walkthrough" gesture can no longer scan the owner session for the
-			// submit tool call after a browser reload. Write an OWNER-SCOPED pointer to
-			// the owner's most-recent completed walkthrough so the `recover` pack route
-			// can re-render the persisted cards on demand (no auto-invoke).
-			if (binding.parentSessionId) {
-				try {
-					await store.put(PRW_PACK_ID, prwLastKey(binding.parentSessionId), {
-						jobId: binding.jobId,
-						changesetId: binding.changesetId,
-						baseSha: binding.baseSha,
-						headSha: binding.headSha,
-						submittedAt,
-					});
-				} catch (err) {
-					console.warn(`[pr-walkthrough] failed to write last-walkthrough pointer for ${binding.parentSessionId}:`, err);
-				}
-			}
-			// Stamp the GENERIC persisted terminal marker BEFORE dismiss, so a restart
-			// between here and the dismiss still lets the generic boot-reap remove the
-			// reviewer (Decision E / Findings 3–4).
-			try { deps.sessionManager?.updateSessionMeta?.(authSessionId, { childTerminal: true, terminalAt: Date.now() }); }
-			catch (err) { console.warn(`[pr-walkthrough] failed to stamp terminal marker for ${authSessionId}:`, err); }
-			// Terminal-synchronous reap: server-dismiss the reviewer without waiting for a
-			// panel poll (Decision E). Best-effort — the boot-reap is the backstop.
-			if (deps.orchestrationCore && binding.parentSessionId) {
-				try { await deps.orchestrationCore.dismiss(binding.parentSessionId, authSessionId); }
-				catch (err) { console.warn(`[pr-walkthrough] failed to dismiss reviewer ${authSessionId}:`, err); }
-			}
+			// NO AUTO-DISMISS / PERSIST-UNTIL-TERMINATED LIFECYCLE (launch-ux design §5.1).
+			// Submitting the YAML does NOT reap the reviewer: it stays a live, read-only,
+			// selectable session whose child-session panel flips pending → rendered cards
+			// (the child self-drives the `status` poll and the `recover` re-render from its
+			// own `binding/<self>`). The reviewer is reaped ONLY by the standard host-agents
+			// owner-gone boot-reap, or when the user terminates it via the session
+			// dismiss/terminate control — never by a PR-walkthrough terminal marker. Hence:
+			// no `last/<owner>` pointer write (there is no owner-session viewer surface),
+			// no `childTerminal`/`terminalAt` stamp (so a restart cannot boot-reap a live
+			// post-submit reviewer), and no terminal-synchronous `orchestrationCore.dismiss`.
+			// The submitted-YAML persistence above is the only durable side effect.
 			json({ ok: true, status: "submitted", jobId: binding.jobId });
 			return true;
 		}

@@ -64,6 +64,11 @@ export interface ServerHostAgentsApi {
 		readOnly?: boolean;
 		context?: Record<string, string>;
 		lifecycle?: "bare" | "full";
+		/** Optional visible session title for the spawned child. Additive optional field
+		 *  on the server-side host.agents capability (NOT the frozen versioned data
+		 *  contract), threaded to `OrchestrationCore.SpawnOpts.title` → `createSession`.
+		 *  When omitted the child defaults to "New session". */
+		title?: string;
 		/** When `true` with `lifecycle:"full"`, create the visible child but do NOT
 		 *  enqueue `instructions` — the caller starts it later via `prompt`. Lets a
 		 *  launcher write its binding before the child's first tool call (Decision A.5). */
@@ -294,6 +299,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 				readOnly: spawnOpts.readOnly,
 				context: spawnOpts.context,
 				lifecycle: spawnOpts.lifecycle,
+				title: spawnOpts.title,
 				deferInitialPrompt: spawnOpts.deferInitialPrompt,
 				toolEnv: spawnOpts.toolEnv,
 				childKind: HOST_AGENTS_KIND,

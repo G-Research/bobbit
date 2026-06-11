@@ -505,6 +505,10 @@ export class OrchestrationCore {
 			const createOpts: Record<string, unknown> = {
 				parentSessionId: opts.ownerSessionId,
 				childKind,
+				// Visible session title (Decision A.5 / launch-ux §5.3). createSession
+				// otherwise defaults to "New session"; thread it so a launcher-supplied
+				// title (e.g. "PR Walkthrough") names the sidebar entry.
+				title: opts.title,
 				readOnly: opts.readOnly,
 				allowedTools: childAllowed,
 				initialModel: model,

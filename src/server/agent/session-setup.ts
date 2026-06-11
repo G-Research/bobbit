@@ -444,7 +444,7 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	// the caller did NOT explicitly pass one, surface the role's accessory so it
 	// renders in the sidebar. This is how a role-carrying spawn that only threads
 	// `roleName` (e.g. the host.agents `pr-reviewer` reviewer child) gets its
-	// `review` accessory without the spawn caller plumbing it. Generic — not
+	// `magnifier` accessory without the spawn caller plumbing it. Generic — not
 	// pr-walkthrough-specific; "none" is treated as "no accessory".
 	if (!plan.accessory || plan.accessory === "none") {
 		const roleName = plan.roleName ?? plan.role;
@@ -1105,7 +1105,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		eventBuffer,
 		unsubscribe: () => {},
 		isCompacting: false,
-		titleGenerated: !!assistantDef || plan.mode === "delegate",
+		// An explicit spawn-supplied title (e.g. the host.agents `pr-reviewer` reviewer's
+		// "PR Walkthrough") must NOT be clobbered by first-prompt auto-title generation
+		// (tryGenerateTitleFromPrompt skips when titleGenerated is true). createSession
+		// defaults plan.title to "New session", so any other value is a deliberate title.
+		titleGenerated: !!assistantDef || plan.mode === "delegate" || (!!plan.title && plan.title !== "New session"),
 		goalId: plan.goalId,
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
