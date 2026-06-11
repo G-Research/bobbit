@@ -79,6 +79,12 @@ const cardsKey = (changesetId) => `cards/${b64url(changesetId)}`;
 const bindingKey = (childSessionId) => `binding/${childSessionId}`;
 const reviewerKey = (parentSessionId, canonicalKey) => `reviewer/${parentSessionId}/${b64url(canonicalKey)}`;
 const submittedKey = (jobId) => `submitted/${jobId}`;
+// FINDING 1 — owner-scoped pointer to the owner's most-recent completed walkthrough,
+// written server-side by submit-yaml (src/server/pr-walkthrough/routes.ts) and read
+// by the `recover` route below so a browser reload re-renders the persisted cards
+// (the submit tool call now lives in the dismissed reviewer child, not the owner
+// transcript). Keyed by the OWNER (parent = ctx.sessionId) session id.
+const lastKey = (parentSessionId) => `last/${parentSessionId}`;
 
 // MODULE-SCOPED in-flight launch map — the analogue of the deleted launchInFlight
 // mutex. The routes module is a worker SINGLETON, so this Map persists across
@@ -268,9 +274,22 @@ export const routes = {
 	// Mints a REAL, isolated, read-only reviewer child via host.agents.spawn (NOT
 	// host.session.postMessage — the user's own agent is never driven). Input:
 	//   { prUrl } | { owner, repo, prNumber } | { baseSha, headSha }
-	// Idempotent (one reviewer per parent+target, concurrency-deduped) and
-	// failure-atomic (compensates on any post-spawn failure). The bound owner is
-	// ctx.sessionId (host.agents children are owner-scoped). Returns either
+	// Idempotent and failure-atomic (compensates on any post-spawn failure). The
+	// bound owner is ctx.sessionId (host.agents children are owner-scoped).
+	//
+	// DEDUP GUARANTEE: SEQUENTIAL re-runs for the same owner+target are
+	// DETERMINISTICALLY deduped via the persisted reviewerKey (the 2nd run finds the
+	// live child and returns created:false). TRULY-SIMULTANEOUS same-target launches
+	// are BEST-EFFORT deduped: each host.callRoute("run") runs in a fresh worker, so
+	// the module-scoped in-flight map only serializes invokes that share a worker;
+	// across workers a post-claim reconcile (launchReviewer) dismisses the losing
+	// child and converges to one live reviewer. A narrow interleaving can still
+	// briefly leave two, because strict cross-worker atomicity would require an atomic
+	// store CAS the pack store intentionally does not expose. The client panel's
+	// busy-guard already prevents the common double-click, so simultaneous launches
+	// are a defence-in-depth edge case, not the normal path.
+	//
+	// Returns either
 	//   { ok:true, created, jobId, childSessionId, changesetId, baseSha, headSha, status } or
 	//   { ok:false, retryable, error, code }   (the panel surfaces a "Run again" affordance).
 	run: async (ctx, req) => {
@@ -366,6 +385,36 @@ export const routes = {
 			return { phase: "error", agentStatus, error: "The reviewer terminated without producing a walkthrough." };
 		}
 		return { phase: "running", agentStatus };
+	},
+
+	// ── recover ──────────────────────────────────────────────────────────────────
+	// FINDING 1 — reload recovery. After the isolated-reviewer Run flow, the
+	// submitted YAML reaches the panel only via the in-memory poll loop; on browser
+	// reload `byJob` is empty and the submit tool call lives in the (dismissed)
+	// reviewer child, NOT the owner transcript — so the legacy owner-transcript scan
+	// recovers nothing. This route reads the OWNER-SCOPED `last/<ctx.sessionId>`
+	// pointer (written server-side by submit-yaml) and returns the persisted YAML so
+	// the panel's "Load walkthrough" gesture can re-render the cards (idempotent
+	// publish). Owner-scoped by ctx.sessionId; never auto-invoked.
+	recover: async (ctx, _req) => {
+		const owner = strOf(ctx && ctx.sessionId);
+		if (!owner) return { found: false };
+		const store = ctx.host.store;
+		const pointer = await store.get(lastKey(owner));
+		if (!pointer || typeof pointer !== "object" || !strOf(pointer.jobId)) {
+			return { found: false };
+		}
+		const submitted = await store.get(submittedKey(pointer.jobId));
+		if (!submitted || typeof submitted !== "object" || !strOf(submitted.yaml)) {
+			return { found: false };
+		}
+		return {
+			found: true,
+			jobId: pointer.jobId,
+			yaml: submitted.yaml,
+			baseSha: submitted.baseSha ?? pointer.baseSha,
+			headSha: submitted.headSha ?? pointer.headSha,
+		};
 	},
 };
 
@@ -684,6 +733,33 @@ async function launchReviewer(ctx, parent, target, canonicalKey) {
 	try {
 		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: false });
 		await store.put(reviewerKey(parent, canonicalKey), { childSessionId, jobId });
+
+		// POST-CLAIM RECONCILE (best-effort cross-worker dedup — the store has no
+		// compare-and-set). Each host.callRoute("run") runs in a FRESH worker, so the
+		// module-scoped in-flight map only dedups invokes that happen to share a worker;
+		// it does NOT serialize separate workers. A concurrent same-target launch in
+		// ANOTHER worker may have written the reviewer index AFTER us (last-write-wins).
+		// Re-read it: if it now names a DIFFERENT, still-live child, that launch won the
+		// claim — dismiss our own just-spawned child, drop our binding, and return the
+		// winner (created:false) so the owner converges to a single live reviewer. A
+		// narrow interleaving (our re-read racing the other worker's write) can still
+		// briefly leave two reviewers; that is the accepted best-effort limit (see the
+		// run-route guarantee comment above the `run` handler).
+		const claimed = await store.get(reviewerKey(parent, canonicalKey));
+		if (claimed && typeof claimed === "object" && claimed.childSessionId && claimed.childSessionId !== childSessionId) {
+			let winnerLive = false;
+			try { winnerLive = (await ctx.host.agents.status(claimed.childSessionId)).status !== "terminated"; }
+			catch { winnerLive = false; }
+			if (winnerLive) {
+				// We lost the claim race: clean up our orphan and yield to the winner.
+				try { await ctx.host.agents.dismiss(childSessionId); } catch { /* loser cleanup */ }
+				await softDelete(store, bindingKey(childSessionId));
+				return { ok: true, created: false, jobId: claimed.jobId, childSessionId: claimed.childSessionId, status: "running" };
+			}
+			// The other claim is stale (its child terminated) — re-assert ours and proceed.
+			await store.put(reviewerKey(parent, canonicalKey), { childSessionId, jobId });
+		}
+
 		await ctx.host.agents.prompt(childSessionId, kickoff);
 		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: true });
 	} catch (e) {

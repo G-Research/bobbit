@@ -33,6 +33,11 @@ const PRW_PACK_ID = "pr-walkthrough";
 const PRW_TERMINAL_STATUSES = new Set(["submitted", "ready", "error"]);
 const prwBindingKey = (childSessionId: string): string => `binding/${childSessionId}`;
 const prwSubmittedKey = (jobId: string): string => `submitted/${jobId}`;
+// FINDING 1 — owner-scoped pointer to the owner's most-recent completed walkthrough,
+// written by submit-yaml and read by the pack `recover` route so a browser reload can
+// re-render the persisted cards (the submit tool call now lives in the dismissed
+// reviewer child, not the owner transcript). Keyed by the OWNER (parent) session id.
+const prwLastKey = (parentSessionId: string): string => `last/${parentSessionId}`;
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -237,13 +242,33 @@ export async function handlePrWalkthroughApiRoute(
 				json({ ok: false, status: "validation_failed", retryable: true, validation: validation.summary });
 				return true;
 			}
+			const submittedAt = Date.now();
 			await store.put(PRW_PACK_ID, prwSubmittedKey(binding.jobId), {
 				yaml: body.yaml,
 				baseSha: binding.baseSha,
 				headSha: binding.headSha,
-				submittedAt: Date.now(),
+				submittedAt,
 			});
 			await store.put(PRW_PACK_ID, prwBindingKey(authSessionId), { ...binding, status: "submitted" });
+			// FINDING 1 — reload recovery. The submitted YAML lives in the (now
+			// dismissed) reviewer child, NOT the owner transcript, so the panel's
+			// "Load walkthrough" gesture can no longer scan the owner session for the
+			// submit tool call after a browser reload. Write an OWNER-SCOPED pointer to
+			// the owner's most-recent completed walkthrough so the `recover` pack route
+			// can re-render the persisted cards on demand (no auto-invoke).
+			if (binding.parentSessionId) {
+				try {
+					await store.put(PRW_PACK_ID, prwLastKey(binding.parentSessionId), {
+						jobId: binding.jobId,
+						changesetId: binding.changesetId,
+						baseSha: binding.baseSha,
+						headSha: binding.headSha,
+						submittedAt,
+					});
+				} catch (err) {
+					console.warn(`[pr-walkthrough] failed to write last-walkthrough pointer for ${binding.parentSessionId}:`, err);
+				}
+			}
 			// Stamp the GENERIC persisted terminal marker BEFORE dismiss, so a restart
 			// between here and the dismiss still lets the generic boot-reap remove the
 			// reviewer (Decision E / Findings 3–4).

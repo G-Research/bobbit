@@ -530,6 +530,49 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
+	// ── Row: Concurrency dedupe — two OVERLAPPING runs → one reviewer (FINDING 3). ──
+	// Pins the ACHIEVABLE concurrency invariant. Each host.callRoute("run") runs in a
+	// FRESH worker, so the module-scoped in-flight map only dedups invokes that share
+	// a worker; across workers the `run` route's post-claim RECONCILE
+	// (launchReviewer) dismisses the losing child and converges to one live reviewer.
+	// Strict cross-worker atomicity would need a store CAS the pack store does not
+	// expose (design Decision E). So this pins the ROBUST, NON-FLAKY invariant: two
+	// near-simultaneous `run` calls for the SAME owner+target fired via Promise.all
+	// both succeed, both return a usable childSessionId, and the reviewer index
+	// resolves to a SINGLE childSessionId naming one of the two (no split-brain
+	// jobId / no crash). Strict "exactly one LIVE child" is NOT asserted: in the
+	// pathological lock-step interleaving each worker re-reads its own claim before
+	// the other's write lands, so the post-claim reconcile cannot always dismiss the
+	// loser — the residual orphan is reaped on parent archive (cascade reap). The
+	// panel's busy-guard prevents the common double-click, so this edge case is
+	// defence-in-depth, not the normal path.
+	test("two overlapping run calls for the same target keep a single reviewer index (best-effort dedup)", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		try {
+			const [a, b] = await Promise.all([
+				invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd),
+				invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd),
+			]);
+			expect(a.ok).toBe(true);
+			expect(b.ok).toBe(true);
+			expect(typeof a.childSessionId).toBe("string");
+			expect(typeof b.childSessionId).toBe("string");
+			createdSessionIds.push(a.childSessionId, b.childSessionId);
+
+			// No split-brain: both runs share the canonical key, so exactly ONE
+			// reviewer/<parent>/<key> entry exists and it names one of the two children.
+			const reviewerKeys = await getPackStore().list(PACK_ID, `reviewer/${owner}/`);
+			expect(reviewerKeys).toHaveLength(1);
+			const idx = await getPackStore().get<{ childSessionId?: string }>(PACK_ID, reviewerKeys[0]);
+			expect(idx?.childSessionId).toBeTruthy();
+			expect([a.childSessionId, b.childSessionId]).toContain(idx!.childSessionId);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
 	// ── Row: Status route is binding-authoritative (right-job routing). ──
 	test("status rejects a mismatched jobId or a foreign childSessionId without leaking a submitted marker", async ({ gateway }) => {
 		const fixture = makeGitFixture();

@@ -40,18 +40,20 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
-	it("source: bridge env merge preserves caller-supplied env after BOBBIT_SESSION_ID + secret", () => {
+	it("source: gateway-owned BOBBIT_SESSION_ID + secret are spread AFTER caller env so they always win", () => {
 		const src = readFileSync(
 			path.join(process.cwd(), "src/server/agent/session-setup.ts"),
 			"utf-8",
 		);
-		// Verify the env-spread shape seeds BOBBIT_SESSION_ID first, then the S1
-		// per-session BOBBIT_SESSION_SECRET, then spreads caller env LAST (so a
-		// caller-supplied env can never override the session id or its secret):
-		//   { BOBBIT_SESSION_ID: plan.id, BOBBIT_SESSION_SECRET: ..., ...plan.env }
+		// Verify the env-spread shape spreads caller env (`...plan.env`) FIRST, then
+		// the gateway-owned BOBBIT_SESSION_ID + per-session BOBBIT_SESSION_SECRET so
+		// a caller-supplied toolEnv key can NEVER clobber the session identity or its
+		// capability secret (which would let a child impersonate another session for
+		// the binding-routed PR-walkthrough tool routes):
+		//   { ...plan.env, BOBBIT_SESSION_ID: plan.id, BOBBIT_SESSION_SECRET: ... }
 		assert.ok(
-			/env:\s*\{\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\.\.\.plan\.env,?\s*\}/.test(src),
-			"bridge env must seed BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET first, then spread caller env",
+			/env:\s*\{\s*\.\.\.plan\.env,\s*BOBBIT_SESSION_ID:\s*plan\.id,\s*BOBBIT_SESSION_SECRET:[\s\S]*?\}/.test(src),
+			"bridge env must spread caller env FIRST, then seed gateway-owned BOBBIT_SESSION_ID + BOBBIT_SESSION_SECRET so they win",
 		);
 	});
 
@@ -72,14 +74,16 @@ describe("session-setup spawn env contract", () => {
 		);
 	});
 
-	it("functional: replicated env-construction logic seeds BOBBIT_SESSION_ID + secret before caller env", () => {
-		// Faithful reproduction of the env-merge in resolveBridgeOptions. The
-		// delegate-of env branch is intentionally gone (see the source test above).
+	it("functional: gateway-owned BOBBIT_SESSION_ID + secret win over caller toolEnv", () => {
+		// Faithful reproduction of the env-merge in resolveBridgeOptions: caller env
+		// (`...plan.env`) is spread FIRST, then the gateway-owned identity keys, so
+		// the gateway values always win. The delegate-of env branch is intentionally
+		// gone (see the source test above).
 		function buildBridgeEnv(plan: { id: string; env?: Record<string, string> }) {
 			const env: Record<string, string> = {
+				...(plan.env ?? {}),
 				BOBBIT_SESSION_ID: plan.id,
 				BOBBIT_SESSION_SECRET: `secret-for-${plan.id}`,
-				...(plan.env ?? {}),
 			};
 			return env;
 		}
@@ -95,5 +99,21 @@ describe("session-setup spawn env contract", () => {
 		const env3 = buildBridgeEnv({ id: "sess-keep", env: { OTHER_VAR: "v" } });
 		assert.equal(env3.BOBBIT_SESSION_ID, "sess-keep");
 		assert.equal(env3.OTHER_VAR, "v");
+
+		// SECURITY: a malicious/buggy toolEnv that sets BOBBIT_SESSION_SECRET or
+		// BOBBIT_SESSION_ID must NOT override the gateway-issued values — otherwise a
+		// child could impersonate another session for the binding-routed PR-walkthrough
+		// tool routes.
+		const hijack = buildBridgeEnv({
+			id: "sess-real",
+			env: {
+				BOBBIT_SESSION_ID: "sess-victim",
+				BOBBIT_SESSION_SECRET: "stolen-secret",
+				OTHER_VAR: "v",
+			},
+		});
+		assert.equal(hijack.BOBBIT_SESSION_ID, "sess-real", "toolEnv must not override the gateway-issued BOBBIT_SESSION_ID");
+		assert.equal(hijack.BOBBIT_SESSION_SECRET, "secret-for-sess-real", "toolEnv must not override the gateway-issued BOBBIT_SESSION_SECRET");
+		assert.equal(hijack.OTHER_VAR, "v", "unrelated toolEnv keys are still passed through");
 	});
 });

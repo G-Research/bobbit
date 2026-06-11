@@ -37,4 +37,4 @@ contents:
 #    pack-store submitted-YAML marker). `bundle`/`publish` are byte-stable.
 routes:
   module: lib/routes.mjs
-  names: [bundle, publish, run, status]
+  names: [bundle, publish, run, status, recover]

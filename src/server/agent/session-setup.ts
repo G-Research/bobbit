@@ -335,10 +335,17 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// S1: inject the per-session capability secret alongside the session id.
 		// Only this session's process receives its own secret — see
 		// `src/server/auth/session-secret.ts`.
+		//
+		// Gateway-owned identity keys (BOBBIT_SESSION_ID / BOBBIT_SESSION_SECRET)
+		// are spread AFTER caller `plan.env` (toolEnv) so the gateway-issued values
+		// always WIN: a caller-supplied toolEnv key can never clobber the session
+		// identity or capability secret (which would let a child impersonate another
+		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
+		// unit test in tests/session-setup-env.test.ts.
 		env: {
+			...plan.env,
 			BOBBIT_SESSION_ID: plan.id,
 			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),
-			...plan.env,
 		},
 	};
 	if (ctx.agentCliPath) {

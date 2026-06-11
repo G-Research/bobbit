@@ -435,30 +435,47 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(attack.text).not.toContain(OUTSIDE_SECRET_FILE);
 		expect(attack.status, `repoDir traversal must NOT return other-repo data (got ${attack.status})`).not.toBe(200);
 
-		// ── reload re-reads the SAME persisted cards (store-rehydration parity) — still
-		// via the BARE launcher (no URL SHA params); the panel re-extracts the SHAs from
-		// the submitted YAML and the publish/bundle recompute the SAME changeset id, so
-		// the persisted record (persistedAt) is stable across the reload. ──
+		// ── FINDING 1: RELOAD RECOVERY via the NEW `recover` route. After the
+		// isolated-reviewer Run flow the submit_pr_walkthrough_yaml tool call lives in
+		// the (dismissed) reviewer child, NOT this owner session — so on a browser
+		// reload the legacy owner-transcript scan recovers NOTHING. The owner-scoped
+		// `last/<sessionId>` pointer + the persisted `submitted/<jobId>` YAML (written
+		// server-side by submit-yaml) let the "Load walkthrough" gesture re-render the
+		// persisted cards via the `recover` route. Seed both store keys directly (the
+		// gateway runs in-process, sharing the pack-store singleton), DELIBERATELY do
+		// NOT re-seed the owner transcript, then assert Load recovers via `recover`
+		// (NOT an owner-session submit tool call) and re-renders the SAME cards. ──
 		const token = await readE2ETokenAsync();
-		const reopenAndLoad = async (): Promise<string | undefined> => {
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const recoverJobId = "prw-recover-finding1";
+		await getPackStore().put(PACK, `submitted/${recoverJobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
+		await getPackStore().put(PACK, `last/${sid}`, { jobId: recoverJobId, baseSha, headSha, submittedAt: Date.now() });
+
+		const reopenAndRecover = async (): Promise<string | undefined> => {
 			await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-			// The agent CLI may resume into a fresh transcript on respawn, so re-assert the
-			// seeded submit tool call (idempotent) — the bare-launcher reload re-reads the
-			// YAML to re-derive the jobId + SHAs that find the SAME persisted store record.
-			await seedSubmitToolCall(gateway, sid!);
+			// NOTE: the owner transcript is intentionally NOT re-seeded — recovery must
+			// come from the `recover` route (pack store), not an owner-session tool call.
 			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
 			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
 			const loadBtn = page.locator('[data-testid="prw-load"]').first();
 			await expect(loadBtn).toBeVisible({ timeout: 20_000 });
+			const recoverResp = page.waitForResponse(
+				(r) => /\/api\/ext\/route\/recover\b/.test(r.url()) && r.request().method() === "POST",
+				{ timeout: 20_000 },
+			);
 			await loadBtn.click();
+			const resp = await recoverResp;
+			expect(resp.status(), `recover callRoute failed: ${await resp.text().catch(() => "")}`).toBe(200);
+			const recovered = await resp.json().catch(() => ({}));
+			expect(recovered.found, "the recover route must return the owner's last completed walkthrough").toBe(true);
 			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
 			return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
 		};
-		const persistedAt2 = await reopenAndLoad();
-		expect(persistedAt2, "deep-link must rehydrate the SAME persisted store record").toBe(persistedAt1);
+		const persistedAt2 = await reopenAndRecover();
+		expect(persistedAt2, "recover must rehydrate the SAME persisted store record").toBe(persistedAt1);
 
 		// ── Step 4: DISABLE via the Market built-in group → launcher + deep-link gone. ──
 		await navigateToHash(page, "#/market");

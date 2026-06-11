@@ -335,8 +335,26 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				byJob.set(paramKey, { status: "loading" });
 				if (host.requestRender) host.requestRender();
 				try {
-					const toolCall = await readSubmittedToolCall();
-					await publishAndLoad(toolCall);
+					// FINDING 1 — reload recovery. After the isolated-reviewer Run flow the
+					// submit_pr_walkthrough_yaml tool call lives in the (dismissed) reviewer
+					// child, NOT this owner session, so on a browser reload the legacy
+					// owner-transcript scan recovers nothing. FIRST consult the `recover`
+					// route, which reads the owner-scoped `last/<sessionId>` pointer + the
+					// persisted submitted YAML; publishAndLoad is idempotent → it re-renders
+					// the persisted cards. Fall back to the owner-transcript scan only when
+					// no recovery pointer exists (e.g. a walkthrough published into THIS
+					// session's transcript by an older flow).
+					let recovered;
+					if (host.callRoute) {
+						try { recovered = await host.callRoute("recover", { method: "POST", body: {} }); }
+						catch { /* recovery is best-effort; fall back to the transcript scan */ }
+					}
+					if (recovered && recovered.found && recovered.yaml) {
+						await publishAndLoad({ input: { yaml: recovered.yaml } }, recovered.baseSha, recovered.headSha);
+					} else {
+						const toolCall = await readSubmittedToolCall();
+						await publishAndLoad(toolCall);
+					}
 				} catch (e) {
 					byJob.set(paramKey, { status: "error", error: e && e.message ? e.message : String(e) });
 				} finally {
