@@ -1,4 +1,5 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
+import "../ui/components/BellToggle.js";
 import "../ui/components/CommentableMarkdown.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
@@ -1548,6 +1549,7 @@ export function doRenderApp(): void {
 							onClick: openGatewayDialog,
 							title: "Connect to gateway",
 						})}
+						<bell-toggle></bell-toggle>
 						<theme-toggle></theme-toggle>
 					</div>
 				</div>
@@ -1593,6 +1595,7 @@ export function doRenderApp(): void {
 							onClick: openGatewayDialog,
 							title: "Connect to a different gateway",
 						})}
+						<bell-toggle></bell-toggle>
 						<theme-toggle></theme-toggle>
 					</div>
 				</div>
@@ -1761,6 +1764,7 @@ export function doRenderApp(): void {
 					onClick: showQrCodeDialog,
 					title: "Show QR code",
 				})}
+				<bell-toggle></bell-toggle>
 				<theme-toggle></theme-toggle>
 			</div>
 		`;
@@ -2449,6 +2453,7 @@ export function doRenderApp(): void {
 								title: "Show QR code",
 								className: "h-6 w-6 text-muted-foreground",
 							})}
+							<bell-toggle></bell-toggle>
 							<theme-toggle></theme-toggle>
 						</div>
 					</div>

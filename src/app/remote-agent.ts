@@ -2298,15 +2298,28 @@ export class RemoteAgent {
 			}
 		}
 
-		// Apply showTimestamps
+		// Apply showTimestamps — default ON when unset; only an explicit `false` opts out.
 		if ("showTimestamps" in prefs) {
-			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			document.documentElement.dataset.showTimestamps = prefs.showTimestamps === false ? "" : "true";
 		}
 
 		// Apply playAgentFinishSound — default ON when unset.
 		if ("playAgentFinishSound" in prefs) {
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";
+			// Notify the header <bell-toggle> (and Settings checkbox) so they reflect
+			// a change pushed from another tab/client.
+			if (typeof window !== "undefined") {
+				window.dispatchEvent(new CustomEvent("bobbit-play-finish-sound-changed", {
+					detail: { enabled: prefs.playAgentFinishSound !== false },
+				}));
+			}
+		}
+
+		// Apply replaceBobbitWithText — default OFF (only explicit true opts in).
+		if ("replaceBobbitWithText" in prefs) {
+			document.documentElement.dataset.replaceBobbitWithText =
+				prefs.replaceBobbitWithText === true ? "true" : "false";
 		}
 
 		// Apply subgoalsEnabled — default OFF. See subgoals-flag.ts. Mirror

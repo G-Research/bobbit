@@ -3391,6 +3391,105 @@ html {
 	.bobbit-blob__zzz-letter--3 { transform: translate(18px, -42px); }
 }
 
+/* ============================================================================
+   Sprite-to-text chat blob (Settings → General → "Replace bobbit sprite with text")
+   Replaces the animated chat-blob sprite with an animated status-text label.
+   Layout parity: occupies roughly the same vertical footprint as the sprite
+   block (canvas 40×36 with margin -15 -6 16 3 inside a .bobbit-blob whose
+   margin-bottom is -28px) so toggling the setting — or changing state — does
+   not shift the surrounding chat layout.
+   ============================================================================ */
+.bobbit-blob-text {
+	/* Single source for the canonical sprite main colour (CANONICAL_PALETTE.main
+	   in src/ui/bobbit-render.ts). Do not scatter this hex elsewhere. */
+	--bobbit-sprite-main: #8ec63f;
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	min-height: 37px;
+	margin: 0 0 -28px 3px;
+	padding-left: 4px;
+	font-weight: 700;
+	font-size: 15px;
+	letter-spacing: 0.01em;
+	line-height: 1;
+	user-select: none;
+	/* Muted by default; the --busy modifier overrides colour + filter below. */
+	color: var(--muted-foreground);
+}
+.goal-chat-panel .bobbit-blob-text {
+	margin-left: 18px;
+}
+.bobbit-blob-text > span {
+	display: inline-block;
+	white-space: pre;
+	will-change: transform, opacity;
+}
+
+/* Idle / Ended — muted, static. */
+.bobbit-blob-text--idle,
+.bobbit-blob-text--compacting {
+	color: var(--muted-foreground);
+}
+.bobbit-blob-text--ended {
+	color: var(--muted-foreground);
+	filter: saturate(0);
+	opacity: 0.7;
+}
+
+/* Busy — sprite's own colour, honouring the per-session hue exactly like the
+   sprite (which applies the same hue-rotate on .bobbit-blob). */
+.bobbit-blob-text--busy {
+	color: var(--bobbit-sprite-main);
+	filter: hue-rotate(var(--bobbit-hue-rotate, 0deg));
+}
+/* Busy — animated ellipsis: the word holds still while a trailing run of dots
+   cycles "" → "." → ".." → "..." on a steps() clock. The pseudo-element
+   reserves a fixed 1.4em so dots appearing/disappearing never reflow the
+   surrounding chat layout. */
+.bobbit-blob-text--busy::after {
+	content: "";
+	display: inline-block;
+	width: 1.4em;
+	text-align: left;
+	white-space: pre;
+	animation: blob-text-dots 1.4s steps(1) infinite;
+}
+
+/* Compacting — reverse (right→left) pulse: the highlight sweeps across the
+   letters from the last to the first (reverse per-letter delays). "Compacting"
+   has 10 letters. */
+.bobbit-blob-text--compacting > span {
+	animation: blob-text-pulse 1.4s ease-in-out infinite;
+}
+.bobbit-blob-text--compacting > span:nth-child(10) { animation-delay: 0s; }
+.bobbit-blob-text--compacting > span:nth-child(9)  { animation-delay: 0.08s; }
+.bobbit-blob-text--compacting > span:nth-child(8)  { animation-delay: 0.16s; }
+.bobbit-blob-text--compacting > span:nth-child(7)  { animation-delay: 0.24s; }
+.bobbit-blob-text--compacting > span:nth-child(6)  { animation-delay: 0.32s; }
+.bobbit-blob-text--compacting > span:nth-child(5)  { animation-delay: 0.40s; }
+.bobbit-blob-text--compacting > span:nth-child(4)  { animation-delay: 0.48s; }
+.bobbit-blob-text--compacting > span:nth-child(3)  { animation-delay: 0.56s; }
+.bobbit-blob-text--compacting > span:nth-child(2)  { animation-delay: 0.64s; }
+.bobbit-blob-text--compacting > span:nth-child(1)  { animation-delay: 0.72s; }
+
+@keyframes blob-text-dots {
+	0%   { content: ""; }
+	25%  { content: "."; }
+	50%  { content: ".."; }
+	75%  { content: "..."; }
+	100% { content: ""; }
+}
+@keyframes blob-text-pulse {
+	0%, 100% { opacity: 0.45; }
+	50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-blob-text > span { animation: none !important; opacity: 1; transform: none; }
+	.bobbit-blob-text--busy::after { animation: none !important; content: "..."; }
+}
+
 /* Idle state — sitting still, offset left, eyes looking around */
 .bobbit-blob--idle .bobbit-blob__sprite {
 	transform: scale(4) translateX(-7px);

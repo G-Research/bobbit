@@ -38,6 +38,7 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
 import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
@@ -105,9 +106,10 @@ let _listening = false;
 
 
 
-let settingsShowTimestamps = false;
+let settingsShowTimestamps = true;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
+let settingsReplaceBobbitWithText = false;
 let settingsSubgoalsEnabled = true;
 let settingsMaxNestingDepth: number | null = null;
 const MAX_NESTING_DEPTH_DEFAULT = 3;
@@ -2170,14 +2172,25 @@ function projectKeyLabel(key: string): string {
 function loadGeneralSettings() {
 	if (!settingsShowTimestampsLoaded) {
 		settingsShowTimestampsLoaded = true;
+		// Keep the beep checkbox in sync when the header <bell-toggle> (or a
+		// preferences_changed broadcast) flips the preference while Settings is open.
+		if (typeof window !== "undefined") {
+			window.addEventListener(PLAY_FINISH_SOUND_CHANGED, () => {
+				const next = isPlayFinishSoundEnabled();
+				if (next !== settingsPlayFinishSound) { settingsPlayFinishSound = next; renderApp(); }
+			});
+		}
 		(async () => {
 			try {
 				const res = await gatewayFetch("/api/preferences");
 				if (res.ok) {
 					const prefs = await res.json();
-					settingsShowTimestamps = !!prefs.showTimestamps;
+					// Default ON when unset — only an explicit `false` opts out.
+					settingsShowTimestamps = prefs.showTimestamps !== false;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
+					// Replace bobbit sprite with text (chat blob) — default OFF; only an explicit `true` enables.
+					settingsReplaceBobbitWithText = prefs.replaceBobbitWithText === true;
 					// Subgoals (Experimental) — default OFF; only an explicit `true` enables. See docs/nested-goals.md.
 					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
 					const rawDepth = prefs.maxNestingDepth;
@@ -2290,16 +2303,24 @@ async function removeTrustedHost(host: string): Promise<void> {
 }
 
 async function togglePlayFinishSound(): Promise<void> {
-	settingsPlayFinishSound = !settingsPlayFinishSound;
-	// Apply synchronously to the dataset so the gate flips without waiting on
-	// the preferences_changed broadcast — mirrors the runtime path used by the
-	// playNotificationBeep() guard.
-	document.documentElement.dataset.playAgentFinishSound = settingsPlayFinishSound ? "true" : "false";
+	// Route through the shared helper so the dataset, persistence, and the
+	// header <bell-toggle> all stay in sync (it fires PLAY_FINISH_SOUND_CHANGED).
+	const next = !isPlayFinishSoundEnabled();
+	settingsPlayFinishSound = next;
+	renderApp();
+	await setPlayFinishSoundEnabled(next);
+}
+
+async function toggleReplaceBobbitWithText(): Promise<void> {
+	settingsReplaceBobbitWithText = !settingsReplaceBobbitWithText;
+	// Apply synchronously to the dataset so the chat blob flips without waiting
+	// on the preferences_changed broadcast — mirrors togglePlayFinishSound.
+	document.documentElement.dataset.replaceBobbitWithText = settingsReplaceBobbitWithText ? "true" : "false";
 	renderApp();
 	try {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
-			body: JSON.stringify({ playAgentFinishSound: settingsPlayFinishSound }),
+			body: JSON.stringify({ replaceBobbitWithText: settingsReplaceBobbitWithText }),
 		});
 	} catch {}
 }
@@ -2413,6 +2434,21 @@ function renderGeneralTab() {
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
 					Display timestamps next to user and assistant messages.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-replace-bobbit-with-text"
+						.checked=${settingsReplaceBobbitWithText}
+						@change=${toggleReplaceBobbitWithText}
+					/>
+					<span class="text-sm font-medium text-foreground">Replace bobbit sprite with text</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Replace the animated chat avatar with a status-text label that reflects the agent's current state.
 				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">
