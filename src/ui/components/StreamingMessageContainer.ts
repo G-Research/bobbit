@@ -18,6 +18,11 @@ export class StreamingMessageContainer extends LitElement {
 
 	@state() private _message: AgentMessage | null = null;
 	@state() private _blobState: 'hidden' | 'active' | 'entering' | 'exiting' | 'idle' | 'compact-shake' | 'compacting' | 'compact-pop' = 'idle';
+	/** When true, the chat blob sprite is replaced by an animated status-text
+	 * label. Mirrors `document.documentElement.dataset.replaceBobbitWithText`,
+	 * kept reactive via a MutationObserver registered in connectedCallback. */
+	@state() private _replaceWithText = false;
+	private _replaceWithTextObserver: MutationObserver | null = null;
 	private _exitVariant: 'exit' | 'exit-roll' = 'exit';
 	private _entryVariant: 'enter' | 'enter-roll' = 'enter';
 	private _entryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -38,6 +43,51 @@ export class StreamingMessageContainer extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
+		this._replaceWithText = StreamingMessageContainer._readReplaceWithText();
+		// Stay reactive to live preference changes (settings toggle / WS
+		// preferences_changed broadcast both mirror to the documentElement
+		// dataset). A MutationObserver re-reads the flag and Lit re-renders on
+		// the @state change.
+		this._replaceWithTextObserver = new MutationObserver(() => {
+			this._replaceWithText = StreamingMessageContainer._readReplaceWithText();
+		});
+		this._replaceWithTextObserver.observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: ["data-replace-bobbit-with-text"],
+		});
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback();
+		if (this._replaceWithTextObserver) {
+			this._replaceWithTextObserver.disconnect();
+			this._replaceWithTextObserver = null;
+		}
+	}
+
+	private static _readReplaceWithText(): boolean {
+		return document.documentElement.dataset.replaceBobbitWithText === "true";
+	}
+
+	/** Pure map from the current blob state to the status word + CSS modifier. */
+	private _blobTextInfo(): { word: string; modifier: string } {
+		if (this.archived) return { word: "Ended", modifier: "ended" };
+		if (this._blobState === 'idle' || this._blobState === 'exiting') return { word: "Idle", modifier: "idle" };
+		if (this._blobState === 'compacting' || this._blobState === 'compact-shake' || this._blobState === 'compact-pop') {
+			return { word: "Compacting", modifier: "compacting" };
+		}
+		// 'active' / 'entering' (and any future busy-like state) → Busy.
+		return { word: "Busy", modifier: "busy" };
+	}
+
+	private _renderBlobText() {
+		const { word, modifier } = this._blobTextInfo();
+		const letters = word.split("");
+		return html`<div
+			class="bobbit-blob-text bobbit-blob-text--${modifier}"
+			role="status"
+			aria-label=${word}
+		>${letters.map((ch) => html`<span aria-hidden="true">${ch}</span>`)}</div>`;
 	}
 
 	override updated(changed: Map<string, unknown>) {
@@ -345,7 +395,10 @@ export class StreamingMessageContainer extends LitElement {
 		return html`
 			<div class="flex flex-col gap-3 mb-3">
 				${content}
-				${this._blobVisible ? html`<div class="${this._blobClass}">
+				${this._blobVisible
+					? (this._replaceWithText
+						? this._renderBlobText()
+						: html`<div class="${this._blobClass}">
 					${renderBlobSpriteImg(this._blobClass.includes("idle"), this.archived)}
 					<div class="bobbit-blob__crown"></div>
 					<div class="bobbit-blob__bandana"></div>
@@ -366,7 +419,8 @@ export class StreamingMessageContainer extends LitElement {
 						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--2">z</span>
 						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--3">z</span>
 					</div>
-				</div>` : nothing}
+				</div>`)
+					: nothing}
 				${showTimer
 					? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">
 						<live-timer .startTime=${this.turnStartTime} .running=${true}></live-timer>

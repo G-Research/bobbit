@@ -108,6 +108,7 @@ let _listening = false;
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
+let settingsReplaceBobbitWithText = false;
 let settingsSubgoalsEnabled = true;
 let settingsMaxNestingDepth: number | null = null;
 const MAX_NESTING_DEPTH_DEFAULT = 3;
@@ -2178,6 +2179,8 @@ function loadGeneralSettings() {
 					settingsShowTimestamps = !!prefs.showTimestamps;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
+					// Replace bobbit sprite with text (chat blob) — default OFF; only an explicit `true` enables.
+					settingsReplaceBobbitWithText = prefs.replaceBobbitWithText === true;
 					// Subgoals (Experimental) — default OFF; only an explicit `true` enables. See docs/nested-goals.md.
 					settingsSubgoalsEnabled = prefs.subgoalsEnabled === true;
 					const rawDepth = prefs.maxNestingDepth;
@@ -2304,6 +2307,20 @@ async function togglePlayFinishSound(): Promise<void> {
 	} catch {}
 }
 
+async function toggleReplaceBobbitWithText(): Promise<void> {
+	settingsReplaceBobbitWithText = !settingsReplaceBobbitWithText;
+	// Apply synchronously to the dataset so the chat blob flips without waiting
+	// on the preferences_changed broadcast — mirrors togglePlayFinishSound.
+	document.documentElement.dataset.replaceBobbitWithText = settingsReplaceBobbitWithText ? "true" : "false";
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ replaceBobbitWithText: settingsReplaceBobbitWithText }),
+		});
+	} catch {}
+}
+
 async function setMaxNestingDepth(raw: number): Promise<void> {
 	if (!Number.isFinite(raw)) return;
 	let n = Math.floor(raw);
@@ -2413,6 +2430,21 @@ function renderGeneralTab() {
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
 					Display timestamps next to user and assistant messages.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-replace-bobbit-with-text"
+						.checked=${settingsReplaceBobbitWithText}
+						@change=${toggleReplaceBobbitWithText}
+					/>
+					<span class="text-sm font-medium text-foreground">Replace bobbit sprite with text</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Replace the animated chat avatar with a status-text label that reflects the agent's current state.
 				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">
