@@ -12,7 +12,7 @@ description: >-
 version: 1.0.0
 contents:
   # pr-reviewer: the read-only reviewer role minted by the `run` route via
-  # host.agents.spawn. Its toolPolicies grant the "PR Walkthrough" group (the
+  # host.agents.spawn. Its toolPolicies allow the "PR Walkthrough" group (the
   # three walkthrough tools); that group is default-deny for every other role, so
   # submit_pr_walkthrough_yaml is reachable ONLY from this role (design Decision C).
   roles: [pr-reviewer]

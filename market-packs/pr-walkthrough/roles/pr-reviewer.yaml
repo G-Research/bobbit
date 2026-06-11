@@ -1,11 +1,11 @@
 name: pr-reviewer
 label: PR Walkthrough Reviewer
 accessory: review
-# Group-level grant for the "PR Walkthrough" tool group (readonly_bash,
+# Group-level allow for the "PR Walkthrough" tool group (readonly_bash,
 # read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml). The same group is
 # default-DENY for every other role (design Decision C), so submit is reachable
 # ONLY from this role — the "only the reviewer submits" property falls out of
-# tool-granting, with no secret.
+# tool-allowlisting, with no secret.
 toolPolicies:
   "PR Walkthrough": allow
 # promptTemplate = ported buildRolePrompt static text + REQUIRED_YAML_SCHEMA_PROMPT
