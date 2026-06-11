@@ -8427,6 +8427,29 @@ async function handleApiRoute(
 		if (!lead) return undefined;
 		return orchestrationCore.list(lead).some(h => h.sessionId === targetId) ? lead : undefined;
 	};
+	// H3 authz — the own-child fallback MUST enforce owner→caller authz, exactly
+	// like /orchestrate/* (server.ts ~9310). The goal /team/* routes accept a
+	// sandbox-scoped token, so without this a same-goal agent that learns a
+	// helper child's session id could prompt/steer/abort/dismiss the team-lead's
+	// PRIVATE team_delegate child. Bind to the unforgeable per-session secret and
+	// require the AUTHENTIC caller to BE the team-lead owner. Goal-MEMBER
+	// operations (the normal /team/* path) are unaffected — this guards the
+	// own-child fallback ONLY. Returns the owner id when authorized, a `denied`
+	// sentinel when the target IS an own child but the caller is not its owner,
+	// or `undefined` when the target is not an own child (normal path continues).
+	const resolveOwnChildOwner = (goalId: string, targetId: string): { owner: string } | { denied: true } | undefined => {
+		const owner = teamLeadOwnChildOwner(goalId, targetId);
+		if (!owner) return undefined;
+		const h = req.headers as Record<string, string | string[] | undefined>;
+		const secretHeader = h["x-bobbit-session-secret"];
+		const secret = Array.isArray(secretHeader) ? secretHeader[0] : secretHeader;
+		const authenticCaller = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+		if (!authenticCaller || authenticCaller !== owner) return { denied: true };
+		return { owner };
+	};
+	const denyOwnChild = () => json({ error: "Caller session is not the owner of this child agent", code: "NOT_OWNER" }, 403);
 	const ocStatusForTeamFallback = (err: unknown): number => {
 		if (err instanceof OrchestrationCoreError) {
 			if (err.code === "NOT_STREAMING") return 409;
@@ -8446,10 +8469,11 @@ async function handleApiRoute(
 		}
 		// Own-child fallback: dismissRole only knows goal team members; a team-lead's
 		// own team_delegate child is tracked by OrchestrationCore, not the team entry.
-		const owner = teamLeadOwnChildOwner(teamDismissMatch[1], body.sessionId);
-		if (owner) {
+		const ownerResult = resolveOwnChildOwner(teamDismissMatch[1], body.sessionId);
+		if (ownerResult) {
+			if ("denied" in ownerResult) { denyOwnChild(); return; }
 			try {
-				const ok = await orchestrationCore.dismiss(owner, body.sessionId);
+				const ok = await orchestrationCore.dismiss(ownerResult.owner, body.sessionId);
 				json({ ok });
 			} catch (err) {
 				json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
@@ -8735,10 +8759,11 @@ async function handleApiRoute(
 		// Validate target is a team agent
 		const agents = teamManager.listAgents(goalId);
 		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			const owner = teamLeadOwnChildOwner(goalId, body.sessionId);
-			if (owner) {
+			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
+			if (ownerResult) {
+				if ("denied" in ownerResult) { denyOwnChild(); return; }
 				try {
-					await orchestrationCore.steer(owner, body.sessionId, body.message);
+					await orchestrationCore.steer(ownerResult.owner, body.sessionId, body.message);
 					json({ ok: true, dispatched: true });
 				} catch (err) {
 					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
@@ -8780,10 +8805,11 @@ async function handleApiRoute(
 		// Validate target is a team agent
 		const agents = teamManager.listAgents(goalId);
 		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			const owner = teamLeadOwnChildOwner(goalId, body.sessionId);
-			if (owner) {
+			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
+			if (ownerResult) {
+				if ("denied" in ownerResult) { denyOwnChild(); return; }
 				try {
-					await orchestrationCore.abort(owner, body.sessionId);
+					await orchestrationCore.abort(ownerResult.owner, body.sessionId);
 					const afterSession = sessionManager.getSession(body.sessionId);
 					json({ ok: true, status: afterSession?.status || "idle" });
 				} catch (err) {
@@ -8831,10 +8857,11 @@ async function handleApiRoute(
 			}
 		}
 		if (!allowed) {
-			const owner = teamLeadOwnChildOwner(goalId, body.sessionId);
-			if (owner) {
+			const ownerResult = resolveOwnChildOwner(goalId, body.sessionId);
+			if (ownerResult) {
+				if ("denied" in ownerResult) { denyOwnChild(); return; }
 				try {
-					const result = await orchestrationCore.prompt(owner, body.sessionId, body.message as string);
+					const result = await orchestrationCore.prompt(ownerResult.owner, body.sessionId, body.message as string);
 					json({ ok: true, status: result.status });
 				} catch (err) {
 					json({ error: String(err instanceof Error ? err.message : err), code: err instanceof OrchestrationCoreError ? err.code : undefined }, ocStatusForTeamFallback(err));
@@ -9518,18 +9545,33 @@ async function handleApiRoute(
 	}
 
 	// ── SUB-GOAL B SEAM (orchestration-core §6.1) ──────────────────────────────
-	// GET /api/sessions/:id/children-count — live child agents that would be
+	// GET /api/sessions/:id/children-count — child agents that would be
 	// cascade-archived if this (non-goal) session is archived. Enumerated with
-	// the SAME predicate `cascadeReapOwner` uses (delegateOf===id OR
-	// childKind+parentSessionId===id) over live sessions, so the non-goal archive
-	// confirmation modal can name the children before the user confirms. The
-	// goal-archival path enumerates affected sessions separately and is untouched.
+	// the SAME predicate AND the SAME source set `cascadeReapOwner` uses: ALL
+	// live persisted sessions across projects (`getAllLiveSessions()`), NOT just
+	// in-memory ones — so DORMANT persisted children (e.g. delegate children
+	// deferred on boot, archived by the cascade only at runtime) are included in
+	// the count and the listed names. The modal lists these before the user
+	// confirms. The goal-archival path enumerates affected sessions separately
+	// and is untouched.
 	const childrenCountMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/children-count$/);
 	if (childrenCountMatch && req.method === "GET") {
 		const id = decodeURIComponent(childrenCountMatch[1]);
-		const children = sessionManager.listSessions()
-			.filter(s => s.id !== id && (s.delegateOf === id || (!!s.childKind && s.parentSessionId === id)))
-			.map(s => ({ id: s.id, title: s.title, childKind: s.childKind }));
+		// Prefer the cross-project persisted source (mirrors cascadeReapOwner's
+		// `getAllLiveSessions()` enumeration, which includes dormant children);
+		// fall back to in-memory sessions when no project context is available.
+		const source = projectContextManager
+			? projectContextManager.getAllLiveSessions()
+			: sessionManager.listSessions();
+		const seen = new Set<string>();
+		const children: Array<{ id: string; title: string; childKind?: string }> = [];
+		for (const s of source) {
+			if (s.id === id || seen.has(s.id)) continue;
+			if (s.delegateOf === id || (!!s.childKind && s.parentSessionId === id)) {
+				seen.add(s.id);
+				children.push({ id: s.id, title: s.title, childKind: s.childKind });
+			}
+		}
 		json({ count: children.length, children });
 		return;
 	}

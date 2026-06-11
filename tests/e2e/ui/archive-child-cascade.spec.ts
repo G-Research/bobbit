@@ -3,8 +3,10 @@
  *
  * OrchestrationCore §6 / §6.1. Covers:
  *   (a) Archiving a NON-GOAL (plain) session that has spawned child agents shows
- *       a confirmation modal that NAMES the children: "This will also archive
- *       its N child agent(s)." (enumerated via GET /api/sessions/:id/children-count).
+ *       a confirmation modal that LISTS the children BY NAME (M1): "This will
+ *       also archive its N child agents: \"Title A\" and \"Title B\"."
+ *       (enumerated via GET /api/sessions/:id/children-count, which now includes
+ *       dormant/persisted children, matching cascadeReapOwner).
  *   (b) After confirming, the children are cascade-archived — they leave the
  *       live session list and appear in the "include=archived" surface, with
  *       parity to today's team-shutdown child archival (no new badge).
@@ -112,10 +114,14 @@ test.describe("Non-goal archive cascade + confirmation modal (UI)", () => {
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		await openTerminateModal(page, parentId);
 
-		// 4. The confirmation modal NAMES the children that will be archived.
+		// 4. The confirmation modal LISTS the children BY NAME (M1, not just a
+		//    count). Order is not guaranteed by the enumeration, so assert both
+		//    titles plus the count phrasing appear.
 		const body = confirmBody(page);
 		await expect(body).toBeVisible({ timeout: 10_000 });
-		await expect(body).toContainText("This will also archive its 2 child agents.");
+		await expect(body).toContainText("This will also archive its 2 child agents");
+		await expect(body).toContainText("CascadeChildA");
+		await expect(body).toContainText("CascadeChildB");
 
 		// 5. Confirm (destructive "Terminate" button in the dialog footer).
 		await page.getByRole("button", { name: "Terminate", exact: true }).last().click();

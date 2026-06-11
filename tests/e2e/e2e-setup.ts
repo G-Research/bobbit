@@ -590,17 +590,51 @@ function maybeInjectOrchestrateSecret(path: string, headers: Record<string, stri
 	return { ...headers, "X-Bobbit-Session-Secret": _orchestrateSecretStore.getOrCreateSecret(decodeURIComponent(m[1])) };
 }
 
+/**
+ * The goal `/team/{prompt,steer,abort,dismiss}` OWN-CHILD fallback (H3) requires
+ * the AUTHENTIC caller — resolved from the per-session secret — to BE the
+ * team-lead owner before it orchestrates the lead's PRIVATE team_delegate child
+ * (mirrors `/orchestrate/*`). In production the team-lead's agent process sends
+ * its BOBBIT_SESSION_SECRET (team/extension.ts). An in-process E2E test acts as
+ * the team-lead by resolving the goal's team-lead session id and injecting its
+ * secret. A test exercising the FOREIGN-caller DENY path supplies its OWN
+ * secret (suppresses injection); the NO-secret DENY path uses `rawApiFetch`
+ * (which bypasses all injectors). Goal-MEMBER `/team/*` calls are unaffected —
+ * the server ignores the secret on the normal path.
+ */
+let _teamLeadResolver: ((goalId: string) => string | undefined) | undefined;
+let _teamLeadSecretStore: { getOrCreateSecret(id: string): string } | undefined;
+export function registerTeamLeadSecretSource(
+	resolver: ((goalId: string) => string | undefined) | undefined,
+	store?: unknown,
+): void {
+	_teamLeadResolver = resolver;
+	_teamLeadSecretStore = store && typeof (store as any).getOrCreateSecret === "function"
+		? (store as { getOrCreateSecret(id: string): string })
+		: undefined;
+}
+const TEAM_OWNCHILD_PATH = /^\/api\/goals\/([^/]+)\/(?:team|swarm)\/(?:prompt|steer|abort|dismiss)$/;
+function maybeInjectTeamLeadSecret(path: string, headers: Record<string, string>): Record<string, string> {
+	const m = TEAM_OWNCHILD_PATH.exec(path.split("?")[0]);
+	if (!m || !_teamLeadResolver || !_teamLeadSecretStore) return headers;
+	// Respect an explicit secret (foreign-caller deny-path tests).
+	if (Object.keys(headers).some((k) => k.toLowerCase() === "x-bobbit-session-secret")) return headers;
+	const lead = _teamLeadResolver(decodeURIComponent(m[1]));
+	if (!lead) return headers;
+	return { ...headers, "X-Bobbit-Session-Secret": _teamLeadSecretStore.getOrCreateSecret(lead) };
+}
+
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	const injected = maybeInjectAcceptCanonical(path, await maybeInjectProjectId(path, opts));
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
 	const finalPath = await maybeInjectProjectIdQuery(path, method);
-	const authedHeaders = maybeInjectOrchestrateSecret(finalPath, await withChildrenAuthzCookie(finalPath, method, {
+	const authedHeaders = maybeInjectTeamLeadSecret(finalPath, maybeInjectOrchestrateSecret(finalPath, await withChildrenAuthzCookie(finalPath, method, {
 		"Content-Type": "application/json",
 		Authorization: `Bearer ${token()}`,
 		...(injected.headers as Record<string, string> || {}),
-	}));
+	})));
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
 			const resp = await fetch(`${base()}${finalPath}`, {
