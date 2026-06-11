@@ -206,6 +206,7 @@ T8 (S, independent) → T9 (S, independent). T2/T3/T5/T7 gate PB-P2 (§1.4).
 - **AI**: [ ] P1 · [ ] P2a · [ ] P2b · [ ] P3a · [ ] P3b · [ ] P4 · [ ] P5 · [ ] P6
 - **CI**: [ ] CI-1 · [ ] CI-2 · [ ] CI-3 · [ ] CI-4 · [ ] CI-5 · [ ] CI-6 · [ ] CI-7 ·
   language-pack cards: [ ] lsp-go · [ ] lsp-rust · [ ] lsp-csharp · [ ] lsp-fsharp · [ ] lsp-jvm · [ ] lsp-clangd · [ ] lsp-kotlin
+- **Cards** (post-dependency, owner-accepted): [ ] Caretaker transcript-retention consolidation pass (distill→prune; after EP G2 + MC P3; [agent-memory.md §1](agent-memory.md))
 
 ## §5 Prerequisite fix (before any lane)
 

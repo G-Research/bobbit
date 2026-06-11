@@ -192,7 +192,10 @@ Letta (a competing harness). **But** the 2026 production trend is text-first (Cl
 CLAUDE.md/auto-memory, Devin Knowledge, Cursor memories) — so: **markdown staff memory stays
 authoritative** for procedural knowledge; Hindsight is the *optional* episodic-memory pack,
 gated on Docker/Postgres availability, an LLM key per `retain` priced in. This nuance is
-recorded against EP G2 here rather than rewriting the EP doc.
+recorded against EP G2 here rather than rewriting the EP doc. **Superseded for depth:** the
+full memory decision record — sessions-vs-Hindsight layering, the comparison table with
+reasons, and the bank-topology decision (one shared tag-scoped bank) — now lives in
+[agent-memory.md](agent-memory.md).
 
 ## §8 Net changes applied to the CI docs after this research
 

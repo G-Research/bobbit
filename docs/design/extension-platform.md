@@ -136,7 +136,7 @@ rest is ignored). v2 servers warn when `schema` is newer than supported.
 ```yaml
 schema: 2
 name: hindsight
-description: Persistent agent memory backed by Hindsight (recall/retain/reflect, per-project banks).
+description: Persistent agent memory backed by Hindsight (recall/retain/reflect, shared tag-scoped bank — see docs/design/agent-memory.md).
 version: 1.0.0
 contents:
   roles: []
@@ -472,12 +472,16 @@ market-packs/hindsight/
 ```
 
 - **Provider flow**: `sessionSetup` → recall vs goal/task spec → "Relevant memory" section;
-  `beforePrompt` → recall vs user prompt (parallel project + global banks, 1500ms timeout ⇒
-  skip); `afterTurn` → **async** retain of the turn (failures queue in the pack store, retried
-  next turn); `beforeCompact` → synchronous retain of salient facts before context loss;
-  `sessionShutdown` → flush.
+  `beforePrompt` → recall vs user prompt (project-scoped + org-wide tag filters in one
+  query, 1500ms timeout ⇒ skip); `afterTurn` → **async** retain of the turn, auto-tagged
+  `project:/agent:/goal:/kind:` from session context (failures queue in the pack store,
+  retried next turn); `beforeCompact` → synchronous retain of salient facts before context
+  loss; `sessionShutdown` → flush.
 - **Tools**: explicit `hindsight_recall` / `hindsight_reflect` / `hindsight_retain` for the
-  model, with `bank: current | global | all`. (Hindsight's own MCP server remains usable via
+  model, with `scope: project | global | all` mapped to tag filters on the shared bank —
+  NOT bank switching; Hindsight has no cross-bank search, which is why the topology is one
+  shared tag-scoped bank (decision + verified facts:
+  [agent-memory.md §3](agent-memory.md)). (Hindsight's own MCP server remains usable via
   normal MCP discovery, orthogonally.)
 - **Panel** (native, same-origin): status + mode setup (managed vs external), memory search,
   recent retains, retain-queue/operations view, runtime health/logs links, settings (model for

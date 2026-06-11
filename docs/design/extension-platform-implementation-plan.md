@@ -498,6 +498,13 @@ panel UI.
 > Implementer note: verify the real Hindsight REST paths against the targeted Hindsight
 > release BEFORE coding the client; the contract below is Bobbit's internal client interface —
 > the stub mirrors THIS contract, and `hindsight-client` adapts it to upstream paths.
+>
+> Bank topology is decided: **one shared tag-scoped bank**, tools take `scope:` mapped to
+> tag filters (NOT `bank:` switching) — rationale + auto-tag taxonomy in
+> [agent-memory.md §3](agent-memory.md). Two upstream checks at this goal: (1) confirm
+> tag-filtered recall with strict matching via REST/SDK; (2) confirm **delete-by-tag**
+> exists for project offboarding — if absent, record the per-project-bank fallback for
+> deletion-sensitive installs in the pack README.
 
 ### G2.1 REST client + stub-server harness *(parallel with all of G1)*
 
