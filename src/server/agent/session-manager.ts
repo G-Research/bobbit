@@ -6617,6 +6617,10 @@ export class SessionManager {
 		} else if (this._testStore) {
 			this._testStore.flush();
 		}
+		// Flush pending bg-process projection writes + store epoch before exit so
+		// re-attach exit codes and dismiss removals survive a restart (the bg
+		// store mirrors sessionStore's stale-snapshot guard).
+		try { (this as any).bgProcessManager?.flush(); } catch { /* best-effort */ }
 
 		// Close search index
 		try {

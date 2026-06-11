@@ -163,6 +163,12 @@ export class ProjectContext {
    *  preventing the FlexSearch flush-on-close race against temp-dir removal. */
   async close(): Promise<void> {
     this.sessionStore.flush();
+    // Mirror sessionStore: flush the bg-process store so its final epoch
+    // (exit status, dismiss removals, offset advances) is on disk before exit.
+    // Otherwise a pending debounced write lands after the next gateway loads
+    // the older epoch, tripping the stale-snapshot guard and silently dropping
+    // every subsequent save (re-attach exit code + dismiss).
+    this.bgProcessStore.flush();
     await this.searchIndex.close();
   }
 }
