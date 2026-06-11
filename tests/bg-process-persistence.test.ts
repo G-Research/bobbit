@@ -111,7 +111,9 @@ describe("BgProcessManager — wrapper builders (POSIX only)", () => {
 
 	it("buildHostWrapper emits subshell, trimmer, status write — no cmd / %errorlevel%", () => {
 		const w = buildHostWrapper("echo hi", paths);
-		assert.match(w, /printf '%s\\n%s\\n' "\$\$" 'NONCE123'/);
+		// Pidfile publishes a Windows-usable winpid (via /proc/$$/winpid) with a $$
+		// fallback off-Windows — see buildPosixWrapper. Off Windows this resolves to $$.
+		assert.match(w, /printf '%s\\n%s\\n' "\$\(cat \/proc\/\$\$\/winpid 2>\/dev\/null \|\| echo \$\$\)" 'NONCE123'/);
 		assert.match(w, /while kill -0 "\$\$"/);
 		assert.match(w, /tail -c 524288 "\$f" > "\$f\.trim"/);
 		assert.match(w, /cat "\$f\.trim" > "\$f"/);

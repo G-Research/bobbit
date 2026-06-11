@@ -24,6 +24,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { restartSentinelPath } from "./harness-signal.js";
 import { missingDependencies } from "./harness-deps.js";
+import { windowsGatewayKillArgs } from "./harness-kill.js";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -165,10 +166,13 @@ async function killServer(): Promise<void> {
 			resolve();
 		});
 
-		// On Windows, SIGTERM doesn't work well — use tree-kill pattern
+		// On Windows, SIGTERM doesn't work well — force-kill the gateway. We kill
+		// ONLY the gateway PID (no `/T` tree-kill): `/T` would walk the child-process
+		// tree and euthanize the detached `bash_bg` wrappers we want to survive the
+		// restart. See harness-kill.ts for the full rationale.
 		if (process.platform === "win32") {
 			try {
-				execSync(`taskkill /pid ${child!.pid} /T /F`, { stdio: "ignore", shell: true as unknown as string });
+				execSync(windowsGatewayKillArgs(child!.pid!).join(" "), { stdio: "ignore", shell: true as unknown as string });
 			} catch {
 				child?.kill("SIGKILL");
 			}
