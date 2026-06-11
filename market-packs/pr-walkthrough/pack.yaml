@@ -11,7 +11,11 @@ description: >-
   allowedTools.
 version: 1.0.0
 contents:
-  roles: []
+  # pr-reviewer: the read-only reviewer role minted by the `run` route via
+  # host.agents.spawn. Its toolPolicies grant the "PR Walkthrough" group (the
+  # three walkthrough tools); that group is default-deny for every other role, so
+  # submit_pr_walkthrough_yaml is reachable ONLY from this role (design Decision C).
+  roles: [pr-reviewer]
   tools: []
   skills: []
   entrypoints:
@@ -28,6 +32,9 @@ contents:
 #    the confined worker (trusted tool/MCP tier), so `bundle` runs REAL `git diff`
 #    LIVE against the SERVER-derived session worktree. `publish` persists
 #    LLM-enhanced cards to the implicit pack-scoped store.
+#    `run` mints the isolated read-only reviewer child via host.agents.spawn (no
+#    longer host.session.postMessage); `status` polls it (host.agents.status +
+#    pack-store submitted-YAML marker). `bundle`/`publish` are byte-stable.
 routes:
   module: lib/routes.mjs
-  names: [bundle, publish]
+  names: [bundle, publish, run, status]

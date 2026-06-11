@@ -44,6 +44,7 @@
 // reads rejected) — so this module never names a packId or a path.
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 // PRODUCTION-FAITHFUL SYNTHESIS (design built-in-first-party-packs §8.4): the pack
 // runs the SAME YAML→cards synthesis as the deleted built-in via the pure shared
@@ -62,6 +63,34 @@ const jobKey = (jobId) => `job/${jobId}`;
 // LLM-enhanced cards persisted at submit time are keyed by the STRUCTURAL changeset
 // id (base..head) so a freshly-recomputed bundle for the same range finds them.
 const cardsKey = (changesetId) => `cards/${b64url(changesetId)}`;
+
+// ── host.agents reviewer migration (design Decisions C/D/E) — pack-store keys. ──
+// The reviewer child is a real, isolated, read-only principal minted by the `run`
+// route via host.agents.spawn (replacing the old host.session.postMessage hijack).
+// Routing/idempotency live entirely in these pack-scoped keys (the legacy
+// WalkthroughAgentStore + submit-proof secret are gone):
+//   binding/<childSessionId>            → { jobId, changesetId, baseSha, headSha,
+//                                            parentSessionId, canonicalKey, target,
+//                                            status, kickedOff }
+//   reviewer/<parentSessionId>/<b64key> → { childSessionId, jobId }   (idempotency index)
+//   submitted/<jobId>                   → { yaml, baseSha, headSha, submittedAt }
+// NO launch-bundle key — the analysis bundle is resolved server-side by the bundle
+// endpoint (design §6). status ∈ running|submitted|ready|error (TERMINAL = the last three).
+const bindingKey = (childSessionId) => `binding/${childSessionId}`;
+const reviewerKey = (parentSessionId, canonicalKey) => `reviewer/${parentSessionId}/${b64url(canonicalKey)}`;
+const submittedKey = (jobId) => `submitted/${jobId}`;
+
+// MODULE-SCOPED in-flight launch map — the analogue of the deleted launchInFlight
+// mutex. The routes module is a worker SINGLETON, so this Map persists across
+// host.callRoute("run") invocations and serializes near-simultaneous same-target
+// launches: a second concurrent `run` for `${parent}\0${canonicalKey}` awaits the
+// first's promise and returns its result (created:false). Cleared in `finally`.
+const inFlightLaunches = new Map();
+
+// host.agents reviewer-launch retry bound (Decision E): clearly-transient spawn
+// errors are auto-retried (short backoff) so a blip never surfaces; non-transient
+// codes like ROLE_TOOLS_UNRESOLVED are NOT retried.
+const SPAWN_MAX_ATTEMPTS = 2;
 
 function b64url(value) {
 	return Buffer.from(String(value), "utf-8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -233,6 +262,89 @@ export const routes = {
 
 		const keys = await ctx.host.store.list("");
 		return { ok: true, jobId, changesetId, persistedAt, cardCount: cards.length, keys };
+	},
+
+	// ── run ──────────────────────────────────────────────────────────────────────
+	// Mints a REAL, isolated, read-only reviewer child via host.agents.spawn (NOT
+	// host.session.postMessage — the user's own agent is never driven). Input:
+	//   { prUrl } | { owner, repo, prNumber } | { baseSha, headSha }
+	// Idempotent (one reviewer per parent+target, concurrency-deduped) and
+	// failure-atomic (compensates on any post-spawn failure). The bound owner is
+	// ctx.sessionId (host.agents children are owner-scoped). Returns either
+	//   { ok:true, created, jobId, childSessionId, changesetId, baseSha, headSha, status } or
+	//   { ok:false, retryable, error, code }   (the panel surfaces a "Run again" affordance).
+	run: async (ctx, req) => {
+		const body = (req && req.body) || {};
+		const parent = strOf(ctx && ctx.sessionId);
+		if (!parent) return { ok: false, retryable: false, error: "missing bound session", code: "NO_SESSION" };
+
+		let target;
+		try {
+			target = await canonicalizeTarget(body, workerCwd());
+		} catch (e) {
+			return { ok: false, retryable: false, error: messageOf(e), code: "INVALID_TARGET" };
+		}
+		const canonicalKey = target.canonicalKey;
+		const launchKey = `${parent}\0${canonicalKey}`;
+
+		// Step 1b: concurrency dedupe — await an in-flight launch for the same key.
+		const pending = inFlightLaunches.get(launchKey);
+		if (pending) {
+			const result = await pending;
+			return { ...result, created: false };
+		}
+		const promise = launchReviewer(ctx, parent, target, canonicalKey);
+		inFlightLaunches.set(launchKey, promise);
+		try {
+			return await promise;
+		} finally {
+			inFlightLaunches.delete(launchKey);
+		}
+	},
+
+	// ── status ───────────────────────────────────────────────────────────────────
+	// BINDING-AUTHORITATIVE poll. Input { childSessionId, jobId }. Loads the binding
+	// FIRST and verifies jobId + parentSessionId===ctx.sessionId before reading
+	// anything else (no probing an arbitrary job's submitted marker). Completion is
+	// the pack-store submitted-YAML marker, NOT the agent's idle status. Returns
+	//   { phase:"running", agentStatus } | { phase:"submitted", yaml, baseSha, headSha }
+	//   | { phase:"error", agentStatus?, error }.
+	status: async (ctx, req) => {
+		const body = (req && req.body) || {};
+		const childSessionId = strOf(body.childSessionId);
+		const jobId = strOf(body.jobId);
+		const store = ctx.host.store;
+		if (!childSessionId || !jobId) {
+			return { phase: "error", error: "childSessionId and jobId are required" };
+		}
+
+		// Verify the caller owns the bound job; on mismatch read NOTHING else.
+		const binding = await store.get(bindingKey(childSessionId));
+		if (!binding || typeof binding !== "object"
+			|| binding.jobId !== jobId
+			|| binding.parentSessionId !== ctx.sessionId) {
+			return { phase: "error", error: "unknown or mismatched binding" };
+		}
+
+		const submitted = await store.get(submittedKey(binding.jobId));
+		let agentStatus = "preparing";
+		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
+		catch { agentStatus = "terminated"; }
+
+		if (submitted && typeof submitted === "object") {
+			// Redundant safety net — submit-yaml already server-dismisses the reviewer.
+			try { await ctx.host.agents.dismiss(childSessionId); } catch { /* idempotent */ }
+			return { phase: "submitted", yaml: submitted.yaml, baseSha: submitted.baseSha, headSha: submitted.headSha };
+		}
+		if (agentStatus === "terminated") {
+			// Errored without submitting: mark the binding terminal and dismiss (the
+			// PRIMARY cleanup driver on this path; dismiss stamps the generic
+			// childTerminal marker server-side so a pre-poll restart still reaps it).
+			await store.put(bindingKey(childSessionId), { ...binding, status: "error" });
+			try { await ctx.host.agents.dismiss(childSessionId); } catch { /* best-effort */ }
+			return { phase: "error", agentStatus, error: "The reviewer terminated without producing a walkthrough." };
+		}
+		return { phase: "running", agentStatus };
 	},
 };
 
@@ -460,4 +572,258 @@ function shortSha(sha) {
 function slug(value) {
 	const clean = String(value).replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 48);
 	return clean || "file";
+}
+
+// ── host.agents reviewer launch (run route helpers) ─────────────────────────────────
+// Steps 2–5 of the run route (§3.2): idempotency → spawn(deferInitialPrompt) →
+// write binding + reviewer index → kickoff prompt → flip kickedOff. All post-spawn
+// steps are wrapped in ONE try/catch that COMPENSATES (dismiss child + tombstone
+// both keys) on any failure, so a retry starts clean.
+async function launchReviewer(ctx, parent, target, canonicalKey) {
+	const store = ctx.host.store;
+	const kickoff = buildKickoffPrompt(target);
+
+	// Step 2: idempotency — reuse a LIVE reviewer; clear a stale (terminated) index.
+	const existing = await store.get(reviewerKey(parent, canonicalKey));
+	if (existing && typeof existing === "object" && existing.childSessionId) {
+		let agentStatus = "terminated";
+		try { agentStatus = (await ctx.host.agents.status(existing.childSessionId)).status; }
+		catch { agentStatus = "terminated"; }
+		if (agentStatus !== "terminated") {
+			const binding = await store.get(bindingKey(existing.childSessionId));
+			if (binding && typeof binding === "object" && binding.kickedOff === false) {
+				// Bound-but-not-started child: re-issue the deterministic kickoff so the
+				// panel never polls a never-started child forever.
+				await ctx.host.agents.prompt(existing.childSessionId, kickoff);
+				await store.put(bindingKey(existing.childSessionId), { ...binding, kickedOff: true });
+			}
+			return {
+				ok: true,
+				created: false,
+				jobId: existing.jobId,
+				childSessionId: existing.childSessionId,
+				changesetId: binding ? binding.changesetId : undefined,
+				baseSha: binding ? binding.baseSha : undefined,
+				headSha: binding ? binding.headSha : undefined,
+				status: binding ? binding.status : "running",
+			};
+		}
+		await softDelete(store, reviewerKey(parent, canonicalKey));
+	}
+
+	// Step 3: spawn the visible, NOT-yet-started reviewer (bounded auto-retry).
+	const jobId = `prw-${randomUUID()}`;
+	const changesetId = changesetIdForTarget(target);
+	let childSessionId;
+	try {
+		const spawned = await spawnReviewerWithRetry(ctx, {
+			role: "pr-reviewer",
+			readOnly: true,
+			lifecycle: "full",
+			deferInitialPrompt: true,
+			instructions: kickoff,
+			context: contextForTarget(target),
+		});
+		childSessionId = spawned && spawned.childSessionId;
+	} catch (e) {
+		return { ok: false, retryable: true, error: messageOf(e), code: spawnErrorCode(e) };
+	}
+	if (!childSessionId) {
+		return { ok: false, retryable: true, error: "spawn returned no childSessionId", code: "SPAWN_FAILED" };
+	}
+
+	// Step 4: all post-spawn steps in ONE try/catch — COMPENSATE on any failure.
+	const bindingBase = {
+		jobId,
+		changesetId,
+		baseSha: target.baseSha,
+		headSha: target.headSha,
+		parentSessionId: parent,
+		canonicalKey,
+		target,
+		status: "running",
+	};
+	try {
+		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: false });
+		await store.put(reviewerKey(parent, canonicalKey), { childSessionId, jobId });
+		await ctx.host.agents.prompt(childSessionId, kickoff);
+		await store.put(bindingKey(childSessionId), { ...bindingBase, kickedOff: true });
+	} catch (e) {
+		try { await ctx.host.agents.dismiss(childSessionId); } catch { /* no orphaned visible child */ }
+		await softDelete(store, bindingKey(childSessionId));
+		await softDelete(store, reviewerKey(parent, canonicalKey));
+		return { ok: false, retryable: true, error: messageOf(e), code: "LAUNCH_FAILED" };
+	}
+
+	// Step 5
+	return {
+		ok: true,
+		created: true,
+		jobId,
+		childSessionId,
+		changesetId,
+		baseSha: target.baseSha,
+		headSha: target.headSha,
+		status: "running",
+	};
+}
+
+async function spawnReviewerWithRetry(ctx, spawnOpts) {
+	let lastErr;
+	for (let attempt = 0; attempt < SPAWN_MAX_ATTEMPTS; attempt++) {
+		try {
+			return await ctx.host.agents.spawn(spawnOpts);
+		} catch (e) {
+			lastErr = e;
+			if (isNonTransientSpawnError(e)) throw e;
+			if (attempt < SPAWN_MAX_ATTEMPTS - 1) await sleep(150 * (attempt + 1));
+		}
+	}
+	throw lastErr;
+}
+
+function isNonTransientSpawnError(err) {
+	return /ROLE_TOOLS_UNRESOLVED/.test(messageOf(err));
+}
+
+function spawnErrorCode(err) {
+	return /ROLE_TOOLS_UNRESOLVED/.test(messageOf(err)) ? "ROLE_TOOLS_UNRESOLVED" : "SPAWN_FAILED";
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The host.store API exposes only get/put/list (NO delete), so a logical delete is
+// a null tombstone: store.get returns null for a null-valued key, which every
+// reader here treats as "absent". Bounded by the per-pack key quota.
+async function softDelete(store, key) {
+	try { await store.put(key, null); } catch { /* best-effort */ }
+}
+
+function messageOf(err) {
+	return err && err.message ? String(err.message) : String(err);
+}
+
+function contextForTarget(target) {
+	const out = { target: target.canonicalKey };
+	if (target.prUrl) out.prUrl = target.prUrl;
+	return out;
+}
+
+// Ported from buildKickoffPrompt (walkthrough-agent-manager.ts) — the PER-TARGET
+// kickoff. The REQUIRED_YAML_SCHEMA_PROMPT is NOT repeated here: the pr-reviewer
+// role's promptTemplate carries it (design Decision B static/per-target split).
+function buildKickoffPrompt(target) {
+	return [
+		`Review target: ${target.canonicalKey}`,
+		target.prUrl ? `PR URL: ${target.prUrl}` : undefined,
+		target.baseSha && target.headSha ? `Range: ${target.baseSha}..${target.headSha}` : undefined,
+		"Start by calling read_pr_walkthrough_bundle in manifest mode, then say you are beginning the investigation with an approximate progress percentage.",
+		"Treat the persisted bundle as authoritative for PR body, SHAs, stats, files, hunks, warnings, and limits.",
+		"Populate the panel only by calling submit_pr_walkthrough_yaml with valid YAML. Stay available after success.",
+	].filter(Boolean).join("\n");
+}
+
+// Ported PURE target canonicalization (canonicalizeTarget from
+// walkthrough-agent-manager.ts). The pack worker cannot import src/server or
+// src/shared (pack-root confinement), so the logic is inlined. canonicalKey is the
+// idempotency key; number-only GitHub targets infer owner/repo/host from the
+// SERVER-DERIVED session worktree's origin remote (never caller-supplied).
+async function canonicalizeTarget(input, cwd) {
+	const prUrl = strOf(input.prUrl);
+	const parsed = prUrl ? parseGithubPrUrl(prUrl) : undefined;
+	let owner = strOf(input.owner) || (parsed && parsed.owner);
+	let repo = strOf(input.repo) || (parsed && parsed.repo);
+	const number = numberValue(input.prNumber) ?? (parsed ? parsed.number : undefined);
+	const baseSha = strOf(input.baseSha);
+	const headSha = strOf(input.headSha);
+	let host = normalizeGithubHost(parsed && parsed.host);
+
+	if (number !== undefined && (!owner || !repo)) {
+		const inferred = await inferGithubRepository(cwd);
+		if (inferred) {
+			owner = owner || inferred.owner;
+			repo = repo || inferred.repo;
+			host = normalizeGithubHost(inferred.host);
+		}
+	}
+
+	if (owner && repo && number !== undefined) {
+		const url = prUrl || `https://${host}/${owner}/${repo}/pull/${number}`;
+		const canonicalKey = host === "github.com"
+			? `github:${owner}/${repo}#${number}`
+			: `github:${host}/${owner}/${repo}#${number}`;
+		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, host, canonicalKey };
+	}
+	if (number !== undefined) {
+		return { provider: "github", prUrl, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
+	}
+	if (baseSha && headSha) {
+		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };
+	}
+	throw new Error("A GitHub PR URL/number or local baseSha/headSha is required");
+}
+
+// Ported changesetIdForTarget: github → changesetIdForGithub (matches
+// src/shared/pr-walkthrough/ids.ts), local → changesetIdForLocal (already inlined).
+function changesetIdForTarget(target) {
+	if (target.provider === "github") {
+		return changesetIdForGithub(target.owner || "unknown", target.repo || "unknown", target.number ?? "unknown", target.headSha);
+	}
+	return changesetIdForLocal(target.baseSha || "unknown", target.headSha || "unknown");
+}
+
+function changesetIdForGithub(owner, repo, number, headSha) {
+	return `github:${String(owner).trim()}/${String(repo).trim()}#${String(number).trim()}:${headSha ? shortSha(headSha) : "unknown"}`;
+}
+
+function parseGithubPrUrl(input) {
+	try {
+		const url = new URL(input);
+		const host = url.hostname.replace(/\.$/, "").toLowerCase();
+		const parts = url.pathname.split("/").filter(Boolean);
+		if (parts.length >= 4 && parts[2] === "pull") {
+			const number = Number(parts[3]);
+			if (Number.isInteger(number) && number > 0) return { owner: parts[0], repo: parts[1], number, host };
+		}
+	} catch { /* not a URL */ }
+	return undefined;
+}
+
+function normalizeGithubHost(host) {
+	const normalized = (host || "github.com").replace(/\.$/, "").toLowerCase();
+	return normalized === "www.github.com" ? "github.com" : normalized;
+}
+
+function numberValue(value) {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+	return undefined;
+}
+
+// Infer owner/repo/host from the session worktree's origin remote (server-derived
+// cwd, never caller-supplied) for number-only GitHub launches.
+async function inferGithubRepository(cwd) {
+	try {
+		const out = await git(cwd, ["remote", "get-url", "origin"]);
+		return parseGithubRemoteUrl(String(out).trim());
+	} catch {
+		return undefined;
+	}
+}
+
+function parseGithubRemoteUrl(url) {
+	if (!url) return undefined;
+	// scp-like: git@host:owner/repo(.git)
+	const scp = url.match(/^[^@]+@([^:]+):([^/]+)\/(.+?)(?:\.git)?$/);
+	if (scp) return { host: scp[1].toLowerCase(), owner: scp[2], repo: scp[3] };
+	try {
+		const u = new URL(url);
+		const parts = u.pathname.split("/").filter(Boolean);
+		if (parts.length >= 2) {
+			return { host: u.hostname.replace(/\.$/, "").toLowerCase(), owner: parts[0], repo: parts[1].replace(/\.git$/, "") };
+		}
+	} catch { /* not a URL */ }
+	return undefined;
 }
