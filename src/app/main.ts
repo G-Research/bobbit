@@ -12,6 +12,10 @@ import "./role-manager.css";
 import "./tool-manager.css";
 import "./marketplace.css";
 import "./storage.js"; // must initialize before anything else
+// Pin the stored theme to an explicit light/dark value before any
+// <theme-toggle> is constructed, so it never renders the ambiguous "system"
+// (Monitor) icon and always reflects the current theme. See theme-init.ts.
+import "./theme-init.js";
 // Eagerly register <bg-process-pill> so it's available the moment the chat
 // view mounts. Lazy-loading via `ensureBgProcessPill()` (lazy-widgets.ts) was
 // 9.3 kB cheaper but produced occasional pill-overflow test flakes during the
@@ -653,10 +657,9 @@ async function initApp() {
 					} else {
 						localStorage.removeItem('palette');
 					}
-					// Apply showTimestamps
-					if (prefs.showTimestamps) {
-						document.documentElement.dataset.showTimestamps = "true";
-					}
+					// Apply showTimestamps — default ON when unset; only an explicit `false` opts out.
+					document.documentElement.dataset.showTimestamps =
+						prefs.showTimestamps === false ? "" : "true";
 					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
@@ -1006,8 +1009,8 @@ async function initApp() {
 				document.documentElement.dataset.palette = palette;
 				localStorage.setItem('palette', palette);
 			}
-			// Apply showTimestamps
-			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			// Apply showTimestamps — default ON when unset; only an explicit `false` opts out.
+			document.documentElement.dataset.showTimestamps = prefs.showTimestamps === false ? "" : "true";
 			// Apply playAgentFinishSound — default ON when unset.
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";

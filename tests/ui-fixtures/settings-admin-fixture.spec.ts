@@ -110,14 +110,15 @@ test.describe("Settings/admin UI fixture", () => {
 		const budget = page.locator("[data-testid='general-skills-catalog-budget']");
 		const reset = page.locator("[data-testid='general-skills-catalog-budget-reset']");
 
-		await expect(timestamps).not.toBeChecked();
+		// Show message timestamps defaults ON (only an explicit `false` opts out).
+		await expect(timestamps).toBeChecked();
 		await expect(playFinish).toBeChecked();
 		await expect(budget).toHaveValue("16");
 		await expect(reset).toBeDisabled();
 
 		await timestamps.click();
-		await expect(timestamps).toBeChecked();
-		await expect.poll(async () => (await prefs(page)).showTimestamps).toBe(true);
+		await expect(timestamps).not.toBeChecked();
+		await expect.poll(async () => (await prefs(page)).showTimestamps).toBe(false);
 
 		await playFinish.click();
 		await expect(playFinish).not.toBeChecked();
@@ -136,7 +137,7 @@ test.describe("Settings/admin UI fixture", () => {
 		const budgetAfter = page.locator("[data-testid='general-skills-catalog-budget']");
 		const resetAfter = page.locator("[data-testid='general-skills-catalog-budget-reset']");
 
-		await expect(timestampsAfter).toBeChecked();
+		await expect(timestampsAfter).not.toBeChecked();
 		await expect(playAfter).not.toBeChecked();
 		await expect(budgetAfter).toHaveValue("32");
 

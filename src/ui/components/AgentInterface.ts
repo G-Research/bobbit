@@ -43,6 +43,7 @@ import type { BgProcessInfo } from "./BgProcessPill.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
+import "./BellToggle.js";
 import { state as appState, renderApp } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -1936,7 +1937,7 @@ export class AgentInterface extends LitElement {
 		return html`
 			<div class="text-xs text-muted-foreground flex justify-between items-center mt-0.5 pl-2 pr-2 sm:pl-0 sm:pr-0">
 				<div class="flex items-center">
-					${this.showThemeToggle ? html`<theme-toggle></theme-toggle>` : html``}
+					${this.showThemeToggle ? html`<bell-toggle></bell-toggle><theme-toggle></theme-toggle>` : html``}
 					${thinkingSelect}
 					${modelButton}
 					${imageModelButton}
