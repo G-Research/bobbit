@@ -816,4 +816,112 @@ test.describe("PR walkthrough — Area B autorun + Area D child-session pane", (
 		const persistedAt2 = await recoverAndAssertCards();
 		expect(persistedAt2, "reload must rehydrate the SAME persisted store record via recover").toBe(persistedAt1);
 	});
+
+	// ── B4 (Finding 3): an autorun deep-link reload AFTER a walkthrough was submitted
+	//    LOADS the existing cards (recover → publish) and does NOT spawn a SECOND
+	//    reviewer. The recover-first check + the durable consumed marker make autorun a
+	//    safe one-shot across reloads (the in-memory flag alone is lost on reload). ──
+	test("B4 — autorun after a prior submit LOADS existing cards, does not spawn a second reviewer", async ({ page, gateway }) => {
+		const runPosts: string[] = [];
+		const recoverPosts: string[] = [];
+		page.on("request", (r) => {
+			if (r.method() !== "POST") return;
+			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
+			if (/\/api\/ext\/route\/recover\b/.test(r.url())) recoverPosts.push(r.url());
+		});
+		const sid = await freshSessionWithPanel(page);
+		const ps = gateway.sessionManager?.getPersistedSession(sid) as { cwd?: string; worktreePath?: string } | undefined;
+		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
+		expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
+		setupSessionGitRepo(sessionWorktree!);
+
+		// Seed the OWNER's completed walkthrough (the last/<owner> pointer + the
+		// persisted submitted YAML the recover route reads). NO binding/<sid> → this is
+		// an owner view, so recover resolves via the owner branch.
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const jobId = "prw-autorun-after-submit";
+		await getPackStore().put(PACK, `submitted/${jobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
+		await getPackStore().put(PACK, `last/${sid}`, { jobId, baseSha, headSha, submittedAt: Date.now() });
+
+		// The git-widget launcher selection IS the one-click gesture → autorun deep-link.
+		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
+		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
+
+		// Autorun consults `recover`, finds the completed walkthrough, and LOADS it —
+		// rendering the cards WITHOUT calling `run` (no second reviewer).
+		await expect.poll(() => recoverPosts.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+		await expect(page.locator('[data-testid="prw-navrail"]').first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
+		expect(runPosts, "autorun must LOAD an existing walkthrough, never spawn a second reviewer").toHaveLength(0);
+	});
+
+	// ── B5 (Finding 3): a DURABLE consumed marker suppresses the autorun re-fire on a
+	//    reload. The in-memory flag is lost on reload, but the host.store marker keyed
+	//    by the bound session id is consulted FIRST and bails before any `run` (this is
+	//    the "reload while a reviewer is still running" guard — the first autorun wrote
+	//    the marker, so a reload mints no duplicate). ──
+	test("B5 — a durable autorun-consumed marker suppresses the autorun re-fire on reload", async ({ page }) => {
+		const runPosts: string[] = [];
+		const storeGets: string[] = [];
+		page.on("request", (r) => {
+			if (r.method() !== "POST") return;
+			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
+			if (/\/api\/ext\/store\/get\b/.test(r.url())) storeGets.push(r.url());
+		});
+		const sid = await freshSessionWithPanel(page);
+		// Seed the durable marker the FIRST autorun would have written (simulating a
+		// reload after the one-shot already fired / while the reviewer is still running).
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		await getPackStore().put(PACK, `autorun-consumed/${sid}`, { consumedAt: Date.now() });
+
+		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
+		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
+
+		// maybeAutorun reads the durable marker (a store/get) and bails — never `run`.
+		await expect.poll(() => storeGets.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+		// The manual Run/Load affordances remain (the bail leaves the pane idle) and no
+		// "Reviewing…" run-status ever appears, proving `run` was never invoked.
+		await expect(page.locator('[data-testid="prw-run"]').first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="prw-run-status"]')).toHaveCount(0);
+		expect(runPosts, "a consumed marker must suppress the autorun re-fire").toHaveLength(0);
+	});
+
+	// ── B6 (Finding 3): autorun does NOT fire from a reviewer-child session. openPanel
+	//    moves the pane INTO the child, so a reload there must not spawn a fresh
+	//    reviewer; the binding/<self> self-lookup detects the child and bails. ──
+	test("B6 — autorun does not fire when the panel is mounted in a reviewer-child session", async ({ page }) => {
+		const runPosts: string[] = [];
+		const storePuts: string[] = [];
+		page.on("request", (r) => {
+			if (r.method() !== "POST") return;
+			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
+			if (/\/api\/ext\/store\/put\b/.test(r.url())) storePuts.push(r.url());
+		});
+		const sid = await freshSessionWithPanel(page);
+		// Make THIS session a bound reviewer child (binding/<self> exists). No durable
+		// marker and no completed walkthrough — only the child binding, so the bail is
+		// driven SOLELY by the child-session detection.
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		await getPackStore().put(PACK, `binding/${sid}`, {
+			jobId: "prw-b6-child-binding",
+			parentSessionId: "prw-b6-owner-session",
+			status: "running",
+			target: {
+				provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
+				canonicalKey: "github:SuuBro/bobbit#4242",
+			},
+		});
+
+		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
+		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
+
+		// maybeAutorun detects the child binding and bails, marking consumed (a
+		// store/put) — never calling `run`.
+		await expect.poll(() => storePuts.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+		await expect(page.locator('[data-testid="prw-run-status"]')).toHaveCount(0);
+		expect(runPosts, "autorun must never fire from a reviewer-child session").toHaveLength(0);
+	});
 });

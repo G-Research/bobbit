@@ -486,6 +486,74 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (host.requestRender) host.requestRender();
 			};
 
+			// ── Area B autorun — the SAFE, durable one-shot machinery (Finding 3). ────
+			// The git-widget entrypoint carries `autorun: true`; its CLICK is the user
+			// gesture, so auto-invoking on mount is NOT a passive auto-invoke. But the
+			// in-memory consumed flag is LOST on a browser reload while the deep-link
+			// still carries autorun=true, so a naive mount-autorun would re-fire `run`
+			// on every reload — spawning a SECOND reviewer after the first
+			// submitted/was dismissed, and (because openPanel now switches the view to
+			// the reviewer child) even firing from the child's OWN session. So:
+			//   1. If a completed walkthrough already exists for this view, LOAD it
+			//      (recover → found) instead of spawning.
+			//   2. NEVER autorun from a reviewer-child session (binding/<self> exists).
+			//   3. Record a DURABLE consumed marker in host.store so a reload does not
+			//      re-fire even within the brief idle window. (The in-memory flag still
+			//      guards same-page re-renders.)
+			//   4. The run route's reviewerKey idempotency stays the final backstop.
+			// Keyed by the BOUND session id so a reload consults the same marker; absent
+			// in non-DOM fixtures with no bound session.
+			const autorunMarkerKey = boundSessionId ? `autorun-consumed/${boundSessionId}` : undefined;
+			const markAutorunConsumed = async () => {
+				if (host && host.store && autorunMarkerKey) {
+					try { await host.store.put(autorunMarkerKey, { consumedAt: Date.now() }); } catch { /* best-effort */ }
+				}
+			};
+			const maybeAutorun = async () => {
+				try {
+					// (3) Durable consumed marker — a reload re-arms the in-memory flag, so
+					// consult the persisted marker FIRST and bail if autorun already fired.
+					if (host.store && autorunMarkerKey) {
+						let consumed;
+						try { consumed = await host.store.get(autorunMarkerKey); } catch { consumed = undefined; }
+						if (consumed) return;
+					}
+					// (2) Never autorun from a reviewer-child session: the pane was moved
+					// INTO the child by openPanel, so a reload there must not spawn a fresh
+					// reviewer. Only a bound reviewer child has a binding/<self> key.
+					if (host.store && boundSessionId) {
+						let selfBinding;
+						try { selfBinding = await host.store.get(`binding/${boundSessionId}`); } catch { selfBinding = undefined; }
+						if (selfBinding && typeof selfBinding === "object") {
+							await markAutorunConsumed(); // never reconsider; the child recovers via Load
+							return;
+						}
+					}
+					// (1) A completed walkthrough already exists for this view → LOAD it
+					// (idempotent publish) instead of spawning a duplicate reviewer.
+					let recovered;
+					if (host.callRoute) {
+						try { recovered = await host.callRoute("recover", { method: "POST", body: {} }); }
+						catch { recovered = undefined; }
+					}
+					await markAutorunConsumed();
+					if (recovered && recovered.found && recovered.yaml) {
+						byJob.set(paramKey, { status: "loading" });
+						if (host.requestRender) host.requestRender();
+						try {
+							await publishAndLoad({ input: { yaml: recovered.yaml } }, recovered.baseSha, recovered.headSha);
+						} catch (e) {
+							byJob.set(paramKey, { status: "error", error: e && e.message ? e.message : String(e) });
+						}
+						if (host.requestRender) host.requestRender();
+						return;
+					}
+					// (4) No completed walkthrough → spawn the reviewer (run-route
+					// reviewerKey idempotency is the final backstop against a duplicate).
+					await onRun();
+				} catch { /* autorun is best-effort; the manual Run affordance remains */ }
+			};
+
 			const statusText = status === "loading" ? "Loading…"
 				: status === "running" ? (entry.slow ? "Still reviewing the PR (this can take a few minutes)…" : "Reviewing the PR…")
 					: status === "publishing" ? "Publishing the walkthrough…"
@@ -493,19 +561,19 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 			const showActions = !entry.bundle && !busy;
 
-			// ── Area B: one-click auto-run from the git widget ────────────────────────
-			// The git-widget entrypoint carries `autorun: true`; its CLICK is the user
-			// gesture, so auto-invoking `run` here is NOT a passive-mount auto-invoke.
-			// Strictly one-shot via the `autorunConsumed` flag on the byJob entry so a
-			// re-render / same-page navigation never re-triggers; a browser reload
-			// re-arms it during the brief idle window, but the `run` route's reviewerKey
-			// idempotency is the backstop (returns the existing reviewer, created:false).
+			// ── Area B: one-click auto-run from the git widget (durable one-shot) ─────
+			// The git-widget click is the user gesture, so this is NOT a passive-mount
+			// auto-invoke. The in-memory `autorunConsumed` flag guards same-page
+			// re-renders; the DURABLE store marker + the recover/child-session checks in
+			// `maybeAutorun` make it safe across a browser reload (see Finding 3 above).
 			// Query params arrive as strings, so accept both "true" and boolean true. The
 			// manual Run button stays for the deep-link / no-autorun case.
 			const wantsAutorun = params && (params.autorun === true || params.autorun === "true");
 			if (wantsAutorun && status === "idle" && !entry.bundle && !entry.autorunConsumed && hasSession && !busy) {
+				// Synchronous in-memory guard prevents a same-page re-render from
+				// re-entering while the async checks in maybeAutorun run.
 				byJob.set(paramKey, { ...entry, autorunConsumed: true });
-				queueMicrotask(() => { void onRun(); }); // after render; onRun sets status:"running"
+				queueMicrotask(() => { void maybeAutorun(); }); // after render
 			}
 
 			return html`
