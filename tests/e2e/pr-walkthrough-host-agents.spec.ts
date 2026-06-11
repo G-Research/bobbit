@@ -853,12 +853,13 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	// principal (isOwner || isChild) and `recover` self-resolves binding/<child> →
 	// submitted YAML. Right-job routing is preserved: the caller must STILL match the
 	// binding's jobId AND be one of the two named principals — a foreign session (the
-	// owner of neither) is rejected exactly as before. NOTE: a reviewer child cannot
-	// resolve its OWN agent status through host.agents (it owns no children), so a
-	// child-self `status` BEFORE submit would mark the binding terminal as a side
-	// effect; production polls with the OWNER host, so we exercise the child side via
-	// the submitted-marker short-circuit (which precedes the agent-status check) — the
-	// strongest faithful proof the child principal is authorized.
+	// owner of neither) is rejected exactly as before. FINDING 2: a reviewer child
+	// cannot resolve its OWN agent status through host.agents (it owns no children),
+	// so the route NO LONGER calls host.agents.status for the child-self caller — it
+	// derives the phase PURELY from the submitted marker. So a child-self `status`
+	// BEFORE submit now returns phase:"running" with NO side effect (the LIVE binding
+	// is never mis-marked terminal), and AFTER submit returns the bound job's YAML via
+	// the submitted-marker short-circuit. Both are exercised below.
 	test("status + recover authorize from the child side (isChild) with right-job routing preserved", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
@@ -893,6 +894,23 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(foreignStatus.phase).toBe("error");
 			expect(foreignStatus.error).toMatch(/unknown or mismatched binding/);
 			expect(foreignStatus.yaml).toBeUndefined();
+
+			// FINDING 2 — CHILD SELF with the CORRECT jobId, BEFORE submit. The child
+			// cannot read its own agent status through host.agents (owner-only), so the
+			// route derives the phase PURELY from the submitted marker: with none yet it
+			// returns phase:"running" (NOT the pre-fix terminal-error a denied
+			// host.agents.status would have produced), and it does NOT mutate the binding
+			// to error — the reviewer is alive.
+			const childBeforeSubmit = await invokeRoute(gateway, child, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(childBeforeSubmit.phase).toBe("running");
+			expect(childBeforeSubmit.yaml).toBeUndefined();
+			expect(childBeforeSubmit.error).toBeUndefined();
+			// The child-self poll left the binding intact (NOT marked error / terminated).
+			const bindingAfterChildPoll = await getPackStore().get(PACK_ID, `binding/${child}`);
+			expect(bindingAfterChildPoll?.status).not.toBe("error");
 
 			// A real submit routes to the bound jobId and server-dismisses the reviewer.
 			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {

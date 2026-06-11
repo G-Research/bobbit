@@ -344,11 +344,22 @@ export const routes = {
 
 	// ── status ───────────────────────────────────────────────────────────────────
 	// BINDING-AUTHORITATIVE poll. Input { childSessionId, jobId }. Loads the binding
-	// FIRST and verifies jobId + parentSessionId===ctx.sessionId before reading
-	// anything else (no probing an arbitrary job's submitted marker). Completion is
-	// the pack-store submitted-YAML marker, NOT the agent's idle status. Returns
-	//   { phase:"running", agentStatus } | { phase:"submitted", yaml, baseSha, headSha }
+	// FIRST and verifies jobId + (parentSessionId===ctx.sessionId OR the caller IS
+	// the bound child) before reading anything else (no probing an arbitrary job's
+	// submitted marker). Completion is the pack-store submitted-YAML marker, NOT the
+	// agent's idle status. Returns
+	//   { phase:"running", agentStatus? } | { phase:"submitted", yaml, baseSha, headSha }
 	//   | { phase:"error", agentStatus?, error }.
+	//
+	// FINDING 2 — the CHILD-SELF poll. The server host API only permits
+	// host.agents.status for children OWNED by the bound session. When the reviewer
+	// CHILD polls its OWN pane (ctx.sessionId === childSessionId, i.e. isChild &&
+	// !isOwner), `ctx.host.agents.status(childSessionId)` is DENIED — caught here as
+	// "terminated" — which would mark the LIVE reviewer's binding `error` and return
+	// phase:"error" even though the reviewer is alive. So for the child-self caller we
+	// do NOT call host.agents.status: the phase is derived PURELY from the submitted
+	// marker (submitted if present, else running). The OWNER path is unchanged (it
+	// still uses host.agents.status to detect terminated-without-submit → error).
 	status: async (ctx, req) => {
 		const body = (req && req.body) || {};
 		const childSessionId = strOf(body.childSessionId);
@@ -373,15 +384,26 @@ export const routes = {
 		}
 
 		const submitted = await store.get(submittedKey(binding.jobId));
-		let agentStatus = "preparing";
-		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
-		catch { agentStatus = "terminated"; }
 
+		// Submitted marker wins for EITHER principal — the reviewer produced its
+		// walkthrough. Redundant safety net: submit-yaml already server-dismisses it.
 		if (submitted && typeof submitted === "object") {
-			// Redundant safety net — submit-yaml already server-dismisses the reviewer.
 			try { await ctx.host.agents.dismiss(childSessionId); } catch { /* idempotent */ }
 			return { phase: "submitted", yaml: submitted.yaml, baseSha: submitted.baseSha, headSha: submitted.headSha };
 		}
+
+		// FINDING 2 — CHILD-SELF poll: derive the phase PURELY from the submitted
+		// marker (handled above ⇒ here it is absent ⇒ running). A reviewer child cannot
+		// read its OWN agent status through host.agents (owner-only), so calling it
+		// would be denied, mis-read as terminated, and wrongly error the LIVE binding.
+		if (isChild && !isOwner) {
+			return { phase: "running" };
+		}
+
+		// OWNER path (unchanged): detect a reviewer that terminated WITHOUT submitting.
+		let agentStatus = "preparing";
+		try { agentStatus = (await ctx.host.agents.status(childSessionId)).status; }
+		catch { agentStatus = "terminated"; }
 		if (agentStatus === "terminated") {
 			// Errored without submitting: mark the binding terminal and dismiss (the
 			// PRIMARY cleanup driver on this path; dismiss stamps the generic
