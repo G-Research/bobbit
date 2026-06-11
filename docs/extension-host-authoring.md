@@ -719,7 +719,7 @@ The six verbs:
 
 | Verb | What it does |
 |---|---|
-| `spawn(opts)` | Launch a child owned by the bound session. `opts`: `instructions` (required), `role?`, `model?`, `thinkingLevel?`, `readOnly?`, `context?`, `lifecycle?` (`"bare"` default / `"full"`). Returns `{ childSessionId }`. |
+| `spawn(opts)` | Launch a child owned by the bound session. `opts`: `instructions` (required), `role?`, `model?`, `thinkingLevel?`, `readOnly?`, `context?`, `lifecycle?` (`"bare"` default / `"full"`), `deferInitialPrompt?`, `toolEnv?`. Returns `{ childSessionId }`. |
 | `prompt(childSessionId, message)` | Run-if-idle / queue a follow-up prompt. |
 | `status(childSessionId)` | Poll the child's live status (`idle` / `streaming` / `queued` / `preparing` / `terminated`). |
 | `list()` | List the bound session's `host.agents` children. |
@@ -747,6 +747,53 @@ already-persisted `childKind`, scoping survives a restart with no new registry.
 > children of that session (the filter is per-session, not per-pack). This may be refined
 > later; it is not addressed now.
 
+#### Spawning a role-carrying, scoped child (the isolated-reviewer pattern)
+
+A pack can mint a child with a **precise, narrow toolset** and its own scoping, without any
+secret. This is exactly how the PR-walkthrough pack spawns its read-only reviewer; copy the
+pattern when you need an isolated principal that is *more* restricted than the owner.
+
+- **Ship a role and spawn with `role`.** A pack ships roles under `roles/*.yaml` (listed in
+  `pack.yaml` `contents.roles`). When `spawn({ role })` carries a role, the child is granted
+  **the role's** resolved tools — never the owner's. This **fails closed**: if the role's
+  grants cannot be resolved the spawn throws `ROLE_TOOLS_UNRESOLVED` rather than inheriting
+  the owner's broader tools, so a misconfigured role can never produce an over-privileged
+  child.
+- **The tool-granting boundary pattern (deny the group, allow it in the role).** To make a
+  tool reachable **only** from your role, set the tool's group to a default-**deny** and have
+  the role's `toolPolicies` re-`allow` it. A static role denies every *other* fixed group it
+  must not hold, plus the `mcp__` wildcard to deny all MCP servers at once. The PR-walkthrough
+  `pr-reviewer` role does exactly this: the `PR Walkthrough` group is default-deny, the role
+  allows it and denies everything else, so `submit_pr_walkthrough_yaml` is callable **only**
+  by the reviewer — a real authorization boundary that falls out of tool-granting, with **no
+  secret**.
+- **`deferInitialPrompt: true`** creates the **visible** child without auto-running
+  `instructions`. Start it later via `prompt`. Use this when you must persist routing state
+  (e.g. a pack-store `{ childSessionId → jobId }` binding) **before** the child's first tool
+  call, to close a spawn/binding race.
+- **`toolEnv`** sets **non-secret** environment variables on the child for tool-scoping
+  (read by tool policies, e.g. to scope a reviewer's `gh` reads to one PR). It is additive and
+  **cannot widen** the child's owner-inherited sandbox/credential scope — the gateway-owned
+  identity keys (`BOBBIT_SESSION_ID` / `BOBBIT_SESSION_SECRET`) are applied after it and
+  always win. Never put a secret in `toolEnv`.
+
+> **Authorizing a child's calls back to your server routes — use the verified caller session
+> id, not a secret.** A child's tools call the gateway over HTTP, carrying their
+> `X-Bobbit-Session-Secret`; the server resolves the **authentic caller session id** and you
+> route by a pack-store binding keyed on it. In Bobbit's single-user trust domain this is
+> *routing/correctness*, not a security boundary, so a per-job submit secret is unnecessary
+> (the PR-walkthrough migration deleted its old one). See
+> [docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child).
+
+> **⚠️ `host.callRoute` runs in a FRESH worker per call — module singletons do not persist.**
+> `ModuleHost.invoke` spins up a new worker for each route call, so a module-scoped variable
+> (a `Map`, a counter, a cache) is **not** reliable cross-call state. Persist anything that
+> must survive between calls in the **pack store** (`ctx.host.store`). A module-scoped value
+> only serializes calls that happen to share a worker — useful as a best-effort same-worker
+> guard, but never as a correctness guarantee. (Strict cross-call atomicity, e.g. an
+> exactly-one concurrent-launch claim, would need a store compare-and-set the pack store does
+> not expose; design for last-write-wins + a reconcile instead.)
+
 #### Invariants
 
 - **No grandchildren.** `host.agents.spawn` is **denied for a bound child session** (it calls
@@ -757,8 +804,9 @@ already-persisted `childKind`, scoping survives a restart with no new registry.
 
 `host.agents` is exercised by a deterministic, **no-LLM fixture pack** (its child runs a
 canned scripted transcript), so the spawn→prompt→poll→read→dismiss test is non-flaky and
-stays in the e2e phase. The API may be amended later when a real consumer (the PR-walkthrough
-migration) lands.
+stays in the e2e phase. Its first production consumer is the **PR-walkthrough pack**, which
+spawns its isolated read-only `pr-reviewer` child this way — the migration that added
+`deferInitialPrompt`, `toolEnv`, and fail-closed role-tool resolution.
 
 ## Activation controls (Market UI)
 
@@ -858,7 +906,8 @@ below and [docs/marketplace.md](marketplace.md#built-in-first-party-packs)).
 
 ```
 pr-walkthrough/
-  pack.yaml                              # contents.tools: []  +  contents.entrypoints: [4 files]  +  routes: { module: lib/routes.mjs, names: [bundle, publish] }
+  pack.yaml                              # contents.tools: []  +  contents.roles: [pr-reviewer]  +  contents.entrypoints: [4 files]  +  routes: { module: lib/routes.mjs, names: [bundle, publish, run, status, recover] }
+  roles/pr-reviewer.yaml                 # read-only reviewer role; allows the "PR Walkthrough" group, denies all else
   panels/pr-walkthrough-panel.yaml       # id: pr-walkthrough.panel, entry: ../lib/panel.js
   entrypoints/
     pr-walkthrough-open.yaml             # composer-slash launcher
@@ -867,16 +916,17 @@ pr-walkthrough/
     pr-walkthrough-route.yaml            # kind: route, routeId: pr-walkthrough
   lib/
     panel.js                             # built viewer panel
-    routes.mjs                           # hand-authored pack-level routes (bundle, publish)
+    routes.mjs                           # hand-authored pack-level routes (bundle, publish, run, status, recover)
 ```
 
 | Built-in piece | Pack contribution |
 |---|---|
-| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`), opened via `host.ui.openPanel({ panelId })` — entrypoints carry **no** hard-coded `jobId`; the panel derives the real job + base/head SHAs from the **current session's** submitted YAML |
-| `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`), reached via `host.callRoute("bundle", …)` (the route resolves the session's own job; the caller does not pass a `jobId`) — **never** a raw fetch |
-| `walkthrough-store.ts` state | **implicit store** → `host.store.*`, pack-scoped |
+| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`), opened via `host.ui.openPanel({ panelId })` — entrypoints carry **no** hard-coded `jobId`; the panel launches via the `run` route and polls `status` (see below) |
+| Launch — a real isolated reviewer | the `run` route calls **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, toolEnv })`** to mint a visible read-only child — NOT `host.session.postMessage`; the user's own agent is never driven |
+| `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
+| `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — also holds the `binding/`, `reviewer/`, `submitted/`, and `last/` routing keys for the reviewer child |
 | Deep-link + launchers | four `entrypoints/*.yaml` — three launchers (composer-slash, git-widget-button, command-palette) **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) |
-| Bespoke transcript access | `host.session.readToolCall(toolUseId)` (own-session, via the adapter) |
+| Reload recovery | the `recover` route reads the owner-scoped `last/<sessionId>` pointer + persisted YAML so the **Load walkthrough** gesture re-renders cards (the reviewer's submit call lives in the dismissed child, not the owner transcript); `host.session.readToolCall` remains a legacy fallback |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
 Two non-obvious decisions worth copying:
@@ -910,26 +960,22 @@ Why do this? It makes the pack contract **load-bearing for production code**, no
 if the Host API can't express a real shipped feature, the gap shows up in the app, not in a litmus.
 Two pieces of the migration are worth understanding when authoring your own ambitious pack:
 
-- **Launch re-expression — drive the current agent, don't mint a new principal.** The deleted
+- **Launch re-expression — mint a real isolated reviewer child via `host.agents`.** The deleted
   built-in git-widget button launched a *new dedicated child walkthrough agent* (a fresh session
   with its own `allowedTools`). When the pack was first written, spawning a new principal was **not
-  pack-expressible** — a pack acted only within the calling session's authority. So the pack
-  re-expresses launch differently:
-  the entrypoints just open the panel (`host.ui.navigate` to `#/ext/pr-walkthrough`), and the panel
-  offers a gesture-gated **"Run PR walkthrough"** button that calls `host.session.postMessage` to
-  direct the **current** session's agent to run the walkthrough using the retained agent tools
-  (`readonly_bash` / `read_pr_walkthrough_bundle` / `submit_pr_walkthrough_yaml`). The agent emits
-  its YAML; the panel reads that tool call (`host.session.readToolCall`) → `host.callRoute("publish")`
-  → renders. This preserves the "click → walkthrough happens" UX without any privilege-minting
-  escape hatch. The panel implements a small state machine (`no-submission` → `posting` → `waiting`
-  → `publishing` → `rendered`, with timeout/refusal/missing-tool error states) so the launch flow is
+  pack-expressible** — a pack acted only within the calling session's authority — so an interim
+  revision re-expressed launch by driving the *current* session's agent via
+  `host.session.postMessage`. That interim model is now superseded: with the ambient
+  [`host.agents`](#hostagents--launch-and-orchestrate-child-agents) capability, the pack's `run`
+  route **mints a real, isolated, read-only `pr-reviewer` child** (`host.agents.spawn` with
+  `deferInitialPrompt` + `toolEnv` + the pack-shipped role) and polls it via the `status` route —
+  the user's own agent is never driven. This is the canonical isolated-reviewer pattern; copy it
+  for any pack that needs a scoped child principal (see
+  [Spawning a role-carrying, scoped child](#spawning-a-role-carrying-scoped-child-the-isolated-reviewer-pattern)
+  and [docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)).
+  The panel implements a small state machine (`running` → `submitted` → `publishing` → `rendered`,
+  with timeout/error states + a `recover`-backed Load gesture for reloads) so the launch flow is
   resilient, not just the happy path — see `market-packs/pr-walkthrough/src/panel.js`.
-
-  > **Update:** principal-minting is **now** pack-expressible via the ambient
-  > [`host.agents`](#hostagents--launch-and-orchestrate-child-agents) capability — a handler can
-  > spawn a real, sandbox-inherited read-only child reviewer instead of driving the user's own
-  > agent. The PR-walkthrough pack has **not yet** been migrated onto it (a separate follow-up
-  > goal); the `postMessage`-driven flow described above is what ships today.
 - **Shared synthesis, one source of truth, bundled into the pack.** The viewer must turn the
   submitted production YAML into the same cards the deleted built-in produced. That synthesis
   (`validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + helpers)
@@ -941,12 +987,14 @@ Two pieces of the migration are worth understanding when authoring your own ambi
   duplicated logic to drift.
 
 What stays agent-tool-side is the explicit carve-out: the `submit_pr_walkthrough_yaml` /
-`read_pr_walkthrough_bundle` / `readonly_bash` tools, `WalkthroughAgentManager` and its
-`/launch` + `/resolve` + `/export/*` lifecycle, and GitHub network/auth. Those are genuine *agent*
-capabilities (model-backed synthesis, credentialed network), not contribution surfaces. Only the
-viewer / route / store / deep-link / user-facing launch-gesture surfaces moved to the pack. Full
-keep-vs-delete detail is in [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md)
-and [docs/design/built-in-first-party-packs.md §8](design/built-in-first-party-packs.md).
+`read_pr_walkthrough_bundle` / `readonly_bash` tools, the `/resolve` + `/export/*` lifecycle, and
+GitHub network/auth. Those are genuine *agent* capabilities (model-backed synthesis, credentialed
+network), not contribution surfaces. The reviewer toolset is granted by the pack-shipped
+`pr-reviewer` role, and the legacy `WalkthroughAgentManager` launcher, `/launch` route, and
+submit-proof secret were **deleted** by the `host.agents` migration. Full keep-vs-delete detail is
+in [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md),
+[docs/design/built-in-first-party-packs.md §8](design/built-in-first-party-packs.md), and
+[docs/design/pr-walkthrough-host-agents-migration.md](design/pr-walkthrough-host-agents-migration.md).
 
 ## Security checklist
 

@@ -50,8 +50,9 @@ historical revisions. Review tabs map to review documents by encoded title.
 The PR walkthrough review surface now ships as a **built-in first-party pack**
 (`market-packs/pr-walkthrough/`) reached through the generic extension route
 `#/ext/pr-walkthrough`, rather than a bespoke side-panel tab kind. A pack
-entrypoint opens the pack panel and its "Run PR walkthrough" action drives the
-current session's agent via `host.session.postMessage`. See
+entrypoint opens the pack panel and its "Run PR walkthrough" action mints a
+separate, isolated, read-only reviewer child via `host.agents.spawn` (not the
+current session's agent). See
 [pr-walkthrough-panel.md](pr-walkthrough-panel.md) and
 [built-in-first-party-packs.md](design/built-in-first-party-packs.md). Desktop
 renders a scrollable tab strip next to the chat; mobile renders the same
