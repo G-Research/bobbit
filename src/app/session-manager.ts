@@ -1433,11 +1433,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else if (msg.type === "bg_process_exited" && msg.processId) {
 				// Update status in the process list. Older servers may omit endTime;
 				// preserve a non-growing null fallback instead of implying Date.now().
+				// terminalReason "unrecoverable" maps to the widened "unrecoverable" status
+				// (live outcome lost across a restart); everything else is a normal terminal "exited".
+				const terminalReason = msg.terminalReason ?? null;
+				const status = terminalReason === "unrecoverable" ? "unrecoverable" as const : "exited" as const;
 				ai.bgProcesses = ai.bgProcesses.map((p) =>
 					p.id === msg.processId
-						? { ...p, status: "exited" as const, exitCode: msg.exitCode ?? null, endTime: typeof msg.endTime === "number" ? msg.endTime : p.endTime ?? null }
+						? { ...p, status, exitCode: msg.exitCode ?? null, terminalReason, endTime: typeof msg.endTime === "number" ? msg.endTime : p.endTime ?? null }
 						: p
 				);
+			} else if (msg.type === "bg_process_dismissed" && msg.processId) {
+				// The process record + its persisted files were purged server-side; drop the pill.
+				ai.bgProcesses = ai.bgProcesses.filter((p) => p.id !== msg.processId);
 			}
 		};
 
@@ -2829,7 +2836,9 @@ async function rehydrateProposalsForSession(sessionId: string): Promise<void> {
 
 async function killBgProcess(sessionId: string, processId: string): Promise<void> {
 	try {
-		await gatewayFetch(`/api/sessions/${sessionId}/bg-processes/${processId}`, { method: "DELETE" });
+		// action=kill terminates the running process but KEEPS the (now terminal) record
+		// until the user explicitly dismisses it.
+		await gatewayFetch(`/api/sessions/${sessionId}/bg-processes/${processId}?action=kill`, { method: "DELETE" });
 		// Refresh the list after kill
 		refreshBgProcessesForSession(sessionId);
 	} catch { /* ignore */ }
@@ -2842,7 +2851,9 @@ async function dismissBgProcess(sessionId: string, processId: string): Promise<v
 		ai.bgProcesses = ai.bgProcesses.filter((p) => p.id !== processId);
 	}
 	try {
-		await gatewayFetch(`/api/sessions/${sessionId}/bg-processes/${processId}`, { method: "DELETE" });
+		// action=dismiss removes the record AND deletes its persisted log/status files,
+		// so it never reappears after a subsequent restart.
+		await gatewayFetch(`/api/sessions/${sessionId}/bg-processes/${processId}?action=dismiss`, { method: "DELETE" });
 	} catch { /* ignore */ }
 }
 

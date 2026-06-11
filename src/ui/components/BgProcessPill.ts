@@ -12,8 +12,17 @@ export interface BgProcessInfo {
 	name: string;
 	command: string;
 	pid: number;
-	status: "running" | "exited";
+	/** "unrecoverable" = the live outcome was lost across a gateway restart (output is still retained). */
+	status: "running" | "exited" | "unrecoverable";
 	exitCode: number | null;
+	/**
+	 * Why the process reached a terminal state. Authoritative source of truth for terminal rendering.
+	 * - "normal"        → finished on its own; `exitCode` is the real code.
+	 * - "killed"        → terminated by the user; `exitCode` is usually null.
+	 * - "unrecoverable" → lost across a restart; `exitCode` is null, never fabricated.
+	 * Null while running; optional/undefined for legacy hydrated processes (fall back to exitCode).
+	 */
+	terminalReason?: "normal" | "killed" | "unrecoverable" | null;
 	startTime: number;
 	/** Null while running; optional for legacy hydrated processes. */
 	endTime?: number | null;
@@ -189,16 +198,44 @@ export class BgProcessPill extends LitElement {
 		return this.process.name || this.process.id;
 	}
 
+	private _isUnrecoverable(p: BgProcessInfo): boolean {
+		return p.status === "unrecoverable" || p.terminalReason === "unrecoverable";
+	}
+
 	private _statusIndicator() {
 		const p = this.process;
-		const isRunning = p.status === "running";
-		return isRunning
-			? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400 animate-pulse shrink-0"></span>`
-			: p.exitCode === 0
-				? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 dark:bg-green-400 shrink-0"></span>`
-				: p.exitCode !== null
-					? html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:11px;line-height:1;font-weight:700">!</span>`
-					: html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0"></span>`;
+		if (p.status === "running") {
+			return html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400 animate-pulse shrink-0"></span>`;
+		}
+		// Lost across a restart — amber "?" marker; output is retained but the exit status is unknown.
+		if (this._isUnrecoverable(p)) {
+			return html`<span class="shrink-0 text-amber-600 dark:text-amber-400" style="font-size:11px;line-height:1;font-weight:700" title="Process was lost across a restart">?</span>`;
+		}
+		// Explicitly killed by the user (no real exit code) — neutral marker.
+		if (p.terminalReason === "killed") {
+			return html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0" title="Killed"></span>`;
+		}
+		// Normal exit (or legacy record without terminalReason): colour by exit code.
+		return p.exitCode === 0
+			? html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 dark:bg-green-400 shrink-0"></span>`
+			: p.exitCode !== null
+				? html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:11px;line-height:1;font-weight:700">!</span>`
+				: html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0"></span>`;
+	}
+
+	/** Terminal status label shown in the dropdown header (right of the runtime). */
+	private _terminalLabel(p: BgProcessInfo) {
+		if (p.status === "running") return nothing;
+		if (this._isUnrecoverable(p)) {
+			return html`<span class="font-mono text-sm font-semibold text-amber-600 dark:text-amber-400" title="Process was lost across a restart">exit status unknown</span>`;
+		}
+		if (p.terminalReason === "killed") {
+			return html`<span class="font-mono text-sm font-semibold text-red-700 dark:text-red-400">killed</span>`;
+		}
+		if (p.exitCode !== null) {
+			return html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`;
+		}
+		return nothing;
 	}
 
 	private _hasValidEndTime(p: BgProcessInfo): p is BgProcessInfo & { endTime: number } {
@@ -249,9 +286,7 @@ export class BgProcessPill extends LitElement {
 						<span class="text-[11px] text-muted-foreground font-normal">${p.id} · pid ${p.pid}</span>
 					</div>
 					<div class="flex items-center gap-2">
-						${!isRunning && p.exitCode !== null
-							? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
-							: nothing}
+						${this._terminalLabel(p)}
 						<span class="font-mono text-[12px] text-muted-foreground" title=${isRunning || this._hasValidEndTime(p) ? "Elapsed since process started" : "Runtime unavailable for legacy process"}>
 							${this._runtimeTemplate(p, isRunning)}
 						</span>

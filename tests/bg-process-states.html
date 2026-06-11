@@ -79,12 +79,15 @@
   .bg-blue-600 { background: #2563eb; }
   .bg-green-600 { background: #16a34a; }
   .bg-green-400 { background: #4ade80; }
+  .bg-muted-foreground { background: var(--muted-foreground); }
   .bg-red-500\/20 { background: rgba(239,68,68,.2); }
   .text-red-600 { color: #dc2626; }
   .text-red-700 { color: #b91c1c; }
   .text-red-400 { color: #f87171; }
   .text-green-700 { color: #15803d; }
   .text-green-400 { color: #4ade80; }
+  .text-amber-600 { color: #d97706; }
+  .text-amber-400 { color: #fbbf24; }
   .hover\:bg-red-500\/30:hover { background: rgba(239,68,68,.3); }
   .hover\:text-foreground:hover { color: var(--foreground); }
 
@@ -304,11 +307,21 @@ class BgProcessPill extends HTMLElement {
     return (this._process && this._process.name) || (this._process && this._process.id) || '';
   }
 
+  _isUnrecoverable(p) {
+    return p.status === 'unrecoverable' || p.terminalReason === 'unrecoverable';
+  }
+
   _statusIndicatorHTML() {
     const p = this._process;
     if (!p) return '';
     if (p.status === 'running') {
       return '<span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse shrink-0" data-status="running"></span>';
+    }
+    if (this._isUnrecoverable(p)) {
+      return '<span class="shrink-0 text-amber-600" style="font-size:10px;line-height:1;font-weight:700" title="Process was lost across a restart" data-status="unrecoverable">?</span>';
+    }
+    if (p.terminalReason === 'killed') {
+      return '<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0" style="background:#999" title="Killed" data-status="killed"></span>';
     }
     if (p.exitCode === 0) {
       return '<span class="inline-block w-1.5 h-1.5 rounded-full bg-green-600 shrink-0" data-status="exited-ok"></span>';
@@ -317,6 +330,21 @@ class BgProcessPill extends HTMLElement {
       return '<span class="shrink-0 text-red-600" style="font-size:10px;line-height:1;font-weight:700" data-status="exited-error">!</span>';
     }
     return '<span class="inline-block w-1.5 h-1.5 rounded-full shrink-0" style="background:#999" data-status="unknown"></span>';
+  }
+
+  _terminalLabelHTML() {
+    const p = this._process;
+    if (!p || p.status === 'running') return '';
+    if (this._isUnrecoverable(p)) {
+      return '<span class="font-mono text-sm font-semibold text-amber-600" title="Process was lost across a restart" data-exit-code>exit status unknown</span>';
+    }
+    if (p.terminalReason === 'killed') {
+      return '<span class="font-mono text-sm font-semibold text-red-700" data-exit-code>killed</span>';
+    }
+    if (p.exitCode !== null) {
+      return `<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700' : 'text-red-700'}" data-exit-code>exit ${p.exitCode}</span>`;
+    }
+    return '';
   }
 
   _renderPortal() {
@@ -342,9 +370,7 @@ class BgProcessPill extends HTMLElement {
       logsHTML = '<div class="h-[180px] overflow-y-auto bg-background text-foreground rounded px-2 py-1.5 font-mono text-[11px] leading-snug break-all" id="bg-log-output"><div class="text-muted-foreground text-center py-1" data-no-output>(no output yet)</div></div>';
     }
 
-    const exitCodeHTML = (!isRunning && p.exitCode !== null)
-      ? `<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700' : 'text-red-700'}" data-exit-code>exit ${p.exitCode}</span>`
-      : '';
+    const exitCodeHTML = this._terminalLabelHTML();
 
     const actionHTML = isRunning
       ? `<button class="px-2 py-0.5 rounded text-[11px] bg-red-500/20 text-red-700 hover:bg-red-500/30 transition-colors" data-kill-btn>Kill</button>`
