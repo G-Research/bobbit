@@ -91,7 +91,8 @@ export function stripTokenFromGitUrl(url: string): string {
  *
  * Unlike `resolveRemotePrimary` (which returns the ref with `origin/` prefix),
  * this returns the bare branch name suitable for substituting into prompt
- * templates as `{{master}}`.
+ * templates as `{{baseBranch}}` (the legacy alias `{{master}}` resolves through
+ * here too).
  */
 export async function detectPrimaryBranch(cwd: string): Promise<string> {
 	try {

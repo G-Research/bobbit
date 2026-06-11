@@ -121,7 +121,7 @@ workflows:
               {{goal_spec}}
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see the implementation diff.
 
               Read the design document content from upstream gates.
@@ -148,14 +148,14 @@ workflows:
             role: code-reviewer
             phase: 2
             prompt: >-
-              Review the code changes on branch {{branch}} vs origin/{{master}}
+              Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
               for quality.
 
 
-              Start with `git diff --stat origin/{{master}}...{{branch}} -- .
+              Start with `git diff --stat origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see which files changed.
 
-              Then use `git diff origin/{{master}}...{{branch}} -M -- .
+              Then use `git diff origin/{{baseBranch}}...{{branch}} -M -- .
               ':!package-lock.json'` (with rename detection) to see actual
               content changes — this collapses pure renames into one-line
               summaries.
@@ -189,7 +189,7 @@ workflows:
               {{goal_spec}}
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see all changes.
 
 
@@ -251,10 +251,10 @@ workflows:
             phase: 2
             prompt: >-
               Security review of changes on branch {{branch}} vs
-              origin/{{master}}.
+              origin/{{baseBranch}}.
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see changes.
 
 
@@ -280,10 +280,10 @@ workflows:
             type: llm-review
             prompt: >-
               Review documentation for the changes on branch {{branch}} vs
-              origin/{{master}}.
+              origin/{{baseBranch}}.
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see all changes.
 
               Read the key documentation files: AGENTS.md, README.md, and files
@@ -401,11 +401,11 @@ workflows:
               origin {{branch}} | grep -q .
           - name: Master merged into branch
             type: command
-            run: git fetch origin {{master}} && git merge-base --is-ancestor
-              origin/{{master}} {{branch}}
+            run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
+              origin/{{baseBranch}} {{branch}}
           - name: PR raised
             type: command
-            run: gh pr list --head {{branch}} --base {{master}} --state open --json url -q
+            run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q
               ".[0].url" | grep -q .
   pr-review:
     id: pr-review
@@ -778,7 +778,7 @@ workflows:
               {{goal_spec}}
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see the implementation diff.
 
               Read the design document content from upstream gates.
@@ -805,14 +805,14 @@ workflows:
             role: code-reviewer
             phase: 2
             prompt: >-
-              Review the code changes on branch {{branch}} vs origin/{{master}}
+              Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
               for quality.
 
 
-              Start with `git diff --stat origin/{{master}}...{{branch}} -- .
+              Start with `git diff --stat origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see which files changed.
 
-              Then use `git diff origin/{{master}}...{{branch}} -M -- .
+              Then use `git diff origin/{{baseBranch}}...{{branch}} -M -- .
               ':!package-lock.json'` (with rename detection) to see actual
               content changes — this collapses pure renames into one-line
               summaries.
@@ -839,10 +839,10 @@ workflows:
             phase: 2
             prompt: >-
               Security review of changes on branch {{branch}} vs
-              origin/{{master}}.
+              origin/{{baseBranch}}.
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see changes.
 
 
@@ -998,10 +998,10 @@ workflows:
             type: llm-review
             prompt: >-
               Review documentation for the changes on branch {{branch}} vs
-              origin/{{master}}.
+              origin/{{baseBranch}}.
 
 
-              Run `git diff origin/{{master}}...{{branch}} -- .
+              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see all changes.
 
               Read the key documentation files: AGENTS.md, README.md, and files
@@ -1119,11 +1119,11 @@ workflows:
               origin {{branch}} | grep -q .
           - name: Master merged into branch
             type: command
-            run: git fetch origin {{master}} && git merge-base --is-ancestor
-              origin/{{master}} {{branch}}
+            run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
+              origin/{{baseBranch}} {{branch}}
           - name: PR raised
             type: command
-            run: gh pr list --head {{branch}} --base {{master}} --state open --json url -q
+            run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q
               ".[0].url" | grep -q .
   bug-fix:
     id: bug-fix
@@ -1222,7 +1222,7 @@ workflows:
               {{goal_spec}}
 
 
-              Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'`
+              Run `git diff {{baseBranch}}...{{branch}} -- . ':!package-lock.json'`
               to see the implementation diff.
 
 
@@ -1248,14 +1248,14 @@ workflows:
             role: code-reviewer
             phase: 2
             prompt: >-
-              Review the code changes on branch {{branch}} vs {{master}} for
+              Review the code changes on branch {{branch}} vs {{baseBranch}} for
               quality.
 
 
-              Start with `git diff --stat {{master}}...{{branch}} -- .
+              Start with `git diff --stat {{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see which files changed.
 
-              Then use `git diff {{master}}...{{branch}} -M -- .
+              Then use `git diff {{baseBranch}}...{{branch}} -M -- .
               ':!package-lock.json'` (with rename detection) to see actual
               content changes — this collapses pure renames into one-line
               summaries.
@@ -1289,7 +1289,7 @@ workflows:
               {{goal_spec}}
 
 
-              Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'`
+              Run `git diff {{baseBranch}}...{{branch}} -- . ':!package-lock.json'`
               to see all changes.
 
 
@@ -1319,10 +1319,10 @@ workflows:
             role: security-reviewer
             phase: 2
             prompt: >-
-              Security review of changes on branch {{branch}} vs {{master}}.
+              Security review of changes on branch {{branch}} vs {{baseBranch}}.
 
 
-              Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'`
+              Run `git diff {{baseBranch}}...{{branch}} -- . ':!package-lock.json'`
               to see changes.
 
 
@@ -1478,10 +1478,10 @@ workflows:
             type: llm-review
             prompt: >-
               Review documentation for the changes on branch {{branch}} vs
-              {{master}}.
+              {{baseBranch}}.
 
 
-              Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'`
+              Run `git diff {{baseBranch}}...{{branch}} -- . ':!package-lock.json'`
               to see all changes.
 
               Read the key documentation files: AGENTS.md, README.md, and files
@@ -1599,11 +1599,11 @@ workflows:
               origin {{branch}} | grep -q .
           - name: Master merged into branch
             type: command
-            run: git fetch origin {{master}} && git merge-base --is-ancestor
-              origin/{{master}} {{branch}}
+            run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
+              origin/{{baseBranch}} {{branch}}
           - name: PR raised
             type: command
-            run: gh pr list --head {{branch}} --base {{master}} --state open --json url -q
+            run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q
               ".[0].url" | grep -q .
   quick-fix:
     id: quick-fix
@@ -1649,7 +1649,7 @@ workflows:
               {{goal_spec}}
 
 
-              Run `git diff {{master}}...{{branch}} -- . ':!package-lock.json'`
+              Run `git diff {{baseBranch}}...{{branch}} -- . ':!package-lock.json'`
               to see the implementation diff.
 
 
@@ -1676,14 +1676,14 @@ workflows:
             role: code-reviewer
             phase: 2
             prompt: >-
-              Review the code changes on branch {{branch}} vs {{master}} for
+              Review the code changes on branch {{branch}} vs {{baseBranch}} for
               quality.
 
 
-              Start with `git diff --stat {{master}}...{{branch}} -- .
+              Start with `git diff --stat {{baseBranch}}...{{branch}} -- .
               ':!package-lock.json'` to see which files changed.
 
-              Then use `git diff {{master}}...{{branch}} -M -- .
+              Then use `git diff {{baseBranch}}...{{branch}} -M -- .
               ':!package-lock.json'` (with rename detection) to see actual
               content changes — this collapses pure renames into one-line
               summaries.
@@ -1715,11 +1715,11 @@ workflows:
               origin {{branch}} | grep -q .
           - name: Master merged into branch
             type: command
-            run: git fetch origin {{master}} && git merge-base --is-ancestor
-              origin/{{master}} {{branch}}
+            run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
+              origin/{{baseBranch}} {{branch}}
           - name: PR raised
             type: command
-            run: gh pr list --head {{branch}} --base {{master}} --state open --json url -q
+            run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q
               ".[0].url" | grep -q .
     createdAt: 1774734770196
     updatedAt: 1774734770196

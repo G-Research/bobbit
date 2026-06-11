@@ -214,7 +214,7 @@ Pass if every criterion is verbatim-covered. Fail with the list of uncovered cri
 /** Integration LLM-review prompt — once children have merged, does the integrated whole make sense? */
 export const INTEGRATION_PROMPT = `Review the cross-component integration after all subgoals have merged.
 
-Run \`git diff origin/{{master}}...HEAD\` to see the cumulative result on the parent branch.
+Run \`git diff origin/{{baseBranch}}...HEAD\` to see the cumulative result on the parent branch.
 
 Verify:
 1. Subgoal merges play together — no accidental regressions where one subgoal silently broke another.

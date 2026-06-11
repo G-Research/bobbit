@@ -1042,7 +1042,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => updateStep({ run: (e.target as HTMLInputElement).value })} />
-							${readOnly ? nothing : html`<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>`}
+							${readOnly ? nothing : html`<div class="wf-field-hint" data-testid="wf-step-run-hint">Variables: {{branch}}, {{baseBranch}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>`}
 							${errs.run ? html`<div class="wf-field-error" data-testid="wf-step-run-error">${errs.run}</div>` : nothing}
 						` : html`
 							<input class="wf-input ${errs.command ? "wf-input-error" : ""}" data-testid="wf-step-command" .value=${step.command || ""} placeholder="Named command (e.g. build, unit)"
