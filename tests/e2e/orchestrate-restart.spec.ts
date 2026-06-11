@@ -14,6 +14,7 @@
  * on resume the parent is REMINDED of its live children and re-collects via the
  * shared `team_wait`.
  */
+import { readFileSync } from "node:fs";
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createSession, deleteSession, connectWs, type WsMsg } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
@@ -135,6 +136,70 @@ test.describe("orchestration restart survival", () => {
 			expect(waitJson.statuses[0].status).toBe("idle");
 			expect(waitJson.statuses[0].status).not.toBe("timeout");
 			expect(waitJson.outputTail ?? "").toContain("OK");
+		} finally {
+			await deleteSession(child).catch(() => {});
+			await deleteSession(parent).catch(() => {});
+		}
+	});
+
+	// REPRODUCING TEST (TDD): delegate children must SURVIVE a real reboot LIVE,
+	// not as a dormant `terminated` husk, and their task must be rebuilt into the
+	// reassembled system prompt. Today restoreSessions() carves delegates out of
+	// the live-restore path (regular = !delegateOf → restoreSession; delegates =
+	// !!delegateOf → addDormantSession), and instructions/context are never
+	// persisted — so after a reboot the child comes back DORMANT (isSessionLive
+	// === false) with no task in its prompt. This test FAILS today on the
+	// isSessionLive assertion and PASSES once the fix (1) persists the task,
+	// (2) restores delegates live, (3) rebuilds the delegate prompt from the
+	// persisted task. Uses the exact steer-gateway-restart.spec.ts reboot
+	// primitive (teardown live SessionInfo + restoreSessions()).
+	test("a delegate child is restored LIVE with its task intact across a restoreSessions reboot", async ({ gateway }) => {
+		const sm = gateway.sessionManager;
+		const parent = await createSession();
+		// Distinctive marker so we can assert it lands in the rebuilt system prompt.
+		const child = await spawnChild(parent, "restart-live-survivor-MARKER helper task");
+		try {
+			// Drive the child's spawn prompt to completion (mock agent → "OK") so a
+			// persisted transcript + agentSessionFile exist before the reboot.
+			await pollUntil(async () => sm.getSession(child)?.status === "idle" ? true : null,
+				{ timeoutMs: 15_000, intervalMs: 50, label: "child idle before reboot" });
+			await pollUntil(async () => (await sm.getSessionOutput(child)).includes("OK") ? true : null,
+				{ timeoutMs: 15_000, intervalMs: 50, label: "child output persisted" });
+			expect(sm.getPersistedSession(child)?.agentSessionFile).toBeTruthy();
+
+			// ── Simulate a clean gateway reboot (steer-gateway-restart.spec.ts
+			// primitive): tear down the live child SessionInfo and drop it from the
+			// in-memory Map, then re-run the boot restore path. restoreSessions()
+			// re-reads the persisted live list — the same code the server runs at boot.
+			const liveChild = sm.sessions.get(child);
+			expect(liveChild, "child live before reboot").toBeTruthy();
+			liveChild.unsubscribe();
+			try { await liveChild.rpcClient.stop(); } catch { /* already dead */ }
+			sm.sessions.delete(child);
+
+			await sm.restoreSessions();
+
+			// CORE REPRO — the delegate must come back LIVE, not a dormant
+			// `terminated` placeholder. FAILS today (delegate → addDormantSession →
+			// dormant === true → isSessionLive false).
+			expect(sm.isSessionLive(child)).toBe(true);
+
+			// TASK INTACT — the rebuilt system prompt must carry the original
+			// instructions. Accessor: restoreSession() writes the reassembled prompt
+			// to <prompts-dir>/<id>.md and records it on bridgeOptions.systemPromptPath;
+			// the in-process mock bridge preserves `options`, so we read the actual
+			// assembled prompt file the restored agent would receive. Fallback (in case
+			// the accessor shape changes): the durable instructions/context fields the
+			// fix persists on the session record (getPersistedSession).
+			const restored = sm.sessions.get(child);
+			const promptPath = (restored?.rpcClient as any)?.options?.systemPromptPath as string | undefined;
+			let promptText = "";
+			if (promptPath) {
+				try { promptText = readFileSync(promptPath, "utf-8"); } catch { /* file gone */ }
+			}
+			const ps = sm.getPersistedSession(child) as any;
+			const durableTask = `${ps?.instructions ?? ""}\n${ps?.context ?? ""}`;
+			expect(`${promptText}\n${durableTask}`).toContain("restart-live-survivor-MARKER");
 		} finally {
 			await deleteSession(child).catch(() => {});
 			await deleteSession(parent).catch(() => {});
