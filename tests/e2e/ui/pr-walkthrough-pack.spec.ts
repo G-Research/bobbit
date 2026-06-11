@@ -531,17 +531,62 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 
-		// ── Step 3a: RUN PR WALKTHROUGH — the launch re-expression (§8.4 step 5). The
-		// panel posts to the CURRENT agent via host.session.postMessage (gesture-gated)
-		// instead of spawning a child agent. A no-tools pack may post (the pack-bound
-		// surface token already proved installed+active+own-session), so the click drives
-		// the state machine into posting → waiting (the seeded agent produces no NEW
-		// submission, so we assert the in-flight waiting state, not a full round-trip). ──
+		// ── Step 3a: RUN PR WALKTHROUGH — the host.agents reviewer launch (migration
+		// Decision D). The gesture-gated Run NO LONGER drives the user's OWN agent via
+		// host.session.postMessage; it calls the pack `run` route → host.agents.spawn,
+		// minting a SEPARATE, isolated, read-only pr-reviewer child. Re-open the panel on
+		// the SHA-carrying deep-link so Run has a changeset target (the bare launcher has
+		// no SHA params; canonicalizeTarget needs baseSha/headSha or a PR URL). The seeded
+		// reviewer (mock agent) does not submit, so we assert the LAUNCH (a visible read-
+		// only reviewer child + the polling status + the user's agent NOT driven), not a
+		// full submit→cards round-trip. (The local-target submit→cards completion is a
+		// reported gap — see tests/e2e/pr-walkthrough-host-agents.spec.ts; submit-authz +
+		// binding-routing + status are covered there, and YAML→cards parity by Step 3's
+		// Load path above + the unit/schema specs.) ──
+		await page.evaluate((h) => { window.location.hash = h; }, liveDeepLink());
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/ext/${PACK}`);
+		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
 		const runBtn = page.locator('[data-testid="prw-run"]').first();
 		await expect(runBtn, "Run is offered when a session surface is present").toBeVisible({ timeout: 10_000 });
+		const runRoutePost = page.waitForResponse(
+			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
+			{ timeout: 20_000 },
+		);
 		await runBtn.click();
+		const runRouteResp = await runRoutePost;
+		expect(runRouteResp.status(), `run route failed: ${await runRouteResp.text().catch(() => "")}`).toBe(200);
+		// The panel transitions to its reviewer-polling state ("Reviewing the PR…").
 		await expect(page.locator('[data-testid="prw-run-status"]').first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-run-status"]').first()).toContainText(/agent/i);
+		// A real, visible, read-only pr-reviewer host-agents child of THIS session is minted.
+		let reviewerChildId: string | undefined;
+		let reviewerReadOnly: boolean | undefined;
+		await expect.poll(() => {
+			const liveSessions = gateway.sessionManager?.getAllSessionsRaw?.() ?? [];
+			for (const s of liveSessions) {
+				const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
+				if (cps?.parentSessionId === sid && cps?.childKind === "host-agents") {
+					reviewerChildId = s.id;
+					reviewerReadOnly = cps.readOnly;
+					return cps.role ?? null;
+				}
+			}
+			return null;
+		}, { timeout: 20_000 }).toBe("pr-reviewer");
+		expect(reviewerReadOnly, "the reviewer child must be read-only").toBe(true);
+		// Anti-postMessage: the user's OWN session agent was NOT prompted — the kickoff
+		// ("Review target…") went to the reviewer child, not the session.
+		const ownerKickoffSeen = await (async () => {
+			const rpc = gateway.sessionManager?.getSession?.(sid!)?.rpcClient;
+			if (!rpc?.getMessages) return false;
+			try {
+				const res = await rpc.getMessages();
+				const msgs = res?.data?.messages ?? res?.data ?? [];
+				return Array.isArray(msgs) && msgs.some((m: any) => JSON.stringify(m).includes("Review target"));
+			} catch { return false; }
+		})();
+		expect(ownerKickoffSeen, "the user's own agent must NOT receive the reviewer kickoff").toBe(false);
+		// Cleanup: dismiss the reviewer child so it does not outlive the test.
+		if (reviewerChildId) await apiFetch(`/api/sessions/${reviewerChildId}`, { method: "DELETE" }).catch(() => {});
 
 		// ── Step 5: NON-REMOVABLE — built-in source + pack cannot be removed/uninstalled. ──
 		// Built-in pack card has no Uninstall control.
