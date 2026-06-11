@@ -1,6 +1,6 @@
 name: team_dismiss
-description: "Dismiss one agent and clean up its worktree"
-summary: "Terminate one team agent"
+description: "Terminate and archive one agent — a goal team agent (cleans its worktree) or your own team_delegate child (shared parent worktree)."
+summary: "Terminate one agent (team or own child)"
 params: [session_id]
 provider:
   type: bobbit-extension
@@ -11,14 +11,24 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  Use after the agent's work is merged back to the goal branch. Cleans up the agent's git worktree. To kill all agents at once, use `team_complete` or `team_abort`.
+  Terminate and archive one agent. For a **goal team agent**, use after its work is merged — it removes the agent's git worktree. For your own **`team_delegate` child** (which runs in your worktree, no sub-branch), it just terminates + archives the child. To dismiss all goal agents at once, use `team_complete`.
 detail_docs: >-
   ## Purpose
 
 
-  Terminate a specific team agent and clean up its resources. This kills the
-  agent's session, removes its git worktree, and frees the associated system
-  resources. The agent is permanently removed from the team.
+  Terminate and archive a specific agent. The verb covers two cases:
+
+
+  - **Goal team agent** (team lead) — kills the agent's session and removes its
+  isolated git worktree (the agent runs on its own goal sub-branch). Verify its
+  work is merged first, or the worktree contents are lost.
+
+  - **Your own `team_delegate` child** (any owner) — terminates and archives the
+  child. The child runs in YOUR worktree (shared parent `cwd`), so there is no
+  sub-branch or worktree to clean up. Own-child scoping is enforced server-side.
+
+
+  In both cases the agent is permanently removed and its session archived.
 
 
   ## Parameters
@@ -77,14 +87,17 @@ detail_docs: >-
   ## Notes / Gotchas
 
 
-  - **Team lead only** — only team lead sessions can dismiss agents.
+  - **Who can dismiss** — a team lead dismisses its goal team agents; any owner
+  (goal or non-goal) can dismiss its own `team_delegate` children. You cannot
+  dismiss an agent you do not own (server-enforced).
 
-  - **Irreversible** — the agent's session is killed and its worktree is
-  deleted. Any uncommitted or unmerged work is lost.
+  - **Irreversible** — the agent's session is killed and archived. For a goal
+  team agent its worktree is deleted; any uncommitted or unmerged work is lost.
 
-  - **Verify merge first** — always confirm the agent has merged its changes
-  back to the goal branch before dismissing. Check with `team_list` or review
-  the git log.
+  - **Verify merge first (goal team agents)** — confirm the agent merged its
+  changes back to the goal branch before dismissing. Check with `team_list` or
+  review the git log. (A `team_delegate` child shares your worktree, so there is
+  nothing separate to merge.)
 
-  - **Worktree cleanup** — the agent's isolated git worktree directory is
-  removed automatically.
+  - **Worktree cleanup** — a goal team agent's isolated git worktree directory
+  is removed automatically; a `team_delegate` child has none (it shared yours).

@@ -14,15 +14,16 @@ detail_docs: >-
 
 
   Launch a **child agent** (a new, properly-scoped principal) to execute a task.
-  The child runs in **your worktree** (shares your `cwd`), gets full tool access
-  (bash, read, write, edit, web search, browser tools), and receives **only the
+  The child runs in **your worktree** (shares your `cwd`) and receives **only the
   instructions you provide** — it has no access to the current conversation,
   messages, or context.
 
 
   The child inherits your **current model** (override with `model`) and a copy of
-  your allowed tools **minus every spawn verb** — a child can never spawn its own
-  children (no grandchildren, at any depth).
+  your allowed tools **minus every spawn verb** (`team_delegate`, `team_spawn`) —
+  so it can do whatever you can except spawn its own children (no grandchildren,
+  at any depth). A `read_only` child additionally loses every mutating tool
+  (write/edit and other file-changing tools).
 
 
   ## Two modes

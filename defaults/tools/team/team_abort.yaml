@@ -1,6 +1,6 @@
 name: team_abort
-description: "Goal-level abort; cleans up all agent worktrees"
-summary: "Terminate goal; kill all agents"
+description: "Force-abort one stuck agent — a team agent or your own team_delegate child; graceful, then kill, then restart."
+summary: "Force-abort one agent (team or own child)"
 params: [session_id]
 provider:
   type: bobbit-extension
@@ -11,12 +11,24 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-
-  This is a goal-level abort, not a single-agent operation. Use `team_dismiss` to remove one agent. Last resort only.
+  Force-aborts a SINGLE agent (graceful → kill → restart), not a goal-level operation. Targets a team agent (team lead) or your own `team_delegate` child; own-child scoping is server-enforced. Use `team_dismiss` to remove an agent permanently. Last resort only.
 detail_docs: >-
   # team_abort
 
 
-  Force-abort a stuck team agent that won't respond to steering.
+  Force-abort a single stuck agent that won't respond to steering. Takes one
+  `session_id` and aborts exactly that agent — it is NOT a goal-level operation
+  and does NOT touch other agents.
+
+
+  ## What it targets
+
+
+  - A **team agent** — when called by a team lead (goal-scoped).
+
+  - **Your own `team_delegate` child** — when called by any owner (goal or
+  non-goal). Own-child scoping is enforced server-side by the `/orchestrate/*`
+  routes, so you can only abort children you spawned.
 
 
   ## When to use

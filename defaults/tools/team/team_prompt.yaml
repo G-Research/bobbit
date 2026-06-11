@@ -73,6 +73,16 @@ detail_docs: >-
   longer need.
 
 
+  ## Your own `team_delegate` children
+
+
+  `team_prompt` also queues/sends to a **non-goal owner's OWN `team_delegate`
+  child** (the non-goal verb is registered by `defaults/tools/agent/extension.ts`
+  and routed through `/orchestrate/*`). Own-child scoping is enforced server-side
+  — you can only prompt children you spawned. Same run-if-idle / queue-if-busy
+  semantics as for team agents.
+
+
   ## Direct-child team-leads
 
 
@@ -126,7 +136,9 @@ detail_docs: >-
   ## Notes / Gotchas
 
 
-  - **Team lead only** — only team lead sessions can prompt agents.
+  - **Who can prompt** — a team lead prompts its team agents (and a direct-child
+  goal's team-lead); any owner (goal or non-goal) can prompt its own
+  `team_delegate` children. Server-enforced scoping applies in both cases.
 
   - **Queued if busy** — if the agent is mid-turn, the prompt is queued and
   delivered automatically when the turn ends. The agent will process it as its

@@ -56,9 +56,12 @@ anywhere `delegate` was granted and runs the child in *your* worktree.
 
 ### `team_delegate`
 
-Launch a child agent in your worktree. The child gets full tool access but **no
-conversation context** — it sees only the `instructions` (and optional `context`) you
-pass, preserving the context-isolation contract the old `delegate` had.
+Launch a child agent in your worktree. The child has **no conversation context** — it
+sees only the `instructions` (and optional `context`) you pass, preserving the
+context-isolation contract the old `delegate` had. It inherits a copy of **your allowed
+tools minus every spawn verb** (`team_delegate`, `team_spawn`) — so it can do whatever
+you can except spawn grandchildren; a `read_only` child additionally loses every
+mutating (file-changing) tool.
 
 - **Blocking one-shot (default)** — spawn → wait for the child to finish → auto-dismiss,
   returning the child's output as the tool result. This is the drop-in replacement for
