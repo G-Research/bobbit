@@ -91,12 +91,12 @@ had no YAML schema so it tried to "learn the schema from validation feedback".
 There are three places the reviewer's role is resolved. The table shows which are
 cascade-aware today:
 
-| Path | Function | File:line | Cascade-aware? | Consequence if not |
+| Path | Function / symbol | Module | Cascade-aware? | Consequence if not |
 |---|---|---|---|---|
-| Spawn-time **allowlist** | `resolveRoleAllowedTools` dep | `server.ts:1205` | **Yes** (cascade-first, then `roleManager`) | — (this is why the allowlist looked right) |
-| Tool **guard** + MCP proxy | `_resolveToolActivation` | `session-setup.ts:630` | **No** (`roleManager.getRole` only) | `effectiveRole = undefined` → guard falls back to **group defaults** → `PR Walkthrough: never` → the three tools get `never` guard entries → **every call rejected** |
-| Restore / force-respawn | `resolveSessionRole` | `session-manager.ts:1646` | **No** (`roleManager.getRole` only) | a reviewer surviving a gateway restart re-resolves to `undefined` → loses its tools again |
-| Role **promptTemplate** (schema) | `resolveRolePromptTemplate` | `session-manager.ts:4453` | **Yes** (cascade-first via `configCascade.resolveRolePromptTemplate`, then `roleManager`) | — (verified; see §2.4) |
+| Spawn-time **allowlist** | `resolveRoleAllowedTools` dep | `server.ts` | **Yes** (cascade-first, then `roleManager`) | — (this is why the allowlist looked right) |
+| Tool **guard** + MCP proxy | `_resolveToolActivation` | `session-setup.ts` | **No** (`roleManager.getRole` only) | `effectiveRole = undefined` → guard falls back to **group defaults** → `PR Walkthrough: never` → the three tools get `never` guard entries → **every call rejected** |
+| Restore / force-respawn | `resolveSessionRole` | `session-manager.ts` | **No** (`roleManager.getRole` only) | a reviewer surviving a gateway restart re-resolves to `undefined` → loses its tools again |
+| Role **promptTemplate** (schema) | `resolveRolePromptTemplate` | `session-manager.ts` | **Yes** (cascade-first via `configCascade.resolveRolePromptTemplate`, then `roleManager`) | — (verified; see §2.4) |
 
 The **guard** is the smoking gun. `_resolveToolActivation` feeds `effectiveRole`
 into **both** `writeMcpProxyExtensions` and `writeToolGuardExtension`. The guard
@@ -110,8 +110,7 @@ symptom.
 
 ### 2.3 The fix pattern is already in the file
 
-`session-setup.ts` already has a **cascade-first role resolver**, `lookupRole`
-(`session-setup.ts:461`):
+`session-setup.ts` already has a **cascade-first role resolver**, `lookupRole`:
 
 ```ts
 function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext): Role | undefined {
@@ -124,15 +123,14 @@ function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext):
 }
 ```
 
-`PipelineContext` exposes both `roleManager` (`session-setup.ts:217`) and
-`configCascade` (`session-setup.ts:228`); the plan carries `projectId`
-(`session-setup.ts:181`). The fix in `_resolveToolActivation` is a one-line swap to
-`lookupRole`. The same cascade-first-then-`roleManager` shape is what
-`server.ts:1205` and `resolveRolePromptTemplate` already use.
+`PipelineContext` exposes both `roleManager` and `configCascade`; the plan carries
+`projectId`. The fix in `_resolveToolActivation` is a one-line swap to `lookupRole`.
+The same cascade-first-then-`roleManager` shape is what `server.ts`'s
+`resolveRoleAllowedTools` dep and `resolveRolePromptTemplate` already use.
 
 ### 2.4 The promptTemplate (schema) path — verified OK
 
-`resolveRolePromptTemplate` (`session-manager.ts:4453`) is already cascade-first
+`resolveRolePromptTemplate` (in `session-manager.ts`) is already cascade-first
 (`configCascade.resolveRolePromptTemplate(roleName, projectId)` →
 `roleManager.getRole(roleName)?.promptTemplate`), so the pack role's
 `promptTemplate` — which carries `REQUIRED_YAML_SCHEMA_PROMPT` — **does** reach a
@@ -158,7 +156,7 @@ assertion (§5).
 
 ### Area A — role-resolution bug fix
 
-**A1. `session-setup.ts::_resolveToolActivation` (`:630`).** Replace the
+**A1. `session-setup.ts::_resolveToolActivation`.** Replace the
 `roleManager`-only lookup with the existing cascade-first helper:
 
 ```ts
@@ -168,14 +166,14 @@ const effectiveRole = (plan.roleName && ctx.roleManager) ? ctx.roleManager.getRo
 const effectiveRole = plan.roleName ? lookupRole(plan.roleName, plan, ctx) : undefined;
 ```
 
-`lookupRole` already lives at `session-setup.ts:461` and resolves
+`lookupRole` already lives in `session-setup.ts` and resolves
 `configCascade.resolveRoles(plan.projectId)` first, falling back to
 `roleManager.getRole`. `effectiveRole` flows unchanged into
 `writeMcpProxyExtensions` and `writeToolGuardExtension`; with the real
 `pr-reviewer` role resolved, its `toolPolicies: { "PR Walkthrough": allow }` beats
 the group default, so the guard emits **no `never` entry** for the three tools.
 
-**A2. `session-manager.ts::resolveSessionRole` (`:1646`).** Make it cascade-aware
+**A2. `session-manager.ts::resolveSessionRole`.** Make it cascade-aware
 and give it a `projectId`:
 
 ```ts
@@ -192,8 +190,8 @@ private resolveSessionRole(roleName?: string, assistantType?: string, projectId?
 ```
 
 Thread `projectId` from both call sites:
-- **Restore path** (`session-manager.ts:3610`): `this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId)` — `ps.projectId` is in scope (used at `:3626`, `:3631`).
-- **Force-respawn path** (`session-manager.ts:6478`): `this.resolveSessionRole(session.role, session.assistantType, session.projectId)` — `session.projectId` is available (used immediately below at `:6491` `resolveInitialModel(session.role, session.projectId)`).
+- **Restore path** (the persisted-session restore in `session-manager.ts`): `this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId)` — `ps.projectId` is in scope.
+- **Force-respawn path** (the force-abort respawn in `session-manager.ts`): `this.resolveSessionRole(session.role, session.assistantType, session.projectId)` — `session.projectId` is available (the adjacent `resolveInitialModel(session.role, session.projectId)` call already uses it).
 
 This keeps a reviewer's tools through a gateway restart and a force-abort respawn.
 
@@ -207,7 +205,7 @@ in the PR description either way.
 ```
 host.agents.spawn({role:"pr-reviewer"})  (run route)
   → OrchestrationCore.spawn → childAllowedTools(owner, readOnly, "pr-reviewer")
-        → resolveRoleAllowedTools("pr-reviewer", ownerProjectId)         [server.ts:1205 — cascade-first ✓]
+        → resolveRoleAllowedTools("pr-reviewer", ownerProjectId)         [server.ts resolveRoleAllowedTools dep — cascade-first ✓]
         → child allowlist = [readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml]
   → createSession (full lifecycle):
         roleName "pr-reviewer" → role (cascade) → accessory "review", promptTemplate (schema) ✓
@@ -220,8 +218,8 @@ host.agents.spawn({role:"pr-reviewer"})  (run route)
 
 **Today.** The git-widget entrypoint
 (`entrypoints/pr-walkthrough-git-widget.yaml`) has `target: { route:
-pr-walkthrough }` with **no params**. `navigateToTarget` (`pack-entrypoints.ts:266`)
-serializes `#/ext/pr-walkthrough` and `main.ts:198` opens the panel with only the
+pr-walkthrough }` with **no params**. `navigateToTarget` (in `pack-entrypoints.ts`)
+serializes `#/ext/pr-walkthrough` and the panel-open path in `main.ts` opens the panel with only the
 params named in the route's `paramKeys`. The route entrypoint
 (`pr-walkthrough-route.yaml`) declares `paramKeys: [jobId, baseSha, headSha]`. The
 panel then shows a **Run** button needing a second click.
@@ -229,8 +227,8 @@ panel then shows a **Run** button needing a second click.
 **B1. Plumb an `autorun` param.** Two edits, both in the pack:
 - `entrypoints/pr-walkthrough-route.yaml`: add `autorun` to `paramKeys` →
   `paramKeys: [jobId, baseSha, headSha, autorun]`. (paramKeys gate which query
-  params survive both `navigateToTarget`'s filter at `pack-entrypoints.ts:277` and
-  the reload-restore filter at `main.ts:199`.)
+  params survive both `navigateToTarget`'s filter in `pack-entrypoints.ts` and
+  the reload-restore filter in `main.ts`.)
 - `entrypoints/pr-walkthrough-git-widget.yaml`: add params to the target →
   ```yaml
   target:
@@ -471,7 +469,7 @@ to opening in the current view (then the navigation in D.3 still selects the chi
 so the pane is correct on the next render either way).
 
 **Client plumbing (`src/app/pack-panels.ts` + `src/app/host-api.ts`).**
-- `host-api.ts:324`: `openPanel: (target) => openPackPanel(target, surface?.packId)`
+- `host-api.ts`: `openPanel: (target) => openPackPanel(target, surface?.packId)`
   — unchanged signature; `target.sessionId` now flows through.
 - `pack-panels.ts::openPackPanel(target, callerPackId)`: thread
   `target.sessionId` to `mountPackPanelTab`.
@@ -558,7 +556,7 @@ document is that reconciliation.
 
 | Group | Area | Files (disjoint for parallelism) |
 |---|---|---|
-| **G1** | A — role resolution | `src/server/agent/session-setup.ts` (`_resolveToolActivation` → `lookupRole`); `src/server/agent/session-manager.ts` (`resolveSessionRole` + the two call sites `:3610`, `:6478`); verify spawn rolePrompt path |
+| **G1** | A — role resolution | `src/server/agent/session-setup.ts` (`_resolveToolActivation` → `lookupRole`); `src/server/agent/session-manager.ts` (`resolveSessionRole` + its two call sites — the persisted-session restore and the force-abort respawn); verify spawn rolePrompt path |
 | **G2** | A tests | `tests/pr-walkthrough-role-tools-policy.test.ts` (extend / add guard-generation assertion); `tests/e2e/pr-walkthrough-host-agents.spec.ts` (call-the-tools + schema-in-prompt) |
 | **G3** | B + C — panel + entrypoints | `market-packs/pr-walkthrough/src/panel.js` (autorun one-shot + poll-loop change) → rebuild `lib/panel.js`; `entrypoints/pr-walkthrough-git-widget.yaml`; `entrypoints/pr-walkthrough-route.yaml`; `docs/pr-walkthrough-panel.md` |
 | **G4** | D — routes + panel re-key | `market-packs/pr-walkthrough/lib/routes.mjs` (`status` child-auth, `recover` child branch); `market-packs/pr-walkthrough/src/panel.js` (child re-key + `openPanel({sessionId})`) → rebuild `lib/panel.js` |

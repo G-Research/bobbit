@@ -960,12 +960,12 @@ pr-walkthrough/
 
 | Built-in piece | Pack contribution |
 |---|---|
-| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`), opened via `host.ui.openPanel({ panelId })` — entrypoints carry **no** hard-coded `jobId`; the panel launches via the `run` route and polls `status` (see below) |
+| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`; the panel launches via the `run` route and polls `status` (see below). After `run` returns the child id it opens the pane **in the reviewer child's session view** via the contract-v2 `host.ui.openPanel({ panelId, sessionId: childSessionId })` (a real session switch — see [`PanelTarget.sessionId`](#panels--persistent-side-panels-hostuiopenpanel)), feature-detected with `host.contractVersion >= 2` and falling back to the active view on a v1 host |
 | Launch — a real isolated reviewer | the `run` route calls **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, toolEnv })`** to mint a visible read-only child — NOT `host.session.postMessage`; the user's own agent is never driven |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — also holds the `binding/`, `reviewer/`, `submitted/`, and `last/` routing keys for the reviewer child |
 | Deep-link + launchers | four `entrypoints/*.yaml` — three launchers (composer-slash, git-widget-button, command-palette) **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) |
-| Reload recovery | the `recover` route reads the owner-scoped `last/<sessionId>` pointer + persisted YAML so the **Load walkthrough** gesture re-renders cards (the reviewer's submit call lives in the dismissed child, not the owner transcript); `host.session.readToolCall` remains a legacy fallback |
+| Reload recovery | the `recover` route returns the persisted YAML so the **Load walkthrough** gesture re-renders cards (the reviewer's submit call lives in the dismissed child, not the owner transcript). It authorizes from **either bound principal**: it checks a **child self-recover** branch **first** — when the caller is the reviewer child it resolves from its own `binding/<childSessionId>` — and otherwise falls back to the owner-scoped `last/<sessionId>` pointer; `host.session.readToolCall` remains a legacy fallback |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
 Two non-obvious decisions worth copying:
