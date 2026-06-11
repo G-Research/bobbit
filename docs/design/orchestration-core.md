@@ -1,8 +1,8 @@
 # Orchestration Core — Design Document
 
-**Status:** Design (pre-implementation). Three sequenced sub-goals: **A** (core + rename + restart), **B** (archive cascade + modal, deps A), **C** (`host.agents` + fixture, deps A).
+**Status:** Design record (HISTORICAL SNAPSHOT, pre-implementation). Three sequenced sub-goals: **A** (core + rename + restart), **B** (archive cascade + modal, deps A), **C** (`host.agents` + fixture, deps A). The feature has since shipped; for current behaviour see [orchestration.md](../orchestration.md).
 
-This document specifies the **HOW**. The product **WHAT** is locked in the goal spec and is not relitigated here. Every file/line reference below was verified against the working tree at design time; line numbers may drift — grep the cited symbol.
+This document specifies the **HOW**. The product **WHAT** is locked in the goal spec and is not relitigated here. **All `file:line` references below are a point-in-time snapshot captured during design and are intentionally NOT maintained** — they will drift as the code evolves. Treat the cited **symbol/module names** as authoritative and `grep` for them; ignore the line numbers except as a historical record of where things stood at design time.
 
 ---
 

@@ -284,6 +284,7 @@ client-trusted). All call the shared `OrchestrationCore` in-process. See
 | `POST` | `/api/sessions/:id/orchestrate/abort` | Force-abort an owned child |
 | `POST` | `/api/sessions/:id/orchestrate/wait` | Wait for the **first** awaited child to settle (chunked heartbeat, like `/wait`) |
 | `POST` | `/api/sessions/:id/orchestrate/dismiss` | Terminate + archive an owned child |
+| `GET` | `/api/sessions/:id/children-count` | Count + list (`{ count, children: [{ id, title }] }`) the session's live **and dormant/persisted** child agents, using the same predicate as the archive cascade. Backs the non-goal archive confirmation modal's child-agent enumeration |
 
 ### Tasks
 
