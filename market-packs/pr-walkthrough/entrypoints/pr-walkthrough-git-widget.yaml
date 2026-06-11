@@ -4,5 +4,12 @@ label: PR Walkthrough
 # A git-widget-button LAUNCHER (the git status widget dropdown). Its selection
 # IS the user gesture; it navigates to the deep-link route. No hard-coded jobId —
 # the panel resolves the real job from the current session's submitted walkthrough.
+# `autorun: true` (Area B) makes the click one-click: the panel auto-invokes its
+# `run` action ONCE on mount (the click is the gesture). The consumed flag makes it
+# strictly one-shot; the `run` route's reviewerKey idempotency is the reload backstop.
+# Only THIS launcher carries autorun — the open/palette launchers and the bare
+# deep-link omit it, preserving the "no auto-invoke on mount" honesty for passive opens.
 target:
   route: pr-walkthrough
+  params:
+    autorun: true

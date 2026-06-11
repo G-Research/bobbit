@@ -36,17 +36,28 @@ The current end-to-end flow:
 - **Launch.** A pack **entrypoint** — a git-widget button, a composer-slash
   launcher, a command-palette launcher, and a `kind:"route"` deep-link — opens
   the pack panel. The entrypoints carry **no** hard-coded `jobId`; opening a
-  launcher just navigates to the panel.
+  launcher just navigates to the panel. The **git-widget button** additionally
+  carries `autorun: true` (the only launcher that does), so clicking it is
+  **one-click**: the panel auto-invokes its `run` action once on mount. The widget
+  click IS the user gesture, so this is not a passive auto-invoke; the deep-link
+  and the open/palette launchers omit `autorun` and keep the manual Run button.
+  See [One-click auto-run](#one-click-auto-run-from-the-git-widget).
 - **Run.** When no walkthrough has been submitted for the session yet, the panel
-  shows a **"Run PR walkthrough"** action. On the user's click it calls the pack's
-  **`run`** route, which mints a **real, isolated, read-only reviewer child**
-  (`host.agents.spawn`) — it does **not** drive the user's own agent. See
+  shows a **"Run PR walkthrough"** action (or auto-runs from the git widget). On
+  the user's click it calls the pack's **`run`** route, which mints a **real,
+  isolated, read-only reviewer child** (`host.agents.spawn`) — it does **not**
+  drive the user's own agent. The pane then **moves into the reviewer child
+  session's view** (pending while analysing, ready cards after submit). See
   [Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child)
   for the full flow, the run/status/recover routes, and the GitHub-PR-only
   scoping.
 - **Poll + render.** The panel polls the **`status`** route until the reviewer
   submits the production YAML, then runs the unchanged `publish`→`bundle`
-  synthesis to render the same cards.
+  synthesis to render the same cards. A long-but-progressing reviewer is **never**
+  errored by a short clock — past ~2 minutes the panel shows a non-error "still
+  reviewing" hint and keeps polling; only a route-confirmed terminal child or a
+  30-minute hard cap ends the poll. See
+  [Poll-loop robustness](#poll-loop-robustness).
 - **Data via pack routes.** The panel never makes a raw `fetch`. It calls the
   pack's own routes (`market-packs/pr-walkthrough/lib/routes.mjs`, registered in
   `pack.yaml` `routes:`) through `host.callRoute`:
@@ -93,7 +104,42 @@ session** — it never drives the user's current agent. This restores the
 pre-pack-migration behaviour (a first-class child reviewer with the `review`
 accessory in the sidebar) on top of the Extension Host's
 [`host.agents`](extension-host-authoring.md#hostagents--launch-and-orchestrate-child-agents)
-capability.
+capability. The walkthrough **pane lives with that reviewer child session** — it
+shows a pending state while analysis runs and the ready cards after submit, beside
+the child's chat — not the owner session that launched it (see
+[The pane lives with the reviewer child](#the-pane-lives-with-the-reviewer-child)).
+
+### One-click auto-run from the git widget
+
+The **git-widget launcher** carries `autorun: true` in its route target params
+(`entrypoints/pr-walkthrough-git-widget.yaml`), and `autorun` is in the route's
+`paramKeys` so it survives navigation and reload-restore. On mount the panel reads
+`params.autorun` (query params arrive as **strings**, so it accepts `"true"` or
+boolean `true`) and, when the session is idle with no existing bundle, invokes
+`run` exactly once via `queueMicrotask`.
+
+This does **not** violate the pack-panel "no auto-invoke on mount" invariant: the
+git-widget **click is the user gesture** (the moral equivalent of clicking Run),
+and `autorun` only fires from the entrypoint that opts into it. Honesty is
+preserved three ways: (i) `autorun` is opt-in per entrypoint — only the git widget
+sets it, the deep-link / open / palette launchers never do; (ii) a per-entry
+**`autorunConsumed`** flag makes it strictly one-shot, so a re-render or same-page
+navigation never re-triggers; (iii) a browser reload re-arms the flag only during
+the brief idle window, and the `run` route's `reviewerKey` idempotency is the
+backstop (it returns the existing reviewer with `created: false` rather than
+spawning a duplicate). The manual **Run** button stays for the no-autorun /
+deep-link case.
+
+### Poll-loop robustness
+
+The panel's poll loop polls **while the reviewer child is alive** rather than
+erroring on a short clock. After the soft `SLOW_HINT_MS` (~2 minutes) of
+`phase: "running"` it surfaces a non-error **"still reviewing"** hint and keeps
+polling; only `phase: "submitted"` (publish) or `phase: "error"` (the route's
+terminal-without-submit verdict) ends the loop. An absolute `HARD_CAP_MS`
+(30 minutes) is the only "ran too long" outcome, and it surfaces a retry message
+rather than a silent failure. A long-but-progressing review of a non-trivial PR is
+never turned into an error by the clock.
 
 **Why a separate principal, not the user's agent?** The earlier pack revision had
 no way to mint a child principal, so its "Run" gesture called
@@ -124,18 +170,50 @@ allow-listed in `pack.yaml`), all reached via `host.callRoute` — never a raw
   keys) and returns `{ ok: false, retryable: true }` so a retry starts clean.
 - **`status`** (the poll): input `{ childSessionId, jobId }`. It is
   **binding-authoritative** — it loads `binding/<childSessionId>` first and
-  verifies both the job id and that the caller owns the binding before reading
-  anything else, so a caller cannot probe another job's state. Completion is
-  signalled by the pack-store **`submitted/<jobId>`** marker (the submitted YAML),
-  not the reviewer's idle status — a read-only agent can go idle without
-  submitting. Returns `{ phase: "running" | "submitted" | "error", … }`.
+  verifies the job id and that the caller is one of the binding's two named
+  principals before reading anything else, so a caller cannot probe another job's
+  state. The caller may be **either bound principal**: the bound owner
+  (`binding.parentSessionId === ctx.sessionId`) **or** the reviewer child polling
+  its own pane (`childSessionId === ctx.sessionId`). Right-job routing is preserved
+  — the caller must match the binding's `jobId` AND be owner or child; a foreign
+  session is still rejected. Completion is signalled by the pack-store
+  **`submitted/<jobId>`** marker (the submitted YAML), not the reviewer's idle
+  status — a read-only agent can go idle without submitting. Returns
+  `{ phase: "running" | "submitted" | "error", … }`.
 - **`recover`** (reload recovery): because the reviewer's
   `submit_pr_walkthrough_yaml` tool call lives in the (dismissed) child session
   rather than the owner's transcript, a browser reload cannot recover a completed
-  walkthrough by scanning the owner transcript. `recover` reads an owner-scoped
-  `last/<parentSessionId>` pointer (written server-side at submit time) and
-  returns the persisted YAML, so the panel's **Load walkthrough** gesture
+  walkthrough by scanning the owner transcript. `recover` authorizes from
+  **either bound principal**. It checks a **child self-recover** branch first: when
+  the caller is itself a bound reviewer child, it resolves the submitted YAML
+  directly from its own `binding/<childSessionId>` (no extra store key). Otherwise
+  it falls through to the **owner** branch, reading the owner-scoped
+  `last/<parentSessionId>` pointer (written server-side at submit time). Either way
+  it returns the persisted YAML, so the panel's **Load walkthrough** gesture
   re-renders the cards. It is never auto-invoked on mount.
+
+### The pane lives with the reviewer child
+
+The walkthrough pane renders **in the reviewer child session's view**, restoring
+the pre-migration UX. The panel keys its per-session state by the bound session id
+(`params.__sessionId`); once `run` returns `{ childSessionId, jobId, … }` the panel
+re-keys its running/poll/render state under the **child** session key and clears
+the owner's entry to idle, so the owner pane stops showing the launch state. It
+then navigates the UI to the child session via the Host API
+(`host.ui.openPanel({ panelId, sessionId: childSessionId })`), gated on
+`host.contractVersion >= 2` (the additive `PanelTarget.sessionId` field, see
+[docs/extension-host-authoring.md](extension-host-authoring.md)); on an older host
+it skips the navigation and the child pane renders on the next select. The pack
+touches **no** platform navigation code directly — only the versioned Host API.
+
+The poll loop keeps running in the owner's `run` closure with the owner host (so
+`status` stays parent-authorized — no new race), but writes its pending /
+publishing / rendered / error state under the child key, so the child-session pane
+shows pending → ready. On reload the child pane finds its `byJob` state empty; its
+**Load walkthrough** gesture calls `recover`, which self-resolves from
+`binding/<childSessionId>` (the child branch above) and re-publishes the cards. The
+reviewer child is server-dismissed on submit but remains a selectable
+(terminal/archived) session, so its pane still renders.
 
 ### Target resolution — GitHub PRs only
 

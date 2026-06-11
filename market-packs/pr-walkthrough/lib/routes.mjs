@@ -359,10 +359,16 @@ export const routes = {
 		}
 
 		// Verify the caller owns the bound job; on mismatch read NOTHING else.
+		// Area D: authorize EITHER bound principal — the bound owner (parent) OR the
+		// reviewer child polling its OWN pane (ctx.sessionId === childSessionId). Right-
+		// job routing is preserved: the caller must still match the binding's jobId AND
+		// be one of the two named principals; a foreign session is still rejected.
 		const binding = await store.get(bindingKey(childSessionId));
+		const isOwner = !!binding && typeof binding === "object" && binding.parentSessionId === ctx.sessionId;
+		const isChild = childSessionId === ctx.sessionId;
 		if (!binding || typeof binding !== "object"
 			|| binding.jobId !== jobId
-			|| binding.parentSessionId !== ctx.sessionId) {
+			|| !(isOwner || isChild)) {
 			return { phase: "error", error: "unknown or mismatched binding" };
 		}
 
@@ -392,14 +398,37 @@ export const routes = {
 	// submitted YAML reaches the panel only via the in-memory poll loop; on browser
 	// reload `byJob` is empty and the submit tool call lives in the (dismissed)
 	// reviewer child, NOT the owner transcript — so the legacy owner-transcript scan
-	// recovers nothing. This route reads the OWNER-SCOPED `last/<ctx.sessionId>`
+	// recovers nothing. Area D adds a CHILD self-recover branch FIRST: when the
+	// reviewer CHILD's pane re-renders after a reload, it resolves the submitted YAML
+	// from its OWN binding/<childSessionId> (the pane lives with the child session
+	// now). The owner branch then reads the OWNER-SCOPED `last/<ctx.sessionId>`
 	// pointer (written server-side by submit-yaml) and returns the persisted YAML so
 	// the panel's "Load walkthrough" gesture can re-render the cards (idempotent
-	// publish). Owner-scoped by ctx.sessionId; never auto-invoked.
+	// publish). Either branch is keyed by ctx.sessionId; never auto-invoked.
 	recover: async (ctx, _req) => {
-		const owner = strOf(ctx && ctx.sessionId);
-		if (!owner) return { found: false };
+		const me = strOf(ctx && ctx.sessionId);
+		if (!me) return { found: false };
 		const store = ctx.host.store;
+		// Area D — CHILD self-recover (checked FIRST). When the reviewer child's pane
+		// re-renders after a reload, it recovers from its OWN binding/<childSessionId>
+		// (no new store key): read the submitted YAML keyed by that binding's jobId.
+		// Authorization-correct — only the bound child can resolve its own binding/<me>,
+		// and the submitted YAML is keyed by that binding's verified jobId.
+		const selfBinding = await store.get(bindingKey(me));
+		if (selfBinding && typeof selfBinding === "object" && strOf(selfBinding.jobId)) {
+			const submitted = await store.get(submittedKey(selfBinding.jobId));
+			if (submitted && typeof submitted === "object" && strOf(submitted.yaml)) {
+				return {
+					found: true,
+					jobId: selfBinding.jobId,
+					yaml: submitted.yaml,
+					baseSha: submitted.baseSha ?? selfBinding.baseSha,
+					headSha: submitted.headSha ?? selfBinding.headSha,
+				};
+			}
+		}
+		// OWNER recover (unchanged): the owner-scoped last/<owner> pointer.
+		const owner = me;
 		const pointer = await store.get(lastKey(owner));
 		if (!pointer || typeof pointer !== "object" || !strOf(pointer.jobId)) {
 			return { found: false };
