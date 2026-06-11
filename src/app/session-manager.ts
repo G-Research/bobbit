@@ -17,7 +17,7 @@ import {
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision } from "./api.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
-import { reconcilePackPanelsForProject } from "./pack-panels.js";
+import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
@@ -992,6 +992,16 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // ============================================================================
 // CONNECT TO SESSION (select + hydrate)
 // ============================================================================
+
+// Wire the canonical full session switch into pack-panels so a pack panel opened
+// with `PanelTarget.sessionId` (e.g. the PR-walkthrough reviewer-child pane) lands
+// beside that session's chat as a first-class SELECTED session. Injected here —
+// rather than statically imported by pack-panels — because pack-panels is imported
+// ABOVE for `reconcilePackPanelsForProject`, so the reverse static import would be
+// a cycle. `connectToSession` is a hoisted function declaration, so this top-level
+// registration is safe. The arrow fixes `isExisting=false` (the same args the
+// sidebar passes for a fresh switch + hydrate).
+setSessionSwitcher((sessionId: string) => { void connectToSession(sessionId, false); });
 
 export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.

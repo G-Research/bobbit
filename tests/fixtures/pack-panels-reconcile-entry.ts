@@ -18,6 +18,7 @@ import {
 	reconcilePackPanelsForProject,
 	panelInfosFromContributions,
 	openPackPanel,
+	setSessionSwitcher,
 } from "../../src/app/pack-panels.js";
 import { state } from "../../src/app/state.js";
 import { panelTabsForSession, activePanelTabIdForSession } from "../../src/app/panel-workspace.js";
@@ -79,6 +80,20 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 (window as any).__openInSession = (panelId: string, sessionId: string, packId?: string) => {
 	openPackPanel({ panelId, sessionId }, packId ?? "demo_pack");
 };
+// Install a STUB session switcher (the production hook is `connectToSession`,
+// wired by session-manager). Records the target it was asked to switch to AND
+// simulates the real switch's synchronous `selectSession` phase by setting
+// `state.selectedSessionId` — so the test can assert openPackPanel delegates to
+// the REAL switch path (not a bare assignment that skips it).
+let lastSwitchTarget: string | undefined;
+(window as any).__installSwitcherStub = () => {
+	lastSwitchTarget = undefined;
+	setSessionSwitcher((sid: string) => {
+		lastSwitchTarget = sid;
+		(state as unknown as { selectedSessionId?: string }).selectedSessionId = sid;
+	});
+};
+(window as any).__lastSwitchTarget = (): string | undefined => lastSwitchTarget;
 (window as any).__selectedSessionId = (): string | undefined =>
 	(state as unknown as { selectedSessionId?: string }).selectedSessionId;
 (window as any).__setSelectedSessionId = (sid: string | undefined) => {

@@ -81,6 +81,25 @@ export function setPanelHostFactory(
 	panelHostFactory = fn;
 }
 
+/** The CANONICAL session-switch entrypoint (`connectToSession(sessionId, false)`
+ *  in session-manager.ts — the same path the sidebar uses). Injected once at
+ *  bootstrap (session-manager self-registers it) rather than statically imported,
+ *  because session-manager ALREADY imports `pack-panels.ts` (for
+ *  `reconcilePackPanelsForProject`) so a reverse static import would be a cycle —
+ *  the same indirection rationale as {@link panelHostFactory}.
+ *
+ *  When set, {@link mountPackPanelTab} drives the FULL switch (cache outgoing
+ *  panel, disconnect, set the hash route, update accessory/hue + localStorage,
+ *  render, then async-hydrate the target) so a `PanelTarget.sessionId` open lands
+ *  the reviewer-child pane beside that child's chat as a first-class SELECTED
+ *  session — not a bare `selectedSessionId` assignment that skips the real switch.
+ *  When UNSET (unit fixtures that never load session-manager) we fall back to the
+ *  v1 bare-assignment so the tab still keys under the target session. */
+let sessionSwitcher: ((sessionId: string) => void) | undefined;
+export function setSessionSwitcher(fn: (sessionId: string) => void): void {
+	sessionSwitcher = fn;
+}
+
 /** The session a freshly-built panel host should bind to (the active session —
  *  the store guard authorizes against the header-bound session, design §2a). */
 function currentSessionIdForPanel(): string | undefined {
@@ -336,19 +355,35 @@ export function openPackPanel(target: PanelTarget, callerPackId?: string): void 
 /** Add or focus the side-panel tab for `{packId, panelId}`, carrying `params`.
  *  Best-effort: guarded so a non-DOM/unit context (no app state) never throws.
  *
- *  CONTRACT v2 (`PanelTarget.sessionId`): when `sessionId` is given, SELECT that
- *  session — set `state.selectedSessionId` (the same field the session-select path
- *  drives) so the sidebar highlight + main view follow the pane on the next
- *  `renderApp()` — and mount/focus the tab under THAT session instead of the
- *  currently-active one. Omitted ⇒ the active session (v1 behaviour, unchanged).
- *  The selection touches no platform navigation code, keeping the pack pure. */
+ *  CONTRACT v2 (`PanelTarget.sessionId`): when `sessionId` is given, SWITCH to
+ *  that session via the canonical {@link sessionSwitcher}
+ *  (`connectToSession(sessionId, false)`) — the SAME full switch the sidebar
+ *  drives (cache outgoing panel, disconnect, set hash route, update accessory/hue
+ *  + localStorage, render, async-hydrate) — so the pane lands beside that
+ *  session's chat as a first-class SELECTED session, then mount/focus the tab
+ *  under THAT session. A bare `selectedSessionId` assignment is NOT enough: it
+ *  skips the hash route + hydration so the main view never actually follows. When
+ *  the switcher is unset (unit fixtures) we fall back to the v1 bare assignment so
+ *  the tab still keys correctly. Omitted `sessionId` ⇒ the active session (v1
+ *  behaviour, unchanged). Reusing `connectToSession` keeps the pack pure — no
+ *  platform navigation code is reimplemented here. */
 function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown>, sessionId?: string): void {
 	try {
 		const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
-		// v2: an explicit target session is selected (so the sidebar + main view
-		// follow) and used as the tab's mount key; otherwise fall back to the active
-		// session exactly as before.
-		if (sessionId && sessionId !== s.selectedSessionId) s.selectedSessionId = sessionId;
+		// v2: an explicit target session is SWITCHED to via the canonical full-switch
+		// path (so the sidebar highlight, hash route, and main view all follow the
+		// pane) and used as the tab's mount key. The synchronous `selectSession` phase
+		// of `connectToSession` runs before its first await, so `selectedSessionId` is
+		// already updated when control returns here — we then mount the tab and render
+		// so it is present + active under the target. Without a switcher (unit
+		// fixtures) fall back to the bare assignment exactly as v1 did.
+		if (sessionId && sessionId !== s.selectedSessionId) {
+			if (sessionSwitcher) {
+				try { sessionSwitcher(sessionId); } catch { /* switch best-effort */ }
+			} else {
+				s.selectedSessionId = sessionId;
+			}
+		}
 		const sid = sessionId || s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
 		const id = packPanelTabId(reg.packId, reg.panelId);
 		const title = reg.title || reg.panelId;
