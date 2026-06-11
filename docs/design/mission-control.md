@@ -59,8 +59,11 @@ Control promotes it to a first-class, still-synthetic, un-deletable scope:
   no archive, no delete.
 - **Sessions:** global sessions attach to the system project. Projectless session handling
   already exists (`tests/e2e/sessions-projectless.spec.ts` pins current behavior — extend,
-  don't fork). **Cwd:** a dedicated `~/.bobbit/mission-control/` workspace dir (a real,
-  writable directory so file tools work), never a project root and never
+  don't fork). **Cwd:** a dedicated `mission-control/` workspace dir under the gateway's
+  state dir — `missionControlDir()` per A.1, i.e. `<bobbit-dir>/state/mission-control/`,
+  where `bobbitDir()` resolves `BOBBIT_DIR` env → else `<gateway root>/.bobbit`
+  (`src/server/bobbit-dir.ts`); it is `~/.bobbit/…` only when `BOBBIT_DIR` points at home.
+  A real, writable directory so file tools work; never a project root and never
   `config.defaultCwd`.
 - **Staff:** `staff-store.ts` / `staff-manager.ts` accept `projectId: "system"` as a *valid*
   owner: project-anchoring validation (staff-agents.md §Project and cwd anchoring) gains an
@@ -207,7 +210,7 @@ graph LR
 
 1. `project-registry.ts`: keep `SYSTEM_PROJECT_ID` hidden from `visibleProjects()`; add
    `isSystemScope(id)` helper; ensure the system project's anchor dir is the
-   `~/.bobbit/mission-control/` workspace (created lazily).
+   `missionControlDir()` workspace under the state dir (A.1; created lazily).
 2. `staff-store.ts`: add `global?: boolean` to `PersistedStaff` (loader normalises missing →
    `false`); `staff-manager.ts` accepts `projectId: "system"` + `global: true` with
    system-scope cwd validation (inside the mission-control workspace) and worktree forced
