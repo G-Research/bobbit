@@ -55,8 +55,8 @@ files split into transient per-stream **spools** and a single durable **combined
 
 - At spawn time, **redirect the command's stdout/stderr into transient per-stream spool files**
   (`<bgId>.out.spool` / `<bgId>.err.spool`) that the child appends to. The spools are explicitly
-  **transient, gateway-managed rings** (copytruncated on every shell, §8) — they are *not* "the
-  persisted log".
+  **transient, gateway-managed rings** (bounded by a wrapper-owned trimmer + gateway copytruncate,
+  §8) — they are *not* "the persisted log".
 - The gateway tails both spool deltas, interleaves them by arrival into the existing in-memory
   capped `log[]` buffer, and continuously rewrites a **single durable combined projection** it owns
   exclusively (`<bgId>.log`, atomic tmp+rename, always ≤ 512KB / 5000 lines **combined across both
@@ -102,8 +102,9 @@ test state dir (`tests/e2e/e2e-setup.ts`) are inherited for free.
   bg-processes.json.bak.1 .. .bak.5      # NEW: rotated backups (mirrors SessionStore)
   bg-processes/                          # NEW: per-process files
     <sessionId>/
-      <bgId>.out.spool                   # TRANSIENT: child appends stdout (gateway-managed ring, copytruncated)
-      <bgId>.err.spool                   # TRANSIENT: child appends stderr (gateway-managed ring, copytruncated)
+      <bgId>.out.spool                   # TRANSIENT: child appends stdout; bounded by wrapper-owned trimmer
+                                         #   (restart-independent) + gateway copytruncate (secondary)
+      <bgId>.err.spool                   # TRANSIENT: child appends stderr; bounded the same way
       <bgId>.log                         # DURABLE COMBINED PROJECTION: gateway-owned, atomic rewrite,
                                          #   ≤512KB/5000 lines COMBINED; lines tagged <ts>\t<stream>\t<text>
       <bgId>.status                      # final exit code, written once by the wrapper
@@ -119,8 +120,8 @@ interleaved view exactly as they do today against the in-memory `log[]`.
 ### 3.1 Stream files: per-stream spools vs combined projection
 
 The wrapper redirects each stream to its **own transient spool file** — keeping two files
-(`.out.spool`, `.err.spool`) is fully portable across Git Bash, cmd, and `/bin/sh`. The child only
-ever appends to the spools.
+(`.out.spool`, `.err.spool`) is fully portable across Git Bash and `/bin/sh` (the persistent path
+is POSIX-only — §4.1). The child only ever appends to the spools.
 
 The gateway tails both spool deltas, feeds them into the existing in-memory capped buffer
 (`appendLog()` interleaves `stdout`/`stderr` by arrival, exactly as today's pipe `data` events),
@@ -228,28 +229,63 @@ The manager then **synchronously flushes** `processPid` (and `hostPid`, `nonce`)
 `bg-processes.json` before broadcasting `bg_process_created`. Until `processPid` is known the record
 persists `processPid: 0` (pending) and is reconciled the moment the pidfile read succeeds.
 
-### 4.1 Host wrapper (Windows Git Bash / `/bin/sh`)
+### 4.1 Host wrapper — POSIX only (Git Bash on Windows / `/bin/sh`)
 
 `getShellConfig()` (`src/server/agent/shell-util.ts`) returns Git Bash (`bash -c`) on Windows when
-present, else `cmd.exe /d /s /c`, and `/bin/sh -c` on Linux/macOS. The wrapper must work for **both
-shell families**. Git Bash and `/bin/sh` share POSIX syntax; cmd.exe does not.
+`GIT_BASH` is found (the **strongly-preferred** Windows default), `/bin/sh -c` on Linux/macOS, and
+only falls back to `cmd.exe /d /s /c` on a Windows host with no Git for Windows installed. The
+**persistent, re-attachable bg-process path requires a POSIX shell** — Git Bash on Windows or
+`/bin/sh` on Linux/macOS (and `/bin/sh` inside docker, §4.2). cmd.exe is **not** part of the
+persistent path (see "Legacy fallback" below).
 
-**POSIX shell (Git Bash on Windows + /bin/sh on Linux/macOS):** the wrapper is a single `-c`
-string. The user command runs in an **isolated subshell** `( <command> )` so that a `exit N` inside
-it only exits the subshell — the wrapper then captures the real code in `code=$?` and writes it to
-the status file. Output is **appended** (`>>`) to the spools so the gateway can copytruncate them
-(§8), and the pidfile gets the wrapper `processPid` **and** the per-spawn nonce on two lines:
+The wrapper is a single POSIX `-c` string. It (1) writes the pidfile (`processPid` + per-spawn
+nonce, two lines); (2) launches a **wrapper-owned background trimmer** that bounds each spool
+independently of the gateway — restart-independent, so spools stay capped even while the gateway is
+down (§8); (3) runs the user command in an **isolated subshell** `( <command> )` so a user `exit N`
+only exits the subshell and the wrapper still captures the real `code=$?`; (4) appends (`>>`) output
+to the spools; (5) stops the trimmer and writes the real exit code to the status file:
 
 ```sh
-printf '%s\n%s\n' "$$" "<nonce>" > "<pid>" ; ( <command> ) >> "<outSpool>" 2>> "<errSpool>" ; code=$? ; printf '%s\n' "$code" > "<status>" ; exit "$code"
+printf '%s\n%s\n' "$$" "<nonce>" > "<pid>"
+# wrapper-owned trimmer: bounds each spool to <KEEP> bytes, restart-independent
+( while kill -0 "$$" 2>/dev/null; do
+    for f in "<outSpool>" "<errSpool>"; do
+      if [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null || echo 0)" -gt <MAX_LOG_BYTES> ]; then
+        tail -c <KEEP> "$f" > "$f.trim" 2>/dev/null && cat "$f.trim" > "$f" && rm -f "$f.trim"
+      fi
+    done
+    sleep 5
+  done ) &
+trimmer=$!
+( <command> ) >> "<outSpool>" 2>> "<errSpool>"
+code=$?
+kill "$trimmer" 2>/dev/null
+printf '%s\n' "$code" > "<status>"
+exit "$code"
 ```
 
-`$$` is the wrapper shell pid (`processPid`); the `( <command> )` subshell means a user `exit N`
-exits only the subshell, so `code=$?` reliably captures the command's real exit code in the
-**wrapper** before it writes `<status>`; `<nonce>` is the random token the manager generated for
-this spawn. This is the **primary path** (Git Bash is preferred on the Windows host per `GIT_BASH`
-in `shell-util.ts`). POSIX `>>` honours `O_APPEND`, so after a gateway copytruncate the next child
-write lands at offset 0 — the property §8 relies on.
+(The manager builds this single-string form by joining the lines with `;`/`&` as needed; it is
+shown multi-line for readability. `<KEEP>` = `MAX_LOG_BYTES` = 512KB is the retained tail; the
+`-gt <MAX_LOG_BYTES>` test is the trim trigger.)
+
+Key correctness points:
+
+- `$$` is the wrapper shell pid (`processPid`); `<nonce>` is the random token the manager generated
+  for this spawn (pid-reuse guard, §7.1).
+- The `( <command> )` subshell means a user `exit N` exits only the subshell, so `code=$?` reliably
+  captures the command's real exit code in the **wrapper** before it writes `<status>`.
+- **Wrapper-owned trimmer (restart-independent spool cap).** The background loop runs as part of the
+  detached/orphaned wrapper, **not** the gateway. While the wrapper is alive (`kill -0 "$$"`) it
+  trims each spool whenever it exceeds `<MAX_LOG_BYTES>`, retaining the last `<KEEP>` bytes. The trim
+  `tail -c <KEEP> "$f" > "$f.trim" && cat "$f.trim" > "$f"` truncates the spool **in place (same
+  inode)** then rewrites the retained tail; the command's `>>` (`O_APPEND`) fd keeps appending at
+  EOF of the **same inode** — standard logrotate **copytruncate**. A few bytes written during the
+  trim window may be lost, which is acceptable because the spool is already a lossy last-N cap. We
+  **must not** use `mv`/rename for the trim (that would orphan the writer's append fd onto the old
+  inode). This bounds each spool **at all times** — during the normal run AND during gateway
+  downtime.
+- POSIX `>>` honours `O_APPEND`, so after either the wrapper trimmer or a gateway copytruncate the
+  next child write lands at EOF of the (now-smaller) same inode — the property §8 relies on.
 
 > **Why the subshell matters.** An earlier `{ <command> ; } ... ; echo $? > <status>` group did
 > **not** isolate `exit`: a user command running `exit 0/1` exited the *wrapper* shell before the
@@ -257,52 +293,79 @@ write lands at offset 0 — the property §8 relies on.
 > killed/unrecoverable. Running `( <command> )` in a child subshell fixes this — `exit N` is
 > contained, `code=$?` is captured, `<status>` is always written.
 
-**cmd.exe fallback (Windows without Git Bash):** POSIX `$$`/`$?` do not exist, and a bare
-`(<command>)` parenthesised block does **not** isolate `exit` in cmd. Nest the user command in a
-**child `cmd`** (`cmd /s /c "<command>"`) so its `exit` cannot kill the wrapper, append (`>>`) to
-the spools so copytruncate applies (see below), and capture `%errorlevel%` after the child cmd
-returns. Wrapper string passed after `/d /s /c` (`<pidwrite>` writes `child.pid` to `<pid>`):
+**Legacy fallback (Windows host with no Git Bash — rare).** When `GIT_BASH` is `null` (no Git for
+Windows) `getShellConfig()` yields `cmd.exe`, which cannot run the POSIX wrapper (no `$$`/`$?`, no
+portable trimmer) and offers no nonce. On that narrow platform exception `bash_bg` **falls back to
+the legacy in-memory, non-persistent behaviour** — the current pipe-based `defaultSpawn` capture.
+The process works for the gateway's lifetime but is **not** persisted, **not** restored after a
+restart, and gets **no** spool/status/pid files or nonce. Its record is flagged `persistent: false`
+(§5.1) so the UI/log never implies durability. Persistence, re-attach, the nonce guard, and the
+wrapper trimmer all assume a POSIX shell; there is no cmd.exe persistent path.
 
-```bat
-<pidwrite> & cmd /s /c "<command>" >> "<outSpool>" 2>> "<errSpool>" & echo %errorlevel% > "<status>"
-```
+> The manager decides persistent (POSIX) vs legacy (no Git Bash) at spawn time from
+> `getShellConfig()`: a POSIX shell (Git Bash or `/bin/sh`) → build the wrapper via
+> `buildHostWrapper(command, paths)` and persist; cmd.exe → legacy pipe capture, `persistent:false`.
+> `buildHostWrapper` only ever emits the POSIX wrapper — there is no cmd branch (§12).
 
-Windows `>>` opens the spool with append semantics (writes land at EOF), so an external
-`fs.truncateSync(spool,0)` resets the effective write position exactly like POSIX `O_APPEND` —
-therefore **copytruncate applies uniformly on cmd.exe too** (§8) and no spool is ever unbounded.
-cmd still has no portable pidfile-from-script idiom, so `<pidwrite>` records the **pid only**
-(`child.pid`, the wrapper `processPid`), with **no nonce** — a documented weaker pid-reuse guard
-(§7.1). `%errorlevel%` after the final `&` captures the child cmd's exit code; `&` (not `&&`)
-ensures the status is written even on failure.
+### 4.2 Docker wrapper (`/bin/sh` inside the container, run under `setsid`)
 
-> Because the wrapper string differs by shell family, the manager picks it via a new helper
-> `buildHostWrapper(command, paths, shellKind)` where `shellKind` is derived from
-> `getShellConfig()` (Git Bash / sh → "posix"; cmd.exe → "cmd"). This keeps the platform branching
-> in one tested function.
-
-### 4.2 Docker wrapper (`/bin/sh -c` inside the container)
-
-Always POSIX `/bin/sh` inside the container. Paths are container-internal (`/tmp/bobbit-bg/...`),
-output appended to the spools, the user command runs in an **isolated subshell** so `exit N` is
-contained (exactly as the POSIX host wrapper), and the pidfile gets the in-container `processPid` +
-nonce. The variant prepends `mkdir -p <dir>` to create the `/tmp/bobbit-bg/...` path:
+Always POSIX `/bin/sh` inside the container. The wrapper mirrors the host POSIX wrapper — pidfile
+(`processPid` + nonce), the **wrapper-owned trimmer**, the isolated subshell `( <command> )`, `>>`
+append to both spools, and the real `code=$?` written to the status file — and prepends
+`mkdir -p <dir>` to create the container-internal `/tmp/bobbit-bg/...` path:
 
 ```sh
-mkdir -p "<dir>" ; printf '%s\n%s\n' "$$" "<nonce>" > "<pid>" ; ( <command> ) >> "<outSpool>" 2>> "<errSpool>" ; code=$? ; printf '%s\n' "$code" > "<status>" ; exit "$code"
+mkdir -p "<dir>"
+printf '%s\n%s\n' "$$" "<nonce>" > "<pid>"
+( while kill -0 "$$" 2>/dev/null; do
+    for f in "<outSpool>" "<errSpool>"; do
+      if [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null || echo 0)" -gt <MAX_LOG_BYTES> ]; then
+        tail -c <KEEP> "$f" > "$f.trim" 2>/dev/null && cat "$f.trim" > "$f" && rm -f "$f.trim"
+      fi
+    done
+    sleep 5
+  done ) &
+trimmer=$!
+( <command> ) >> "<outSpool>" 2>> "<errSpool>"
+code=$?
+kill "$trimmer" 2>/dev/null
+printf '%s\n' "$code" > "<status>"
+exit "$code"
 ```
 
-Here `$$` is the **in-container wrapper pid** (`processPid`), read back post-spawn via
+(joined into the single `-c` string by the builder; shown multi-line for readability. `<KEEP>` =
+`MAX_LOG_BYTES` = 512KB.)
+
+**Run the wrapper in its own process group/session so the WHOLE command tree is killable.** A bare
+`docker exec <cid> kill -TERM <processPid>` would signal only the wrapper shell, leaving the
+`( <command> )` subshell and any grandchildren orphaned inside the container (still appending to the
+spools after the pill goes terminal). To mirror the host path (detached process group +
+`process.kill(-pid, ...)`), spawn the wrapper under `setsid` so `processPid` (`$$`, read back
+post-spawn) is the **process-group leader**:
+
+```
+docker exec -w <containerCwd> <containerId> setsid /bin/sh -c '<wrapper>'
+```
+
+With `setsid` the in-container `processPid` == the process-group id, so kill targets the whole group
+with a negative pid: `docker exec <cid> kill -TERM -<processPid>` → escalate to
+`kill -KILL -<processPid>` (§7.1/§9). `setsid` ships with util-linux/busybox and is present in
+effectively all images.
+
+> **Image without `setsid` (fallback).** If a target image lacks `setsid`, plain
+> `docker exec ... /bin/sh -c '<wrapper>'` cannot make `processPid` a group leader, so a
+> negative-pid group kill is unavailable. Fall back to a best-effort tree kill:
+> `docker exec <cid> kill -TERM <processPid>` **plus** `docker exec <cid> pkill -TERM -P
+> <processPid>` (and/or `kill -- -<processPid>` if a group happens to exist), escalating to `-KILL`.
+> This is best-effort only and documented as the degraded path; the `setsid` group kill is the
+> primary mechanism.
+
+`$$` is the **in-container wrapper pid** (`processPid` / group leader), read back post-spawn via
 `docker exec <cid> cat <pid>` (§4.0) since the host-side `child.pid` is only the docker-exec handle.
-
-spawned as:
-
-```
-docker exec -w <containerCwd> <containerId> /bin/sh -c '<wrapper>'
-```
-
-(unchanged `docker exec` shape from `defaultSpawn`; only the inner string gains the redirect +
-status write). `MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL=*` env stays so Git Bash on the host
-does not mangle container paths.
+The `docker exec` shape is otherwise unchanged from `defaultSpawn` (the inner string gains the
+pidfile, trimmer, redirect, and status write; the outer command gains `setsid`).
+`MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL=*` env stays so Git Bash on the host does not mangle
+container paths.
 
 ### 4.3 stdio for the spawned wrapper
 
@@ -341,7 +404,7 @@ export interface PersistedBgProcess {
   terminalReason: "normal" | "killed" | "unrecoverable" | null;
   startTime: number;
   endTime: number | null;
-  // transient spool files (child appends; gateway-managed ring, copytruncated on every shell — §8)
+  // transient spool files (child appends; bounded by wrapper trimmer + gateway copytruncate — §8)
   outSpool: string;
   errSpool: string;
   // durable COMBINED capped projection (gateway-owned; atomic tmp+rename; ≤512KB/5000 lines
@@ -366,6 +429,12 @@ single authoritative field — there is **no** separate `unrecoverable` boolean 
 requires widening the union in `BgProcess`, `BgProcessInfo` (`bg-process-manager.ts`), the WS event
 types (`src/server/ws/protocol.ts`), and the client/UI types (§9). `exitCode` is never fabricated;
 it stays `null` for `killed`-without-status and `unrecoverable`.
+
+**Legacy non-persistent processes are never written to `bg-processes.json`.** The cmd.exe fallback
+(§4.1) keeps the current in-memory record only; the in-memory `BgProcess`/`BgProcessInfo` and the
+`bg_process_created` WS event carry a `persistent: boolean` flag (`true` on the POSIX path, `false`
+for the legacy fallback) so the UI/log never implies durability for a process that will not survive
+a restart.
 
 ### 5.2 Store class — mirror `SessionStore`
 
@@ -534,8 +603,6 @@ if status == "running":
   - **pidfile missing, unreadable, or nonce mismatched** → the live pid is a **reused/foreign**
     pid → if no status file, **UNRECOVERABLE** (`terminalReason="unrecoverable"`, `exitCode=null`,
     never fabricated).
-  The cmd.exe fallback writes a pid-only pidfile (no nonce, §4.1); there the guard degrades to
-  status-file-presence + `kill(pid,0)` only — a documented weaker guard for that rare path.
 - **Docker:** container alive via `docker inspect -f '{{.State.Running}}' <cid>` (and the
   containerId must still resolve from `SandboxManager`; if the project's container was recreated,
   the old container/exec is gone → not alive). Then `docker exec <cid> kill -0 <processPid>` for the
@@ -583,35 +650,52 @@ stdout/stderr into one `log[]` already trimmed to the combined `MAX_LOG_LINES`/`
 projection is bounded **continuously** — it can never exceed the combined per-process cap, even
 mid-run, on any shell.
 
-### Bounding the transient spools — copytruncate on EVERY shell
+### Bounding the transient spools — wrapper-owned trimmer (primary) + gateway copytruncate (secondary)
 
-The child writes each spool with append redirection (`>>`) — on **all** host shells (Git Bash,
-`/bin/sh`, **and cmd.exe**) and docker `/bin/sh`. POSIX `/bin/sh`, Git Bash (MSYS), and docker
-`/bin/sh` honour `O_APPEND`; Windows `>>` opens the spool with append semantics so writes always
-land at EOF. In every case, when the gateway has consumed a spool up to its read offset **and** the
-spool exceeds `MAX_LOG_BYTES`, the gateway does `fs.truncateSync(spool, 0)` and resets its read
-offset to `0`; the next child write lands at offset 0 — a classic logrotate **copytruncate** that
-works **uniformly across Git Bash, /bin/sh, docker AND cmd.exe**. **No platform path is ever
-unbounded** — the earlier "cmd spool may grow unbounded" exception is removed.
+The spools are bounded by **two independent mechanisms**, so neither the gateway nor the wrapper is
+the sole guard:
 
-> **copytruncate race (acknowledged):** a few bytes written between the gateway's last read and the
-> `truncate(0)` can be lost. This is the standard logrotate copytruncate caveat and is **acceptable
-> here** because the on-disk log is already an explicitly lossy last-N cap, not an audit log.
+1. **Wrapper-owned trimmer (primary, restart-independent).** The detached/orphaned wrapper runs a
+   background loop (§4.1/§4.2) that, while alive, trims each spool to the last `<KEEP>` = 512KB
+   whenever it exceeds `MAX_LOG_BYTES`, via `tail -c <KEEP> "$f" > "$f.trim" && cat "$f.trim" > "$f"`
+   (in-place same-inode copytruncate). Because the loop is part of the **wrapper, not the gateway**,
+   it bounds each spool **at all times — during the normal run AND while the gateway is down.** This
+   is what holds the "on-disk logs stay within caps at all times" requirement during a long outage.
+2. **Gateway copytruncate (secondary).** When the gateway has consumed a spool up to its read offset
+   **and** the spool exceeds `MAX_LOG_BYTES`, it also does `fs.truncateSync(spool, 0)` and resets its
+   read offset to `0`. The next child write lands at offset 0 (POSIX `>>`/`O_APPEND`). This is a
+   redundant bound that catches the brief windows between trimmer passes while the gateway is up; it
+   is no longer the sole mechanism.
+
+Both paths require a POSIX shell (the persistent path is POSIX-only, §4.1); the legacy cmd.exe
+fallback is in-memory/non-persistent and writes no spools at all, so it has no on-disk spool to
+bound.
+
+> **copytruncate race (acknowledged):** a few bytes written between a read/trim and the
+> `cat "$f.trim" > "$f"` / `truncate(0)` can be lost. This is the standard logrotate copytruncate
+> caveat and is **acceptable here** because the on-disk log is already an explicitly lossy last-N
+> cap, not an audit log. Both the wrapper trimmer and the gateway use copytruncate (same inode,
+> never `mv`/rename) so the command's append fd is never orphaned.
 >
-> **Belt-and-braces:** the gateway enforces this hard spool ceiling via copytruncate regardless of
-> shell, and the durable combined projection is independently capped from the in-memory buffer — so
-> neither the spools nor the durable log can grow without bound on any platform.
+> **Belt-and-braces:** the wrapper bounds each spool independently of the gateway (even during
+> downtime), the gateway re-bounds on consume, and the durable combined projection is independently
+> capped from the in-memory buffer — so neither the spools nor the durable log can grow without
+> bound on any POSIX platform.
 
 ### Downtime window
 
-While the gateway is down only the spools grow (the child keeps appending; nothing projects). On
-`restoreSession()` the gateway reads only the **bounded tail** (last 512KB / 5000 lines combined) of
-the spools to rebuild the in-memory `log[]` buffer and immediately rewrite the combined projection,
-**then copytruncates both spools**. So even after an arbitrarily long downtime the durable
-projection is capped the moment restore runs, and the spools are reset to a bounded size.
+While the gateway is down, the **wrapper-owned trimmer keeps each spool bounded** (≤ ~512KB) — the
+child keeps appending but the trimmer (part of the orphaned wrapper) keeps copytruncating, so the
+spools do **not** grow unbounded during an arbitrarily long outage. Only the combined projection
+goes stale (nothing projects while the gateway is down). On `restoreSession()` the gateway reads only
+the **bounded tail** (last 512KB / 5000 lines combined) of the spools to rebuild the in-memory
+`log[]` buffer, immediately rewrites the combined projection, **then copytruncates both spools** as a
+secondary bound. So both the spools (wrapper trimmer) and the durable projection (restore rewrite)
+are capped throughout.
 
 There is no separate "post-exit trim" and no multi-megabyte "safety ceiling": the combined
-projection is the durable artefact and is bounded at every instant by construction.
+projection is the durable artefact and is bounded at every instant by construction, and the spools
+are bounded continuously by the wrapper trimmer.
 
 ## 9. Kill vs dismiss
 
@@ -658,10 +742,13 @@ restoreSession(sessionId): Promise<void>;            // NEW: §7 per-session rec
   required.
 - **Docker:** after a restart there is **no host `child` handle** for a re-attached process, and
   `hostPid` (the dead docker-exec handle) is useless, so kill via the **persisted in-container
-  `processPid`**: `docker exec <cid> kill -TERM <processPid>`, escalating to
-  `docker exec <cid> kill -KILL <processPid>` if it does not exit within a grace window.
-  `child.kill(...)` on a still-live docker-exec handle is only an optimisation when the gateway
-  never restarted.
+  `processPid`**, which is the process-group leader (spawned under `setsid`, §4.2). Signal the
+  **whole group** with a negative pid: `docker exec <cid> kill -TERM -<processPid>`, escalating to
+  `docker exec <cid> kill -KILL -<processPid>` if it does not exit within a grace window — this
+  terminates the wrapper, the `( <command> )` subshell, and any grandchildren, not just the wrapper
+  shell. (Image without `setsid`: best-effort `kill -TERM <processPid>` + `pkill -TERM -P
+  <processPid>`, §4.2.) `child.kill(...)` on a still-live docker-exec handle is only an optimisation
+  when the gateway never restarted.
 
 `remove()` (existing, index-only) is folded into `dismiss()`. `cleanup(sessionId)` (on session
 terminate, `session-manager.ts` ~L5601) keeps killing running children but now also leaves durable
@@ -700,13 +787,13 @@ files in place only if the session is merely restarting — on real terminate it
 ```
 agent -> POST /bg-processes -> bgMgr.create()
   generate nonce; compute BgPaths under <stateDir>/bg-processes/<sid>/
-  spawnFn(cmd, cwd, undefined, paths)            # wrapper: printf $$\nnonce > pid; ( cmd ) >> out.spool 2>> err.spool; code=$?; printf code > status; exit code
+  spawnFn(cmd, cwd, undefined, paths)            # POSIX wrapper: pidfile($$+nonce); bg trimmer bounds both spools; ( cmd ) >> out.spool 2>> err.spool; code=$?; kill trimmer; printf code > status
   child.unref();  hostPid = child.pid
   REQUIRED post-spawn: read pidfile -> processPid (host: <pid> file/child.pid)
   store.put(record status=running, terminalReason=null, nonce, hostPid, processPid)   # SYNC flush before created
   tailerFactory({outSpool,errSpool}).start(0,0) # poll BOTH SPOOLS -> appendLog (combined capped log[]) -> bg_process_output WS
                                                  #   -> debounced atomic rewrite of single <bgId>.log combined projection
-                                                 #   -> copytruncate each spool when > cap (every shell, incl cmd.exe)
+                                                 #   -> copytruncate each spool when > cap (gateway secondary; wrapper trimmer is primary)
   statusWatcher.start()                          # poll <status>
   broadcast bg_process_created
 ```
@@ -717,7 +804,7 @@ wrapper appends -> <bgId>.out.spool / <bgId>.err.spool grow
 tailers poll detect delta -> read spool bytes -> appendLog() [combined interleaved capped log[]]
   -> debounced(~500ms) atomic rewrite single <bgId>.log combined projection (<=512KB/5000 COMBINED) [ALWAYS capped]
      each line tagged <ts>\t<stream>\t<text>
-  -> if a spool > cap && consumed: fs.truncateSync(spool,0); offset=0                 [copytruncate, every shell]
+  -> if a spool > cap && consumed: fs.truncateSync(spool,0); offset=0                 [copytruncate, gateway secondary; wrapper trimmer primary]
   -> store.update(outOffset/errOffset) [debounced] -> broadcast bg_process_output -> pill.appendOutput()
 ```
 
@@ -751,7 +838,7 @@ statusWatcher sees <status> with content -> parse exitCode (retry on partial)
 ```
 UI Kill -> DELETE ?action=kill -> bgMgr.kill()
   host:   taskkill /pid <processPid> /T /F (win) | process.kill(-processPid,SIGTERM)->SIGKILL (posix)  [persisted processPid]
-  docker: docker exec <cid> kill -TERM <processPid>  ->escalate-> kill -KILL <processPid>   [persisted in-container processPid]
+  docker: docker exec <cid> kill -TERM -<processPid> ->escalate-> kill -KILL -<processPid>  [setsid group leader; whole tree]
           (child.kill only as optimisation when a live host handle still exists, pre-restart)
 if wrapper wrote <status> -> statusWatcher -> status=exited, terminalReason=normal (real code)
 else hard-killed before status -> status=exited, exitCode=null, terminalReason=killed   # known kill, not fabricated
@@ -770,8 +857,8 @@ record never reappears after subsequent restart (files + index entry gone)
 
 ## 11. Risks & edge cases
 
-- **Partial status-file write.** `printf '%s\n' "$code" > f` (cmd: `echo %errorlevel% > f`) is a
-  single small write but the watcher may read mid-write. Mitigation: require a parseable integer
+- **Partial status-file write.** `printf '%s\n' "$code" > f` is a single small write but the watcher
+  may read mid-write. Mitigation: require a parseable integer
   **followed by newline**; if absent, retry for up to ~2s before treating as still-writing. The
   wrapper writes exactly one line, so a complete read yields a clean integer.
 - **Pid reuse (host) — detected, not just documented.** §7.1: status-file presence is authoritative
@@ -779,15 +866,15 @@ record never reappears after subsequent restart (files + index entry gone)
   gateway re-reads the pidfile and compares the **per-spawn nonce** (`printf '%s\n%s\n' "$$"
   "<nonce>"` in the wrapper, §4.1/§4.2; compared against the live `processPid` pidfile). Match → same process, re-attach. Missing/mismatched nonce
   (or pidfile gone) with no status file → **pid reused** → `terminalReason="unrecoverable"`,
-  `exitCode=null` — never fabricated. The only weaker path is the cmd.exe fallback (pid-only
-  pidfile, no nonce), documented in §4.1/§7.1.
+  `exitCode=null` — never fabricated. (The legacy cmd.exe fallback is non-persistent (§4.1), so it
+  is never restored and never reaches the nonce guard.)
 - **Log rotation racing the tailer.** The durable **combined projection** (`<bgId>.log`) is
   rewritten atomically (tmp + rename) by the gateway alone and the child never writes it, so readers
   never see a torn projection. The **spool** copytruncate (§8) may lose a few bytes between
   last-read and `truncate(0)` — the standard logrotate copytruncate caveat, acceptable because the
-  log is already a lossy last-N cap. Copytruncate applies **uniformly on every shell including
-  cmd.exe** (Windows `>>` writes at EOF, so external `truncate(0)` resets the effective position),
-  so no spool is ever unbounded.
+  log is already a lossy last-N cap. Each spool is bounded by the **wrapper-owned trimmer** (primary,
+  restart-independent) and the **gateway copytruncate** (secondary); both are POSIX-only (the legacy
+  cmd.exe fallback writes no spool), so no spool is ever unbounded.
 - **Windows process-group kill.** `taskkill /pid <processPid> /T /F` kills the wrapper shell **and** its
   child tree (`/T`), so a force-killed host process **may not write a status file**. Handling:
   `kill()` records an intent-to-kill timestamp; the watcher, seeing the `processPid` gone with no
@@ -814,8 +901,8 @@ export interface BgPaths { outSpool; errSpool; logFile; status; pid; nonce; inCo
 export type SpawnFn = (command, cwd, containerId, paths: BgPaths) => ChildProcess;
 export interface TailerSpec { outSpool; errSpool; inContainer; containerId?; onChunk }  // watches the SPOOLS
 export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
-function buildHostWrapper(command, paths, shellKind: "posix" | "cmd"): string;
-function buildDockerWrapper(command, paths): string;
+function buildHostWrapper(command, paths): string;   // POSIX wrapper only (Git Bash / /bin/sh); no cmd branch
+function buildDockerWrapper(command, paths): string; // POSIX /bin/sh wrapper, spawned under setsid
 class BgProcessManager {
   constructor(clientsProvider, spawnFn?, storeProvider?, tailerFactory?);
   create(sessionId, command, cwd, containerId?, sandboxed?, name?): BgProcessInfo;  // spawn + REQUIRED post-spawn pidfile read -> processPid (sync flush) + wires spools+tailers+combined projection
@@ -826,6 +913,7 @@ class BgProcessManager {
 }
 // BgProcess / BgProcessInfo: pid -> { hostPid, processPid }; status widened to "running" | "exited" | "unrecoverable";
 // + terminalReason: "normal" | "killed" | "unrecoverable" | null  (authoritative; null while running)
+// + persistent: boolean (false only for the legacy cmd.exe in-memory fallback, §4.1)
 ```
 
 `src/server/agent/bg-process-store.ts` (NEW) — `BgProcessStore`, `PersistedBgProcess` (§5).
@@ -854,6 +942,10 @@ field, no standalone `unrecoverable?`); add `bg_process_dismissed`.
 ### Unit (`tests/`, `node:test`, no real OS processes)
 
 Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-persistence.test.ts`**:
+
+> Persistence/re-attach/nonce/trimmer all assume a **POSIX shell** (Git Bash on Windows, `/bin/sh`
+> elsewhere/docker). The cmd.exe path is the **legacy non-persistent fallback** and is not part of
+> the persistence tests (covered only by the dedicated "legacy cmd.exe fallback" case below).
 
 - **Persistence round-trip:** create with a fake `SpawnFn` + fake `TailerFactory` that writes to a
   temp `stateDir`; assert `bg-processes.json` written atomically and the durable **combined
@@ -890,22 +982,38 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   writes `3` even though the user command called `exit`.
 - **Docker restore/kill targets the in-container `processPid`:** persisted docker record;
   `restoreSession()` liveness uses `docker exec <cid> kill -0 <processPid>` (not `hostPid`), and
-  `kill()` issues `docker exec <cid> kill -TERM/-KILL <processPid>` against the in-container pid
-  read from the pidfile — assert the dead `hostPid` is never signalled.
+  `kill()` issues `docker exec <cid> kill -TERM/-KILL -<processPid>` (**negative** pid = process
+  group, `setsid` leader) against the in-container pid read from the pidfile — assert the dead
+  `hostPid` is never signalled and the group form is used. **Manual/integration (needs Docker):**
+  assert killing a docker bg process stops the actual long-running **child** command (e.g. a
+  `sleep`/printing loop inside `( <command> )`), not just the wrapper shell — extend
+  `tests/manual-integration/sandbox-recovery-docker.spec.ts`.
 - **Dismiss purges files:** `dismiss()` deletes `.out.spool/.err.spool/<bgId>.log/.status/.pid` and
   the index entry; a subsequent `restoreSession()` finds nothing.
-- **Disk caps — COMBINED, WHILE RUNNING, EVERY SHELL:** feed > cap of interleaved stdout+stderr via
+- **Disk caps — COMBINED, WHILE RUNNING, POSIX:** feed > cap of interleaved stdout+stderr via
   the fake tailer **without** exiting; assert the durable **combined** projection `<bgId>.log` on
   disk is ≤ 512KB / 5000 lines **combined across both streams**, **before** any exit (the
   gateway-owned capped rewrite), and stays ≤ caps after exit (no separate post-exit trim; bounded
-  continuously). Assert spool copytruncate fires past the cap on **every** shell path — posix, docker
-  **and cmd.exe** (`>>`/`truncate(0)`), so the cmd path is bounded (no unbounded spool).
-- **Wrapper builders:** `buildHostWrapper` (posix vs cmd) and `buildDockerWrapper` produce the exact
-  strings — posix/docker run the user command in an **isolated subshell** `( <command> )`, **append**
-  (`>>`) to both spools, capture `code=$?` and `printf code > status ; exit code`, and write
-  `printf '%s\n%s\n' "$$" "<nonce>"` to the pidfile; cmd nests the command in a child
-  `cmd /s /c "<command>"` (so its `exit` cannot kill the wrapper), uses `>>` to both spools, writes
-  `%errorlevel% > status`, and writes pid only (no nonce). String assertions — pure, fast.
+  continuously). Assert gateway copytruncate fires past the cap on the posix + docker spool paths
+  (`>>`/`truncate(0)`) as the secondary bound.
+- **Wrapper-owned trimmer bounds spools (string + simulated):** assert `buildHostWrapper` /
+  `buildDockerWrapper` emit the background trimmer loop (`while kill -0 "$$"`, `tail -c <KEEP>`,
+  `cat "$f.trim" > "$f"`, **no** `mv`/rename) targeting both spools with the `<MAX_LOG_BYTES>`
+  trigger / `<KEEP>` retain. Plus a unit test that **simulates the trimmer logic** in a temp dir
+  (write > cap bytes to a fake spool, run the trim step) and asserts the spool ends ≤ `<KEEP>` and
+  the **inode is unchanged** (in-place truncate, not rename) — i.e. spools stay capped independently
+  of the gateway, modelling the downtime case.
+- **Wrapper builders (POSIX only):** `buildHostWrapper` and `buildDockerWrapper` produce the exact
+  POSIX strings — pidfile (`printf '%s\n%s\n' "$$" "<nonce>"`), the wrapper-owned trimmer loop, the
+  user command in an **isolated subshell** `( <command> )`, **append** (`>>`) to both spools, the
+  trimmer stop (`kill "$trimmer"`), and `code=$? ; printf code > status ; exit code`; the docker
+  builder is otherwise identical and is spawned under `setsid`. Assert there is **no** cmd branch and
+  **no** `%errorlevel%`. String assertions — pure, fast.
+- **Legacy cmd.exe fallback is non-persistent:** when `getShellConfig()` yields cmd.exe (no Git
+  Bash), `create()` uses the legacy in-memory pipe capture, flags the record `persistent: false`,
+  writes **no** `bg-processes.json` entry and no spool/status/pid files, and the process is **not**
+  restored after a simulated restart. (Persistence tests assume a POSIX shell; the cmd path is
+  explicitly excluded from them.)
 
 ### Browser E2E (required) — `tests/e2e/ui/bg-process-persistence.spec.ts`
 
@@ -933,9 +1041,10 @@ unchanged). Docker re-attach is covered by `test:manual` (extend
 ## 14. Implementation order (suggested)
 
 1. `BgProcessStore` + `PersistedBgProcess` (copy `SessionStore` helpers) + unit round-trip test.
-2. `BgPaths`, wrapper builders (isolated subshell `( <command> )` / nested child `cmd` so `exit N`
-   is contained; `>>` append to both spools on every shell; `code=$?`/`%errorlevel%` status write;
-   `processPid`+nonce pidfile), change `defaultSpawn` + `create()` to redirect output to the
+2. `BgPaths`, POSIX wrapper builders (isolated subshell `( <command> )` so `exit N` is contained;
+   wrapper-owned trimmer bounding both spools; `>>` append; `code=$?` status write;
+   `processPid`+nonce pidfile; docker spawned under `setsid`), the legacy cmd.exe in-memory fallback
+   (`persistent:false`, no files) when Git Bash is absent, change `defaultSpawn` + `create()` to redirect output to the
    **spools**, perform the **required post-spawn pidfile read** to resolve `processPid` (sync
    flush), and feed the combined capped buffer + single durable combined projection from a `Tailer`
    (default poll tailer); status watcher for exit.
@@ -943,7 +1052,8 @@ unchanged). Docker re-attach is covered by `test:manual` (extend
    the `restoreSessions()` per-session loop; `ProjectContext.bgProcessStore`.
 4. `dismiss()` + split DELETE route + `bg_process_dismissed` WS event + `terminalReason`
    (`normal`/`killed`/`unrecoverable`) plumbing through protocol/client/pill; Docker kill via
-   persisted in-container pid (`docker exec kill -TERM/-KILL`).
-5. Disk caps: continuous combined-projection rewrite (≤512KB/5000 lines combined) + spool
-   copytruncate on every shell incl cmd.exe (no post-exit trim, no unbounded spool).
+   persisted in-container group leader (`docker exec kill -TERM/-KILL -<processPid>`).
+5. Disk caps: continuous combined-projection rewrite (≤512KB/5000 lines combined) + wrapper-owned
+   spool trimmer (restart-independent) + gateway copytruncate (secondary); no post-exit trim, no
+   unbounded spool, POSIX only.
 6. Tests: unit persistence/re-attach/dismiss/caps; browser E2E; keep guard test green; `check`.
