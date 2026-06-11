@@ -69,7 +69,6 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { rotateSubmissionProofForRestoredJob, WalkthroughAgentStore } from "../pr-walkthrough/walkthrough-agent-store.js";
 import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
@@ -219,10 +218,6 @@ export interface SessionInfo {
 	childTerminal?: boolean;
 	/** Epoch ms when `childTerminal` was stamped. */
 	terminalAt?: number;
-	/** PR walkthrough job metadata for session-hosted walkthrough children. */
-	walkthroughJobId?: string;
-	walkthroughChangesetId?: string;
-	walkthroughTargetKey?: string;
 	/** Role in a team goal (e.g., 'coder', 'reviewer', 'tester', 'team-lead') */
 	role?: string;
 	/** The team goal ID this agent belongs to */
@@ -3359,33 +3354,18 @@ export class SessionManager {
 		// parent was archived while the server was down would come back as a LIVE
 		// ORPHAN. (delegateOf-linked children are reaped in restoreSessions()'s
 		// dormant-defer loop using the same helper.) pr-walkthrough additionally
-		// supplies a kind-specific terminal signal (job ready/error/missing) so its
-		// behaviour stays byte-identical to the old shouldReapWalkthroughChildOnBoot.
+		// supplies the generic `childTerminal` terminal signal (set server-side by
+		// completing code) so a terminal reviewer is reaped with ZERO pack knowledge here.
 		if (ps.childKind && ps.parentSessionId && !ps.delegateOf) {
 			let kindTerminal = false;
 			let kindTerminalReason: string | undefined;
 			// GENERIC persisted terminal marker (orchestration-core Decision E /
 			// Findings 3–4): any child stamped `childTerminal:true` by completing
 			// server-side code is reapable on boot, with ZERO pack/kind knowledge here.
-			// host-agents reviewers (e.g. pr-walkthrough's host.agents reviewer) rely on
-			// this; the legacy `pr-walkthrough` job-store branch below stays for now.
+			// host-agents reviewers (e.g. pr-walkthrough's host.agents reviewer) rely on this.
 			if (ps.childTerminal === true) {
 				kindTerminal = true;
 				kindTerminalReason = "child session marked terminal";
-			}
-			if (ps.childKind === "pr-walkthrough") {
-				let jobStatus: string | undefined;
-				if (ps.walkthroughJobId) {
-					try { jobStatus = new WalkthroughAgentStore(bobbitStateDir()).get(ps.walkthroughJobId)?.status; }
-					catch (err) { console.warn(`[session-manager] Failed to read walkthrough job for ${ps.id}:`, err); }
-				}
-				if (!ps.walkthroughJobId || !jobStatus) {
-					kindTerminal = true;
-					kindTerminalReason = "walkthrough job record is missing";
-				} else if (jobStatus === "ready" || jobStatus === "error") {
-					kindTerminal = true;
-					kindTerminalReason = `walkthrough job is terminal (${jobStatus})`;
-				}
 			}
 			const parent = this.getPersistedSession(ps.parentSessionId);
 			const decision = shouldReapChildOnBoot({
@@ -3493,23 +3473,10 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
-			walkthroughJobId: ps.walkthroughJobId,
-			walkthroughChangesetId: ps.walkthroughChangesetId,
-			walkthroughTargetKey: ps.walkthroughTargetKey,
 			allowedTools: ps.allowedTools,
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 		});
-	}
-
-	private restoreWalkthroughSubmitEnv(ps: PersistedSession, env: Record<string, string>): void {
-		if (ps.childKind !== "pr-walkthrough" || !ps.walkthroughJobId) return;
-		try {
-			const scopedEnv = rotateSubmissionProofForRestoredJob(bobbitStateDir(), ps.id, ps.walkthroughJobId);
-			if (scopedEnv) Object.assign(env, scopedEnv);
-		} catch (err) {
-			console.warn(`[session-manager] Failed to rotate PR walkthrough submit proof for ${ps.id}:`, err);
-		}
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
@@ -3524,7 +3491,6 @@ export class SessionManager {
 			BOBBIT_SESSION_ID: ps.id,
 			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(ps.id),
 		};
-		this.restoreWalkthroughSubmitEnv(ps, bridgeOptions.env);
 		if (ps.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = ps.goalId;
 		}
@@ -3780,9 +3746,6 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
-			walkthroughJobId: ps.walkthroughJobId,
-			walkthroughChangesetId: ps.walkthroughChangesetId,
-			walkthroughTargetKey: ps.walkthroughTargetKey,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -3892,7 +3855,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -3952,9 +3915,6 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
-				walkthroughJobId: opts?.walkthroughJobId,
-				walkthroughChangesetId: opts?.walkthroughChangesetId,
-				walkthroughTargetKey: opts?.walkthroughTargetKey,
 				allowedTools: opts?.allowedTools,
 				// Mirror session-setup's effectiveRoleId fallback: when callers
 				// (team-manager, staff-manager) pass only `roleName`, use that as
@@ -3997,9 +3957,6 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
-				walkthroughJobId: opts?.walkthroughJobId,
-				walkthroughChangesetId: opts?.walkthroughChangesetId,
-				walkthroughTargetKey: opts?.walkthroughTargetKey,
 				sessionScopedAllowedTools,
 				worktreePath,
 				repoPath,
@@ -4062,9 +4019,6 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
-			walkthroughJobId: opts?.walkthroughJobId,
-			walkthroughChangesetId: opts?.walkthroughChangesetId,
-			walkthroughTargetKey: opts?.walkthroughTargetKey,
 			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
@@ -4948,9 +4902,6 @@ export class SessionManager {
 		parentSessionId?: string;
 		childKind?: string;
 		readOnly?: boolean;
-		walkthroughJobId?: string;
-		walkthroughChangesetId?: string;
-		walkthroughTargetKey?: string;
 		role?: string;
 		teamGoalId?: string;
 		teamLeadSessionId?: string;
@@ -4991,9 +4942,6 @@ export class SessionManager {
 				parentSessionId: ps?.parentSessionId ?? s.parentSessionId,
 				childKind: ps?.childKind ?? s.childKind,
 				readOnly: ps?.readOnly ?? s.readOnly,
-				walkthroughJobId: ps?.walkthroughJobId ?? s.walkthroughJobId,
-				walkthroughChangesetId: ps?.walkthroughChangesetId ?? s.walkthroughChangesetId,
-				walkthroughTargetKey: ps?.walkthroughTargetKey ?? s.walkthroughTargetKey,
 				role: s.role,
 				teamGoalId: s.teamGoalId,
 				teamLeadSessionId: s.teamLeadSessionId,
@@ -5070,7 +5018,7 @@ export class SessionManager {
 	}
 
 	/** Update session metadata fields and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): boolean {
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) {
 			// Store-only session (dormant/delegate) — update store directly
@@ -5102,9 +5050,6 @@ export class SessionManager {
 		if (updates.readOnly !== undefined) session.readOnly = updates.readOnly;
 		if (updates.childTerminal !== undefined) session.childTerminal = updates.childTerminal;
 		if (updates.terminalAt !== undefined) session.terminalAt = updates.terminalAt;
-		if (updates.walkthroughJobId !== undefined) session.walkthroughJobId = updates.walkthroughJobId;
-		if (updates.walkthroughChangesetId !== undefined) session.walkthroughChangesetId = updates.walkthroughChangesetId;
-		if (updates.walkthroughTargetKey !== undefined) session.walkthroughTargetKey = updates.walkthroughTargetKey;
 		this.resolveStoreForSession(id).update(id, updates);
 		return true;
 	}
@@ -5158,9 +5103,6 @@ export class SessionManager {
 				parentSessionId: session.parentSessionId,
 				childKind: session.childKind,
 				readOnly: session.readOnly,
-				walkthroughJobId: session.walkthroughJobId,
-				walkthroughChangesetId: session.walkthroughChangesetId,
-				walkthroughTargetKey: session.walkthroughTargetKey,
 				sandboxed: session.sandboxed,
 				projectId: session.projectId,
 			});
@@ -5653,11 +5595,14 @@ export class SessionManager {
 		this.sessionSecretStore.remove(id);
 
 		// Clean up sandbox worktree inside the container.
-		// Skip for delegate sessions AND pr-walkthrough children — both share the
-		// parent's worktree and must never remove it. Only the owning session should
-		// clean up (cascade-terminating a prw child must not delete the launching
-		// session's still-active /workspace-wt/<name>).
-		if (session.sandboxed && !session.delegateOf && session.childKind !== "pr-walkthrough" && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+		// Skip for sessions that SHARE the parent's worktree and must never remove it:
+		// delegate children (`delegateOf`) AND read-only child principals
+		// (`readOnly` + `parentSessionId`, e.g. the host-agents PR-walkthrough reviewer).
+		// A read-only child cannot write, so it never owns its own worktree — it shares
+		// the launching session's still-active /workspace-wt/<name>. Only the owning
+		// session should clean up. (Team children own a SEPARATE worktree and are not
+		// read-only, so they are not skipped here.)
+		if (session.sandboxed && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
 			try {
 				const sandbox = this.sandboxManager.get(session.projectId);
 				if (sandbox) {
@@ -5766,7 +5711,7 @@ export class SessionManager {
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
-	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number; walkthroughJobId?: string; walkthroughChangesetId?: string; walkthroughTargetKey?: string }): boolean {
+	updateArchivedMeta(id: string, updates: { teamLeadSessionId?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; childTerminal?: boolean; terminalAt?: number }): boolean {
 		const store = this.resolveStoreForId(id);
 		if (!store) return false;
 		const ps = store.get(id);
@@ -5819,9 +5764,6 @@ export class SessionManager {
 		parentSessionId?: string;
 		childKind?: string;
 		readOnly?: boolean;
-		walkthroughJobId?: string;
-		walkthroughChangesetId?: string;
-		walkthroughTargetKey?: string;
 		role?: string;
 		teamGoalId?: string;
 		teamLeadSessionId?: string;
@@ -5854,9 +5796,6 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
-			walkthroughJobId: ps.walkthroughJobId,
-			walkthroughChangesetId: ps.walkthroughChangesetId,
-			walkthroughTargetKey: ps.walkthroughTargetKey,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,

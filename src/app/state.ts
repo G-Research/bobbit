@@ -47,10 +47,6 @@ export interface GatewaySession {
 	childKind?: string;
 	/** Whether the session should be treated as read-only by clients/tools. */
 	readOnly?: boolean;
-	/** PR walkthrough job metadata for session-hosted walkthrough children. */
-	walkthroughJobId?: string;
-	walkthroughChangesetId?: string;
-	walkthroughTargetKey?: string;
 	/** Role in a team goal */
 	role?: string;
 	/** The team goal this agent belongs to */

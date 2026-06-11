@@ -72,10 +72,6 @@ export interface PersistedSession {
 	childTerminal?: boolean;
 	/** Epoch ms when `childTerminal` was stamped. */
 	terminalAt?: number;
-	/** PR walkthrough job metadata for session-hosted walkthrough children. */
-	walkthroughJobId?: string;
-	walkthroughChangesetId?: string;
-	walkthroughTargetKey?: string;
 	/** Explicit session-scoped tool allowlist captured at creation. Undefined means derive from role/default policy. */
 	allowedTools?: string[];
 	/** Which project this session belongs to */
@@ -155,9 +151,6 @@ export type UpdatableSessionFields = Pick<
 	| "readOnly"
 	| "childTerminal"
 	| "terminalAt"
-	| "walkthroughJobId"
-	| "walkthroughChangesetId"
-	| "walkthroughTargetKey"
 	| "role"
 	| "teamGoalId"
 	| "teamLeadSessionId"
@@ -535,7 +528,6 @@ export class SessionStore {
 		"repoWorktrees", "archived", "archivedAt",
 		"sandboxed", "projectId", "goalId", "delegateOf",
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
-		"walkthroughJobId", "walkthroughChangesetId", "walkthroughTargetKey",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId",

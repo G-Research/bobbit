@@ -12,7 +12,7 @@ import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "
 import { safeExternalUrl, normalizeTrustedHosts } from "../../shared/pr-walkthrough/url-safety.js";
 import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
-import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
+import type { WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 import { WalkthroughAnalysisBundleStore, createAnalysisBundleFromParsedDiff, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
 import { resolveGithubPr } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
@@ -121,8 +121,9 @@ export type PrWalkthroughRouteDeps = {
 	createSynthesisAdapter?: (context: WalkthroughSynthesisContext) => WalkthroughLlmAdapter | undefined | Promise<WalkthroughLlmAdapter | undefined>;
 	sessionManager?: WalkthroughSessionManagerLike;
 	broadcast?: (event: Record<string, unknown>) => void;
-	walkthroughAgentManager?: WalkthroughAgentManager;
-	preflightGithubLaunch?: WalkthroughAgentManagerDeps["preflightGithubLaunch"];
+	/** Optional GitHub preflight hook for the binding-routed bundle path (resolves
+	 *  trusted-host/credentials before a GitHub fetch). Unused in production today. */
+	preflightGithubLaunch?: (job: PrWalkthroughJobRecord) => Promise<void> | void;
 	sandboxScope?: SandboxScope;
 	// ── host.agents reviewer migration (design Decisions C/D/E) ──
 	/** OrchestrationCore — submit-yaml server-dismisses the reviewer child on terminal
@@ -140,40 +141,9 @@ type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown
 type WalkthroughSynthesisContext = { sessionId?: string; cwd: string; changeset?: WalkthroughChangeset };
 let synthesisAdapterForTesting: WalkthroughLlmAdapter | undefined;
 let configuredSynthesisAdapter: WalkthroughLlmAdapter | undefined | null;
-const agentManagersBySessionManager = new WeakMap<object, WalkthroughAgentManager>();
-const agentManagersByStateKey = new Map<string, WalkthroughAgentManager>();
 
 export function setPrWalkthroughSynthesisAdapterForTesting(adapter: WalkthroughLlmAdapter | undefined): void {
 	synthesisAdapterForTesting = adapter;
-}
-
-function getWalkthroughAgentManager(deps: PrWalkthroughRouteDeps): WalkthroughAgentManager {
-	if (deps.walkthroughAgentManager) return deps.walkthroughAgentManager;
-	const create = () => new WalkthroughAgentManager({
-		defaultCwd: deps.defaultCwd,
-		stateDir: deps.stateDir,
-		resolveSessionCwd: deps.resolveSessionCwd,
-		resolveSessionModel: deps.resolveSessionModel,
-		sessionManager: deps.sessionManager,
-		broadcast: deps.broadcast,
-		preflightGithubLaunch: deps.preflightGithubLaunch,
-		preferencesStore: deps.preferencesStore,
-	});
-	if (deps.sessionManager && typeof deps.sessionManager === "object") {
-		let manager = agentManagersBySessionManager.get(deps.sessionManager);
-		if (!manager) {
-			manager = create();
-			agentManagersBySessionManager.set(deps.sessionManager, manager);
-		}
-		return manager;
-	}
-	const key = `${deps.stateDir ?? ""}\0${deps.defaultCwd}`;
-	let manager = agentManagersByStateKey.get(key);
-	if (!manager) {
-		manager = create();
-		agentManagersByStateKey.set(key, manager);
-	}
-	return manager;
 }
 
 export async function handlePrWalkthroughApiRoute(
@@ -282,23 +252,10 @@ export async function handlePrWalkthroughApiRoute(
 			return true;
 		}
 
-		if (url.pathname === "/api/pr-walkthrough/launch" && req.method === "POST") {
-			const body = await deps.readBody(req);
-			if (!body || typeof body !== "object") {
-				fail(400, "Invalid launch request");
-				return true;
-			}
-			const manager = getWalkthroughAgentManager(deps);
-			const result = await manager.launch(body as LaunchWalkthroughRequest);
-			json(result, result.created ? 201 : 200);
-			return true;
-		}
-
-		// VIEWER-FEED routes deleted (built-in viewer removed): GET
-		// /api/pr-walkthrough/jobs/:id, /session/:id, and the generic /:id no longer
-		// exist — the pr-walkthrough first-party pack serves the viewer surface via its
-		// own host.callRoute("bundle"|"publish") routes. launch/resolve/export + the
-		// internal bundle/analysis-bundle/submit-yaml routes stay (agent toolchain).
+		// VIEWER-FEED + legacy /launch routes deleted. The reviewer is now minted via
+		// `host.agents.spawn` from the pack `run` route (design Decision F Phase 3);
+		// /resolve, /export/*, and the internal bundle/submit-yaml routes stay (the
+		// agent toolchain + the standalone walkthrough resolver).
 		if (url.pathname === "/api/pr-walkthrough/resolve" && req.method === "POST") {
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {

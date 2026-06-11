@@ -152,9 +152,6 @@ export interface SessionSetupPlan {
 	parentSessionId?: string;
 	childKind?: string;
 	readOnly?: boolean;
-	walkthroughJobId?: string;
-	walkthroughChangesetId?: string;
-	walkthroughTargetKey?: string;
 	/** Explicit session-scoped tool allowlist that must survive process restarts. */
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
@@ -678,9 +675,6 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
-		walkthroughJobId: plan.walkthroughJobId,
-		walkthroughChangesetId: plan.walkthroughChangesetId,
-		walkthroughTargetKey: plan.walkthroughTargetKey,
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
@@ -1083,9 +1077,6 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
-		walkthroughJobId: plan.walkthroughJobId,
-		walkthroughChangesetId: plan.walkthroughChangesetId,
-		walkthroughTargetKey: plan.walkthroughTargetKey,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn

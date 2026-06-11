@@ -2,73 +2,21 @@
  * Server-side tests for the UI-managed trusted-host allowlist:
  *   - canonicalizeTarget produces a host-qualified key for enterprise hosts and
  *     keeps github.com unchanged (back-compat).
- *   - The synchronous launch trust-check throws `untrusted_github_host` (carrying
- *     the offending host) BEFORE any job/child is created, and adding the host to
- *     the preferences store lets the immediate launch proceed.
  *   - classifyDiffResolutionError preserves the `untrusted_github_host` code + host
  *     (backstop for the async path), and GithubPrAdapterError carries the host.
+ *
+ * The legacy `WalkthroughAgentManager.launch` trust-check tests were removed with
+ * the launcher (host.agents reviewer migration, design Decision F Phase 3); the
+ * launch trust enforcement now lives in the github-adapter + the pack `run` route
+ * and is covered by `tests/e2e/pr-walkthrough-host-agents.spec.ts`. These remaining
+ * tests pin the surviving PURE target/error helpers.
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
-const { WalkthroughAgentStore } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
-const { WalkthroughAgentManager, canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting, numberOnlyTargetFromInferred } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
+const { canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting, numberOnlyTargetFromInferred } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
 const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, changesetIdForGithubForTesting } = await import("../src/server/pr-walkthrough/github-adapter.ts");
 const { parseGithubRefForTesting } = await import("../src/server/pr-walkthrough/routes.ts");
-
-let tempDir = "";
-
-function makeSessionManager() {
-	const sessions = new Map<string, any>();
-	const prompts: string[] = [];
-	sessions.set("parent", { id: "parent", cwd: tempDir, status: "idle", projectId: "project-1", sandboxed: false });
-	return {
-		sessions,
-		prompts,
-		async createSession(cwd: string, _a?: unknown, _b?: unknown, _c?: unknown, opts?: Record<string, unknown>) {
-			const id = String(opts?.sessionId ?? "child");
-			const session = {
-				id,
-				cwd,
-				status: "idle",
-				env: opts?.env,
-				allowedTools: opts?.allowedTools,
-				rpcClient: {
-					prompt: async (text: string) => { prompts.push(text); return { success: true }; },
-					onEvent: () => () => undefined,
-				},
-			};
-			sessions.set(id, session);
-			return session;
-		},
-		getSession(id: string) { return sessions.get(id); },
-		getPersistedSession(id: string) { return sessions.get(id); },
-		updateSessionMeta(id: string, updates: Record<string, unknown>) { Object.assign(sessions.get(id), updates); return true; },
-		setTitle(id: string, title: string) { Object.assign(sessions.get(id), { title }); },
-		enqueuePrompt(_id: string, text: string) { prompts.push(text); return { status: "queued" }; },
-	};
-}
-
-function createGitDiffFixture(): { baseSha: string; headSha: string } {
-	execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
-	execFileSync("git", ["config", "user.email", "tests@example.com"], { cwd: tempDir });
-	execFileSync("git", ["config", "user.name", "Tests"], { cwd: tempDir });
-	execFileSync("git", ["config", "core.autocrlf", "false"], { cwd: tempDir });
-	const filePath = "demo.ts";
-	fs.writeFileSync(path.join(tempDir, filePath), "export const value = 1;\n", "utf-8");
-	execFileSync("git", ["add", filePath], { cwd: tempDir });
-	execFileSync("git", ["commit", "-m", "base"], { cwd: tempDir, stdio: "ignore" });
-	const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: tempDir, encoding: "utf-8" }).trim();
-	fs.writeFileSync(path.join(tempDir, filePath), "export const value = 2;\n", "utf-8");
-	execFileSync("git", ["add", filePath], { cwd: tempDir });
-	execFileSync("git", ["commit", "-m", "change"], { cwd: tempDir, stdio: "ignore" });
-	const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: tempDir, encoding: "utf-8" }).trim();
-	return { baseSha, headSha };
-}
 
 describe("canonicalizeTarget host-qualified identity", () => {
 	it("keeps the historical key shape for github.com", () => {
@@ -320,63 +268,5 @@ describe("resolveGithubPr host routing and token scoping", () => {
 			fetch,
 		});
 		assert.ok(auth.some(h => h === "Bearer explicit-token"));
-	});
-});
-
-describe("synchronous launch trust-check", () => {
-	beforeEach(() => { tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prw-trust-")); });
-	afterEach(() => { fs.rmSync(tempDir, { recursive: true, force: true }); });
-
-	it("aborts an untrusted enterprise launch with code+host and creates no job/child", async () => {
-		const sessionManager = makeSessionManager();
-		const store = new WalkthroughAgentStore(tempDir);
-		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
-
-		await assert.rejects(
-			() => manager.launch({ sessionId: "parent", prUrl: "https://github.example.com/acme/widgets/pull/42" }),
-			(error: any) => error?.extra?.code === "untrusted_github_host" && error?.extra?.host === "github.example.com" && error?.status === 400,
-		);
-		assert.equal(store.list().length, 0, "no walkthrough job/tab should be created for an untrusted host");
-		assert.equal(sessionManager.sessions.size, 1, "no child session should be created");
-		assert.equal(sessionManager.prompts.length, 0);
-	});
-
-	it("proceeds when the host is present in the managed preferences allowlist", async () => {
-		const fixture = createGitDiffFixture();
-		const sessionManager = makeSessionManager();
-		const store = new WalkthroughAgentStore(tempDir);
-		const manager = new WalkthroughAgentManager({
-			defaultCwd: tempDir,
-			stateDir: tempDir,
-			sessionManager,
-			store,
-			preferencesStore: { get: (key: string) => (key === "githubTrustedHosts" ? ["github.example.com"] : undefined) },
-		});
-
-		const launch = await manager.launch({
-			sessionId: "parent",
-			prUrl: "https://github.example.com/acme/widgets/pull/42",
-			baseSha: fixture.baseSha,
-			headSha: fixture.headSha,
-		});
-		assert.equal(launch.status, "waiting_for_yaml");
-		assert.equal(launch.job.target.canonicalKey, "github:github.example.com/acme/widgets#42");
-		assert.equal(store.list().length, 1);
-	});
-
-	it("github.com launches remain trusted without any managed hosts", async () => {
-		const fixture = createGitDiffFixture();
-		const sessionManager = makeSessionManager();
-		const store = new WalkthroughAgentStore(tempDir);
-		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
-
-		const launch = await manager.launch({
-			sessionId: "parent",
-			prUrl: "https://github.com/acme/widgets/pull/42",
-			baseSha: fixture.baseSha,
-			headSha: fixture.headSha,
-		});
-		assert.equal(launch.status, "waiting_for_yaml");
-		assert.equal(launch.job.target.canonicalKey, "github:acme/widgets#42");
 	});
 });

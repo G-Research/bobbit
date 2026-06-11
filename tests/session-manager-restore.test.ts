@@ -164,24 +164,6 @@ describe("restoreSession source guard", () => {
 		);
 	});
 
-	it("restoreSession rehydrates PR walkthrough submit proof env before tool activation", async () => {
-		const src = fs.readFileSync(
-			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
-			"utf-8",
-		);
-		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
-		assert.ok(idx > 0, "restoreSession declaration not found");
-		const window = src.slice(idx, idx + 10_000);
-		const envInitIdx = window.indexOf("BOBBIT_SESSION_ID: ps.id,");
-		const restoreEnvIdx = window.indexOf("this.restoreWalkthroughSubmitEnv(ps, bridgeOptions.env)");
-		const toolActivationIdx = window.indexOf("this.buildToolActivationArgs");
-		assert.ok(envInitIdx >= 0, "restoreSession must initialize session env");
-		assert.ok(restoreEnvIdx > envInitIdx, "restoreSession must rotate/re-inject walkthrough submit proof env");
-		assert.ok(toolActivationIdx > restoreEnvIdx, "walkthrough submit env must be available before extensions are activated");
-		assert.match(src, /rotateSubmissionProofForRestoredJob\(bobbitStateDir\(\), ps\.id, ps\.walkthroughJobId\)/);
-		assert.match(src, /Object\.assign\(env, scopedEnv\)/, "rotated env, including target scope, must be merged into bridgeOptions.env");
-	});
-
 	it("restoreSession spawn-pins a persisted model before role or preference fallback", async () => {
 		const src = fs.readFileSync(
 			path.join(process.cwd(), "src/server/agent/session-manager.ts"),
