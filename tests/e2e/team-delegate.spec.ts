@@ -345,6 +345,25 @@ test.describe("team_delegate — read-only child enforcement (finding #1)", () =
 			const rwTools = toolsOf(rwId);
 			expect(rwTools).toContain("write");
 			expect(rwTools).toContain("edit");
+
+			// H2: the stripped allow-list must be PERSISTED (not just held live), so a
+			// restart/revive cannot revert the child to role defaults. createDelegateSession
+			// now sets sessionScopedAllowedTools → persistOnce writes `allowedTools`.
+			const persistedRo = gateway.sessionManager.getPersistedSession(roId)!.allowedTools ?? [];
+			const persistedRw = gateway.sessionManager.getPersistedSession(rwId)!.allowedTools ?? [];
+			// Recursion guard survives restart for BOTH children (no grandchildren).
+			for (const tools of [persistedRo, persistedRw]) {
+				expect(tools.length).toBeGreaterThan(0); // explicit list persisted, not undefined
+				expect(tools).not.toContain("team_delegate");
+				expect(tools).not.toContain("team_spawn");
+			}
+			// Read-only restriction survives restart: mutating tools stay out of the
+			// PERSISTED allow-list; the writable child keeps them.
+			for (const t of ["write", "edit", "bash", "bash_bg"]) {
+				expect(persistedRo).not.toContain(t);
+			}
+			expect(persistedRw).toContain("write");
+			expect(persistedRw).toContain("edit");
 		} finally {
 			if (roId) await orchestrate(parent, "dismiss", { childSessionId: roId }).catch(() => {});
 			if (rwId) await orchestrate(parent, "dismiss", { childSessionId: rwId }).catch(() => {});
