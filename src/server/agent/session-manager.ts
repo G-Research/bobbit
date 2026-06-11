@@ -31,6 +31,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 } from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
+import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -638,6 +639,7 @@ export class SessionManager {
 	private systemPromptPath?: string;
 	/** @internal Test-only session store (used when no PCM is available). */
 	private _testStore: SessionStore | null = null;
+	private _testBgProcessStore: BgProcessStore | null = null;
 	/** @internal Test-only cost tracker (used when no PCM is available). */
 	private _testCostTracker: CostTracker | null = null;
 	/** @internal Test-only search index (used when no PCM is available). */
@@ -937,6 +939,7 @@ export class SessionManager {
 			// ProjectContextManager. Stores are created from the explicit stateDir.
 			const stateDir = bobbitStateDir();
 			this._testStore = new SessionStore(stateDir);
+			this._testBgProcessStore = new BgProcessStore(stateDir);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
 			this._testGoalManager = new GoalManager(new GoalStore(stateDir));
@@ -988,6 +991,18 @@ export class SessionManager {
 		}
 		if (this._testStore) return this._testStore;
 		throw new Error("No project context manager or test store available");
+	}
+
+	/** Resolve the BgProcessStore for a given project. Requires projectId when PCM is active. */
+	getBgProcessStore(projectId?: string): BgProcessStore {
+		if (this.projectContextManager) {
+			if (!projectId) throw new Error("Cannot resolve bg-process store: projectId is required");
+			const ctx = this.projectContextManager.getOrCreate(projectId);
+			if (!ctx) throw new Error(`Cannot resolve bg-process store: project "${projectId}" not found`);
+			return ctx.bgProcessStore;
+		}
+		if (this._testBgProcessStore) return this._testBgProcessStore;
+		throw new Error("No project context manager or test bg-process store available");
 	}
 
 	/** Resolve the GoalStore for a given project. Requires projectId when PCM is active. */
@@ -3841,6 +3856,15 @@ export class SessionManager {
 
 		this.sessions.set(ps.id, session);
 
+		// Restore + re-attach this session's persisted background processes. The
+		// session now exists and (for sandboxed sessions) containerId has been
+		// re-resolved, so liveness/re-attach can target the live process.
+		const bgMgr = (this as any).bgProcessManager;
+		if (bgMgr?.restoreSession) {
+			try { await bgMgr.restoreSession(ps.id); }
+			catch (err) { console.warn(`[session-manager] bg-process restore failed for ${ps.id}:`, err); }
+		}
+
 		// If the agent was mid-turn when the server died, re-prompt it to continue
 		if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
@@ -6584,6 +6608,10 @@ export class SessionManager {
 		} else if (this._testStore) {
 			this._testStore.flush();
 		}
+		// Flush pending bg-process projection writes + store epoch before exit so
+		// re-attach exit codes and dismiss removals survive a restart (the bg
+		// store mirrors sessionStore's stale-snapshot guard).
+		try { (this as any).bgProcessManager?.flush(); } catch { /* best-effort */ }
 
 		// Close search index
 		try {

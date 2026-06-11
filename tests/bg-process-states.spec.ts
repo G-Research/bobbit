@@ -56,6 +56,32 @@ const EXITED_ERROR_PROCESS = {
 	startTime: Date.now() - 10000,
 };
 
+// Killed by the user: terminal "exited" record with no real exit code (terminalReason="killed").
+const KILLED_PROCESS = {
+	id: "bg-killed",
+	name: "killed proc",
+	command: "sleep 999",
+	pid: 12348,
+	status: "exited" as const,
+	exitCode: null,
+	terminalReason: "killed" as const,
+	startTime: Date.now() - 8000,
+	endTime: Date.now() - 2000,
+};
+
+// Lost across a gateway restart: widened "unrecoverable" status, exit code unknown (never fabricated).
+const UNRECOVERABLE_PROCESS = {
+	id: "bg-unrec",
+	name: "lost proc",
+	command: "npm run watch",
+	pid: 12349,
+	status: "unrecoverable" as const,
+	exitCode: null,
+	terminalReason: "unrecoverable" as const,
+	startTime: Date.now() - 20000,
+	endTime: Date.now() - 1000,
+};
+
 async function ready(page: Page) {
 	await page.waitForFunction(() => (window as any)._testReady === true);
 }
@@ -131,6 +157,27 @@ test.describe("BgProcessPill status indicators", () => {
 		await expect(indicator).toBeVisible();
 		await expect(indicator).toHaveClass(/text-red-600/);
 		await expect(indicator).toHaveText("!");
+	});
+
+	test("killed process shows a neutral (muted) indicator dot", async ({ page }) => {
+		await createPill(page, KILLED_PROCESS);
+
+		const dot = page.locator("bg-process-pill [data-status='killed']");
+		await expect(dot).toBeVisible();
+		// Not green/red and not pulsing — it's a known kill, not a normal exit.
+		const classes = (await dot.getAttribute("class")) || "";
+		expect(classes).not.toContain("animate-pulse");
+		expect(classes).not.toContain("bg-green-600");
+	});
+
+	test("unrecoverable process shows an amber '?' indicator with a restart title", async ({ page }) => {
+		await createPill(page, UNRECOVERABLE_PROCESS);
+
+		const indicator = page.locator("bg-process-pill [data-status='unrecoverable']");
+		await expect(indicator).toBeVisible();
+		await expect(indicator).toHaveClass(/text-amber-600/);
+		await expect(indicator).toHaveText("?");
+		await expect(indicator).toHaveAttribute("title", /lost across a restart/i);
 	});
 
 	test("pill displays process name", async ({ page }) => {
@@ -273,6 +320,35 @@ test.describe("BgProcessPill kill and dismiss", () => {
 
 		// No Kill button
 		expect(await page.locator("#bg-process-dropdown [data-kill-btn]").count()).toBe(0);
+	});
+
+	test("dropdown shows Remove button (not Kill) for unrecoverable process", async ({ page }) => {
+		await createPill(page, UNRECOVERABLE_PROCESS);
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+
+		const removeBtn = page.locator("#bg-process-dropdown [data-dismiss-btn]");
+		await expect(removeBtn).toBeVisible();
+		await expect(removeBtn).toHaveText("Remove");
+		expect(await page.locator("#bg-process-dropdown [data-kill-btn]").count()).toBe(0);
+	});
+
+	test("unrecoverable pill action button shows an X icon (dismiss, not kill)", async ({ page }) => {
+		await createPill(page, UNRECOVERABLE_PROCESS);
+		await expect(page.locator("bg-process-pill [data-x-btn]")).toHaveText("✕");
+		expect(await page.locator("bg-process-pill [data-x-btn] svg").count()).toBe(0);
+	});
+
+	test("pill X button dismisses an unrecoverable process", async ({ page }) => {
+		await page.evaluate((p) => {
+			const pill = (window as any).createPill(p);
+			(window as any).__dismissCalls = [];
+			pill.onDismiss = (id) => (window as any).__dismissCalls.push(id);
+		}, UNRECOVERABLE_PROCESS);
+
+		await page.locator("bg-process-pill [data-x-btn]").click();
+
+		const dismissCalls = await page.evaluate(() => (window as any).__dismissCalls);
+		expect(dismissCalls).toEqual([UNRECOVERABLE_PROCESS.id]);
 	});
 
 	test("Kill button fires onKill callback after confirmation", async ({ page }) => {
@@ -469,6 +545,30 @@ test.describe("BgProcessPill exit code display", () => {
 		await page.locator("bg-process-pill [data-toggle-btn]").click();
 
 		expect(await page.locator("#bg-process-dropdown [data-exit-code]").count()).toBe(0);
+	});
+
+	test("killed process shows 'killed' label (no fabricated exit code) in dropdown", async ({ page }) => {
+		await createPill(page, KILLED_PROCESS);
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+
+		const label = page.locator("#bg-process-dropdown [data-exit-code]");
+		await expect(label).toBeVisible();
+		await expect(label).toHaveText("killed");
+		// Never an "exit N" code for a killed process.
+		expect(await label.textContent()).not.toMatch(/exit\s+\d/);
+	});
+
+	test("unrecoverable process shows 'exit status unknown' in amber in dropdown", async ({ page }) => {
+		await createPill(page, UNRECOVERABLE_PROCESS);
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+
+		const label = page.locator("#bg-process-dropdown [data-exit-code]");
+		await expect(label).toBeVisible();
+		await expect(label).toHaveText("exit status unknown");
+		await expect(label).toHaveClass(/text-amber-600/);
+		await expect(label).toHaveAttribute("title", /lost across a restart/i);
+		// No fabricated numeric exit code.
+		expect(await label.textContent()).not.toMatch(/exit\s+\d/);
 	});
 
 	test("dropdown header shows process id and pid", async ({ page }) => {

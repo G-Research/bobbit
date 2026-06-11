@@ -1219,10 +1219,23 @@ export function createGateway(config: GatewayConfig) {
 		toolManager,
 		orchestrationCore,
 	});
-	const bgProcessManager = new BgProcessManager((sessionId: string) => {
-		const session = sessionManager.getSession(sessionId);
-		return session?.clients;
-	});
+	const bgProcessManager = new BgProcessManager(
+		(sessionId: string) => {
+			const session = sessionManager.getSession(sessionId);
+			return session?.clients;
+		},
+		undefined,
+		(sessionId: string) => {
+			// Resolve the per-project bg-process store for this session.
+			try {
+				const projectId = sessionManager.getSession(sessionId)?.projectId
+					?? (sessionManager as any).getPersistedSession?.(sessionId)?.projectId;
+				return sessionManager.getBgProcessStore(projectId);
+			} catch {
+				return undefined;
+			}
+		},
+	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
@@ -11742,15 +11755,31 @@ async function handleApiRoute(
 		return;
 	}
 
-	// DELETE /api/sessions/:id/bg-processes/:pid — kill or remove a background process
+	// DELETE /api/sessions/:id/bg-processes/:pid — kill or dismiss a background process
+	//   ?action=kill    → terminate a running process; KEEP the exited record until dismissed
+	//   ?action=dismiss → remove the record + delete persisted log/status/spool files
+	//   (no action)     → legacy: kill-if-running else dismiss
 	const bgKillMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/bg-processes\/([^/]+)$/);
 	if (bgKillMatch && req.method === "DELETE") {
 		const [, sessionId, processId] = bgKillMatch;
-		// Try kill first (running), then remove (exited)
+		const action = url.searchParams.get("action");
+		if (action === "kill") {
+			const killed = bgProcessManager.kill(sessionId, processId);
+			if (!killed) { json({ error: "Process not found or not running" }, 404); return; }
+			json({ ok: true, killed: true });
+			return;
+		}
+		if (action === "dismiss") {
+			const dismissed = bgProcessManager.dismiss(sessionId, processId);
+			if (!dismissed) { json({ error: "Process not found or still running" }, 409); return; }
+			json({ ok: true });
+			return;
+		}
+		// Legacy: kill-if-running else dismiss.
 		const killed = bgProcessManager.kill(sessionId, processId);
 		if (!killed) {
-			const removed = bgProcessManager.remove(sessionId, processId);
-			if (!removed) { json({ error: "Process not found" }, 404); return; }
+			const dismissed = bgProcessManager.dismiss(sessionId, processId);
+			if (!dismissed) { json({ error: "Process not found" }, 404); return; }
 		}
 		json({ ok: true });
 		return;

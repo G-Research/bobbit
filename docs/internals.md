@@ -2476,7 +2476,7 @@ For the parallel pattern on the agent stream (different event family, same shape
 
 Background process pills render live state from `BgProcessManager` snapshots, not from browser-local assumptions. This matters because an exited process may remain visible for hours, survive reconnects, or be rehydrated through REST; using `Date.now() - startTime` after exit makes old processes look like they ran until the current page render.
 
-**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps.
+**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps, plus `status: "running" | "exited" | "unrecoverable"`, `exitCode: number | null`, and `terminalReason: "normal" | "killed" | "unrecoverable" | null` (null while running).
 
 - While `status === "running"`, `endTime` is `null` and the UI may render a live elapsed timer from `startTime`.
 - On child `exit`, the server updates `status`, `exitCode`, and `endTime` once before resolving waiters or broadcasting the exit event.
@@ -2488,9 +2488,45 @@ Background process pills render live state from `BgProcessManager` snapshots, no
 - `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for initial hydration and reconnect refresh.
 - `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited. This is a long-poll — it streams chunked with a periodic heartbeat to survive undici's ~300 s `headersTimeout` (see [Long-poll heartbeat (chunked keep-alive)](#long-poll-heartbeat-chunked-keep-alive)).
 - `bg_process_created` carries the full running `process` snapshot with `endTime: null`.
-- `bg_process_exited` carries `processId`, `exitCode`, and `endTime` so the client can freeze an existing pill immediately.
+- `bg_process_exited` carries `processId`, `exitCode`, `endTime`, and `terminalReason` so the client can freeze an existing pill immediately. `terminalReason` is `"normal"` (clean exit), `"killed"` (user-requested kill), or `"unrecoverable"` (real exit code could not be recovered after a restart); `exitCode` is `null` for the latter two and clients must not fabricate one.
+- `bg_process_dismissed` carries `processId` and tells the client to remove the pill; it fires on explicit dismiss (and the legacy kill-then-dismiss path) after the persisted log/status files are purged.
 
-The REST and WS contracts are additive for older clients, but new clients must treat missing `endTime` as unknown rather than deriving a misleading final duration from the current clock.
+The REST and WS contracts are additive for older clients, but new clients must treat missing `endTime` as unknown rather than deriving a misleading final duration from the current clock. See [websocket-protocol.md](websocket-protocol.md#background-process-events) and [rest-api.md](rest-api.md) for the full event/route shapes.
+
+---
+
+## Background process persistence (bash_bg)
+
+`bash_bg` background processes survive a gateway restart and **re-attach** to
+still-running processes: live output keeps streaming and the real exit code is
+captured, as if the server never restarted. This is needed because the old
+`BgProcessManager` was in-memory only — a restart lost every record, all output,
+and the live handle, and you cannot re-attach to a dead parent's stdout/stderr
+pipes.
+
+The fix moves output and exit status onto disk, independent of the gateway
+lifetime: each process redirects stdout/stderr to transient per-stream **spools**
+that the detached child keeps appending to; the gateway tails them into a single
+durable **combined projection** (`<bgId>.log`, a host file it owns and rewrites
+atomically, always within the 512KB/5000-line cap) and captures the real exit
+code from a per-process **status file** written by a POSIX shell wrapper (or the
+Node `bg-runner` helper on Windows without Git Bash; docker spawns run under
+`setsid` and mirror into host files). Metadata persists to
+`<stateDir>/bg-processes.json` via `BgProcessStore` (mirrors `SessionStore`:
+atomic write, 5 backups, epoch guard); per-process files live under
+`<stateDir>/bg-processes/<sessionId>/`. Restore is hooked into
+`restoreSessions()` and reconciles each `running` record as alive (re-attach +
+tail + capture eventual code), completed-during-downtime (read the status file),
+or unrecoverable (labelled terminal state, **never** a fabricated exit code).
+Kill and dismiss are distinct (`?action=kill` keeps the terminal record;
+`?action=dismiss` purges record + files); on-disk logs stay bounded at all times.
+
+Full behaviour, reconciliation cases, kill-vs-dismiss, and bounded-growth
+mechanics: [docs/bg-process-persistence.md](bg-process-persistence.md). Design
+record: [docs/design/persistent-bg-processes.md](design/persistent-bg-processes.md).
+Implementation: `src/server/agent/bg-process-manager.ts`, `bg-process-store.ts`,
+`bg-runner.ts`; client/UI in `src/app/session-manager.ts` and
+`src/ui/components/BgProcessPill.ts`.
 
 ---
 
