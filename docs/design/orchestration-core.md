@@ -37,7 +37,7 @@ All in `src/server/agent/session-manager.ts`:
 - `waitForIdle(sessionId, timeoutMs=600_000)` (`:4063`) — resolves on `agent_end`, rejects on `process_exit`/timeout, instant if already `idle`. `waitForStreaming` (`:4098`) is the symmetric helper.
 - `getSessionOutput(sessionId)` (`:4128`) — concatenated assistant text.
 - `terminateSession(id)` (`:5297`) — terminate + archive; **already cascades** to live children where `delegateOf===id` OR (`childKind==="pr-walkthrough" && parentSessionId===id`) (`:5305`), and archives persisted-but-dormant such children (`:5314-5322`).
-- `restoreSessions()` (`:3150`) — restores `regular` sessions; **`delegateOf` children are deferred as dormant** (`:3179-3203`, revived on-demand via `addClient`); **no boot-reap for delegates**. `pr-walkthrough` children are boot-reaped in `restoreOneSession` via `shouldReapWalkthroughChildOnBoot` (`:3293-3318`).
+- `restoreSessions()` (`:3150`) — restores `regular` sessions live; **`delegateOf` children are now also restored LIVE** through the same `restoreOneSession`/`restoreSession` path (§4 — durable-task / re-run model), after an orphan-reap pass (`shouldReapChildOnBoot`) archives delegates whose owner is gone/archived. (Originally delegates were deferred as dormant via `addDormantSession` and revived on-demand; that was superseded — see §4.) `pr-walkthrough` children are boot-reaped in `restoreOneSession` via `shouldReapWalkthroughChildOnBoot` (`:3293-3318`).
 - `updateSessionMeta(id, {delegateOf?, parentSessionId?, childKind?, readOnly?, ...})` (`:4854`).
 
 Model-inheritance resolver already exists at the call sites: `resolveSessionModel(sessionId)` (`server.ts:1536`, `:2398`) returns `"${provider}/${id}"` from the persisted session — this is what `OrchestrationCore` uses to inherit the parent's **current** model.
@@ -169,20 +169,33 @@ The core keeps `Map<ownerSessionId, ChildHandle[]>` **in memory only**. It is **
 
 ---
 
-## 4. Restart survival (outcome #3) — children survive, parent reminded, one shared wait
+## 4. Restart survival (outcome #3) — delegates ride the worker restart path
 
-**Locked principle: no transparent tool-call resumption.** A blocking `team_delegate` is *spawn tracked child → shared `wait(policy:"all")` → auto-dismiss*, all inside the agent's tool loop. On restart the agent subprocess dies; the long-poll promise is gone; the parent is rebuilt from transcript with a `tool_use` and no matching `tool_result`. We **do not** splice a synthetic `tool_result`.
+> **REVISION (shipped).** This section originally specified that surviving delegates were kept as **dormant** session entries on restore and that the locked principle was *"no transparent tool-call resumption."* That decision proved insufficient **for delegates** and was **deliberately superseded** by the **durable-task / re-run-on-restart model** described below — the same machinery goal-team **workers** already use. This is a conscious design revision, not silent drift. The historical decision and the one nuance still kept from it are recorded at the end of this section.
 
-Mechanism:
+**Why the dormant model failed.** Workers survive a restart because (a) they are restored **live** (their subprocess comes back) and (b) their task — the **goal spec** — is durable and rebuilt into the system prompt on restore (`restoreSession` → `resolveGoal` → `goal.spec` → `buildRestoreRolePrompt`), then re-nudged. Delegates had **neither**: `restoreSessions()` split sessions into `regular` (restored live via `restoreOneSession`/`restoreSession`) and `delegates` (handed to `addDormantSession`, which created a `terminated` placeholder with an un-started bridge — revived only when a human opened the session in the UI). And a delegate's task lived only in its **spawn-time** prompt (`session-setup.ts` `mode === "delegate"`), never persisted on the session record. The two failure symptoms followed directly:
 
-1. **Children survive.** `restoreSessions()` keeps `delegateOf` children as dormant entries (unchanged, `:3179-3203`) and now also runs `rebuildIndexFromPersisted`. Boot-reap (§5) reaps a child **only** if its parent is gone or archived. A child whose parent is restoring is never reaped.
-2. **Parent reminded on resume.** Reuse the **boot-resume nudge machinery** in `team-manager.ts` (`resumeTeams` → boot-resume `enqueuePrompt(..., { isSteered:true })`, `:945-968`). Generalize it to a non-goal owner: after `restoreSessions`, for each owner with ≥1 live restored child, inject a system reminder via `sessionManager.enqueuePrompt(ownerId, msg, { source:"system", isSteered:true })`.
-   - **Injection point:** a new `OrchestrationCore.remindOwnersWithLiveChildren()` called from the server boot sequence right after `restoreSessions()` + `teamManager.restoreTeams()` (so team owners and standalone owners are both covered; team-managed children are skipped to avoid double-nudge — filter `childKind!=="team"`).
+- **Lost work / `terminated` husks.** A blocking `team_delegate` child came back as a dead placeholder; the parent's `team_wait` re-attached to a `terminated` dormant entry and resolved with no real result.
+- **"No task in my system prompt."** Even when revived, `restoreSession` ran the goal/role prompt branch, found no goal (`goalSpec` undefined), and the task evaporated.
+
+**The fix — reuse the worker machinery (one restart path, no parallel registry).** Delegates now durably persist their task and are restored **live** through the same path workers use:
+
+1. **Durable task.** `instructions` (and `context`) are persisted on the session record — the delegate's equivalent of a worker's `goal.spec`. The fields live on `PersistedSession` (`session-store.ts`: `PersistedSession.instructions` / `PersistedSession.context`) and are written at spawn by `session-setup.ts::persistOnce`. They survive restart with the rest of the session record.
+2. **Live restore.** `restoreSessions()` no longer defers `delegateOf` children to `addDormantSession`. After the orphan-reap pass (§5), surviving delegates are concatenated with the `regular` set and flow through the **same** `restoreOneSession` → `restoreSession` live-respawn path — they come back as real running processes, not dormant husks.
+3. **Prompt rebuilt from the durable task.** `restoreSession()` has a **delegate branch** (`delegateOf` set, **no** `goalId`) that rebuilds the system prompt from the persisted `instructions` + `context` + `projectRoot` (`ps.repoPath`), mirroring `session-setup.ts::_resolvePrompt` `mode === "delegate"` and assembling via `assembleSystemPrompt`. A revived delegate therefore carries its **original task**, not an empty goal/role prompt — closing the "no task" symptom.
+4. **Re-run on restart (the worker model).** The respawned delegate is re-driven by the shared **`wasStreaming` boot-resume drain** — the same mechanism workers use to resume a mid-turn task. The parent is reminded via `OrchestrationCore.remindOwnersWithLiveChildren(h => h.childKind !== "team")` (called from `restoreSessions()` after `rebuildIndexFromPersisted`), and re-collects a **real** result through the shared `team_wait`, which now re-attaches to a **LIVE** child instead of resolving a `terminated` dormant placeholder. Team-managed children (`childKind === "team"`) are skipped here to avoid a double-nudge; team-manager nudges those.
    - **Reminder text** enumerates the N live children (ids + one-line title) and points at `team_wait`:
      > `[ORCHESTRATION] The gateway restarted. You have N live child agent(s) from before the restart: <id1> "<title1>", … Their results were not collected. Call team_wait to collect them (it returns on the first child idle and tells you who remains).`
-3. **Non-blocking children** were already re-promptable; the reminder simply resurfaces them.
+5. **Boot-reap unchanged (§5).** An **orphaned** delegate — owner gone or archived — is still reaped in `restoreSessions()` via `shouldReapChildOnBoot` **before** the live-dispatch pass. It is **not** resurrected as a live orphan. Only delegates whose owner is restoring (exists, not archived) survive into the live-restore set.
 
-Pinned by a restart E2E (§11): kill + reboot mid-orchestration → children survive, parent receives the reminder, `team_wait` collects, no orphan.
+**Idempotency caveat (explicit).** Because a survivor is re-driven from its durable task, a re-run delegate may **repeat non-idempotent side effects** (re-issue an API write, re-create a file, etc.). This is **identical to how workers already behave** on restart — the worker re-runs its goal spec the same way — and is **accepted**. We do not attempt exactly-once side-effect semantics.
+
+**What we still do NOT do (the one nuance kept from the original decision).** We still do **not** splice a **synthetic `tool_result`** into the parent's transcript. A blocking `team_delegate`'s in-flight long-poll lived in the now-dead agent subprocess; on restart the parent is rebuilt from transcript with a `tool_use` and no matching `tool_result`, and we do not fabricate one. The difference from the original model is what happens **on the child side**: instead of the child staying a dormant husk, the child survives **live** and **re-runs** its durable task, and the parent re-collects explicitly via `team_wait` (resurfaced by the reminder). So "no synthetic tool_result splicing" survives; "delegates stay dormant / no re-run" was replaced.
+
+**Pinned by:**
+- `tests/e2e/orchestrate-restart.spec.ts` — a delegate child is restored **LIVE** with its task intact across a `restoreSessions` reboot (parent gets the reminder, `team_wait` re-collects a real result, no orphan).
+- `tests/session-store.test.ts` — durable-task round-trip (`PersistedSession.instructions`/`context` persist and reload).
+- `tests/session-manager-delegate-restore.test.ts` — delegate-branch prompt re-assembly in `restoreSession` (revived delegate's prompt contains its original instructions + context).
 
 ---
 
@@ -212,7 +225,7 @@ export function shouldReapChildOnBoot(i: ReapInput): { reap: boolean; reason?: s
 - For `delegate`: `kindTerminal` is undefined (delegates have no terminal job); reap only on owner-gone/archived. **This closes the orphan-delegate gap** (today delegates are never boot-reaped).
 - Never reap a child whose owner is restoring (owner exists, not archived).
 
-`restoreOneSession` calls `shouldReapChildOnBoot` for any session with a `childKind`/`delegateOf`. Delegate children remain dormant unless reaped.
+Delegate orphan-reap runs in `restoreSessions()` (via `shouldReapChildOnBoot`) **before** the live-dispatch pass; **surviving delegates are now restored LIVE, not dormant** (§4 — they ride the worker `restoreOneSession`/`restoreSession` path). The generalized `restoreOneSession` reap still covers non-delegate kinded children (`childKind`/`parentSessionId`, e.g. `pr-walkthrough`).
 
 ---
 
