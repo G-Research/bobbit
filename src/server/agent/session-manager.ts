@@ -3876,8 +3876,17 @@ export class SessionManager {
 			catch (err) { console.warn(`[session-manager] bg-process restore failed for ${ps.id}:`, err); }
 		}
 
-		// If the agent was mid-turn when the server died, re-prompt it to continue
-		if (ps.wasStreaming) {
+		// If the agent was mid-turn when the server died, re-prompt it to continue.
+		// EXCEPTION: verification reviewer / agent-qa sessions are nonInteractive
+		// and are re-driven EXCLUSIVELY by the verification harness
+		// (`resumeInterruptedVerifications()` -> `_tryResumeFromSession`, which
+		// waits for readiness and sends its own reminder prompt). Firing the boot
+		// nudge here too would race two prompts on the same cold reviewer agent.
+		// We still clear `wasStreaming` so the flag doesn't leak across restarts.
+		if (ps.wasStreaming && ps.nonInteractive) {
+			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn but is nonInteractive — leaving re-drive to the verification harness`);
+			restoreStore.update(ps.id, { wasStreaming: false });
+		} else if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
 			restoreStore.update(ps.id, { wasStreaming: false });
 			rpcClient.prompt(
