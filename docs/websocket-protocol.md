@@ -70,7 +70,8 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `preferences_changed` | `preferences` | Server preferences were updated |
 | `bg_process_created` | `process` (`BgProcessInfo`) | Background process started; `process.endTime` is `null` |
 | `bg_process_output` | `processId`, `stream`, `text` | Output from a background process |
-| `bg_process_exited` | `processId`, `exitCode`, `endTime` | Background process terminated; `endTime` is the fixed exit timestamp |
+| `bg_process_exited` | `processId`, `exitCode`, `endTime`, `terminalReason` | Background process terminated; `endTime` is the fixed exit timestamp. `exitCode` is `number \| null` (null when no real code was captured). `terminalReason` is `"normal" \| "killed" \| "unrecoverable"` |
+| `bg_process_dismissed` | `processId` | A background process record was dismissed (removed) and its persisted log/status files purged |
 | `gate_signal_received` | `goalId`, `gateId`, `signalId` | Gate signal received |
 | `gate_verification_started` | `goalId`, `gateId`, `signalId` | Gate verification began |
 | `gate_verification_step_started` | `goalId`, `gateId`, `stepIndex`, `stepName` | A verification step began |
@@ -95,9 +96,11 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 
 ### Background process events
 
-`BgProcessInfo` snapshots carry `{ id, name, command, pid, status, exitCode, startTime, endTime }`, where timestamps are epoch milliseconds. Running processes have `endTime: null`; exited processes set `endTime` once at child exit.
+`BgProcessInfo` snapshots carry `{ id, name, command, pid, status, exitCode, terminalReason, startTime, endTime }`, where timestamps are epoch milliseconds. `status` is `"running" | "exited" | "unrecoverable"`. `exitCode` is `number | null`. `terminalReason` is `"normal" | "killed" | "unrecoverable" | null` (null while running). Running processes have `endTime: null`; exited processes set `endTime` once at child exit.
 
-`bg_process_created` sends the full running snapshot. `bg_process_exited` sends `{ processId, exitCode, endTime }` so clients can update an existing pill without waiting for REST hydration. Missing legacy `endTime` values mean the final runtime is unknown; clients should keep the display non-growing rather than deriving elapsed time from `Date.now()`.
+`bg_process_created` sends the full running snapshot. `bg_process_exited` sends `{ processId, exitCode, endTime, terminalReason }` so clients can update an existing pill without waiting for REST hydration: `terminalReason` distinguishes a clean exit (`"normal"`), a user-requested kill (`"killed"`), and a process whose real exit code could not be recovered after a gateway restart (`"unrecoverable"`); in the latter two cases `exitCode` is `null` and clients must not fabricate one. Missing legacy `endTime` values mean the final runtime is unknown; clients should keep the display non-growing rather than deriving elapsed time from `Date.now()`.
+
+`bg_process_dismissed` (`{ processId }`) fires when a record is removed — either via explicit dismiss or as part of the legacy kill-then-dismiss path — and signals that the pill should disappear and its persisted log/status files have been purged. Dismiss is rejected (REST 409) while a process is still running; clients kill it first, then dismiss the resulting exited record.
 
 ### Session cost hydration
 

@@ -186,8 +186,9 @@ a query param. The two actions are deliberately distinct:
 | *(legacy)* | `DELETE …/bg-processes/:pid` | kill-if-running else dismiss | — |
 
 `action=kill` returns `{ ok: true, killed: true }` (404 if not found/not
-running). `action=dismiss` returns `{ ok: true }` (409 if still running and not
-forced). Dismiss refuses a still-running process unless forced.
+running). `action=dismiss` returns `{ ok: true }`, or **409** if the process is
+still running — there is no force option. The required sequence for a running
+process is **kill first, then dismiss** the resulting terminal record.
 
 **Kill mechanics** always target the persisted `processPid` (never the dead
 `hostPid`): on host, `taskkill /pid <processPid> /T /F` (Windows) or

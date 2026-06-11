@@ -1,7 +1,11 @@
 # Persistent `bash_bg` processes — survive gateway restart + re-attach to live processes
 
-Status: design (implementation pending)
+Status: implemented
 Owner: bg-process feature
+
+> This is the durable architecture record for the persistent `bash_bg` feature. The
+> behaviour described below is implemented; see [docs/bg-process-persistence.md](../bg-process-persistence.md)
+> for the operational reference and [docs/internals.md](../internals.md) for the runtime contract.
 Related goal: "Persistent bash_bg processes"
 
 ## 1. Problem & current state
@@ -19,11 +23,11 @@ On gateway restart we lose:
 Two distinct failure modes follow:
 
 1. **Host spawns** — `defaultSpawn` spawns with `detached: true` + `child.unref()`
-   (`bg-process-manager.ts` `create()` ~L121), so on gateway exit the process keeps running as
+   (`BgProcessManager.create()` in `bg-process-manager.ts`), so on gateway exit the process keeps running as
    an orphan. But its stdout/stderr pipes were owned by the now-dead parent and **cannot be
    re-attached** from a new process. The new gateway has no record it ever existed.
 2. **Docker-exec spawns** — `defaultSpawn` runs `docker exec ... <shell> -c <cmd>`
-   (`bg-process-manager.ts` ~L30). The command keeps running inside the still-alive container,
+   (the `defaultSpawn` helper in `bg-process-manager.ts`). The command keeps running inside the still-alive container,
    but the **host-side `docker exec` handle dies with the gateway**, so output streaming and exit
    capture stop.
 
@@ -34,7 +38,7 @@ Make bg processes behave as if the server never restarted:
 - Persist each process's metadata + captured output to disk (atomic writes, mirroring
   `SessionStore`).
 - Restore records on boot alongside `restoreSessions()`
-  (`src/server/agent/session-manager.ts` ~L3169) so `GET /api/sessions/:id/bg-processes` and the
+  (`restoreSessions()` in `src/server/agent/session-manager.ts`) so `GET /api/sessions/:id/bg-processes` and the
   WS-driven pills show them after a restart with output intact.
 - **Re-attach to still-running processes** — resume streaming live output and capture the
   eventual **real** exit code. Never fabricate exit codes.
@@ -44,7 +48,7 @@ Make bg processes behave as if the server never restarted:
   **combined per-process** across stdout+stderr, matching the in-memory trim) **at all times** —
   while the process is running, across a restart, and after exit (§8).
 - Preserve sandbox parity and the `sandboxed && !containerId` host-execution guard
-  (`bg-process-manager.ts` `create()` ~L118).
+  (the guard at the top of `BgProcessManager.create()` in `bg-process-manager.ts`).
 
 ## 2. The crux: durable log/status files instead of in-memory pipes
 
@@ -94,7 +98,7 @@ child's pipes directly, and the durable projection is rewritten from that same c
 ## 3. On-disk layout
 
 All files live under the **project state dir** (`ProjectContext.stateDir` =
-`<project.rootPath>/.bobbit/state`, see `src/server/agent/project-context.ts` ~L72). This is the
+`<project.rootPath>/.bobbit/state`, see `ProjectContext` in `src/server/agent/project-context.ts`). This is the
 same dir `SessionStore` writes `sessions.json` into, so per-project isolation and the isolated
 test state dir (`tests/e2e/e2e-setup.ts`) are inherited for free.
 
@@ -176,7 +180,7 @@ Final naming (used throughout this doc):
 For sandboxed sessions the worktree is **container-internal** (cloned into `/workspace` or
 `/workspace-wt/...`), **not** bind-mounted from the host (see
 `src/server/agent/sandbox-clone-source.ts`, `MOUNTED_SRC_PATH`, and
-`session-manager.ts::isSandboxContainerPath` ~L96). The host cannot read a file written inside the
+`session-manager.ts::isSandboxContainerPath`). The host cannot read a file written inside the
 container by path, and a container can be **recreated or removed** at any time — taking its
 filesystem with it.
 
@@ -554,7 +558,7 @@ pill (`_fetchedUpTo`) and manager handle the small overlap.
 
 ### 5.3 Wiring per project
 
-`BgProcessManager` currently has one global instance constructed in `server.ts` ~L1210. Per-project
+`BgProcessManager` currently has one global instance constructed in `server.ts`. Per-project
 state dirs mean the manager must resolve the **right** store per session. Two options:
 
 - **Chosen:** give `BgProcessManager` a `storeProvider: (sessionId) => BgProcessStore | undefined`
@@ -562,7 +566,7 @@ state dirs mean the manager must resolve the **right** store per session. Two op
   session's `projectId` via `sessionManager.getSessionStore`'s sibling — add
   `SessionManager.getBgProcessStore(projectId?)` that returns `ProjectContext.bgProcessStore` (a
   new field on `ProjectContext`, constructed next to the other stores in
-  `project-context.ts` ~L77). For the test/no-PCM path, fall back to a single store over the test
+  the other stores in `project-context.ts`). For the test/no-PCM path, fall back to a single store over the test
   state dir.
 
 ```ts
@@ -695,8 +699,8 @@ never from `child.exitCode` (which, post-restart, we don't have).
 Hook into boot right where sessions restore. Restore is **per-session**:
 `BgProcessManager.restoreSession(sessionId)` is called from
 `session-manager.ts::restoreSessions()` inside its existing per-session loop (after the live-restore
-step, ~L3260) — at which point the session exists and (for sandboxed sessions) `session.containerId`
-has been re-resolved via `SandboxManager.getContainerId()` (`session-manager.ts` ~L3858). Because
+step) — at which point the session exists and (for sandboxed sessions) `session.containerId`
+has been re-resolved via `SandboxManager.getContainerId()` (in `session-manager.ts`). Because
 stores are per-project, `restoreSession(sessionId)` deterministically resolves *that* session's
 store via `storeProvider(sessionId)` and iterates only that session's `PersistedBgProcess` records
 — no cross-store enumeration is needed.
@@ -872,7 +876,7 @@ are bounded continuously by the child-owned ring.
 ## 9. Kill vs dismiss
 
 Today both UI buttons issue the same `DELETE /api/sessions/:id/bg-processes/:pid`, and the route
-(`server.ts` ~L11762) "tries kill first, then remove". This conflates the two. Make them explicit.
+(the `DELETE /api/sessions/:id/bg-processes/:pid` route in `server.ts`) "tries kill first, then remove". This conflates the two. Make them explicit.
 
 ### 9.1 REST
 
@@ -926,13 +930,13 @@ restoreSession(sessionId): Promise<void>;            // NEW: §7 per-session rec
   when the gateway never restarted.
 
 `remove()` (existing, index-only) is folded into `dismiss()`. `cleanup(sessionId)` (on session
-terminate, `session-manager.ts` ~L5601) keeps killing running children but now also leaves durable
+terminate, `cleanup()` in `session-manager.ts`) keeps killing running children but now also leaves durable
 files in place only if the session is merely restarting — on real terminate it should
 `removeForSession` + delete files (a terminated session's pills are gone).
 
 ### 9.3 WS protocol
 
-`src/server/ws/protocol.ts` (~L158):
+The `bg_process_*` events in `src/server/ws/protocol.ts`:
 
 - `bg_process_created` / `bg_process_output` — unchanged.
 - `bg_process_exited` — gains `terminalReason: "normal" | "killed" | "unrecoverable"` as the
@@ -944,7 +948,7 @@ files in place only if the session is merely restarting — on real terminate it
 ### 9.4 Client + UI
 
 - `src/app/session-manager.ts`: `killBgProcess` → DELETE `?action=kill`; `dismissBgProcess` →
-  DELETE `?action=dismiss`. Add a WS handler for `bg_process_dismissed` (~L1422) that removes the
+  DELETE `?action=dismiss`. Add a WS handler for `bg_process_dismissed` (in `src/app/session-manager.ts`) that removes the
   process from `ai.bgProcesses`. `bg_process_exited` handler maps `exitCode` **and** `terminalReason`
   into the local record.
 - `src/ui/components/BgProcessPill.ts`: extend `BgProcessInfo.status` to include `"unrecoverable"`
