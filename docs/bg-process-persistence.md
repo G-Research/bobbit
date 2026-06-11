@@ -100,10 +100,22 @@ re-attachable — there is no non-persistent host path:
 
 - **POSIX shell wrapper (primary)** — Git Bash on Windows, `/bin/sh` on
   Linux/macOS, and `/bin/sh` inside docker. A single `sh -c` string that writes
-  the pidfile (`$$` + nonce), launches a wrapper-owned background trimmer that
-  bounds both spools, runs the isolated subshell appending (`>>`) to the spools,
-  then writes the real exit code to the status file. Built by `buildHostWrapper`
-  / `buildDockerWrapper`.
+  the pidfile (a **Windows-usable pid** + nonce — see below), launches a
+  wrapper-owned background trimmer that bounds both spools, runs the isolated
+  subshell appending (`>>`) to the spools, then writes the real exit code to the
+  status file. Built by `buildHostWrapper` / `buildDockerWrapper`.
+
+  **Windows-usable pid in the pidfile.** The pidfile's pid line is
+  `$(cat /proc/$$/winpid 2>/dev/null || echo $$)`, not bare `$$`. On MSYS / Git
+  Bash `$$` is the **MSYS-internal** pid, which is *not* a Windows pid the
+  gateway can signal (empirically `$$`=1105 while `/proc/$$/winpid`=17172 for the
+  same shell); `/proc/$$/winpid` yields the real Windows pid. Off Windows
+  (Linux/macOS) `/proc/$$/winpid` does not exist, so `cat` fails and the line
+  falls back to `$$` — which already *is* the real pid there, making the pidfile
+  content byte-for-byte identical off-Windows (no behaviour change). This matters
+  because the host restore path reconciles `processPid` from this pidfile (see
+  [`processPid` vs `hostPid`](#processpid-vs-hostpid)) so liveness checks and
+  kills target the signalable pid.
 - **Node `bg-runner` helper (Windows without Git Bash)** — `bg-runner.ts`, spawned
   detached via `process.execPath`. On a Windows host with no Git for Windows,
   `cmd.exe` can't run the POSIX wrapper, so rather than degrade to a
@@ -131,12 +143,28 @@ Two pids are persisted because they differ for docker:
 - **`hostPid`** — the host-side `child.pid`. For docker this is the `docker exec`
   handle, valid only while the original gateway lives; **never** used for
   liveness or kill after a restart.
-- **`processPid`** — the signalable wrapper pid in its own namespace. On host it
-  equals `child.pid`; for docker it is the in-container wrapper pid, read back
-  from the pidfile after spawn (via `docker exec cat <containerPid>`). Liveness
-  checks and kills always target `processPid`. It is `0` until resolved (docker
-  resolves it synchronously at create time with a bounded retry, and again on
-  restore if needed).
+- **`processPid`** — the signalable wrapper pid in its own namespace. For docker
+  it is the in-container wrapper pid, read back from the pidfile after spawn (via
+  `docker exec cat <containerPid>`). On host the spawn-time value is `child.pid`
+  (the top-level wrapper pid), but **on restore the host path re-reads the
+  pidfile and adopts the pid the wrapper published** — see below. Liveness checks
+  and kills always target `processPid`. It is `0` until resolved (docker resolves
+  it synchronously at create time with a bounded retry, and again on restore if
+  needed).
+
+**Host `processPid` reconciliation (Windows + Git Bash).** On Windows the
+spawn-time `child.pid` is the OS pid of the top-level `bash.exe`, which can
+*differ* from the Windows pid the wrapper publishes via `/proc/$$/winpid` (the
+wrapper resolves its own winpid from inside MSYS). So `restoreSession` reconciles
+the host `processPid` the same way the docker path does: for a non-container
+record it re-reads the nonce-checked pidfile **before** the liveness check, and
+if the pidfile pid is valid, its nonce matches the record, and it differs from
+the persisted `processPid`, it adopts the pidfile pid (and persists it). This
+runs before `isHostPidAlive` / `taskkill` so both target the correct signalable
+pid. On Linux/macOS the pidfile pid equals `child.pid`, so the reconciliation is
+a no-op. The nonce pid-reuse guard is unchanged — a *mismatched* nonce is never
+adopted (it still resolves to unrecoverable/killed) and no pid is ever
+fabricated.
 
 ## Restore reconciliation — the three cases
 
@@ -173,6 +201,29 @@ file and the persisted `processPid` is alive, the gateway re-reads the pidfile
 and compares its per-spawn `nonce` against the record. Match → genuinely our
 process → re-attach. Missing/mismatched nonce → the live pid is foreign
 (reused) → unrecoverable. This is why every spawn mechanism writes a nonce.
+
+### Dev restart harness must not tree-kill (Windows)
+
+Re-attach only works if the detached bg children **outlive the gateway** across
+a restart. The dev restart harness (`src/server/harness.ts`) used to force-kill
+the gateway on Windows with `taskkill /pid <pid> /T /F`. The `/T` walks the
+gateway's child-process tree by parent→child pid linkage and kills *every*
+descendant — including the detached `bash.exe` wrappers running `bash_bg`
+commands. On Windows `detached: true` only creates a new process *group*; it does
+**not** sever the parent-pid linkage, so `/T` still found and euthanized those
+wrappers, and `/F` denied them the chance to flush their `.status`. The next
+boot then found a dead `processPid` and no status snapshot, so restore correctly
+classified the record `unrecoverable` — the persistence layer reporting the
+truth while the harness quietly killed the children it was meant to let survive.
+
+The fix lives in `src/server/harness-kill.ts`: `windowsGatewayKillArgs(pid)`
+returns `taskkill /pid <pid> /F` — **no `/T`**. Force-killing only the gateway
+process still reliably frees the port, while the detached + unref'd wrappers
+survive, keep writing their spools while the gateway is down, and write
+`.status` on natural exit — so restore re-attaches a still-running process or
+reads the real exit code of one that finished during downtime. This was a
+harness-local defect: a normal (non-harness) gateway shutdown already let bg
+children survive, because it does not tree-kill.
 
 ## Kill vs dismiss
 

@@ -265,8 +265,12 @@ Immediately after `spawnFn` returns, and **before the process is reported as cre
 resolves the signalable wrapper pid (`processPid`) and sync-flushes it to disk — this is
 recovery-critical because restore, liveness, and post-restart kill all target `processPid`:
 
-- **Host:** read the `<pid>` pidfile written by the wrapper (`$$`/pid-write), or fall back to
-  `child.pid`; for host these coincide. `hostPid = child.pid`.
+- **Host:** `hostPid = child.pid` (the top-level wrapper pid). The wrapper also writes a pidfile
+  carrying a **Windows-usable pid** (`/proc/$$/winpid` on MSYS, `$$` elsewhere — §4.1) plus the
+  nonce. On Linux/macOS the pidfile pid equals `child.pid`; on Windows + Git Bash it can differ
+  (`child.pid` is the OS pid of `bash.exe`, the pidfile carries the MSYS-resolved winpid). The host
+  `processPid` is reconciled **from this pidfile on restore** (§7.1), analogous to the docker path,
+  so liveness/kill target the signalable pid.
 - **Docker:** the in-container wrapper pid is **not** `child.pid` (that is the host-side `docker
   exec` handle, valid only while the original gateway lives). Read it via
   `docker exec <cid> cat <containerPid>`, **retrying briefly** (the wrapper writes the pidfile
@@ -295,7 +299,7 @@ only exits the subshell and the wrapper still captures the real `code=$?`; (4) a
 to the spools; (5) stops the trimmer and writes the real exit code to the status file:
 
 ```sh
-printf '%s\n%s\n' "$$" "<nonce>" > "<pid>"
+printf '%s\n%s\n' "$(cat /proc/$$/winpid 2>/dev/null || echo $$)" "<nonce>" > "<pid>"
 # wrapper-owned trimmer: bounds each spool to <KEEP> bytes, restart-independent
 ( while kill -0 "$$" 2>/dev/null; do
     for f in "<outSpool>" "<errSpool>"; do
@@ -312,6 +316,16 @@ kill "$trimmer" 2>/dev/null
 printf '%s\n' "$code" > "<status>"
 exit "$code"
 ```
+
+**Why the pidfile publishes `/proc/$$/winpid`, not bare `$$`.** On MSYS / Git Bash `$$` is the
+**MSYS-internal** pid, which is *not* a Windows pid the gateway can signal (empirically `$$`=1105 vs
+`/proc/$$/winpid`=17172 for the same shell). `/proc/$$/winpid` yields the real Windows pid. Off
+Windows `/proc/$$/winpid` does not exist, so `cat` fails and the expression falls back to `$$` —
+which already *is* the real pid there, so the pidfile content is **byte-for-byte identical**
+off-Windows (no behaviour change). The host restore path reconciles `processPid` from this pidfile
+(§4.0/§7.1) so `isHostPidAlive` / `taskkill` target the signalable pid. The trimmer loop keeps
+using `$$` for `kill -0 "$$"` — that is a same-shell self-liveness check inside MSYS, where the
+MSYS pid is correct. (The kill-trigger `$?`/subshell semantics are unchanged.)
 
 (The manager builds this single-string form by joining the lines with `;`/`&` as needed; it is
 shown multi-line for readability. `<KEEP>` = `MAX_LOG_BYTES` = 512KB is the retained tail; the
@@ -391,7 +405,7 @@ append to both spools, and the real `code=$?` written to the status file — and
 
 ```sh
 mkdir -p "<dir>"
-printf '%s\n%s\n' "$$" "<nonce>" > "<pid>"
+printf '%s\n%s\n' "$(cat /proc/$$/winpid 2>/dev/null || echo $$)" "<nonce>" > "<pid>"
 ( while kill -0 "$$" 2>/dev/null; do
     for f in "<outSpool>" "<errSpool>"; do
       if [ -f "$f" ] && [ "$(wc -c < "$f" 2>/dev/null || echo 0)" -gt <MAX_LOG_BYTES> ]; then
@@ -408,7 +422,11 @@ printf '%s\n' "$code" > "<status>"
 exit "$code"
 ```
 
-(joined into the single `-c` string by the builder; shown multi-line for readability. `<KEEP>` =
+(joined into the single `-c` string by the builder; shown multi-line for readability. Both the host
+and docker wrappers share one builder (`buildPosixWrapper`), so the pidfile line is identical —
+`$(cat /proc/$$/winpid 2>/dev/null || echo $$)`. Inside a Linux container `/proc/$$/winpid` does not
+exist, so it falls back to the in-container `$$` (the correct in-container wrapper pid), exactly as
+before the winpid change; the winpid path only ever fires on a Windows host. `<KEEP>` =
 `MAX_LOG_BYTES` = 512KB. For docker `<outSpool>`/`<errSpool>` = `containerOutSpool`/
 `containerErrSpool`, `<status>` = `containerStatus`, `<pid>` = `containerPid` — all container-internal
 under `/tmp/bobbit-bg/...`. The gateway tails these via `docker exec` and **mirrors** observed bytes
@@ -472,8 +490,11 @@ export interface PersistedBgProcess {
   /** host-side child.pid; for docker this is the `docker exec` handle pid — valid ONLY while the
    *  original gateway lives, NOT usable after restart. Liveness/kill must NOT use this. */
   hostPid: number;
-  /** the signalable wrapper pid in its OWN namespace — host: equals child.pid; docker: the
-   *  in-container wrapper pid read from the pidfile post-spawn. Liveness/kill use THIS. 0 = pending. */
+  /** the signalable wrapper pid in its OWN namespace. host: spawn-time child.pid, but RECONCILED
+   *  from the (nonce-checked) pidfile on restore — on Windows+Git Bash the wrapper publishes a
+   *  Windows-usable winpid (/proc/$$/winpid) that can differ from child.pid; on Linux/macOS they
+   *  coincide. docker: the in-container wrapper pid read from the pidfile post-spawn. Liveness/kill
+   *  use THIS. 0 = pending. */
   processPid: number;
   cwd: string;
   containerId?: string;       // present for sandboxed/docker spawns
@@ -753,8 +774,15 @@ if status == "running":
 
 ### 7.1 Liveness checks
 
-- **Host:** `process.kill(processPid, 0)` — throws ESRCH if gone, returns if alive (host
-  `processPid` equals `child.pid`). **Pid-reuse guard (nonce):** if the status file exists, the
+- **Host:** **first reconcile `processPid` from the pidfile** (analogous to the docker path): for a
+  non-container record, re-read the nonce-checked pidfile **before** the liveness check; if the
+  pidfile pid is valid, its nonce matches the record, and it differs from the persisted
+  `processPid`, adopt the pidfile pid and persist it. This matters on Windows + Git Bash where the
+  spawn-time `child.pid` (the OS pid of `bash.exe`) can differ from the Windows-usable pid the
+  wrapper published via `/proc/$$/winpid` (§4.1); on Linux/macOS the two coincide so it is a no-op.
+  A **mismatched** nonce is never adopted here — that is true pid reuse, handled by the post-liveness
+  guard below — and no pid is ever fabricated. Then `process.kill(processPid, 0)` — throws ESRCH if
+  gone, returns if alive. **Pid-reuse guard (nonce):** if the status file exists, the
   process already finished → treat as COMPLETED regardless of pid liveness (a reused pid can't
   retroactively un-write the status file). If the status file is absent and `kill(processPid,0)`
   succeeds, **re-read the pidfile and compare its nonce** against the persisted `nonce`:
@@ -992,6 +1020,7 @@ tailers poll detect delta -> read spool bytes -> appendLog() [combined interleav
 boot: restoreSessions() loops sessions; per session containerId re-resolved
   -> bgMgr.restoreSession(sessionId):            # store = storeProvider(sessionId) (this session's store)
   for each PersistedBgProcess of that session:                       # liveness/kill target processPid (NOT hostPid)
+    HOST records: reconcile processPid from the (nonce-checked) pidfile BEFORE liveness  # Windows winpid != child.pid
     running + alive(processPid + nonce match) -> rehydrate; read bounded tail of BOTH spools -> combined projection;
                                       copytruncate spools; tailers.start(newOffsets); statusWatcher.start()  (terminalReason stays null)
     running + completed            -> read <status> exitCode; bounded spool tails -> combined projection;
@@ -1092,6 +1121,35 @@ Dismiss: delete HOST <bgId>.log + <bgId>.status; best-effort docker exec rm -f t
   **`terminalReason="killed"`** — we *know* it was killed, which is not fabrication. This is
   distinct from the restart-loss case (`terminalReason="unrecoverable"`). If the wrapper *did* get
   to write the status file, `terminalReason="normal"` with the real code instead.
+- **Dev restart harness tree-kill (Windows) — the primary restart-survival bug.** The dev restart
+  harness (`src/server/harness.ts`) force-kills the gateway on Windows. It used to use
+  `taskkill /pid <pid> /T /F`; the `/T` walks the gateway's child-process tree by parent→child pid
+  linkage and kills **every** descendant — including the detached `bash.exe` wrappers running
+  `bash_bg` commands. On Windows `detached: true` only creates a new process *group*; it does **not**
+  sever the parent-pid linkage, so `/T` still found and euthanized those wrappers, and `/F` denied
+  them the chance to flush their `.status`. The next boot then found a dead `processPid` and no
+  status snapshot, so restore **correctly** classified the record `unrecoverable` — the persistence
+  layer reporting the truth while the harness silently killed the very children it was meant to let
+  survive. **Fix:** `src/server/harness-kill.ts` exports `windowsGatewayKillArgs(pid)` →
+  `taskkill /pid <pid> /F` (**no `/T`**); `harness.ts::killServer()` uses it. Force-killing only the
+  gateway pid still reliably frees the port, while the detached + unref'd wrappers survive, keep
+  writing their spools while the gateway is down, and write `.status` on natural exit — so restore
+  re-attaches a still-running process or reads the real exit code of one that finished during
+  downtime. This was a **harness-local** defect: a normal (non-harness) gateway shutdown does not
+  tree-kill, so bg children already survived it. `harness-kill.ts` is a pure, side-effect-free module
+  (importing it launches nothing) so the argv construction is unit-testable in isolation.
+- **Host `processPid` is the wrapper's Windows pid, not `child.pid` (Windows + Git Bash).** On MSYS /
+  Git Bash `$$` is the MSYS-internal pid, which is **not** a Windows pid the gateway can signal
+  (empirically `$$`=1105 vs `/proc/$$/winpid`=17172 for the same shell). So the wrapper pidfile line
+  publishes `$(cat /proc/$$/winpid 2>/dev/null || echo $$)` — the real Windows pid — with a `$$`
+  fallback off Windows (where `$$` already *is* the real pid, making the pidfile byte-for-byte
+  identical off-Windows). The spawn-time `child.pid` persisted as `processPid` is the OS pid of the
+  top-level `bash.exe`, which can differ from this winpid. So on restore the host path **reconciles
+  `processPid` from the nonce-checked pidfile before the liveness check** (§7.1), the same way the
+  docker path reconciles the in-container pid — so `isHostPidAlive` / `taskkill` target the
+  signalable pid. On Linux/macOS the pidfile pid equals `child.pid`, so the reconciliation is a
+  no-op. A mismatched nonce is never adopted (it stays true pid-reuse) and no pid is ever
+  fabricated.
 - **Docker container gone.** The container-internal `/tmp` source files vanish with the container,
   **but the HOST projection + HOST status snapshot survive**. The retained host output is always
   shown; if a real exit code was already mirrored to the host snapshot → exited with that code; else
@@ -1160,6 +1218,14 @@ field, no standalone `unrecoverable?`); add `bg_process_dismissed`.
 
 `src/ui/components/BgProcessPill.ts` — render by `terminalReason` (`normal`→`exit N`,
 `killed`→"killed", `unrecoverable`→"exit status unknown"); dismiss for all terminal states.
+
+`src/server/harness-kill.ts` (NEW) — pure, side-effect-free helper `windowsGatewayKillArgs(pid):
+string[]` returning the Windows gateway-kill argv `taskkill /pid <pid> /F` (**no `/T`**), so the dev
+restart harness force-kills only the gateway pid and the detached `bash_bg` wrappers survive the
+restart (§11). Importing the module launches nothing, so it is unit-testable in isolation.
+
+`src/server/harness.ts` — `killServer()` builds its Windows kill command from
+`windowsGatewayKillArgs(child.pid)` instead of the inline `taskkill /pid <pid> /T /F`.
 
 ## 13. Test plan
 
@@ -1262,6 +1328,17 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   stdout/stderr and assert each spool is trimmed to the last `<KEEP>` (bounded ring, in-place,
   restart-independent); emit an `exit` with code 7 and assert the helper writes `7` to the status
   file and `processPid`+`nonce` to the pidfile. No real processes.
+- **Windows dev-harness restart survival (reproducing) — `tests/bg-process-windows-restart.test.ts`:**
+  pins the three fixable seams of the Windows restart bug, all with injected deps (fake `SpawnFn`,
+  noop tailers, isolated temp `BgProcessStore`, faked `BgEnv`) so **no real OS process** is touched.
+  (A) `src/server/harness-kill.ts` exports `windowsGatewayKillArgs(pid)` returning a `taskkill`
+  argv that targets the gateway pid with `/F` **and omits `/T`** (no tree-kill). (B) `buildHostWrapper`
+  emits a pidfile line publishing a Windows-usable winpid via `/proc/$$/winpid`, not bare `$$`.
+  (C) `restoreSession` reconciles the host `processPid` from the nonce-checked pidfile: persist a
+  running HOST record with a stale `processPid`, write a pidfile with a different (Windows-usable)
+  pid + matching nonce, make liveness pass **only** for the pidfile pid, and assert restore adopts
+  and persists the pidfile pid and re-attaches (`running`, not `unrecoverable`). Every assertion
+  message carries the `WIN_BG_RESTART_BUG` marker for the reproducing-test gate.
 
 ### Browser E2E (required) — `tests/e2e/ui/bg-process-persistence.spec.ts`
 
@@ -1289,6 +1366,24 @@ unchanged). Docker re-attach — including the **copytruncate offset rebase afte
 in-container process whose spool the in-container trimmer copytruncated, then a gateway restart still
 resumes streaming via probe + `tail -c +1 -F` from the normalized offset) — is covered by
 `test:manual` (extend `sandbox-recovery-docker.spec.ts`).
+
+### Manual-integration (real gateway + real detached wrappers) — `tests/manual-integration/bg-process-restart-survival.spec.ts`
+
+This is the natural home for the **restart-survival acceptance** because it needs a real spawn + a
+real restart (the unit test stubs both). It drives a REAL gateway with REAL detached `bash_bg`
+wrappers across a restart and asserts the documented restore contract:
+
+1. A **still-running** ticker (`while ...; echo tick $i; sleep 1`) re-attaches and **keeps streaming**
+   after the restart — the record stays `running`, its log keeps growing past the pre-restart tick
+   count, and it is **not** resolved to `unrecoverable`.
+2. A **short-lived** process that **finishes during downtime** (`sleep 4; exit 7`, with the gateway
+   down for ~6s) comes back with its **real exit code** (`terminalReason="normal"`, `exitCode=7`).
+
+Crucially, the test restarts by killing **only the gateway pid** — on Windows via the same
+`windowsGatewayKillArgs` argv the production harness now uses (no `/T`), elsewhere a single SIGTERM
+to the gateway pid (not its process group). This mirrors the harness fix; using `taskkill /T` here
+would euthanize the detached wrappers and reproduce the bug. The suite is **gate-exempt** (not run
+by the implementation gate); run it via `npm run test:manual`.
 
 ### Commands
 

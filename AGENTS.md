@@ -9,8 +9,7 @@ npm run restart-server # Rebuild & restart after server changes
 npm run check          # Type-check server + web (no emit)
 npm run test:unit      # Unit phase — node:test logic + file:// browser fixtures, run concurrently (~90s)
 npm run test:e2e       # E2E phase — API (in-process) + browser (spawned gateway)
-npm run test:manual    # Manual integration — real agents/LLM + Docker (~5 min); ONLY gate-exempt path
-SCREENSHOTS=1 npm run test:manual  # + browser screenshots + HTML report
+npm run test:manual    # Manual integration — real agents/LLM + Docker (~5 min); ONLY gate-exempt path (SCREENSHOTS=1 adds screenshots + HTML report)
 ```
 
 UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Always `npm run check` before restarting. Sessions survive restarts via `.bobbit/state/sessions.json`.
@@ -23,7 +22,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 - **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. `bash_bg` processes persist + re-attach across restart via `bg-process-{manager,store,runner}.ts`; state under `<stateDir>/bg-processes/`. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md).
 - **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Tool descriptions are budget-pinned by `tests/tool-description-budget.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
-- **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; `config-cascade.ts` + `slash-skills.ts` are adapters. Built-in first-party packs live in `market-packs/`, shipped via `scripts/copy-builtin-packs.mjs` and resolved in place by `builtin-packs.ts`. See [docs/marketplace.md](docs/marketplace.md).
+- **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
 - **Tests**: `tests/` (unit), `tests/e2e/` (API), `tests/e2e/ui/` (browser), `tests/manual-integration/` (real agents + Docker).

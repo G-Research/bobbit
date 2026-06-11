@@ -162,7 +162,14 @@ function buildPosixWrapper(
 	const qOut = shQuote(o.outSpool);
 	const qErr = shQuote(o.errSpool);
 	if (o.mkdir) lines.push(`mkdir -p ${shQuote(path.posix.dirname(o.outSpool))}`);
-	lines.push(`printf '%s\\n%s\\n' "$$" ${shQuote(o.nonce)} > ${shQuote(o.pid)}`);
+	// Publish a WINDOWS-USABLE pid: on MSYS/Git Bash `$$` is the MSYS-internal pid
+	// (NOT a Windows pid the gateway can signal), while `/proc/$$/winpid` yields the
+	// real Windows pid. Off Windows (Linux/macOS) `/proc/$$/winpid` does not exist,
+	// so `cat` fails and we fall back to `$$` — which already IS the real pid there,
+	// so the pidfile content is byte-for-byte equivalent off-Windows. The host
+	// restore path reconciles processPid from this pidfile so liveness/kill target
+	// the signalable pid.
+	lines.push(`printf '%s\\n%s\\n' "$(cat /proc/$$/winpid 2>/dev/null || echo $$)" ${shQuote(o.nonce)} > ${shQuote(o.pid)}`);
 	// wrapper-owned trimmer: bounds each spool to KEEP_BYTES, restart-independent.
 	lines.push(
 		`( while kill -0 "$$" 2>/dev/null; do ` +
@@ -977,6 +984,22 @@ export class BgProcessManager {
 		if (bg.paths.inContainer && bg.containerId && bg.processPid <= 0) {
 			const pf = this.readPidFile(bg);
 			if (pf && pf.pid > 0 && pf.nonce === bg.nonce) {
+				bg.processPid = pf.pid;
+				this.store(sessionId)?.update(sessionId, bg.id, { processPid: pf.pid });
+			}
+		}
+
+		// HOST processPid reconciliation, analogous to the docker Fix-1b path above.
+		// The spawn-time child.pid persisted as processPid is the top-level wrapper
+		// PID; on Windows + Git Bash the wrapper publishes a Windows-usable winpid (via
+		// /proc/$$/winpid) that can differ from it. Re-read the (nonce-checked) pidfile
+		// and adopt its pid BEFORE the liveness check so isHostPidAlive / kill target
+		// the correct signalable PID. A MISMATCHED nonce is true pid-reuse — never adopt
+		// it here (the post-liveness guard handles that); never fabricate a pid. On
+		// Linux/macOS the pidfile pid equals child.pid, so this is a no-op there.
+		if (!bg.paths.inContainer) {
+			const pf = this.readPidFile(bg);
+			if (pf && pf.pid > 0 && pf.nonce === bg.nonce && pf.pid !== bg.processPid) {
 				bg.processPid = pf.pid;
 				this.store(sessionId)?.update(sessionId, bg.id, { processPid: pf.pid });
 			}
