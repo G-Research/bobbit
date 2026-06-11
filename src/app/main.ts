@@ -660,6 +660,9 @@ async function initApp() {
 					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
+					// Apply replaceBobbitWithText — default OFF (only explicit true opts in).
+					document.documentElement.dataset.replaceBobbitWithText =
+						prefs.replaceBobbitWithText === true ? "true" : "false";
 					// Apply subgoalsEnabled — default OFF (only explicit true opts in).
 					document.documentElement.dataset.subgoalsEnabled =
 						prefs.subgoalsEnabled === true ? "true" : "false";
@@ -1008,6 +1011,9 @@ async function initApp() {
 			// Apply playAgentFinishSound — default ON when unset.
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";
+			// Apply replaceBobbitWithText — default OFF (only explicit true opts in).
+			document.documentElement.dataset.replaceBobbitWithText =
+				prefs.replaceBobbitWithText === true ? "true" : "false";
 			// Apply subgoalsEnabled — default OFF (only explicit true opts in).
 			document.documentElement.dataset.subgoalsEnabled =
 				prefs.subgoalsEnabled === true ? "true" : "false";
