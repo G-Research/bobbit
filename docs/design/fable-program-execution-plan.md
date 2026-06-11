@@ -7,16 +7,19 @@ it creates goals from §3, in lane order, and ticks §4 as PRs merge.
 The workstreams (each doc owns its *content* — tasks, contracts, acceptance; this doc owns
 *ordering, slicing, and the checklist*):
 
-| Workstream | Doc | Granularity there |
+| Workstream | Design (WHAT/WHY) | Execution authority (HOW) |
 |---|---|---|
-| **EP** extension platform | [extension-platform.md](extension-platform.md) (design) + [extension-platform-implementation-plan.md](extension-platform-implementation-plan.md) (execution authority) | G1.1–G9, owned files, RED→GREEN tests |
-| **CE** token/cost efficiency | [token-cost-efficiency.md](token-cost-efficiency.md) §6 | CE-G0.1–G7.2, lanes, BENCH gates |
-| **CS** comms-stack reliability | [comms-stack/04-current-state-and-backlog.md](comms-stack/04-current-state-and-backlog.md) §6–§7 | CS-R/H/D/P/T waves + merge map |
-| **SN** sidebar & goal-nesting | [sidebar-goal-nesting-audit.md](sidebar-goal-nesting-audit.md) §4 | T1–T9, files/diagnosis/fix/acceptance |
-| **PB** client perf/battery | [client-performance-battery.md](client-performance-battery.md) + Appendix A | P0–P3, FX1–FX9, owned files |
-| **MC** Mission Control | [mission-control.md](mission-control.md) + Appendix A | P0–P5, contracts, owned files |
-| **AI** autoimprovement | [autoimprovement.md](autoimprovement.md) + Appendix A | P1–P6, contracts, owned files |
-| **GA** gap-analysis easy wins | [harness-gap-analysis.md](harness-gap-analysis.md) §5 | R2–R6, R9 (R1/R7/R8 alias PB/MC/AI) |
+| **EP** extension platform | [extension-platform.md](extension-platform.md) | [extension-platform-implementation-plan.md](extension-platform-implementation-plan.md) (G1.1–G9) |
+| **CE** token/cost efficiency | [token-cost-efficiency.md](token-cost-efficiency.md) §1–§5 | same doc, §6 (CE-G0.1–G7.2, BENCH gates) |
+| **CS** comms-stack reliability | [comms-stack/01–03](comms-stack/01-understanding.md) | [comms-stack/04-current-state-and-backlog.md](comms-stack/04-current-state-and-backlog.md) §6–§7 (waves + merge map) |
+| **SN** sidebar & goal-nesting | [sidebar-goal-nesting-audit.md](sidebar-goal-nesting-audit.md) §1–§3 | same doc, §4 (T1–T9) |
+| **PB** client perf/battery | [client-performance-battery.md](client-performance-battery.md) | [client-performance-battery-implementation-plan.md](client-performance-battery-implementation-plan.md) |
+| **MC** Mission Control | [mission-control.md](mission-control.md) | [mission-control-implementation-plan.md](mission-control-implementation-plan.md) |
+| **AI** autoimprovement | [autoimprovement.md](autoimprovement.md) | [autoimprovement-implementation-plan.md](autoimprovement-implementation-plan.md) |
+| **GA** gap-analysis easy wins | [harness-gap-analysis.md](harness-gap-analysis.md) | [gap-easy-wins-implementation-plan.md](gap-easy-wins-implementation-plan.md) |
+
+**An implementer agent receives exactly one goal ID and reads: the execution-authority doc's
+goal section → the contracts it cites → §1 below. Nothing else is required.**
 
 ---
 
@@ -83,6 +86,55 @@ graph TD
 **Day-1 starter set** (parallel, no collisions): AGENTS.md trim (§5) · CS-R1 · SN-T1 ·
 PB-P0 · CE-G0.1 · EP G1.1 · GA-R2 · GA-R3.
 
+## §2.1 THE ORDER — waves (the operational answer to "what do we work on now?")
+
+The §2 graph is the truth about *dependencies*; this section is the truth about *sequence*.
+A wave starts only when its blocking entries from the previous wave are merged (non-blocking
+stragglers from an earlier wave may continue in parallel). Within a wave, everything is
+parallel-safe **provided the §1.4 seam table is respected**.
+
+```mermaid
+flowchart TD
+    W0["WAVE 0 — prereq (hours)
+    AGENTS.md trim → suite green"]
+    W1["WAVE 1 — foundations, all parallel
+    CS-R1 (outage fix) · SN-T1 (pin tree builders)
+    PB-P0 (perf baseline) · CE-G0.1 (cost ledger)
+    EP G1.1 (manifest v2) · GA-R2 (triggers) · GA-R3 (standing orders)"]
+    W2["WAVE 2 — hygiene + scope
+    CS: H1‖H2 → R2 → R5‖R6 (its §7 order)
+    SN: T2 → T3, T4 · PB: P1a → P1b
+    CE: G0.2, G0.3, G1.0 · EP: G1.2 → G1.3
+    MC: P0 → P1 · GA: R9, R6 (anytime)"]
+    W3["WAVE 3 — spines
+    CS: R3 → R7 → R4 → R8‖R9 · SN: T5 (the big one), T8, T9
+    PB: P2a (after SN-T2/T3) → P2b → P2d
+    CE: post-G1.0 lanes (G2, G7; BENCH-gated G4/G5 wait for G0.3)
+    EP: G1.4 → G1.5 → G1.6 · MC: P2a → P2b, P3 · AI: P1"]
+    W4["WAVE 4 — features on the spines
+    SN: T6, T7 · PB: P2c (after SN-T5) → P3
+    CS: waves 2–4 (D*, P*, T*) · EP: G2 → G3
+    MC: P4a → P4b · AI: P2a → P2b · GA: R4, R5 (R5 prefers EP G1.6)"]
+    W5["WAVE 5 — the loop closes
+    AI: P3a → P3b → P4 → P5 → P6 · MC: P5
+    EP: G4…G9 · CE: remaining BENCH-gated goals"]
+    W0 --> W1 --> W2 --> W3 --> W4 --> W5
+```
+
+Milestones the waves deliver (what the user can feel):
+
+| After | The product visibly gains |
+|---|---|
+| Wave 1 | green suite, cost + perf both measurable, staff can fire one-shot/`gate_failed` triggers |
+| Wave 2 | battery: idle tab stops animating; sidebar races hardened; Mission Control entry exists |
+| Wave 3 | `bobbit` meta-tool live (chat can run everything); flight recorder visible; one nesting render path |
+| Wave 4 | system-staff crew + dashboard; human-in-the-loop self-improvement proposing skills |
+| Wave 5 | dreaming, calibrated autonomy with revert/demotion, briefing + onboarding; EP ecosystem complete |
+
+**Rule of thumb for the orchestrator:** at any moment, prefer (1) the lowest-numbered
+unfinished wave, (2) within it, the entry that unblocks the most §2 edges, (3) never two
+in-flight goals on the same §1.4 seam.
+
 ## §3 Lanes and PR slicing
 
 Effort: S ≤ 1 day · M ≤ 3 days · L ≈ a week. EP, CE, and CS are **not re-sliced here** —
@@ -95,7 +147,7 @@ workstreams:
 T1 (M, no deps) → T2 (M) → T3 (S) → T4 (M) → T5 (L, after T1+T4) → T6 (M) → T7 (S) →
 T8 (S, independent) → T9 (S, independent). T2/T3/T5/T7 gate PB-P2 (§1.4).
 
-### Lane PB — perf/battery (contracts in its Appendix A)
+### Lane PB — perf/battery (execute from [client-performance-battery-implementation-plan.md](client-performance-battery-implementation-plan.md))
 
 | PR | Scope | Effort | Mergeable because |
 |---|---|---|---|
@@ -108,7 +160,7 @@ T8 (S, independent) → T9 (S, independent). T2/T3/T5/T7 gate PB-P2 (§1.4).
 | PB-P2d | FX8 timer audit + convicted-loop fixes | M | per-loop independent |
 | PB-P3 | battery-saver mode + flag-soak removal + after-table | M | additive setting |
 
-### Lane MC→AI — Mission Control then autoimprovement (contracts in their Appendices A)
+### Lane MC→AI — Mission Control then autoimprovement (execute from [mission-control-implementation-plan.md](mission-control-implementation-plan.md), [autoimprovement-implementation-plan.md](autoimprovement-implementation-plan.md), [gap-easy-wins-implementation-plan.md](gap-easy-wins-implementation-plan.md))
 
 | PR | Scope | Effort | Mergeable because |
 |---|---|---|---|

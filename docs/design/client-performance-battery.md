@@ -1,8 +1,11 @@
 # Client performance & battery — analysis and implementation plan
 
-Status: proposal / implementation blueprint. Each phase in §6 is written to convert 1:1 into a
-mission goal with acceptance criteria, and each step is explicit enough to execute without
-re-deriving the analysis.
+Status: design accepted, not started. This is the WHAT/WHY + contracts (Appendix A).
+
+> **Execution authority:** implement from
+> [client-performance-battery-implementation-plan.md](client-performance-battery-implementation-plan.md)
+> (per-goal owned files, symbol anchors, RED→GREEN tests, measurement discipline).
+> Sequencing: [fable-program-execution-plan.md](fable-program-execution-plan.md).
 
 **The symptom this answers:** Bobbit visibly drains laptop battery — noticeably worse than
 leaving a typical web app open. The goal: an *idle* Bobbit tab should cost ≈0% CPU with zero

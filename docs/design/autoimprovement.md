@@ -1,8 +1,11 @@
 # Autoimprovement — recursive self-improvement with earned autonomy
 
-Status: proposal / implementation blueprint. Each phase in §7 converts 1:1 into a mission
-goal with acceptance criteria; steps name exact files and reuse points so they can be
-executed without re-deriving this analysis.
+Status: design accepted, not started. This is the WHAT/WHY + contracts (Appendix A).
+
+> **Execution authority:** implement from
+> [autoimprovement-implementation-plan.md](autoimprovement-implementation-plan.md)
+> (per-goal owned files, symbol anchors, RED→GREEN tests, acceptance). Sequencing:
+> [fable-program-execution-plan.md](fable-program-execution-plan.md).
 
 **What this is:** Bobbit learning from its own usage — drafting new skills after notable
 sessions, patching skills that misfired, proposing AGENTS.md/prompt/config improvements,

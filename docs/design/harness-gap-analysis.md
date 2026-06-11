@@ -1,8 +1,13 @@
 # Harness gap analysis — OpenClaw, Hermes, Claude Code vs Bobbit
 
-Status: research + prioritized roadmap. Feature/UX gaps only — **cost/token efficiency is
-explicitly out of scope** here because [token-cost-efficiency.md](token-cost-efficiency.md)
-§4 already covers the Claude Code / Hermes comparison on that axis.
+Status: research complete; roadmap not started. Feature/UX gaps only — **cost/token
+efficiency is explicitly out of scope** here because
+[token-cost-efficiency.md](token-cost-efficiency.md) §4 already covers the Claude Code /
+Hermes comparison on that axis.
+
+> **Execution authority** for the §5 quick wins (R2–R6, R9):
+> [gap-easy-wins-implementation-plan.md](gap-easy-wins-implementation-plan.md).
+> Sequencing: [fable-program-execution-plan.md](fable-program-execution-plan.md).
 
 **The question this answers:** what do the strongest peer harnesses have that Bobbit lacks,
 which of those Bobbit actually wants given its direction (the best harness out there —

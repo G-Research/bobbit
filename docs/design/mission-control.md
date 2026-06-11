@@ -1,8 +1,11 @@
 # Mission Control — the global scope, global staff, and the flight recorder
 
-Status: proposal / implementation blueprint. Each phase in §8 converts 1:1 into a mission
-goal with acceptance criteria; steps name exact files, functions, and reuse points so they
-can be executed without re-deriving this analysis.
+Status: design accepted, not started. This is the WHAT/WHY + contracts (Appendix A).
+
+> **Execution authority:** implement from
+> [mission-control-implementation-plan.md](mission-control-implementation-plan.md)
+> (per-goal owned files, symbol anchors, RED→GREEN tests, acceptance). Sequencing:
+> [fable-program-execution-plan.md](fable-program-execution-plan.md).
 
 **What this is:** a first-class **global scope** at the top of the sidebar — the main entry
 point for using Bobbit. Mission Control sessions can set up new projects, talk to any agent
