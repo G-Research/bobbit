@@ -82,9 +82,45 @@ graph TD
     AI1 --> AI2[AI-P2a/b Improver] --> AI3[AI-P3a/b curator+dreaming]
     MC4 --> AI2; MC3 --> AI5
     AI2 --> AI4[AI-P4 shadow] --> AI5[AI-P5 autonomy] --> AI6[AI-P6 measurement]
+    CI12[CI-1 ast tools, CI-2 diagnostics] --> CI3[CI-3 LSP supervisor] --> CI456[CI-4 lang packs, CI-5 repo map, CI-6 services chip]
+    CI456 --> CI7[CI-7 capability swap + BENCH]
+    EP -.G8 capabilities.- CI7
     GA6[GA-R6 importers] --> EP
     GA5[GA-R5 user profile] -.coordinate.- EP
 ```
+
+**The same graph in plain English.** Read "·" as "can run at the same time".
+
+- **Six lanes need nothing from anyone and can all start on day one, in parallel:**
+  the comms-stack reliability backlog (starting with making the gateway's message-queue
+  drain un-crashable, then respawn fencing, steer delivery, and the rest of its own
+  ordered waves); the sidebar-nesting cleanup (pin the pure tree builders with tests
+  first — that's the safety net for everything after); the cost-efficiency lane (per-turn
+  usage ledger first, because every later claim is measured against it); the extension
+  platform (manifest schema 2 → lifecycle hub → prompt-section providers, in order);
+  the client-performance lane (measurement harness first, then animation gating); and
+  the two small gap wins (one-shot/`gate_failed` triggers, standing-orders docs).
+- **Sidebar before performance-on-the-sidebar.** The performance lane's session-poll
+  demotion and render work wait for the sidebar's concurrency hardening
+  (refresh-dedup, archived freshness), and the streaming render throttle explicitly
+  rebases on the big nesting render unification. Battery saver comes last, after all of
+  it soaks behind a flag.
+- **Mission Control is a strict chain:** legitimize the global scope → Mission Control
+  sessions + sidebar entry → then two parallel branches (the `bobbit` meta-tool; the
+  flight recorder) → which rejoin for the mission-control pack + system-staff crew (this
+  also wants the triggers win, so staff can be woken by events) → briefing, onboarding,
+  and budgets close it out.
+- **Autoimprovement rides on Mission Control:** the proposal substrate needs the global
+  scope and triggers; the Improver needs the meta-tool + crew; then curator/dreaming,
+  shadow calibration, graduated autonomy (which also wants the flight recorder for its
+  evidence trail), and the measurement loop — strictly in that order.
+- **Code intelligence is its own lane:** ast-grep tools and structured diagnostics first
+  (independent of everything); then the LSP supervisor; then language packs, the repo
+  map, and the services chip in parallel; the final capability-swap goal waits on the
+  extension platform's capability registry (a local shim covers the gap).
+- **Two soft couplings:** the Hermes/OpenClaw skill importers feed the extension
+  platform's pack format, and the user-profile memory win should coordinate with (not
+  block on) the platform's session-memory pack.
 
 **Day-1 starter set** (parallel, no collisions): AGENTS.md trim (§5) · CS-R1 · SN-T1 ·
 PB-P0 · CE-G0.1 · EP G1.1 · GA-R2 · GA-R3.
@@ -126,6 +162,53 @@ flowchart TD
     CI: CI-4 (language packs) · CI-6 (services chip + graphify viz) · CI-7 (capability swap + BENCH)"]
     W0 --> W1 --> W2 --> W3 --> W4 --> W5
 ```
+
+**The same waves in plain English** — what each wave actually does, and what runs in
+parallel inside it. Everything listed within one wave can be in flight simultaneously
+(different people/sessions) as long as no two touch the same §1.4 seam.
+
+- **Wave 0 — hours, not days.** Trim AGENTS.md and get the test suite green. Nothing else
+  starts until the suite is trustworthy, because every later goal proves itself with tests.
+- **Wave 1 — foundations, seven things at once.** Fix the gateway crash (comms); pin the
+  sidebar's pure tree builders with real-source tests; stand up the performance
+  measurement harness; stand up the per-turn cost ledger; land manifest schema 2 for
+  packs; ship the one-shot/`gate_failed` triggers; write the standing-orders convention.
+  None of these share files; all seven can merge in any order.
+- **Wave 2 — hygiene and scope.** Comms does its harness-fidelity work and then respawn
+  fencing + retry/compaction gating; sidebar hardens `refreshSessions` concurrency, then
+  archived-freshness and the goal-graph module; performance gates ambient animations and
+  rewrites paint properties; cost-efficiency adds the cost lens UI, the benchmark harness
+  (the BENCH gate everything risky waits for), and the SDK upgrade; the extension
+  platform builds the lifecycle hub and the sessionSetup → "Dynamic Context" section;
+  Mission Control legitimizes the global scope and gets its sidebar entry; `bobbit
+  doctor` and the skill importers can land any time here.
+- **Wave 3 — the spines (the heaviest wave).** Comms lands steer exactly-once delivery,
+  idle-drain, and ledger durability; sidebar does the big one — unifying nesting into a
+  single render path — plus the role-picker and cleanup bundles; performance demotes
+  session polling and scopes the verification tick (now safe, because the sidebar
+  concurrency work merged in wave 2); cost-efficiency starts its post-upgrade lanes
+  (tool-output budgets, discovery guidance); the extension platform wires per-turn hooks,
+  market UI, and the session-memory pack; Mission Control ships the `bobbit` meta-tool
+  and the flight recorder; autoimprovement lays its proposal substrate; **code
+  intelligence starts here** with the ast-grep tools and structured diagnostics — both
+  independent, both immediately useful to every coding agent.
+- **Wave 4 — features on the spines.** Sidebar finishes mobile reuse and keyed lists;
+  performance lands the streaming render throttle (rebased on the wave-3 render
+  unification) and then battery saver; comms clears its client-side duplicate/loss
+  backlog; the extension platform ships the Hindsight memory pack, then managed runtimes;
+  Mission Control assembles the pack + system-staff crew; autoimprovement turns on the
+  human-in-the-loop Improver; the "while you were away" summary and user-profile memory
+  land; code intelligence builds the LSP supervisor (TypeScript + Python first), then
+  the ranked repo map on top of the wave-3 ast tooling.
+- **Wave 5 — the loop closes.** Autoimprovement runs curator → dreaming → shadow
+  calibration → graduated autonomy → the measurement loop, strictly in that order;
+  Mission Control finishes briefing/onboarding/budgets; the extension platform completes
+  its ecosystem (memory depth, MCP-as-pack, hooks, the Claude-plugin adapter,
+  capabilities + selectors, workflow templates); cost-efficiency executes its remaining
+  BENCH-gated diets (the team-lead role rewrite chief among them); code intelligence
+  fans out language packs (Go, Rust, C#, F#, JVM, clangd), ships the services chip +
+  graphify visualization pack, and swaps its local capability shim for the platform
+  registry, validating the whole workstream on BENCH.
 
 Milestones the waves deliver (what the user can feel):
 
