@@ -37,6 +37,7 @@ class FakeView implements OrchestrationSessionView {
 	prompts: Array<{ sessionId: string; text: string; opts?: any }> = [];
 	terminated: string[] = [];
 	aborted: string[] = [];
+	markedTerminal: string[] = [];
 	private seq = 0;
 
 	owner(id: string, opts?: Partial<FakeSession> & Partial<PersistedSessionLike>): void {
@@ -79,16 +80,27 @@ class FakeView implements OrchestrationSessionView {
 	getPersistedSession(id: string): PersistedSessionLike | undefined { return this.persisted.get(id); }
 	async terminateSession(id: string): Promise<boolean> { this.terminated.push(id); return true; }
 	async forceAbort(id: string): Promise<void> { this.aborted.push(id); }
+	markChildTerminal(id: string): void {
+		this.markedTerminal.push(id);
+		const ps = this.persisted.get(id);
+		if (ps) this.persisted.set(id, { ...ps, childTerminal: true, terminalAt: Date.now() });
+	}
 	// A FakeSession is live unless explicitly marked `live:false` (dormant, H1).
 	isSessionLive(id: string): boolean { return (this.live.get(id)?.live ?? true) !== false; }
 	getQueuedPromptCount(id: string): number { return this.live.get(id)?.queuedPromptCount ?? 0; }
 }
 
-function makeCore(view: FakeView, model?: string, resolveEffectiveTools?: (id: string) => string[] | undefined) {
+function makeCore(
+	view: FakeView,
+	model?: string,
+	resolveEffectiveTools?: (id: string) => string[] | undefined,
+	resolveRoleAllowedTools?: (roleName: string, projectId?: string) => string[] | undefined,
+) {
 	return new OrchestrationCore({
 		sessionManager: view,
 		resolveSessionModel: () => model,
 		resolveEffectiveTools,
+		resolveRoleAllowedTools,
 		audit: () => { /* silent */ },
 	});
 }
@@ -140,6 +152,39 @@ describe("OrchestrationCore.spawn — sandbox/credential inheritance (no escalat
 		const { opts } = view.createSessionCalls[0];
 		assert.equal(opts.sandboxed, undefined, "unsandboxed owner ⇒ child sandboxed flag stays falsy");
 		assert.equal(opts.projectId, "proj-B");
+	});
+});
+
+describe("OrchestrationCore.spawn — NON-SECRET toolEnv forwarding (Finding 2)", () => {
+	// The pr-walkthrough reviewer needs the launched-PR identity in its process env
+	// (BOBBIT_WALKTHROUGH_TARGET_*) so readonly_bash scopes `gh` to that PR. toolEnv
+	// is plain metadata: it threads to the child's env on BOTH lifecycle paths and
+	// must NOT touch the owner-inherited sandbox/project scope.
+	const toolEnv = {
+		BOBBIT_WALKTHROUGH_TARGET_PROVIDER: "github",
+		BOBBIT_WALKTHROUGH_TARGET_OWNER: "SuuBro",
+		BOBBIT_WALKTHROUGH_TARGET_REPO: "bobbit",
+		BOBBIT_WALKTHROUGH_TARGET_NUMBER: "42",
+	};
+
+	it("forwards toolEnv to the FULL-lifecycle createSession env (the pr-walkthrough path)", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { sandboxed: true, projectId: "proj-A", cwd: "/host/validated/owner-1" });
+		const core = makeCore(view, "anthropic/claude-x");
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", lifecycle: "full", toolEnv });
+		const { opts } = view.createSessionCalls[0];
+		assert.deepEqual(opts.env, toolEnv, "toolEnv must reach the child's createSession env");
+		// toolEnv never widens the owner-inherited sandbox/project scope.
+		assert.equal(opts.sandboxed, true);
+		assert.equal(opts.projectId, "proj-A");
+	});
+
+	it("forwards toolEnv to the BARE delegate env too", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, "anthropic/claude-x");
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", toolEnv });
+		assert.deepEqual(view.delegateCalls[0].opts.env, toolEnv);
 	});
 });
 
@@ -206,6 +251,154 @@ describe("OrchestrationCore.spawn — allowedTools subtraction (recursion guard)
 		const core = makeCore(view);
 		await core.spawn({ ownerSessionId: "owner-1", instructions: "x" });
 		assert.equal(view.delegateCalls[0].opts.allowedTools, undefined);
+	});
+});
+
+describe("OrchestrationCore.spawn — role-sourced child tools (Decision A.2, FAIL CLOSED)", () => {
+	it("grants a role-carrying spawn the ROLE's tools, never the owner's", async () => {
+		const view = new FakeView();
+		// Owner has broad tools; the role spawn must NOT inherit them.
+		view.owner("owner-1", { allowedTools: ["bash", "write", "edit", "read"] });
+		const roleTools = ["readonly_bash", "read_pr_walkthrough_bundle", "submit_pr_walkthrough_yaml"];
+		const core = makeCore(view, "anthropic/x", undefined, (r) => (r === "pr-reviewer" ? roleTools : undefined));
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "pr-reviewer", readOnly: true, lifecycle: "full" });
+		assert.equal(view.createSessionCalls.length, 1);
+		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, roleTools);
+	});
+
+	it("filters spawn verbs out of the role's tools", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, undefined, undefined, () => ["read", "team_delegate", "team_spawn", "grep"]);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "some-role", lifecycle: "full" });
+		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, ["read", "grep"]);
+	});
+
+	it("filters read-only-denied tools out of the role's tools when readOnly", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, undefined, undefined, () => ["read", "write", "bash", "grep"]);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "some-role", readOnly: true, lifecycle: "full" });
+		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, ["read", "grep"]);
+	});
+
+	it("threads the OWNER's projectId into role-tool resolution (project-scoped role no longer fails closed)", async () => {
+		// FINDING 2: childAllowedTools used to call resolveRoleAllowedTools(role)
+		// WITHOUT projectId, so a project-scoped/custom role that only resolves with
+		// the owner's projectId would fail closed with ROLE_TOOLS_UNRESOLVED. The fake
+		// resolver below returns tools ONLY when called with (role, expected projectId),
+		// proving the owner's projectId is threaded through.
+		const view = new FakeView();
+		view.owner("owner-1", { projectId: "proj-Z" });
+		const seen: Array<{ role: string; projectId?: string }> = [];
+		const resolver = (role: string, projectId?: string): string[] | undefined => {
+			seen.push({ role, projectId });
+			return projectId === "proj-Z" ? ["read", "grep"] : undefined;
+		};
+		const core = makeCore(view, undefined, undefined, resolver);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "project-role", lifecycle: "full" });
+		assert.deepEqual(seen, [{ role: "project-role", projectId: "proj-Z" }]);
+		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, ["read", "grep"]);
+	});
+
+	it("FAIL CLOSED: throws ROLE_TOOLS_UNRESOLVED when no resolver is wired", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { allowedTools: ["bash", "write"] });
+		const core = makeCore(view); // no resolveRoleAllowedTools
+		await assert.rejects(
+			core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "pr-reviewer", readOnly: true, lifecycle: "full" }),
+			(e: unknown) => e instanceof OrchestrationCoreError && (e as OrchestrationCoreError).code === "ROLE_TOOLS_UNRESOLVED",
+		);
+		// Never silently inherited the owner's tools (no child was created).
+		assert.equal(view.createSessionCalls.length, 0);
+		assert.equal(view.delegateCalls.length, 0);
+	});
+
+	it("FAIL CLOSED: throws ROLE_TOOLS_UNRESOLVED when the resolver returns empty", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { allowedTools: ["bash"] });
+		const core = makeCore(view, undefined, undefined, () => []);
+		await assert.rejects(
+			core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "pr-reviewer", lifecycle: "full" }),
+			(e: unknown) => e instanceof OrchestrationCoreError && (e as OrchestrationCoreError).code === "ROLE_TOOLS_UNRESOLVED",
+		);
+	});
+
+	it("role-LESS spawns are unaffected (owner-derived path)", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { allowedTools: ["bash", "team_delegate", "read"] });
+		// resolveRoleAllowedTools is wired but MUST NOT be consulted for a role-less spawn.
+		const core = makeCore(view, undefined, undefined, () => { throw new Error("must not be called"); });
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x" });
+		assert.deepEqual(view.delegateCalls[0].opts.allowedTools, ["bash", "read"]);
+	});
+});
+
+describe("OrchestrationCore.spawn — lifecycle selection (Decision A.1)", () => {
+	it("explicit lifecycle:\"full\" wins over the readOnly\u2192bare default", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, "anthropic/x", undefined, () => ["read"]);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "r", readOnly: true, lifecycle: "full" });
+		assert.equal(view.delegateCalls.length, 0, "explicit full must NOT take the bare delegate path");
+		assert.equal(view.createSessionCalls.length, 1);
+		assert.equal(view.createSessionCalls[0].opts.readOnly, true);
+		assert.equal(view.createSessionCalls[0].opts.roleName, "r");
+	});
+
+	it("readOnly with NO explicit lifecycle still defaults to bare (no regression)", async () => {
+		const view = new FakeView();
+		view.owner("owner-1", { allowedTools: ["read", "write"] });
+		const core = makeCore(view);
+		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", readOnly: true });
+		assert.equal(view.delegateCalls.length, 1, "read-only with no lifecycle still goes bare");
+		assert.equal(view.createSessionCalls.length, 0);
+	});
+});
+
+describe("OrchestrationCore.spawn — deferInitialPrompt (Decision A.5)", () => {
+	it("full lifecycle with deferInitialPrompt does NOT enqueue the kickoff", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, "anthropic/x", undefined, () => ["readonly_bash"]);
+		const h = await core.spawn({ ownerSessionId: "owner-1", instructions: "kickoff", role: "r", readOnly: true, lifecycle: "full", deferInitialPrompt: true });
+		assert.equal(view.createSessionCalls.length, 1);
+		// No kickoff prompt was enqueued for the child.
+		assert.equal(view.prompts.filter(p => p.sessionId === h.sessionId).length, 0);
+	});
+
+	it("full lifecycle WITHOUT deferInitialPrompt enqueues the kickoff (unchanged)", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view, "anthropic/x", undefined, () => ["readonly_bash"]);
+		const h = await core.spawn({ ownerSessionId: "owner-1", instructions: "kickoff", role: "r", readOnly: true, lifecycle: "full" });
+		const kickoffs = view.prompts.filter(p => p.sessionId === h.sessionId);
+		assert.equal(kickoffs.length, 1);
+		assert.equal(kickoffs[0].text, "kickoff");
+	});
+});
+
+describe("OrchestrationCore.dismiss — stamps the generic terminal marker (Decision E / Findings 3\u20134)", () => {
+	it("invokes markChildTerminal on the dismissed child before terminating", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		const core = makeCore(view);
+		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a", childKind: "host-agents" });
+		await core.dismiss("owner-1", a.sessionId);
+		assert.deepEqual(view.markedTerminal, [a.sessionId]);
+		assert.equal(view.persisted.get(a.sessionId)?.childTerminal, true);
+	});
+
+	it("dismiss still succeeds when markChildTerminal is not implemented by the view", async () => {
+		const view = new FakeView();
+		view.owner("owner-1");
+		// Strip the optional method to simulate a view that doesn't implement it.
+		(view as { markChildTerminal?: unknown }).markChildTerminal = undefined;
+		const core = makeCore(view);
+		const a = await core.spawn({ ownerSessionId: "owner-1", instructions: "a", childKind: "host-agents" });
+		const ok = await core.dismiss("owner-1", a.sessionId);
+		assert.equal(ok, true);
+		assert.deepEqual(view.terminated, [a.sessionId]);
 	});
 });
 
@@ -426,6 +619,20 @@ describe("OrchestrationCore.rebuildIndexFromPersisted", () => {
 describe("shouldReapChildOnBoot table (§5)", () => {
 	it("reaps a kind-terminal child", () => {
 		assert.deepEqual(shouldReapChildOnBoot({ childKind: "pr-walkthrough", ownerSessionId: "o", ownerExists: true, ownerArchived: false, kindTerminal: true, kindTerminalReason: "ready" }), { reap: true, reason: "ready" });
+	});
+	it("reaps a host-agents child stamped terminal (childTerminal\u2192kindTerminal) even while the owner exists & is unarchived", () => {
+		// The boot-reap caller (session-manager) derives ReapInput.kindTerminal from
+		// the GENERIC persisted childTerminal field. A host-agents reviewer whose
+		// dismiss stamped childTerminal:true must be reaped even though its owner is
+		// still alive and unarchived (Decision E / Findings 3\u20134).
+		const persistedChildTerminal = true; // ps.childTerminal as session-manager would read it
+		assert.deepEqual(
+			shouldReapChildOnBoot({ childKind: "host-agents", ownerSessionId: "o", ownerExists: true, ownerArchived: false, kindTerminal: persistedChildTerminal, kindTerminalReason: "child terminal" }),
+			{ reap: true, reason: "child terminal" },
+		);
+	});
+	it("does NOT reap a live host-agents child (no terminal marker) while the owner exists", () => {
+		assert.equal(shouldReapChildOnBoot({ childKind: "host-agents", ownerSessionId: "o", ownerExists: true, ownerArchived: false, kindTerminal: false }).reap, false);
 	});
 	it("reaps an orphaned delegate (owner gone)", () => {
 		assert.equal(shouldReapChildOnBoot({ childKind: "delegate", ownerSessionId: "o", ownerExists: false, ownerArchived: false }).reap, true);

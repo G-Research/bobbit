@@ -1,4 +1,6 @@
-/** Regression tests for first-class child session metadata used by PR walkthrough sessions. */
+/** Regression tests for first-class child session metadata used by visible child sessions
+ * (parentSessionId/childKind/readOnly). The legacy walkthrough* fields were removed when the
+ * PR walkthrough migrated to host.agents (binding-routed; no per-session walkthrough metadata). */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -11,9 +13,6 @@ describe("child session metadata wiring", () => {
 			"parentSessionId",
 			"childKind",
 			"readOnly",
-			"walkthroughJobId",
-			"walkthroughChangesetId",
-			"walkthroughTargetKey",
 		]) {
 			assert.match(managerSrc, new RegExp(`${field}\\?:`), `createSession opts/SessionInfo must include ${field}`);
 			const forwards = managerSrc.match(new RegExp(`${field}:\\s*opts\\?\\.${field}`, "g")) ?? [];
@@ -27,9 +26,6 @@ describe("child session metadata wiring", () => {
 			"parentSessionId",
 			"childKind",
 			"readOnly",
-			"walkthroughJobId",
-			"walkthroughChangesetId",
-			"walkthroughTargetKey",
 		]) {
 			assert.match(setupSrc, new RegExp(`${field}:\\s*plan\\.${field}`), `persistOnce/spawnAgent must preserve ${field}`);
 		}

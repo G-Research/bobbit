@@ -36,28 +36,34 @@ describe("PR walkthrough bundle access tool metadata", () => {
 	});
 
 	it("registers read_pr_walkthrough_bundle through the gateway instead of broad filesystem reads", () => {
+		// host.agents reviewer migration (design Decision C): the server resolves the
+		// job binding from the verified X-Bobbit-Session-Secret caller, so the tool sends
+		// ONLY the whitelisted read args (no env-scoped sessionId/jobId in the body).
 		const source = readToolText("extension.ts");
 		assert.match(source, /name:\s*"read_pr_walkthrough_bundle"/);
 		assert.match(source, /BOBBIT_SESSION_ID/);
-		assert.match(source, /BOBBIT_WALKTHROUGH_JOB_ID/);
+		assert.match(source, /BOBBIT_SESSION_SECRET/);
 		assert.match(source, /api\/internal\/pr-walkthrough\/(bundle|analysis-bundle)/);
-		assert.match(source, /JSON\.stringify\(\{ \.\.\.readArgs, sessionId, jobId \}\)/, "env-scoped IDs must be appended after whitelisted read args");
+		assert.match(source, /"X-Bobbit-Session-Secret": sessionSecret/);
+		assert.match(source, /JSON\.stringify\(\{ \.\.\.readArgs \}\)/, "the body carries only whitelisted read args; identity comes from the session secret header");
 		assert.doesNotMatch(source, /JSON\.stringify\(\{ sessionId, jobId, \.\.\.args \}\)/, "tool args must not override scoped session/job IDs");
 		assert.doesNotMatch(source, /readFileSync\([^)]*BOBBIT_WALKTHROUGH/i, "bundle tool must not read arbitrary env-provided paths from disk");
+		assert.doesNotMatch(source, /BOBBIT_WALKTHROUGH_JOB_ID/, "the per-job env var is gone (binding-routed)");
 	});
 
-	it("read_pr_walkthrough_bundle ignores caller-supplied identity fields at execution", async () => {
+	it("read_pr_walkthrough_bundle posts only whitelisted read args, authenticated by the session secret header", async () => {
 		const previousEnv = { ...process.env };
 		const previousFetch = globalThis.fetch;
 		let postedBody: any;
+		let postedHeaders: any;
 		try {
 			process.env.BOBBIT_SESSION_ID = "env-session";
-			process.env.BOBBIT_WALKTHROUGH_JOB_ID = "env-job";
-			process.env.BOBBIT_WALKTHROUGH_SUBMIT_PROOF = "proof";
+			process.env.BOBBIT_SESSION_SECRET = "env-secret";
 			process.env.BOBBIT_GATEWAY_URL = "https://gateway.test";
 			process.env.BOBBIT_TOKEN = "token";
 			globalThis.fetch = (async (_url: string, init?: any) => {
 				postedBody = JSON.parse(String(init?.body ?? "{}"));
+				postedHeaders = init?.headers ?? {};
 				return new Response(JSON.stringify({ ok: true }), { status: 200 });
 			}) as any;
 			let bundleTool: any;
@@ -66,6 +72,9 @@ describe("PR walkthrough bundle access tool metadata", () => {
 
 			await bundleTool.execute("call-1", { mode: "file", path: "src/demo.ts", index: 3, offset: 4, limit: 5, hunkOffset: 6, hunkLimit: 7, sessionId: "attacker-session", jobId: "attacker-job", extra: "ignored" });
 
+			// No sessionId/jobId in the body — caller-supplied identity fields are dropped
+			// (the body is built from the explicit read-arg whitelist) and the authentic
+			// session is proven by the X-Bobbit-Session-Secret header.
 			assert.deepEqual(postedBody, {
 				mode: "file",
 				path: "src/demo.ts",
@@ -74,9 +83,8 @@ describe("PR walkthrough bundle access tool metadata", () => {
 				limit: 5,
 				hunkOffset: 6,
 				hunkLimit: 7,
-				sessionId: "env-session",
-				jobId: "env-job",
 			});
+			assert.equal(postedHeaders["X-Bobbit-Session-Secret"], "env-secret");
 		} finally {
 			globalThis.fetch = previousFetch;
 			process.env = previousEnv;

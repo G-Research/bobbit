@@ -106,11 +106,32 @@ export interface SpawnOpts {
 	model?: string;
 	/** Default: inherit the owner's thinking level. */
 	thinkingLevel?: string;
-	/** `readOnly:true` always forces lifecycle:"bare". */
+	/** Read-only marker. With NO explicit `lifecycle` a read-only child defaults
+	 *  to lifecycle:"bare"; an explicit `lifecycle:"full"` still wins (a visible,
+	 *  role-carrying read-only reviewer requires the full lifecycle — Decision A.1). */
 	readOnly?: boolean;
 	context?: Record<string, string>;
-	/** Default "bare"; "full" opt-in (Lifecycle Hub). */
+	/**
+	 * NON-SECRET tool-scoping env vars to set on the child process (additive,
+	 * alongside the gateway-set BOBBIT_SESSION_ID/SECRET). Used by tool policies
+	 * that read process env — e.g. the pr-walkthrough reviewer's launched-PR
+	 * `gh` scoping via `BOBBIT_WALKTHROUGH_TARGET_*`. This carries plain metadata
+	 * ONLY; it MUST NOT widen the child's sandbox or project (credential) scope —
+	 * those remain owner-inherited and are derived independently below.
+	 */
+	toolEnv?: Record<string, string>;
+	/** Default "bare"; "full" opt-in (Lifecycle Hub). When set it wins over the
+	 *  readOnly→bare default. */
 	lifecycle?: SpawnLifecycle;
+	/**
+	 * When `true`, the FULL-lifecycle (`createSession`) path creates the visible
+	 * child but does NOT enqueue `instructions` as a kickoff — the caller starts it
+	 * later via an explicit follow-up `prompt` (Decision A.5). This lets a launcher
+	 * write its `{childSessionId→…}` binding BEFORE the child's first tool call,
+	 * closing the spawn/binding race. Only meaningful for the full lifecycle; the
+	 * bare/delegate path is unaffected.
+	 */
+	deferInitialPrompt?: boolean;
 	/** Default "delegate". */
 	childKind?: ChildKind;
 	title?: string;
@@ -202,6 +223,16 @@ export interface PersistedSessionLike {
 	projectId?: string;
 	/** Owner's validated host-side cwd (never trust a container-internal cwd). */
 	cwd?: string;
+	/**
+	 * GENERIC, pack-agnostic terminal marker (Decision E / Findings 3–4). Set
+	 * server-side when a child session reaches a terminal state (e.g. a dismissed
+	 * `host-agents` reviewer, or a completing submit endpoint). `shouldReapChildOnBoot`
+	 * derives `ReapInput.kindTerminal` purely from this field — core reads NO
+	 * pack-store keys and has NO per-pack knowledge.
+	 */
+	childTerminal?: boolean;
+	/** When the terminal marker was stamped (epoch ms). */
+	terminalAt?: number;
 }
 
 /** Live session fields the core reads (structural subset of SessionInfo). */
@@ -237,6 +268,8 @@ export interface OrchestrationSessionView {
 		allowedTools?: string[];
 		initialModel?: string;
 		initialThinkingLevel?: string;
+		/** NON-SECRET tool-scoping env vars (additive; never widens sandbox/project scope). */
+		env?: Record<string, string>;
 		/** Persisted so the source discriminator survives restart (§3). Default "delegate". */
 		childKind?: string;
 		/** Persisted read-only marker (§2.2). Tool gating is via `allowedTools`. */
@@ -268,6 +301,16 @@ export interface OrchestrationSessionView {
 	isSessionLive?(id: string): boolean;
 	/** Pending prompt-queue length for the `queued` status mapping (M3). Optional. */
 	getQueuedPromptCount?(id: string): number;
+	/**
+	 * Stamp the GENERIC persisted terminal marker (`childTerminal:true` +
+	 * `terminalAt`) on a child session, so the generic boot-reap
+	 * (`shouldReapChildOnBoot` reading `PersistedSessionLike.childTerminal`) can
+	 * remove it after a restart even if a dismiss never ran (Decision E /
+	 * Findings 3–4). Called best-effort by `dismiss`. The real SessionManager
+	 * implementation writes via `updateSessionMeta`/`updateArchivedMeta`. Optional:
+	 * when a view does not implement it, `dismiss` simply skips the stamp.
+	 */
+	markChildTerminal?(childSessionId: string): void;
 }
 
 export interface OrchestrationCoreDeps {
@@ -284,6 +327,15 @@ export interface OrchestrationCoreDeps {
 	 * the child falls back to inheriting the owner's allow-list unchanged.
 	 */
 	resolveEffectiveTools?: (id: string) => string[] | undefined;
+	/**
+	 * Resolve a ROLE's effective tool grants (the explicit allow-list a role
+	 * session would receive), for role-carrying spawns (Decision A.2). Production
+	 * wires it to `computeEffectiveAllowedTools(toolManager, role, groupPolicyStore,
+	 * mcpManager)`. When a `role` is set on a spawn the child is granted the ROLE's
+	 * tools and NEVER falls back to the owner's — if this dep is absent or returns
+	 * empty, the spawn throws `ROLE_TOOLS_UNRESOLVED` (FAIL CLOSED).
+	 */
+	resolveRoleAllowedTools?: (roleName: string, projectId?: string) => string[] | undefined;
 	audit?: (event: OrchestrationAuditEvent) => void;
 	/** Optional reader for the `read` verb (delegates to read_session machinery). */
 	readTranscript?: (sessionId: string, opts?: ReadTranscriptLike) => Promise<unknown>;
@@ -335,12 +387,30 @@ export class OrchestrationCore {
 	 * explicit "all-except-spawn-verbs" list rather than `undefined` (which the
 	 * tool-activation layer treats as "all tools", spawn verbs included).
 	 */
-	private childAllowedTools(ownerId: string, readOnly?: boolean): string[] | undefined {
+	private childAllowedTools(ownerId: string, readOnly?: boolean, role?: string): string[] | undefined {
 		// A spawn verb is ALWAYS stripped (recursion guard, §7); a mutating tool is
 		// additionally stripped for a read-only child (§2.2) so it is never even
 		// REGISTERED on the child — the same allow-list mechanism pr-walkthrough uses.
 		const deny = (t: string): boolean =>
 			SPAWN_VERBS.includes(t) || (readOnly === true && READ_ONLY_DENY_TOOLS.includes(t));
+		// FAIL CLOSED (Decision A.2): a role-carrying spawn is granted the ROLE's
+		// tools, NEVER the owner's. If the role's grants cannot be resolved
+		// (dep absent / empty), throw rather than silently inheriting the owner's
+		// broader tools. The owner-derived fallback below is reached ONLY for
+		// role-LESS delegate/team spawns.
+		if (role) {
+			// Thread the OWNER's projectId so a project-scoped/custom role resolves via
+			// the owner's project cascade (mirrors the full-lifecycle path which reads
+			// `ownerPs?.projectId`); otherwise a role that only exists in the owner's
+			// project would fail closed with ROLE_TOOLS_UNRESOLVED.
+			const projectId = this.deps.sessionManager.getPersistedSession(ownerId)?.projectId;
+			const roleTools = this.deps.resolveRoleAllowedTools?.(role, projectId);
+			if (!roleTools || roleTools.length === 0) {
+				throw new OrchestrationCoreError(
+					`Cannot resolve tool grants for role ${role}`, "ROLE_TOOLS_UNRESOLVED");
+			}
+			return roleTools.filter(t => !deny(t));
+		}
 		const explicit = this.deps.sessionManager.getSession(ownerId)?.allowedTools;
 		if (explicit && explicit.length > 0) {
 			return explicit.filter(t => !deny(t));
@@ -375,9 +445,11 @@ export class OrchestrationCore {
 		const childKind: ChildKind = opts.childKind ?? "delegate";
 		const model = opts.model ?? this.deps.resolveSessionModel(opts.ownerSessionId);
 		const thinkingLevel = opts.thinkingLevel ?? this.deps.resolveSessionThinking?.(opts.ownerSessionId);
-		const childAllowed = this.childAllowedTools(opts.ownerSessionId, opts.readOnly);
-		// readOnly always implies bare (§2.2).
-		const lifecycle: SpawnLifecycle = opts.readOnly ? "bare" : (opts.lifecycle ?? "bare");
+		const childAllowed = this.childAllowedTools(opts.ownerSessionId, opts.readOnly, opts.role);
+		// `opts.lifecycle` wins when set; otherwise default "bare" (a read-only child
+		// with no explicit lifecycle still goes bare — no regression). An explicit
+		// `lifecycle:"full"` is honored even under readOnly (Decision A.1).
+		const lifecycle: SpawnLifecycle = opts.lifecycle ?? (opts.readOnly ? "bare" : "bare");
 
 		const sharedMode = !opts.worktree || opts.worktree.mode === "shared";
 
@@ -394,6 +466,8 @@ export class OrchestrationCore {
 				allowedTools: childAllowed,
 				initialModel: model,
 				initialThinkingLevel: thinkingLevel,
+				// NON-SECRET tool-scoping env (additive; never widens sandbox/project scope).
+				env: opts.toolEnv,
 				// Persist the source discriminator + read-only marker so they survive
 				// restart (§3): rebuildIndexFromPersisted reads childKind to reconstruct
 				// e.g. host-agents children instead of mislabelling them "delegate".
@@ -436,6 +510,9 @@ export class OrchestrationCore {
 				initialModel: model,
 				initialThinkingLevel: thinkingLevel,
 				roleName: opts.role,
+				// NON-SECRET tool-scoping env (additive; never widens sandbox/project scope —
+				// sandboxed/projectId below are derived from the OWNER and are not affected).
+				env: opts.toolEnv,
 				worktreeOpts,
 				// Inherit the owner's sandbox + project scope (never exceed it). For the
 				// sub-branch (goal) path `projectId` may be undefined here — createSession
@@ -448,8 +525,13 @@ export class OrchestrationCore {
 			}
 			const child = await this.deps.sessionManager.createSession(cwd, undefined, goalId, undefined, createOpts);
 			childId = child.id;
-			// Bare/full createSession children still need the spawn prompt delivered.
-			await this.deps.sessionManager.enqueuePrompt(childId, opts.instructions);
+			// Full createSession children still need the spawn prompt delivered — UNLESS
+			// the caller defers it (Decision A.5): a deferred launch creates the visible
+			// child but does NOT enqueue the kickoff, so the caller can write its binding
+			// before starting the child via an explicit follow-up `prompt`.
+			if (!opts.deferInitialPrompt) {
+				await this.deps.sessionManager.enqueuePrompt(childId, opts.instructions);
+			}
 		}
 
 		const title = opts.title ?? this.deps.sessionManager.getSession(childId)?.title;
@@ -541,6 +623,14 @@ export class OrchestrationCore {
 
 	async dismiss(ownerId: string, childId: string): Promise<boolean> {
 		this.requireOwnChild(ownerId, childId);
+		// Stamp the GENERIC persisted terminal marker BEFORE terminating, so a restart
+		// between here and the terminate still lets the generic boot-reap remove the
+		// child (Decision E / Findings 3–4). Best-effort: never let it break dismiss.
+		try {
+			this.deps.sessionManager.markChildTerminal?.(childId);
+		} catch (err) {
+			console.error(`[orchestration] markChildTerminal failed for ${childId}:`, err);
+		}
 		const ok = await this.deps.sessionManager.terminateSession(childId);
 		this.forgetChild(childId);
 		this.audit({ event: "dismiss", ownerSessionId: ownerId, childSessionId: childId });

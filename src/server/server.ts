@@ -239,7 +239,6 @@ import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieT
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
-import { WalkthroughAgentManager } from "./pr-walkthrough/walkthrough-agent-manager.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
@@ -1196,6 +1195,19 @@ export function createGateway(config: GatewayConfig) {
 			if (!role) return undefined;
 			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
 		},
+		// Resolve a ROLE's effective tool grants for role-carrying spawns
+		// (orchestration-core Decision A.2 — FAIL CLOSED). Resolves pack-contributed
+		// roles (e.g. the pr-walkthrough pack's `pr-reviewer`) via the config cascade
+		// FIRST — the same source session-setup uses (session-setup.ts:441) — then
+		// falls back to roleManager so EVERY built-in role still resolves (backward
+		// compat: a role-carrying team_delegate spawn must not fail closed). Mirrors
+		// the resolveEffectiveTools grant pipeline above.
+		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
+			const cascadeRole = configCascade.resolveRoles(projectId).find(r => r.item.name === roleName)?.item;
+			const role = cascadeRole ?? roleManager.getRole(roleName);
+			if (!role) return undefined;
+			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, sessionManager.getMcpManager() ?? undefined).map(e => e.name);
+		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
 
@@ -1342,7 +1354,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1592,23 +1604,6 @@ export function createGateway(config: GatewayConfig) {
 		});
 	}
 
-	const prWalkthroughAgentManager = new WalkthroughAgentManager({
-		defaultCwd: config.defaultCwd,
-		stateDir,
-		sessionManager,
-		preferencesStore,
-		broadcast: broadcastToAll,
-		preflightGithubLaunch: true,
-		resolveSessionCwd: (sessionId: string) => {
-			const live = sessionManager.getSession(sessionId);
-			const persisted = sessionManager.getPersistedSession(sessionId);
-			return live?.worktreePath || persisted?.worktreePath || live?.cwd || persisted?.cwd;
-		},
-		resolveSessionModel: (sessionId: string) => {
-			const persisted = sessionManager.getPersistedSession(sessionId);
-			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
-		},
-	});
 
 	// Bridge search index progress bus → WS. Progress events are debounced
 	// to 500ms per-project (design §9). Complete + error events pass through.
@@ -1931,7 +1926,6 @@ export function createGateway(config: GatewayConfig) {
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
-			prWalkthroughAgentManager.restore();
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
@@ -2385,7 +2379,6 @@ async function handleApiRoute(
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
-	prWalkthroughAgentManager?: WalkthroughAgentManager,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
@@ -2463,7 +2456,6 @@ async function handleApiRoute(
 		readBody,
 		sessionManager,
 		broadcast: broadcastToAll,
-		walkthroughAgentManager: prWalkthroughAgentManager,
 		resolveSessionCwd: (sessionId: string) => {
 			const live = sessionManager.getSession(sessionId);
 			const persisted = sessionManager.getPersistedSession(sessionId);
@@ -2475,6 +2467,13 @@ async function handleApiRoute(
 		},
 		preferencesStore,
 		sandboxScope,
+		// host.agents reviewer migration (design Decisions C/D/E): the binding-routed
+		// submit-yaml/bundle paths resolve the jobId from the pack-store binding keyed
+		// by the verified caller session id, and submit-yaml server-dismisses the
+		// reviewer child on terminal (terminal-synchronous reap).
+		orchestrationCore,
+		packStore: getPackStore(),
+		sessionSecretStore: sessionManager.sessionSecretStore,
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
@@ -4125,9 +4124,6 @@ async function handleApiRoute(
 					parentSessionId: archived.parentSessionId,
 					childKind: archived.childKind,
 					readOnly: archived.readOnly,
-					walkthroughJobId: archived.walkthroughJobId,
-					walkthroughChangesetId: archived.walkthroughChangesetId,
-					walkthroughTargetKey: archived.walkthroughTargetKey,
 					role: archived.role,
 					accessory: archived.accessory,
 					teamGoalId: archived.teamGoalId,
@@ -4168,9 +4164,6 @@ async function handleApiRoute(
 			parentSessionId: sessionPs?.parentSessionId ?? session.parentSessionId,
 			childKind: sessionPs?.childKind ?? session.childKind,
 			readOnly: sessionPs?.readOnly ?? session.readOnly,
-			walkthroughJobId: sessionPs?.walkthroughJobId ?? session.walkthroughJobId,
-			walkthroughChangesetId: sessionPs?.walkthroughChangesetId ?? session.walkthroughChangesetId,
-			walkthroughTargetKey: sessionPs?.walkthroughTargetKey ?? session.walkthroughTargetKey,
 			role: session.role,
 			accessory: session.accessory,
 			teamGoalId: session.teamGoalId,
@@ -4440,9 +4433,6 @@ async function handleApiRoute(
 				parentSessionId: typeof body?.parentSessionId === "string" ? body.parentSessionId : undefined,
 				childKind: typeof body?.childKind === "string" ? body.childKind : undefined,
 				readOnly: typeof body?.readOnly === "boolean" ? body.readOnly : undefined,
-				walkthroughJobId: typeof body?.walkthroughJobId === "string" ? body.walkthroughJobId : undefined,
-				walkthroughChangesetId: typeof body?.walkthroughChangesetId === "string" ? body.walkthroughChangesetId : undefined,
-				walkthroughTargetKey: typeof body?.walkthroughTargetKey === "string" ? body.walkthroughTargetKey : undefined,
 			});
 
 			// Set assistant role metadata if no explicit role was provided
@@ -4479,9 +4469,6 @@ async function handleApiRoute(
 				parentSessionId: session.parentSessionId,
 				childKind: session.childKind,
 				readOnly: session.readOnly,
-				walkthroughJobId: session.walkthroughJobId,
-				walkthroughChangesetId: session.walkthroughChangesetId,
-				walkthroughTargetKey: session.walkthroughTargetKey,
 				reattemptGoalId,
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);

@@ -152,9 +152,6 @@ export interface SessionSetupPlan {
 	parentSessionId?: string;
 	childKind?: string;
 	readOnly?: boolean;
-	walkthroughJobId?: string;
-	walkthroughChangesetId?: string;
-	walkthroughTargetKey?: string;
 	/** Explicit session-scoped tool allowlist that must survive process restarts. */
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
@@ -338,10 +335,17 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// S1: inject the per-session capability secret alongside the session id.
 		// Only this session's process receives its own secret — see
 		// `src/server/auth/session-secret.ts`.
+		//
+		// Gateway-owned identity keys (BOBBIT_SESSION_ID / BOBBIT_SESSION_SECRET)
+		// are spread AFTER caller `plan.env` (toolEnv) so the gateway-issued values
+		// always WIN: a caller-supplied toolEnv key can never clobber the session
+		// identity or capability secret (which would let a child impersonate another
+		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
+		// unit test in tests/session-setup-env.test.ts.
 		env: {
+			...plan.env,
 			BOBBIT_SESSION_ID: plan.id,
 			BOBBIT_SESSION_SECRET: ctx.sessionSecretStore.getOrCreateSecret(plan.id),
-			...plan.env,
 		},
 	};
 	if (ctx.agentCliPath) {
@@ -434,6 +438,23 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	}
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;
+
+	// Generic role-accessory application. When a session is created with a
+	// role (roleName/role) that resolves to a Role carrying an `accessory`, and
+	// the caller did NOT explicitly pass one, surface the role's accessory so it
+	// renders in the sidebar. This is how a role-carrying spawn that only threads
+	// `roleName` (e.g. the host.agents `pr-reviewer` reviewer child) gets its
+	// `review` accessory without the spawn caller plumbing it. Generic — not
+	// pr-walkthrough-specific; "none" is treated as "no accessory".
+	if (!plan.accessory || plan.accessory === "none") {
+		const roleName = plan.roleName ?? plan.role;
+		if (roleName) {
+			const resolvedRole = lookupRole(roleName, plan, ctx);
+			if (resolvedRole?.accessory && resolvedRole.accessory !== "none") {
+				plan.accessory = resolvedRole.accessory;
+			}
+		}
+	}
 }
 
 /** Look up a role by name, preferring the cascade-resolved version when available. */
@@ -678,9 +699,6 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
-		walkthroughJobId: plan.walkthroughJobId,
-		walkthroughChangesetId: plan.walkthroughChangesetId,
-		walkthroughTargetKey: plan.walkthroughTargetKey,
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
@@ -938,6 +956,13 @@ export async function executeWorktreeAsync(
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
+	// resolveTools may have applied the role's accessory (generic role-accessory
+	// application); mirror it onto the live worktree session so the sidebar
+	// renders it (the early placeholder persist predates accessory resolution).
+	if (plan.accessory && session.accessory !== plan.accessory) {
+		session.accessory = plan.accessory;
+		ctx.store.update(session.id, { accessory: plan.accessory });
+	}
 	if (plan.bridgeOptions.initialModel) session.spawnPinnedModel = plan.bridgeOptions.initialModel;
 	if (plan.bridgeOptions.initialThinkingLevel) session.spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 
@@ -1083,9 +1108,6 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
-		walkthroughJobId: plan.walkthroughJobId,
-		walkthroughChangesetId: plan.walkthroughChangesetId,
-		walkthroughTargetKey: plan.walkthroughTargetKey,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn

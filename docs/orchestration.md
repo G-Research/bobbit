@@ -197,9 +197,19 @@ giving delegates the two things workers always had: a **durable task** and **liv
    wait, which now re-attaches to a **live** child and returns a **real** result instead of a
    `terminated` placeholder.
 4. **Orphans still reaped.** A child is reaped on boot **only** if its parent is gone or
-   archived (the generalized `shouldReapChildOnBoot`, covering delegate, PR-walkthrough, and
-   future kinds). A delegate whose parent is restoring is never reaped; one whose owner is
-   gone is archived before live dispatch, never resurrected as a live orphan.
+   archived, **or** if the child carries a generic terminal marker (see below) — the
+   generalized `shouldReapChildOnBoot`, covering delegate, `host.agents`, and future kinds.
+   A delegate whose parent is restoring is never reaped; one whose owner is gone is archived
+   before live dispatch, never resurrected as a live orphan.
+
+> **Generic terminal marker (no per-kind knowledge in core).** A child that has finished its
+> job while its parent is still alive would not be caught by the owner-gone reap. Rather than
+> teach the core about any specific child kind, completing server-side code stamps a generic
+> persisted **`childTerminal`** flag (plus `terminalAt`) on the child session
+> (`SessionManager.markChildTerminal`, also stamped by `dismiss`). `shouldReapChildOnBoot`
+> reaps any child whose `childTerminal` is set — reading only that generic field, never a
+> pack store or a kind-specific branch. This is how a terminal PR-walkthrough reviewer is
+> reaped after a restart with **zero** PR-walkthrough knowledge in `OrchestrationCore`.
 
 > **Why reuse the worker machinery?** Delegates and workers now share **one** restart path —
 > durable task + live restore + prompt rebuild + re-nudge — with no parallel registry. The
@@ -252,6 +262,22 @@ Key properties (full detail in the authoring guide):
 - **Poll-based** — `spawn` / `prompt` / `dismiss` / `list` / `read` / `status`. There is
   **no blocking `wait`**: the worker tier terminates calls on timeout, so a handler spawns
   then polls across worker calls.
+- **`spawn` opts beyond the basics.** Besides `instructions` / `role` / `model` /
+  `thinkingLevel` / `readOnly` / `context` / `lifecycle`, two opts support the
+  isolated-reviewer pattern (added by the PR-walkthrough migration):
+  - **`deferInitialPrompt`** — create a **visible** child without auto-running
+    `instructions`; the caller starts it later via `prompt`. This lets a launcher write its
+    own routing state (e.g. a pack-store binding) **before** the child's first tool call,
+    closing a spawn/binding race.
+  - **`toolEnv`** — non-secret environment variables set on the child process for
+    **tool-scoping** (read by tool policies, e.g. to scope a reviewer's `gh` reads to one
+    PR). It is purely additive and **cannot widen** the child's owner-inherited sandbox or
+    credential scope (the gateway-owned identity keys always win).
+- **Role spawns fail closed.** When `spawn` carries a `role`, the child is granted the
+  **role's** resolved tools, never the owner's. If those grants cannot be resolved the spawn
+  throws `ROLE_TOOLS_UNRESOLVED` rather than silently inheriting the owner's broader tools —
+  so a misconfigured role can never produce an over-privileged child. (The owner-derived
+  tool path remains only for role-less delegate/team spawns.)
 - **Scoped to its own children** — every verb is filtered to the bound session's children
   with `childKind === "host-agents"`. A pack cannot see the session's `delegate`/`team`
   children, nor any foreign session. There is no parameter to target the user or another
@@ -263,8 +289,13 @@ Key properties (full detail in the authoring guide):
 This resurfaces a privilege that was lost when PR walkthrough became a pack: spawning a
 child principal is no longer "not pack-expressible." The capability is exercised by a
 deterministic, no-LLM **fixture pack** so its end-to-end test stays non-flaky and in the
-e2e phase. (Migrating the real PR-walkthrough pack onto `host.agents` is a separate
-follow-up.)
+e2e phase. The **PR-walkthrough pack now ships on `host.agents`**: clicking "Run PR
+walkthrough" mints a real isolated read-only `pr-reviewer` child via `host.agents.spawn`
+(`deferInitialPrompt` + `toolEnv` + a pack-shipped role) instead of driving the user's own
+agent — the migration that drove the `deferInitialPrompt` / `toolEnv` / fail-closed-role
+amendments above. See
+[docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)
+and [docs/design/pr-walkthrough-host-agents-migration.md](design/pr-walkthrough-host-agents-migration.md).
 
 ---
 

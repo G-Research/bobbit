@@ -212,6 +212,12 @@ export function resolveGrantPolicy(
 			return normalizePolicy(role.toolPolicies[mcpKeys.tool]);
 		}
 		if (role?.toolPolicies?.[mcpKeys.group]) return normalizePolicy(role.toolPolicies[mcpKeys.group]);
+		// Wildcard MCP key: a bare `mcp__` role key matches EVERY MCP server at once.
+		// Dynamic per-server keys (`mcp__<server>`) use runtime names a static role
+		// file cannot enumerate, so this primitive lets a role deny (or otherwise set)
+		// all MCP servers in one entry. Exact tool/group keys above always take
+		// precedence; this is the catch-all beneath them.
+		if (role?.toolPolicies?.["mcp__"]) return normalizePolicy(role.toolPolicies["mcp__"]);
 	}
 	if (toolGroup && role?.toolPolicies?.[toolGroup]) return normalizePolicy(role.toolPolicies[toolGroup]);
 
