@@ -77,3 +77,4 @@ Once you're comfortable with the basics, explore these references:
 ## Development
 
 Want to contribute to Bobbit or hack on the code? See the [development workflow guide](dev-workflow.md) for how to set up a dev environment, run tests, and make changes.
+<!-- Note: human sign-off gate flow test (goal/human-sign-off-3ffef922) — no behavioural impact; safe to revert. -->
