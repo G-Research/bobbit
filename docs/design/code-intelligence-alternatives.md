@@ -44,6 +44,42 @@ capability-swappable engines.
 | multilspy (Microsoft) | N/A directly | Python-only research library (13 langs); its 2026 fix history (server hangs, orphaned processes) confirms lifecycle is where the bodies are buried |
 | MCP bridges (mcp-language-server 1.5k★, lsmcp, cclsp, lsproxy) | Rejected | All single-maintainer; most dormant ≥10 months (mcp-language-server since 2025-06, lsmcp since 2025-08); single-root designs; none do worktree-aware pooling. lsproxy (REST, Rust, multi-server pool) is the closest design reference |
 
+### §2.1 The Serena question, in full ("why not one LSP to rule them all, wrapped and fixed?")
+
+Owner asked this directly (2026-06-11); recording the complete argument since it's the most
+tempting future re-litigation. Compare the two stacks:
+
+```
+Wrap Serena:   agents → MCP protocol → Serena (Python 3.13 + uv sidecar) → solidlsp → language servers
+Proposed:      agents → first-party code_* tools → LSP supervisor (in the gateway, TS)   → language servers
+```
+
+1. **The valuable part of Serena is the part we'd rewrite anyway.** Its worth is the bottom
+   layer — server lifecycle + symbol caching — and its tracker shows that battle ongoing
+   (§2 table: #944 30 GB RAM, #1390/#937 init hangs, #900 stdio races, #634 re-init loops).
+   The fixes Bobbit needs most — **per-(worktree, language) pooling, idle eviction, disposal
+   wired into goal-worktree cleanup** — are absent from Serena's one-project-one-session
+   architecture. That's not a wrapper-sized change; it's the design.
+2. **The protocol layer — the part that looks scary — is the cheap part.** Microsoft's
+   `vscode-jsonrpc` + `vscode-languageserver-protocol` give the full typed client off the
+   shelf; the lifecycle layer is ~500–1000 lines with coc.nvim as reference. So "buy Serena"
+   saves the *easy* part while charging a Python-3.13/uv runtime, a sidecar process per
+   workspace, and a second supervisor-in-a-different-language to debug when it wedges.
+3. **The MCP surface is the already-observed failure mode.** Generic MCP tools = no token
+   budgets, no `file:line` renderers, no tool-guard tiers, no prompt guidance — and Serena's
+   rename writes files directly, bypassing the preview-diff → review flow. The model-facing
+   UX, where tool adoption is won or lost, is precisely what a wrapper can't fix.
+4. **Serena still pays us twice.** We port its two best designs (synchronous two-tier symbol
+   cache; auto-download of server binaries, both also in multilspy), and because everything
+   sits behind the `code.symbol-nav` capability, a Serena-backed pack remains a legitimate
+   community alternative — and the **escape hatch**: if the CI-3 supervisor stalls in its
+   wave, wrapping Serena behind the same capability is roughly a week's work, not a rewrite.
+
+One-sentence verdict: *Serena is the right idea delivered as the wrong dependency — keep the
+idea (supervised language servers behind symbol tools), delete the Python/MCP middle, build
+the thin lifecycle layer natively where Bobbit's budgets, renderers, review flow, and
+worktree model already live.*
+
 ## §3 Per-language servers (research-corrected picks)
 
 Two picks **changed** from the original draft: TS/JS `typescript-language-server` → **vtsls**;

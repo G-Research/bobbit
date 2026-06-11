@@ -91,8 +91,10 @@ it does not duplicate the temporal one.
   Copilot CLI (`.github/lsp.json`) converged on independently.
 - **Why not Serena/MCP as the surface:** same capability, but token-opaque outputs, no
   renderer, no tool-guard tiers, Python runtime baggage per worktree, and the observed
-  MCP-underuse problem. Serena remains the design reference and a fallback pack if the
-  supervisor proves harder than planned (the capability seam makes that swap cheap).
+  MCP-underuse problem. Serena remains the design reference and the escape hatch — a
+  Serena-backed pack behind the same `code.symbol-nav` capability is ~a week's work if the
+  supervisor stalls. Full argument:
+  [code-intelligence-alternatives.md §2.1](code-intelligence-alternatives.md).
 
 ## §3 Structural layer — ast-grep tools
 
