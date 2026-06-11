@@ -2298,9 +2298,9 @@ export class RemoteAgent {
 			}
 		}
 
-		// Apply showTimestamps
+		// Apply showTimestamps — default ON when unset; only an explicit `false` opts out.
 		if ("showTimestamps" in prefs) {
-			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			document.documentElement.dataset.showTimestamps = prefs.showTimestamps === false ? "" : "true";
 		}
 
 		// Apply playAgentFinishSound — default ON when unset.

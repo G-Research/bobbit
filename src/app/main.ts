@@ -653,10 +653,9 @@ async function initApp() {
 					} else {
 						localStorage.removeItem('palette');
 					}
-					// Apply showTimestamps
-					if (prefs.showTimestamps) {
-						document.documentElement.dataset.showTimestamps = "true";
-					}
+					// Apply showTimestamps — default ON when unset; only an explicit `false` opts out.
+					document.documentElement.dataset.showTimestamps =
+						prefs.showTimestamps === false ? "" : "true";
 					// Apply playAgentFinishSound — default ON when unset.
 					document.documentElement.dataset.playAgentFinishSound =
 						prefs.playAgentFinishSound === false ? "false" : "true";
@@ -1006,8 +1005,8 @@ async function initApp() {
 				document.documentElement.dataset.palette = palette;
 				localStorage.setItem('palette', palette);
 			}
-			// Apply showTimestamps
-			document.documentElement.dataset.showTimestamps = prefs.showTimestamps ? "true" : "";
+			// Apply showTimestamps — default ON when unset; only an explicit `false` opts out.
+			document.documentElement.dataset.showTimestamps = prefs.showTimestamps === false ? "" : "true";
 			// Apply playAgentFinishSound — default ON when unset.
 			document.documentElement.dataset.playAgentFinishSound =
 				prefs.playAgentFinishSound === false ? "false" : "true";

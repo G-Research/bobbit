@@ -105,7 +105,7 @@ let _listening = false;
 
 
 
-let settingsShowTimestamps = false;
+let settingsShowTimestamps = true;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
 let settingsReplaceBobbitWithText = false;
@@ -2176,7 +2176,8 @@ function loadGeneralSettings() {
 				const res = await gatewayFetch("/api/preferences");
 				if (res.ok) {
 					const prefs = await res.json();
-					settingsShowTimestamps = !!prefs.showTimestamps;
+					// Default ON when unset — only an explicit `false` opts out.
+					settingsShowTimestamps = prefs.showTimestamps !== false;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					// Replace bobbit sprite with text (chat blob) — default OFF; only an explicit `true` enables.
