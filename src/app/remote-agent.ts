@@ -2309,6 +2309,12 @@ export class RemoteAgent {
 				prefs.playAgentFinishSound === false ? "false" : "true";
 		}
 
+		// Apply replaceBobbitWithText — default OFF (only explicit true opts in).
+		if ("replaceBobbitWithText" in prefs) {
+			document.documentElement.dataset.replaceBobbitWithText =
+				prefs.replaceBobbitWithText === true ? "true" : "false";
+		}
+
 		// Apply subgoalsEnabled — default OFF. See subgoals-flag.ts. Mirror
 		// unconditionally: the broadcast sends the full prefs object, so an
 		// unset pref is absent and must normalize to "false" (not retain stale).
