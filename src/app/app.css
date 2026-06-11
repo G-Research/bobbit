@@ -13,8 +13,9 @@ textarea::selection {
 	color: var(--accent-foreground);
 }
 
-/* Match theme-toggle button color to adjacent QR code button */
-theme-toggle button {
+/* Match theme-toggle / bell-toggle button color to adjacent QR code button */
+theme-toggle button,
+bell-toggle button {
 	color: var(--color-muted-foreground) !important;
 }
 
