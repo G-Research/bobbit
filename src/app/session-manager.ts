@@ -2395,26 +2395,43 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 	// loaded live sessions so the user sees what else gets archived before
 	// confirming. The goal-archival path (app/api.ts) enumerates affected
 	// sessions separately and is intentionally left untouched.
-	let childCount = 0;
+	// Spec acceptance (M1, locked): the modal LISTS the child agents by name —
+	// not just a count. Include dormant/persisted children (the server route
+	// enumerates them).
+	let childList: Array<{ id: string; title?: string }> = [];
 	if (!(isTeamLead && goalId)) {
-		// Prefer the server route (authoritative — includes on-demand child
-		// sessions not yet loaded into state.gatewaySessions); fall back to the
-		// already-loaded live sessions if it is unavailable.
+		// Prefer the server route (authoritative — includes on-demand / dormant
+		// child sessions not yet loaded into state.gatewaySessions); fall back to
+		// the already-loaded live sessions if it is unavailable.
+		const fromState = () => state.gatewaySessions
+			.filter((s) => s.id !== sessionId && (s.delegateOf === sessionId || s.parentSessionId === sessionId))
+			.map((s) => ({ id: s.id, title: s.title }));
 		try {
 			const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/children-count`);
 			if (res.ok) {
-				const data = await res.json().catch(() => null) as { count?: number } | null;
-				if (data && typeof data.count === "number") childCount = data.count;
+				const data = await res.json().catch(() => null) as { count?: number; children?: Array<{ id: string; title?: string }> } | null;
+				if (data && Array.isArray(data.children)) childList = data.children;
+				else childList = fromState();
 			} else {
-				childCount = state.gatewaySessions.filter((s) => s.id !== sessionId && (s.delegateOf === sessionId || s.parentSessionId === sessionId)).length;
+				childList = fromState();
 			}
 		} catch {
-			childCount = state.gatewaySessions.filter((s) => s.id !== sessionId && (s.delegateOf === sessionId || s.parentSessionId === sessionId)).length;
+			childList = fromState();
 		}
 	}
-	const childCascadeNote = childCount > 0
-		? ` This will also archive its ${childCount} child agent${childCount === 1 ? "" : "s"}.`
-		: "";
+	const childCount = childList.length;
+	let childCascadeNote = "";
+	if (childCount > 0) {
+		const MAX_NAMED = 5;
+		const names = childList.slice(0, MAX_NAMED).map((c) => `"${c.title || "Untitled"}"`);
+		const remaining = childCount - names.length;
+		const namesText = remaining > 0
+			? `${names.join(", ")}, and ${remaining} more`
+			: names.length > 1
+				? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
+				: names[0];
+		childCascadeNote = ` This will also archive its ${childCount} child agent${childCount === 1 ? "" : "s"}: ${namesText}.`;
+	}
 	const confirmed = await confirmAction(
 		isTeamLead && goalId ? "End Team" : "Terminate Session",
 		isTeamLead && goalId
