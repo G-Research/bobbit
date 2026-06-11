@@ -3,6 +3,7 @@ import type { RegisteredProject } from "./project-registry.js";
 import { GoalStore } from "./goal-store.js";
 import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import { SessionStore } from "./session-store.js";
+import { BgProcessStore } from "./bg-process-store.js";
 import { GateStore } from "./gate-store.js";
 import { TaskStore } from "./task-store.js";
 import { TeamStore } from "./team-store.js";
@@ -39,6 +40,7 @@ export class ProjectContext {
   // State stores
   readonly goalStore: GoalStore;
   readonly sessionStore: SessionStore;
+  readonly bgProcessStore: BgProcessStore;
   readonly gateStore: GateStore;
   readonly taskStore: TaskStore;
   readonly teamStore: TeamStore;
@@ -75,6 +77,7 @@ export class ProjectContext {
     // Instantiate state stores with project-scoped state directory
     this.goalStore = new GoalStore(this.stateDir);
     this.sessionStore = new SessionStore(this.stateDir);
+    this.bgProcessStore = new BgProcessStore(this.stateDir);
     this.gateStore = new GateStore(this.stateDir);
     this.taskStore = new TaskStore(this.stateDir);
     this.teamStore = new TeamStore(this.stateDir);

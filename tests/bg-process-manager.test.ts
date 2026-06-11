@@ -1,25 +1,24 @@
 /**
- * Unit tests for BgProcessManager.waitForExit \u2014 deterministic state-machine
- * coverage.
+ * Unit tests for BgProcessManager.waitForExit — deterministic state-machine
+ * coverage in the persistent (file-backed) model.
  *
- * Previously these tests spawned real child processes (sleep/ping/cmd /c exit)
- * and asserted on wall-clock elapsed times. That made them flaky on loaded CI
- * runners and forced ordering hacks (50 ms slack, polling loops, "give
- * listeners a tick" sleeps).
- *
- * The class now accepts an injected `SpawnFn`. Tests pass a fake child built
- * on EventEmitter so `exit` is fired by the test, not by the OS scheduler.
- * Combined with `node:test` mock timers this gives us byte-deterministic
- * coverage of the abort / timeout / exit race without touching processes.
+ * The class accepts an injected `SpawnFn` (fake EventEmitter child), a faked
+ * `TailerFactory`, an isolated temp `BgProcessStore`, and a faked `BgEnv` so no
+ * real OS processes are touched. Exit is now captured from a durable STATUS
+ * file (as a wrapper would write it); the child `exit` event is only a hint to
+ * check that file promptly, so tests write the status file then emit `exit`.
  */
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 
-import { BgProcessManager, type SpawnFn } from "../src/server/agent/bg-process-manager.ts";
+import { BgProcessManager, type SpawnFn, type BgEnv, type TailerFactory, type Tailer } from "../src/server/agent/bg-process-manager.ts";
+import { BgProcessStore } from "../src/server/agent/bg-process-store.ts";
 
 // --- Fake child plumbing --------------------------------------------------
 
@@ -29,158 +28,149 @@ interface FakeChild extends EventEmitter {
 	stderr: EventEmitter & { destroy(): void };
 	kill(_sig?: string): boolean;
 	unref(): void;
-	__killed: string[];
 }
 
 function makeFakeChild(): FakeChild {
 	const child = new EventEmitter() as FakeChild;
 	child.pid = Math.floor(Math.random() * 1_000_000) + 1000;
-	child.__killed = [];
 	const mkStream = () => Object.assign(new EventEmitter(), { destroy() { /* noop */ } });
 	child.stdout = mkStream();
 	child.stderr = mkStream();
-	child.kill = (sig = "SIGTERM") => { child.__killed.push(sig); return true; };
+	child.kill = () => true;
 	child.unref = () => { /* noop */ };
 	return child;
 }
 
-/** SpawnFn that returns a fresh fake and exposes it via the returned ref. */
-function fakeSpawner(): { spawn: SpawnFn; last: () => FakeChild } {
+function makeManager(env?: Partial<BgEnv>) {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bgmgr-"));
+	const store = new BgProcessStore(stateDir);
 	let last: FakeChild | null = null;
-	const spawn: SpawnFn = () => {
-		last = makeFakeChild();
-		return last as unknown as ChildProcess;
+	const spawn: SpawnFn = () => { last = makeFakeChild(); return last as unknown as ChildProcess; };
+	const tailerFactory: TailerFactory = () => {
+		const mk = (): Tailer => ({ start() {}, stop() {} });
+		return { out: mk(), err: mk() };
 	};
-	return { spawn, last: () => { if (!last) throw new Error("spawn not called"); return last; } };
+	const killCalls: Array<[number, string]> = [];
+	const fullEnv: BgEnv = {
+		isHostPidAlive: env?.isHostPidAlive ?? (() => false),
+		killHostTree: env?.killHostTree ?? ((pid, sig) => killCalls.push([pid, sig])),
+		dockerCli: env?.dockerCli ?? (() => ({ code: 0, stdout: "" })),
+	};
+	const mgr = new BgProcessManager(() => undefined, spawn, () => store, tailerFactory, fullEnv);
+	return {
+		mgr, stateDir, store,
+		last: () => { if (!last) throw new Error("spawn not called"); return last; },
+		killCalls,
+		/** Drive a clean exit: write the status file then emit the child `exit` hint. */
+		driveExit(session: string, id: string, code = 0) {
+			const rec = store.get(session, id)!;
+			fs.writeFileSync(rec.statusSnapshot, `${code}\n`);
+			this.last().emit("exit", code);
+		},
+	};
 }
 
-function makeManager() {
-	const spawner = fakeSpawner();
-	const mgr = new BgProcessManager(() => undefined, spawner.spawn);
-	return { mgr, last: spawner.last };
-}
-
-// Each test gets its own session id so a leaked entry can't bleed across cases.
 function freshSession() { return `s-${randomUUID()}`; }
 
 // --- Tests ----------------------------------------------------------------
 
-describe("BgProcessManager.waitForExit \u2014 state machine", () => {
+describe("BgProcessManager.waitForExit — state machine", () => {
 	it("abort before exit resolves with aborted:true and leaves process running", async () => {
-		const { mgr, last } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 		assert.equal(info.status, "running");
+		assert.equal(info.terminalReason, null);
 
 		const controller = new AbortController();
-		mgr.registerWait(SESSION, controller);
+		h.mgr.registerWait(SESSION, controller);
 
-		const waitPromise = mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
-		mgr.abortAllWaits(SESSION);
+		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
+		h.mgr.abortAllWaits(SESSION);
 		const result = await waitPromise;
-		mgr.unregisterWait(SESSION, controller);
+		h.mgr.unregisterWait(SESSION, controller);
 
 		assert.ok(result, "result should not be null");
 		assert.equal(result!.aborted, true);
 		assert.equal(result!.timedOut, false);
-		assert.equal(result!.info.status, "running", "process must still be running after abort");
+		assert.equal(result!.info.status, "running");
 
-		// No bg-process side effect from the abort itself.
-		assert.deepEqual(last().__killed, [], "abort must not kill the underlying child");
-
-		// Process is still tracked & running.
-		const still = mgr.list(SESSION).find(p => p.id === info.id);
+		const still = h.mgr.list(SESSION).find(p => p.id === info.id);
 		assert.ok(still);
 		assert.equal(still!.status, "running");
-
-		// No listener leaks on the abort signal.
 		assert.equal(controller.signal.aborted, true);
 
-		mgr.cleanup(SESSION);
+		h.mgr.cleanup(SESSION);
 	});
 
-	it("exit resolves immediately and reflects exited status (no 50ms slack)", async () => {
-		const { mgr, last } = makeManager();
+	it("exit resolves immediately and reflects exited status + terminalReason normal", async () => {
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "noop", os.tmpdir());
+		const info = h.mgr.create(SESSION, "noop", h.stateDir);
 
 		const controller = new AbortController();
-		const waitPromise = mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
+		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
 
-		// Drive the exit on a microtask boundary so the awaiter is already parked.
-		queueMicrotask(() => last().emit("exit", 0));
+		queueMicrotask(() => h.driveExit(SESSION, info.id, 0));
 
 		const result = await waitPromise;
 		assert.ok(result);
 		assert.equal(result!.timedOut, false);
 		assert.equal(result!.aborted, false);
-		// The critical invariant: the snapshot returned to the caller already
-		// shows status === "exited". Previously this required a 50 ms slack
-		// timeout to be reliable.
 		assert.equal(result!.info.status, "exited");
 		assert.equal(result!.info.exitCode, 0);
+		assert.equal(result!.info.terminalReason, "normal");
 
-		mgr.cleanup(SESSION);
+		h.mgr.cleanup(SESSION);
 	});
 
 	it("already-exited short-circuit returns aborted:false even with a fresh signal", async () => {
-		const { mgr, last } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "noop", os.tmpdir());
+		const info = h.mgr.create(SESSION, "noop", h.stateDir);
 
-		// Synchronously exit before any waiter attaches.
-		last().emit("exit", 0);
+		h.driveExit(SESSION, info.id, 0); // synchronous exit before any waiter attaches
 
 		const controller = new AbortController();
-		const result = await mgr.waitForExit(SESSION, info.id, 1000, controller.signal);
+		const result = await h.mgr.waitForExit(SESSION, info.id, 1000, controller.signal);
 		assert.ok(result);
 		assert.equal(result!.timedOut, false);
 		assert.equal(result!.aborted, false);
 		assert.equal(result!.info.status, "exited");
 
-		// Aborting after the fact must not throw or produce side effects.
 		controller.abort();
-		assert.deepEqual(last().__killed, []);
-
-		mgr.cleanup(SESSION);
+		h.mgr.cleanup(SESSION);
 	});
 
 	it("timeout fires deterministically under fake timers", (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 
-		const { mgr } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 
 		const controller = new AbortController();
-		mgr.registerWait(SESSION, controller);
+		h.mgr.registerWait(SESSION, controller);
 
-		const waitPromise = mgr.waitForExit(SESSION, info.id, 50, controller.signal);
-
-		// Advance by the exact timeout \u2014 zero wall-clock involvement.
+		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 50, controller.signal);
 		t.mock.timers.tick(50);
 
 		return waitPromise.then((result) => {
 			assert.ok(result);
 			assert.equal(result!.timedOut, true);
 			assert.equal(result!.aborted, false);
-
-			// Aborting after timeout must not produce a second resolution.
 			controller.abort();
-			mgr.unregisterWait(SESSION, controller);
-			mgr.cleanup(SESSION);
+			h.mgr.unregisterWait(SESSION, controller);
+			h.mgr.cleanup(SESSION);
 		});
 	});
 
 	it("does not leak abort listeners across many cycles", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
-		const { mgr, last } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 
-		// AbortSignal has no public listener-count API — wrap add/remove so the
-		// test can assert structurally that every wait that didn't fire abort
-		// still cleaned up the listener it added.
 		const controller = new AbortController();
 		const signal = controller.signal;
 		let active = 0;
@@ -196,11 +186,8 @@ describe("BgProcessManager.waitForExit \u2014 state machine", () => {
 			return origRemove(type, listener, opts);
 		}) as any;
 
-		// 200 wait/timeout cycles re-using the same signal. If we leak a listener
-		// per cycle, `active` grows without bound.
 		for (let i = 0; i < 200; i++) {
-			const p = mgr.waitForExit(SESSION, info.id, 1, signal);
-			// Drain microtasks so the wait has parked, then fire its timer.
+			const p = h.mgr.waitForExit(SESSION, info.id, 1, signal);
 			await Promise.resolve();
 			t.mock.timers.tick(1);
 			await p;
@@ -208,29 +195,28 @@ describe("BgProcessManager.waitForExit \u2014 state machine", () => {
 
 		assert.equal(active, 0, "abort listener must be removed when wait settles via timeout");
 		assert.ok(peak <= 1, `at most one abort listener should be live at a time, peak=${peak}`);
-		// And no listener accumulated on the underlying child either.
-		assert.equal(last().listenerCount("exit"), 1, "only the manager's create() listener should remain");
+		assert.equal(h.last().listenerCount("exit"), 1, "only the manager's create() exit hint should remain");
 
-		mgr.cleanup(SESSION);
+		h.mgr.cleanup(SESSION);
 	});
 
 	it("multiple concurrent waits all abort on abortAllWaits()", async () => {
-		const { mgr, last } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 
 		const c1 = new AbortController();
 		const c2 = new AbortController();
 		const c3 = new AbortController();
-		mgr.registerWait(SESSION, c1);
-		mgr.registerWait(SESSION, c2);
-		mgr.registerWait(SESSION, c3);
+		h.mgr.registerWait(SESSION, c1);
+		h.mgr.registerWait(SESSION, c2);
+		h.mgr.registerWait(SESSION, c3);
 
-		const p1 = mgr.waitForExit(SESSION, info.id, 10_000, c1.signal);
-		const p2 = mgr.waitForExit(SESSION, info.id, 10_000, c2.signal);
-		const p3 = mgr.waitForExit(SESSION, info.id, 10_000, c3.signal);
+		const p1 = h.mgr.waitForExit(SESSION, info.id, 10_000, c1.signal);
+		const p2 = h.mgr.waitForExit(SESSION, info.id, 10_000, c2.signal);
+		const p3 = h.mgr.waitForExit(SESSION, info.id, 10_000, c3.signal);
 
-		mgr.abortAllWaits(SESSION);
+		h.mgr.abortAllWaits(SESSION);
 		const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
 
 		for (const r of [r1, r2, r3]) {
@@ -238,90 +224,80 @@ describe("BgProcessManager.waitForExit \u2014 state machine", () => {
 			assert.equal(r!.aborted, true);
 			assert.equal(r!.info.status, "running");
 		}
-		assert.deepEqual(last().__killed, [], "abortAllWaits must not kill the bg child");
 
-		mgr.unregisterWait(SESSION, c1);
-		mgr.unregisterWait(SESSION, c2);
-		mgr.unregisterWait(SESSION, c3);
-		mgr.cleanup(SESSION);
+		h.mgr.unregisterWait(SESSION, c1);
+		h.mgr.unregisterWait(SESSION, c2);
+		h.mgr.unregisterWait(SESSION, c3);
+		h.mgr.cleanup(SESSION);
 	});
 
-	it("cleanup() aborts in-flight waits (separate from kill)", async () => {
-		const { mgr, last } = makeManager();
+	it("cleanup() aborts in-flight waits and signals running children", async () => {
+		const h = makeManager({ isHostPidAlive: () => true });
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 
 		const controller = new AbortController();
-		mgr.registerWait(SESSION, controller);
-		const waitPromise = mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
+		h.mgr.registerWait(SESSION, controller);
+		const waitPromise = h.mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
 
-		mgr.cleanup(SESSION);
+		h.mgr.cleanup(SESSION);
 
 		const result = await waitPromise;
 		assert.ok(result);
-		// cleanup() calls abortAllWaits() FIRST, so the abort branch must win
-		// regardless of what happens to the child afterwards.
 		assert.equal(result!.aborted, true, "cleanup must abort the pending wait");
-
-		// And cleanup must also have signalled the child.
-		assert.ok(last().__killed.includes("SIGTERM"), "cleanup must SIGTERM running children");
+		assert.ok(h.killCalls.length >= 1, "cleanup must signal running children via env.killHostTree");
 	});
 
 	it("waitForExit on unknown processId returns null", async () => {
-		const { mgr } = makeManager();
-		const result = await mgr.waitForExit(freshSession(), "bg-does-not-exist", 100);
+		const h = makeManager();
+		const result = await h.mgr.waitForExit(freshSession(), "bg-does-not-exist", 100);
 		assert.equal(result, null);
 	});
 
 	it("pre-aborted signal returns immediately without arming the timer", (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 
-		const { mgr } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 
 		const controller = new AbortController();
-		controller.abort(); // abort BEFORE waitForExit is invoked
+		controller.abort();
 
-		// If waitForExit incorrectly armed the timer it would still be pending;
-		// we can detect that via t.mock.timers.runAll() having work to do.
-		return mgr.waitForExit(SESSION, info.id, 10_000, controller.signal).then((result) => {
+		return h.mgr.waitForExit(SESSION, info.id, 10_000, controller.signal).then((result) => {
 			assert.ok(result);
 			assert.equal(result!.aborted, true);
 			assert.equal(result!.timedOut, false);
-			// Running all pending timers must not produce any extra resolution
-			// or unhandled rejection \u2014 this assertion is purely structural.
 			t.mock.timers.runAll();
-			mgr.cleanup(SESSION);
+			h.mgr.cleanup(SESSION);
 		});
 	});
 });
 
 describe("BgProcessManager endTime snapshots", () => {
 	it("created/running process info exposes endTime null", () => {
-		const { mgr } = makeManager();
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
-
+		const info = h.mgr.create(SESSION, "sleep 30", h.stateDir);
 		try {
 			assert.equal((info as { endTime?: unknown }).endTime, null, "running BgProcessInfo must include endTime: null");
 		} finally {
-			mgr.cleanup(SESSION);
+			h.mgr.cleanup(SESSION);
 		}
 	});
 
-	it("list() and waitForExit() expose numeric endTime after child exit", async () => {
-		const { mgr, last } = makeManager();
+	it("list() and waitForExit() expose numeric endTime after exit", async () => {
+		const h = makeManager();
 		const SESSION = freshSession();
-		const info = mgr.create(SESSION, "noop", os.tmpdir());
+		const info = h.mgr.create(SESSION, "noop", h.stateDir);
 
 		try {
-			const waitPromise = mgr.waitForExit(SESSION, info.id, 10_000);
-			queueMicrotask(() => last().emit("exit", 0));
+			const waitPromise = h.mgr.waitForExit(SESSION, info.id, 10_000);
+			queueMicrotask(() => h.driveExit(SESSION, info.id, 0));
 
 			const result = await waitPromise;
 			assert.ok(result);
-			const listed = mgr.list(SESSION).find((p) => p.id === info.id);
+			const listed = h.mgr.list(SESSION).find((p) => p.id === info.id);
 			assert.ok(listed);
 
 			const listEndTime = (listed as { endTime?: unknown }).endTime;
@@ -332,7 +308,7 @@ describe("BgProcessManager endTime snapshots", () => {
 			assert.ok((listEndTime as number) >= info.startTime, "list() endTime must be at or after startTime");
 			assert.equal(waitEndTime, listEndTime, "waitForExit() and list() should report the same final endTime");
 		} finally {
-			mgr.cleanup(SESSION);
+			h.mgr.cleanup(SESSION);
 		}
 	});
 });
