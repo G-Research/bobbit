@@ -10,11 +10,14 @@
 //   - host.callRoute("publish", { yaml, jobId, baseSha, headSha }) → the pack route
 //     runs the SAME production YAML→cards synthesis as the deleted built-in and
 //     persists the result (the read→publish parity seam).
+//   - host.callRoute("run", …) → mints a SEPARATE, isolated, read-only reviewer
+//     child via host.agents.spawn (the user's own agent is NEVER driven). Returns
+//     { childSessionId, jobId, baseSha, headSha } for the panel to poll.
+//   - host.callRoute("status", { childSessionId, jobId }) → poll the reviewer until
+//     it submits the production YAML ({ phase:"submitted", yaml, … }).
 //   - host.session.readTranscript / readToolCall → reads the unchanged
-//     submit_pr_walkthrough_yaml tool call (own-session).
-//   - host.session.postMessage → the "Run PR walkthrough" launch gesture drives the
-//     CURRENT agent to run the walkthrough tools (re-expresses the deleted git-widget
-//     "launch a child agent" privilege without minting a new principal).
+//     submit_pr_walkthrough_yaml tool call (own-session) — the legacy "Load" path
+//     for a walkthrough previously published into THIS session's bundle store.
 //
 // PRODUCTION-FAITHFUL: the panel hands the RAW submitted YAML (the rich production
 // `pr` + `walkthrough.{…}` document) to `publish`; the route validates + maps it via
@@ -22,8 +25,9 @@
 // doc's `pr` (changesetIdForGithub) — no `job-litmus-1` literal.
 //
 // SECURITY: NO auto-invoke on mount (v1 §5 v). Reads/publish fire ONLY from the
-// user's "Load" click; postMessage fires ONLY from the "Run" click (gesture-gated).
-// Theme tokens only; structured data rendered via the escaping lit toolkit.
+// user's "Load" click; the "Run" click is gesture-gated and mints a SEPARATE
+// read-only reviewer child via the `run` route (the user's own agent is NEVER
+// driven). Theme tokens only; structured data rendered via the escaping lit toolkit.
 
 import { parse as parseYaml } from "yaml";
 
@@ -32,16 +36,6 @@ import { changesetIdForGithub } from "../../../src/shared/pr-walkthrough/ids.ts"
 const SUBMIT_TOOL = "submit_pr_walkthrough_yaml";
 const RUN_TIMEOUT_MS = 120_000;
 const POLL_INTERVAL_MS = 1_500;
-
-// The text the "Run PR walkthrough" gesture posts to the CURRENT agent. The agent
-// already has readonly_bash / read_pr_walkthrough_bundle / submit_pr_walkthrough_yaml
-// (the kept agent toolchain) and emits the production YAML, which the panel then
-// reads → publishes → renders.
-const RUN_PROMPT = [
-	"Please run a PR walkthrough for the current branch.",
-	"Use readonly_bash to inspect the diff, read_pr_walkthrough_bundle to assemble the changeset,",
-	"then call submit_pr_walkthrough_yaml with the production walkthrough YAML.",
-].join(" ");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -87,22 +81,23 @@ function deriveJobRef(yamlText, fallback) {
 	return ref;
 }
 
-// Map a postMessage failure onto a clear, user-facing message (the §8.4 failure
-// model): a missing user gesture, a session that lacks the submit tool in
-// allowedTools (server allowedTools gate), or no pack-served session surface.
-function postErrorMessage(e) {
-	const msg = (e && e.message) ? String(e.message) : String(e);
-	if (/gesture/i.test(msg)) return "Please click Run again (a user gesture is required).";
-	if (/allowed|not permitted|forbidden|tool/i.test(msg)) return "This session can't run a walkthrough (the agent lacks the walkthrough tools).";
-	if (/pack-served|session/i.test(msg)) return "No active session — open this from a session to run a walkthrough.";
-	return `Could not ask the agent: ${msg}`;
+// Map a `run` route failure (a thrown error, or a structured { ok:false, error })
+// onto a clear, user-facing message. The `run` route is idempotent, so any failure
+// is safely retryable via the "Run again" affordance.
+function runErrorMessage(e) {
+	const msg = (e && e.error) ? String(e.error)
+		: (e && e.message) ? String(e.message)
+			: String(e);
+	return `Could not start the reviewer: ${msg} — try again.`;
 }
 
 export default function createPanel({ html, nothing, renderHeader }) {
 	void renderHeader;
 
 	// paramKey → { status, bundle?, toolCall?, error?, activeCardId?, jobId? }.
-	// status ∈ idle | loading | posting | waiting | publishing | rendered | error.
+	// status ∈ idle | loading | running | publishing | rendered | error.
+	//   running    → a reviewer child has been minted; the panel is polling `status`.
+	//   publishing → transient: the reviewer submitted; running publish → bundle.
 	// Module-level so it survives panel re-mounts within a page session.
 	const byJob = new Map();
 
@@ -274,7 +269,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const headSha = params && params.headSha;
 			const entry = byJob.get(paramKey) || { status: "idle" };
 			const status = entry.status || "idle";
-			const busy = status === "loading" || status === "posting" || status === "waiting" || status === "publishing";
+			const busy = status === "loading" || status === "running" || status === "publishing";
 			const hasSession = Boolean(host && host.capabilities && host.capabilities.session);
 			const displayJob = entry.jobId || paramJobId || "current session";
 
@@ -296,16 +291,22 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				return null;
 			};
 
-			const publishAndLoad = async (toolCall) => {
+			// `publishAndLoad` is the UNCHANGED read→publish→render seam. It accepts the
+			// RAW submitted YAML wrapped as a toolCall-like `{ input: { yaml } }`; the only
+			// change for the new `run` flow is that the YAML now arrives from the `status`
+			// route (a separate reviewer session) instead of `host.session.readToolCall`.
+			// The optional baseSha/headSha overrides let the `run` flow pass the binding's
+			// SHAs (the Load path passes none and keeps its prior fallback chain).
+			const publishAndLoad = async (toolCall, baseShaOverride, headShaOverride) => {
 				const yamlText = rawYamlOf(toolCall);
 				const ref = deriveJobRef(yamlText, paramJobId);
 				const jobId = ref.jobId;
 				// SHAs for the LIVE recompute: PREFER the submitted YAML's pr.base_sha/
-				// head_sha (the bare-launcher path carries NO URL params); fall back to the
-				// deep-link params only when the YAML lacks them. Without these, `publish`
-				// stores a pointer with undefined SHAs and `bundle` returns the empty state.
-				const effBaseSha = ref.baseSha || baseSha;
-				const effHeadSha = ref.headSha || headSha;
+				// head_sha; then the explicit override (the `status` route's binding SHAs);
+				// then the deep-link params. Without these, `publish` stores a pointer with
+				// undefined SHAs and `bundle` returns the empty state.
+				const effBaseSha = ref.baseSha || baseShaOverride || baseSha;
+				const effHeadSha = ref.headSha || headShaOverride || headSha;
 				// Persist via the pack's OWN `publish` route BEFORE reading `bundle`, so the
 				// bundle serves the synthesized production cards over the structural fallback.
 				if (yamlText && host.callRoute) {
@@ -343,80 +344,79 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				}
 			};
 
-			// ── "Run PR walkthrough" launch gesture (§8.4 step 5). postMessage MUST be the
-			// first await-free call so the synchronous user-activation check passes. ──
-			const onRun = () => {
-				if (!host || !hasSession || busy) return; // duplicate-click guard
-				let postPromise;
+			// ── "Run PR walkthrough" launch (Decision D). Calls the `run` route, which mints
+			// a SEPARATE, isolated, read-only reviewer child via host.agents.spawn (the
+			// user's own agent is NEVER driven), then polls the `status` route until the
+			// reviewer submits the production YAML. The launch is a route call (not a
+			// gesture-gated postMessage), so `onRun` may be async — the button is still
+			// gesture-gated (it only fires from the user's click) with NO auto-invoke. ──
+			const onRun = async () => {
+				if (!host || busy) return; // duplicate-click guard
+				// The changeset selector the panel already has (deep-link params).
+				const runBody = {};
+				if (params && params.prUrl) runBody.prUrl = params.prUrl;
+				if (params && params.owner) runBody.owner = params.owner;
+				if (params && params.repo) runBody.repo = params.repo;
+				if (params && params.prNumber != null) runBody.prNumber = params.prNumber;
+				if (baseSha) runBody.baseSha = baseSha;
+				if (headSha) runBody.headSha = headSha;
+
+				byJob.set(paramKey, { status: "running" });
+				if (host.requestRender) host.requestRender();
+
+				let started;
 				try {
-					byJob.set(paramKey, { status: "posting" });
-					postPromise = host.session.postMessage({ role: "user", text: RUN_PROMPT, resumeTurn: true });
+					started = await host.callRoute("run", { method: "POST", body: runBody });
 				} catch (e) {
-					byJob.set(paramKey, { status: "error", error: postErrorMessage(e) });
+					byJob.set(paramKey, { status: "error", error: runErrorMessage(e) });
 					if (host.requestRender) host.requestRender();
 					return;
 				}
-				if (host.requestRender) host.requestRender();
-				(async () => {
-					try {
-						await postPromise;
-					} catch (e) {
-						byJob.set(paramKey, { status: "error", error: postErrorMessage(e) });
-						if (host.requestRender) host.requestRender();
-						return;
-					}
-					// Snapshot the submit tool calls present at post time so we only react to
-					// a NEW one the agent produces (not a stale prior submission).
-					const beforeIds = new Set();
-					try {
-						const env = await host.session.readTranscript({ pattern: SUBMIT_TOOL, limit: 100 });
-						for (const m of (env.messages || [])) {
-							for (const blk of (m.content || [])) {
-								if (blk.type === "tool_use" && blk.tool === SUBMIT_TOOL) beforeIds.add(blk.toolUseId);
-							}
-						}
-					} catch { /* best-effort */ }
-					byJob.set(paramKey, { status: "waiting" });
+				if (!started || started.ok === false) {
+					byJob.set(paramKey, { status: "error", error: runErrorMessage(started || "launch failed") });
 					if (host.requestRender) host.requestRender();
+					return;
+				}
 
-					const deadline = Date.now() + RUN_TIMEOUT_MS;
-					let newCall = null;
-					while (Date.now() < deadline) {
-						const st = byJob.get(paramKey);
-						if (!st || st.status !== "waiting") return; // user took another action
+				const childSessionId = started.childSessionId;
+				const jobId = started.jobId;
+				const startBaseSha = started.baseSha;
+				const startHeadSha = started.headSha;
+				const deadline = Date.now() + RUN_TIMEOUT_MS;
+				while (Date.now() < deadline) {
+					// The user took another action (Load/re-Run) — abandon this poll loop.
+					const cur = byJob.get(paramKey);
+					if (!cur || cur.status !== "running") return;
+					let st;
+					try {
+						st = await host.callRoute("status", { method: "POST", body: { childSessionId, jobId } });
+					} catch { st = undefined; }
+					if (st && st.phase === "submitted") {
+						byJob.set(paramKey, { status: "publishing" });
+						if (host.requestRender) host.requestRender();
 						try {
-							const env = await host.session.readTranscript({ pattern: SUBMIT_TOOL, limit: 100 });
-							let submitId;
-							for (const m of (env.messages || [])) {
-								for (const blk of (m.content || [])) {
-									if (blk.type === "tool_use" && blk.tool === SUBMIT_TOOL && !beforeIds.has(blk.toolUseId)) submitId = blk.toolUseId;
-								}
-							}
-							if (submitId) { newCall = await host.session.readToolCall(submitId); break; }
-						} catch { /* keep polling */ }
-						await sleep(POLL_INTERVAL_MS);
-					}
-					if (!newCall) {
-						byJob.set(paramKey, { status: "error", error: "The agent didn't produce a walkthrough — try again." });
+							await publishAndLoad({ input: { yaml: st.yaml } }, st.baseSha ?? startBaseSha, st.headSha ?? startHeadSha);
+						} catch (e) {
+							byJob.set(paramKey, { status: "error", error: e && e.message ? e.message : String(e) });
+						}
 						if (host.requestRender) host.requestRender();
 						return;
 					}
-					byJob.set(paramKey, { status: "publishing" });
-					if (host.requestRender) host.requestRender();
-					try {
-						await publishAndLoad(newCall);
-					} catch (e) {
-						byJob.set(paramKey, { status: "error", error: e && e.message ? e.message : String(e) });
+					if (st && st.phase === "error") {
+						byJob.set(paramKey, { status: "error", error: st.error || "The reviewer failed — try again." });
+						if (host.requestRender) host.requestRender();
+						return;
 					}
-					if (host.requestRender) host.requestRender();
-				})();
+					await sleep(POLL_INTERVAL_MS);
+				}
+				byJob.set(paramKey, { status: "error", error: "The reviewer didn't produce a walkthrough — try again." });
+				if (host.requestRender) host.requestRender();
 			};
 
 			const statusText = status === "loading" ? "Loading…"
-				: status === "posting" ? "Asking the agent…"
-					: status === "waiting" ? "Waiting for the agent to submit a walkthrough…"
-						: status === "publishing" ? "Publishing the walkthrough…"
-							: undefined;
+				: status === "running" ? "Reviewing the PR…"
+					: status === "publishing" ? "Publishing the walkthrough…"
+						: undefined;
 
 			const showActions = !entry.bundle && !busy;
 
