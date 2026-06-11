@@ -73,8 +73,21 @@ export const OPENAI_MODEL_ADDITIONS: OpenAIAddition[] = [
 		input: ["text", "image"],
 		cost: COST_GPT_55,
 	},
-	// Deliberately no openai-codex/gpt-5.5-pro: Pi 0.77 only ships
-	// openai-codex/gpt-5.5, and live ChatGPT rejects the pro id.
+	// Deliberately no openai-codex/gpt-5.5-pro: pi-ai (through 0.79.1) only
+	// ships openai-codex/gpt-5.5, and live ChatGPT rejects the pro id. It lives
+	// in DEPRECATED_OPENAI_MODEL_ADDITIONS below so any previously-persisted
+	// speculative entry is actively pruned.
+	//
+	// NOTE (pi-ai 0.79.1): openai/gpt-5.5, openai/gpt-5.5-pro and
+	// openai-codex/gpt-5.5 are now first-party pi-ai built-ins. The entries
+	// above are therefore no longer additive — at runtime assembleModels()
+	// filters them out (built-in wins, so the authoritative upstream context
+	// window/maxTokens are used, e.g. openai/gpt-5.5 = 272K not the historical
+	// 1M placeholder), and writeOpenAIModelAdditions() removes/migrates any
+	// stale persisted duplicate via syncOrRemoveBuiltInDuplicate(). They are
+	// retained here ONLY so that cleanup path keeps recognising the historical
+	// Bobbit-emitted defaults; do not delete them or old installs would keep a
+	// stale shadow entry in models.json.
 ];
 
 const DEPRECATED_OPENAI_MODEL_ADDITIONS: OpenAIAddition[] = [

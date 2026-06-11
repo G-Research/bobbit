@@ -179,9 +179,27 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * Order matters: --model and --thinking are inserted BEFORE caller-supplied
  * `options.args` so any explicit override in `args` (e.g. `--model x` from
  * a custom flow) wins over the spawn-time pin.
+ *
+ * `--no-approve` (pi 0.79.0 project-trust gate) is ALWAYS present AND
+ * NON-OVERRIDABLE: Bobbit injects all config via ~/.bobbit/agent + RPC args and
+ * never loads project-local `.pi` directories. `--no-approve` makes pi decline
+ * project trust deterministically (projectTrustOverride=false →
+ * resolveProjectTrusted returns false immediately), so the agent never stalls on
+ * a trust prompt and never loads project-local settings/resources/packages/
+ * extensions. Both the local-spawn arg list and the Docker-exec arg list flow
+ * through this builder, so a single flag covers both spawn paths. This must NOT
+ * depend on settings.json state. See goal: project-trust decision (no `.pi`
+ * support).
+ *
+ * pi parses the trust flags sequentially, last-wins (see pi-coding-agent
+ * dist/cli/args.js: `--approve`/`-a` set projectTrustOverride=true,
+ * `--no-approve`/`-na` set it false). A caller-supplied `--approve` in
+ * `options.args` would therefore re-enable project-local loading. To keep the
+ * decline deterministic we STRIP every trust flag spelling from `options.args`
+ * and emit exactly one leading `--no-approve` that no caller can override.
  */
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
-	const args = ["--mode", "rpc"];
+	const args = ["--mode", "rpc", "--no-approve"];
 	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
 	if (options.initialModel) {
 		const slash = options.initialModel.indexOf("/");
@@ -196,7 +214,14 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 			args.push("--thinking", options.initialThinkingLevel);
 		}
 	}
-	if (options.args) args.push(...options.args);
+	if (options.args) {
+		// Drop any caller-supplied project-trust flag so the single leading
+		// `--no-approve` above is non-overridable. These flags are valueless
+		// booleans, so filtering the token alone is sufficient (no paired value to
+		// also remove).
+		const TRUST_FLAGS = new Set(["--approve", "-a", "--no-approve", "-na"]);
+		args.push(...options.args.filter((a) => !TRUST_FLAGS.has(a)));
+	}
 	return args;
 }
 

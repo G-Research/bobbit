@@ -17,13 +17,80 @@ import assert from "node:assert/strict";
 import { buildAgentArgs } from "../src/server/agent/rpc-bridge.ts";
 
 describe("buildAgentArgs", () => {
+	it("always includes --no-approve so pi never stalls on the 0.79 project-trust gate", () => {
+		// Project-trust must be declined deterministically on EVERY spawn,
+		// independent of options. Bobbit injects all config via ~/.bobbit/agent
+		// and RPC args; it never loads project-local .pi directories.
+		for (const opts of [
+			{},
+			{ initialModel: "anthropic/claude-opus-4-8" },
+			{ initialThinkingLevel: "high" },
+			{ systemPromptPath: "/tmp/p.md", initialModel: "openai/gpt-4o", initialThinkingLevel: "xhigh" },
+			{ args: ["--tools", "read,write"] },
+		]) {
+			const args = buildAgentArgs(opts);
+			assert.ok(args.includes("--no-approve"), `--no-approve must always be present, got: ${args.join(" ")}`);
+			assert.ok(!args.includes("--approve"), "must never pass --approve");
+		}
+	});
+
+	it("strips a caller-supplied --approve and keeps exactly one non-overridable --no-approve", () => {
+		// pi parses trust flags last-wins; a trailing --approve would re-enable
+		// project-local .pi loading. It must be stripped, leaving the leading
+		// --no-approve as the sole, winning trust decision.
+		const args = buildAgentArgs({ args: ["--approve"] });
+		assert.ok(!args.includes("--approve"), `--approve must be stripped, got: ${args.join(" ")}`);
+		assert.equal(
+			args.filter((a) => a === "--no-approve").length,
+			1,
+			`exactly one --no-approve expected, got: ${args.join(" ")}`,
+		);
+	});
+
+	it("strips the -a short alias for --approve", () => {
+		const args = buildAgentArgs({ args: ["-a"] });
+		assert.ok(!args.includes("-a"), `-a must be stripped, got: ${args.join(" ")}`);
+		assert.ok(!args.includes("--approve"));
+		assert.equal(args.filter((a) => a === "--no-approve").length, 1);
+	});
+
+	it("de-duplicates a caller-supplied --no-approve (and -na) to a single leading flag", () => {
+		for (const dup of ["--no-approve", "-na"]) {
+			const args = buildAgentArgs({ args: [dup] });
+			assert.ok(!args.includes("-na"), `-na alias must be dropped, got: ${args.join(" ")}`);
+			assert.equal(
+				args.filter((a) => a === "--no-approve").length,
+				1,
+				`exactly one --no-approve expected for dup=${dup}, got: ${args.join(" ")}`,
+			);
+		}
+	});
+
+	it("strips trust flags but preserves --extension and other ordering semantics", () => {
+		const args = buildAgentArgs({
+			initialModel: "anthropic/claude-3-5-sonnet",
+			args: ["--approve", "--extension", "/foo.ts", "-na", "--tools", "read"],
+		});
+		assert.ok(!args.includes("--approve"), "caller --approve stripped");
+		assert.ok(!args.includes("-na"), "caller -na stripped");
+		assert.equal(args.filter((a) => a === "--no-approve").length, 1, "single --no-approve");
+		// Non-trust args survive untouched, in order, after --model.
+		const idxModel = args.indexOf("--model");
+		const idxExt = args.indexOf("--extension");
+		const idxTools = args.indexOf("--tools");
+		assert.ok(idxModel >= 0 && idxExt >= 0 && idxTools >= 0);
+		assert.ok(idxModel < idxExt && idxExt < idxTools, `expected --model < --extension < --tools, got: ${args.join(" ")}`);
+		assert.equal(args[idxExt + 1], "/foo.ts", "--extension value preserved");
+		assert.equal(args[idxTools + 1], "read", "--tools value preserved");
+	});
+
 	it("includes --model and --thinking when initialModel/initialThinkingLevel are set", () => {
 		const args = buildAgentArgs({
 			initialModel: "anthropic/claude-3-5-sonnet",
 			initialThinkingLevel: "high",
 		});
 		assert.deepEqual(args, [
-			"--mode", "rpc",
+			"--mode", "rpc", "--no-approve",
 			"--model", "anthropic/claude-3-5-sonnet",
 			"--thinking", "high",
 		]);
@@ -89,7 +156,7 @@ describe("buildAgentArgs", () => {
 		});
 
 		assert.deepEqual(args, [
-			"--mode", "rpc",
+			"--mode", "rpc", "--no-approve",
 			"--model", "anthropic/claude-opus-4-8",
 			"--thinking", "xhigh",
 		]);
