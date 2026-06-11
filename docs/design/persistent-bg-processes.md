@@ -49,9 +49,10 @@ Make bg processes behave as if the server never restarted:
 ## 2. The crux: durable log/status files instead of in-memory pipes
 
 You **cannot** re-attach to a dead parent's stdout/stderr pipes. The spawn model must change so
-that output and exit status live on disk, owned by the *child*, independent of the gateway. The
-files split into transient per-stream **spools** and a single durable **combined projection** (see
-§8 for the cap mechanics):
+that output and exit status live on disk, independent of the gateway lifetime. The files split into
+transient per-stream **spools** (written by the child — on the host, or container-internal for
+docker) and a single durable **combined projection** plus a terminal **status snapshot** that the
+**gateway owns as HOST files** (for BOTH host and docker spawns — see §3.2/§8 for the cap mechanics):
 
 - At spawn time, **redirect the command's stdout/stderr into transient per-stream spool files**
   (`<bgId>.out.spool` / `<bgId>.err.spool`) that the child appends to. The spools are explicitly
@@ -59,8 +60,10 @@ files split into transient per-stream **spools** and a single durable **combined
   §8) — they are *not* "the persisted log".
 - The gateway tails both spool deltas, interleaves them by arrival into the existing in-memory
   capped `log[]` buffer, and continuously rewrites a **single durable combined projection** it owns
-  exclusively (`<bgId>.log`, atomic tmp+rename, always ≤ 512KB / 5000 lines **combined across both
-  streams**). Each line is tagged `<ts>\t<stream>\t<text>` so restore rebuilds the interleaved
+  exclusively (`<bgId>.log`, **always a HOST file** for both host and docker spawns, atomic
+  tmp+rename, always ≤ 512KB / 5000 lines **combined across both streams**). For docker the gateway
+  mirrors the container-internal spool bytes into this host projection (§3.2). Each line is tagged
+  `<ts>\t<stream>\t<text>` so restore rebuilds the interleaved
   `log[]` plus `stdout[]`/`stderr[]` faithfully. Restore and the REST readers read the **combined
   projection**, never the raw spools.
 - **Capture the real exit code durably**: wrap the command in an **isolated subshell**
@@ -83,7 +86,7 @@ child's pipes directly, and the durable projection is rewritten from that same c
 | Survives gateway restart | No | Yes (child keeps appending to spool) |
 | Re-attach output after restart | Impossible | Tail spool from saved offset → projection |
 | Real exit code after restart | Lost | Read from status file |
-| Docker-exec, gateway down | Lost | Container keeps writing spool; read on restore |
+| Docker-exec, gateway down | Lost | Container keeps writing spool; gateway mirrors to HOST projection on restore; survives container churn |
 | On-disk cap held while running | n/a | Gateway-owned combined capped projection (§8) |
 | stdout/stderr interleaving survives restart | n/a | Combined timestamped projection rebuilds order |
 | Unit-testable without OS | Fake child EventEmitter | Fake file paths + fake `Tailer` |
@@ -100,28 +103,39 @@ test state dir (`tests/e2e/e2e-setup.ts`) are inherited for free.
   sessions.json                          # existing
   bg-processes.json                      # NEW: metadata index (all sessions for this project)
   bg-processes.json.bak.1 .. .bak.5      # NEW: rotated backups (mirrors SessionStore)
-  bg-processes/                          # NEW: per-process files
+  bg-processes/                          # NEW: per-process files — HOST, gateway-owned (BOTH host & docker)
     <sessionId>/
-      <bgId>.out.spool                   # TRANSIENT: child appends stdout; bounded by wrapper-owned trimmer
+      <bgId>.log                         # DURABLE COMBINED PROJECTION: HOST, gateway-owned, atomic rewrite,
+                                         #   ≤512KB/5000 lines COMBINED; lines tagged <ts>\t<stream>\t<text>.
+                                         #   ALWAYS host for BOTH host and docker spawns — the authoritative
+                                         #   retained log; survives container recreation/removal.
+      <bgId>.status                      # HOST terminal status snapshot (real exit code). Host spawns: the
+                                         #   wrapper/helper writes it directly. Docker: the gateway MIRRORS the
+                                         #   real code here once it reads the container status. Survives churn.
+      # --- host spawns ONLY: live source files written on the host by the wrapper or Node helper ---
+      <bgId>.out.spool                   # TRANSIENT: child appends stdout; bounded by wrapper/helper ring
                                          #   (restart-independent) + gateway copytruncate (secondary)
       <bgId>.err.spool                   # TRANSIENT: child appends stderr; bounded the same way
-      <bgId>.log                         # DURABLE COMBINED PROJECTION: gateway-owned, atomic rewrite,
-                                         #   ≤512KB/5000 lines COMBINED; lines tagged <ts>\t<stream>\t<text>
-      <bgId>.status                      # final exit code, written once by the wrapper
-      <bgId>.pid                         # wrapper processPid + spawn nonce — liveness + pid-reuse probe
+      <bgId>.pid                         # wrapper/helper processPid + spawn nonce — liveness + pid-reuse probe
+      # --- docker spawns keep their LIVE SOURCE spool/status/pid container-internal (/tmp/bobbit-bg/...),
+      #     tailed/read via `docker exec` and MIRRORED by the gateway into the host <bgId>.log + <bgId>.status (§3.2) ---
 ```
 
-The **spools** are the only files the child writes; the gateway never lets the child write the
-**combined projection** (`<bgId>.log`). Restore and every REST reader
-(`getLogs`/`grep`/`head`/`slice`) read the combined projection exclusively — the spools are
-implementation-internal rings, never served to clients. grep/head/slice operate on the combined
-interleaved view exactly as they do today against the in-memory `log[]`.
+The **combined projection** (`<bgId>.log`) and the **terminal status snapshot** (`<bgId>.status`)
+are **always HOST files the gateway owns exclusively**, for BOTH host and docker spawns — the child
+never writes the projection. For host spawns the child appends only to the host spools; for docker
+the child appends to container-internal spools that the gateway tails and mirrors into the host
+projection (§3.2). Restore and every REST reader (`getLogs`/`grep`/`head`/`slice`) read the host
+combined projection exclusively — the spools are implementation-internal rings, never served to
+clients. grep/head/slice operate on the combined interleaved view exactly as they do today against
+the in-memory `log[]`.
 
 ### 3.1 Stream files: per-stream spools vs combined projection
 
-The wrapper redirects each stream to its **own transient spool file** — keeping two files
-(`.out.spool`, `.err.spool`) is fully portable across Git Bash and `/bin/sh` (the persistent path
-is POSIX-only — §4.1). The child only ever appends to the spools.
+The wrapper (or Node bg-runner helper) redirects each stream to its **own transient spool file** —
+keeping two files (`.out.spool`, `.err.spool`) is fully portable across Git Bash, `/bin/sh`, and the
+Node helper (the helper covers Windows without Git Bash — §4.1). The child only ever appends to the
+spools.
 
 The gateway tails both spool deltas, feeds them into the existing in-memory capped buffer
 (`appendLog()` interleaves `stdout`/`stderr` by arrival, exactly as today's pipe `data` events),
@@ -143,64 +157,93 @@ The projection is always within caps (§8). The status file remains a single `<b
 Final naming (used throughout this doc):
 
 ```
+# HOST-owned, gateway-written — ALWAYS host for BOTH host and docker spawns:
+<stateDir>/bg-processes/<sessionId>/<bgId>.log         # durable COMBINED projection (authoritative retained log)
+<stateDir>/bg-processes/<sessionId>/<bgId>.status      # HOST terminal status snapshot (host: wrapper/helper-written; docker: gateway-mirrored)
+# host spawns ONLY — live source, host paths:
 <stateDir>/bg-processes/<sessionId>/<bgId>.out.spool   # transient, child-written (stdout)
 <stateDir>/bg-processes/<sessionId>/<bgId>.err.spool   # transient, child-written (stderr)
-<stateDir>/bg-processes/<sessionId>/<bgId>.log         # durable COMBINED projection, gateway-written
-<stateDir>/bg-processes/<sessionId>/<bgId>.status
-<stateDir>/bg-processes/<sessionId>/<bgId>.pid         # processPid + nonce (host: written by wrapper;
-                                                       #   docker: in-container pidfile read post-spawn)
+<stateDir>/bg-processes/<sessionId>/<bgId>.pid         # processPid + nonce, wrapper/helper-written
+# docker spawns ONLY — live source, container-internal (read/mirrored via docker exec, §3.2):
+/tmp/bobbit-bg/<sessionId>/<bgId>.out.spool            # containerOutSpool
+/tmp/bobbit-bg/<sessionId>/<bgId>.err.spool            # containerErrSpool
+/tmp/bobbit-bg/<sessionId>/<bgId>.status               # containerStatus (gateway mirrors into HOST <bgId>.status)
+/tmp/bobbit-bg/<sessionId>/<bgId>.pid                  # containerPid (processPid + nonce, read via docker exec cat)
 ```
 
-### 3.2 Docker reachability
+### 3.2 Docker reachability — container-internal live source, HOST-owned projection
 
 For sandboxed sessions the worktree is **container-internal** (cloned into `/workspace` or
 `/workspace-wt/...`), **not** bind-mounted from the host (see
 `src/server/agent/sandbox-clone-source.ts`, `MOUNTED_SRC_PATH`, and
 `session-manager.ts::isSandboxContainerPath` ~L96). The host cannot read a file written inside the
-container by path.
+container by path, and a container can be **recreated or removed** at any time — taking its
+filesystem with it.
 
-Therefore docker-exec processes keep **both spool files plus the combined projection, status, and
-pidfile inside the container** (under `/tmp/bobbit-bg/<sessionId>/<bgId>.*`), and the host reaches
-them via `docker exec`. The same spool→combined-projection split applies: the child appends to the
-two in-container spools; the gateway tails both and rewrites the single in-container combined
-projection via `docker exec <cid> /bin/sh -c 'cat > <log>.tmp && mv <log>.tmp <log>'` from the
-capped buffer (atomic rename inside the container). The single `inContainer` flag therefore covers
-every file uniformly.
+So the durable artefacts must be **host-owned even for docker**:
 
-- **Tail live / re-attach:** `docker exec <cid> tail -c +<offset+1> -F <containerSpoolPath>` per
-  spool (the `-F` keeps following across truncation; `-c +<offset+1>` resumes from a byte offset).
-- **Read projection / final on restore-after-downtime:** `docker exec <cid> cat <containerLogPath>`
-  (the single combined `<bgId>.log`) and `docker exec <cid> cat <containerStatusPath>`.
-- **Resolve `processPid` post-spawn / liveness:** `docker exec <cid> cat <containerPidfile>` reads
-  the in-container wrapper pid (`processPid`) **and** the spawn nonce (§4/§7.1); liveness is
+- **Live source files stay container-internal.** Because the wrapper runs *inside* the container,
+  the two spools, the status file, and the pidfile are written under
+  `/tmp/bobbit-bg/<sessionId>/<bgId>.*` in the container (fields `containerOutSpool`,
+  `containerErrSpool`, `containerStatus`, `containerPid`). The host reaches them via `docker exec`.
+- **The durable combined projection (`<bgId>.log`) and the terminal status snapshot
+  (`<bgId>.status`) are HOST files the gateway owns** — same host path as for host spawns
+  (`<stateDir>/bg-processes/<sessionId>/<bgId>.{log,status}`). The gateway tails the container
+  spools and **mirrors observed bytes into the host projection**, and when it reads the container
+  status it **mirrors the real exit code into the host status snapshot**. Captured output + final
+  outcome therefore survive container recreation/removal — satisfying "output retained until
+  dismissed" and sandbox parity.
+
+Mechanics (all container access via `docker exec`):
+
+- **Tail live / re-attach:** `docker exec <cid> tail -c +<offset+1> -F <containerOutSpool>` /
+  `<containerErrSpool>` (the `-F` keeps following across truncation; `-c +<offset+1>` resumes from a
+  byte offset). The gateway feeds the bytes into the in-memory capped `log[]` and atomically
+  rewrites the **host** `<bgId>.log` projection from it (exactly as for host spawns).
+- **Read final status / mirror:** `docker exec <cid> cat <containerStatus>`; on a complete read the
+  gateway writes the real exit code into the **host** `<bgId>.status` snapshot (atomic tmp+rename).
+- **Resolve `processPid` post-spawn / liveness:** `docker exec <cid> cat <containerPid>` reads the
+  in-container wrapper pid (`processPid`) **and** the spawn nonce (§4/§7.1); liveness is
   `docker inspect -f '{{.State.Running}}' <cid>` for the container plus
   `docker exec <cid> kill -0 <processPid>` for the in-container wrapper.
 
-The metadata records the **container paths** (host paths empty for docker), plus the `containerId`.
-The in-container pidfile holds the `processPid` **and** nonce, read via `docker exec cat`.
+The metadata records BOTH the host projection/snapshot paths (`logFile`, `statusSnapshot`) **and**
+the container source paths (`containerOutSpool`/`containerErrSpool`/`containerStatus`/
+`containerPid`), plus the `containerId`. `inContainer=true` selects the docker tail/cat/mirror path;
+the host `logFile`/`statusSnapshot` are written by the gateway regardless.
 
-> The container path lives under the worktree (host-unreadable but container-writable) which is
-> the only guaranteed-writable, restart-stable location for a sandboxed session. `/tmp` is also
-> acceptable and avoids polluting the worktree; **chosen: `/tmp/bobbit-bg/<sessionId>/<bgId>.*`**
-> inside the container, created with `mkdir -p` by the wrapper. `/tmp` survives for the container's
-> lifetime, which is exactly the process's lifetime.
+> The container source path `/tmp/bobbit-bg/<sessionId>/<bgId>.*` is created with `mkdir -p` by the
+> wrapper; `/tmp` survives for the container's lifetime. Because the authoritative retained log +
+> status now live on the **host**, losing the container (recreation/removal) loses only the *live
+> source* — never the already-captured output or an already-mirrored exit code (§7.2).
 
 ## 4. Spawn model (concrete commands)
 
 `SpawnFn` keeps its signature so tests can override it. `defaultSpawn` changes to: (a) compute the
-spool/combined-projection/status/pid paths, (b) build a wrapper command that redirects output to the
-**spool** files and writes the status file + pidfile (`processPid` + nonce), (c) spawn the wrapper.
+host projection/status-snapshot paths plus the spool/status/pid source paths, (b) build a wrapper
+command that redirects output to the **spool** files and writes the status file + pidfile
+(`processPid` + nonce), (c) spawn the wrapper. For docker the spool/status/pid live in the container
+and the host combined projection + status snapshot are **gateway-mirrored** (§3.2). On a Windows host
+**without Git Bash**, `defaultSpawn` instead launches the detached **Node bg-runner helper**, which
+produces the same files + full persistence parity (§4.1).
 
 ```ts
 // bg-process-manager.ts
 export interface BgPaths {
-  outSpool: string; // TRANSIENT child-written stdout spool (host path OR container path)
-  errSpool: string; // TRANSIENT child-written stderr spool
-  logFile: string;  // DURABLE gateway-written COMBINED projection (<bgId>.log; <ts>\t<stream>\t<text>)
-  status: string;
-  pid: string;      // pidfile path: host wrapper writes processPid+nonce; docker in-container pidfile
-  nonce: string;    // per-spawn random token written into the pidfile (pid-reuse guard, §7.1)
-  /** true when paths are container-internal and must be read/written via `docker exec` */
+  // HOST-owned, gateway-written — ALWAYS host for BOTH host and docker spawns:
+  logFile: string;        // DURABLE COMBINED projection <bgId>.log (<ts>\t<stream>\t<text>); authoritative retained log
+  statusSnapshot: string; // HOST <bgId>.status terminal snapshot (host: wrapper/helper-written; docker: gateway-mirrored)
+  // LIVE SOURCE — host spawns: host paths; docker spawns: empty (see container* below):
+  outSpool: string;       // TRANSIENT child-written stdout spool
+  errSpool: string;       // TRANSIENT child-written stderr spool
+  pidFile: string;        // host wrapper/helper writes processPid+nonce
+  // LIVE SOURCE — docker spawns only, container-internal (/tmp/bobbit-bg/...), read via docker exec:
+  containerOutSpool?: string;
+  containerErrSpool?: string;
+  containerStatus?: string;
+  containerPid?: string;  // in-container pidfile: processPid + nonce
+  nonce: string;          // per-spawn random token written into the pidfile (pid-reuse guard, §7.1)
+  /** true => docker: live source is the container* paths; gateway mirrors into logFile + statusSnapshot */
   inContainer: boolean;
 }
 
@@ -222,7 +265,7 @@ recovery-critical because restore, liveness, and post-restart kill all target `p
   `child.pid`; for host these coincide. `hostPid = child.pid`.
 - **Docker:** the in-container wrapper pid is **not** `child.pid` (that is the host-side `docker
   exec` handle, valid only while the original gateway lives). Read it via
-  `docker exec <cid> cat <containerPidfile>`, **retrying briefly** (the wrapper writes the pidfile
+  `docker exec <cid> cat <containerPid>`, **retrying briefly** (the wrapper writes the pidfile
   asynchronously) until a pid+nonce line appears. `hostPid = child.pid` (the docker-exec handle).
 
 The manager then **synchronously flushes** `processPid` (and `hostPid`, `nonce`) into
@@ -233,10 +276,12 @@ persists `processPid: 0` (pending) and is reconciled the moment the pidfile read
 
 `getShellConfig()` (`src/server/agent/shell-util.ts`) returns Git Bash (`bash -c`) on Windows when
 `GIT_BASH` is found (the **strongly-preferred** Windows default), `/bin/sh -c` on Linux/macOS, and
-only falls back to `cmd.exe /d /s /c` on a Windows host with no Git for Windows installed. The
-**persistent, re-attachable bg-process path requires a POSIX shell** — Git Bash on Windows or
-`/bin/sh` on Linux/macOS (and `/bin/sh` inside docker, §4.2). cmd.exe is **not** part of the
-persistent path (see "Legacy fallback" below).
+resolves `cmd.exe /d /s /c` on a Windows host with no Git for Windows installed. The **primary**
+bg-process mechanism is a **POSIX shell wrapper** — Git Bash on Windows or `/bin/sh` on Linux/macOS
+(and `/bin/sh` inside docker, §4.2) — which provides full persistence + re-attach. On the rare
+Windows host where `GIT_BASH` is `null`, the manager does **not** fall back to a non-persistent mode;
+instead it spawns a detached **Node bg-runner helper** that provides full persistence parity (see
+§4.1.1). **Every** host platform is therefore persistent + re-attachable.
 
 The wrapper is a single POSIX `-c` string. It (1) writes the pidfile (`processPid` + per-spawn
 nonce, two lines); (2) launches a **wrapper-owned background trimmer** that bounds each spool
@@ -266,7 +311,10 @@ exit "$code"
 
 (The manager builds this single-string form by joining the lines with `;`/`&` as needed; it is
 shown multi-line for readability. `<KEEP>` = `MAX_LOG_BYTES` = 512KB is the retained tail; the
-`-gt <MAX_LOG_BYTES>` test is the trim trigger.)
+`-gt <MAX_LOG_BYTES>` test is the trim trigger. For host spawns `<outSpool>`/`<errSpool>` = the host
+spools, `<status>` = the host `<bgId>.status` snapshot, `<pid>` = the host pidfile — all under
+`<stateDir>/bg-processes/...`; the gateway needs no mirroring on the host because the wrapper writes
+the host-owned files directly.)
 
 Key correctness points:
 
@@ -293,19 +341,42 @@ Key correctness points:
 > killed/unrecoverable. Running `( <command> )` in a child subshell fixes this — `exit N` is
 > contained, `code=$?` is captured, `<status>` is always written.
 
-**Legacy fallback (Windows host with no Git Bash — rare).** When `GIT_BASH` is `null` (no Git for
-Windows) `getShellConfig()` yields `cmd.exe`, which cannot run the POSIX wrapper (no `$$`/`$?`, no
-portable trimmer) and offers no nonce. On that narrow platform exception `bash_bg` **falls back to
-the legacy in-memory, non-persistent behaviour** — the current pipe-based `defaultSpawn` capture.
-The process works for the gateway's lifetime but is **not** persisted, **not** restored after a
-restart, and gets **no** spool/status/pid files or nonce. Its record is flagged `persistent: false`
-(§5.1) so the UI/log never implies durability. Persistence, re-attach, the nonce guard, and the
-wrapper trimmer all assume a POSIX shell; there is no cmd.exe persistent path.
+### 4.1.1 Windows without Git Bash → Node bg-runner helper
 
-> The manager decides persistent (POSIX) vs legacy (no Git Bash) at spawn time from
-> `getShellConfig()`: a POSIX shell (Git Bash or `/bin/sh`) → build the wrapper via
-> `buildHostWrapper(command, paths)` and persist; cmd.exe → legacy pipe capture, `persistent:false`.
-> `buildHostWrapper` only ever emits the POSIX wrapper — there is no cmd branch (§12).
+When `GIT_BASH` is `null` (no Git for Windows) `cmd.exe` cannot run the POSIX wrapper (no `$$`/`$?`,
+no portable trimmer, no nonce). Rather than degrade to a non-persistent mode, the manager spawns a
+bundled **Node bg-runner helper** that provides **full persistence parity** with the POSIX wrapper.
+Node is always available — it is the gateway runtime (`process.execPath`) — and the helper script
+ships with the gateway package, resolved **relative to the gateway module** (e.g.
+`new URL('./bg-runner.js', import.meta.url)` / `path.join(__dirname, 'bg-runner.js')`) so it is
+present after a restart regardless of cwd.
+
+The helper (a small standalone Node script) is given the user command, the resolved shell
+(`getShellConfig()`), the `BgPaths`, the `nonce`, and the caps. It:
+
+- runs the user command via the resolved shell (`spawn(shell, [...args, command])`);
+- **owns the spool with a bounded ring** — it appends child stdout/stderr to `<bgId>.out.spool` /
+  `<bgId>.err.spool` and trims each to the last `<KEEP>` = `MAX_LOG_BYTES` whenever it exceeds the
+  cap (the same combined caps as everywhere else). Because the helper is itself a **detached process
+  that survives gateway exit**, this ring is **restart-independent** — it keeps the spools bounded
+  even while the gateway is down, exactly like the POSIX wrapper-owned trimmer;
+- writes `processPid` (the helper's pid, which roots the child tree) **and** the per-spawn `nonce`
+  to the pidfile;
+- writes the **real child exit code** to the status file on the child's `exit` event;
+- is spawned `detached: true` + `unref()` so it **survives gateway restart**. The gateway re-attaches
+  by tailing the spool + reading the status **exactly as for the shell wrapper** — the helper path
+  is indistinguishable downstream.
+
+Because the helper writes the same spool/status/pid (with nonce) the pid-reuse guard (§7.1), the
+bounded-log cap (§8), restore, and re-attach (§6/§7) all work **unchanged** on this path.
+
+> The manager selects the host mechanism at spawn time from `getShellConfig()`: a POSIX shell (Git
+> Bash or `/bin/sh`) → build the wrapper via `buildHostWrapper(command, paths)` and spawn it; a
+> non-POSIX shell (cmd.exe, i.e. Windows without Git Bash) → spawn the detached Node bg-runner
+> helper instead. **Both paths are fully persistent + re-attachable**; there is no non-persistent
+> host path. `buildHostWrapper` only ever emits the POSIX wrapper — there is no cmd branch (§12).
+> The injectable `SpawnFn` abstracts both choices, so unit tests exercise wrapper-vs-helper
+> selection without touching the OS.
 
 ### 4.2 Docker wrapper (`/bin/sh` inside the container, run under `setsid`)
 
@@ -334,7 +405,11 @@ exit "$code"
 ```
 
 (joined into the single `-c` string by the builder; shown multi-line for readability. `<KEEP>` =
-`MAX_LOG_BYTES` = 512KB.)
+`MAX_LOG_BYTES` = 512KB. For docker `<outSpool>`/`<errSpool>` = `containerOutSpool`/
+`containerErrSpool`, `<status>` = `containerStatus`, `<pid>` = `containerPid` — all container-internal
+under `/tmp/bobbit-bg/...`. The gateway tails these via `docker exec` and **mirrors** observed bytes
+into the HOST `<bgId>.log` projection and the real exit code into the HOST `<bgId>.status` snapshot,
+so captured output + outcome survive container recreation/removal — §3.2/§6.)
 
 **Run the wrapper in its own process group/session so the WHOLE command tree is killable.** A bare
 `docker exec <cid> kill -TERM <processPid>` would signal only the wrapper shell, leaving the
@@ -372,8 +447,8 @@ container paths.
 Because output now goes to the spool files, the child's stdio can be `["ignore", "ignore",
 "ignore"]` for host spawns — we no longer read pipes. The wrapper-written pidfile, read back in the
 required post-spawn step §4.0, supplies `processPid`, so we never depend on a stdout pipe for it
-(docker resolves `processPid` via `docker exec <cid> cat <pidfile>` instead; the docker-exec host
-handle is only used for liveness/kill while alive). Host spawns keep `detached: true` +
+(docker resolves `processPid` via `docker exec <cid> cat <containerPid>` instead; the docker-exec
+host handle is only used for liveness/kill while alive). Host spawns keep `detached: true` +
 `child.unref()` so the orphan survives gateway exit.
 
 > Edge: a tiny window exists between spawn and the wrapper creating the spool files. The tailer
@@ -404,17 +479,26 @@ export interface PersistedBgProcess {
   terminalReason: "normal" | "killed" | "unrecoverable" | null;
   startTime: number;
   endTime: number | null;
-  // transient spool files (child appends; bounded by wrapper trimmer + gateway copytruncate — §8)
+  // HOST-owned, gateway-written — ALWAYS host for BOTH host and docker spawns:
+  // durable COMBINED capped projection (atomic tmp+rename; ≤512KB/5000 lines COMBINED across both
+  // streams; lines tagged <ts>\t<stream>\t<text>) — <bgId>.log; authoritative retained log.
+  logFile: string;
+  // HOST terminal status snapshot — <bgId>.status (host spawns: wrapper/helper-written; docker:
+  // gateway mirrors the real exit code here once read from the container). Survives container churn.
+  statusSnapshot: string;
+  // LIVE SOURCE — host spawns: host paths (child appends; bounded by wrapper/helper ring +
+  // gateway copytruncate — §8). For docker these are empty; use the container* fields.
   outSpool: string;
   errSpool: string;
-  // durable COMBINED capped projection (gateway-owned; atomic tmp+rename; ≤512KB/5000 lines
-  // COMBINED across both streams; lines tagged <ts>\t<stream>\t<text>) — <bgId>.log
-  logFile: string;
-  statusFile: string;
-  pidFile: string;            // host: wrapper-written processPid+nonce; docker: in-container pidfile path
+  pidFile: string;            // host wrapper/helper-written processPid+nonce
+  // LIVE SOURCE — docker spawns only, container-internal (/tmp/bobbit-bg/...), via docker exec:
+  containerOutSpool?: string;
+  containerErrSpool?: string;
+  containerStatus?: string;
+  containerPid?: string;
   /** per-spawn random token; written into the pidfile, re-checked on restore to detect pid reuse (§7.1) */
   nonce: string;
-  /** true when the files are container-internal (read/written via docker exec) */
+  /** true => docker: live source is container-internal; gateway mirrors into logFile + statusSnapshot */
   inContainer: boolean;
   /** bytes of each spool already consumed by the tailer — lets re-attach resume */
   outOffset: number;
@@ -430,11 +514,10 @@ requires widening the union in `BgProcess`, `BgProcessInfo` (`bg-process-manager
 types (`src/server/ws/protocol.ts`), and the client/UI types (§9). `exitCode` is never fabricated;
 it stays `null` for `killed`-without-status and `unrecoverable`.
 
-**Legacy non-persistent processes are never written to `bg-processes.json`.** The cmd.exe fallback
-(§4.1) keeps the current in-memory record only; the in-memory `BgProcess`/`BgProcessInfo` and the
-`bg_process_created` WS event carry a `persistent: boolean` flag (`true` on the POSIX path, `false`
-for the legacy fallback) so the UI/log never implies durability for a process that will not survive
-a restart.
+**Every host process is persisted** — there is no non-persistent path. The POSIX wrapper and the
+Node bg-runner helper (§4.1/§4.1.1) both write the durable host projection + status snapshot and a
+full `bg-processes.json` record, so every process survives restart and re-attaches. There is **no**
+`persistent` flag anywhere.
 
 ### 5.2 Store class — mirror `SessionStore`
 
@@ -498,8 +581,10 @@ constructor(
 A `Tailer` watches a **spool** file and emits new bytes from a starting offset. It is injectable
 (`tailerFactory`) so unit tests can drive it with fake content and never touch the OS. The manager
 feeds each chunk into the capped in-memory `log[]` buffer (interleaving stdout/stderr by arrival)
-and (debounced ~500ms) rewrites the **single durable combined projection** `<bgId>.log` from that
-buffer, tagging each line `<ts>\t<stream>\t<text>` (§8).
+and (debounced ~500ms) rewrites the **single durable combined projection** `<bgId>.log` — **always a
+HOST file** — from that buffer, tagging each line `<ts>\t<stream>\t<text>` (§8). For docker the tailer
+reads the **container** spools via `docker exec` and the gateway thereby **mirrors** the container
+output into the host projection (§3.2).
 
 ```ts
 export interface Tailer {
@@ -508,7 +593,9 @@ export interface Tailer {
   stop(): void;
 }
 export interface TailerSpec {
-  outSpool: string; errSpool: string;   // the tailer watches the SPOOLS, never the projection
+  // the tailer watches the SPOOLS, never the projection. host spawns: host spool paths;
+  // docker spawns: the container-internal containerOutSpool/containerErrSpool paths (via docker exec).
+  outSpool: string; errSpool: string;
   inContainer: boolean; containerId?: string;
   onChunk: (stream: "stdout" | "stderr", text: string, newOffset: number) => void;
 }
@@ -520,32 +607,37 @@ export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
   **Chosen: poll loop** (200ms) reading `fs.statSync(spool).size`; if larger than offset, read the
   delta, split into lines, invoke `onChunk`, advance offset. Treat ENOENT as "not yet created".
   The same loop performs spool copytruncate when the spool exceeds the cap (§8).
-- **Docker:** spawn `docker exec <cid> tail -c +<offset+1> -F <containerSpoolPath>` and read its
-  stdout pipe; `onChunk` advances offset by bytes received. `stop()` kills the `tail` exec. On
-  restart this same mechanism resumes from the persisted offset — that **is** the re-attach.
+- **Docker:** spawn `docker exec <cid> tail -c +<offset+1> -F <containerOutSpool>` /
+  `<containerErrSpool>` and read its stdout pipe; `onChunk` advances offset by bytes received and the
+  gateway **mirrors** the bytes into the HOST `<bgId>.log` projection. `stop()` kills the `tail`
+  exec. On restart this same mechanism resumes from the persisted offset — that **is** the re-attach.
 
 The tailer feeds the existing in-memory `appendLog()` / `bg.stdout`/`bg.stderr` arrays (already
 capped, interleaved into `log[]`) and the existing `bg_process_output` WS broadcast — so the API
 (`getLogs`, `grep`, `head`, `slice`) and the pill work unchanged on the combined interleaved view —
-and triggers the debounced atomic rewrite of the single combined durable projection from that
-capped buffer (§8). The only change to `create()` is that the chunk source is the two spool tailers,
-not `child.stdout.on("data")`. Readers always consume the combined projection, never the spools.
+and triggers the debounced atomic rewrite of the single combined durable projection (the HOST
+`<bgId>.log`) from that capped buffer (§8). The only change to `create()` is that the chunk source is
+the two spool tailers, not `child.stdout.on("data")`. Readers always consume the host combined
+projection, never the spools.
 
 ### 6.1 Detecting exit via the status file
 
-Independently of the tailer, a **status watcher** polls `<bgId>.status` (host: `fs.existsSync` +
-read; docker: `docker exec <cid> cat <statusFile>` returning non-empty). When the status file
-appears with content:
+Independently of the tailer, a **status watcher** polls the status file (host: `fs.existsSync` +
+read the host `<bgId>.status`; docker: `docker exec <cid> cat <containerStatus>` returning
+non-empty). When the status file appears with content:
 
 1. parse the integer exit code (trim; tolerate partial write — see §11, retry until a full integer
    line is present or a short grace timeout elapses);
-2. set `status="exited"`, `exitCode=<n>`, `terminalReason="normal"`, `endTime=Date.now()`;
+2. set `status="exited"`, `exitCode=<n>`, `terminalReason="normal"`, `endTime=Date.now()`; for docker
+   **mirror** the real exit code into the HOST `<bgId>.status` snapshot (atomic tmp+rename) so the
+   outcome survives container removal;
 3. do a **final tail flush** (read any remaining bytes of both spools past their offsets → capped
    `log[]` buffer → final atomic combined-projection rewrite) so no trailing output is lost and the
    `<bgId>.log` projection is current;
 4. resolve `bg.exited`, persist (recovery-critical → sync), broadcast `bg_process_exited` (with
    `terminalReason`), stop the tailers and status watcher, then delete the now-consumed spool
-   files (the durable combined projection is what survives — §8).
+   files (host spawns: unlink the host spools; docker: best-effort `docker exec <cid> rm -f` the
+   container spools — the durable HOST combined projection + status snapshot are what survive, §8).
 
 This **replaces** the current reliance on `child.on("exit")`. The child `exit` event (when we still
 have a handle, i.e. while live) is used only as a *hint* to check the status file promptly rather
@@ -566,30 +658,39 @@ store via `storeProvider(sessionId)` and iterates only that session's `Persisted
 For each persisted record:
 
 ```
+# the HOST combined projection <bgId>.log + HOST status snapshot <bgId>.status are ALWAYS read
+# first — they survive container recreation/removal. The host projection is NEVER discarded.
+
 if status == "exited" or "unrecoverable":
-    rehydrate in-memory record; load tail of the COMBINED projection <bgId>.log into
+    rehydrate in-memory record; load tail of the HOST COMBINED projection <bgId>.log into
       log[]/stdout[]/stderr[] (parse <ts>\t<stream>\t<text>, last MAX_LOG_LINES/MAX_LOG_BYTES,
       interleaving preserved); broadcast nothing (client re-fetches via GET on reconnect). Done.
 
 if status == "running":
+    always load the HOST projection tail first   # output is retained regardless of the outcome below
     liveness = checkAlive(record)        # processPid/container probe + nonce re-check (§7.1)
     case ALIVE (nonce matches):
-        # re-attach
+        # re-attach (host spawn, or docker whose container still resolves + wrapper alive)
         rehydrate record (status stays "running", terminalReason stays null)
         read bounded tail (last 512KB/5000 lines) of BOTH spools from persistedOffsets -> capped
-          log[] buffer -> rewrite combined projection; then copytruncate both spools (§8)
-        start tailers from new offsets       -> resumes live streaming
-        start status watcher                 -> captures eventual real exit code (-> terminalReason="normal")
-    case COMPLETED_DURING_DOWNTIME:   # not alive, but status file present & parseable
-        read exitCode from status file; read bounded spool tails -> combined projection
+          log[] buffer -> rewrite HOST combined projection; then copytruncate both spools (§8)
+          (docker: read the container spools via docker exec; mirror into the HOST projection)
+        start tailers from new offsets       -> resumes live streaming (docker: mirror to host)
+        start status watcher                 -> captures eventual real exit code (-> terminalReason="normal",
+                                                mirrored to the HOST status snapshot for docker)
+    case COMPLETED_DURING_DOWNTIME:   # not alive, but a real exit code is available
+        # status source: the HOST status snapshot if already mirrored; else, if the container is
+        # still alive, docker exec cat <containerStatus> (then mirror to host); else host snapshot only
+        read exitCode from the available status; final bounded tail -> HOST combined projection
         status="exited"; exitCode=<n>; terminalReason="normal"
-        endTime = status file mtime (best-effort) or Date.now()
+        endTime = status mtime (best-effort) or Date.now()
         broadcast bg_process_exited{ exitCode, terminalReason:"normal" }
-    case UNRECOVERABLE:               # not alive AND (no status file | projection+spools missing | pid reused)
+    case UNRECOVERABLE:               # not alive AND no real exit code anywhere (no host snapshot,
+                                      #   container gone / no containerStatus, or pid reused)
         status="unrecoverable"; exitCode stays null; terminalReason="unrecoverable"
-        load whatever combined-projection tail exists
+        # the HOST projection tail (already loaded) is RETAINED and shown — only the LIVE outcome
+        # is unknown; NEVER discard the retained output, NEVER fabricate an exit code
         broadcast bg_process_exited{ exitCode:null, terminalReason:"unrecoverable" }
-        # NEVER fabricate an exit code
 ```
 
 ### 7.1 Liveness checks
@@ -606,18 +707,28 @@ if status == "running":
 - **Docker:** container alive via `docker inspect -f '{{.State.Running}}' <cid>` (and the
   containerId must still resolve from `SandboxManager`; if the project's container was recreated,
   the old container/exec is gone → not alive). Then `docker exec <cid> kill -0 <processPid>` for the
-  in-container wrapper (the `processPid` read from the in-container pidfile, **not** `hostPid`/the
-  dead docker-exec handle), **plus `docker exec <cid> cat <pidfile>` to re-check the nonce** exactly
-  as the host path. If the container is gone, the in-container `/tmp` files are gone too → if no
-  status was ever read, **unrecoverable** (`terminalReason="unrecoverable"`); if we had already
-  recorded an exit, it stays exited.
+  in-container wrapper (the `processPid` read from the in-container pidfile `containerPid`, **not**
+  `hostPid`/the dead docker-exec handle), **plus `docker exec <cid> cat <containerPid>` to re-check
+  the nonce** exactly as the host path. If the container is gone, the in-container `/tmp` source
+  files are gone too — **but the HOST projection + any mirrored HOST status snapshot survive** (§7.2):
+  if a real exit code was already mirrored to the host snapshot it stays exited; if no status was
+  ever mirrored, **unrecoverable** for the unknown live outcome (`terminalReason="unrecoverable"`),
+  with the retained host output still shown.
 
 ### 7.2 Container recreated
 
-Container recreation (new `containerId`) means the process and its `/tmp` files are gone. Such a
-record is **unrecoverable** (`terminalReason="unrecoverable"`, `exitCode=null`) unless its
-status/exit was captured before the restart. This is correct and honest — we do not invent an exit
-code.
+Container recreation/removal (new or absent `containerId`) means the process and its
+container-internal `/tmp` source files are gone — but the **host-owned projection `<bgId>.log` and
+host status snapshot `<bgId>.status` survive**. Reconcile from the host files:
+
+- The host projection tail is **always loaded and shown** — captured output is never lost to
+  container churn (satisfies "output retained until dismissed").
+- If a **terminal status was already mirrored** to the host snapshot before the restart → present
+  that **real exit code** (`status="exited"`, `terminalReason="normal"`).
+- Only if **no** status was ever mirrored **and** the container/process is gone → mark
+  `status="unrecoverable"` (`terminalReason="unrecoverable"`, `exitCode=null`) for the **unknown live
+  outcome** — but the retained host output is **still shown**. We never invent an exit code and never
+  discard the retained output.
 
 ## 8. Log caps on disk — transient spools + gateway-owned combined capped projection
 
@@ -632,14 +743,17 @@ child has open (especially on Windows). The solution separates transient spools 
 combined projection:
 
 - **Transient per-stream spools** (`<bgId>.out.spool` / `<bgId>.err.spool`) — the child appends here
-  (`>>`, §4). These are explicitly transient, **gateway-managed rings**, *not* "the persisted log".
-  Each spool is independently copytruncated at ≤ 512KB; it may exceed that only transiently (between
-  gateway consume cycles) and is reclaimed (deleted) on exit. Spools are never read by clients.
-- **Durable combined projection** (`<bgId>.log`) — the **gateway owns this file exclusively** and
-  rewrites it **atomically (tmp + rename)** from the single in-memory capped `log[]` buffer, tagging
+  (`>>`, §4; host spawns: host paths; docker spawns: container-internal `/tmp/bobbit-bg/...`). These
+  are explicitly transient, **child-owned rings** bounded restart-independently (wrapper trimmer or
+  Node helper ring) plus gateway copytruncate, *not* "the persisted log". Each spool is independently
+  trimmed at ≤ 512KB; it may exceed that only transiently (between trim cycles) and is reclaimed
+  (deleted) on exit. Spools are never read by clients.
+- **Durable combined projection** (`<bgId>.log`) — a **HOST file the gateway owns exclusively** (for
+  BOTH host and docker spawns; for docker the gateway mirrors the container spool bytes into it) and
+  rewrites **atomically (tmp + rename)** from the single in-memory capped `log[]` buffer, tagging
   each line `<ts>\t<stream>\t<text>`. It is therefore **always ≤ 512KB / 5000 lines COMBINED across
   both streams**, fully consistent with the in-memory trim. Restore and every REST reader
-  (`getLogs`/`grep`/`head`/`slice`) read this combined projection, never the spools.
+  (`getLogs`/`grep`/`head`/`slice`) read this host combined projection, never the spools.
 
 ### Keeping the combined projection capped while running
 
@@ -655,21 +769,25 @@ mid-run, on any shell.
 The spools are bounded by **two independent mechanisms**, so neither the gateway nor the wrapper is
 the sole guard:
 
-1. **Wrapper-owned trimmer (primary, restart-independent).** The detached/orphaned wrapper runs a
-   background loop (§4.1/§4.2) that, while alive, trims each spool to the last `<KEEP>` = 512KB
-   whenever it exceeds `MAX_LOG_BYTES`, via `tail -c <KEEP> "$f" > "$f.trim" && cat "$f.trim" > "$f"`
-   (in-place same-inode copytruncate). Because the loop is part of the **wrapper, not the gateway**,
-   it bounds each spool **at all times — during the normal run AND while the gateway is down.** This
-   is what holds the "on-disk logs stay within caps at all times" requirement during a long outage.
+1. **Child-owned ring (primary, restart-independent).** The detached/orphaned child bounds each
+   spool itself, independent of the gateway: on the POSIX path a **wrapper-owned trimmer** background
+   loop (§4.1/§4.2) and on Windows-without-Git-Bash the **Node bg-runner helper ring** (§4.1.1). It
+   trims each spool to the last `<KEEP>` = 512KB whenever it exceeds `MAX_LOG_BYTES`; the POSIX form
+   is `tail -c <KEEP> "$f" > "$f.trim" && cat "$f.trim" > "$f"` (in-place same-inode copytruncate) and
+   the Node helper does the equivalent in-place truncate. Because this runs in the **child, not the
+   gateway**, it bounds each spool **at all times — during the normal run AND while the gateway is
+   down.** This is what holds the "on-disk logs stay within caps at all times" requirement during a
+   long outage.
 2. **Gateway copytruncate (secondary).** When the gateway has consumed a spool up to its read offset
    **and** the spool exceeds `MAX_LOG_BYTES`, it also does `fs.truncateSync(spool, 0)` and resets its
    read offset to `0`. The next child write lands at offset 0 (POSIX `>>`/`O_APPEND`). This is a
    redundant bound that catches the brief windows between trimmer passes while the gateway is up; it
    is no longer the sole mechanism.
 
-Both paths require a POSIX shell (the persistent path is POSIX-only, §4.1); the legacy cmd.exe
-fallback is in-memory/non-persistent and writes no spools at all, so it has no on-disk spool to
-bound.
+On the POSIX path the wrapper-owned trimmer bounds the spools; on the Windows-without-Git-Bash path
+the **Node bg-runner helper's bounded ring** does the same (§4.1.1) — both are restart-independent
+because they run in the detached child, not the gateway. Every host path therefore has a
+restart-independent spool bound; there is no unbounded or non-persistent host path.
 
 > **copytruncate race (acknowledged):** a few bytes written between a read/trim and the
 > `cat "$f.trim" > "$f"` / `truncate(0)` can be lost. This is the standard logrotate copytruncate
@@ -677,25 +795,25 @@ bound.
 > cap, not an audit log. Both the wrapper trimmer and the gateway use copytruncate (same inode,
 > never `mv`/rename) so the command's append fd is never orphaned.
 >
-> **Belt-and-braces:** the wrapper bounds each spool independently of the gateway (even during
-> downtime), the gateway re-bounds on consume, and the durable combined projection is independently
-> capped from the in-memory buffer — so neither the spools nor the durable log can grow without
-> bound on any POSIX platform.
+> **Belt-and-braces:** the child (wrapper trimmer or Node helper ring) bounds each spool
+> independently of the gateway (even during downtime), the gateway re-bounds on consume, and the
+> durable HOST combined projection is independently capped from the in-memory buffer — so neither
+> the spools nor the durable log can grow without bound on any host platform (or docker).
 
 ### Downtime window
 
-While the gateway is down, the **wrapper-owned trimmer keeps each spool bounded** (≤ ~512KB) — the
-child keeps appending but the trimmer (part of the orphaned wrapper) keeps copytruncating, so the
-spools do **not** grow unbounded during an arbitrarily long outage. Only the combined projection
-goes stale (nothing projects while the gateway is down). On `restoreSession()` the gateway reads only
-the **bounded tail** (last 512KB / 5000 lines combined) of the spools to rebuild the in-memory
-`log[]` buffer, immediately rewrites the combined projection, **then copytruncates both spools** as a
-secondary bound. So both the spools (wrapper trimmer) and the durable projection (restore rewrite)
-are capped throughout.
+While the gateway is down, the **child-owned ring keeps each spool bounded** (≤ ~512KB) — the child
+keeps appending but the wrapper trimmer (POSIX) or Node helper ring (Windows-without-Git-Bash) keeps
+truncating, so the spools do **not** grow unbounded during an arbitrarily long outage. Only the
+combined projection goes stale (nothing projects while the gateway is down). On `restoreSession()`
+the gateway reads only the **bounded tail** (last 512KB / 5000 lines combined) of the spools to
+rebuild the in-memory `log[]` buffer, immediately rewrites the HOST combined projection, **then
+copytruncates both spools** as a secondary bound. So both the spools (child ring) and the durable
+host projection (restore rewrite) are capped throughout.
 
 There is no separate "post-exit trim" and no multi-megabyte "safety ceiling": the combined
 projection is the durable artefact and is bounded at every instant by construction, and the spools
-are bounded continuously by the wrapper trimmer.
+are bounded continuously by the child-owned ring.
 
 ## 9. Kill vs dismiss
 
@@ -720,26 +838,29 @@ DELETE /api/sessions/:id/bg-processes/:pid                  # legacy: kill-if-ru
   and **persists**. Returns `{ ok: true, killed: true }`.
 - `action=dismiss` → new `bgProcessManager.dismiss(sessionId, pid)`: refuse if still running
   (must kill first) unless `force`; remove the in-memory record, `BgProcessStore.remove`, and
-  **delete the per-process files** — both spools **and** the combined projection plus status/pid:
-  `.out.spool`, `.err.spool`, `<bgId>.log`, `.status`, `.pid` (for docker also
-  `docker exec <cid> rm -f <containerPaths>` best-effort). Broadcast a new
-  `bg_process_dismissed` WS event so other clients drop the pill. Returns `{ ok: true }`.
+  **delete the per-process files** — always the **HOST** combined projection `<bgId>.log` and HOST
+  status snapshot `<bgId>.status`, plus (host spawns) the host spools + pidfile
+  `.out.spool`/`.err.spool`/`.pid`; and (docker) the container-internal source files best-effort via
+  `docker exec <cid> rm -f <containerOutSpool> <containerErrSpool> <containerStatus> <containerPid>`
+  (they may already be gone with the container). Broadcast a new `bg_process_dismissed` WS event so
+  other clients drop the pill. Returns `{ ok: true }`.
 
 ### 9.2 New manager methods
 
 ```ts
 // bg-process-manager.ts
 kill(sessionId, processId): boolean;                 // existing — keep; signals processPid; exit code from status file, else terminalReason="killed"
-dismiss(sessionId, processId, opts?: { force?: boolean }): boolean;   // NEW: remove record + purge spools+combined projection+status+pid
+dismiss(sessionId, processId, opts?: { force?: boolean }): boolean;   // NEW: remove record + purge HOST projection+status snapshot (+host spools/pid; docker: best-effort container files)
 restoreSession(sessionId): Promise<void>;            // NEW: §7 per-session reconciliation (called from restoreSessions loop)
 ```
 
 **Kill mechanics** (signalling the right process pre- vs post-restart) — always target the persisted
 `processPid`, never `hostPid`:
-- **Host:** `taskkill /pid <processPid> /T /F` (Windows) or `process.kill(-processPid, SIGTERM)` then
-  `SIGKILL` (POSIX) against the persisted wrapper `processPid` (= `child.pid` on host). A live
-  `child` handle, when one still exists (pre-restart), is used as an optimisation but is not
-  required.
+- **Host:** `taskkill /pid <processPid> /T /F` (Windows — covers both Git Bash and the Node bg-runner
+  helper, whose `processPid` roots the child tree so `/T` takes the tree down) or
+  `process.kill(-processPid, SIGTERM)` then `SIGKILL` (POSIX) against the persisted `processPid`
+  (= `child.pid` on host). A live `child` handle, when one still exists (pre-restart), is used as an
+  optimisation but is not required.
 - **Docker:** after a restart there is **no host `child` handle** for a re-attached process, and
   `hostPid` (the dead docker-exec handle) is useless, so kill via the **persisted in-container
   `processPid`**, which is the process-group leader (spawned under `setsid`, §4.2). Signal the
@@ -849,10 +970,26 @@ pill stays as a terminal pill until dismissed
 ```
 UI Remove -> DELETE ?action=dismiss -> bgMgr.dismiss()
   refuse if running (unless force)
-  store.remove(); delete <out>.spool,<err>.spool,<bgId>.log,<status>,<pid>
-  docker: docker exec <cid> rm -f <containerPaths>  (best-effort)
+  store.remove(); delete HOST <bgId>.log + HOST <bgId>.status (always)
+                  host spawns: + <bgId>.out.spool,<bgId>.err.spool,<bgId>.pid
+  docker: docker exec <cid> rm -f <containerOutSpool> <containerErrSpool> <containerStatus> <containerPid>  (best-effort)
   broadcast bg_process_dismissed -> all clients drop pill
 record never reappears after subsequent restart (files + index entry gone)
+```
+
+### Docker deltas (Create / Live / Restore / Exit / Dismiss)
+```
+Create : wrapper writes spool/status/pid CONTAINER-INTERNAL (/tmp/bobbit-bg/...); host logFile+statusSnapshot allocated
+         processPid resolved via docker exec cat <containerPid> (+nonce); HOST record persisted (sync)
+Live   : tailers = docker exec tail -F <containerOutSpool>/<containerErrSpool> -> appendLog (combined capped)
+         -> MIRROR bytes into HOST <bgId>.log projection (atomic rewrite); copytruncate handled by in-container ring
+Exit   : statusWatcher = docker exec cat <containerStatus> -> parse real code
+         -> MIRROR real exit code into HOST <bgId>.status snapshot (atomic) -> broadcast exited{code,normal}
+Restore: HOST <bgId>.log projection ALWAYS loaded+shown (survives container churn)
+         container resolves + wrapper alive (nonce match) -> re-attach (docker exec tail) + mirror
+         container/process gone, HOST status mirrored      -> exited with REAL code
+         container/process gone, NO status mirrored        -> unrecoverable (output still shown; no fabricated code)
+Dismiss: delete HOST <bgId>.log + <bgId>.status; best-effort docker exec rm -f the container source files
 ```
 
 ## 11. Risks & edge cases
@@ -866,15 +1003,16 @@ record never reappears after subsequent restart (files + index entry gone)
   gateway re-reads the pidfile and compares the **per-spawn nonce** (`printf '%s\n%s\n' "$$"
   "<nonce>"` in the wrapper, §4.1/§4.2; compared against the live `processPid` pidfile). Match → same process, re-attach. Missing/mismatched nonce
   (or pidfile gone) with no status file → **pid reused** → `terminalReason="unrecoverable"`,
-  `exitCode=null` — never fabricated. (The legacy cmd.exe fallback is non-persistent (§4.1), so it
-  is never restored and never reaches the nonce guard.)
+  `exitCode=null` — never fabricated. (Every host path — POSIX wrapper or Node bg-runner helper —
+  writes the nonce, so the guard applies uniformly.)
 - **Log rotation racing the tailer.** The durable **combined projection** (`<bgId>.log`) is
   rewritten atomically (tmp + rename) by the gateway alone and the child never writes it, so readers
   never see a torn projection. The **spool** copytruncate (§8) may lose a few bytes between
   last-read and `truncate(0)` — the standard logrotate copytruncate caveat, acceptable because the
-  log is already a lossy last-N cap. Each spool is bounded by the **wrapper-owned trimmer** (primary,
-  restart-independent) and the **gateway copytruncate** (secondary); both are POSIX-only (the legacy
-  cmd.exe fallback writes no spool), so no spool is ever unbounded.
+  log is already a lossy last-N cap. Each spool is bounded by a restart-independent ring in the
+  detached child — the **wrapper-owned trimmer** on the POSIX path or the **Node bg-runner helper
+  ring** on Windows-without-Git-Bash — plus the **gateway copytruncate** (secondary). Every host path
+  writes a bounded spool; none is ever unbounded.
 - **Windows process-group kill.** `taskkill /pid <processPid> /T /F` kills the wrapper shell **and** its
   child tree (`/T`), so a force-killed host process **may not write a status file**. Handling:
   `kill()` records an intent-to-kill timestamp; the watcher, seeing the `processPid` gone with no
@@ -882,8 +1020,15 @@ record never reappears after subsequent restart (files + index entry gone)
   **`terminalReason="killed"`** — we *know* it was killed, which is not fabrication. This is
   distinct from the restart-loss case (`terminalReason="unrecoverable"`). If the wrapper *did* get
   to write the status file, `terminalReason="normal"` with the real code instead.
-- **Docker container gone.** `/tmp` files vanish with the container. If exit was already captured →
-  exited; else → unrecoverable. Never invent a code.
+- **Docker container gone.** The container-internal `/tmp` source files vanish with the container,
+  **but the HOST projection + HOST status snapshot survive**. The retained host output is always
+  shown; if a real exit code was already mirrored to the host snapshot → exited with that code; else
+  → unrecoverable for the unknown live outcome (output still shown). Never invent a code (§7.2).
+- **Node bg-runner helper availability.** The helper ships with the gateway package and is resolved
+  relative to the gateway module (`import.meta.url` / `__dirname`), so it is present after a restart
+  regardless of cwd. Node itself is guaranteed (it is the gateway runtime, `process.execPath`). If
+  the helper script is somehow missing, `create()` fails loudly rather than silently degrading to a
+  non-persistent mode — there is no non-persistent host path.
 - **File not yet created** between spawn and first wrapper write: tailer treats ENOENT as 0 bytes
   and retries.
 - **Per-project store growth.** `bg-processes.json` only holds live records; dismiss/cleanup prune
@@ -897,12 +1042,19 @@ record never reappears after subsequent restart (files + index entry gone)
 
 `src/server/agent/bg-process-manager.ts`
 ```ts
-export interface BgPaths { outSpool; errSpool; logFile; status; pid; nonce; inContainer: boolean }  // logFile = single combined <bgId>.log
+export interface BgPaths { logFile; statusSnapshot; outSpool; errSpool; pidFile; containerOutSpool?; containerErrSpool?; containerStatus?; containerPid?; nonce; inContainer }  // logFile + statusSnapshot are HOST, always (BOTH host & docker)
 export type SpawnFn = (command, cwd, containerId, paths: BgPaths) => ChildProcess;
-export interface TailerSpec { outSpool; errSpool; inContainer; containerId?; onChunk }  // watches the SPOOLS
+export interface TailerSpec { outSpool; errSpool; inContainer; containerId?; onChunk }  // watches the SPOOLS (docker: container* paths)
 export type TailerFactory = (spec: TailerSpec) => { out: Tailer; err: Tailer };
 function buildHostWrapper(command, paths): string;   // POSIX wrapper only (Git Bash / /bin/sh); no cmd branch
 function buildDockerWrapper(command, paths): string; // POSIX /bin/sh wrapper, spawned under setsid
+// Node bg-runner helper (NEW): standalone script shipped with the gateway, spawned detached on a
+// Windows host without Git Bash. Full persistence parity (bounded spool ring, nonce pidfile, real
+// exit code to status). Entry e.g. src/server/agent/bg-runner.ts -> dist bg-runner.js; resolved via
+// import.meta.url/__dirname so it survives restart.
+function bgRunnerHelperPath(): string;               // resolve helper script relative to gateway module
+// host-mechanism selection (in defaultSpawn): POSIX shell -> buildHostWrapper + spawn; cmd.exe
+//   (no Git Bash) -> spawn(process.execPath, [bgRunnerHelperPath(), ...args]) detached+unref
 class BgProcessManager {
   constructor(clientsProvider, spawnFn?, storeProvider?, tailerFactory?);
   create(sessionId, command, cwd, containerId?, sandboxed?, name?): BgProcessInfo;  // spawn + REQUIRED post-spawn pidfile read -> processPid (sync flush) + wires spools+tailers+combined projection
@@ -913,7 +1065,7 @@ class BgProcessManager {
 }
 // BgProcess / BgProcessInfo: pid -> { hostPid, processPid }; status widened to "running" | "exited" | "unrecoverable";
 // + terminalReason: "normal" | "killed" | "unrecoverable" | null  (authoritative; null while running)
-// + persistent: boolean (false only for the legacy cmd.exe in-memory fallback, §4.1)
+// (no `persistent` flag — every host path is persistent + re-attachable: POSIX wrapper or Node helper)
 ```
 
 `src/server/agent/bg-process-store.ts` (NEW) — `BgProcessStore`, `PersistedBgProcess` (§5).
@@ -943,9 +1095,10 @@ field, no standalone `unrecoverable?`); add `bg_process_dismissed`.
 
 Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-persistence.test.ts`**:
 
-> Persistence/re-attach/nonce/trimmer all assume a **POSIX shell** (Git Bash on Windows, `/bin/sh`
-> elsewhere/docker). The cmd.exe path is the **legacy non-persistent fallback** and is not part of
-> the persistence tests (covered only by the dedicated "legacy cmd.exe fallback" case below).
+> Two host mechanisms are both fully persistent: the **POSIX shell wrapper** (Git Bash on Windows,
+> `/bin/sh` elsewhere/docker) and the **Node bg-runner helper** (Windows without Git Bash). Both are
+> exercised via the injectable `SpawnFn` / fake child + fake files — no real OS processes. There is
+> no non-persistent path to test.
 
 - **Persistence round-trip:** create with a fake `SpawnFn` + fake `TailerFactory` that writes to a
   temp `stateDir`; assert `bg-processes.json` written atomically and the durable **combined
@@ -988,6 +1141,13 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   assert killing a docker bg process stops the actual long-running **child** command (e.g. a
   `sleep`/printing loop inside `( <command> )`), not just the wrapper shell — extend
   `tests/manual-integration/sandbox-recovery-docker.spec.ts`.
+- **Docker container recreated/removed — host projection retained:** persisted docker record whose
+  container no longer resolves (or has a new `containerId`). `restoreSession()` **always** loads +
+  shows the **HOST** `<bgId>.log` projection tail (output retained). If the **host status snapshot**
+  was already mirrored → `status=exited` with the **real** exit code; if **no** status was ever
+  mirrored → `status=unrecoverable`, `exitCode=null`, `terminalReason="unrecoverable"` **but the
+  retained host output is still present** (assert the projection lines survive and **no** exit code
+  is fabricated).
 - **Dismiss purges files:** `dismiss()` deletes `.out.spool/.err.spool/<bgId>.log/.status/.pid` and
   the index entry; a subsequent `restoreSession()` finds nothing.
 - **Disk caps — COMBINED, WHILE RUNNING, POSIX:** feed > cap of interleaved stdout+stderr via
@@ -1009,11 +1169,18 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   trimmer stop (`kill "$trimmer"`), and `code=$? ; printf code > status ; exit code`; the docker
   builder is otherwise identical and is spawned under `setsid`. Assert there is **no** cmd branch and
   **no** `%errorlevel%`. String assertions — pure, fast.
-- **Legacy cmd.exe fallback is non-persistent:** when `getShellConfig()` yields cmd.exe (no Git
-  Bash), `create()` uses the legacy in-memory pipe capture, flags the record `persistent: false`,
-  writes **no** `bg-processes.json` entry and no spool/status/pid files, and the process is **not**
-  restored after a simulated restart. (Persistence tests assume a POSIX shell; the cmd path is
-  explicitly excluded from them.)
+- **Host-mechanism selection (wrapper vs Node helper):** with `getShellConfig()` returning a POSIX
+  shell, `create()` builds the POSIX wrapper via `buildHostWrapper`; with cmd.exe (no Git Bash),
+  `create()` spawns the **Node bg-runner helper** (`process.execPath` + resolved helper path,
+  `detached:true`+`unref()`), **not** a non-persistent fallback. Both write a full
+  `bg-processes.json` record + spool/status/pid and restore after a simulated restart. Drive via the
+  injectable `SpawnFn`; assert the chosen argv (wrapper string vs helper script) and that **both**
+  persist + re-attach.
+- **Node bg-runner helper ring + exit capture (Node, fake child):** unit-test the helper's logic
+  directly with a **fake injected child** (an EventEmitter, no real OS process): feed > cap bytes of
+  stdout/stderr and assert each spool is trimmed to the last `<KEEP>` (bounded ring, in-place,
+  restart-independent); emit an `exit` with code 7 and assert the helper writes `7` to the status
+  file and `processPid`+`nonce` to the pidfile. No real processes.
 
 ### Browser E2E (required) — `tests/e2e/ui/bg-process-persistence.spec.ts`
 
@@ -1043,17 +1210,20 @@ unchanged). Docker re-attach is covered by `test:manual` (extend
 1. `BgProcessStore` + `PersistedBgProcess` (copy `SessionStore` helpers) + unit round-trip test.
 2. `BgPaths`, POSIX wrapper builders (isolated subshell `( <command> )` so `exit N` is contained;
    wrapper-owned trimmer bounding both spools; `>>` append; `code=$?` status write;
-   `processPid`+nonce pidfile; docker spawned under `setsid`), the legacy cmd.exe in-memory fallback
-   (`persistent:false`, no files) when Git Bash is absent, change `defaultSpawn` + `create()` to redirect output to the
-   **spools**, perform the **required post-spawn pidfile read** to resolve `processPid` (sync
-   flush), and feed the combined capped buffer + single durable combined projection from a `Tailer`
-   (default poll tailer); status watcher for exit.
+   `processPid`+nonce pidfile; docker spawned under `setsid`), the **Node bg-runner helper** (bounded
+   spool ring, nonce pidfile, real exit code to status; detached+unref) selected when Git Bash is
+   absent on Windows, change `defaultSpawn` + `create()` to redirect output to the **spools**,
+   perform the **required post-spawn pidfile read** to resolve `processPid` (sync flush), and feed
+   the combined capped buffer + single durable **HOST** combined projection from a `Tailer` (default
+   poll tailer; docker tailer mirrors into the host projection); status watcher for exit (docker
+   mirrors the real code into the host status snapshot).
 3. `restoreSession(sessionId)` reconciliation (alive / completed / pid-reused / lost) + wire into
    the `restoreSessions()` per-session loop; `ProjectContext.bgProcessStore`.
 4. `dismiss()` + split DELETE route + `bg_process_dismissed` WS event + `terminalReason`
    (`normal`/`killed`/`unrecoverable`) plumbing through protocol/client/pill; Docker kill via
    persisted in-container group leader (`docker exec kill -TERM/-KILL -<processPid>`).
-5. Disk caps: continuous combined-projection rewrite (≤512KB/5000 lines combined) + wrapper-owned
-   spool trimmer (restart-independent) + gateway copytruncate (secondary); no post-exit trim, no
-   unbounded spool, POSIX only.
+5. Disk caps: continuous **HOST** combined-projection rewrite (≤512KB/5000 lines combined; mirrored
+   for docker) + child-owned spool ring (POSIX wrapper trimmer or Node helper ring,
+   restart-independent) + gateway copytruncate (secondary); no post-exit trim, no unbounded spool,
+   every host path persistent.
 6. Tests: unit persistence/re-attach/dismiss/caps; browser E2E; keep guard test green; `check`.
