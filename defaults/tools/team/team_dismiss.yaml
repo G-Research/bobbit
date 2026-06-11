@@ -38,8 +38,9 @@ detail_docs: >-
 
   |------|------|----------|-------------|
 
-  | `session_id` | string | **Yes** | The session ID of the agent to dismiss.
-  Get this from `team_list`. |
+  | `session_id` | string | **Yes** | The session ID of the agent to dismiss \u2014
+  a team agent (from `team_list`) or your own `team_delegate` child (id from
+  `team_wait` / a `non_blocking` spawn). |
 
 
   ## When to Use

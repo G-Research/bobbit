@@ -1,5 +1,5 @@
 name: team_prompt
-description: "Queued or immediate follow-up to a team agent (own team OR a direct-child goal's team-lead). Other scopes: use goal_pause / goal_archive_child."
+description: "Queued or immediate follow-up to a team agent, your own team_delegate child, or a direct-child goal's team-lead."
 summary: "Send prompt to a team agent"
 params: [session_id, message, workflowGateId?, inputGateIds?]
 provider:
@@ -94,8 +94,9 @@ detail_docs: >-
 
   Scope is **direct children only** — grandchildren and arbitrary descendants
   return 403 `NOT_TEAM_MEMBER_OR_DIRECT_CHILD`. The asymmetry with `team_steer`
-  / `team_abort` / `team_dismiss` (still caller-team-only) is intentional:
-  destructive operations on a subgoal go through `goal_pause` /
+  / `team_abort` / `team_dismiss` (which act on your own team agents and your
+  own `team_delegate` children, but never on a child goal's team) is
+  intentional: destructive operations on a subgoal go through `goal_pause` /
   `goal_archive_child`, not direct session manipulation.
 
 
