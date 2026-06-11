@@ -270,33 +270,22 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(persisted?.childKind).toBe("host-agents");
 			expect(persisted?.readOnly).toBe(true);
 			expect(persisted?.role).toBe("pr-reviewer");
-			// NOTE (reported production gap — design Risk #4): the reviewer is minted
-			// with the pr-reviewer ROLE, but `OrchestrationCore.spawn`'s full-lifecycle
-			// `createSession` threads `roleName` WITHOUT deriving/passing the role's
-			// `accessory`, and `session-setup` only applies an explicitly-passed
-			// `accessory` — so `review` is NOT applied to the child session here. The
-			// acceptance criterion wants the `review` accessory visible in the sidebar;
-			// this is flagged to the team lead to wire in src (accessory ← resolved
-			// role) rather than weakened away. Asserting the gap so a future fix
-			// re-tightens it to `.toBe("review")`.
-			expect(persisted?.accessory ?? undefined).toBeUndefined();
+			// The reviewer is minted with the pr-reviewer role's `review` accessory
+			// (session-setup applies the resolved role's accessory) — visible in the
+			// sidebar, pre-downgrade parity.
+			expect(persisted?.accessory).toBe("review");
 
 			// Row: the reviewer's effective toolset. The reviewer carries all three
 			// walkthrough tools and read-only is enforced (no write/edit/bash/spawn).
 			const toolset = new Set<string>(persisted?.allowedTools ?? []);
 			for (const t of REVIEWER_TOOLS) expect(toolset.has(t), `reviewer must have ${t}`).toBe(true);
-			for (const t of ["write", "edit", "bash", "team_spawn", "team_delegate"]) {
+			for (const t of ["write", "edit", "bash", "team_spawn", "team_delegate", "task_create", "gate_signal"]) {
 				expect(toolset.has(t), `read-only reviewer must NOT have ${t}`).toBe(false);
 			}
-			// NOTE (reported production gap): the spec/acceptance require the reviewer's
-			// allowedTools to be EXACTLY the three walkthrough tools. Today the
-			// `pr-reviewer` role's `toolPolicies: { "PR Walkthrough": allow }` grants the
-			// PR-Walkthrough group ON TOP of the default-allow tool groups, so the
-			// child also carries read/grep/find/ls/browser_*/web_*/task_*/gate_* etc.
-			// (read-only-safe, but NOT the tight three-tool scope). Flagged to the team
-			// lead to tighten the role (explicit `tools:` allow-list or deny-other-groups);
-			// when fixed, re-tighten this to deepEqual === REVIEWER_TOOLS.
-			expect(toolset.size).toBeGreaterThan(REVIEWER_TOOLS.length);
+			// The reviewer's effective toolset is EXACTLY the three walkthrough tools:
+			// the pr-reviewer role allows the "PR Walkthrough" group and denies every
+			// other fixed tool group, so no read/grep/task/gate/etc. leak through.
+			expect([...toolset].sort()).toEqual([...REVIEWER_TOOLS].sort());
 
 			// The kickoff was sent to the REVIEWER, not the owner.
 			await pollUntil(async () => {
@@ -407,7 +396,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	// LOCAL-launched reviewer's submission is ALWAYS rejected on provider mismatch —
 	// the panel Run→submit→cards happy-path cannot complete for a local target.
 	// This documents the repro deterministically; flagged to the team lead.
-	test("[gap] a local-target reviewer's submission is rejected on provider mismatch", async ({ gateway }) => {
+	test("a local-target reviewer's submission is rejected (walkthrough is GitHub-PR-only)", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);

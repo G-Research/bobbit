@@ -98,8 +98,48 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 			assert.equal(
 				resolveGrantPolicy(tool, PR_WALKTHROUGH_GROUP, reviewer, undefined, groupPolicyStore),
 				"allow",
-				`pr-reviewer must resolve ${tool} to allow (role group grant beats group default-deny)`,
+				`pr-reviewer must resolve ${tool} to allow (role group allow beats group default-deny)`,
 			);
 		});
 	}
+
+	// GAP 2: the reviewer must resolve to EXACTLY the three walkthrough tools — no
+	// state-mutating / orchestration tools leak through. Enumerate every FIXED tool
+	// shipped under defaults/tools and assert the pr-reviewer role resolves only the
+	// PR Walkthrough trio to a non-`never` policy; every other tool resolves to
+	// `never`. (Dynamic per-server MCP tool groups use runtime keys not expressible
+	// in a static role file and are out of scope for this fixed-surface assertion.)
+	const TOOLS_DIR = path.join(DEFAULTS_DIR, "tools");
+	function enumerateFixedTools(): Array<{ name: string; group: string }> {
+		const out: Array<{ name: string; group: string }> = [];
+		for (const groupDir of fs.readdirSync(TOOLS_DIR)) {
+			const abs = path.join(TOOLS_DIR, groupDir);
+			if (!fs.statSync(abs).isDirectory()) continue;
+			for (const file of fs.readdirSync(abs)) {
+				if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+				const doc = YAML.parse(fs.readFileSync(path.join(abs, file), "utf-8")) as { name?: string; group?: string } | null;
+				if (doc && typeof doc.name === "string" && typeof doc.group === "string") {
+					out.push({ name: doc.name, group: doc.group });
+				}
+			}
+		}
+		return out;
+	}
+
+	it("pr-reviewer resolves to EXACTLY the three walkthrough tools across the fixed tool surface", () => {
+		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+		const fixedTools = enumerateFixedTools();
+		assert.ok(fixedTools.length >= 20, "expected to enumerate the full fixed tool surface");
+
+		const allowed: string[] = [];
+		for (const { name, group } of fixedTools) {
+			const policy = resolveGrantPolicy(name, group, reviewer, undefined, groupPolicyStore);
+			if (policy !== "never") allowed.push(name);
+		}
+		assert.deepEqual(
+			allowed.sort(),
+			[...PR_WALKTHROUGH_TOOLS].sort(),
+			"pr-reviewer must resolve ONLY the three PR Walkthrough tools to a non-never policy",
+		);
+	});
 });

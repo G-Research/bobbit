@@ -560,6 +560,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		// A real, visible, read-only pr-reviewer host-agents child of THIS session is minted.
 		let reviewerChildId: string | undefined;
 		let reviewerReadOnly: boolean | undefined;
+		let reviewerAccessory: string | undefined;
 		await expect.poll(() => {
 			const liveSessions = gateway.sessionManager?.getAllSessionsRaw?.() ?? [];
 			for (const s of liveSessions) {
@@ -567,12 +568,15 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 				if (cps?.parentSessionId === sid && cps?.childKind === "host-agents") {
 					reviewerChildId = s.id;
 					reviewerReadOnly = cps.readOnly;
+					reviewerAccessory = (s as { accessory?: string }).accessory ?? (cps as { accessory?: string }).accessory;
 					return cps.role ?? null;
 				}
 			}
 			return null;
 		}, { timeout: 20_000 }).toBe("pr-reviewer");
 		expect(reviewerReadOnly, "the reviewer child must be read-only").toBe(true);
+		// GAP 1 fix: the reviewer carries the role's `review` accessory (sidebar parity).
+		expect(reviewerAccessory, "the reviewer child must surface the review accessory").toBe("review");
 		// Anti-postMessage: the user's OWN session agent was NOT prompted — the kickoff
 		// ("Review target…") went to the reviewer child, not the session.
 		const ownerKickoffSeen = await (async () => {
