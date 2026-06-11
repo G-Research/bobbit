@@ -396,6 +396,9 @@ Compaction has a minimum duration of 3.5s and a safety timeout of 10 minutes.
 - `transform-origin: 5px 8px` — pivot at bottom center
 - Three simultaneous animations during busy: `blob-busy-move` (body), `blob-busy-eyes` (eyes), `blob-shimmer` (skin)
 
+> **Note**: A General-settings toggle can replace this sprite with an animated
+> status-text label for the chat blob only. See [section 10, Text-Replacement Mode](#10-text-replacement-mode-settings-toggle).
+
 ### Role page — `idleBlob()`
 
 **File**: `src/app/role-manager-page.ts`
@@ -579,3 +582,95 @@ This prevents the bobbit from looking off-center in the narrower chat area.
 On screens ≤ 639px:
 - Chat blob gets `margin-left: 16px` to avoid hugging the screen edge (where container padding is tighter)
 - This is applied via margin rather than changing `translateX` to avoid breaking the entry/exit animation transitions
+
+---
+
+## 10. Text-Replacement Mode (Settings Toggle)
+
+### What it does
+
+Some people find the large animated chat blob distracting, or simply prefer a
+quieter, more literal status indicator. The **"Replace bobbit sprite with text"**
+toggle (Settings → General, directly below "Show message timestamps") swaps the
+chat blob's animated sprite for a compact animated **status-text label** that
+spells out the agent's current state.
+
+**Scope is the chat blob only.** The sidebar (`statusBobbit()`) and goal-dashboard
+status sprites are deliberately **not** affected — they stay as sprites. The chat
+blob is the one place where the sprite is large enough to be distracting, and it
+already exposes a rich state machine (see section 5) that maps cleanly to words,
+so it is the only context worth replacing.
+
+### Preference
+
+| | |
+|---|---|
+| Key | `replaceBobbitWithText` |
+| Type | boolean |
+| Default | **OFF** — only an explicit `true` enables it |
+| Transport | `PUT /api/preferences` (auto-included in `getSafePreferences`, no special-casing) |
+
+The default is off so the sprite — the app's mascot and the default experience —
+is preserved unless the user opts in.
+
+### State → text mapping
+
+The label reflects the chat blob's current `_blobState` (and the `archived`
+property). The mapping lives in `StreamingMessageContainer._blobTextInfo()`:
+
+| Blob state | Text | Colour | Animation |
+|------------|------|--------|-----------|
+| `active` / `entering` (streaming/busy) | **Busy** | sprite colour | Mexican wave — each letter rises and falls in sequence, looping |
+| `compacting` / `compact-shake` / `compact-pop` | **Compacting** | muted | Reverse (right→left) pulse sweep across the letters, looping |
+| `idle` / `exiting` | **Idle** | muted | Static (no/minimal motion) |
+| `archived` | **Ended** | muted, desaturated | Static |
+
+"Busy" uses the sprite's own canonical colour rather than a generic accent so the
+text still reads as "the bobbit". It applies the same per-session
+`--bobbit-hue-rotate` the sprite uses, so the word shifts hue with the session
+identity exactly as the sprite body would (see section 3). The single source for
+the sprite colour is `--bobbit-sprite-main` defined on `.bobbit-blob-text` in
+`src/ui/app.css` (mirroring `CANONICAL_PALETTE.main` in `src/ui/bobbit-render.ts`) —
+the hex is not scattered elsewhere.
+
+### Rendering
+
+`StreamingMessageContainer.render()` branches on the preference: when enabled it
+renders the text label **instead of** the entire sprite block. Because the
+`<canvas>` is never created, the eye-animation loop never starts — the sprite is
+fully suppressed, not merely hidden. When disabled, the sprite renders exactly as
+before. All blob-state transition logic is unchanged; only the render output
+differs.
+
+The label spells the word with one `<span>` per letter so the wave / pulse can
+stagger per-letter via `animation-delay` (`:nth-child`). For accessibility the
+container carries `role="status"` and `aria-label` with the full word, while the
+per-letter spans are `aria-hidden="true"` so a screen reader announces "Busy"
+rather than "B u s y". Keyframes (`blob-text-wave`, `blob-text-pulse`) live in
+`src/ui/app.css` alongside the blob keyframes and collapse to static text under
+`@media (prefers-reduced-motion: reduce)`.
+
+The label is sized (`min-height` + matching margins) to occupy roughly the same
+vertical footprint as the sprite block, so toggling the setting — or changing
+state — does not shift the surrounding chat layout.
+
+### Preference plumbing (dataset mirror)
+
+The text label is a Lit component, but the preference is a plain dataset string —
+this follows the same default-off boolean pattern as `subgoalsEnabled` and
+`playAgentFinishSound`. The value is mirrored to
+`document.documentElement.dataset.replaceBobbitWithText` (`"true"` / `"false"`) at
+three sites so it survives load and updates live:
+
+1. **`src/app/main.ts`** — initial-load and reconnect preference blocks.
+2. **`src/app/remote-agent.ts`** — the `preferences_changed` WebSocket handler.
+3. **`src/app/settings-page.ts`** — synchronously in the toggle handler (before the
+   `PUT`), so the blob flips immediately without waiting on the broadcast.
+
+`StreamingMessageContainer` reads the dataset value on each render and stays
+reactive via a `MutationObserver` on `document.documentElement` (filtered to
+`data-replace-bobbit-with-text`), so the label appears/disappears the instant the
+preference changes — no reload required.
+
+For the full design rationale, file-by-file plan, and CSS specifics, see
+[docs/design/sprite-to-text.md](design/sprite-to-text.md).
