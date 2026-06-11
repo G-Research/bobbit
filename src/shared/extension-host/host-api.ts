@@ -34,7 +34,12 @@ export const HOST_API_VERSION = 1 as const;
  *  internal→contract adapter (Phase 2: `src/server/extension-host/contract-adapter.ts`),
  *  the single place the mapping lives — so internals can be refactored freely without
  *  breaking packs. */
-export const HOST_CONTRACT_VERSION = 1 as const;
+//
+// v2 (additive): added the optional `PanelTarget.sessionId` field — open/focus a
+// panel in a CHOSEN session's view. Purely additive (a new optional field), so
+// packs that don't read it are unaffected; packs that rely on it feature-detect via
+// `host.contractVersion >= 2` and fall back to the active view. See PanelTarget.
+export const HOST_CONTRACT_VERSION = 2 as const;
 
 /**
  * The single, versioned, capability-scoped object through which ALL extension code
@@ -188,7 +193,14 @@ export interface HostStoreApi {
 }
 
 // ── Structured UI addressing (frozen; no hash strings) ──
-export interface PanelTarget { panelId: string; params?: Record<string, unknown>; }
+export interface PanelTarget {
+	panelId: string;
+	params?: Record<string, unknown>;
+	/** CONTRACT v2: open/focus the panel in THIS session's view (selecting it if
+	 *  needed), instead of the currently-active session. Omitted ⇒ active session
+	 *  (v1 behaviour). Packs feature-detect via host.contractVersion >= 2. */
+	sessionId?: string;
+}
 export interface RouteTarget { route: string; params?: Record<string, unknown>; }
 
 // ── Host-API-OWNED data contracts (versioned by HOST_CONTRACT_VERSION) ──

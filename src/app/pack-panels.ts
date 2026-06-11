@@ -330,15 +330,26 @@ export function openPackPanel(target: PanelTarget, callerPackId?: string): void 
 		return;
 	}
 	void loadPanelModule(panelKey(reg.packId, reg.panelId), reg);
-	mountPackPanelTab(reg, target.params);
+	mountPackPanelTab(reg, target.params, target.sessionId);
 }
 
 /** Add or focus the side-panel tab for `{packId, panelId}`, carrying `params`.
- *  Best-effort: guarded so a non-DOM/unit context (no app state) never throws. */
-function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown>): void {
+ *  Best-effort: guarded so a non-DOM/unit context (no app state) never throws.
+ *
+ *  CONTRACT v2 (`PanelTarget.sessionId`): when `sessionId` is given, SELECT that
+ *  session — set `state.selectedSessionId` (the same field the session-select path
+ *  drives) so the sidebar highlight + main view follow the pane on the next
+ *  `renderApp()` — and mount/focus the tab under THAT session instead of the
+ *  currently-active one. Omitted ⇒ the active session (v1 behaviour, unchanged).
+ *  The selection touches no platform navigation code, keeping the pack pure. */
+function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown>, sessionId?: string): void {
 	try {
 		const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
-		const sid = s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
+		// v2: an explicit target session is selected (so the sidebar + main view
+		// follow) and used as the tab's mount key; otherwise fall back to the active
+		// session exactly as before.
+		if (sessionId && sessionId !== s.selectedSessionId) s.selectedSessionId = sessionId;
+		const sid = sessionId || s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
 		const id = packPanelTabId(reg.packId, reg.panelId);
 		const title = reg.title || reg.panelId;
 		const tab: PanelWorkspaceTab = {

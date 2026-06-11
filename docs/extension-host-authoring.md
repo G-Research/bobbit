@@ -530,6 +530,32 @@ panels from `GET /api/ext/contributions` (pack-scoped), not `/api/tools`.
 `host.ui.openPanel({ panelId })` stays **pack-relative** — the caller surface's bound `packId`
 resolves `panelId` → `{packId, panelId}` before fetching bytes.
 
+**Open a panel in a chosen session's view (`PanelTarget.sessionId`, contract v2).** By default
+`openPanel` mounts/focuses the tab in the **currently-active** session. A pack that has just
+created another session (e.g. a spawned child agent) can open the panel **in that session's
+view** by passing its id:
+
+```js
+// CONTRACT v2: open the pane in a chosen session, selecting it so the sidebar +
+// main view follow. Feature-detect; fall back to the active view on a v1 host.
+const target = { panelId: "pr-walkthrough.panel", params: {} };
+if (host.contractVersion >= 2) target.sessionId = childSessionId;
+host.ui.openPanel(target);
+```
+
+When `sessionId` is present the platform **selects** that session (the same `selectedSessionId`
+the normal session-select path drives, so the sidebar highlight + main view follow) and mounts
+the tab **under that session** instead of the active one. The selection lives entirely in the
+platform (`src/app/pack-panels.ts`) — the pack never touches navigation/router state, preserving
+pack purity. The field is **purely additive**: omitting it is the v1 behaviour, and packs that
+never set it are unaffected.
+
+This addition bumped **`HOST_CONTRACT_VERSION` 1 → 2** (the data/addressing-contract version;
+`HOST_API_VERSION` stays `1` because no method signature changed). Adding an optional field is
+additive, but the version bump lets a pack **feature-detect field support** via
+`host.contractVersion >= 2` and degrade gracefully (open in the active view) on an older host.
+No new capability flag is added — `openPanel` already lives under the `ui` capability.
+
 **Panel conventions (enforced — identical to renderer rules):** theme tokens only; preserve any
 embedded iframe `sandbox` attribute (untrusted/LLM content goes in a `sandbox`ed iframe);
 **no auto-invoke / navigation on mount**.
