@@ -5,6 +5,10 @@ Status: design accepted, not started. Workstream **CI** in
 
 > **Execution authority:** implement from
 > [code-intelligence-implementation-plan.md](code-intelligence-implementation-plan.md).
+> **Alternatives & evidence:** every engine/library pick below is justified against its
+> competitors, with citations, in
+> [code-intelligence-alternatives.md](code-intelligence-alternatives.md) — read it before
+> swapping any component.
 
 **The problem:** Bobbit agents are "an LLM with grep". 56% of tool calls are bash
 (token-cost-efficiency.md §3), discovery is multi-round grep cascades, edits are text
@@ -62,19 +66,29 @@ it does not duplicate the temporal one.
   `code_symbols` (document/workspace), `code_hover`, `code_rename` (preview-diff →
   review-flow apply), `code_diagnostics`. Budgeted outputs (cap + spill per CE-G2),
   renderers that show locations as clickable `file:line`.
-- **Engine:** a gateway-side **LSP supervisor** (`lsp-supervisor.ts`): spawns language
-  servers per `(worktree, language)`, idle-shutdown (default 10 min), capped concurrent
-  servers, health-restart — the `sandbox-manager.ts` idempotent-ensure shape. Servers are
-  *processes the gateway owns*; agents never talk LSP directly.
+- **Engine:** a gateway-side **LSP supervisor** (`lsp-supervisor.ts`) built on
+  `vscode-jsonrpc` + `vscode-languageserver-protocol` (Microsoft-maintained, standalone-
+  capable; coc.nvim is the reference lifecycle implementation): spawns language servers per
+  `(worktree, language)`, idle-shutdown (default 10 min), capped concurrent servers,
+  health-restart — the `sandbox-manager.ts` idempotent-ensure shape. Servers are *processes
+  the gateway owns*; agents never talk LSP directly. The supervisor also pushes **post-edit
+  diagnostics** into the turn (the Claude Code v2.0.74 pattern — fix without a separate
+  build step). The operational invariants (didOpen tracking, position-encoding negotiation,
+  readiness gating, client-side file watching, orphan reaping…) are enumerated in
+  [code-intelligence-alternatives.md §3](code-intelligence-alternatives.md) and are CI-3
+  pinning tests.
 - **Language autodiscovery:** a detection registry maps manifest/file signals →
-  language-server descriptor (`tsconfig.json`/`package.json` → typescript-language-server;
-  `pyproject.toml` → pyright; `go.mod` → gopls; `Cargo.toml` → rust-analyzer; `.csproj`/
-  `.fsproj` → Roslyn/FsAutoComplete; `pom.xml`/`build.gradle*` → JDT-LS; `CMakeLists.txt`/
-  compile-commands → clangd). Descriptors ship as **per-language packs**
+  language-server descriptor (`tsconfig.json`/`package.json` → **vtsls**;
+  `pyproject.toml` → **basedpyright**; `go.mod` → gopls; `Cargo.toml` → rust-analyzer
+  (per-worktree `CARGO_TARGET_DIR`); `.csproj` → csharp-ls; `.fsproj` → FsAutoComplete;
+  `pom.xml`/`build.gradle*` → JDT-LS; `CMakeLists.txt`/compile-commands → clangd; Kotlin
+  deferred — kotlin-lsp is alpha). Descriptors ship as **per-language packs**
   (`lsp-typescript`, `lsp-python`, …): the descriptor is data (binary acquisition, args,
   init options, health probe), so adding a fleet language = a pack, not core code. v1
   bundles TypeScript + Python; the rest are cards (CI-4) — autodiscovery *detects* an
   uncovered language and surfaces "install the lsp-go pack" in the UI instead of failing.
+  This config-not-binaries pack model is the same shape Claude Code (LSP plugins) and
+  Copilot CLI (`.github/lsp.json`) converged on independently.
 - **Why not Serena/MCP as the surface:** same capability, but token-opaque outputs, no
   renderer, no tool-guard tiers, Python runtime baggage per worktree, and the observed
   MCP-underuse problem. Serena remains the design reference and a fallback pack if the
@@ -82,10 +96,11 @@ it does not duplicate the temporal one.
 
 ## §3 Structural layer — ast-grep tools
 
-`ast_search(pattern, lang?, paths?)` and `ast_rewrite(pattern, rewrite, …)` over the
-**ast-grep** single static binary (shipped via the existing `binaries/` mechanism —
-`binaries.versions.json` + checksums; per-call execution, nothing to supervise, ~25
-languages). `ast_rewrite` never writes directly: it returns a unified diff rendered through
+`ast_search(pattern, lang?, paths?)` and `ast_rewrite(pattern, rewrite, …)` over
+**ast-grep** (MIT, the de-facto structural engine for agents), shipped as the
+`@ast-grep/cli` npm dependency — prebuilt per-platform binaries via optionalDependencies,
+no custom shipping; per-call execution with `--json=stream`, nothing to supervise, ~25–31
+languages + custom tree-sitter grammars. `ast_rewrite` never writes directly: it returns a unified diff rendered through
 the existing diff renderer; applying goes through the normal edit path so review-pane and
 git-status flows see it. This is the single biggest verifiability upgrade over regex/sed —
 and the first goal to land (CI-1).
@@ -94,14 +109,20 @@ and the first goal to land (CI-1).
 
 Two deliberately separate concerns:
 
-- **Prompt/orientation path (in-house, small):** `code_map` — an Aider-style budgeted map:
-  per-directory → file → public symbols/signatures, built from ast-grep's parse output
-  (no new parser dependency), content-hash cached per worktree, **hard token budget**
-  (default 2 KB tool result; later an EP provider contributes a prompt section under the
-  same budget machinery as the skills catalog). Owner asked "isn't in-house overkill?" —
-  no, because this reuses the ast-grep engine from §3 and the existing budget/prompt-section
-  patterns; the *graph database* part of graphify is precisely what we don't need for
-  prompts. Deterministic, relative-path-only, worktree-safe by construction.
+- **Prompt/orientation path (in-house, small):** `code_map` — an Aider-style budgeted
+  **ranked** map: tree-sitter tag extraction (defs **and** refs) → file/symbol graph →
+  personalized PageRank seeded by session state (files in context, identifiers mentioned in
+  the goal) → signature-only rendering, binary-searched down to a **hard token budget**
+  (default 2 KB tool result, arg-raisable to 8 KB; later an EP provider contributes a
+  prompt section under the same budget machinery as the skills catalog). Content-hash
+  cached per worktree. The ranking is what makes a 2 KB map useful — flat symbol dumps
+  aren't (evidence: RepoGraph ICLR'25 ≈+33% relative on SWE-bench-Lite; details and the
+  Aider algorithm in [code-intelligence-alternatives.md §5](code-intelligence-alternatives.md)).
+  Owner asked "isn't in-house overkill?" — no: extraction reuses tree-sitter/ast-grep
+  machinery and Aider's MIT `tags.scm` queries; the *graph database* part of graphify is
+  precisely what we don't need for prompts. Deterministic, relative-path-only,
+  worktree-safe by construction. Embeddings indexing: deliberately not in v1 (contested
+  evidence, real infra cost — annex §5); the capability seam leaves room for a pack.
 - **Visualization path (reuse, optional):** a `graphify` **marketplace pack** (not built-in)
   wrapping graphify per worktree: output to a gitignored `graphify-out/`, rendered in a pack
   panel (`#/ext/graphify`). Known risk to verify at install: absolute-path leakage in
@@ -113,10 +134,16 @@ Two deliberately separate concerns:
 
 `code_check(scope)` runs the project's known checkers (from project config; autodiscovered
 defaults: `tsc --noEmit`, eslint, pytest, `go vet`/`go test`, `cargo check`) and returns
-**typed results**: `{tool, file, line, code, severity, message}[]` + summary counts —
-never raw logs (cap + spill for the rare overflow). Verification gates can consume the same
-parser output, and the team-lead's "did it work" loop becomes data-driven. Parsers are
-per-tool modules; unknown checkers fall back to capped raw output (never block).
+**typed results** — a flattened-rdjsonl record `{tool, file, line, endLine?, col?, code,
+severity, message, fix?}[]` + summary counts — never raw logs (cap + spill for the rare
+overflow). Parser strategy: native JSON where it exists (eslint, ruff/Biome rdjson, mypy,
+cargo, go), stable-regex for `tsc --pretty false`, JUnit XML for pytest, a SARIF→internal
+adapter (unlocks dotnet/semgrep/clang in one converter), and the bundled reviewdog
+**`errorformat`** static binary as the universal fallback (~50 preset parsers + user `-efm`
+patterns) — that one ships via the existing `binaries/` mechanism. Verification gates can
+consume the same parser output, and the team-lead's "did it work" loop becomes data-driven.
+Unknown checkers fall back to capped raw output (never block). No shipping agent harness
+has this layer typed today — Claude Code feeds raw hook text, Codex/Devin read raw logs.
 
 ## §6 UX — "what's running, where?" (owner requirement)
 
@@ -149,7 +176,9 @@ artifacts for absolute paths — the graphify lesson, enforced.
 - Every mutating surface (`ast_rewrite`, `code_rename`) previews before applying; every
   CI tool result is budgeted; `code_check` closes every edit loop.
 
-Cross-references: [token-cost-efficiency.md](token-cost-efficiency.md) (CE-G2/G7),
+Cross-references: [code-intelligence-alternatives.md](code-intelligence-alternatives.md)
+(alternatives, citations, research record),
+[token-cost-efficiency.md](token-cost-efficiency.md) (CE-G2/G7),
 [extension-platform.md](extension-platform.md) (capabilities §3.1, providers, runtimes),
 [harness-gap-analysis.md](harness-gap-analysis.md) (peer evidence),
 [mission-control.md](mission-control.md) (Caretaker sweep, flight recorder for service
