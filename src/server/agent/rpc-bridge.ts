@@ -179,9 +179,19 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * Order matters: --model and --thinking are inserted BEFORE caller-supplied
  * `options.args` so any explicit override in `args` (e.g. `--model x` from
  * a custom flow) wins over the spawn-time pin.
+ *
+ * `--no-approve` (pi 0.79.0 project-trust gate) is ALWAYS present: Bobbit
+ * injects all config via ~/.bobbit/agent + RPC args and never loads
+ * project-local `.pi` directories. `--no-approve` makes pi decline project
+ * trust deterministically (projectTrustOverride=false → resolveProjectTrusted
+ * returns false immediately), so the agent never stalls on a trust prompt and
+ * never loads project-local settings/resources/packages/extensions. Both the
+ * local-spawn arg list and the Docker-exec arg list flow through this builder,
+ * so a single flag covers both spawn paths. This must NOT depend on
+ * settings.json state. See goal: project-trust decision (no `.pi` support).
  */
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
-	const args = ["--mode", "rpc"];
+	const args = ["--mode", "rpc", "--no-approve"];
 	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
 	if (options.initialModel) {
 		const slash = options.initialModel.indexOf("/");
