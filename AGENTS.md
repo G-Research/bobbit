@@ -20,7 +20,7 @@ UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Serve
 Where things live. Use this to orient, then `rg` for the symbol.
 
 - **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WebSocket in `src/server/ws/`.
-- **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context.
+- **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. `bash_bg` processes persist + re-attach across restart via `bg-process-{manager,store,runner}.ts`; state under `<stateDir>/bg-processes/`. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md).
 - **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Tool descriptions are budget-pinned by `tests/tool-description-budget.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; `config-cascade.ts` + `slash-skills.ts` are adapters. Built-in first-party packs live in `market-packs/`, shipped via `scripts/copy-builtin-packs.mjs` and resolved in place by `builtin-packs.ts`. See [docs/marketplace.md](docs/marketplace.md).

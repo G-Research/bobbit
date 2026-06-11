@@ -2494,6 +2494,41 @@ The REST and WS contracts are additive for older clients, but new clients must t
 
 ---
 
+## Background process persistence (bash_bg)
+
+`bash_bg` background processes survive a gateway restart and **re-attach** to
+still-running processes: live output keeps streaming and the real exit code is
+captured, as if the server never restarted. This is needed because the old
+`BgProcessManager` was in-memory only — a restart lost every record, all output,
+and the live handle, and you cannot re-attach to a dead parent's stdout/stderr
+pipes.
+
+The fix moves output and exit status onto disk, independent of the gateway
+lifetime: each process redirects stdout/stderr to transient per-stream **spools**
+that the detached child keeps appending to; the gateway tails them into a single
+durable **combined projection** (`<bgId>.log`, a host file it owns and rewrites
+atomically, always within the 512KB/5000-line cap) and captures the real exit
+code from a per-process **status file** written by a POSIX shell wrapper (or the
+Node `bg-runner` helper on Windows without Git Bash; docker spawns run under
+`setsid` and mirror into host files). Metadata persists to
+`<stateDir>/bg-processes.json` via `BgProcessStore` (mirrors `SessionStore`:
+atomic write, 5 backups, epoch guard); per-process files live under
+`<stateDir>/bg-processes/<sessionId>/`. Restore is hooked into
+`restoreSessions()` and reconciles each `running` record as alive (re-attach +
+tail + capture eventual code), completed-during-downtime (read the status file),
+or unrecoverable (labelled terminal state, **never** a fabricated exit code).
+Kill and dismiss are distinct (`?action=kill` keeps the terminal record;
+`?action=dismiss` purges record + files); on-disk logs stay bounded at all times.
+
+Full behaviour, reconciliation cases, kill-vs-dismiss, and bounded-growth
+mechanics: [docs/bg-process-persistence.md](bg-process-persistence.md). Design
+record: [docs/design/persistent-bg-processes.md](design/persistent-bg-processes.md).
+Implementation: `src/server/agent/bg-process-manager.ts`, `bg-process-store.ts`,
+`bg-runner.ts`; client/UI in `src/app/session-manager.ts` and
+`src/ui/components/BgProcessPill.ts`.
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved - the agent is stuck mid tool-call and the steer feels ignored.

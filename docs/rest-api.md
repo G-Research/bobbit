@@ -56,6 +56,9 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
 | `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
+| `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=kill` | Terminate a running process (whole tree / group); keep the now-terminal record until dismissed. `{ ok, killed }`; 404 if not found/not running |
+| `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=dismiss` | Remove the record **and** delete its persisted log/status/spool files; broadcasts `bg_process_dismissed`. `{ ok }`; 409 if still running |
+| `DELETE` | `/api/sessions/:id/bg-processes/:pid` | Legacy: kill-if-running, else dismiss |
 | `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
@@ -106,8 +109,13 @@ type BgProcessInfo = {
   name: string;
   command: string;
   pid: number;
-  status: "running" | "exited";
+  // "unrecoverable" = the live outcome was lost across a gateway restart (output is still retained).
+  status: "running" | "exited" | "unrecoverable";
   exitCode: number | null;
+  // Why the process reached a terminal state; null while running. Authoritative for UI rendering.
+  // "normal" → real exitCode; "killed" → user kill (exitCode usually null); "unrecoverable" → lost
+  // across a restart (exitCode null, never fabricated). Optional/undefined for legacy snapshots.
+  terminalReason?: "normal" | "killed" | "unrecoverable" | null;
   startTime: number;
   endTime: number | null;
 };
@@ -116,10 +124,12 @@ type BgProcessInfo = {
 `endTime` is `null` while `status === "running"`. On child exit the server sets `endTime` once, and list / wait snapshots preserve that final value so reloads and reconnects keep showing the fixed `endTime - startTime` runtime.
 
 - `POST /api/sessions/:id/bg-processes` returns `201 BgProcessInfo` for the created process.
-- `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for UI hydration.
+- `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for UI hydration. Background processes survive a gateway restart — this list is rehydrated from the on-disk store and re-attached processes keep streaming. See [docs/bg-process-persistence.md](bg-process-persistence.md).
 - `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info: BgProcessInfo, timedOut: boolean, aborted: boolean }`; `info.endTime` is numeric after exit and remains `null` for running timeout/abort snapshots.
 
 Older exited snapshots may omit `endTime` or set it to `null`. Clients must render those runtimes as unknown/non-growing instead of substituting `Date.now()` for an exit timestamp.
+
+**WS events.** `bg_process_created` / `bg_process_output` carry the running snapshot and streamed output; `bg_process_exited` carries `processId`, `exitCode`, `endTime`, and `terminalReason` (the authoritative terminal field — `exitCode` is `null` for `killed`/`unrecoverable`); `bg_process_dismissed` carries `{ processId }` so all clients drop the pill when a process is dismissed.
 
 ### Proposal drafts
 
