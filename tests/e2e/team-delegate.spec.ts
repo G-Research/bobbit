@@ -13,8 +13,11 @@
  *   • a spawned child inherits the parent's CURRENT model (regression vs the
  *     old system-default drop) + per-call `model` override,
  *   • the non-blocking interactive flow spawn → prompt → wait → read → dismiss,
- *   • a team-lead can ALSO `team_delegate` (the Agent-group reclassification
- *     does not regress its goal `team_*` tools).
+ *   • the /orchestrate/delegate ROUTE stays functional for a team-lead caller
+ *     even though the lead's MODEL no longer sees `team_delegate`/`team_wait`
+ *     (denied at the role layer so the lead orchestrates via team_spawn +
+ *     notifications and goes idle; route authz is ownership-based, not tool-
+ *     policy-based — see role-team-tools-policy.test.ts).
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createSession, createGoal, startTeam, deleteSession, deleteGoal, teardownTeam, connectWs } from "./e2e-setup.js";
@@ -252,8 +255,14 @@ test.describe("team_delegate — non-blocking interactive flow", () => {
 });
 
 test.describe("team_delegate — team-lead parity", () => {
-	test("a team-lead can ALSO team_delegate (no regression to its goal team tools)", async ({ gateway }) => {
-		const goal = await createGoal({ title: "Orchestration delegate parity", team: true });
+	// The lead's MODEL no longer sees team_delegate/team_wait — they are denied at
+	// the role layer (team-lead.yaml; pinned by role-team-tools-policy.test.ts) so
+	// the lead orchestrates only via team_spawn + notifications and goes idle. The
+	// /orchestrate/delegate ROUTE, however, is authz'd by session ownership, NOT by
+	// tool policy, so it stays functional for a lead caller — this guards that the
+	// role-layer deny did not also break the route (defense-in-depth boundary).
+	test("the /orchestrate/delegate route stays functional for a lead (tool denied, route intact)", async ({ gateway }) => {
+		const goal = await createGoal({ title: "Orchestration delegate route intact", team: true });
 		let leadId: string | undefined;
 		try {
 			leadId = await startTeam(goal.id as string);
@@ -263,6 +272,47 @@ test.describe("team_delegate — team-lead parity", () => {
 			expect(json.delegates.length).toBe(1);
 			expect(json.delegates[0].status).toBe("completed");
 		} finally {
+			await teardownTeam(goal.id as string).catch(() => {});
+			await deleteGoal(goal.id as string).catch(() => {});
+		}
+	});
+
+	test("team_wait (no ids) EXCLUDES team-spawned workers so the lead goes idle, not block", async () => {
+		// Regression: a team-spawned worker is registered as an OrchestrationCore
+		// child (childKind:"team") of the lead, but it is notify-managed by the
+		// team-manager — the lead is meant to spawn-then-go-idle. Before the fix,
+		// `team_wait` with no ids defaulted to ALL children (incl. the team worker)
+		// and BLOCKED for the worker's whole lifetime, so the lead never went idle.
+		const goal = await createGoal({ title: "team_wait excludes team workers", team: true });
+		let leadId: string | undefined;
+		let workerId: string | undefined;
+		try {
+			leadId = await startTeam(goal.id as string);
+			expect(leadId).toBeTruthy();
+
+			// Spawn a LIVE team worker (kept busy) — a tracked childKind:"team" child.
+			const spawnResp = await apiFetch(`/api/goals/${goal.id}/team/spawn`, {
+				method: "POST",
+				body: JSON.stringify({ role: "coder", task: "STAY_BUSY:3000 Run this exact bash command: sleep 120. Do not do anything else." }),
+			});
+			expect(spawnResp.status).toBe(201);
+			workerId = (await spawnResp.json()).sessionId as string;
+			expect(workerId).toBeTruthy();
+
+			// It IS a tracked child of the lead, with childKind "team".
+			await pollUntil(async () => {
+				const kids = await listChildren(leadId!);
+				const w = kids.find((c) => c.sessionId === workerId);
+				return w && w.childKind === "team" ? true : null;
+			}, { timeoutMs: 5_000, intervalMs: 50, label: "worker registered as team child" });
+
+			// team_wait with NO ids must NOT block on the team worker — it is excluded
+			// from the default set, leaving nothing to await → 400 immediately.
+			const wait = await orchestrate(leadId!, "wait", { timeout_ms: 600_000 });
+			expect(wait.status).toBe(400);
+			expect(wait.json?.error).toBe("No children to await");
+		} finally {
+			if (workerId) await apiFetch(`/api/goals/${goal.id}/team/dismiss`, { method: "POST", body: JSON.stringify({ sessionId: workerId }) }).catch(() => {});
 			await teardownTeam(goal.id as string).catch(() => {});
 			await deleteGoal(goal.id as string).catch(() => {});
 		}

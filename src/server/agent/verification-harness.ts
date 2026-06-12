@@ -59,6 +59,7 @@ import {
 	isProviderBackoffError,
 	shouldRetryVerificationStep,
 	shouldSuppressRestartInterrupt,
+	isRestartInterruptError,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
@@ -1128,31 +1129,63 @@ export class VerificationHarness {
 				}
 				await this._resumeOneVerification(v);
 			} catch (err) {
-				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
-				// Best-effort: mark as failed. Wrap each external store call in
-				// try/catch so a missing goal/gate doesn't stop us from cleaning
-				// up the in-memory entry below (HTTP 409 lock-after-restart bug).
-				try {
-					this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
-						status: "failed",
-						steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 }],
-					});
-					this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
-				} catch (storeErr) {
-					console.error(`[verification] Failed to update gate store for ${v.signalId} during resume cleanup:`, storeErr);
-				}
-				try {
-					this.broadcastFn(v.goalId, {
-						type: "gate_verification_complete",
-						goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
-					});
-					this.broadcastFn(v.goalId, {
-						type: "gate_status_changed",
-						goalId: v.goalId, gateId: v.gateId, status: "failed",
-					});
-					this.notifyTeamLead(v.goalId, v.gateId, "failed");
-				} catch (bcastErr) {
-					console.error(`[verification] Failed to broadcast failure for ${v.signalId} during resume cleanup:`, bcastErr);
+				const errMsg = (err as Error).message;
+				if (isRestartInterruptError(errMsg)) {
+					// A restart-induced resume error (cold-agent RPC timeout, agent
+					// process not yet up) must NEVER surface as a hard gate failure.
+					// Leave the gate `pending` so the team-lead re-signals, and send
+					// the benign nudge (mirrors the suppression path in
+					// `_resumeOneVerification`). Persist an honest audit record but keep
+					// the GATE status `pending`.
+					console.warn(`[verification] Resume of ${v.signalId} hit a restart-interrupt error (gate left pending): ${errMsg}`);
+					try {
+						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
+							status: "failed",
+							steps: [{ name: "Resume Interrupted", type: "command", passed: false, output: `Reviewer agent was not ready / timed out while resuming after server restart: ${errMsg}`, duration_ms: 0 }],
+						});
+						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "pending");
+					} catch (storeErr) {
+						console.error(`[verification] Failed to update gate store for ${v.signalId} during restart-interrupt cleanup:`, storeErr);
+					}
+					try {
+						this.broadcastFn(v.goalId, {
+							type: "gate_status_changed",
+							goalId: v.goalId, gateId: v.gateId, status: "pending",
+						});
+						this.notifyTeamLeadFn?.(
+							v.goalId,
+							`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
+						);
+					} catch (bcastErr) {
+						console.error(`[verification] Failed to broadcast restart-interrupt for ${v.signalId}:`, bcastErr);
+					}
+				} else {
+					console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
+					// Best-effort: mark as failed. Wrap each external store call in
+					// try/catch so a missing goal/gate doesn't stop us from cleaning
+					// up the in-memory entry below (HTTP 409 lock-after-restart bug).
+					try {
+						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
+							status: "failed",
+							steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
+						});
+						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
+					} catch (storeErr) {
+						console.error(`[verification] Failed to update gate store for ${v.signalId} during resume cleanup:`, storeErr);
+					}
+					try {
+						this.broadcastFn(v.goalId, {
+							type: "gate_verification_complete",
+							goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
+						});
+						this.broadcastFn(v.goalId, {
+							type: "gate_status_changed",
+							goalId: v.goalId, gateId: v.gateId, status: "failed",
+						});
+						this.notifyTeamLead(v.goalId, v.gateId, "failed");
+					} catch (bcastErr) {
+						console.error(`[verification] Failed to broadcast failure for ${v.signalId} during resume cleanup:`, bcastErr);
+					}
 				}
 			} finally {
 				// Drop the in-memory entry so subsequent gate_signal calls aren't
@@ -1444,12 +1477,35 @@ export class VerificationHarness {
 			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
 			const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : VERIFICATION_RESULT_REMINDER;
 			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${jsonErr ? "JSON-retry" : "generic"} reminder...`);
-			await session.rpcClient.prompt(reminderPrompt);
-			// Reminder dispatch is fire-and-forget on the RPC channel; the session
-			// stays `idle` for a tick before transitioning to `streaming`. Wait for
-			// the next agent_start so the subsequent waitForIdle race doesn't
-			// resolve instantly against the still-idle status.
-			await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
+			// A freshly-revived reviewer is COLD (model init + MCP extension load),
+			// often needing 30-90s to first respond — worse under 5-way parallel
+			// session restore. So (1) wait for the agent to become ready before
+			// prompting and (2) use a generous prompt timeout, instead of letting
+			// `prompt()` reject with the 30s-default `Command timed out: prompt`.
+			//
+			// If the agent can't be reached (still cold / process gone / RPC
+			// timeout), DO NOT throw: a restart-interrupt must never surface as a
+			// hard gate failure. Return a step whose output is BOTH transient (so
+			// `_resumeOneVerification` routes it into `_rerunLlmReviewStep`) AND a
+			// restart-interrupt marker (so `shouldSuppressRestartInterrupt` leaves
+			// the gate `pending` when the rerun context is unavailable).
+			try {
+				await session.rpcClient.waitForReady(90_000);
+				await session.rpcClient.prompt(reminderPrompt, undefined, 120_000);
+				// Reminder dispatch is fire-and-forget on the RPC channel; the session
+				// stays `idle` for a tick before transitioning to `streaming`. Wait for
+				// the next agent_start so the subsequent waitForIdle race doesn't
+				// resolve instantly against the still-idle status.
+				await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).catch(() => {});
+			} catch (resumeErr) {
+				const msg = (resumeErr as Error)?.message || String(resumeErr);
+				console.warn(`[verification] Resume reminder for ${step.sessionId} could not reach the revived reviewer (treating as restart-interrupt): ${msg}`);
+				return {
+					name: step.name, type: step.type, passed: false,
+					output: `Reviewer agent was not ready / timed out while resuming after server restart: ${msg}`,
+					duration_ms: Date.now() - step.startedAt,
+				};
+			}
 
 			const result2 = await Promise.race([
 				resultPromise.then((r: VerificationResult) => ({ type: "result" as const, ...r })),

@@ -95,7 +95,35 @@ export const RESTART_INTERRUPT_MARKERS: readonly string[] = [
 	"Agent process exited unexpectedly",
 	"Reviewer agent process died",
 	"Agent did not call verification_result after server restart",
+	// Resume path could not re-attach to the revived reviewer: the agent was
+	// still cold (model + MCP init) and the readiness wait / reminder prompt
+	// RPC timed out. This is a restart-interrupt, not a real review failure.
+	"timed out while resuming after server restart",
 ];
+
+/**
+ * Return true iff a resume *error message* (from a thrown RpcBridge call —
+ * `waitForReady` / `prompt`) indicates the failure was caused by the server
+ * restart killing+reviving the reviewer agent (cold-init RPC timeout, process
+ * not yet up) rather than a genuine verification failure.
+ *
+ * Used by `resumeInterruptedVerifications`'s outer catch to route such errors
+ * into the `pending`-with-benign-nudge path instead of marking the gate
+ * `failed` with a `Resume Error` step.
+ */
+export function isRestartInterruptError(message: string): boolean {
+	if (!message) return false;
+	const patterns = [
+		"Command timed out",
+		"timed out",
+		"not ready",
+		"did not become ready",
+		"Agent process exited",
+		"Agent process not running",
+		"process exited",
+	];
+	return patterns.some(p => message.includes(p));
+}
 
 /**
  * Return true iff every failed step in `steps` looks like a restart

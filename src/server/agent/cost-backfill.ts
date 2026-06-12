@@ -83,7 +83,7 @@ export function backfillLegacyCostGoalIds(opts: CostBackfillOptions): CostBackfi
 
 	const unstamped = costTracker.getUnstampedSessionIds();
 	if (unstamped.length === 0) {
-		logger.log("[cost-backfill] stamped goalId on 0 entries; 0 still unattributable");
+		if (process.env.BOBBIT_DEBUG) logger.log("[cost-backfill] stamped goalId on 0 entries; 0 still unattributable");
 		return { stamped: 0, unattributable: 0 };
 	}
 
@@ -127,9 +127,12 @@ export function backfillLegacyCostGoalIds(opts: CostBackfillOptions): CostBackfi
 	const stamped = costTracker.backfillGoalIds(resolver);
 	const remaining = costTracker.getUnstampedSessionIds().length;
 
-	logger.log(
-		`[cost-backfill] stamped goalId on ${stamped} entries; ${remaining} still unattributable`,
-	);
+	// Only emit when a real backfill happened; a no-op pass (stamped=0) is boot
+	// noise — the standing `remaining` backlog is surfaced in the tree-cost panel.
+	if (stamped > 0 || process.env.BOBBIT_DEBUG)
+		logger.log(
+			`[cost-backfill] stamped goalId on ${stamped} entries; ${remaining} still unattributable`,
+		);
 
 	return { stamped, unattributable: remaining };
 }
@@ -325,7 +328,7 @@ export async function backfillLegacyCostGoalIdsFromTranscripts(
 
 	const unmapped = costTracker.getUnstampedSessionIds();
 	if (unmapped.length === 0) {
-		logger.log("[cost-backfill] transcript-pass stamped goalId on 0 additional entries; 0 still unattributable");
+		if (process.env.BOBBIT_DEBUG) logger.log("[cost-backfill] transcript-pass stamped goalId on 0 additional entries; 0 still unattributable");
 		return { stamped: 0, unattributable: 0, skipped: 0 };
 	}
 
@@ -334,7 +337,7 @@ export async function backfillLegacyCostGoalIdsFromTranscripts(
 		if (g && typeof g.id === "string" && g.id.length > 0) known.add(g.id);
 	}
 	if (known.size === 0) {
-		logger.log(`[cost-backfill] transcript-pass stamped goalId on 0 additional entries; ${unmapped.length} still unattributable`);
+		if (process.env.BOBBIT_DEBUG) logger.log(`[cost-backfill] transcript-pass stamped goalId on 0 additional entries; ${unmapped.length} still unattributable`);
 		return { stamped: 0, unattributable: unmapped.length, skipped: 0 };
 	}
 
@@ -370,9 +373,10 @@ export async function backfillLegacyCostGoalIdsFromTranscripts(
 	const remaining = costTracker.getUnstampedSessionIds().length;
 
 	const suffix = skipped > 0 ? ` (deadline reached; ${skipped} session(s) skipped)` : "";
-	logger.log(
-		`[cost-backfill] transcript-pass stamped goalId on ${stamped} additional entries; ${remaining} still unattributable${suffix}`,
-	);
+	if (stamped > 0 || process.env.BOBBIT_DEBUG)
+		logger.log(
+			`[cost-backfill] transcript-pass stamped goalId on ${stamped} additional entries; ${remaining} still unattributable${suffix}`,
+		);
 
 	return { stamped, unattributable: remaining, skipped };
 }

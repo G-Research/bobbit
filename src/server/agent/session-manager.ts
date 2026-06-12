@@ -3469,7 +3469,9 @@ export class SessionManager {
 		}
 		try {
 			await this.restoreSession(ps);
-			console.log(`[session-manager] Restored: "${ps.title}" (${ps.id})`);
+			// Per-session restore detail is debug-only — the `Restoring N session(s)`
+			// summary above covers the routine boot case; failures still log loudly.
+			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Restored: "${ps.title}" (${ps.id})`);
 		} catch (err) {
 			const msg = err instanceof Error ? (err.stack || err.message) : String(err);
 			console.error(`[session-manager] Failed to restore "${ps.title}" (${ps.id}), will retry next restart:`, err);
@@ -3876,8 +3878,17 @@ export class SessionManager {
 			catch (err) { console.warn(`[session-manager] bg-process restore failed for ${ps.id}:`, err); }
 		}
 
-		// If the agent was mid-turn when the server died, re-prompt it to continue
-		if (ps.wasStreaming) {
+		// If the agent was mid-turn when the server died, re-prompt it to continue.
+		// EXCEPTION: verification reviewer / agent-qa sessions are nonInteractive
+		// and are re-driven EXCLUSIVELY by the verification harness
+		// (`resumeInterruptedVerifications()` -> `_tryResumeFromSession`, which
+		// waits for readiness and sends its own reminder prompt). Firing the boot
+		// nudge here too would race two prompts on the same cold reviewer agent.
+		// We still clear `wasStreaming` so the flag doesn't leak across restarts.
+		if (ps.wasStreaming && ps.nonInteractive) {
+			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn but is nonInteractive — leaving re-drive to the verification harness`);
+			restoreStore.update(ps.id, { wasStreaming: false });
+		} else if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
 			restoreStore.update(ps.id, { wasStreaming: false });
 			rpcClient.prompt(
@@ -4646,7 +4657,7 @@ export class SessionManager {
 					});
 					this._writeModelNameFile(session.id, sessionModelPref);
 					this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
-					console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
+					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
 					broadcast(session.clients, {
 						type: "state",
 						data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
@@ -4705,7 +4716,7 @@ export class SessionManager {
 		const roleThinking = this.resolveRoleThinkingLevel(session);
 		if (roleThinking) {
 			if (spawnPinnedThinking === roleThinking) {
-				console.log(`[session-manager] Role thinking level "${roleThinking}" already pinned at spawn for ${session.id}`);
+				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Role thinking level "${roleThinking}" already pinned at spawn for ${session.id}`);
 				return;
 			}
 			try {
@@ -4745,7 +4756,7 @@ export class SessionManager {
 			}
 		} catch { /* best-effort */ }
 		if (spawnPinnedThinking === level) {
-			console.log(`[session-manager] Default thinking level "${level}" already pinned at spawn for ${session.id}`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Default thinking level "${level}" already pinned at spawn for ${session.id}`);
 			return;
 		}
 		try {

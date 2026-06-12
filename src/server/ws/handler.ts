@@ -512,7 +512,8 @@ export function handleWebSocketConnection(
 		try {
 			switch (msg.type) {
 				case "prompt": {
-					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
+					// The prompt text is rendered in the UI transcript — debug-only here.
+					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path

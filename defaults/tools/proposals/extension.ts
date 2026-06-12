@@ -400,5 +400,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log("[proposal-tools] Registered 9 proposal tools");
+	if (process.env.BOBBIT_DEBUG) console.log("[proposal-tools] Registered 9 proposal tools");
 }

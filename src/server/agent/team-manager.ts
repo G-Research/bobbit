@@ -844,9 +844,12 @@ export class TeamManager {
 				this.sessionToGoal.set(agent.sessionId, p.goalId);
 			}
 
-			console.log(
-				`[team-manager] Restored team for goal ${p.goalId} — team lead: ${p.teamLeadSessionId}, agents: ${entry.agents.length}`,
-			);
+			// Per-team restore detail is debug-only; the `Re-subscribed to events for
+			// N team(s)` summary covers the routine boot case.
+			if (process.env.BOBBIT_DEBUG)
+				console.log(
+					`[team-manager] Restored team for goal ${p.goalId} — team lead: ${p.teamLeadSessionId}, agents: ${entry.agents.length}`,
+				);
 		}
 	}
 
@@ -1955,7 +1958,9 @@ export class TeamManager {
 				// Idle: enqueue as a steered prompt so it drains immediately
 				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true, source: "auto-nudge" });
 			}
-			console.log(`[team-manager] Notified team lead for goal ${goalId} (status=${teamLeadSession.status}): ${message}`);
+			// The full message body (agent completion summary) is already visible in
+			// the UI transcript — log only a concise reference here.
+			console.log(`[team-manager] Notified team lead for goal ${goalId} (status=${teamLeadSession.status}, ${message.length} chars)`);
 		} catch (err) {
 			console.error(`[team-manager] Failed to notify team lead for goal ${goalId}:`, err);
 		}
@@ -2001,7 +2006,7 @@ export class TeamManager {
 		} else {
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
 		}
-		console.log(`[team-manager] Notified team lead of spec change for goal ${goalId} (${prevLen} → ${newLen} chars)`);
+		if (process.env.BOBBIT_DEBUG) console.log(`[team-manager] Notified team lead of spec change for goal ${goalId} (${prevLen} → ${newLen} chars)`);
 	}
 
 	notifyTeamLeadOfTaskCompletion(goalId: string, taskTitle: string, taskState: string): void {
@@ -2020,7 +2025,7 @@ export class TeamManager {
 		} else {
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true, source: "task-notification" });
 		}
-		console.log(`[team-manager] Notified team lead of task completion for goal ${goalId}: ${taskTitle} → ${taskState}`);
+		if (process.env.BOBBIT_DEBUG) console.log(`[team-manager] Notified team lead of task completion for goal ${goalId}: ${taskTitle} → ${taskState}`);
 	}
 
 	/**
