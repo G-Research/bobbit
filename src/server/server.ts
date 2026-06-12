@@ -9441,9 +9441,18 @@ async function handleApiRoute(
 			// POST /orchestrate/wait — policy:"first"; chunked heartbeat like /wait.
 			if (verb === "wait") {
 				const timeoutMs = body?.timeout_ms ?? 600_000;
+				// Default (no explicit ids) excludes `childKind:"team"` workers: a team
+				// lead's goal members are NOT waited on via team_wait — they are
+				// notify-managed by the team-manager (worker-idle nudge), and the lead is
+				// meant to spawn-then-go-idle, not block. Mirrors the restart reminder's
+				// `childKind!=="team"` filter (orchestration-core remindOwnersWithLiveChildren).
+				// An EXPLICIT childSessionIds list is still honored verbatim (own-child
+				// scoping is enforced by orchestrationCore.wait → requireOwnChild). Without
+				// this, a lead that called team_wait after team_spawn blocked for the whole
+				// worker lifetime and never went idle.
 				const childIds: string[] = Array.isArray(body?.childSessionIds) && body.childSessionIds.length > 0
 					? body.childSessionIds.map((s: any) => String(s))
-					: orchestrationCore.list(ownerId).map(h => h.sessionId);
+					: orchestrationCore.list(ownerId).filter(h => h.childKind !== "team").map(h => h.sessionId);
 				if (childIds.length === 0) { json({ error: "No children to await" }, 400); return; }
 				res.writeHead(200, { "Content-Type": "application/json", "Transfer-Encoding": "chunked", "Cache-Control": "no-cache" });
 				const heartbeat = setInterval(() => { try { res.write("\n"); } catch { /* ignore */ } }, 60_000);

@@ -268,6 +268,47 @@ test.describe("team_delegate — team-lead parity", () => {
 		}
 	});
 
+	test("team_wait (no ids) EXCLUDES team-spawned workers so the lead goes idle, not block", async () => {
+		// Regression: a team-spawned worker is registered as an OrchestrationCore
+		// child (childKind:"team") of the lead, but it is notify-managed by the
+		// team-manager — the lead is meant to spawn-then-go-idle. Before the fix,
+		// `team_wait` with no ids defaulted to ALL children (incl. the team worker)
+		// and BLOCKED for the worker's whole lifetime, so the lead never went idle.
+		const goal = await createGoal({ title: "team_wait excludes team workers", team: true });
+		let leadId: string | undefined;
+		let workerId: string | undefined;
+		try {
+			leadId = await startTeam(goal.id as string);
+			expect(leadId).toBeTruthy();
+
+			// Spawn a LIVE team worker (kept busy) — a tracked childKind:"team" child.
+			const spawnResp = await apiFetch(`/api/goals/${goal.id}/team/spawn`, {
+				method: "POST",
+				body: JSON.stringify({ role: "coder", task: "STAY_BUSY:3000 Run this exact bash command: sleep 120. Do not do anything else." }),
+			});
+			expect(spawnResp.status).toBe(201);
+			workerId = (await spawnResp.json()).sessionId as string;
+			expect(workerId).toBeTruthy();
+
+			// It IS a tracked child of the lead, with childKind "team".
+			await pollUntil(async () => {
+				const kids = await listChildren(leadId!);
+				const w = kids.find((c) => c.sessionId === workerId);
+				return w && w.childKind === "team" ? true : null;
+			}, { timeoutMs: 5_000, intervalMs: 50, label: "worker registered as team child" });
+
+			// team_wait with NO ids must NOT block on the team worker — it is excluded
+			// from the default set, leaving nothing to await → 400 immediately.
+			const wait = await orchestrate(leadId!, "wait", { timeout_ms: 600_000 });
+			expect(wait.status).toBe(400);
+			expect(wait.json?.error).toBe("No children to await");
+		} finally {
+			if (workerId) await apiFetch(`/api/goals/${goal.id}/team/dismiss`, { method: "POST", body: JSON.stringify({ sessionId: workerId }) }).catch(() => {});
+			await teardownTeam(goal.id as string).catch(() => {});
+			await deleteGoal(goal.id as string).catch(() => {});
+		}
+	});
+
 	test("a team-lead can prompt + dismiss its own non-blocking team_delegate child via /team/* (finding #6)", async ({ gateway }) => {
 		// A team-lead holds the GOAL-scoped team_prompt/dismiss (from team/extension.ts),
 		// not the own-child variants. Its own team_delegate(non_blocking) child is NOT a
