@@ -18,14 +18,24 @@
  * expands them — never the shell (Windows command-line-length limit).
  */
 import { spawn, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { availableParallelism } from "node:os";
+import { existsSync, realpathSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NODE_UNIT_GLOBS } from "./test-phase-config.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
+
+// Canonicalize TMPDIR so os.tmpdir() returns the REAL path in every spawned test
+// worker. On macOS os.tmpdir() yields /var/folders/... which reaches /private/var
+// through a symlink; node-logic tests that register a project under os.tmpdir()
+// then trip the server's `symlink_root` guard (rootPath !== realpath(rootPath)).
+// The E2E phase already canonicalizes rootPaths in tests/e2e/e2e-setup.ts; this is
+// the node-logic-phase equivalent, applied once at the entry point and inherited
+// by both spawned runners. Tests that deliberately exercise the symlink guard
+// create their own explicit symlinks and are unaffected.
+try { process.env.TMPDIR = realpathSync(tmpdir()); } catch { /* leave default */ }
 
 // Some node-logic tests import compiled server modules from dist/server.
 if (!existsSync(join(projectRoot, "dist", "server"))) {
