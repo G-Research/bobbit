@@ -93,6 +93,19 @@ test.describe("Goal/workflow editor fixture", () => {
 		await expect(stepBody.locator("select.wf-select")).toHaveCount(1);
 	});
 
+	test("free-form command run hint advertises {{baseBranch}} and not {{master}}", async ({ page }) => {
+		await loadWorkflow(page, workflowWithSteps([
+			{ name: "Run step", type: "command", run: "echo test", phase: 0 },
+		]));
+		await expandFirstGate(page);
+		await expandStep(page, "Run step");
+
+		const hint = page.locator("[data-testid='wf-step-run-hint']").first();
+		await expect(hint).toBeVisible({ timeout: 5_000 });
+		await expect(hint).toContainText("{{baseBranch}}");
+		expect(await hint.textContent()).not.toContain("{{master}}");
+	});
+
 	test("phase grouping renders headers and defaults missing phase to phase 0", async ({ page }) => {
 		await loadWorkflow(page, workflowWithSteps([
 			{ name: "No phase step", type: "command", run: "echo default" },

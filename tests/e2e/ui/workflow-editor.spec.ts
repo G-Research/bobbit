@@ -331,6 +331,41 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 	});
 
+	test("free-form command run hint advertises {{baseBranch}} and not {{master}}, persists, and clears on type switch", async ({ page }) => {
+		const wfId = "run-hint-" + Date.now();
+		await gotoNewEditor(page, wfId, [{
+			id: "g1", name: "Gate", depends_on: [],
+			verify: [{ name: "Step", type: "command", run: "echo x" }],
+		}]);
+		await expandFirstGate(page);
+		await expandFirstStep(page);
+
+		// Hint advertises {{baseBranch}}, not the legacy {{master}} alias.
+		const hint = page.locator("[data-testid='wf-step-run-hint']").first();
+		await expect(hint).toBeVisible({ timeout: 5_000 });
+		await expect(hint).toContainText("{{baseBranch}}");
+		expect(await hint.textContent()).not.toContain("{{master}}");
+
+		// Persistence across reload — re-open the editor and re-expand the step.
+		await openWorkflowEditor(page, wfId);
+		await expandFirstGate(page);
+		// Gate body re-renders after reload; wait for the step card before expanding.
+		await expect(page.locator("[data-testid='wf-vstep-card']").first()).toBeVisible({ timeout: 10_000 });
+		await expandFirstStep(page);
+		const hintAfterReload = page.locator("[data-testid='wf-step-run-hint']").first();
+		await expect(hintAfterReload).toBeVisible({ timeout: 5_000 });
+		await expect(hintAfterReload).toContainText("{{baseBranch}}");
+		expect(await hintAfterReload.textContent()).not.toContain("{{master}}");
+
+		// Cleanup: switching away from `command` removes the run field and its hint.
+		await page.locator("[data-testid='wf-step-type']").first().selectOption("human-signoff");
+		await expect(page.locator("[data-testid='wf-step-type']").first()).toHaveValue("human-signoff");
+		await expect(page.locator("[data-testid='wf-step-run']")).toHaveCount(0);
+		await expect(page.locator("[data-testid='wf-step-run-hint']")).toHaveCount(0);
+
+		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+	});
+
 	test("gate-level fields round-trip: optional, manual, metadata", async ({ page }) => {
 		const wfId = "gate-fields-" + Date.now();
 		await gotoNewEditor(page, wfId, [{

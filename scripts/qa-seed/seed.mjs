@@ -149,7 +149,7 @@ const frozenWorkflow = {
 				{
 					name: "Master merged into branch",
 					type: "command",
-					run: "git fetch origin {{master}}",
+					run: "git fetch origin {{baseBranch}}",
 				},
 				{
 					name: "PR raised",

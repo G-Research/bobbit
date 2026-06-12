@@ -161,7 +161,7 @@ workflows:
           - { name: "Build myapp", type: command, component: "myapp", command: "build" }
           # Component-linked, free-form shell (cwd derived from component):
           - { name: "Custom thing", type: command, component: "myapp", run: "./scripts/special.sh" }
-          - { name: "Code review", type: llm-review, phase: 1, prompt: "Review the changes on {{branch}} vs origin/{{master}}." }
+          - { name: "Code review", type: llm-review, phase: 1, prompt: "Review the changes on {{branch}} vs origin/{{baseBranch}}." }
 
       - id: ready-to-merge
         name: Ready to Merge
@@ -180,7 +180,7 @@ workflows:
 - `component:` referencing an unknown component name
 - a `(component, command)` pair where the component has no such command name
 
-The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{goal_title}}`, etc.) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
+The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{goal_title}}`, etc. — `{{master}}` is still accepted as a legacy alias) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
 
 #### Workflow editor authoring
 
@@ -557,7 +557,7 @@ verify:
       Review the design doc for {{branch}} and approve or reject.
 ```
 
-Both `label` and `prompt` are required (the validator rejects the step on load otherwise). `{{branch}}`, `{{master}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` tokens are substituted before the prompt is shown to the user — same machinery as the other step types.
+Both `label` and `prompt` are required (the validator rejects the step on load otherwise). `{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` tokens (`{{master}}` remains valid as a legacy alias) are substituted before the prompt is shown to the user — same machinery as the other step types.
 
 **Lifecycle.** When the harness reaches the step it broadcasts `gate_verification_awaiting_human` (see [websocket-protocol.md](websocket-protocol.md)), sets `awaitingHuman: true` on the active step, persists, and `await`s a deferred resolver. The chat-header `<goal-status-widget>` (mounted on any session with a goal id) surfaces the pending request and its **View content** action opens the submitted gate content in the review pane. The review pane owns inline comments, final comment, Approve / Reject validation, and decision submission. The browser POSTs to `/api/goals/:id/gates/:gateId/signoff` with `{ signalId, stepName, decision, feedback? }`; the harness builds a step result (passed = `decision === "pass"`; `output` and a `text/markdown` artifact carry the composed final/inline feedback when present) and the gate completes through the standard phase machinery. See [Review Pane Sign-Off](review-pane-signoff.md) for the review-source model, validation rules, persistence, and sanitization constraints.
 

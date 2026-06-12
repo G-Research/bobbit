@@ -256,7 +256,7 @@ Reviewer agent. Runs against the diff between the goal's branch and master, with
   role: code-reviewer       # any registered role; default if omitted
   phase: 2
   prompt: |
-    Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
+    Review the code changes on branch {{branch}} vs origin/{{baseBranch}} for quality.
 ```
 
 ### 4.3 `type: agent-qa`
@@ -291,7 +291,7 @@ Parks the gate on a deferred resolver until a human approves or rejects via the 
     Pay attention to the cancellation semantics in §3.
 ```
 
-Required: `label` (non-empty) and `prompt` (non-empty). The validator rejects the step on load otherwise. `{{branch}}`, `{{master}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` are substituted before the prompt is shown to the user.
+Required: `label` (non-empty) and `prompt` (non-empty). The validator rejects the step on load otherwise. `{{branch}}`, `{{baseBranch}}` (and the legacy alias `{{master}}`), `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` are substituted before the prompt is shown to the user.
 
 Behavior contract:
 
@@ -311,7 +311,8 @@ Free-form `run:` strings and `prompt:` bodies may reference:
 | Token | Meaning |
 |---|---|
 | `{{branch}}` | the goal/session branch name |
-| `{{master}}` | the project's primary branch (e.g. `master`, `main`) |
+| `{{baseBranch}}` | the bare integration branch from the project's `base_ref`, falling back to the detected primary branch (e.g. `master`/`main`) |
+| `{{master}}` | **deprecated/backwards-compat alias** — always resolves to the detected primary branch regardless of `base_ref`. Prefer `{{baseBranch}}`. |
 | `{{goal_spec}}` | full markdown of the goal spec |
 | `{{agent.<key>}}` | metadata supplied by the signaling agent |
 | `{{<gate_id>.meta.<key>}}` | metadata from a passed upstream gate |
@@ -425,7 +426,7 @@ workflows:
           - { name: "Check bobbit", type: command, phase: 1, component: "bobbit", command: "check" }
           - { name: "Unit bobbit",  type: command, phase: 1, component: "bobbit", command: "unit" }
           - { name: "E2E bobbit",   type: command, phase: 1, component: "bobbit", command: "e2e", timeout: 900 }
-          - { name: "Code quality review", type: llm-review, role: code-reviewer, phase: 2, prompt: "Review the code changes on branch {{branch}} vs origin/{{master}} for quality." }
+          - { name: "Code quality review", type: llm-review, role: code-reviewer, phase: 2, prompt: "Review the code changes on branch {{branch}} vs origin/{{baseBranch}} for quality." }
 
       - id: documentation
         name: Documentation
@@ -438,8 +439,8 @@ workflows:
         depends_on: [documentation]
         verify:
           - { name: "Branch pushed to remote",   type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
-          - { name: "Master merged into branch", type: command, run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}" }
-          - { name: "PR raised",                 type: command, run: "gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q ." }
+          - { name: "Base ref merged into branch", type: command, run: "git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}" }
+          - { name: "PR raised",                 type: command, run: "gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q \".[0].url\" | grep -q ." }
 ```
 
 ### 7.2 Multi-repo (api + web + shared data-only)
