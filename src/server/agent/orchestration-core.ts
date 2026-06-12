@@ -359,7 +359,8 @@ export class OrchestrationCore {
 	private audit(ev: OrchestrationAuditEvent): void {
 		try {
 			if (this.deps.audit) this.deps.audit(ev);
-			else console.log(`[orchestration] ${ev.event} owner=${ev.ownerSessionId} child=${ev.childSessionId ?? "-"} kind=${ev.childKind ?? "-"}${ev.detail ? ` ${ev.detail}` : ""}`);
+			// Internal orchestration trail (spawn/wait/terminal) — debug-only by default.
+			else if (process.env.BOBBIT_DEBUG) console.log(`[orchestration] ${ev.event} owner=${ev.ownerSessionId} child=${ev.childSessionId ?? "-"} kind=${ev.childKind ?? "-"}${ev.detail ? ` ${ev.detail}` : ""}`);
 		} catch { /* audit must never throw into the orchestration path */ }
 	}
 
