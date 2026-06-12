@@ -14,6 +14,27 @@ toolPolicies:
   gate_inspect: always-allow
   # Re-enable the Team tool group (default policy is `never` for non-leads).
   Team: allow
+  # Deny the own-children delegation pair team_delegate + team_wait (both live in
+  # the allow-by-default `Agent` group, so without these denies a lead inherits
+  # them). A team lead's ONE delegation primitive is team_spawn: it puts each
+  # worker in an ISOLATED sub-branch worktree and the team-manager NOTIFIES the
+  # lead on worker-idle — the role prompt's "spawn, then end your turn and go
+  # idle" model. The Agent-group pair is for a NON-goal agent orchestrating its
+  # own children, and for a lead it actively harms:
+  #   • team_delegate runs a child in the LEAD'S OWN goal-branch worktree (shared,
+  #     last-write-wins) — the opposite of the lead's isolated-worktree, merge-
+  #     member-branches model.
+  #   • team_wait tempts the lead to BLOCK on team-spawned workers (notify-managed
+  #     core children), so it never goes idle — the exact regression here. The
+  #     server already excludes team workers from team_wait's default set, but the
+  #     tool's result text instructs an explicit-id re-call that bypasses that, so
+  #     the only robust fix is to remove the tool from the lead's surface.
+  # Stripping both removes them from the lead's tool docs entirely so the model
+  # can't reach for them. The /orchestrate/* routes stay reachable (authz'd by
+  # session ownership, not tool policy) — this only governs the lead's EXPOSURE.
+  # Pinned by tests/role-team-tools-policy.test.ts.
+  team_delegate: never
+  team_wait: never
   goal_spawn_child: always-allow
   goal_plan_propose: always-allow
   goal_plan_status: always-allow
