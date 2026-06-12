@@ -835,14 +835,14 @@ GET  /api/marketplace/pack-activation?scope=<scope>&projectId=<id>&packName=<nam
          scope, packName,
          catalogue: {            // UNFILTERED — every toggleable entity the pack DECLARES
            roles:       string[],   // = installed pack manifest.contents.roles
-           tools:       string[],   // = manifest.contents.tools
+           tools:       string[],   // concrete tool names expanded from manifest.contents.tools groups
            skills:      string[],   // = manifest.contents.skills
            entrypoints: Array<{ listName: string; label?: string }>,  // = contents.entrypoints (+ display label from the entrypoint file)
            descriptions?: {         // OPTIONAL one-line per-entity descriptions for the
              roles?:       Record<string, string>,   //   "Show details" disclosure (pack-based-marketplace §10.4 R3).
              tools?:       Record<string, string>,   //   Read from the SAME installed pack dir as the
-             skills?:      Record<string, string>,   //   catalogue above — keyed by name (roles/skills),
-             entrypoints?: Record<string, string>    //   GROUP name (tools), or listName (entrypoints).
+             skills?:      Record<string, string>,   //   catalogue above — keyed by concrete name
+             entrypoints?: Record<string, string>    //   (roles/tools/skills), or listName (entrypoints).
            }
          },
          disabled: DisabledRefs   // current overrides (default {} = all enabled)
@@ -854,10 +854,11 @@ PUT  /api/marketplace/pack-activation
 ```
 
 **The GET/PUT `catalogue` is the UNFILTERED authoritative source for the Market UI toggles (§9).** It is
-read straight from the *installed* pack's `pack.yaml` manifest (`contents.roles/tools/skills/entrypoints`)
-on disk — NOT from the runtime-filtered `/api/tools` or `/api/ext/contributions` — so a disabled entity
+read from the *installed* pack's `pack.yaml` manifest (`contents.roles/skills/entrypoints`) plus
+concrete tool names expanded from `contents.tools` group directories on disk — NOT from the
+runtime-filtered `/api/tools` or `/api/ext/contributions` — so a disabled entity
 still appears in the toggle list and can be re-enabled. `disabled` is the current `pack_activation`
-override for the scope. The toggle's checked state = `name ∉ disabled[kind]`. This decoupling is the fix
+override for the scope. Tool refs in `DisabledRefs.tools` are concrete tool names, not group names. The toggle's checked state = `name ∉ disabled[kind]`. This decoupling is the fix
 for the "disable → reload → entity vanishes → cannot re-enable" hazard: runtime registries stay filtered
 (so disabled entities do not register/resolve), while the activation catalogue stays complete. **`PUT`
 returns the refreshed `catalogue` alongside the normalized `disabled`**, so the UI never needs a
@@ -1032,27 +1033,20 @@ reload.
 - Result: `tools/artifact_demo/artifact_demo.yaml` declares `renderer` (+ no actions in this pack);
   pack-scoped surfaces live in `panels/` + `entrypoints/`.
 
-### 10.2 `market-packs/pr-walkthrough/` — becomes a no-tools pack
+### 10.2 No-tools pack coverage and PR walkthrough update
 
-- **Remove the dummy carrier tool** `tools/pr-walkthrough/pr_walkthrough.yaml`. No `tools/` dir needed
-  (`contents.tools: []`).
-- Declare the panel in `panels/pr-walkthrough-panel.yaml`:
-  ```yaml
-  id: pr-walkthrough.panel
-  title: PR Walkthrough
-  entry: ../lib/panel.js
-  ```
-- Declare the four entrypoints as `entrypoints/<name>.yaml` files (3 launchers + 1 `kind:"route"`), and
-  list their basenames in `pack.yaml.contents.entrypoints`.
-- Declare routes at pack level in `pack.yaml`:
-  ```yaml
-  routes:
-    module: lib/routes.mjs
-    names: [bundle, publish]
-  ```
-- Move `panel.js` + `routes.mjs` into `lib/`. Drop `stores:`. No `permissions:`.
-- This pack is the **orphan / UI-only** litmus: it installs, registers entrypoints, opens a panel, calls
-  routes, and uses store/session APIs through pack-bound surface auth with **no tool in `allowedTools`**.
+This V1 design originally used `market-packs/pr-walkthrough/` as the production no-tools
+litmus after removing the dummy carrier tool. That is now historical. Current no-tools /
+UI-only coverage lives in fixture/litmus packs such as
+`tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`, which installs with
+`contents.tools: []`, registers entrypoints, opens a panel, calls routes, and uses
+store/session APIs through pack-bound surface auth with **no tool in `allowedTools`**.
+
+The production PR walkthrough pack later gained real reviewer tools. It now declares
+`contents.tools: [pr-walkthrough]` and owns the three tool YAMLs plus shared implementation
+under `market-packs/pr-walkthrough/tools/pr-walkthrough/`. Its panel, routes, and entrypoints
+remain pack-bound surfaces; its reviewer tools remain normal role/tool-policy-resolved agent
+tools.
 
 ### 10.3 `scripts/build-market-packs.mjs`
 
@@ -1089,9 +1083,12 @@ reload.
 - **artifacts** (browser E2E): renderer renders inline pill → opens pack-scoped panel
   (`/api/ext/packs/artifacts/panels/artifacts.viewer`) → deep-link reload restores the panel via the
   `kind:"route"` entrypoint.
-- **pr-walkthrough / no-tools pack** (browser E2E): installs with no `tools/`; an entrypoint launches a
-  panel; the panel calls a route (`bundle`) and uses store/session APIs — all via pack-bound surface
-  auth with no tool in `allowedTools`.
+- **no-tools fixture pack** (browser E2E): installs with no `tools/`; an entrypoint launches a
+  panel; the panel calls a route and uses store/session APIs — all via pack-bound surface auth
+  with no tool in `allowedTools`.
+- **pr-walkthrough first-party pack** (browser E2E): resolves from the built-in band with its
+  viewer surfaces plus pack-owned reviewer tools; the installed card expands the manifest tool
+  group into concrete tool toggles.
 - **Market UI disable-entrypoint** (browser E2E): explicit catalogue-path assertions —
   (1) toggle an entrypoint off; assert its launcher + deep-link registration is removed while the
   underlying panel stays available to an enabled tool;
@@ -1164,7 +1161,7 @@ Owns `src/app/**`, `src/ui/**`:
 
 Owns `market-packs/**`, `scripts/build-market-packs.mjs`, `tests/fixtures/**`:
 
-- Migrate `artifacts` (§10.1) and `pr-walkthrough` to a no-tools pack (§10.2).
+- Migrate `artifacts` (§10.1), keep no-tools behavior covered by fixture packs (§10.2), and treat `pr-walkthrough` as a first-party pack with pack-owned reviewer tools.
 - Update `build-market-packs.mjs` (renderer tool-local, panel/shared → `lib/`) (§10.3).
 - Update all marketplace/extension-host fixtures under `tests/fixtures/**` to the new schema (new-layout
   fixtures: a renderer+action tool pack, a no-tools pack, a panel-only pack, conflict fixtures for the

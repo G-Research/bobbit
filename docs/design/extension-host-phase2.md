@@ -1367,8 +1367,10 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
 ### D2.2 Test adaptation + deletion
 
 Adapt PR-walkthrough tests + `tests/e2e/ui/extension-host.spec.ts` pattern. Stage deletion
-of `src/ui/components/pr-walkthrough/`, `src/server/pr-walkthrough/routes.ts` bespoke
-dispatch, and `defaults/tools/pr-walkthrough/` once parity E2E is green.
+of `src/ui/components/pr-walkthrough/` and bespoke viewer dispatch once parity E2E is green.
+Current PR walkthrough reviewer tools are pack-owned under
+`market-packs/pr-walkthrough/tools/pr-walkthrough/`; they remain normal agent tools, not
+carrier authorization for pack-bound surfaces.
 
 ### D2.3 Live changeset recompute IS pack-expressible (ambient `child_process`/`fs`)
 

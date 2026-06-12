@@ -88,13 +88,16 @@ The current end-to-end flow:
 The **agent-side toolchain** that actually produces the YAML — the three
 read-only tools (`readonly_bash`, `read_pr_walkthrough_bundle`,
 `submit_pr_walkthrough_yaml`) and the `/resolve` · `/export/*` routes — is
-**retained**, but it now runs inside a dedicated **reviewer child session**, not
-the user's own agent (see
+**retained**, but it now ships from the pack under
+`market-packs/pr-walkthrough/tools/pr-walkthrough/` and runs inside a dedicated
+**reviewer child session**, not the user's own agent (see
 [Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child)
 and [Agent-side walkthrough lifecycle](#agent-side-walkthrough-lifecycle-retained)).
-The legacy `WalkthroughAgentManager` launcher, the `/api/pr-walkthrough/launch`
-route, the `host.session.postMessage` launch gesture, and the submit-proof secret
-were **deleted** by that migration.
+`pack.yaml` advertises the `pr-walkthrough` tool group; Marketplace expands that
+group into concrete tool toggles, and `DisabledRefs.tools` is keyed by concrete
+tool name. The legacy `WalkthroughAgentManager` launcher, the
+`/api/pr-walkthrough/launch` route, the `host.session.postMessage` launch gesture,
+and the submit-proof secret were **deleted** by that migration.
 
 For the pack model, see
 [docs/marketplace.md § Built-in (first-party) packs](marketplace.md#built-in-first-party-packs),
@@ -288,7 +291,8 @@ spawn:
 
 The reviewer child gets its tools from the pack-shipped **`pr-reviewer` role**
 (`market-packs/pr-walkthrough/roles/pr-reviewer.yaml`), which resolves to
-**exactly** the three walkthrough tools.
+**exactly** the three walkthrough tools shipped in
+`market-packs/pr-walkthrough/tools/pr-walkthrough/`.
 
 **The role must resolve cascade-first.** Because `pr-reviewer` ships *in the pack*,
 it lives in the config cascade, not the in-memory `RoleManager`. Every server path
@@ -318,7 +322,9 @@ tool group and **denies every other fixed group plus all MCP servers** (an
 orchestration tools. The `PR Walkthrough` group is **default-deny for every other
 role**, so `submit_pr_walkthrough_yaml` is reachable **only** from the reviewer —
 the "only the reviewer submits" boundary falls out of tool-granting, with **no
-secret**.
+secret**. This is separate from pack-bound surface authorization: panels, routes,
+and entrypoints are authorized by installed + active pack + own session, while
+these three tools remain normal role/tool-policy-resolved tools.
 
 **Submit / bundle authorization without a secret.** The reviewer's
 `submit_pr_walkthrough_yaml` and `read_pr_walkthrough_bundle` tools call the
@@ -407,7 +413,7 @@ panel.
 The pack-served viewer is covered end-to-end by
 `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (install-free built-in-band resolution
 → launcher → live `bundle` recompute → render → `publish` → reload persistence →
-disable). The launch-UX correction is pinned in the same spec: clicking the
+entrypoint and concrete-tool activation toggles). The launch-UX correction is pinned in the same spec: clicking the
 git-widget launcher on a branch with no PR shows the inline
 `git-widget-launcher-error` and spawns **no** session / performs **no** view switch
 (the browser harness has no real PR, so a click resolves `NO_PR`); the child pane

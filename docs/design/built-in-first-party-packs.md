@@ -12,9 +12,13 @@ The design landed substantially as written below — the synthetic `builtin` sou
 resolve-in-place band, the Market UI section (`src/app/marketplace-page.ts`), the
 ship pipeline (`scripts/copy-builtin-packs.mjs` + `build:packs`), the
 `pr-walkthrough` migration with its built-in twin deleted and the synthesis
-extracted to the shared `src/shared/pr-walkthrough/yaml-to-cards.ts`. The
-user-facing summary lives in [docs/marketplace.md](../marketplace.md#built-in-first-party-packs)
-and [docs/extension-host-authoring.md](../extension-host-authoring.md#first-party-packs-dogfood-the-host-api);
+extracted to the shared `src/shared/pr-walkthrough/yaml-to-cards.ts`. Later PR
+walkthrough hardening moved the reviewer tools into the pack itself under
+`market-packs/pr-walkthrough/tools/pr-walkthrough/`; `pack.yaml` now advertises the
+`pr-walkthrough` tool group, and Marketplace activation expands that group into
+concrete tool toggles. The user-facing summary lives in
+[docs/marketplace.md](../marketplace.md#built-in-first-party-packs) and
+[docs/extension-host-authoring.md](../extension-host-authoring.md#first-party-packs-dogfood-the-host-api);
 the executed deletion is reconciled in
 [`pr-walkthrough-pack-deletion.md`](./pr-walkthrough-pack-deletion.md).
 
@@ -41,8 +45,9 @@ The dogfood is proven by migrating **`pr-walkthrough`** from a litmus/test marke
 pack into the first-party built-in source and **deleting its built-in
 implementation** so the pack is the sole provider of the viewer/route/store/
 deep-link surface. The `submit_pr_walkthrough_yaml` (+ `read_pr_walkthrough_bundle`
-/ `readonly_bash`) agent tools and their `WalkthroughAgentManager` stay as agent
-tools — only the contribution surfaces move.
+/ `readonly_bash`) capabilities remain normal agent tools granted through role and
+tool-policy resolution; they now ship inside the first-party pack rather than
+`defaults/tools`.
 
 This is **pre-release**: no backwards-compatibility burden.
 
@@ -587,9 +592,10 @@ ledger entry (a server-scope user override of the same name is fully uninstallab
 ### 8.1 Migration
 
 `pr-walkthrough` already exists as a complete pack at
-`market-packs/pr-walkthrough/` (pack.yaml: no tools, one panel, pack-level
-`routes: { module: lib/routes.mjs, names: [bundle, publish] }`, four entrypoints).
-Migration = **add `"pr-walkthrough"` to the `FIRST_PARTY_PACKS` allowlist** in
+`market-packs/pr-walkthrough/` (current pack.yaml: `contents.tools: [pr-walkthrough]`,
+one panel, pack-level `routes: { module: lib/routes.mjs, names: [bundle, publish,
+run, status, recover] }`, four entrypoints). Migration = **add `"pr-walkthrough"`
+to the `FIRST_PARTY_PACKS` allowlist** in
 `scripts/copy-builtin-packs.mjs` (§3.3). No manual install: the §5 band resolves it
 active-by-default. The mandatory E2E (§11) drives it with **no install step**.
 
@@ -641,9 +647,9 @@ delete until that is green in CI.
   `POST /launch`, `POST /resolve`, `POST …/export/preview`, `POST …/export/submit`
   (network + GitHub auth), AND the internal `POST /api/internal/pr-walkthrough/bundle`
   / `/analysis-bundle` / `/submit-yaml` routes — these are consumed by the KEPT
-  agent tools (`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_yaml`; see
-  `defaults/tools/pr-walkthrough/extension.ts`), NOT by the viewer. Adjust the
-  `server.ts` `handlePrWalkthroughApiRoute(...)` dispatch accordingly (keep the
+  agent tools (`read_pr_walkthrough_bundle`, `submit_pr_walkthrough_yaml`; now
+  shipped from `market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts`),
+  NOT by the viewer. Adjust the `server.ts` `handlePrWalkthroughApiRoute(...)` dispatch accordingly (keep the
   import + call; narrow only the public viewer-feed matcher).
 - **`walkthrough-store.ts` + `git-changeset.ts` + `diff-parser.ts` are KEPT — they
   are load-bearing for the agent toolchain (carve-out §8.5), NOT viewer surfaces.**
@@ -660,9 +666,11 @@ delete until that is green in CI.
   **Confirm the E2E green first** (see §8.4 for
   the persistence seam).
 
-**Tool defs** — `defaults/tools/pr-walkthrough/` is **kept** (the agent-driving
-tools `submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle` / `readonly_bash`
-stay — §8.5).
+**Tool defs** — historical note: this design originally kept the reviewer tools in
+the default tool tree. The current implementation ships the agent-driving tools
+(`submit_pr_walkthrough_yaml`, `read_pr_walkthrough_bundle`, `readonly_bash`) from
+`market-packs/pr-walkthrough/tools/pr-walkthrough/` so the pack owns both its UI
+surfaces and its reviewer tool group.
 
 ### 8.4 Persistence — the pack's `host.store` is the sole VIEWER-state provider
 
@@ -742,19 +750,21 @@ green **before** removing the viewer-feed routes.
 
 ### 8.5 Agent-tool carve-out
 
-`defaults/tools/pr-walkthrough/` (the `submit_pr_walkthrough_yaml`,
-`read_pr_walkthrough_bundle`, `readonly_bash` tools), `WalkthroughAgentManager`,
-`github-adapter.ts`, `card-synthesis.ts`, `export-mapper.ts`,
-`walkthrough-agent-manager.ts`, `walkthrough-agent-store.ts`,
-`walkthrough-analysis-bundle.ts`, `walkthrough-yaml-schema.ts`,
-`walkthrough-readonly-policy.ts` **all stay** — they are genuine agent capabilities
-(model-backed synthesis + GitHub network/auth), not contribution surfaces. Only the
-viewer/route/store/deep-link surfaces move to the pack.
+The `submit_pr_walkthrough_yaml`, `read_pr_walkthrough_bundle`, and
+`readonly_bash` tools, `WalkthroughAgentManager`, `github-adapter.ts`,
+`card-synthesis.ts`, `export-mapper.ts`, `walkthrough-agent-manager.ts`,
+`walkthrough-agent-store.ts`, `walkthrough-analysis-bundle.ts`,
+`walkthrough-yaml-schema.ts`, and `walkthrough-readonly-policy.ts` **all stay** —
+they are genuine agent capabilities (model-backed synthesis + GitHub network/auth),
+not contribution surfaces. The three tools now live in
+`market-packs/pr-walkthrough/tools/pr-walkthrough/`, while the viewer/route/store/
+deep-link surfaces are pack-bound Host API surfaces.
 
-**The YAML→cards synthesis is the one thing that MOVES OUT of the agent-only side**
-(§8.4): it is extracted to a PURE `src/shared/pr-walkthrough/yaml-to-cards.ts`,
-imported by the agent side AND bundled into the pack — one source of truth, used by
-both. The `submit_pr_walkthrough_yaml` tool itself is UNCHANGED.
+**The YAML→cards synthesis moved out of the agent-only side** (§8.4): it is
+extracted to a PURE `src/shared/pr-walkthrough/yaml-to-cards.ts`, imported by the
+agent side AND bundled into the pack — one source of truth, used by both. The
+`submit_pr_walkthrough_yaml` tool contract is unchanged, but the tool definition
+and implementation are pack-owned.
 
 **Launch re-expression (§8.4 step 5) — what is deleted vs retained, unambiguously:**
 - **DELETED (built-in UI feature surface):** the git-widget "PR Walkthrough" button

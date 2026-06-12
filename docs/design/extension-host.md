@@ -1318,11 +1318,11 @@ serve+lazy-import mechanism keyed off `panels[].entry`). Heavyweight deps (`high
 publish time, not installed (`npm run build:packs`); the host toolkit stays factory-injected,
 never bundled.
 
-### 6.2 PR-walkthrough (`src/ui/components/pr-walkthrough/`, `defaults/tools/pr-walkthrough/`, `server/pr-walkthrough/routes.ts`)
+### 6.2 PR-walkthrough (`market-packs/pr-walkthrough/`, pack-owned reviewer tools, pack-bound surfaces)
 
 | Existing behavior | Frozen primitive |
 |---|---|
-| `submit.yaml` / `read_pr_walkthrough_bundle.yaml` / `readonly_bash.yaml` tools | tool YAMLs + `renderer:` for any inline tool blocks |
+| `submit.yaml` / `read_pr_walkthrough_bundle.yaml` / `readonly_bash.yaml` tools | pack-owned tool YAMLs under `tools/pr-walkthrough/`; normal role/tool-policy-resolved agent tools |
 | `PrWalkthroughPanel.ts` full-surface viewer | **`panels:`** → `host.ui.openPanel({ panelId: "pr-walkthrough.panel", params: { jobId } })` |
 | Deep-link to a walkthrough (`#/...`) | **`entrypoints:`** (composer-slash / git-widget button / command palette launchers + a `kind:"route"` deep-link) + `host.ui.navigate({ route: "pr-walkthrough", params: { jobId } })` (structured — the host maps it to `#/ext/pr-walkthrough?jobId=…`; the pack never builds a hash string) |
 | `handlePrWalkthroughApiRoute` bespoke endpoints | **`routes:`** → the pack's OWN namespace, reached via the typed, pack-scoped `host.callRoute(name, init)` — **never** a raw gateway fetch |
@@ -1331,12 +1331,13 @@ never bundled.
 | Reading the `submit_pr_walkthrough_yaml` tool call | `host.session.readToolCall(toolUseId)` (own-session, via the adapter) instead of bespoke transcript access |
 | Live `git diff` recompute for the changeset | the `bundle` route runs **real `git`** LIVE in the confined worker (`child_process`/`fs` are ambient; resource-capped + killable; `process.cwd()` is the session worktree) — covering PRs created after install |
 
-**Shipped** as `market-packs/pr-walkthrough/` — the maximal case using **all** reserved
-keys: `routes` + `stores` + `panels` + `entrypoints` + `host.session.readToolCall`. Every
-dynamic behavior routes through a TYPED, scoped capability — `host.callRoute` (the pack's
-own routes, resolved by a pack-level `RouteRegistry` so a panel opened from one tool reaches
-a route declared on another tool in the SAME pack), `host.ui.*` (structured targets),
-`host.store.*` (pack-scoped), `host.session.readToolCall` — **with no raw `gateway.fetch`**.
+**Shipped** as `market-packs/pr-walkthrough/` — the maximal case combining pack-bound
+surfaces (`routes` + `panels` + `entrypoints` + implicit store) with normal agent tools.
+Every dynamic surface behavior routes through a TYPED, scoped capability — `host.callRoute`
+(the pack's own routes, resolved by a pack-level `RouteRegistry`), `host.ui.*` (structured
+targets), `host.store.*` (pack-scoped), and session reads where needed — **with no raw
+`gateway.fetch`**. The reviewer tools are not carrier authorization for those surfaces; they
+flow through the normal tool resolver, role policies, group policies, and tool guard.
 The **synthesis split** (the one non-obvious decision): the worker has full ambient env /
 network parity (like a tool), so a pack *could* run its own inference — but keeping LLM card
 synthesis AGENT-tool-side at submit time (persisted to the store keyed by changeset id) is a
@@ -1453,4 +1454,5 @@ fields + bootstrap call), `src/ui/tools/types.ts` (`host?` field),
 authoring guide.
 
 **Phase-2 targets — studied, NOT modified:** `src/ui/tools/artifacts/`,
-`src/ui/components/pr-walkthrough/`, `defaults/tools/pr-walkthrough/`.
+`src/ui/components/pr-walkthrough/`, and the PR walkthrough toolchain now owned by
+`market-packs/pr-walkthrough/tools/pr-walkthrough/`.
