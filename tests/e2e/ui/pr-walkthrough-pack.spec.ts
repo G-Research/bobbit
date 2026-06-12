@@ -359,7 +359,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			const toggle = prwCard.locator(`[data-testid="market-toggle-tool-${toolName}"]`);
 			await expect(toggle, `tool toggle ${toolName} must render`).toBeVisible({ timeout: 15_000 });
 			await expect(toggle, `tool toggle ${toolName} starts enabled`).toBeChecked();
-			await expect(prwCard.getByText(toolName, { exact: true }), `tool label ${toolName} must render`).toBeVisible();
+			await expect(toggle.locator("xpath=ancestor::label").getByText(toolName, { exact: true }), `tool label ${toolName} must render`).toBeVisible();
 		}
 
 		// Disabling one concrete tool removes exactly that runtime tool; siblings and
