@@ -91,6 +91,14 @@ export class InProcessMockBridge {
 		return this.sendCommand({ type: "prompt", message: text, ...(images?.length ? { images } : {}) });
 	}
 
+	// Mirror RpcBridge.promptWhenReady: wait for the (cold) agent to be ready,
+	// then prompt. This mock's prompt ignores the timeout arg, so we don't pass
+	// one along.
+	async promptWhenReady(text, images, opts) {
+		await this.waitForReady(opts?.readyTimeoutMs ?? 90_000);
+		return this.prompt(text, images);
+	}
+
 	steer(text) {
 		return this.sendCommand({ type: "steer", message: text });
 	}

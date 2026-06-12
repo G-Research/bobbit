@@ -707,6 +707,19 @@ export class SessionManager {
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
 
+	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
+	 *  boot. The team-manager boot-resume nudge consults `wasBootReprompted` to
+	 *  skip these leads so two prompts don't race the same cold agent. Entries
+	 *  are cleared on agent_start (the session has begun its turn). */
+	private _bootRepromptedSessions = new Set<string>();
+
+	/** True if restoreSession's mid-turn branch re-prompted this session on boot
+	 *  and it hasn't yet started its turn. Used by the team-manager boot-resume
+	 *  nudge to avoid double-prompting a cold agent. */
+	wasBootReprompted(sessionId: string): boolean {
+		return this._bootRepromptedSessions.has(sessionId);
+	}
+
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
 		this._onPrCreationDetected = cb;
 	}
@@ -1874,6 +1887,11 @@ export class SessionManager {
 		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
 		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
 		source?: PromptSource;
+		/** Dispatch against a possibly-cold (freshly-restored) agent: the direct
+		 *  dispatch waits for readiness and uses a generous prompt timeout via
+		 *  RpcBridge.promptWhenReady, so the boot-resume nudge actually lands
+		 *  instead of timing out on the default 30s. */
+		coldStart?: boolean;
 	}): Promise<{ status: "dispatched" | "queued" }> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
@@ -1973,7 +1991,7 @@ export class SessionManager {
 					// where attachments aren't tracked on SessionInfo), fall back to
 					// the synthetic phrase so we never re-send blank/invalid content.
 					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered);
+					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
 					return { status: "dispatched" };
 				}
 			}
@@ -1984,7 +2002,7 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered);
+			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
 			return { status: "dispatched" };
 		}
 
@@ -1993,7 +2011,7 @@ export class SessionManager {
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart);
 			return { status: "dispatched" };
 		}
 
@@ -2259,6 +2277,7 @@ export class SessionManager {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
 		attachments?: unknown[],
 		isSteered?: boolean,
+		coldStart?: boolean,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
@@ -2267,7 +2286,12 @@ export class SessionManager {
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered }];
 		let recovered = false;
 		try {
-			const resp = await session.rpcClient.prompt(text, images);
+			// Cold (freshly-restored) agent: wait for readiness, then prompt with a
+			// generous timeout so a boot-resume nudge lands instead of timing out
+			// on the default 30s. Everything else (recovery, rethrow) is identical.
+			const resp = coldStart
+				? await session.rpcClient.promptWhenReady(text, images)
+				: await session.rpcClient.prompt(text, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
@@ -2428,6 +2452,10 @@ export class SessionManager {
 		}
 
 		if (event.type === "agent_start") {
+			// The session has begun its turn — clear the boot re-prompt marker so
+			// the set doesn't leak across the process lifetime (restoreSession is
+			// also re-invoked on in-place respawn).
+			this._bootRepromptedSessions.delete(session.id);
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.turnHadToolCalls = false;
@@ -3891,7 +3919,14 @@ export class SessionManager {
 		} else if (ps.wasStreaming) {
 			console.log(`[session-manager] Session "${ps.title}" (${ps.id}) was interrupted mid-turn — re-prompting to continue`);
 			restoreStore.update(ps.id, { wasStreaming: false });
-			rpcClient.prompt(
+			// Record a boot-coordination marker so the team-manager boot-resume
+			// nudge skips this lead and we don't race two prompts at the same
+			// cold agent. Cleared in handleAgentLifecycle on agent_start.
+			this._bootRepromptedSessions.add(ps.id);
+			// Cold agent: wait for readiness, then prompt with a generous timeout
+			// (the default 30s reliably times out on boot). Keep the .catch() so a
+			// failure is logged and never throws.
+			rpcClient.promptWhenReady(
 				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
 				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]"

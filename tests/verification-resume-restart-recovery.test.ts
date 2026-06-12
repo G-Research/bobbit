@@ -125,6 +125,12 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 				if (pendingResolver) pendingResolver({ verdict: true, summary: "Docs look good." });
 				return Promise.resolve();
 			},
+			// Mirror RpcBridge.promptWhenReady: wait for ready, then prompt with the
+			// generous resume timeout. Method shorthand so `this` binds to rpcClient.
+			async promptWhenReady(text: string, images?: unknown, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }) {
+				await this.waitForReady(opts?.readyTimeoutMs ?? 90_000);
+				return this.prompt(text, images, opts?.promptTimeoutMs ?? 120_000);
+			},
 		},
 	};
 
@@ -207,6 +213,10 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 			onEvent: (_fn: (event: any) => void) => () => {},
 			waitForReady: (_ms?: number) => Promise.resolve(),
 			prompt: (_text: string) => Promise.reject(new Error("Command timed out: prompt")),
+			async promptWhenReady(text: string, _images?: unknown, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }) {
+				await this.waitForReady(opts?.readyTimeoutMs ?? 90_000);
+				return this.prompt(text);
+			},
 		},
 	};
 	const stubSessionManager = {
