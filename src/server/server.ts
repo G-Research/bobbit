@@ -321,8 +321,9 @@ function readYamlMapping(file: string): Record<string, unknown> | null {
 
 /**
  * Expand manifest-declared tool GROUP directories into concrete tool names.
- * `DisabledRefs.tools` is keyed by tool name, while pack.yaml keeps declaring
- * tool groups for manifest compatibility.
+ * Runtime tool loading scans `.yaml` files only, so activation uses the same
+ * extension filter. `DisabledRefs.tools` is keyed by tool name, while pack.yaml
+ * keeps declaring tool groups for manifest compatibility.
  */
 export function readConcretePackToolsFromGroups(
 	packDir: string,
@@ -345,7 +346,7 @@ export function readConcretePackToolsFromGroups(
 			continue;
 		}
 		for (const file of files) {
-			if (!file.isFile() || (!file.name.endsWith(".yaml") && !file.name.endsWith(".yml"))) continue;
+			if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
 			const yamlPath = path.join(groupDir, file.name);
 			if (!isPackPathWithinRoot(groupDir, yamlPath)) continue;
 			const data = readYamlMapping(yamlPath);

@@ -16,7 +16,7 @@ import {
 	buildMarketToolRootsForProject,
 	readConcretePackToolsFromGroups,
 } from "../src/server/server.ts";
-import { BuiltinConfigProvider } from "../src/server/agent/builtin-config.ts";
+import { BuiltinConfigProvider, parseToolsDir } from "../src/server/agent/builtin-config.ts";
 import { ConfigCascade } from "../src/server/agent/config-cascade.ts";
 import { ToolManager, __resetToolScanCache } from "../src/server/agent/tool-manager.ts";
 import { computeEffectiveAllowedTools } from "../src/server/agent/tool-activation.ts";
@@ -65,15 +65,18 @@ afterEach(() => {
 });
 
 describe("activation catalogue tool expansion", () => {
-	it("expands manifest tool groups to concrete YAML tool names and descriptions", () => {
+	it("expands manifest tool groups to concrete .yaml tool names and descriptions", () => {
 		const packDir = path.join(tmp, "market-packs", "pr-walkthrough");
 		tool(packDir, "pr-walkthrough", "readonly_bash.yaml", "readonly_bash", "Run read-only commands");
-		tool(packDir, "pr-walkthrough", "bundle.yml", "read_pr_walkthrough_bundle", "Read the bundle");
+		tool(packDir, "pr-walkthrough", "bundle.yaml", "read_pr_walkthrough_bundle", "Read the bundle");
+		tool(packDir, "pr-walkthrough", "ignored.yml", "ignored_yml", "Runtime ignores yml");
 		tool(packDir, "other-group", "ignored.yaml", "not_declared", "Ignored");
 
 		const result = readConcretePackToolsFromGroups(packDir, ["pr-walkthrough", "../unsafe"]);
+		const runtimeNames = parseToolsDir(path.join(packDir, "tools")).map((t) => t.name).sort();
 
 		assert.deepEqual([...result.tools].sort(), ["read_pr_walkthrough_bundle", "readonly_bash"]);
+		assert.deepEqual(runtimeNames, ["not_declared", "read_pr_walkthrough_bundle", "readonly_bash"]);
 		assert.deepEqual(result.descriptions, {
 			readonly_bash: "Run read-only commands",
 			read_pr_walkthrough_bundle: "Read the bundle",
