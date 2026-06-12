@@ -26,14 +26,14 @@ import {
 	launcherKey,
 } from "../../src/app/pack-entrypoints.js";
 import { getRouteFromHash } from "../../src/app/routing.js";
-import { registerPackPanels } from "../../src/app/pack-panels.js";
+import { registerPackPanels, setLauncherHostFactory } from "../../src/app/pack-panels.js";
 
 type EntrypointWire = {
 	id: string;
 	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
 	label?: string;
 	routeId?: string;
-	target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { panelId?: string; route?: string; params?: Record<string, unknown>; action?: string };
 	paramKeys?: string[];
 	listName: string;
 };
@@ -54,6 +54,11 @@ const THIRDPARTY_PACKS: PackWire[] = [
 			{ id: "tp.slash", kind: "composer-slash", label: "Open Third-Party", target: { panelId: "thirdparty.viewer" }, listName: "tp-slash" },
 			{ id: "tp.navlaunch", kind: "command-palette", label: "Deep-link TP", target: { route: "thirdparty.route" }, listName: "tp-navlaunch" },
 			{ id: "tp.gitbtn", kind: "git-widget-button", label: "TP Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-gitbtn" },
+			// A SPAWN launcher (design pr-walkthrough-launch-ux.md §3.1): click → call the
+			// pack `run` route, then open `panelId` in the returned childSessionId. It also
+			// carries a `panelId`, so the registry's `action`-first detection must keep it
+			// off the openPackPanel path (T-10/R3).
+			{ id: "tp.spawn", kind: "git-widget-button", label: "TP Spawn", target: { action: "spawn", route: "run", panelId: "thirdparty.viewer" }, listName: "tp-spawn" },
 		],
 	},
 ];
@@ -113,5 +118,46 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 (window as any).__setHash = (h: string) => { window.location.hash = h; };
 (window as any).__clearHash = () => { history.replaceState({}, "", window.location.pathname); };
 (window as any).__flush = async (): Promise<void> => { await new Promise((r) => setTimeout(r, 30)); };
+
+// ── SPAWN-LAUNCHER dispatch fixtures (design §3 / T-1 / T-10) ────────────────────
+// A MOCK launcher host installed via setLauncherHostFactory records `callRoute`
+// invocations + `ui.openPanel` targets, so the spawn dispatch can be asserted WITHOUT
+// a real server: a `run` returning {ok:true, childSessionId} must open the panel in
+// THAT child (auto-switch) and mount NO owner panel; an {ok:false}/throw must flow
+// back through onResult; a never-resolving `callRoute` proves the within-gesture guard
+// suppresses a second concurrent click.
+type SpawnBehavior = "ok" | "nopr" | "throw" | "hang";
+const callRouteCalls: Array<{ route: string; sessionId: string | undefined; packId: string; contributionId: string }> = [];
+const openPanelCalls: Array<{ panelId?: string; sessionId?: string }> = [];
+(window as any).__installLauncherHost = (behavior: SpawnBehavior): void => {
+	callRouteCalls.length = 0;
+	openPanelCalls.length = 0;
+	setLauncherHostFactory((sessionId, packId, contributionId) => ({
+		capabilities: { callRoute: true } as any,
+		callRoute: async (route: string) => {
+			callRouteCalls.push({ route, sessionId, packId, contributionId });
+			if (behavior === "nopr") return { ok: false, code: "NO_PR", error: "No open GitHub PR for the current branch." };
+			if (behavior === "throw") throw new Error("spawn boom");
+			if (behavior === "hang") return await new Promise(() => { /* never resolves */ });
+			return { ok: true, childSessionId: "c1", jobId: "job-1" };
+		},
+		ui: { openPanel: (t: { panelId?: string; sessionId?: string }) => { openPanelCalls.push({ panelId: t.panelId, sessionId: t.sessionId }); } },
+	}) as any);
+};
+// Run a spawn launcher and resolve with the dispatch result (or null if onResult
+// never fires within the window — the "hang" case).
+(window as any).__runSpawn = (keyOrId: string): Promise<any> => new Promise((resolve) => {
+	let settled = false;
+	runLauncherEntrypoint(keyOrId, (r) => { settled = true; resolve(r); });
+	setTimeout(() => { if (!settled) resolve(null); }, 250);
+});
+// Fire the SAME launcher twice synchronously (a re-entrant double-click) — the
+// within-gesture guard must let only the first reach callRoute.
+(window as any).__runSpawnTwiceSync = (keyOrId: string): void => {
+	runLauncherEntrypoint(keyOrId);
+	runLauncherEntrypoint(keyOrId);
+};
+(window as any).__callRouteCalls = (): typeof callRouteCalls => callRouteCalls.slice();
+(window as any).__openPanelCalls = (): typeof openPanelCalls => openPanelCalls.slice();
 
 (window as any).__ready = true;

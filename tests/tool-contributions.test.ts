@@ -147,6 +147,27 @@ describe("parseEntrypoints (reused by the pack-level loader; tolerant, never rej
 		);
 	});
 
+	it("parses a spawn launcher carrying { action, route, panelId } (all three preserved)", () => {
+		assert.deepEqual(
+			parseEntrypoints(
+				[{ id: "spawn", kind: "git-widget-button", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "prw.panel" } }],
+				FP,
+			),
+			[{ id: "spawn", kind: "git-widget-button", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "prw.panel" } }],
+		);
+	});
+
+	it("drops a spawn launcher missing route or panelId — never rejects", () => {
+		assert.deepEqual(
+			parseEntrypoints([{ id: "spawn", kind: "git-widget-button", label: "X", target: { action: "spawn", route: "run" } }], FP),
+			[],
+		); // no panelId
+		assert.deepEqual(
+			parseEntrypoints([{ id: "spawn", kind: "git-widget-button", label: "X", target: { action: "spawn", panelId: "p" } }], FP),
+			[],
+		); // no route
+	});
+
 	it("parses a `route` kind with routeId + target.panelId + paramKeys", () => {
 		assert.deepEqual(
 			parseEntrypoints(

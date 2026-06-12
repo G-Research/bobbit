@@ -222,6 +222,7 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 		const rawTarget = (obj.target && typeof obj.target === "object") ? obj.target as Record<string, unknown> : undefined;
 		const panelId = rawTarget && typeof rawTarget.panelId === "string" ? rawTarget.panelId : undefined;
 		const route = rawTarget && typeof rawTarget.route === "string" ? rawTarget.route : undefined;
+		const action = rawTarget && typeof rawTarget.action === "string" ? rawTarget.action : undefined;
 		const params = rawTarget && rawTarget.params && typeof rawTarget.params === "object"
 			? rawTarget.params as Record<string, unknown>
 			: undefined;
@@ -252,11 +253,28 @@ export function parseEntrypoints(raw: unknown, filePath: string): EntrypointCont
 				console.warn(`[tool-contributions] Dropping launcher entrypoint '${id}' with no structured target in ${filePath}`);
 				continue;
 			}
+			// A spawn launcher (`action:"spawn"`) carries ALL of { action, route, panelId }:
+			// the client calls `route` to spawn the child, then opens `panelId` in the
+			// returned child session. Both are required — drop with a warning if either
+			// is missing. Non-spawn launchers keep the legacy shape (panelId wins, else route).
+			if (action === "spawn") {
+				if (!route || !panelId) {
+					console.warn(`[tool-contributions] Dropping spawn launcher entrypoint '${id}' missing target.route or target.panelId in ${filePath}`);
+					continue;
+				}
+			}
 			if (seen.has(id)) continue;
 			seen.add(id);
-			const target: { panelId?: string; route?: string; params?: Record<string, unknown> } = {};
-			if (panelId) target.panelId = panelId;
-			else if (route) target.route = route;
+			const target: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> } = {};
+			if (action === "spawn") {
+				target.action = "spawn";
+				target.route = route;
+				target.panelId = panelId;
+			} else if (panelId) {
+				target.panelId = panelId;
+			} else if (route) {
+				target.route = route;
+			}
 			if (params) target.params = params;
 			out.push({ id, kind: kind as EntrypointContribution["kind"], label, target });
 		}

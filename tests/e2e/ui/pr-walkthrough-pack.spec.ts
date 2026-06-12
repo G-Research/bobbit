@@ -1,64 +1,61 @@
 /**
  * Browser E2E — Built-in first-party packs DOGFOOD (design
- * docs/design/built-in-first-party-packs.md §11.2). Proves the PR-walkthrough
- * feature is served END-TO-END by the FIRST-PARTY PACK with NO manual install —
- * it is resolved active-by-default by the built-in resolver band — and that its
- * built-in twin is gone (this spec replaces the deleted built-in viewer specs).
+ * docs/design/built-in-first-party-packs.md §11.2) + the NEW PR-Walkthrough
+ * LAUNCH UX (docs/design/pr-walkthrough-launch-ux.md §1–§5, §8). Proves the
+ * PR-walkthrough feature is served END-TO-END by the FIRST-PARTY PACK with NO
+ * manual install — it is resolved active-by-default by the built-in resolver band —
+ * and that its launch surface is now a SPAWN launcher: clicking a launcher calls the
+ * pack `run` route and, on `ok:true`, opens the panel in the returned reviewer CHILD
+ * session (auto-switch). There is NO owner-session panel, NO `autorun`, and NO manual
+ * Run/Load buttons anywhere. The panel renders ONLY inside a reviewer child session,
+ * self-driving a read-only `status` poll until the reviewer submits.
  *
- * The pack re-expresses the whole viewer surface through public contributions +
- * the durable Host API: panels + pack-level routes + an implicit pack-scoped
- * store + entrypoints (launchers + a kind:"route" deep-link) + host.session.
- * readToolCall. The bundle route RECOMPUTES the changeset LIVE via `git` in the
- * confined worker against the SERVER-DERIVED session worktree (never a caller
- * path). LLM-card parity flows through the PANEL's own read→publish seam (no test
- * helper): on Load the panel parses the cards out of the submit_pr_walkthrough_yaml
- * tool call and persists them via the pack's `publish` route; `bundle` then serves
- * them over the structural fallback.
+ * Harness constraint (§8 R2): the browser harness has no real GitHub PR and
+ * `execFile("gh")` resolves the real binary, so a click-driven `run` resolves
+ * `NO_PR` and mints no reviewer in-browser. Reviewer-spawn / lifecycle assertions
+ * live in the API spec (tests/e2e/pr-walkthrough-host-agents.spec.ts) with an
+ * explicit github target. Here we pin the BROWSER-only seams: the NO_PR inline error
+ * via the GitStatusWidget (T-2), the bound-child pending state (T-3), and the
+ * child-session pane's submit→cards + reload→recover (T-4) — the latter two by
+ * SEEDING the pack store directly (the gateway shares the in-process pack-store
+ * singleton), since the harness cannot spawn a real reviewer.
  *
  * Coverage:
  *   1. NO INSTALL — the pack is resolved by the built-in band: it appears in
  *      /api/ext/contributions (panel + entrypoints + routes) + the Installed list
  *      flagged `builtin:true`, and contributes NOTHING to /api/tools (no-tools pack).
- *   2. ENTRYPOINT LAUNCH — the git-widget-button launcher mounts the viewer (no
- *      auto-invoke before the Load click).
- *   3. LIVE RECOMPUTE + PANEL PUBLISH — Load hands the RAW production YAML to the
- *      pack's publish route, which runs the SAME synthesis as the deleted built-in
- *      (validate + map against the live diff) and persists PrWalkthroughCard[]; the
- *      real git diff renders, the SYNTHESIZED cards (orientation/design/review/audit
- *      nav rail) show with the PR title + suggested comment; a reload re-reads them.
- *   3a. RUN — the "Run PR walkthrough" action posts to the current agent (the launch
- *      re-expression, §8.4 step 5).
  *   3b. PATH-TRAVERSAL PROBE — a caller-supplied `repoDir` cannot exfiltrate another
- *      repo's diff (the route ignores it and runs in the session worktree).
+ *      repo's diff (the bundle route ignores it and runs in the session worktree).
  *   4. DISABLE/RE-ENABLE — toggling the pack's entrypoints off in the Market
  *      "Built-in" group removes the launcher + the #/ext/pr-walkthrough deep-link
- *      (the feature is unavailable, the deep-link shows the empty state); toggling
- *      back on restores it; the state survives a reload.
+ *      (the deep-link shows the empty state); toggling back on restores the panel
+ *      (NEUTRAL state — there is no binding for the owner session); state survives a
+ *      reload.
  *   5. NON-REMOVABLE — the built-in source has no Remove control + DELETE → 403; the
  *      built-in pack has no Uninstall control + DELETE /installed → 403.
+ *   T-2. NO_PR launch → inline git-widget error, no reviewer child, no view switch.
+ *   T-3. Bound reviewer child pane auto-shows pending + spinner, no Run/Load buttons.
+ *   T-4. Bound reviewer child pane self-recovers READY cards from binding/<child> on
+ *      mount (no click), and a reload re-renders the SAME cards via child-self recover.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { test, expect, type GatewayInfo } from "../gateway-harness.js";
+import { test, expect } from "../gateway-harness.js";
 import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
 
-// Within-file serial: a single end-to-end lifecycle test.
+// Within-file serial: a single end-to-end lifecycle test in describe 1; the
+// child-pane describe seeds its own state per test.
 test.describe.configure({ mode: "serial" });
 
 const PACK = "pr-walkthrough";
 const PANEL_ID = "pr-walkthrough.panel";
-const SUBMIT_TOOL = "submit_pr_walkthrough_yaml";
-const SUBMIT_TOOL_USE_ID = "tu-prw-submit-1";
+// The git-widget SPAWN launcher. Its compound key is `pr-walkthrough\u0000pr-
+// walkthrough.git-widget` (packId NUL entrypointId); the test locates the rendered
+// button by its visible label "PR Walkthrough" rather than the NUL-bearing attr.
 const GIT_WIDGET_LAUNCHER = "pr-walkthrough.git-widget";
-// The composer-slash launcher navigates to the BARE deep-link (NO autorun) — used
-// for the manual-Load entrypoint flow below. Area B made ONLY the git-widget
-// launcher carry `autorun: true` (its click is the one-click gesture); the
-// open/palette launchers + the bare deep-link stay manual. The git-widget autorun
-// is exercised separately in the "Area B autorun + Area D child pane" describe.
-const OPEN_LAUNCHER = "pr-walkthrough.open";
 // Entrypoint listNames (the basenames of entrypoints/*.yaml) → the activation
 // toggle testids in the Market built-in group.
 const ENTRYPOINT_LIST_NAMES = [
@@ -125,17 +122,13 @@ function setupOutsideRepo(): void {
 
 const HUNK_HEADER = "@@ -2,3 +2,3 @@ export class SyncWorker {";
 
-/** The RAW production walkthrough YAML the agent's submit_pr_walkthrough_yaml emits
- *  (the rich `pr` + `walkthrough.{context,merge_assessment,design_decisions,
- *  review_chunks,omissions_and_followups,audit,display}` schema — NOT a `{cards}`
- *  shortcut). The pack's publish route validates + maps it (against the LIVE git
- *  diff) into PrWalkthroughCard[] via the SAME synthesis the deleted built-in ran.
- *  YAML is a superset of JSON, so the pack/route `yaml` parser reads this.
- *
- *  The `pr.base_sha`/`pr.head_sha` carry the REAL session-worktree SHAs (the
- *  bare-launcher dogfood path supplies NO URL SHA params, so the panel MUST read
- *  these from the submitted YAML to drive the LIVE recompute). Call AFTER
- *  setupSessionGitRepo so the module-level SHAs are populated. */
+/** The RAW production walkthrough YAML the reviewer's submit_pr_walkthrough_yaml
+ *  would emit (the rich `pr` + `walkthrough.{…}` schema). The pack's publish route
+ *  validates + maps it (against the LIVE git diff) into PrWalkthroughCard[] via the
+ *  SAME synthesis the deleted built-in ran. YAML is a superset of JSON, so the
+ *  pack/route `yaml` parser reads this. The `pr.base_sha`/`pr.head_sha` carry the
+ *  REAL session-worktree SHAs — call AFTER setupSessionGitRepo so the module-level
+ *  SHAs are populated. Used only by T-4 (the seeded child-pane recover). */
 function submitYaml(): string {
 	const doc = {
 		schema_version: 1,
@@ -243,44 +236,6 @@ async function listInstalled(): Promise<Array<{ packName: string; scope: string;
 	return (await res.json()).installed as Array<{ packName: string; scope: string; builtin?: boolean }>;
 }
 
-async function seedSubmitToolCall(gateway: GatewayInfo, sid: string): Promise<void> {
-	let file: string | undefined;
-	await expect
-		.poll(() => {
-			file = gateway.sessionManager?.getPersistedSession(sid)?.agentSessionFile as string | undefined;
-			return file ?? null;
-		}, { timeout: 10_000 })
-		.not.toBeNull();
-	const useLine = JSON.stringify({
-		type: "message",
-		message: {
-			role: "assistant",
-			content: [{ type: "tool_use", id: SUBMIT_TOOL_USE_ID, name: SUBMIT_TOOL, input: { yaml: submitYaml() } }],
-		},
-	});
-	const resultLine = JSON.stringify({
-		type: "message",
-		message: {
-			role: "user",
-			content: [{ type: "tool_result", tool_use_id: SUBMIT_TOOL_USE_ID, content: "published", is_error: false }],
-		},
-	});
-	const seedBlock = `\n${useLine}\n${resultLine}\n`;
-	let stable = 0;
-	await expect
-		.poll(() => {
-			const cur = fs.readFileSync(file!, "utf8");
-			if (cur.includes(SUBMIT_TOOL_USE_ID)) {
-				stable += 1;
-			} else {
-				stable = 0;
-				fs.appendFileSync(file!, seedBlock);
-			}
-			return stable;
-		}, { timeout: 20_000, intervals: [150, 250, 400] })
-		.toBeGreaterThanOrEqual(4);
-}
-
 /** Mint a server-minted pack-bound surface token for the pack's PANEL (no carrier
  *  tool — no-tools pack). Used only by the path-traversal probe below. */
 async function mintSurfaceToken(sid: string): Promise<string> {
@@ -305,8 +260,8 @@ async function callBundleRoute(sid: string, query: Record<string, string>): Prom
 }
 
 function liveDeepLink(): string {
-	// No jobId — the launchers dropped it; the panel resolves the real job from the
-	// session's submitted doc. baseSha/headSha drive the LIVE recompute.
+	// No jobId — the launchers dropped it; baseSha/headSha would drive a LIVE
+	// recompute. Used here only to navigate the (now-disabled) deep-link.
 	const params = new URLSearchParams({ baseSha, headSha });
 	return `#/ext/${PACK}?${params.toString()}`;
 }
@@ -326,7 +281,7 @@ test.afterEach(async () => {
 });
 
 test.describe("Built-in first-party pack — pr-walkthrough served by the built-in band", () => {
-	test("no-install dogfood: launcher → live recompute + panel publish → disable/re-enable → non-removable", async ({ page, gateway }) => {
+	test("no-install dogfood: built-in resolution → path-traversal probe → disable/re-enable → non-removable", async ({ page, gateway }) => {
 		setupOutsideRepo();
 
 		// ── Step 1: NO INSTALL. The built-in band resolves the pack active-by-default. ──
@@ -341,11 +296,6 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(builtinRow, "the built-in pack must appear in the Installed list flagged builtin").toBeTruthy();
 		expect(builtinRow?.scope).toBe("server");
 
-		const bundlePosts: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() === "POST" && /\/api\/ext\/route\/bundle\b/.test(r.url())) bundlePosts.push(r.url());
-		});
-
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "hello");
@@ -353,89 +303,14 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(sid, "a session must be selected").toBeTruthy();
 		await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
 
-		// Initialise the SESSION WORKTREE as a git repo FIRST (the route diffs against
-		// the worker's server-derived process.cwd(), never a caller path). This sets
-		// the REAL baseSha/headSha that the submitted YAML's pr.base_sha/head_sha must
-		// carry — the bare-launcher dogfood path has no URL SHA params, so the panel
-		// reads them from the YAML to drive the LIVE recompute.
+		// Initialise the SESSION WORKTREE as a git repo (the bundle route diffs against
+		// the worker's server-derived process.cwd(), never a caller path).
 		const ps = gateway.sessionManager?.getPersistedSession(sid!) as { cwd?: string; worktreePath?: string } | undefined;
 		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
 		expect(sessionWorktree, "the session must have a resolvable working dir").toBeTruthy();
 		setupSessionGitRepo(sessionWorktree!);
 
-		// Seed the submit_pr_walkthrough_yaml tool call AFTER the repo exists so the
-		// YAML's pr.base_sha/head_sha are the REAL session-worktree SHAs.
-		await seedSubmitToolCall(gateway, sid!);
-
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
-
-		// ── Step 2: ENTRYPOINT LAUNCH — a NON-autorun launcher (the composer-slash
-		// "open") mounts the viewer with NO auto-invoke, so the manual-Load flow below
-		// is deterministic. (The git-widget launcher now carries `autorun: true` and
-		// auto-fires `run` on mount — covered by the Area B describe, not here.) ──
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), OPEN_LAUNCHER);
-		// The open launcher carries no jobId and no autorun → it navigates to the bare deep-link.
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 })
-			.toBe(`#/ext/${PACK}`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible();
-		expect(bundlePosts, "panel must NOT auto-invoke callRoute on mount").toHaveLength(0);
-
-		// ── Step 3: LIVE RECOMPUTE + PANEL PUBLISH via the BARE LAUNCHER (no URL SHA
-		// params — the real dogfood). The panel is already mounted at the bare
-		// #/ext/pr-walkthrough from the launcher; Load reads the submitted YAML, extracts
-		// pr.base_sha/head_sha from it, publishes the agent's cards (read→publish seam)
-		// and reads the live bundle; the bundle serves the persisted LLM cards. ──
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
-		const load1 = page.locator('[data-testid="prw-load"]').first();
-		await expect(load1).toBeVisible({ timeout: 15_000 });
-		const liveResp = page.waitForResponse(
-			(r) => /\/api\/ext\/route\/bundle\b/.test(r.url()) && r.request().method() === "POST",
-			{ timeout: 20_000 },
-		);
-		await load1.click();
-		const resp1 = await liveResp;
-		expect(resp1.status(), `live bundle callRoute failed: ${await resp1.text().catch(() => "")}`).toBe(200);
-
-		// The header renders the PRODUCTION PR title (synthesized changeset, persisted by
-		// publish); the sha-range sibling shows the LIVE recomputed changeset. The nav
-		// rail shows the SYNTHESIZED phases — orientation / design / significant / audit —
-		// proving the pack ran the SAME YAML→cards synthesis as the deleted built-in.
-		await expect(page.locator('[data-testid="prw-navrail"]').first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-bundle"]').first()).toContainText(baseSha.slice(0, 7));
-		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"]').first()).toBeVisible();
-		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="design-backoff-strategy"]').first()).toBeVisible();
-		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="audit-checklist"]').first()).toBeVisible();
-		// The first (orientation) card renders its synthesized guided sections.
-		await expect(page.locator('[data-testid="prw-card"]').first()).toContainText("PR context");
-		// The significant review card carries the REAL changed file's diff + its mapped
-		// suggested comment (DiffReferenceMapper resolved the anchor against the live diff).
-		await page.locator('[data-testid="prw-nav-card"][data-prw-nav="significant-sync-worker"]').first().click();
-		const liveDiff = page.locator('[data-testid="prw-diffblock"]').first();
-		await expect(liveDiff).toBeVisible({ timeout: 10_000 });
-		await expect(liveDiff).toHaveAttribute("data-prw-file", SYNC_FILE);
-		await expect(liveDiff).toContainText("this.withRetry");
-		await expect(page.locator('[data-testid="prw-suggested-comment"]').first()).toContainText("jitter", { timeout: 10_000 });
-		const persistedAt1 = (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
-		expect(persistedAt1, "stored cards must carry a persistedAt").toBeTruthy();
-
-		// ── Step 3-leak (Bug 2): PER-SESSION ISOLATION. Within the SAME page load (no
-		// reload), open the panel in a SECOND session. The module-level panel state is
-		// keyed by the BOUND session id, so session B must NOT see session A's rendered
-		// bundle and MUST offer Load/Run for its own (absent) submission. ──
-		await createSessionViaUI(page);
-		const sidB = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
-		expect(sidB, "a second session must be selected").toBeTruthy();
-		expect(sidB).not.toBe(sid);
-		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
-		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-		// No leaked bundle: session A's rendered walkthrough must NOT appear here.
-		await expect(page.locator('[data-testid="prw-bundle"]')).toHaveCount(0);
-		await expect(page.locator('[data-testid="prw-title"]')).toHaveCount(0);
-		// Session B is offered Load/Run for its OWN submission.
-		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible({ timeout: 10_000 });
 
 		// ── Step 3b: PATH-TRAVERSAL PROBE — a caller-supplied repoDir cannot exfiltrate
 		// another repo's diff (the route ignores it; the outside SHAs fail closed). ──
@@ -444,47 +319,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(attack.text).not.toContain(OUTSIDE_SECRET_FILE);
 		expect(attack.status, `repoDir traversal must NOT return other-repo data (got ${attack.status})`).not.toBe(200);
 
-		// ── FINDING 1: RELOAD RECOVERY via the NEW `recover` route. After the
-		// isolated-reviewer Run flow the submit_pr_walkthrough_yaml tool call lives in
-		// the (dismissed) reviewer child, NOT this owner session — so on a browser
-		// reload the legacy owner-transcript scan recovers NOTHING. The owner-scoped
-		// `last/<sessionId>` pointer + the persisted `submitted/<jobId>` YAML (written
-		// server-side by submit-yaml) let the "Load walkthrough" gesture re-render the
-		// persisted cards via the `recover` route. Seed both store keys directly (the
-		// gateway runs in-process, sharing the pack-store singleton), DELIBERATELY do
-		// NOT re-seed the owner transcript, then assert Load recovers via `recover`
-		// (NOT an owner-session submit tool call) and re-renders the SAME cards. ──
 		const token = await readE2ETokenAsync();
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		const recoverJobId = "prw-recover-finding1";
-		await getPackStore().put(PACK, `submitted/${recoverJobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
-		await getPackStore().put(PACK, `last/${sid}`, { jobId: recoverJobId, baseSha, headSha, submittedAt: Date.now() });
-
-		const reopenAndRecover = async (): Promise<string | undefined> => {
-			await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
-			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-			// NOTE: the owner transcript is intentionally NOT re-seeded — recovery must
-			// come from the `recover` route (pack store), not an owner-session tool call.
-			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
-			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
-			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
-			const loadBtn = page.locator('[data-testid="prw-load"]').first();
-			await expect(loadBtn).toBeVisible({ timeout: 20_000 });
-			const recoverResp = page.waitForResponse(
-				(r) => /\/api\/ext\/route\/recover\b/.test(r.url()) && r.request().method() === "POST",
-				{ timeout: 20_000 },
-			);
-			await loadBtn.click();
-			const resp = await recoverResp;
-			expect(resp.status(), `recover callRoute failed: ${await resp.text().catch(() => "")}`).toBe(200);
-			const recovered = await resp.json().catch(() => ({}));
-			expect(recovered.found, "the recover route must return the owner's last completed walkthrough").toBe(true);
-			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-			return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
-		};
-		const persistedAt2 = await reopenAndRecover();
-		expect(persistedAt2, "recover must rehydrate the SAME persisted store record").toBe(persistedAt1);
 
 		// ── Step 4: DISABLE via the Market built-in group → launcher + deep-link gone. ──
 		await navigateToHash(page, "#/market");
@@ -549,60 +384,16 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
 			return meta?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER) ? "ok" : "no";
 		}, { timeout: 10_000 }).toBe("ok");
-		// The deep-link resolves again from a CLEAN context (open a fresh session, then
-		// navigate the deep-link → the panel mounts via the re-registered route).
+		// The deep-link resolves again from a CLEAN context (re-open the session, then
+		// navigate the bare deep-link → the panel mounts via the re-registered route).
+		// With NO binding for the owner session the panel renders the NEUTRAL state —
+		// prw-panel-root is visible; we do NOT assert cards.
 		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
 		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-
-		// ── Step 3a: RUN PR WALKTHROUGH — the NO-target launch contract (migration
-		// Decision D). The gesture-gated Run NO LONGER drives the user's OWN agent via
-		// host.session.postMessage; it calls the pack `run` route → host.agents.spawn.
-		// This harness has NO real `gh`/PR and the walkthrough is GitHub-PR-only (a local
-		// SHA-only target is now rejected up front with LOCAL_UNSUPPORTED — see
-		// tests/e2e/pr-walkthrough-host-agents.spec.ts), so a reviewer CANNOT be spawned
-		// through the panel here. Re-open the panel on the BARE launcher hash (no SHA
-		// params) so Run posts an empty body: the route resolves the current branch's
-		// open GitHub PR, finds none, and returns code:"NO_PR". We assert that contract —
-		// the route is called and the panel surfaces the "No open GitHub PR" message via
-		// prw-error, with NO reviewer child minted. (The reviewer-spawn + `review`
-		// accessory + exactly-three-tools assertions live in the API spec, which uses an
-		// explicit github target; YAML→cards parity is covered by Step 3's Load path.) ──
-		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/ext/${PACK}`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-		const runBtn = page.locator('[data-testid="prw-run"]').first();
-		await expect(runBtn, "Run is offered when a session surface is present").toBeVisible({ timeout: 10_000 });
-		const runRoutePost = page.waitForResponse(
-			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
-			{ timeout: 20_000 },
-		);
-		await runBtn.click();
-		const runRouteResp = await runRoutePost;
-		expect(runRouteResp.status(), `run route failed: ${await runRouteResp.text().catch(() => "")}`).toBe(200);
-		// No open GitHub PR for the current branch ⇒ the panel surfaces the NO_PR error.
-		const prwError = page.locator('[data-testid="prw-error"]').first();
-		await expect(prwError).toBeVisible({ timeout: 10_000 });
-		await expect(prwError).toContainText(/No open GitHub PR/i);
-		// The user's OWN session agent was NOT driven (anti-postMessage), and NO reviewer
-		// child was minted (the run was rejected before any spawn).
-		const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((s: any) => {
-			const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
-			return cps?.parentSessionId === sid && cps?.childKind === "host-agents";
-		});
-		expect(reviewerSpawned, "a NO_PR launch must not mint a reviewer child").toBe(false);
-		const ownerKickoffSeen = await (async () => {
-			const rpc = gateway.sessionManager?.getSession?.(sid!)?.rpcClient;
-			if (!rpc?.getMessages) return false;
-			try {
-				const res = await rpc.getMessages();
-				const msgs = res?.data?.messages ?? res?.data ?? [];
-				return Array.isArray(msgs) && msgs.some((m: any) => JSON.stringify(m).includes("Review target"));
-			} catch { return false; }
-		})();
-		expect(ownerKickoffSeen, "the user's own agent must NOT receive the reviewer kickoff").toBe(false);
+		await expect(page.locator('[data-testid="prw-neutral"]').first()).toBeVisible({ timeout: 10_000 });
 
 		// ── Step 5: NON-REMOVABLE — built-in source + pack cannot be removed/uninstalled. ──
 		// Built-in pack card has no Uninstall control.
@@ -627,25 +418,17 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// Area B (one-click autorun) + Area D (the pane lives with the reviewer child)
+// NEW launch UX — the browser-only acceptance rows (design §8: T-2/T-3/T-4)
 // ────────────────────────────────────────────────────────────────────────────
-// Restore-PR-Walkthrough-UX design rows B1/B2/B3 + the Area D child-session pane.
-//
-// ENVIRONMENT NOTE (read before extending): the panel's `run` route, on the
-// git-widget's bare autorun deep-link, resolves the CURRENT BRANCH's open GitHub
-// PR via the ambient `gh` in the confined worker (the only target a bare deep-link
-// can carry — paramKeys gates out prUrl/owner/repo, and a baseSha+headSha pair is
-// rejected as LOCAL_UNSUPPORTED). This harness has no real `gh` PR (and a mock `gh`
-// cannot be injected: `execFile("gh")` resolves the real binary), so a PANEL-driven
-// autorun deterministically returns NO_PR and mints no reviewer. Therefore the
-// reviewer-SPAWN assertions (a `review`-accessory child, status/recover routing,
-// the dismissed-but-viewable child) are pinned in the API spec
-// tests/e2e/pr-walkthrough-host-agents.spec.ts (rows A2/D2/D5), which uses an
-// EXPLICIT github target (no `gh`) + the canned mock agent. Here we faithfully pin
-// the BROWSER-only seams: the autorun ONE-SHOT trigger (B1/B2/B3) and the
-// child-session pane's recover→render + reload persistence (Area D), the latter by
-// seeding the child binding the run flow would have written.
-test.describe("PR walkthrough — Area B autorun + Area D child-session pane", () => {
+// The launch surface is now a SPAWN launcher: a click calls the pack `run` route
+// and, on ok:true, opens the panel in the returned reviewer child session. The
+// harness has no real `gh` PR, so a click-driven `run` resolves NO_PR and mints no
+// reviewer — pinned here as the inline-error path (T-2). The child-session pane's
+// pending state (T-3) and submit→cards + reload→recover (T-4) are pinned by SEEDING
+// the binding/<self> (+ submitted/<jobId>) the run flow would have written, then
+// driving the panel as the bound (child) session. Reviewer-spawn + lifecycle
+// assertions live in the API spec (tests/e2e/pr-walkthrough-host-agents.spec.ts).
+test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)", () => {
 	/** Open the app, create + select a session, reconcile pack renderers. Returns sid. */
 	async function freshSessionWithPanel(page: import("@playwright/test").Page): Promise<string> {
 		await openApp(page);
@@ -658,120 +441,138 @@ test.describe("PR walkthrough — Area B autorun + Area D child-session pane", (
 		return sid!;
 	}
 
-	// ── B1: the git-widget launcher carries autorun → the panel auto-fires `run`
-	//    EXACTLY ONCE on mount, with NO Run-button click. ──
-	test("B1 — git-widget launcher autorun fires `run` exactly once on mount (no Run click)", async ({ page }) => {
+	// ── T-2: a NO_PR launch surfaces an INLINE error in the GitStatusWidget dropdown,
+	//    spawns NO reviewer child, and does NOT switch the view. ──
+	test("T-2 — NO_PR launch shows an inline git-widget error, spawns no reviewer, no view switch", async ({ page, gateway }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+		// The session is selected on creation; resolve its id BEFORE the first message
+		// so the worktree can be made a git repo before the idle git-status refresh.
+		let sid: string | null = null;
+		await expect.poll(async () => {
+			sid = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+			return sid;
+		}, { timeout: 15_000 }).toBeTruthy();
+		expect(sid).toBeTruthy();
+
+		// The git-widget pill renders only when the session worktree is a git repo;
+		// make it one so the launcher is reachable. (A bare-body `run` resolves NO_PR
+		// regardless — the repo is here only to surface the pill.)
+		const ps = gateway.sessionManager?.getPersistedSession(sid!) as { cwd?: string; worktreePath?: string } | undefined;
+		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
+		expect(sessionWorktree, "the session must have a resolvable working dir").toBeTruthy();
+		setupSessionGitRepo(sessionWorktree!);
+
+		// A message → working→idle transition re-runs the (unconditional) git-status
+		// refresh, which now sees the repo and renders the pill.
+		await sendMessage(page, "hello");
+		await waitForSessionStatus(sid!, "idle").catch(() => { /* best-effort */ });
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
+
 		const runPosts: string[] = [];
 		page.on("request", (r) => {
 			if (r.method() === "POST" && /\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
 		});
-		await freshSessionWithPanel(page);
 
-		// Run the REAL git-widget launcher — its selection IS the one-click gesture.
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
-		// Area B: ONLY this launcher's target carries autorun:true, so the deep-link
-		// hash carries it (paramKeys includes `autorun`).
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 })
-			.toBe(`#/ext/${PACK}?autorun=true`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
+		// Open the git-widget dropdown (portaled under document.body).
+		const pill = page.locator(".git-status-pill").first();
+		await expect(pill, "the git-status pill must render once the worktree is a repo").toBeVisible({ timeout: 20_000 });
+		await pill.click();
 
-		// The panel auto-invokes `run` ONCE on mount — no Run-button click. (This harness
-		// has no real GitHub PR, so run resolves NO_PR and mints no reviewer; the
-		// reviewer spawn + `review` accessory are pinned by the API spec.)
-		await expect.poll(() => runPosts.length, { timeout: 15_000 }).toBe(1);
-		const prwError = page.locator('[data-testid="prw-error"]').first();
-		await expect(prwError).toBeVisible({ timeout: 10_000 });
-		await expect(prwError).toContainText(/No open GitHub PR/i);
-		// The run completed (error surfaced) — still EXACTLY one fire, no Run-button click.
-		expect(runPosts, "autorun must fire `run` exactly once, with no Run-button click").toHaveLength(1);
+		// The launcher button's data-entrypoint-id is a NUL-bearing compound key, so
+		// locate it by its visible label instead of a CSS attribute selector.
+		const launcher = page.locator('[data-testid="git-widget-launcher"]', { hasText: "PR Walkthrough" }).first();
+		await expect(launcher, "the PR Walkthrough launcher must render in the dropdown").toBeVisible({ timeout: 10_000 });
+
+		const runResp = page.waitForResponse(
+			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
+			{ timeout: 20_000 },
+		);
+		await launcher.click();
+		const resp = await runResp;
+		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
+
+		// The structured NO_PR error renders inline beneath the launcher button.
+		const err = page.locator('[data-testid="git-widget-launcher-error"]').first();
+		await expect(err).toBeVisible({ timeout: 10_000 });
+		await expect(err).toContainText(/No open GitHub PR/i);
+		// The dropdown stays OPEN (the launcher button is still visible).
+		await expect(launcher).toBeVisible();
+		// `run` fired exactly once.
+		expect(runPosts, "the launcher must call `run` exactly once").toHaveLength(1);
+
+		// No reviewer child was minted (NO_PR returns before any spawn).
+		const reviewerSpawned = (gateway.sessionManager?.getAllSessionsRaw?.() ?? []).some((s: any) => {
+			const cps = gateway.sessionManager?.getPersistedSession?.(s.id);
+			return cps?.parentSessionId === sid && cps?.childKind === "host-agents";
+		});
+		expect(reviewerSpawned, "a NO_PR launch must not mint a reviewer child").toBe(false);
+
+		// The view did NOT switch — the same session is still selected.
+		const sidAfter = await page.evaluate(() => (window as any).__bobbitState?.selectedSessionId as string | null);
+		expect(sidAfter, "a NO_PR launch must not switch the view").toBe(sid);
 	});
 
-	// ── B2: autorun is strictly one-shot — the consumed flag prevents a re-fire on
-	//    re-render / remount within the page (the run-route reviewerKey idempotency
-	//    is the RELOAD backstop, pinned in the API spec). ──
-	test("B2 — autorun is one-shot: a remount does not re-fire `run` (autorunConsumed)", async ({ page }) => {
-		const runPosts: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() === "POST" && /\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
-		});
+	// ── T-3: a BOUND reviewer child pane auto-shows the pending state on mount —
+	//    "PR Walkthrough: In Progress" + spinner — with NO Run/Load buttons. ──
+	test("T-3 — bound child pane auto-shows pending + spinner, no Run/Load buttons", async ({ page }) => {
 		const sid = await freshSessionWithPanel(page);
 
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-		await expect.poll(() => runPosts.length, { timeout: 15_000 }).toBe(1);
-
-		// The first autorun completed (NO_PR surfaced).
-		await expect(page.locator('[data-testid="prw-error"]').first()).toBeVisible({ timeout: 10_000 });
-
-		// Re-navigate AWAY from the panel and back to the SAME autorun deep-link (re-
-		// rendering the panel). The module-level byJob entry (status:error +
-		// autorunConsumed) persists within the page, so autorun does NOT re-fire `run`.
-		await page.evaluate((h) => { window.location.hash = h; }, `#/session/${sid}`);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain("#/session/");
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-		// The re-rendered pane shows the FIRST run's persisted error (deterministic
-		// post-re-navigation signal) — and autorun did NOT re-fire.
-		await expect(page.locator('[data-testid="prw-error"]').first()).toBeVisible({ timeout: 10_000 });
-		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
-		expect(runPosts, "autorun must stay one-shot across re-navigation (status!=idle + autorunConsumed)").toHaveLength(1);
-	});
-
-	// ── B3: a NON-autorun launch (the composer-slash `open` launcher / bare deep-link)
-	//    shows the manual Run affordance and auto-invokes NOTHING on mount. ──
-	test("B3 — a non-autorun launch shows manual Run and auto-fires nothing", async ({ page }) => {
-		const runPosts: string[] = [];
-		const bundlePosts: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() !== "POST") return;
-			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
-			if (/\/api\/ext\/route\/bundle\b/.test(r.url())) bundlePosts.push(r.url());
+		// Seed ONLY a child binding (jobId set, NO submitted/<jobId>): the pane is a
+		// bound reviewer child still producing the walkthrough. No git repo needed —
+		// the pending state does not recompute; the status poll returns running.
+		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const pendingJobId = "prw-t3-pending";
+		await getPackStore().put(PACK, `binding/${sid}`, {
+			jobId: pendingJobId,
+			parentSessionId: "prw-t3-owner-session",
+			status: "running",
+			target: {
+				provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
+				canonicalKey: "github:SuuBro/bobbit#4242",
+			},
 		});
-		await freshSessionWithPanel(page);
 
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), OPEN_LAUNCHER);
-		// The open launcher carries NO autorun → the bare deep-link.
+		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-		// The manual Run + Load affordances are offered…
-		await expect(page.locator('[data-testid="prw-run"]').first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-load"]').first()).toBeVisible();
-		// …and NOTHING auto-invokes on mount (no autorun on this launcher). The panel is
-		// fully mounted (Run/Load visible) and shows NO "reviewing" run-status, proving
-		// no run was triggered — mirrors the existing step-2 no-auto-invoke assertion.
-		await expect(page.locator('[data-testid="prw-run-status"]')).toHaveCount(0);
-		expect(runPosts, "a non-autorun launch must NOT auto-fire `run`").toHaveLength(0);
-		expect(bundlePosts, "the panel must NOT auto-invoke callRoute on mount").toHaveLength(0);
+		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
+
+		// Pending: exact copy "PR Walkthrough: In Progress" + the spinner.
+		const pending = page.locator('[data-testid="prw-pending"]').first();
+		await expect(pending).toBeVisible({ timeout: 15_000 });
+		await expect(pending).toContainText("PR Walkthrough: In Progress");
+		await expect(page.locator('[data-testid="prw-spinner"]').first()).toBeVisible();
+		// The manual Run/Load buttons are GONE.
+		await expect(page.locator('[data-testid="prw-run"]')).toHaveCount(0);
+		await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
+		// The pane stays pending (the status poll keeps returning running).
+		await expect(pending).toBeVisible();
 	});
 
-	// ── Area D: the walkthrough pane lives WITH the reviewer-child session. When the
-	//    child pane re-renders after a reload, its Load gesture recovers the READY
-	//    cards from its OWN binding/<child> (the routes.mjs child self-recover branch),
-	//    and a reload re-renders the SAME persisted cards. We seed the binding the run
-	//    flow would have written (no `gh`, no reviewer spawn needed) and drive the
-	//    panel as the bound (child) session. ──
-	test("D — the pane recovers READY cards from binding/<child> in the child session, and a reload re-renders them", async ({ page, gateway }) => {
+	// ── T-4: the walkthrough pane lives WITH the reviewer-child session. On mount the
+	//    bound child pane self-resolves the READY cards from its OWN binding/<child>
+	//    via the child-self `recover` branch — NO click, NO Run/Load button — and a
+	//    reload re-renders the SAME persisted cards (child self-recover again). ──
+	test("T-4 — bound child pane self-recovers READY cards on mount and re-renders after reload", async ({ page, gateway }) => {
 		const sid = await freshSessionWithPanel(page);
 		// The bound session's worktree must be a real git repo so publish/bundle
-		// recompute the LIVE diff (the same path the dogfood Load uses). This sets the
-		// module-level baseSha/headSha that submitYaml()'s pr.base_sha/head_sha carry.
+		// recompute the LIVE diff. This sets the module-level baseSha/headSha that
+		// submitYaml()'s pr.base_sha/head_sha carry.
 		const ps = gateway.sessionManager?.getPersistedSession(sid) as { cwd?: string; worktreePath?: string } | undefined;
 		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
 		expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
 		setupSessionGitRepo(sessionWorktree!);
 
 		// Seed the pack store so THIS session is a bound reviewer child whose pane
-		// recovers from its OWN binding/<child>. We seed binding/<sid> (the CHILD key)
-		// and DELIBERATELY NOT last/<sid> (the owner pointer), so a successful recover
-		// proves the Area D child self-recover branch (binding/<me> → submitted) fired —
-		// not the legacy owner branch.
+		// recovers from its OWN binding/<child>. Seed binding/<sid> (the CHILD key) +
+		// submitted/<jobId> (NO owner pointer): a successful recover proves the child
+		// self-recover branch (binding/<me> → submitted) fired.
 		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		const childJobId = "prw-area-d-child-recover";
+		const childJobId = "prw-t4-child-recover";
 		await getPackStore().put(PACK, `submitted/${childJobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
 		await getPackStore().put(PACK, `binding/${sid}`, {
 			jobId: childJobId,
-			parentSessionId: "prw-area-d-owner-session",
+			parentSessionId: "prw-t4-owner-session",
 			baseSha, headSha,
 			status: "submitted",
 			target: {
@@ -781,22 +582,24 @@ test.describe("PR walkthrough — Area B autorun + Area D child-session pane", (
 			},
 		});
 
+		// The child pane AUTO-mounts: on mount it self-resolves binding/<self> →
+		// `recover` → re-publishes → renders cards. NO click, NO prw-load button.
 		const recoverAndAssertCards = async (): Promise<string | undefined> => {
-			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
-			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
-			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
-			const loadBtn = page.locator('[data-testid="prw-load"]').first();
-			await expect(loadBtn).toBeVisible({ timeout: 20_000 });
 			const recoverResp = page.waitForResponse(
 				(r) => /\/api\/ext\/route\/recover\b/.test(r.url()) && r.request().method() === "POST",
 				{ timeout: 20_000 },
 			);
-			await loadBtn.click();
+			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
+			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
+			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
+			// The recover POST fires automatically — NO button click.
 			const resp = await recoverResp;
 			expect(resp.status(), `recover callRoute failed: ${await resp.text().catch(() => "")}`).toBe(200);
 			const recovered = await resp.json().catch(() => ({}));
 			expect(recovered.found, "the child pane must self-resolve binding/<child> → submitted YAML").toBe(true);
 			expect(recovered.jobId).toBe(childJobId);
+			// There is NO manual Load button — the pane auto-renders.
+			await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
 			// The READY cards render in THIS (child) session's pane.
 			await expect(page.locator('[data-testid="prw-navrail"]').first()).toBeVisible({ timeout: 10_000 });
 			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
@@ -815,113 +618,5 @@ test.describe("PR walkthrough — Area B autorun + Area D child-session pane", (
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
 		const persistedAt2 = await recoverAndAssertCards();
 		expect(persistedAt2, "reload must rehydrate the SAME persisted store record via recover").toBe(persistedAt1);
-	});
-
-	// ── B4 (Finding 3): an autorun deep-link reload AFTER a walkthrough was submitted
-	//    LOADS the existing cards (recover → publish) and does NOT spawn a SECOND
-	//    reviewer. The recover-first check + the durable consumed marker make autorun a
-	//    safe one-shot across reloads (the in-memory flag alone is lost on reload). ──
-	test("B4 — autorun after a prior submit LOADS existing cards, does not spawn a second reviewer", async ({ page, gateway }) => {
-		const runPosts: string[] = [];
-		const recoverPosts: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() !== "POST") return;
-			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
-			if (/\/api\/ext\/route\/recover\b/.test(r.url())) recoverPosts.push(r.url());
-		});
-		const sid = await freshSessionWithPanel(page);
-		const ps = gateway.sessionManager?.getPersistedSession(sid) as { cwd?: string; worktreePath?: string } | undefined;
-		const sessionWorktree = ps?.worktreePath ?? ps?.cwd;
-		expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
-		setupSessionGitRepo(sessionWorktree!);
-
-		// Seed the OWNER's completed walkthrough (the last/<owner> pointer + the
-		// persisted submitted YAML the recover route reads). NO binding/<sid> → this is
-		// an owner view, so recover resolves via the owner branch.
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		const jobId = "prw-autorun-after-submit";
-		await getPackStore().put(PACK, `submitted/${jobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
-		await getPackStore().put(PACK, `last/${sid}`, { jobId, baseSha, headSha, submittedAt: Date.now() });
-
-		// The git-widget launcher selection IS the one-click gesture → autorun deep-link.
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-
-		// Autorun consults `recover`, finds the completed walkthrough, and LOADS it —
-		// rendering the cards WITHOUT calling `run` (no second reviewer).
-		await expect.poll(() => recoverPosts.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
-		await expect(page.locator('[data-testid="prw-navrail"]').first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-		expect(runPosts, "autorun must LOAD an existing walkthrough, never spawn a second reviewer").toHaveLength(0);
-	});
-
-	// ── B5 (Finding 3): a DURABLE consumed marker suppresses the autorun re-fire on a
-	//    reload. The in-memory flag is lost on reload, but the host.store marker keyed
-	//    by the bound session id is consulted FIRST and bails before any `run` (this is
-	//    the "reload while a reviewer is still running" guard — the first autorun wrote
-	//    the marker, so a reload mints no duplicate). ──
-	test("B5 — a durable autorun-consumed marker suppresses the autorun re-fire on reload", async ({ page }) => {
-		const runPosts: string[] = [];
-		const storeGets: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() !== "POST") return;
-			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
-			if (/\/api\/ext\/store\/get\b/.test(r.url())) storeGets.push(r.url());
-		});
-		const sid = await freshSessionWithPanel(page);
-		// Seed the durable marker the FIRST autorun would have written (simulating a
-		// reload after the one-shot already fired / while the reviewer is still running).
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		await getPackStore().put(PACK, `autorun-consumed/${sid}`, { consumedAt: Date.now() });
-
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-
-		// maybeAutorun reads the durable marker (a store/get) and bails — never `run`.
-		await expect.poll(() => storeGets.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
-		// The manual Run/Load affordances remain (the bail leaves the pane idle) and no
-		// "Reviewing…" run-status ever appears, proving `run` was never invoked.
-		await expect(page.locator('[data-testid="prw-run"]').first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-run-status"]')).toHaveCount(0);
-		expect(runPosts, "a consumed marker must suppress the autorun re-fire").toHaveLength(0);
-	});
-
-	// ── B6 (Finding 3): autorun does NOT fire from a reviewer-child session. openPanel
-	//    moves the pane INTO the child, so a reload there must not spawn a fresh
-	//    reviewer; the binding/<self> self-lookup detects the child and bails. ──
-	test("B6 — autorun does not fire when the panel is mounted in a reviewer-child session", async ({ page }) => {
-		const runPosts: string[] = [];
-		const storePuts: string[] = [];
-		page.on("request", (r) => {
-			if (r.method() !== "POST") return;
-			if (/\/api\/ext\/route\/run\b/.test(r.url())) runPosts.push(r.url());
-			if (/\/api\/ext\/store\/put\b/.test(r.url())) storePuts.push(r.url());
-		});
-		const sid = await freshSessionWithPanel(page);
-		// Make THIS session a bound reviewer child (binding/<self> exists). No durable
-		// marker and no completed walkthrough — only the child binding, so the bail is
-		// driven SOLELY by the child-session detection.
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
-		await getPackStore().put(PACK, `binding/${sid}`, {
-			jobId: "prw-b6-child-binding",
-			parentSessionId: "prw-b6-owner-session",
-			status: "running",
-			target: {
-				provider: "github", owner: "SuuBro", repo: "bobbit", number: 4242, host: "github.com",
-				canonicalKey: "github:SuuBro/bobbit#4242",
-			},
-		});
-
-		await page.evaluate((id) => (window as any).__bobbitRunPackLauncher(id), GIT_WIDGET_LAUNCHER);
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}?autorun=true`);
-		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 15_000 });
-
-		// maybeAutorun detects the child binding and bails, marking consumed (a
-		// store/put) — never calling `run`.
-		await expect.poll(() => storePuts.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
-		await expect(page.locator('[data-testid="prw-run-status"]')).toHaveCount(0);
-		expect(runPosts, "autorun must never fire from a reviewer-child session").toHaveLength(0);
 	});
 });

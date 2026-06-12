@@ -1,15 +1,15 @@
 id: pr-walkthrough.git-widget
 kind: git-widget-button
 label: PR Walkthrough
-# A git-widget-button LAUNCHER (the git status widget dropdown). Its selection
-# IS the user gesture; it navigates to the deep-link route. No hard-coded jobId —
-# the panel resolves the real job from the current session's submitted walkthrough.
-# `autorun: true` (Area B) makes the click one-click: the panel auto-invokes its
-# `run` action ONCE on mount (the click is the gesture). The consumed flag makes it
-# strictly one-shot; the `run` route's reviewerKey idempotency is the reload backstop.
-# Only THIS launcher carries autorun — the open/palette launchers and the bare
-# deep-link omit it, preserving the "no auto-invoke on mount" honesty for passive opens.
+# A git-widget-button LAUNCHER (the git status widget dropdown). Its selection IS
+# the user gesture. SPAWN-ON-CLICK model (launch UX correction): the click does NOT
+# open a panel in the current (owner) session. Instead the platform launcher calls
+# the pack `run` route (POST, empty body) which mints a fresh read-only reviewer
+# sub-agent, then opens `panelId` in the returned child session and auto-switches the
+# view to it. A NO_PR / spawn failure surfaces as an inline error in the git-widget
+# dropdown and spawns nothing. Always-fresh: every click is a NEW reviewer (the old
+# server-side reviewerKey dedup is gone; a within-gesture guard blocks double-spawn).
 target:
-  route: pr-walkthrough
-  params:
-    autorun: true
+  action: spawn
+  route: run
+  panelId: pr-walkthrough.panel

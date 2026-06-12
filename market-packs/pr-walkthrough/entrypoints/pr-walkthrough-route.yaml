@@ -5,13 +5,14 @@ target:
   panelId: pr-walkthrough.panel
 # The kind:"route" DEEP-LINK: registering routeId:"pr-walkthrough" → the viewer
 # panel, so #/ext/pr-walkthrough?jobId=… resolves through the client pack route
-# registry and reopens the panel rehydrated from host.store.*.
+# registry and reopens the panel rehydrated from host.store.*. This is what lets a
+# RELOAD of a reviewer SUB-AGENT session restore its walkthrough pane (the panel is
+# only ever mounted inside a reviewer child session now — there is no owner pane).
 # jobId rehydrates a persisted job pointer; baseSha/headSha let a deep-link drive
 # a LIVE recompute (design §D2.3) for a freshly-opened PR. The git repo root is
 # SERVER-DERIVED (the session worktree), never a deep-link param — so no `repoDir`
-# key (a caller must not be able to point the route at another repo).
-# `autorun` (Area B) is set ONLY by the git-widget launcher's target params (the
-# widget click IS the user gesture); the bare deep-link and the open/palette
-# launchers omit it, so they still land on the manual-Run panel. paramKeys gate
-# which query params survive navigateToTarget's filter AND the reload-restore filter.
-paramKeys: [jobId, baseSha, headSha, autorun]
+# key (a caller must not be able to point the route at another repo). The legacy
+# `autorun` param is GONE (spawn-on-click replaced the owner-session autorun model);
+# paramKeys gate which query params survive navigateToTarget's filter AND the
+# reload-restore filter.
+paramKeys: [jobId, baseSha, headSha]

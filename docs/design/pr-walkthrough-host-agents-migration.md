@@ -1,6 +1,31 @@
 # PR Walkthrough → `host.agents` migration
 
-**Status:** design — implementation-ready
+> **PARTIALLY SUPERSEDED — launch + lifecycle model.** This doc's `host.agents`
+> **foundation and decisions A–D shipped** and remain accurate (the read-only
+> child principal, role-based tool grant, no submit-proof secret, binding-routed
+> right-job authorization, the `run`/`status`/`recover` routes). But its
+> **launch and lifecycle model is no longer what ships**. In particular the
+> following parts of this doc describe behaviour that has since been **replaced**
+> and must not be treated as current:
+>
+> - **`reviewerKey` idempotency / live-reviewer reuse** — removed; launch is now
+>   **always-fresh** (every click spawns a new reviewer, no dedup).
+> - **`accessory: review`** on the `pr-reviewer` role — the shipped accessory is
+>   **`magnifier`** and the role `label` / session title is exactly
+>   **`PR Walkthrough`**.
+> - **Submit-time / status-poll dismissal**, the `childTerminal` / `terminalAt`
+>   terminal cleanup, and any test asserting server-dismiss-on-submit — removed;
+>   the reviewer is **never auto-dismissed**, survives a gateway restart, and is
+>   terminated only by the user.
+> - **Navigate-then-autorun launch** (owner-session panel + `host.session.postMessage`
+>   framing below) — replaced by **spawn-on-click** from every launcher with the
+>   panel mounted only in the child session.
+>
+> For the authoritative launch + lifecycle model see
+> [pr-walkthrough-launch-ux.md](pr-walkthrough-launch-ux.md). The `host.agents`
+> foundation in this doc is retained for rationale.
+
+**Status:** design — `host.agents` foundation shipped; launch/lifecycle model superseded (see banner above)
 **Goal:** Restore the PR walkthrough to a real, isolated, **read-only child reviewer principal** launched via `host.agents`, replacing today's downgrade that hijacks the user's current agent via `host.session.postMessage`. Delete the legacy `src/server/pr-walkthrough` launcher, the `childKind:"pr-walkthrough"` session-manager special-cases, and the submit-proof secret — preserving every security-critical and production-faithful piece (the read-only policy, the bundle/publish/card synthesis, idempotency, model inheritance, right-job routing).
 
 This doc finalizes the **HOW**. The **WHAT** is locked by the goal spec; do not relitigate it.

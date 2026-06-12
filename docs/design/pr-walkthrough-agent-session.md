@@ -1,13 +1,23 @@
 # PR walkthrough agent session architecture
 
-> **Superseded behaviour:** this doc's references to switching the child to
-> fullscreen review mode "on success" / "on ready" describe the original design.
-> That auto-fullscreen-on-ready plumbing has since been **removed** — the
-> walkthrough panel now shares the HTML preview panel's resize logic and
-> fullscreen is strictly user-initiated. See
-> [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md). The rest of
-> this design (child session, bundle, YAML submission, persistence, export) is
-> still accurate.
+> **⚠️ SUPERSEDED — launch, lifecycle & termination model.** Two parts of this
+> doc no longer reflect the shipped system:
+> 1. The auto-fullscreen-on-ready plumbing was **removed** — the walkthrough panel
+>    shares the HTML preview panel's resize logic and fullscreen is user-initiated
+>    (see [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md)).
+> 2. The **launch + child-session lifecycle** described below is replaced by the
+>    spawn-on-click model in
+>    [pr-walkthrough-launch-ux.md](pr-walkthrough-launch-ux.md): a launcher click
+>    spawns a fresh read-only reviewer and auto-switches to it; on submit the
+>    reviewer is **NOT terminated** — it stays live, read-only, selectable, and
+>    available for follow-up, survives a gateway restart, and is reaped only by the
+>    owner-gone rule or explicit user termination. Wherever this doc says the child
+>    is "**terminated** once the walkthrough reaches `ready`/`error`" or that "there
+>    is no follow-up chat", read [pr-walkthrough-launch-ux.md](pr-walkthrough-launch-ux.md)
+>    and [../pr-walkthrough-panel.md](../pr-walkthrough-panel.md) instead.
+>
+> The foundation (read-only child session, persisted analysis bundle, YAML
+> submission, persistence, export) is still accurate.
 
 ## Summary
 

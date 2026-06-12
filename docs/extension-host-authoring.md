@@ -563,15 +563,34 @@ This addition bumped **`HOST_CONTRACT_VERSION` 1 → 2** (the data/addressing-co
 additive, but the version bump lets a pack **feature-detect field support** via
 `host.contractVersion >= 2` and degrade gracefully (open in the active view) on an older host.
 No new capability flag is added — `openPanel` already lives under the `ui` capability.
-This capability was added so the PR-walkthrough pack could move its pane into a freshly
+This capability was added so the PR-walkthrough pack could open its pane in a freshly
 spawned reviewer-child session; see
-[docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md) for the
-motivating design and [docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md#the-pane-lives-with-the-reviewer-child)
+[docs/design/pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md) for the
+launch-UX correction that made this the *only* place the pane lives, and
+[docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md#the-pane-lives-only-with-the-reviewer-child)
 for how the pack consumes it.
+
+> **The spawn-launcher work did NOT bump the contract.** `PanelTarget.sessionId` already shipped
+> in v2. The launch-UX correction added an optional `title` to the **server-side**
+> `host.agents.spawn` surface (so the spawned child gets a visible session title), which is an
+> additive field on a server capability — **not** part of the frozen versioned `PanelTarget` /
+> `HostApi` data contract — so `HOST_CONTRACT_VERSION` stays at `2`.
 
 **Panel conventions (enforced — identical to renderer rules):** theme tokens only; preserve any
 embedded iframe `sandbox` attribute (untrusted/LLM content goes in a `sandbox`ed iframe);
 **no auto-invoke / navigation on mount**.
+
+**Sanctioned exception — the bound-child-pane auto-open carve-out.** There is exactly one
+documented exception to "no auto-invoke on mount". A panel mounted **inside a bound child
+session** — a pane whose `__sessionId` has a `binding/<self>` record in the pack store — may
+auto-open and self-drive **without a user gesture**, *provided it is strictly read-only*: it may
+only poll its own job's `status` route and render; it must never spawn or mutate. This is safe
+because it is the child's own pane reading the child's own job — nothing it does can reach
+another session. The PR-walkthrough reviewer-child pane is the one consumer: it auto-shows a
+pending state, self-polls `status`, flips to rendered cards on submit, and re-renders on reload
+via the child-self `recover` route (see
+[docs/pr-walkthrough-panel.md § The pane lives only with the reviewer child](pr-walkthrough-panel.md#the-pane-lives-only-with-the-reviewer-child)).
+Do **not** generalise this to owner-session panels or to any mutating call.
 
 ### Routes — the pack's own server endpoints (`host.callRoute`)
 
@@ -682,8 +701,51 @@ paramKeys: [artifactId]       # the only params serialized into / parsed from th
 host.ui.navigate({ route: "artifacts", params: { artifactId } });
 ```
 
-- **Launcher kinds** register a label that, on click, calls `openPanel` or `navigate`. The
-  click **is** the user gesture — never auto-invoke on mount.
+**Spawn launcher** (`target.action: "spawn"`) — a launcher that, on click, calls a pack
+**route** and opens the returned child session's panel:
+
+```yaml
+# entrypoints/reviewer-launch.yaml
+id: my-pack.launch
+kind: git-widget-button       # any launcher kind
+label: Run Reviewer
+target:
+  action: spawn               # discriminates a SpawnLaunchTarget
+  route: run                  # pack route name; called POST with an empty body
+  panelId: my-pack.panel      # panel opened in the returned childSessionId
+```
+
+On click the platform launcher dispatch (`src/app/pack-entrypoints.ts`) calls the pack's
+`route` (POST) through the versioned Host API, and on a `{ ok: true, childSessionId }` result
+opens `panelId` **in that child session** and auto-switches the view to it via
+`host.ui.openPanel({ panelId, sessionId: childSessionId })` (contract-v2 `PanelTarget.sessionId`,
+a real session switch). A `{ ok: false }` result (e.g. `{ code, error }`) is **not** opened as a
+panel — it is handed back to the launching surface, which renders it inline (the
+git-status-widget dropdown shows `data-testid="git-widget-launcher-error"`); nothing is spawned
+and the view does not switch. This is how the **PR-walkthrough** launchers work — a click spawns
+a fresh read-only reviewer sub-agent and the panel lives only in that child session (see
+[docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)).
+
+- **Pack purity.** The pack declares **only** the structured `{ action, route, panelId }`
+  target. The route call and the session-switch navigation are performed by the platform through
+  the versioned Host API — the pack never touches `state` or the router.
+- **Double-spawn guard.** The dispatch keeps a **within-gesture** guard so a single click cannot
+  double-fire the spawn. It is *not* cross-click dedup: separate clicks each spawn a fresh child.
+- **Launcher-bound Host API.** A spawn launcher needs `callRoute` + `ui.openPanel` bound to the
+  pack and the **active (owner)** session (so the route resolves against the owner's worktree).
+  Launchers now receive a pack-bound Host API from a **launcher-host factory**
+  (`setLauncherHostFactory` / `getLauncherHost` in `src/app/pack-panels.ts`, self-registered by
+  `src/app/host-api.ts`) — the sibling of the panel-host factory that already backs panels. It is
+  authorized through the same per-session pack-surface guard as a panel's `callRoute`.
+- **Server schema.** The server entrypoint contribution `target` carries an optional `action`
+  field; for a spawn launcher `route` and `panelId` coexist on the same target. `parseEntrypoints`
+  (`src/server/agent/tool-contributions.ts`) validates that an `action:"spawn"` launcher supplies
+  both `route` and `panelId` and drops it otherwise.
+
+- **Launcher kinds** register a label that, on click, calls `openPanel`, `navigate`, or (for a
+  spawn launcher) the pack route + child-session open. The click **is** the user gesture —
+  never auto-invoke on mount (see the [child-session auto-open carve-out](#panels--persistent-side-panels-hostuiopenpanel)
+  for the single sanctioned exception).
 - **`kind:"route"`** registers a deep-link in the client pack-route registry.
   `navigate({ route, params })` looks it up, filters `params` to the declared `paramKeys`, and
   serializes `#/ext/<routeId>?<params>` through the router — **you never build a URL string**.
@@ -960,12 +1022,12 @@ pr-walkthrough/
 
 | Built-in piece | Pack contribution |
 |---|---|
-| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`; the panel launches via the `run` route and polls `status` (see below). After `run` returns the child id it opens the pane **in the reviewer child's session view** via the contract-v2 `host.ui.openPanel({ panelId, sessionId: childSessionId })` (a real session switch — see [`PanelTarget.sessionId`](#panels--persistent-side-panels-hostuiopenpanel)), feature-detected with `host.contractVersion >= 2` and falling back to the active view on a v1 host |
-| Launch — a real isolated reviewer | the `run` route calls **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, toolEnv })`** to mint a visible read-only child — NOT `host.session.postMessage`; the user's own agent is never driven |
+| `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
+| Launch — spawn-on-click, a real isolated reviewer | all three launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces inline in the git-widget dropdown; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
-| `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — also holds the `binding/`, `reviewer/`, `submitted/`, and `last/` routing keys for the reviewer child |
-| Deep-link + launchers | four `entrypoints/*.yaml` — three launchers (composer-slash, git-widget-button, command-palette) **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) |
-| Reload recovery | the `recover` route returns the persisted YAML so the **Load walkthrough** gesture re-renders cards (the reviewer's submit call lives in the dismissed child, not the owner transcript). It authorizes from **either bound principal**: it checks a **child self-recover** branch **first** — when the caller is the reviewer child it resolves from its own `binding/<childSessionId>` — and otherwise falls back to the owner-scoped `last/<sessionId>` pointer; `host.session.readToolCall` remains a legacy fallback |
+| `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds the `binding/<child>` and `submitted/<jobId>` routing keys for the reviewer child. The old `reviewer/` dedup index and owner `last/` recovery pointer were removed (always-fresh launch + child-self recovery only) |
+| Deep-link + launchers | four `entrypoints/*.yaml` — three **spawn launchers** (composer-slash, git-widget-button, command-palette) all carrying `target.action: spawn` **and** a `kind:"route"` deep-link (`routeId:"pr-walkthrough"`) that re-registers the panel so a child-session reload restores `#/ext/pr-walkthrough` |
+| Reload recovery | the `recover` route is **child-self only**: the reviewer child pane auto-invokes it on mount (the read-only carve-out) and it resolves the persisted YAML from the child's own `binding/<childSessionId>` (`binding/<self>` → `submitted/<jobId>`). The old owner-scoped `last/<sessionId>` branch and the manual "Load walkthrough" gesture were removed with the owner-session surface |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
 Two non-obvious decisions worth copying:
@@ -984,7 +1046,9 @@ Two non-obvious decisions worth copying:
    See `docs/design/pr-walkthrough-pack-deletion.md`.)
 
 Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
-launcher → panel renders from `callRoute` + store → `readToolCall` → deep-link → disable/re-enable).
+launcher click spawns the reviewer child → the bound child pane auto-renders from `callRoute` +
+store via child-self `status`/`recover` → deep-link → disable/re-enable). There is no owner-transcript
+`readToolCall` scan and no manual Load path.
 
 ## First-party packs dogfood the Host API
 
@@ -1013,8 +1077,10 @@ Two pieces of the migration are worth understanding when authoring your own ambi
   [Spawning a role-carrying, scoped child](#spawning-a-role-carrying-scoped-child-the-isolated-reviewer-pattern)
   and [docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)).
   The panel implements a small state machine (`running` → `submitted` → `publishing` → `rendered`,
-  with timeout/error states + a `recover`-backed Load gesture for reloads) so the launch flow is
-  resilient, not just the happy path — see `market-packs/pr-walkthrough/src/panel.js`.
+  with timeout/error states) so the launch flow is resilient, not just the happy path. There are no
+  manual `Run`/`Load` buttons: inside the bound reviewer-child pane the panel auto-opens and
+  self-drives the poll (the read-only carve-out), and on reload it auto-recovers on mount via the
+  child-self `recover` — see `market-packs/pr-walkthrough/src/panel.js`.
 - **Shared synthesis, one source of truth, bundled into the pack.** The viewer must turn the
   submitted production YAML into the same cards the deleted built-in produced. That synthesis
   (`validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + helpers)
