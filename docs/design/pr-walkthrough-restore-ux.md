@@ -1,6 +1,18 @@
 # Restore PR Walkthrough UX
 
-**Status:** design — implementation-ready
+> **⚠️ SUPERSEDED (launch + lifecycle model).** The launch flow and reviewer
+> lifecycle described below — navigate the owner session, autorun on mount,
+> re-key the pane to the child, and **server-dismiss the reviewer on submit** —
+> were replaced by the spawn-on-click model in
+> [`pr-walkthrough-launch-ux.md`](pr-walkthrough-launch-ux.md): a launcher click
+> spawns a fresh read-only reviewer and auto-switches to it (no owner-session
+> panel), the child pane auto-opens read-only, and the reviewer is **never
+> auto-dismissed** (it persists until the user terminates it). The
+> `host.agents`-minted, role-granted, no-secret, binding-routed reviewer
+> foundation in this doc still holds; only the launch/lifecycle layer is
+> superseded. See also [docs/pr-walkthrough-panel.md](../pr-walkthrough-panel.md).
+
+**Status:** superseded for launch/lifecycle (see banner) — foundation retained
 **Goal:** Restore the PR Walkthrough feature to its pre-pack-migration user journey
 (a first-class reviewer child whose walkthrough pane lives *with that child's
 session*), and fix the role-resolution bug that currently makes the reviewer child
