@@ -4,17 +4,17 @@
  *
  * Covers:
  *   - manifest validation: contents.entrypoints (string[]) + top-level
- *     routes:{module,names} accepted; contents.mcp still rejected; no stores schema.
+ *     routes:{module,names} accepted; contents.mcp rejected for schema 1 and accepted for schema 2; schema-v2 keys round-trip.
  *   - loadPackContributions: panels/*.yaml + entrypoints/*.yaml (filtered by
  *     contents.entrypoints[], carrying listName) + pack.yaml.routes → §5.1 shapes;
  *     malformed file warned + dropped.
  *   - path containment to PACK ROOT (renderer/entry/routes.module via
  *     isPackPathWithinRoot); escaping path rejected.
- *   - the 4 hard conflicts: dup panel id / dup entrypoint id / dup route name
+ *   - hard conflicts: dup panel id / dup entrypoint id / dup route name
  *     (loader throws PackContributionError); dup host-global routeId (registry
  *     registers NEITHER deep-link).
  *   - winning-pack collapse (§5.2.1): same packId at two scopes → ONE getPack.
- *   - activation filtering (§7): a disabled entrypoint is omitted.
+ *   - activation filtering (§7): disabled entrypoints/providers are omitted.
  *   - a no-tools pack still registers panels/entrypoints/routes.
  */
 import { describe, it, before, after } from "node:test";
@@ -76,10 +76,53 @@ describe("validateManifest (§1.2)", () => {
 		const m = validateManifest({ ...ok, routes: { module: "lib/routes.mjs", names: ["bundle", "publish"] } });
 		assert.deepEqual(m!.routes, { module: "lib/routes.mjs", names: ["bundle", "publish"] });
 	});
-	it("still rejects contents.mcp; carries no stores schema", () => {
-		assert.equal(validateManifest({ ...ok, contents: { ...ok.contents, mcp: ["x"] } }), null);
+	it("still rejects contents.mcp at schema 1; carries no stores schema", () => {
+		const problems: string[] = [];
+		assert.equal(validateManifest({ ...ok, contents: { ...ok.contents, mcp: ["x"] } }, problems), null);
+		assert.equal(problems[0], "pack.yaml: contents.mcp is not allowed (MCP installs are out of scope in MVP)");
 		const m = validateManifest(ok)! as unknown as Record<string, unknown>;
 		assert.equal((m.contents as Record<string, unknown>).stores, undefined);
+	});
+
+	it("schema 2 accepts and normalizes new contents keys plus capabilities", () => {
+		const m = validateManifest({
+			...ok,
+			schema: 2,
+			provides: ["memory-api"],
+			requires: ["host-api"],
+			contents: {
+				...ok.contents,
+				providers: ["memory"],
+				hooks: ["turn"],
+				mcp: ["local"],
+				"pi-extensions": ["pi"],
+				runtimes: ["node"],
+				workflows: ["review"],
+			},
+		});
+		assert.ok(m);
+		assert.equal(m.schema, 2);
+		assert.deepEqual(m.provides, ["memory-api"]);
+		assert.deepEqual(m.requires, ["host-api"]);
+		assert.deepEqual(m.contents.providers, ["memory"]);
+		assert.deepEqual(m.contents.hooks, ["turn"]);
+		assert.deepEqual(m.contents.mcp, ["local"]);
+		assert.deepEqual(m.contents.piExtensions, ["pi"]);
+		assert.deepEqual(m.contents.runtimes, ["node"]);
+		assert.deepEqual(m.contents.workflows, ["review"]);
+	});
+
+	it("rejects bad capability names and warns on newer schemas without failing", () => {
+		const badProblems: string[] = [];
+		assert.equal(validateManifest({ ...ok, schema: 2, provides: ["Bad_Name"] }, badProblems), null);
+		assert.equal(badProblems[0], 'pack.yaml: provides entry "Bad_Name" must match /^[a-z0-9][a-z0-9-]*$/');
+
+		const problems: string[] = [];
+		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, providers: ["memory"] } }, problems);
+		assert.ok(m);
+		assert.equal(m.schema, 3);
+		assert.deepEqual(m.contents.providers, ["memory"]);
+		assert.deepEqual(problems, ["pack.yaml: schema 3 is newer than supported (2)"]);
 	});
 });
 
@@ -88,7 +131,18 @@ describe("validateManifest (§1.2)", () => {
 function manifest(name: string, opts: Partial<PackManifest["contents"]> & { routes?: PackManifest["routes"] } = {}): PackManifest {
 	return {
 		name, description: "d", version: "1",
-		contents: { roles: [], tools: [], skills: [], entrypoints: opts.entrypoints ?? [] },
+		contents: {
+			roles: [],
+			tools: [],
+			skills: [],
+			entrypoints: opts.entrypoints ?? [],
+			providers: opts.providers ?? [],
+			hooks: opts.hooks ?? [],
+			mcp: opts.mcp ?? [],
+			piExtensions: opts.piExtensions ?? [],
+			runtimes: opts.runtimes ?? [],
+			workflows: opts.workflows ?? [],
+		},
 		...(opts.routes ? { routes: opts.routes } : {}),
 	};
 }
@@ -250,6 +304,27 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		const pack = filtered.getPack(undefined, "artifacts")!;
 		assert.equal(pack.entrypoints.length, 0);
 		assert.equal(pack.panels.length, 1);
+	});
+
+	it("activation filtering: a disabled provider is omitted and re-enabled by removing the ref", () => {
+		const root = packRoot("act-provider", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), "id: memory\nmodule: ../lib/provider.js\nhooks: [beforePrompt]\n");
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = manifest("memory-pack", { providers: ["memory"] });
+		const enabled = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(enabled.listProviders(undefined).map((p) => p.id), ["memory"]);
+
+		const filtered = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined,
+			(_scope, _pid, packName) => (packName === "memory-pack" ? ["memory"] : []),
+		);
+		assert.deepEqual(filtered.listProviders(undefined).map((p) => p.id), []);
+
+		const restored = new PackContributionRegistry(() => [entry(root, "server", m)], undefined, () => []);
+		assert.deepEqual(restored.listProviders(undefined).map((p) => p.id), ["memory"]);
+		assert.equal(restored.getPack(undefined, "memory-pack")!.entrypoints.length, 0, "entrypoint filtering remains unchanged");
 	});
 
 	it("always-emit: an installed pack with no panels/entrypoints/routes still produces a list row", () => {

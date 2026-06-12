@@ -87,13 +87,40 @@ export function validateManifest(
 	if (!nonEmptyString(d.description)) return fail("pack.yaml: description is required and non-empty");
 	if (!nonEmptyString(d.version)) return fail("pack.yaml: version is required and non-empty");
 
+	let schema = 1;
+	if (d.schema !== undefined) {
+		if (typeof d.schema !== "number" || !Number.isInteger(d.schema) || d.schema <= 0) {
+			return fail("pack.yaml: schema must be a positive integer");
+		}
+		schema = d.schema;
+		if (schema > 2) problems?.push(`pack.yaml: schema ${schema} is newer than supported (2)`);
+	}
+
+	const parseCapabilities = (key: "provides" | "requires"): string[] | undefined | null => {
+		const raw = d[key];
+		if (raw === undefined) return undefined;
+		const parsed = asStringArray(raw);
+		if (parsed === null) return fail(`pack.yaml: ${key} must be an array of strings`);
+		for (const entry of parsed) {
+			if (!PACK_NAME_RE.test(entry)) {
+				return fail(`pack.yaml: ${key} entry ${JSON.stringify(entry)} must match /^[a-z0-9][a-z0-9-]*$/`);
+			}
+		}
+		return parsed;
+	};
+	const provides = parseCapabilities("provides");
+	if (provides === null) return null;
+	const requires = parseCapabilities("requires");
+	if (requires === null) return null;
+
 	const contents = d.contents;
 	if (!contents || typeof contents !== "object" || Array.isArray(contents)) {
 		return fail("pack.yaml: contents is required (object with roles/tools/skills arrays)");
 	}
 	const c = contents as Record<string, unknown>;
-	// MVP boundary: MCP installs are out of scope — reject any contents.mcp.
-	if ("mcp" in c) {
+	// MVP boundary for v1: MCP installs were out of scope. Schema 2 accepts the
+	// catalogue key only; no MCP loader is introduced in this PR.
+	if (schema < 2 && "mcp" in c) {
 		return fail("pack.yaml: contents.mcp is not allowed (MCP installs are out of scope in MVP)");
 	}
 	const roles = asStringArray(c.roles);
@@ -102,32 +129,47 @@ export function validateManifest(
 	if (roles === null) return fail("pack.yaml: contents.roles must be an array of strings");
 	if (tools === null) return fail("pack.yaml: contents.tools must be an array of strings");
 	if (skills === null) return fail("pack.yaml: contents.skills must be an array of strings");
-	// NEW (pack-schema-v1 §1.2): contents.entrypoints — basenames of entrypoints/<name>.yaml
-	// files. Optional + defaults to [] (a pack with no entrypoints stays valid); when
-	// present it MUST be a string array.
-	let entrypoints: string[] = [];
-	if (c.entrypoints !== undefined) {
-		const parsed = asStringArray(c.entrypoints);
-		if (parsed === null) return fail("pack.yaml: contents.entrypoints must be an array of strings");
-		// Path-traversal guard: each entry is a file basename joined into
-		// entrypoints/<name>.yaml — reject separators, `..`, absolute/drive forms.
+	const parseContentsBasenames = (yamlKey: string, raw: unknown): string[] | null => {
+		if (raw === undefined) return [];
+		const parsed = asStringArray(raw);
+		if (parsed === null) return fail(`pack.yaml: contents.${yamlKey} must be an array of strings`);
+		// Path-traversal guard: each entry is a file basename joined into a
+		// contribution subdir — reject separators, `..`, absolute/drive forms.
 		for (const e of parsed) {
 			if (!isSafeBasename(e)) {
 				return fail(
-					`pack.yaml: contents.entrypoints entry ${JSON.stringify(e)} is not a safe basename ` +
+					`pack.yaml: contents.${yamlKey} entry ${JSON.stringify(e)} is not a safe basename ` +
 						`(must match /^[A-Za-z0-9._-]+$/ with no path separators or ".." segments)`,
 				);
 			}
 		}
-		entrypoints = parsed;
-	}
+		return parsed;
+	};
+	// contents.entrypoints — basenames of entrypoints/<name>.yaml files.
+	const entrypoints = parseContentsBasenames("entrypoints", c.entrypoints);
+	if (entrypoints === null) return null;
+	const providers = parseContentsBasenames("providers", c.providers);
+	if (providers === null) return null;
+	const hooks = parseContentsBasenames("hooks", c.hooks);
+	if (hooks === null) return null;
+	const mcp = parseContentsBasenames("mcp", c.mcp);
+	if (mcp === null) return null;
+	const piExtensions = parseContentsBasenames("pi-extensions", c["pi-extensions"]);
+	if (piExtensions === null) return null;
+	const runtimes = parseContentsBasenames("runtimes", c.runtimes);
+	if (runtimes === null) return null;
+	const workflows = parseContentsBasenames("workflows", c.workflows);
+	if (workflows === null) return null;
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints },
+		contents: { roles, tools, skills, entrypoints, providers, hooks, mcp, piExtensions, runtimes, workflows },
 	};
+	if (d.schema !== undefined) manifest.schema = schema;
+	if (provides !== undefined) manifest.provides = provides;
+	if (requires !== undefined) manifest.requires = requires;
 	// NEW (pack-schema-v1 §1.2): optional top-level `routes: { module?, names? }`.
 	// Tolerant — a malformed routes block is dropped (no routes), never fatal.
 	const routes = parseRoutesRef(d.routes);
