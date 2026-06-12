@@ -7,6 +7,7 @@ import https from "node:https";
 import path from "node:path";
 
 import os from "node:os";
+import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
 import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-timing.js";
@@ -273,6 +274,7 @@ import { builtinFirstPartyPackEntries, resolveBuiltinPacksDir } from "./agent/bu
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions } from "./agent/marketplace-install.js";
 import { scopeMarketPackEntries } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { isSafeBasename } from "./agent/pack-manifest.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -301,6 +303,89 @@ export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
+
+function oneLineDescription(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const t = value.replace(/\s+/g, " ").trim();
+	return t.length > 0 ? t : undefined;
+}
+
+function readYamlMapping(file: string): Record<string, unknown> | null {
+	try {
+		const data = parseYaml(fs.readFileSync(file, "utf-8"));
+		return data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Expand manifest-declared tool GROUP directories into concrete tool names.
+ * `DisabledRefs.tools` is keyed by tool name, while pack.yaml keeps declaring
+ * tool groups for manifest compatibility.
+ */
+export function readConcretePackToolsFromGroups(
+	packDir: string,
+	toolGroups: readonly string[],
+): { tools: string[]; descriptions: Record<string, string> } {
+	const tools: string[] = [];
+	const descriptions: Record<string, string> = {};
+	const seen = new Set<string>();
+	const toolsDir = path.join(packDir, "tools");
+	if (!isPackPathWithinRoot(packDir, toolsDir)) return { tools, descriptions };
+
+	for (const group of toolGroups) {
+		if (!isSafeBasename(group)) continue;
+		const groupDir = path.join(toolsDir, group);
+		if (!isPackPathWithinRoot(toolsDir, groupDir)) continue;
+		let files: fs.Dirent[];
+		try {
+			files = fs.readdirSync(groupDir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const file of files) {
+			if (!file.isFile() || (!file.name.endsWith(".yaml") && !file.name.endsWith(".yml"))) continue;
+			const yamlPath = path.join(groupDir, file.name);
+			if (!isPackPathWithinRoot(groupDir, yamlPath)) continue;
+			const data = readYamlMapping(yamlPath);
+			const name = typeof data?.name === "string" ? data.name : "";
+			if (!name || seen.has(name)) continue;
+			seen.add(name);
+			tools.push(name);
+			const desc = oneLineDescription(data?.description);
+			if (desc) descriptions[name] = desc;
+		}
+	}
+	return { tools, descriptions };
+}
+
+export function buildMarketToolRootsForProject(options: {
+	projectId?: string;
+	builtinEntries: readonly PackEntry[];
+	marketEntries: (scope: InstallScope, projectId?: string) => readonly PackEntry[];
+	disabledTools: (scope: InstallScope, projectId: string | undefined, packName: string) => readonly string[] | undefined;
+}): MarketToolRoot[] {
+	const roots: MarketToolRoot[] = [];
+	const seen = new Set<string>();
+	const push = (entry: PackEntry, activationScope: InstallScope): void => {
+		const toolsDir = path.join(entry.path, "tools");
+		const key = path.resolve(toolsDir);
+		if (seen.has(key)) return;
+		seen.add(key);
+		const packName = entry.manifest?.name;
+		const disabledTools = packName ? options.disabledTools(activationScope, options.projectId, packName) : undefined;
+		roots.push({ dir: toolsDir, disabledTools: disabledTools ? [...disabledTools] : undefined });
+	};
+
+	// Built-in first-party packs are toggleable at server scope and sit below all
+	// user-installed market scopes, mirroring ConfigCascade.resolveEntities().
+	for (const entry of options.builtinEntries) push(entry, "server");
+	for (const scope of ["server", "global-user", "project"] as const) {
+		for (const entry of options.marketEntries(scope, options.projectId)) push(entry, scope);
+	}
+	return roots;
+}
 
 /**
  * Delete remote branches associated with a goal (integration + agent worktree branches).
@@ -1021,24 +1106,13 @@ export function createGateway(config: GatewayConfig) {
 	// listing does — no split-brain between `/api/tools` and the renderer/action/
 	// surface-token/prompt-doc paths. `packActivationStore` is the SAME store the
 	// cascade reads (defined just below; referenced lazily at request time).
-	const marketToolRoots = (projectId?: string): MarketToolRoot[] => {
-		const roots: MarketToolRoot[] = [];
-		const seen = new Set<string>();
-		for (const scope of ["server", "global-user", "project"] as const) {
-			for (const e of marketPackProvider.marketEntries(scope, projectId)) {
-				const toolsDir = path.join(e.path, "tools");
-				const key = path.resolve(toolsDir);
-				if (seen.has(key)) continue;
-				seen.add(key);
-				const packName = e.manifest?.name;
-				const disabledTools = packName
-					? packActivationStore(scope, projectId)?.getPackActivation(scope, packName).tools
-					: undefined;
-				roots.push({ dir: toolsDir, disabledTools: disabledTools ?? undefined });
-			}
-		}
-		return roots;
-	};
+	const marketToolRoots = (projectId?: string): MarketToolRoot[] =>
+		buildMarketToolRootsForProject({
+			projectId,
+			builtinEntries: builtinFirstPartyPackEntries(resolveBuiltinPacksDir()),
+			marketEntries: (scope, pid) => marketPackProvider.marketEntries(scope, pid),
+			disabledTools: (scope, pid, packName) => packActivationStore(scope, pid)?.getPackActivation(scope, packName).tools,
+		});
 	// Server-level toolManager (used by GET /api/tools/:name without a project)
 	// sees server + global-user market packs (project scope needs a projectId).
 	toolManager.setMarketToolRootsProvider(() => marketToolRoots(undefined));
@@ -6539,6 +6613,13 @@ async function handleApiRoute(
 			}
 			if (!entry || !entry.manifest) return null;
 			const c = entry.manifest.contents;
+			const concreteTools = readConcretePackToolsFromGroups(entry.path, c.tools);
+			const descriptions = readPackEntityDescriptions(entry.path, entry.manifest);
+			if (Object.keys(concreteTools.descriptions).length > 0) {
+				descriptions.tools = concreteTools.descriptions;
+			} else {
+				delete descriptions.tools;
+			}
 			// Entrypoint display metadata (best-effort) from the entrypoint files.
 			// The Market UI needs the kind/route to distinguish duplicate labels such as
 			// "PR Walkthrough" in different launch surfaces.
@@ -6550,7 +6631,7 @@ async function handleApiRoute(
 			} catch { /* metadata is optional; listName is the stable key */ }
 			return {
 				roles: [...c.roles],
-				tools: [...c.tools],
+				tools: concreteTools.tools,
 				skills: [...c.skills],
 				entrypoints: (c.entrypoints ?? []).map((listName) => {
 					const meta = entrypointByListName.get(listName);
@@ -6559,7 +6640,7 @@ async function handleApiRoute(
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never
 				// from the runtime-filtered /api/tools or /api/ext/contributions.
-				descriptions: readPackEntityDescriptions(entry.path, entry.manifest),
+				descriptions,
 			};
 		};
 		if (url.pathname === "/api/marketplace/pack-activation" && req.method === "GET") {
