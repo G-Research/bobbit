@@ -25,10 +25,10 @@ export interface TrustedExecutableResolutionOptions {
 
 async function loadPolicy(): Promise<(command: string, options?: PolicyOptions) => PolicyDecision> {
 	try {
-		const mod = await import("../../../src/server/pr-walkthrough/walkthrough-readonly-policy.ts");
+		const mod = await import("../../../../src/server/pr-walkthrough/walkthrough-readonly-policy.ts");
 		return mod.evaluateWalkthroughReadonlyCommand;
 	} catch {
-		const mod = await import("../../../pr-walkthrough/walkthrough-readonly-policy.js");
+		const mod = await import("../../../../pr-walkthrough/walkthrough-readonly-policy.js");
 		return mod.evaluateWalkthroughReadonlyCommand;
 	}
 }

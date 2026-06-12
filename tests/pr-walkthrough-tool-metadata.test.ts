@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { normalizeReadonlyTimeout } from "../defaults/tools/pr-walkthrough/extension.ts";
+import { normalizeReadonlyTimeout } from "../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
 
-const groupDir = path.resolve("defaults/tools/pr-walkthrough");
+const groupDir = path.resolve("market-packs/pr-walkthrough/tools/pr-walkthrough");
 
 function readToolText(file: string): string {
 	return fs.readFileSync(path.join(groupDir, file), "utf-8");
