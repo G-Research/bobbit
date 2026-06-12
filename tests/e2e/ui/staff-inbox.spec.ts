@@ -230,12 +230,20 @@ test.describe("Staff inbox panel", () => {
 		await tab.click();
 		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 5_000 });
 
-		// Press Ctrl+] to collapse — the keyboard handler treats staff sessions as
+		// Press Ctrl/Cmd+] to collapse — the keyboard handler treats staff sessions as
 		// panel-bearing once `state.inboxPanelOpen` is true. After collapse, the
 		// localStorage key matches the shared per-session pattern.
 		// Wait for the shortcut listener to attach (document.body.dataset.shortcutsReady).
 		await page.waitForFunction(() => document.body.dataset.shortcutsReady === "1");
-		await page.keyboard.press("Control+]");
+		// Dispatch the keydown with BOTH ctrlKey and metaKey so the platform-aware
+		// `ctrlOrMeta` match in shortcut-registry fires on macOS (metaKey) and
+		// Linux/Windows (ctrlKey). `page.keyboard.press("Control+]")` only sets
+		// ctrlKey, so it never matches on macOS where ctrlOrMeta resolves to Cmd.
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "]", code: "BracketRight", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		});
 
 		const collapsedKey = `bobbit-preview-collapsed-${sid}`;
 		const collapsed = await page.evaluate((k) => localStorage.getItem(k), collapsedKey);
