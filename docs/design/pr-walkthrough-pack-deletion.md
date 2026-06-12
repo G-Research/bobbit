@@ -77,13 +77,15 @@ is a pack DESIGN CHOICE (keep `bundle` deterministic), not a credential limitati
 > `pr-walkthrough` is now a **built-in first-party pack** resolved **in place**
 > active-by-default via the built-in first-party band in `buildPackList()`
 > (`builtinFirstPartyPackEntries()`) — **no manual install**, and it cannot be
-> uninstalled, only **disabled** via the activation toggles. It is a **no-tools /
-> UI-only** pack (`pack.yaml` + `panels/` + `entrypoints/` + `lib/`), not a
-> `tools/`-bearing pack. See
-> [built-in-first-party-packs.md](./built-in-first-party-packs.md) and
-> [docs/marketplace.md § Built-in (first-party) packs](../marketplace.md#built-in-first-party-packs).
-> The parity table below stays accurate (it maps bespoke surfaces → pack
-> re-expression); only the install/uninstall framing is historical.
+> uninstalled, only **disabled** via the activation toggles. It is no longer a
+> no-tools/UI-only pack: it owns its reviewer tools under
+> `market-packs/pr-walkthrough/tools/pr-walkthrough/`, and `pack.yaml` advertises
+> the `pr-walkthrough` tool group. Marketplace expands that group into concrete
+> tool toggles. See [built-in-first-party-packs.md](./built-in-first-party-packs.md)
+> and [docs/marketplace.md § Built-in (first-party) packs](../marketplace.md#built-in-first-party-packs).
+> The parity table below stays accurate for pack-bound surfaces (it maps bespoke
+> surfaces → pack re-expression); only the install/uninstall and no-tools framing
+> is historical.
 
 The pack ships at the repo-root design-specified location
 `market-packs/pr-walkthrough/` (NOT as a test fixture) and is built by
@@ -96,7 +98,7 @@ contributions + the durable Host API:
 | Changeset/diff bundle endpoint | `src/server/pr-walkthrough/routes.ts` (`handlePrWalkthroughApiRoute`) | `routes:` → `routes.mjs` (`bundle` LIVE git recompute + `publish` persist), reached via `host.callRoute`, using ambient `child_process`/`fs` |
 | Persisted job/changeset state | `src/server/pr-walkthrough/walkthrough-store.ts` | `stores:` → `host.store.*` (pack-namespaced) |
 | Launcher + SPA deep-link | composer/git-widget launch + the `"walkthrough"` `RouteView` in `src/app/routing.ts` (its union entry + `getRouteFromHash` case) | `entrypoints:` (composer-slash + **git-widget-button** + command-palette launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
-| Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
+| Submitted YAML handoff | bespoke transcript access / viewer feed | the pack-spawned reviewer calls `submit_pr_walkthrough_yaml`; the server resolves the caller session, writes the pack-store submitted marker, and the panel observes it through `status`/`recover` |
 
 The mandatory E2E `tests/e2e/ui/pr-walkthrough-pack.spec.ts` exercises the full
 chain end-to-end (the pack resolves active-by-default via the built-in band →
@@ -190,11 +192,11 @@ PR-walkthrough QA pass on the pack is green:
   (see the credential carve-outs above).
 - **Server store** — `src/server/pr-walkthrough/walkthrough-store.ts` (the
   schema-versioned file persistence) is replaced by `host.store.*`.
-- **Tool defs** — `defaults/tools/pr-walkthrough/` (`submit.yaml`,
-  `read_pr_walkthrough_bundle.yaml`, `readonly_bash.yaml`, `extension.ts`) move into
-  the pack as appropriate. NOTE: the agent-facing `submit_pr_walkthrough_yaml` /
-  `read_pr_walkthrough_bundle` tools that DRIVE a walkthrough (agent side) are a
-  larger migration than the VIEWER litmus covers — see "Out of scope" below.
+- **Tool defs** — the agent-facing `submit_pr_walkthrough_yaml`,
+  `read_pr_walkthrough_bundle`, and `readonly_bash` tools now live in
+  `market-packs/pr-walkthrough/tools/pr-walkthrough/` with a shared
+  `extension.ts`. They are normal agent tools granted through role/tool-policy
+  resolution, not carrier authorization for the panel/routes/entrypoints.
 
 Supporting server modules split by capability. The **structural** changeset/diff
 logic (`git-changeset.ts`, `diff-parser.ts`) is now RE-EXPRESSED LIVE in the pack

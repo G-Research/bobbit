@@ -120,24 +120,43 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 
 	// GAP 2: the reviewer must resolve to EXACTLY the three walkthrough tools — no
 	// state-mutating / orchestration tools leak through. Enumerate every FIXED tool
-	// shipped under defaults/tools and assert the pr-reviewer role resolves only the
-	// PR Walkthrough trio to a non-`never` policy; every other tool resolves to
-	// `never`. (Dynamic per-server MCP tool groups use runtime keys not expressible
-	// in a static role file and are out of scope for this fixed-surface assertion.)
+	// shipped under defaults/tools plus the pack-origin PR Walkthrough tool YAMLs and
+	// assert the pr-reviewer role resolves only the PR Walkthrough trio to a non-`never`
+	// policy; every other tool resolves to `never`. (Dynamic per-server MCP tool groups
+	// use runtime keys not expressible in a static role file and are out of scope for
+	// this fixed-surface assertion.)
 	const TOOLS_DIR = path.join(DEFAULTS_DIR, "tools");
+	const PR_WALKTHROUGH_PACK_TOOLS_DIR = path.join(ROOT, "market-packs", "pr-walkthrough", "tools", "pr-walkthrough");
+
+	function readToolYaml(filePath: string): { name: string; group: string } | null {
+		const doc = YAML.parse(fs.readFileSync(filePath, "utf-8")) as { name?: string; group?: string } | null;
+		if (doc && typeof doc.name === "string" && typeof doc.group === "string") {
+			return { name: doc.name, group: doc.group };
+		}
+		return null;
+	}
+
+	function appendToolYamlFiles(out: Array<{ name: string; group: string }>, dir: string): void {
+		for (const file of fs.readdirSync(dir)) {
+			if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+			const tool = readToolYaml(path.join(dir, file));
+			if (tool) out.push(tool);
+		}
+	}
+
 	function enumerateFixedTools(): Array<{ name: string; group: string }> {
 		const out: Array<{ name: string; group: string }> = [];
 		for (const groupDir of fs.readdirSync(TOOLS_DIR)) {
 			const abs = path.join(TOOLS_DIR, groupDir);
 			if (!fs.statSync(abs).isDirectory()) continue;
-			for (const file of fs.readdirSync(abs)) {
-				if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
-				const doc = YAML.parse(fs.readFileSync(path.join(abs, file), "utf-8")) as { name?: string; group?: string } | null;
-				if (doc && typeof doc.name === "string" && typeof doc.group === "string") {
-					out.push({ name: doc.name, group: doc.group });
-				}
-			}
+			appendToolYamlFiles(out, abs);
 		}
+		appendToolYamlFiles(out, PR_WALKTHROUGH_PACK_TOOLS_DIR);
+
+		const duplicates = out
+			.map(tool => tool.name)
+			.filter((name, index, names) => names.indexOf(name) !== index);
+		assert.deepEqual(duplicates, [], "fixed tool surface must not contain duplicate active tool names");
 		return out;
 	}
 

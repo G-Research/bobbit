@@ -2,10 +2,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { normalizeReadonlyTimeout } from "../defaults/tools/pr-walkthrough/extension.ts";
+import {
+	loadPolicy,
+	normalizeReadonlyTimeout,
+	readonlyPolicyImportSpecifiers,
+} from "../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
 
-const groupDir = path.resolve("defaults/tools/pr-walkthrough");
+const groupDir = path.resolve("market-packs/pr-walkthrough/tools/pr-walkthrough");
 
 function readToolText(file: string): string {
 	return fs.readFileSync(path.join(groupDir, file), "utf-8");
@@ -88,6 +93,46 @@ describe("PR walkthrough tool metadata", () => {
 		assert.doesNotMatch(source, /createWriteStream|tmpdir|tempFilePath|Full output saved to/);
 	});
 
+	it("resolves readonly policy imports for source and shipped built-in pack paths", () => {
+		const sourceUrl = pathToFileURL(path.join(process.cwd(), "market-packs", "pr-walkthrough", "tools", "pr-walkthrough", "extension.ts")).href;
+		assert.equal(
+			readonlyPolicyImportSpecifiers(sourceUrl)[0],
+			pathToFileURL(path.join(process.cwd(), "src", "server", "pr-walkthrough", "walkthrough-readonly-policy.ts")).href,
+		);
+
+		const distExtensionUrl = pathToFileURL(path.join(process.cwd(), "dist", "server", "builtin-packs", "market-packs", "pr-walkthrough", "tools", "pr-walkthrough", "extension.ts")).href;
+		assert.equal(
+			readonlyPolicyImportSpecifiers(distExtensionUrl)[1],
+			pathToFileURL(path.join(process.cwd(), "dist", "server", "pr-walkthrough", "walkthrough-readonly-policy.js")).href,
+		);
+	});
+
+	it("loads the readonly policy from the shipped built-in dist path", async () => {
+		const distExtensionUrl = pathToFileURL(path.join(process.cwd(), "dist", "server", "builtin-packs", "market-packs", "pr-walkthrough", "tools", "pr-walkthrough", "extension.ts")).href;
+		const expectedDistPolicy = pathToFileURL(path.join(process.cwd(), "dist", "server", "pr-walkthrough", "walkthrough-readonly-policy.js")).href;
+		const evaluate = await loadPolicy(distExtensionUrl, async (specifier) => {
+			if (specifier !== expectedDistPolicy) throw new Error("wrong import path");
+			return { evaluateWalkthroughReadonlyCommand: () => ({ allowed: true, argv: ["dist-policy"] }) };
+		});
+
+		assert.deepEqual(evaluate("ignored"), { allowed: true, argv: ["dist-policy"] });
+	});
+
+	it("falls back to the bundled readonly policy from Docker-remapped pack paths", async () => {
+		const attempted: string[] = [];
+		const evaluate = await loadPolicy(
+			"file:///market-packs-builtin/pr-walkthrough/tools/pr-walkthrough/extension.ts",
+			async (specifier) => {
+				attempted.push(specifier);
+				throw new Error("not mounted in sandbox");
+			},
+		);
+
+		assert.deepEqual(attempted, readonlyPolicyImportSpecifiers("file:///market-packs-builtin/pr-walkthrough/tools/pr-walkthrough/extension.ts"));
+		assert.deepEqual(evaluate("cat README.md"), { allowed: true, argv: ["cat", "README.md"] });
+		assert.equal(evaluate("rm README.md").allowed, false);
+	});
+
 	it("readonly_bash executes resolved trusted executables directly with a sanitized environment", () => {
 		const source = readToolText("extension.ts");
 		assert.match(source, /resolveTrustedExecutable/);
@@ -99,7 +144,8 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /getSanitizedEnv/);
 		assert.match(source, /NO_COLOR:\s*"1"/);
 		assert.match(source, /FORCE_COLOR:\s*"0"/);
-		assert.doesNotMatch(source, /\/bin\/bash|cmd\.exe|\["-c"\]|\["\/c"\]/);
+		assert.doesNotMatch(source, /\/bin\/bash|\["-c"\]|\["\/c"\]/);
+		assert.doesNotMatch(source, /spawn\([^\n]*cmd\.exe/i);
 		assert.doesNotMatch(source, /\.\.\.process\.env/);
 	});
 

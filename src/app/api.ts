@@ -2556,9 +2556,10 @@ export interface MarketplaceSource {
 }
 
 /** One-line per-entity descriptions sourced from the pack dir (R3). Keyed by the
- *  same identity the toggles/chips use: roles/skills by name, tools by GROUP
- *  name, entrypoints by `listName`. MUST stay in sync with the server type of
- *  the same name (`src/server/agent/marketplace-install.ts`). */
+ *  identity used by the corresponding row: roles/skills by name, activation tools
+ *  by concrete tool name, manifest chips by declared tool group, and entrypoints
+ *  by `listName`. MUST stay in sync with the server type of the same name
+ *  (`src/server/agent/marketplace-install.ts`). */
 export interface PackEntityDescriptions {
 	roles?: Record<string, string>;
 	tools?: Record<string, string>;
@@ -2703,8 +2704,8 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 // Per-scope/project activation overrides for USER-FACING entities only:
 // roles, tools, skills, entrypoints (entrypoints keyed by `listName`). Default
 // (absent) = all enabled. The GET/PUT `catalogue` is the UNFILTERED authoritative
-// source for the Market UI toggles — read straight from the installed pack
-// manifest's `contents`, NOT from the runtime-filtered /api/tools or
+// source for the Market UI toggles — server-expanded from pack declarations (tool
+// groups become concrete tool names), NOT from the runtime-filtered /api/tools or
 // /api/ext/contributions — so a disabled entity stays visible + re-enableable.
 // ============================================================================
 
@@ -2716,9 +2717,10 @@ export interface DisabledRefs {
 	entrypoints?: string[];
 }
 
-/** The UNFILTERED catalogue of toggleable entities a pack DECLARES (§6.7). */
+/** The UNFILTERED catalogue of toggleable entities a pack exposes (§6.7). */
 export interface PackActivationCatalogue {
 	roles: string[];
+	/** Concrete tool names, not manifest tool-group directory names. */
 	tools: string[];
 	skills: string[];
 	entrypoints: Array<{

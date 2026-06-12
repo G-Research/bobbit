@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { buildDockerRunArgs } from "../src/server/agent/docker-args.js";
 
 describe("buildDockerRunArgs", () => {
@@ -58,5 +61,28 @@ describe("buildDockerRunArgs", () => {
 			!args.some(a => a.includes("/workspace-wt")),
 			"should not mount worktrees volume without projectId",
 		);
+	});
+
+	it("mounts config tools, builtin tools, and builtin first-party pack roots read-only", () => {
+		const previousBuiltinPacksDir = process.env.BOBBIT_BUILTIN_PACKS_DIR;
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-docker-pack-mounts-"));
+		const builtinToolsDir = path.join(root, "defaults", "tools");
+		const builtinPacksDir = path.join(root, "builtin-packs", "market-packs");
+		fs.mkdirSync(builtinToolsDir, { recursive: true });
+		fs.mkdirSync(path.join(builtinPacksDir, "pr-walkthrough", "tools", "pr-walkthrough"), { recursive: true });
+		process.env.BOBBIT_BUILTIN_PACKS_DIR = builtinPacksDir;
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test",
+				toolManager: { getBuiltinToolsDir: () => builtinToolsDir } as any,
+			});
+			const mounts = args.filter((a, i) => args[i - 1] === "-v");
+			assert.ok(mounts.some((m) => m.endsWith(":/tools:ro")), "config tools mount stays /tools:ro");
+			assert.ok(mounts.some((m) => m.endsWith(":/tools-builtin:ro")), "builtin tools mount stays /tools-builtin:ro");
+			assert.ok(mounts.some((m) => m.endsWith(":/market-packs-builtin:ro")), "builtin first-party packs mount read-only");
+		} finally {
+			if (previousBuiltinPacksDir === undefined) delete process.env.BOBBIT_BUILTIN_PACKS_DIR;
+			else process.env.BOBBIT_BUILTIN_PACKS_DIR = previousBuiltinPacksDir;
+		}
 	});
 });

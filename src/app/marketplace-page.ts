@@ -72,9 +72,10 @@ let conflicts: ConflictWire[] = [];
 
 /** Per-installed-pack activation catalogue + disabled overrides, keyed by
  *  `${scope}:${packName}` (pack schema V1 §6.7/§9). This is the UNFILTERED
- *  authoritative source for the activation toggles — read from the installed
- *  pack manifest's `contents`, NOT from the runtime-filtered /api/tools or
- *  /api/ext/contributions — so a DISABLED entity stays visible + re-enableable. */
+ *  authoritative source for the activation toggles — server-expanded from pack
+ *  declarations (tool groups become concrete tool names), NOT from the runtime-
+ *  filtered /api/tools or /api/ext/contributions — so a DISABLED entity stays
+ *  visible + re-enableable. */
 const activationByPack = new Map<string, PackActivationResponse>();
 
 let newSourceUrl = "";
@@ -637,7 +638,8 @@ interface EntityNameLists {
  *  entity that HAS a one-line description, across roles/tools/skills/entry
  *  points. Used by BOTH the Installed activation list and the Browse pack card.
  *  Rows with no description are omitted; the disclosure is omitted entirely when
- *  no row would render. Tools are keyed by GROUP name; entrypoints by `listName`
+ *  no row would render. Tool keys follow the provided entity list (manifest groups
+ *  for browse chips, concrete tool names for activation); entrypoints use `listName`
  *  (kind `entrypoint`). */
 function renderEntityDetails(packName: string, descriptions: PackEntityDescriptions | undefined, entities: EntityNameLists): TemplateResult {
 	if (!descriptions) return html``;
@@ -907,9 +909,9 @@ function conflictsForPack(pack: InstalledPackWire): ConflictWire[] {
  *  ALWAYS wins over the built-in, regardless of which entity kinds it ships. We
  *  therefore detect the shadow by the presence of a non-corrupt same-name install,
  *  NOT via `/api/packs/conflicts`: that endpoint only reports role/tool/skill
- *  conflicts, so an ENTRYPOINT/panel/route-only pack (e.g. `pr-walkthrough`, whose
- *  `contents.roles/tools/skills` are all empty) would never appear there and the
- *  built-in row would wrongly stay live (the winner-owns-the-toggle rule broken).
+ *  conflicts, so an ENTRYPOINT/panel/route-only pack with empty role/tool/skill
+ *  declarations would never appear there and the built-in row would wrongly stay
+ *  live (the winner-owns-the-toggle rule broken).
  *  A `corrupt` install is excluded from resolution, so it never wins and never
  *  suppresses the built-in toggle. With no non-corrupt same-name install, the
  *  built-in row owns the live (server, packName) toggle. */
@@ -981,7 +983,7 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 			</div>
 			${shadowed
 				? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
-				: renderActivationControls(pack)}
+				: html`${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
 		</div>
 	`;
 }
@@ -1031,6 +1033,7 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 					${renderProvenance(pack)}
 					${expanded && hasConflict ? renderConflictDetails(packConflicts) : ""}
 					${renderActivationControls(pack)}
+					${renderActivationEntityDetails(pack)}
 				</div>
 				<div class="flex flex-col items-end gap-1 shrink-0">
 					<div class="flex items-center gap-1">
@@ -1126,6 +1129,18 @@ function entrypointKindLabel(kind: PackActivationResponse["catalogue"]["entrypoi
 function entrypointDisplayLabel(entrypoint: PackActivationResponse["catalogue"]["entrypoints"][number]): string {
 	if (entrypoint.kind === "route" && entrypoint.routeId) return `#/ext/${entrypoint.routeId}`;
 	return entrypoint.label || entrypoint.listName;
+}
+
+function renderActivationEntityDetails(pack: InstalledPackWire): TemplateResult {
+	const activation = activationByPack.get(`${pack.scope}:${pack.packName}`);
+	if (!activation) return html``;
+	const cat = activation.catalogue;
+	return renderEntityDetails(pack.packName, cat.descriptions, {
+		roles: cat.roles,
+		tools: cat.tools,
+		skills: cat.skills,
+		entrypoints: cat.entrypoints.map((e) => ({ listName: e.listName, label: entrypointDisplayLabel(e) })),
+	});
 }
 
 function renderActivationControls(pack: InstalledPackWire): TemplateResult {
