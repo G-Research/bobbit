@@ -49,7 +49,7 @@ Everything Bobbit resolves for these three entity types is a pack in that one li
 
 Unifying these into one resolver replaced two separate mechanisms — `ConfigCascade` (roles/tools) and `slash-skills.ts` (skills) — that each had their own precedence rules. See [Architecture](#architecture-developer) below.
 
-> **Out of scope, by design.** MCP servers (`mcp-manager.ts`, `.mcp.json`) and AGENTS/CLAUDE.md prompt assembly (`system-prompt.ts`) keep their own loaders and resolve exactly as before. A market pack may **not** ship `mcp/` or AGENTS content in the MVP. See [Limitations & deferred work](#limitations--deferred-work).
+> **Out of scope, by design.** MCP servers (`mcp-manager.ts`, `.mcp.json`) and AGENTS/CLAUDE.md prompt assembly (`system-prompt.ts`) keep their own loaders and resolve exactly as before. A market pack may **not** ship `mcp/` or AGENTS content in the MVP. See [Limitations & deferred work](#limitations--deferred-work). (The Extension-Platform `schema: 2` manifest now *accepts* a `contents.mcp` catalogue key — see [pack.yaml schema 2](#packyaml-schema-2-extension-platform) — but there is still no MCP **loader**; the key is reserved for a later goal.)
 
 ## Using the marketplace
 
@@ -135,6 +135,15 @@ surface, so you can disable individual entities without uninstalling the pack. *
 user-facing entities are toggleable:** roles, tools, skills, and entrypoints. Support surfaces
 — panels, routes, stores, renderers, actions, `lib/` — are **not** independently toggleable
 (panels may be shown read-only as "support surfaces").
+
+> **Extension Platform (`schema: 2`).** The activation system also covers the new pack-scoped
+> kinds — `providers` plus the reserved siblings `hooks` / `mcp` / `piExtensions` / `runtimes`
+> / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
+> `pack-activation` catalogue includes their arrays, so the toggles round-trip through the same
+> REST. Of these, only **providers** currently has a loader, so disabling a provider actually
+> removes it from `PackContributionRegistry.listProviders(...)`; the other five toggle purely as
+> catalogue metadata until their loaders land. See
+> [pack.yaml schema 2 → Per-provider activation](#per-provider-activation).
 
 What disabling does:
 
@@ -302,7 +311,173 @@ routes:                          # OPTIONAL top-level block — Extension-Host p
   names:  [bundle, publish]       #   exported route-name allowlist.
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected** — MCP installs are out of scope in the MVP. There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected at schema 1** (the absent-or-`1` default) — MCP installs are out of scope in the MVP — but **accepted at `schema: 2`** as catalogue metadata (no MCP loader exists yet; see [pack.yaml schema 2](#packyaml-schema-2-extension-platform)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+
+### `pack.yaml` schema 2 (Extension Platform)
+
+Schema 2 is the first step of the **Extension Platform** workstream. It is deliberately
+**additive and inert**: schema 2 widens what a `pack.yaml` may declare and adds a loader for
+one new contribution type (**providers**), but **nothing dispatches providers yet** — there is
+zero runtime behaviour and zero behaviour change for existing schema-1 (v1) packs. A pack opts
+in with a top-level `schema:` field; absent (or `1`) keeps the exact v1 semantics.
+
+Why ship the schema ahead of the runtime? The Extension Platform lands as a sequence of
+independently-mergeable PRs. Defining the manifest surface and the per-entity activation
+plumbing first means later PRs (the lifecycle hub that actually *runs* providers, plus loaders
+for the other reserved contribution types) only add dispatch — they never have to re-open the
+manifest format or the activation REST. Authors can also start shipping provider files now and
+have them load, validate, and toggle, even though they do nothing until the dispatch PR lands.
+
+#### The `schema` field and back-compat
+
+- **`schema?: number`** — a positive integer. Absent ⇒ **1** (every existing pack). Schema 1
+  keeps verbatim v1 validation, including the `contents.mcp` rejection below.
+- **`schema: 2`** unlocks the six new `contents` keys and the `provides`/`requires` arrays.
+- **`schema: 3` or higher** is *not* fatal: the pack loads its **schema-2 subset** and one
+  forward-compat warning is recorded (`pack.yaml: schema N is newer than supported (2)`).
+  This keeps a newer pack installable on an older Bobbit rather than vanishing — the publisher
+  gets a warning, the supported keys still resolve, and unknown keys are ignored as always.
+
+#### `provides` / `requires` capability names
+
+Two optional top-level arrays of **capability names** (each entry matches `/^[a-z0-9][a-z0-9-]*$/`):
+
+- **`provides?: string[]`** — capability names this pack contributes.
+- **`requires?: string[]`** — capability names this pack depends on.
+
+They are **metadata only** in this PR (recorded on the parsed manifest, surfaced nowhere
+behaviourally yet) — the dependency/capability graph that consumes them belongs to a later
+goal. They are validated now so packs can declare them ahead of that work.
+
+#### Six new `contents` keys
+
+Schema 2 adds six optional `contents` keys. Each is a `string[]` of **safe basenames** (same
+guard as `contents.entrypoints` — no path separators, no `..`, no absolute/drive forms), and
+each defaults to `[]` when absent:
+
+| `contents` key | YAML key | Loader in this PR? | Purpose |
+|---|---|---|---|
+| `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
+| `hooks` | `hooks` | No (reserved) | Hook contribution basenames. |
+| `mcp` | `mcp` | No (reserved) | MCP contribution basenames (accepted at schema 2 only). |
+| `piExtensions` | `pi-extensions` | No (reserved) | PI-extension basenames. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
+| `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
+| `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
+
+**Only `providers` has a loader in this PR.** The other five keys are **accepted** in the
+manifest, **normalised** onto `contents`, and **surfaced in the activation catalogue** (so the
+Market UI and the `pack-activation` REST already see and toggle them), but there is no loader
+that reads their files — that is owned by the later goals that implement each contribution
+type. Declaring them today is harmless: they validate as basenames and round-trip, nothing
+more.
+
+#### Minimal schema-2 example
+
+```yaml
+# pack.yaml
+name: memory-pack
+description: Session-memory provider contributions.
+version: 1.0.0
+schema: 2                     # opt into schema 2; absent ⇒ schema 1
+provides: [session-memory]    # capability names this pack offers (metadata only)
+requires: []                  # capability names it depends on (metadata only)
+contents:
+  roles:    []
+  tools:    []
+  skills:   []
+  providers: [memory]         # loads providers/memory.yaml (see below)
+  # hooks / mcp / pi-extensions / runtimes / workflows are accepted here at
+  # schema 2 but have no loader in this PR — reserved for later goals.
+```
+
+#### Provider contributions (`providers/<id>.yaml`)
+
+A **provider** is a new **pack-scoped** Extension-Host contribution, loaded into the existing
+`PackContributionRegistry` by the same code path as panels/entrypoints/routes
+(`pack-contributions.ts`). Only files whose basename is listed in `contents.providers` are
+loaded — `providers/<name>.yaml` (a `.yml` extension is tolerated). A provider file is a
+mapping with these fields:
+
+```yaml
+# providers/memory.yaml
+id: memory                    # REQUIRED. Unique WITHIN the pack; /^[a-z0-9][a-z0-9_.-]*$/i
+kind: memory                  # memory | selector | generic. Default: generic
+module: ./memory.mjs          # REQUIRED. ESM module path, resolved RELATIVE to this file
+                              #   and containment-checked against the pack root.
+hooks: [sessionSetup, beforePrompt]   # subset of the hook allowlist (below); default []
+runtime: node                 # OPTIONAL free-form runtime hint
+budget:                       # OPTIONAL; both fields clamped
+  maxTokens: 2000             #   clamped to [64, 8192];  default 1600
+  timeoutMs: 1500             #   clamped to [100, 10000]; default 1500
+defaultEnabled: true          # default true (only an explicit `false` disables by default)
+config:                       # OPTIONAL opaque mapping handed to the provider verbatim
+  maxEntries: 50
+```
+
+Field rules and defaults:
+
+- **`id`** (required) — unique **within the pack**; a duplicate id in the same pack is a hard
+  error (`PackContributionError`) that aborts that pack's contribution load so the registry
+  surfaces it loudly rather than silently registering an ambiguous provider.
+- **`kind`** — `memory`, `selector`, or `generic`. Absent ⇒ `generic`. An unknown kind drops
+  the provider (warn) without failing the pack.
+- **`module`** (required) — an ESM module path resolved **relative to the provider YAML** and
+  re-validated (realpath-aware) to stay **inside the pack root** — the same containment guard
+  used for routes/entrypoints. A module that resolves outside the pack root drops the provider.
+- **`hooks`** — a subset of the **hook allowlist**: `sessionSetup`, `beforePrompt`,
+  `afterTurn`, `beforeCompact`, `sessionShutdown`. An **unknown hook name drops *that*
+  provider** (warn) — the rest of the pack still loads. (This is the tolerant
+  warn-and-drop contract; only the duplicate-id conflict is hard.)
+- **`budget`** — `{ maxTokens, timeoutMs }`. Defaults `{ maxTokens: 1600, timeoutMs: 1500 }`;
+  `maxTokens` is clamped to `[64, 8192]` and `timeoutMs` to `[100, 10000]`. The budget exists
+  so the (future) dispatch tier can bound how much a provider may contribute and how long it
+  may run — defined now, enforced when dispatch lands.
+- **`defaultEnabled`** — default `true`; only an explicit `false` opts out by default.
+- **`runtime?`** / **`config?`** — optional pass-through fields for the future dispatch tier.
+
+**Providers are inert in this PR.** The loader validates them and the registry indexes them,
+but nothing reads `module`, runs a `hook`, or applies the `budget` yet — provider dispatch is a
+later goal (the lifecycle hub). Authoring a provider today gets you validation, catalogue
+listing, and activation toggles, and nothing else.
+
+#### Why providers are pack-scoped, *not* a new `EntityType`
+
+Providers are keyed `(packId, contributionId)` and loaded through the pack-contribution path —
+they are deliberately **not** added to the `EntityType` union (`roles`/`tools`/`skills`) that
+the `PackResolver` name-merges. This is the binding design decision for **all** future
+pack-scoped entity types, so it is worth stating the why:
+
+`EntityType` resolution merges by **name across packs**, with higher-priority packs shadowing
+lower ones of the same name. That is exactly the wrong semantics for providers: two different
+packs may each legitimately ship a provider with id `memory`, and **both must stay active** —
+there is no "winner". Provider identity is therefore the *pair* `(packId, contributionId)`, not
+a global name, which is precisely what the `pack-contributions.ts` registry already gives
+panels/entrypoints/routes (keyed by `packId`). Reusing that path — rather than extending
+`EntityType` — keeps two same-named providers from collapsing into one. Future pack-scoped
+entity types should follow the same rule: load via the pack-contribution registry, never the
+name-merging resolver.
+
+#### Per-provider activation
+
+Providers (and the five reserved sibling kinds) are **first-class in the activation system**,
+so they round-trip through the same `GET/PUT /api/marketplace/pack-activation` REST as roles,
+tools, skills, and entrypoints — see [Activation controls](#activation-controls):
+
+- **`DisabledRefs`** gains `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
+  `workflows` arrays, and all six are added to `ACTIVATION_KINDS` so normalisation, hydration,
+  and `getPackActivation` cover them automatically (one constant drives all three).
+- The **activation catalogue** in the `pack-activation` response includes the new arrays
+  (read straight from the installed pack's `contents`), so a disabled provider stays visible in
+  the unfiltered catalogue and can be re-enabled — the same
+  [catalogue/runtime split](#activation-controls) invariant that applies to every other kind.
+- A provider is toggled by its **`listName`** (its `contents.providers` basename), exactly like
+  an entrypoint. `PackContributionRegistry` filters disabled providers by `listName` (the
+  generalised analogue of the entrypoint filter), and
+  **`listProviders(projectId)`** returns only providers from packs that are **installed +
+  active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
+
+These REST shapes are **purely additive** — a schema-1 pack produces a byte-identical
+catalogue, so existing clients and the existing marketplace test suite are unaffected.
 
 ### Generated `.pack-meta.yaml`
 

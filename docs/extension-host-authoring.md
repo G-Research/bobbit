@@ -42,6 +42,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
+| **Providers** *(schema 2; inert)* | `providers/<id>.yaml` (listed in `contents.providers`) | — not dispatched yet — | none yet (loaded + toggleable only) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
@@ -89,6 +90,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
 
   panels/<panel>.yaml             # pack-scoped panel definitions, one file each (auto-discovered)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
+  providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; INERT)
 
   lib/                            # shared implementation modules, NOT entities
     SharedRenderer.js
@@ -753,6 +755,35 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
 - **Ids and conflicts.** Entrypoint `id` is **pack-local**; `routeId` is **host-global** (two
   packs declaring the same `routeId` is a hard rejection at registry build). Panel ids referenced
   by `target.panelId` are pack-local.
+
+### Providers (`providers/<id>.yaml`) — schema 2, loaded but inert
+
+**Status:** a `schema: 2` pack may ship **provider** contributions — a new pack-scoped
+contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes. In
+this PR they are **loaded, validated, catalogued, and per-entity toggleable, but never
+dispatched**: nothing imports a provider `module`, runs a `hook`, or applies its `budget`.
+Provider *dispatch* (the lifecycle hub) is a later Extension-Platform goal. Author them now to
+get validation + activation; expect no runtime effect yet.
+
+Unlike every other contribution in this guide, a provider has **no Host-API surface** — it is
+not reached through `ctx.host`. It is a forward-declared entity whose only observable behaviour
+today is that it appears in the activation catalogue and in
+`PackContributionRegistry.listProviders(projectId)` (installed + active + enabled).
+
+Key author-facing rules (full reference, field table, defaults, and clamps live in
+[docs/marketplace.md → Provider contributions](marketplace.md#provider-contributions-providersidyaml)):
+
+- Only files whose basename is in **`contents.providers`** load (`providers/<name>.yaml`;
+  `.yml` tolerated), exactly like `contents.entrypoints` gates `entrypoints/`.
+- `id` is unique **within the pack** — two packs may each ship id `memory` and both stay
+  active, because providers are keyed `(packId, contributionId)`, **not** name-merged like an
+  `EntityType` (see the [pack-scoped rationale](marketplace.md#why-providers-are-pack-scoped-not-a-new-entitytype)).
+  A duplicate id *within one pack* is a hard `PackContributionError`.
+- `module` resolves relative to the provider YAML and is containment-checked against the pack
+  root — the same guard as routes/entrypoints.
+- `hooks` must be a subset of `sessionSetup` / `beforePrompt` / `afterTurn` / `beforeCompact` /
+  `sessionShutdown`; an unknown hook drops *that* provider (warn) and the rest of the pack
+  still loads.
 
 ### `host.session.*` — transcript reads, posts, and live events
 
