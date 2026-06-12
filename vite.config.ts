@@ -283,7 +283,10 @@ function dynamicGatewayProxy(): Plugin {
 					proxyRes.pipe(res, { end: true });
 				});
 				proxyReq.on("error", (err: Error) => {
-					console.warn(`[api proxy] ${err.message} — gateway likely restarting`);
+					// ECONNREFUSED is the expected state while the gateway restarts — only
+					// surface it under BOBBIT_DEBUG. Other errors always warn.
+					if (!/ECONNREFUSED/.test(err.message) || process.env.BOBBIT_DEBUG)
+						console.warn(`[api proxy] ${err.message} — gateway likely restarting`);
 					if (!res.headersSent) {
 						res.writeHead(502, { "Content-Type": "text/plain" });
 						res.end("Gateway restarting");
@@ -320,7 +323,8 @@ function dynamicGatewayProxy(): Plugin {
 					socket.on("error", () => proxySocket.destroy());
 				});
 				proxyReq.on("error", (err) => {
-					console.warn(`[ws proxy] ${err.message} — gateway likely restarting`);
+					if (!/ECONNREFUSED/.test(err.message) || process.env.BOBBIT_DEBUG)
+						console.warn(`[ws proxy] ${err.message} — gateway likely restarting`);
 					socket.destroy();
 				});
 				if (head.length) proxyReq.write(head);

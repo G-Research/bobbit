@@ -143,5 +143,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[inbox-tools] Registered 3 inbox tools for session ${sessionId}, staff ${staffId}`);
+	if (process.env.BOBBIT_DEBUG) console.log(`[inbox-tools] Registered 3 inbox tools for session ${sessionId}, staff ${staffId}`);
 }
