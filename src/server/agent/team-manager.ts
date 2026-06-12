@@ -956,6 +956,10 @@ export class TeamManager {
 			const session = this.sessionManager.getSession(entry.teamLeadSessionId);
 			if (!session || session.status !== "idle") continue;
 			if (this.shouldSkipNudge(goalId)) continue;
+			// A session that was mid-turn (wasStreaming) is already being
+			// re-prompted by SessionManager.restoreSession's mid-turn path;
+			// nudging it here too would race two prompts at the same cold agent.
+			if (this.sessionManager.wasBootReprompted?.(entry.teamLeadSessionId)) continue;
 			const summary = this._outstandingWorkSummary(goalId);
 			if (!summary) continue;
 
@@ -965,18 +969,33 @@ export class TeamManager {
 				"Check `task_list` and `gate_list` to confirm, then resume — fix any\n" +
 				"failed gate, assign or complete open tasks, or call `team_complete`\n" +
 				"if everything is genuinely done.";
-			try {
-				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, msg, { isSteered: true });
-				this.nudgePending.set(goalId, true);
-				this.lastNudgeAtPerGoal.set(goalId, now);
-				resumed++;
-				console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
-			} catch (err) {
-				console.error(`[team-manager] Boot-resume enqueuePrompt failed for goal=${goalId}:`, err);
-			}
+			// enqueuePrompt drains ASYNCHRONOUSLY: for an idle lead with an empty
+			// queue it awaits dispatchDirectPrompt → rpcClient.prompt(), which on
+			// a cold agent rejects with the cold-start timeout. Dispatch through a
+			// helper that owns (awaits + catches) that rejection so it never
+			// escapes as `[gateway] Unhandled rejection`.
+			void this._dispatchBootResumeNudge(entry.teamLeadSessionId, msg, goalId);
+			this.nudgePending.set(goalId, true);
+			this.lastNudgeAtPerGoal.set(goalId, now);
+			resumed++;
+			console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
 		}
 		if (resumed > 0) {
 			console.log(`[team-manager] Boot-resume nudged ${resumed} idle team-lead(s) with outstanding work.`);
+		}
+	}
+
+	/**
+	 * Dispatch a boot-resume nudge through enqueuePrompt with cold-start
+	 * handling, owning the async drain's rejection so a cold-start prompt
+	 * timeout is caught and logged here rather than escaping as a process-level
+	 * `[gateway] Unhandled rejection`.
+	 */
+	private async _dispatchBootResumeNudge(sessionId: string, msg: string, goalId: string): Promise<void> {
+		try {
+			await this.sessionManager.enqueuePrompt(sessionId, msg, { isSteered: true, coldStart: true });
+		} catch (err) {
+			console.error(`[team-manager] Boot-resume nudge failed for goal=${goalId}:`, err);
 		}
 	}
 

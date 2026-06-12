@@ -106,6 +106,7 @@ export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
+	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
 	steer(text: string): Promise<any>;
 	abort(): Promise<any>;
 	getState(): Promise<any>;
@@ -131,6 +132,16 @@ export type RpcBridgeFactory = (options: RpcBridgeOptions) => IRpcBridge | null;
  * un-poisoning already-committed blank-text user messages.
  */
 export const ATTACHMENT_ONLY_TEXT = "Attachments:";
+
+/**
+ * Cold-restart re-prompt timeouts. A freshly-revived agent — model init + MCP
+ * extension load — often needs 30-90s to first respond, worse under parallel
+ * restore; the default 30s prompt timeout reliably times out on boot. The
+ * verification-harness resume, the mid-turn restore re-prompt, and the
+ * team-manager boot-resume nudge all use these via `RpcBridge.promptWhenReady`.
+ */
+export const COLD_REPROMPT_READY_TIMEOUT_MS = 90_000;
+export const COLD_REPROMPT_PROMPT_TIMEOUT_MS = 120_000;
 
 /**
  * Pure helper: decide the model-facing text for a prompt.
@@ -499,6 +510,19 @@ export class RpcBridge {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
 		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+	}
+
+	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
+	 *  generous timeout. Shared by the verification-harness resume, the mid-turn
+	 *  restore re-prompt, and the team-manager boot-resume nudge so none of them
+	 *  re-implements the wait-for-ready + generous-timeout dance. */
+	async promptWhenReady(
+		text: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number },
+	): Promise<any> {
+		await this.waitForReady(opts?.readyTimeoutMs ?? COLD_REPROMPT_READY_TIMEOUT_MS);
+		return this.prompt(text, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
 	}
 
 	steer(text: string) {

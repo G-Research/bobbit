@@ -1490,8 +1490,7 @@ export class VerificationHarness {
 			// restart-interrupt marker (so `shouldSuppressRestartInterrupt` leaves
 			// the gate `pending` when the rerun context is unavailable).
 			try {
-				await session.rpcClient.waitForReady(90_000);
-				await session.rpcClient.prompt(reminderPrompt, undefined, 120_000);
+				await session.rpcClient.promptWhenReady(reminderPrompt, undefined);
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
 				// stays `idle` for a tick before transitioning to `streaming`. Wait for
 				// the next agent_start so the subsequent waitForIdle race doesn't
