@@ -7,10 +7,13 @@ import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
+import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
 const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
+/** Container mount for shipped first-party market packs. */
+export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
 
 /**
  * Redact sensitive env vars from Docker arg arrays for logging.
@@ -666,9 +669,11 @@ export class RpcBridge {
 		const toolsDir = TOOLS_DIR;
 		const stateDir = bobbitStateDir();
 		const mcpExtDir = path.join(stateDir, "mcp-extensions");
+		const builtinPacksDir = resolveBuiltinPacksDir();
 		const normalizedToolsDir = toolsDir.replace(/\\/g, "/");
 		const normalizedStateDir = stateDir.replace(/\\/g, "/");
 		const normalizedMcpExtDir = mcpExtDir.replace(/\\/g, "/");
+		const normalizedBuiltinPacksDir = builtinPacksDir.replace(/\\/g, "/");
 
 		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths
 		const builtinToolsDir = this.options.toolManager?.getBuiltinToolsDir();
@@ -698,6 +703,10 @@ export class RpcBridge {
 					// Remap builtin tool extension paths: dist/.../defaults/tools/... → /tools-builtin/...
 					const relative = normalized.substring(normalizedBuiltinToolsDir.length);
 					remappedArgs.push(`/tools-builtin${relative}`);
+				} else if (normalized.startsWith(normalizedBuiltinPacksDir)) {
+					// Remap shipped first-party pack paths: dist/.../builtin-packs/market-packs/... → /market-packs-builtin/...
+					const relative = normalized.substring(normalizedBuiltinPacksDir.length);
+					remappedArgs.push(`${BUILTIN_PACKS_CONTAINER_DIR}${relative}`);
 				} else if (normalized.startsWith(normalizedMcpExtDir)) {
 					// Remap MCP extension paths: .bobbit/state/mcp-extensions/... → /mcp-extensions/...
 					const relative = normalized.substring(normalizedMcpExtDir.length);
@@ -787,6 +796,7 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 	const agentSessionsDir = path.join(globalAgentDir(), "sessions");
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
 	const mcpExtDir = path.join(stateDir, "mcp-extensions");
+	const builtinPacksDir = resolveBuiltinPacksDir();
 
 	// Order matters: most specific prefixes first so /home/node/.bobbit/agent/sessions
 	// matches before a hypothetical /home/node/.bobbit/agent would.
@@ -794,6 +804,7 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 		{ containerPrefix: CONTAINER_AGENT_DIR + "sessions", hostPath: agentSessionsDir },
 		{ containerPrefix: "/tmp/session-prompts", hostPath: sessionPromptsDir },
 		{ containerPrefix: "/mcp-extensions", hostPath: mcpExtDir },
+		{ containerPrefix: BUILTIN_PACKS_CONTAINER_DIR, hostPath: builtinPacksDir },
 		// Mount only specific state subdirectories — never the full state dir
 		// (which contains the host gateway token, TLS keys, etc.)
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
