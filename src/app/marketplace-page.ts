@@ -983,7 +983,7 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 			</div>
 			${shadowed
 				? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
-				: renderActivationControls(pack)}
+				: html`${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
 		</div>
 	`;
 }
@@ -1033,6 +1033,7 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 					${renderProvenance(pack)}
 					${expanded && hasConflict ? renderConflictDetails(packConflicts) : ""}
 					${renderActivationControls(pack)}
+					${renderActivationEntityDetails(pack)}
 				</div>
 				<div class="flex flex-col items-end gap-1 shrink-0">
 					<div class="flex items-center gap-1">
@@ -1128,6 +1129,18 @@ function entrypointKindLabel(kind: PackActivationResponse["catalogue"]["entrypoi
 function entrypointDisplayLabel(entrypoint: PackActivationResponse["catalogue"]["entrypoints"][number]): string {
 	if (entrypoint.kind === "route" && entrypoint.routeId) return `#/ext/${entrypoint.routeId}`;
 	return entrypoint.label || entrypoint.listName;
+}
+
+function renderActivationEntityDetails(pack: InstalledPackWire): TemplateResult {
+	const activation = activationByPack.get(`${pack.scope}:${pack.packName}`);
+	if (!activation) return html``;
+	const cat = activation.catalogue;
+	return renderEntityDetails(pack.packName, cat.descriptions, {
+		roles: cat.roles,
+		tools: cat.tools,
+		skills: cat.skills,
+		entrypoints: cat.entrypoints.map((e) => ({ listName: e.listName, label: entrypointDisplayLabel(e) })),
+	});
 }
 
 function renderActivationControls(pack: InstalledPackWire): TemplateResult {

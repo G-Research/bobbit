@@ -732,7 +732,7 @@ test.describe("Marketplace UI", () => {
 		await expect(card.locator('[data-testid="market-entity-desc-entrypoint-polish-ep"]')).toBeVisible();
 		await expect(card.locator('[data-testid="market-entity-desc-entrypoint-polish-ep"]')).toContainText("a polished entry point");
 		await expect(card.locator('[data-testid="market-entity-desc-role-polish-role"]')).toContainText("a polished role");
-		await expect(card.locator('[data-testid="market-entity-desc-tool-polishgroup"]')).toContainText("a polished tool");
+		await expect(card.locator('[data-testid="market-entity-desc-tool-polish-tool"]')).toContainText("a polished tool");
 		await expect(card.locator('[data-testid="market-entity-desc-skill-polish-skill"]')).toContainText("a polished skill");
 
 		// Bump the upstream version, reload, and the Update button appears (R2).
