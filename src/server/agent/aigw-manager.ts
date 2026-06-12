@@ -1,21 +1,33 @@
 /**
- * AI Gateway (aigw) manager — handles model discovery, models.json generation,
- * and HTTP proxying for browser-side API access.
+ * Model-gateway manager — handles discovery, models.json generation, and HTTP
+ * proxying for an ordered list of named, typed OpenAI-compatible gateways.
  *
- * When the user configures an aigw URL in preferences:
- * 1. Server fetches available models from the gateway's /v1/models endpoint
- * 2. Server writes/merges an "aigw" provider into ~/.bobbit/agent/models.json
- *    so agent subprocesses can use `set_model` with provider="aigw"
- * 3. Browser discovers models via server proxy (the aigw hostname may not
- *    resolve from the browser)
+ * Each gateway is a {@link ModelGateway} identified by a user-chosen `name`,
+ * which is the provider key used EVERYWHERE: the picker `provider`, the
+ * `models.json` block key, and `set_model(name, id)`. Two types are supported:
  *
- * When aigw is removed, the "aigw" provider is cleaned from models.json.
+ *   - `aigw`              — enterprise AI-Gateway: Bedrock-routes Claude ids,
+ *                           sends the `x-opencode-session` / User-Agent headers,
+ *                           and is exclusive (shadows all built-ins + other
+ *                           gateways). Pinned to the singleton name "aigw" so
+ *                           the three literal `"aigw"` guards in
+ *                           pi-ai-bedrock-headers-patch.ts / model-completion.ts
+ *                           / shared/thinking-levels.ts stay correct unchanged.
+ *   - `openai-compatible` — plain OpenAI gateway (ollama / llama-swap / vLLM …):
+ *                           no Bedrock, no special headers, never exclusive.
+ *
+ * For each enabled gateway the server discovers models (GET /v1/models) and
+ * writes one `providers.<name>` block into ~/.bobbit/agent/models.json so agent
+ * subprocesses can bind it via `set_model`. Removed / disabled gateways are
+ * pruned. The two dispatch tables ({@link DISCOVERY}, PROVIDER_WRITERS) are the
+ * documented extension point for future native types (ollama, llama-server …).
  */
 
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
@@ -45,6 +57,25 @@ export interface AigwModel {
 export interface AigwConfig {
 	url: string;
 	models: AigwModel[];
+}
+
+/**
+ * The discovery/request-shaping family a gateway belongs to. Only `aigw` and
+ * `openai-compatible` are implemented now; new native types (e.g. `ollama`,
+ * `llama-server`) slot in by extending this union plus the two dispatch tables
+ * (see §10 of docs/design/multi-gateway-providers.md).
+ */
+export type GatewayType = "aigw" | "openai-compatible";
+
+export interface ModelGateway {
+	/** Stable identity (crypto.randomUUID()); never shown, used only as a UI row key. */
+	id: string;
+	/** Provider key used EVERYWHERE: picker `provider`, models.json block key, set_model(name, id). */
+	name: string;
+	/** Base URL as the user entered it (may or may not end with /v1). */
+	url: string;
+	type: GatewayType;
+	enabled: boolean;
 }
 
 // ── Well-known model metadata ──────────────────────────────────────
@@ -321,13 +352,12 @@ export function writeContextWindowOverrides(): void {
 	}
 }
 
+// ── Bedrock environment ────────────────────────────────────────────
+
 /**
- * Write aigw models into ~/.bobbit/agent/models.json, merging with existing
- * providers (preserving non-aigw entries).
- */
-/**
- * Set env vars so agent subprocesses route Bedrock calls through the gateway.
- * Called both on fresh configuration and on startup when aigw is already configured.
+ * Set env vars so agent subprocesses route Bedrock calls through an `aigw`
+ * gateway. Called from {@link syncGatewaysModelsJson} (and the startup check)
+ * when an enabled `aigw`-type gateway is present.
  */
 function setBedrockEnvVars(aigwUrl: string): void {
 	const bedrockBaseUrl = aigwUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/aws";
@@ -340,21 +370,83 @@ function setBedrockEnvVars(aigwUrl: string): void {
 	console.log(`[aigw] Bedrock env configured: endpoint=${bedrockBaseUrl}`);
 }
 
-export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void {
-	const data = readModelsJson();
-	if (!data.providers) data.providers = {};
+/**
+ * Clear the four AWS_* vars set by {@link setBedrockEnvVars}. Called when no
+ * enabled `aigw`-type gateway exists so disabling the gateway restores a real
+ * `amazon-bedrock` provider in the same process. `AWS_REGION` is intentionally
+ * left alone (it may be a genuine user setting, and setBedrockEnvVars only sets
+ * it when previously unset).
+ */
+function clearBedrockEnvVars(): void {
+	if (process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME !== undefined) {
+		console.log("[aigw] No enabled aigw-type gateway — clearing Bedrock env");
+	}
+	delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
+	delete process.env.AWS_BEDROCK_FORCE_HTTP1;
+	delete process.env.AWS_ACCESS_KEY_ID;
+	delete process.env.AWS_SECRET_ACCESS_KEY;
+}
 
-	// AI gateways typically expose both OpenAI-compatible and Bedrock endpoints.
-	// Route Claude models through the Bedrock Converse API (same path as Claude
-	// Code) for full feature parity — native tool use, images, streaming.
-	// Non-Claude models use OpenAI completions with conservative compat.
-	const normalizedUrl = aigwUrl.replace(/\/+$/, "");
+/**
+ * Set Bedrock env from the (first) enabled `aigw`-type gateway, or clear it when
+ * none is present. The single point that owns Bedrock env so merged mode never
+ * hijacks a real `amazon-bedrock` provider.
+ */
+function applyAigwBedrockEnv(aigwGateway: ModelGateway | undefined): void {
+	if (aigwGateway) setBedrockEnvVars(aigwGateway.url);
+	else clearBedrockEnvVars();
+}
+
+// ── Type predicates + URL helpers ──────────────────────────────────
+
+/** Whether a model id should be Bedrock-routed (Claude family). */
+export function isClaudeId(id: string): boolean {
+	return id.toLowerCase().includes("claude");
+}
+
+/** Strip a leading `provider/` prefix, e.g. "aws/us.anthropic.x" → "us.anthropic.x". */
+export function stripProviderPrefix(id: string): string {
+	const i = id.indexOf("/");
+	return i >= 0 ? id.slice(i + 1) : id;
+}
+
+/**
+ * Whether a gateway type Bedrock-routes Claude ids. Only `aigw` does — this is
+ * the property that makes Claude→Bedrock routing local to the `aigw` type and
+ * removes the old global heuristic (an `openai-compatible` gateway exposing a
+ * model literally named `claude-*` must NEVER be Bedrock-routed).
+ */
+export function bedrockRoutesForType(t: GatewayType): boolean {
+	return t === "aigw";
+}
+
+/** Strip trailing slashes; append `/v1` unless already present. */
+function normalizeOpenAiBaseUrl(url: string): string {
+	const trimmed = url.replace(/\/+$/, "");
+	return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+// ── Type-driven models.json writers ────────────────────────────────
+
+type ProviderBlock = Record<string, unknown>;
+type GatewayWriter = (gateway: ModelGateway, models: AigwModel[]) => ProviderBlock;
+
+/**
+ * Build the `aigw`-type provider block. Byte-for-byte the behavior of the old
+ * single-URL writer, keyed by `gateway.name` and reading `gateway.url`:
+ *   - provider-level `x-opencode-session` / User-Agent headers,
+ *   - Claude ids → prefix stripped + `bedrock-converse-stream` + per-model
+ *     `<url-without-/v1>/aws` baseUrl,
+ *   - non-Claude ids → `openai-completions` with conservative compat flags.
+ * Does NOT touch Bedrock env — {@link syncGatewaysModelsJson} owns that.
+ */
+export function buildAigwProviderBlock(gateway: ModelGateway, models: AigwModel[]): ProviderBlock {
+	const normalizedUrl = gateway.url.replace(/\/+$/, "");
 	// Bedrock Converse traffic goes to <gateway>/aws/model/<id>/converse-stream;
 	// the provider's normalized baseUrl ends in /v1 for the OpenAI-compatible path
 	// and is wrong for Bedrock. pi-ai uses `model.baseUrl` directly as the
 	// `BedrockRuntimeClient` endpoint, so emit a per-model override on Claude
-	// entries pointing at the /aws sub-tree. Mirrors the env var written by
-	// setBedrockEnvVars() but survives across subprocess/env-strip boundaries.
+	// entries pointing at the /aws sub-tree.
 	const bedrockBaseUrl = normalizedUrl.replace(/\/v1$/, "") + "/aws";
 
 	const openaiCompat: Record<string, unknown> = {
@@ -366,15 +458,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		maxTokensField: "max_tokens",
 	};
 
-	const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
-
-	// Strip provider prefix for Bedrock (e.g. "aws/us.anthropic.claude-..." → "us.anthropic.claude-...")
-	const bedrockModelId = (id: string) => {
-		const slash = id.indexOf("/");
-		return slash >= 0 ? id.slice(slash + 1) : id;
-	};
-
-	data.providers.aigw = {
+	return {
 		baseUrl: normalizedUrl,
 		apiKey: "none",
 		api: "openai-completions",
@@ -390,9 +474,9 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		},
 		models: models.map(m => {
 			const cost = m.cost ?? zeroAigwCost();
-			if (isClaudeModel(m.id)) {
+			if (isClaudeId(m.id)) {
 				return {
-					id: bedrockModelId(m.id),
+					id: stripProviderPrefix(m.id),
 					name: m.name,
 					contextWindow: m.contextWindow,
 					maxTokens: m.maxTokens,
@@ -418,21 +502,282 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 			};
 		}),
 	};
-
-	setBedrockEnvVars(aigwUrl);
-
-	writeModelsJson(data);
 }
 
 /**
- * Remove the "aigw" provider from models.json.
+ * Build an `openai-compatible` provider block. Plain OpenAI for EVERY model —
+ * including a model literally named `claude-*` (the key fix to the latent
+ * multi-gateway bug). No headers, no Bedrock, baseUrl normalized to end `/v1`.
  */
-export function removeAigwModelsJson(): void {
-	const data = readModelsJson();
-	if (data.providers?.aigw) {
-		delete data.providers.aigw;
-		writeModelsJson(data);
+export function buildOpenAiCompatibleProviderBlock(gateway: ModelGateway, models: AigwModel[]): ProviderBlock {
+	return {
+		baseUrl: normalizeOpenAiBaseUrl(gateway.url),
+		apiKey: "none",
+		api: "openai-completions",
+		models: models.map(m => ({
+			id: m.id,
+			name: m.name,
+			// Plain OpenAI for EVERY model — never bedrock-converse-stream, even for
+			// a model literally named claude-*. Explicit per-model `api` so the
+			// no-Bedrock guarantee is visible on each entry, not just inherited.
+			api: "openai-completions",
+			contextWindow: m.contextWindow,
+			maxTokens: m.maxTokens,
+			reasoning: m.reasoning,
+			input: m.input,
+			cost: m.cost ?? zeroAigwCost(),
+			compat: { ...GATEWAY_COMPAT, ...(m.compat || {}) },
+		})),
+	};
+}
+
+/**
+ * Per-type provider-block writers. Extension point for future native types
+ * (see §10 of docs/design/multi-gateway-providers.md): register a new writer
+ * here keyed by the new {@link GatewayType}.
+ */
+const PROVIDER_WRITERS: Record<GatewayType, GatewayWriter> = {
+	"aigw": buildAigwProviderBlock,
+	"openai-compatible": buildOpenAiCompatibleProviderBlock,
+};
+
+/**
+ * Per-type discovery. Both implemented types use the same `GET /v1/models`
+ * shape for now; a future native type registers its own protocol fn here.
+ */
+const DISCOVERY: Record<GatewayType, (url: string) => Promise<AigwModel[]>> = {
+	"aigw": discoverAigwModels,
+	"openai-compatible": discoverAigwModels,
+};
+
+/** Discover a gateway's models via the dispatch table for its type. */
+export function discoverGatewayModels(g: ModelGateway): Promise<AigwModel[]> {
+	return DISCOVERY[g.type](g.url);
+}
+
+// ── Gateway list preferences ───────────────────────────────────────
+
+const GATEWAYS_PREF_KEY = "modelGateways";
+/** Internal bookkeeping pref — the gateway names we last wrote into models.json. */
+const MANAGED_PROVIDERS_PREF_KEY = "_managedGatewayProviders";
+
+const GATEWAY_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+
+/**
+ * pi-ai built-in provider ids a gateway `name` must not collide with. Mirrors
+ * `model-registry.ts::ENV_MAP` (kept inline to avoid a registry↔manager import
+ * cycle). Note "aigw" is intentionally NOT here — it is the reserved singleton
+ * name for the `aigw`-type gateway.
+ */
+const BUILTIN_PROVIDER_IDS = new Set([
+	"anthropic",
+	"openai",
+	"google",
+	"google-gemini-cli",
+	"google-vertex",
+	"xai",
+	"amazon-bedrock",
+	"groq",
+	"mistral",
+]);
+
+/** Parse + sanitise one persisted row into a ModelGateway, or undefined if malformed. */
+function parseGatewayRow(row: unknown): ModelGateway | undefined {
+	if (!row || typeof row !== "object") return undefined;
+	const o = row as Record<string, unknown>;
+	if (typeof o.name !== "string" || typeof o.url !== "string") return undefined;
+	const type = o.type === "aigw" || o.type === "openai-compatible" ? o.type : undefined;
+	if (!type) return undefined;
+	return {
+		id: typeof o.id === "string" && o.id ? o.id : randomUUID(),
+		name: o.name,
+		url: o.url,
+		type,
+		enabled: typeof o.enabled === "boolean" ? o.enabled : true,
+	};
+}
+
+/** Full gateway list (incl. disabled). Defensive: `[]` for any non-array / malformed value. */
+export function listGateways(prefs: PreferencesStore): ModelGateway[] {
+	const raw = prefs.get(GATEWAYS_PREF_KEY);
+	if (!Array.isArray(raw)) return [];
+	const out: ModelGateway[] = [];
+	for (const row of raw) {
+		const g = parseGatewayRow(row);
+		if (g) out.push(g);
 	}
+	return out;
+}
+
+/** Only enabled gateways. */
+export function getEnabledGateways(prefs: PreferencesStore): ModelGateway[] {
+	return listGateways(prefs).filter(g => g.enabled);
+}
+
+/** Look up a gateway by its `name` (provider key), or undefined. */
+export function getGatewayByName(prefs: PreferencesStore, name: string): ModelGateway | undefined {
+	return listGateways(prefs).find(g => g.name === name);
+}
+
+/**
+ * Exclusive mode is DERIVED, not a manual toggle: any enabled `aigw`-type
+ * gateway makes the whole setup exclusive (built-ins + `openai-compatible`
+ * gateways are suppressed; only `aigw`-type contributes).
+ */
+export function isExclusiveMode(gateways: ModelGateway[]): boolean {
+	return gateways.some(g => g.enabled && g.type === "aigw");
+}
+
+/**
+ * Validate and persist the gateway list (replaces the whole list). Fills any
+ * missing `id` with a fresh UUID. Throws on any §1 violation:
+ *   - name empty / not matching `^[a-zA-Z0-9._-]+$`,
+ *   - name colliding with a built-in provider id,
+ *   - duplicate names (case-sensitive),
+ *   - an `aigw`-type gateway named ≠ "aigw", or more than one `aigw`-type row.
+ */
+export function saveGateways(prefs: PreferencesStore, gateways: ModelGateway[]): void {
+	const seen = new Set<string>();
+	let aigwCount = 0;
+	const normalized: ModelGateway[] = [];
+
+	for (const g of gateways) {
+		const name = (g?.name ?? "").trim();
+		if (!name) throw new Error("Gateway name must not be empty");
+		if (!GATEWAY_NAME_PATTERN.test(name)) {
+			throw new Error(`Invalid gateway name "${name}": must match ${GATEWAY_NAME_PATTERN.source}`);
+		}
+		if (BUILTIN_PROVIDER_IDS.has(name)) {
+			throw new Error(`Gateway name "${name}" collides with a built-in provider id`);
+		}
+		if (seen.has(name)) throw new Error(`Duplicate gateway name "${name}"`);
+		seen.add(name);
+
+		if (g.type !== "aigw" && g.type !== "openai-compatible") {
+			throw new Error(`Invalid gateway type "${String(g.type)}" for "${name}"`);
+		}
+		if (g.type === "aigw") {
+			aigwCount++;
+			if (name !== "aigw") {
+				throw new Error(`An aigw-type gateway must be named "aigw" (got "${name}")`);
+			}
+			if (aigwCount > 1) throw new Error("At most one aigw-type gateway is allowed");
+		}
+
+		normalized.push({
+			id: typeof g.id === "string" && g.id ? g.id : randomUUID(),
+			name,
+			url: (g.url ?? "").trim(),
+			type: g.type,
+			enabled: g.enabled !== false,
+		});
+	}
+
+	prefs.set(GATEWAYS_PREF_KEY, normalized);
+}
+
+/**
+ * Idempotent boot-time migration of the legacy single-URL prefs
+ * (`aigw.url` [+ `aigw.exclusive`]) into the `modelGateways` list. Called once
+ * at server boot before {@link startupAigwCheck}.
+ *
+ * Rules:
+ *   1. `modelGateways` already present (even []) → no-op; defensively strip any
+ *      leftover `aigw.url` / `aigw.exclusive`.
+ *   2. Non-empty `aigw.url` → create one `{name:"aigw", type:"aigw"}` gateway,
+ *      remove `aigw.url` + `aigw.exclusive` (exclusivity is now derived, §4).
+ *   3. Nothing to migrate → leave prefs untouched (readers treat absent as []).
+ *
+ * The migrated gateway keeps `name:"aigw"`, so existing
+ * `default.sessionModel = "aigw/<id>"` (etc.) continue to resolve unchanged.
+ */
+export function migrateGatewayPrefs(prefs: PreferencesStore): { migrated: boolean; gateways: ModelGateway[] } {
+	const existing = prefs.get(GATEWAYS_PREF_KEY);
+	if (existing !== undefined) {
+		// Already on the new schema — no-op, but strip any stale legacy keys.
+		prefs.remove("aigw.url");
+		prefs.remove("aigw.exclusive");
+		return { migrated: false, gateways: listGateways(prefs) };
+	}
+
+	const aigwUrl = prefs.get("aigw.url");
+	if (typeof aigwUrl === "string" && aigwUrl.trim()) {
+		const gateways: ModelGateway[] = [{
+			id: randomUUID(),
+			name: "aigw",
+			url: aigwUrl.replace(/\/+$/, ""),
+			type: "aigw",
+			enabled: true,
+		}];
+		prefs.set(GATEWAYS_PREF_KEY, gateways);
+		prefs.remove("aigw.url");
+		prefs.remove("aigw.exclusive");
+		console.log("[aigw] Migrated legacy aigw.url → modelGateways list");
+		return { migrated: true, gateways };
+	}
+
+	return { migrated: false, gateways: [] };
+}
+
+// ── models.json sync orchestrator ──────────────────────────────────
+
+function readManagedProviders(prefs: PreferencesStore): string[] {
+	const v = prefs.get(MANAGED_PROVIDERS_PREF_KEY);
+	return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * Discover the enabled gateways and (re)write their `providers.<name>` blocks
+ * into models.json, pruning everything we previously managed, never clobbering
+ * unrelated providers (anthropic / amazon-bedrock / custom). Preserves the
+ * last-good block for a gateway that is unreachable this run. Sets/clears the
+ * Bedrock env based on the presence of an enabled `aigw`-type gateway.
+ *
+ * @returns discovered models keyed by gateway name (empty array on failure).
+ */
+export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<Record<string, AigwModel[]>> {
+	const gateways = listGateways(prefs);
+	const enabled = gateways.filter(g => g.enabled);
+	const enabledNames = new Set(enabled.map(g => g.name));
+
+	const data = readModelsJson();
+	if (!data.providers) data.providers = {};
+	const existingBlocks: Record<string, any> = { ...data.providers };
+
+	// Prune: the keys we own = previously-managed names ∪ {"aigw"} (legacy
+	// single-URL block). Any owned key no longer enabled is removed — this
+	// handles disabled, removed, and renamed gateways without the previous list.
+	const owned = new Set<string>([...readManagedProviders(prefs), "aigw"]);
+	for (const key of owned) {
+		if (!enabledNames.has(key)) delete data.providers[key];
+	}
+
+	const discovered: Record<string, AigwModel[]> = {};
+	for (const g of enabled) {
+		try {
+			const models = await DISCOVERY[g.type](g.url);
+			data.providers[g.name] = PROVIDER_WRITERS[g.type](g, models);
+			discovered[g.name] = models;
+		} catch (err: any) {
+			const msg = err?.message || String(err);
+			if (existingBlocks[g.name] !== undefined) {
+				// Keep the last-good block (preserves the "gateway unreachable on
+				// startup ⇒ keep existing models.json" behavior).
+				data.providers[g.name] = existingBlocks[g.name];
+				console.warn(`[aigw] gateway unreachable on startup (${msg}), keeping existing models.json for "${g.name}"`);
+			} else {
+				console.warn(`[aigw] gateway "${g.name}" unreachable (${msg}), no existing models to keep`);
+			}
+			discovered[g.name] = [];
+		}
+	}
+
+	// Bedrock env is owned here so merged mode never hijacks a real bedrock provider.
+	applyAigwBedrockEnv(enabled.find(g => g.type === "aigw"));
+
+	writeModelsJson(data);
+	prefs.set(MANAGED_PROVIDERS_PREF_KEY, [...enabledNames]);
+	return discovered;
 }
 
 // ── Startup internet check ─────────────────────────────────────────
@@ -488,22 +833,29 @@ export async function checkInternetAvailable(): Promise<boolean> {
 }
 
 /**
- * Run once at gateway startup:
- * - If aigw is already configured, nothing to do.
- * - If not configured but internet is unavailable, try to auto-discover
- *   a gateway at a well-known local URL and configure it.
+ * Run once at gateway startup (list-aware):
+ *   - Defensively run {@link migrateGatewayPrefs} (idempotent — boot also runs
+ *     it earlier; this keeps standalone callers / tests robust).
+ *   - If any gateway is enabled, set/clear Bedrock env, wire PI_OFFLINE, and
+ *     (unless `BOBBIT_SKIP_AIGW_DISCOVERY`) re-run {@link syncGatewaysModelsJson}.
+ *   - Else, when offline, probe well-known local URLs and, if a gateway is
+ *     found, create a `{type:"aigw"}` gateway and sync.
  *
- * Returns true if aigw is active after this call.
+ * Returns true if any gateway is active after this call.
  */
 export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean> {
-	// Already configured — ensure env vars are set and models.json is up to date
-	const existingUrl = getAigwUrl(prefs);
-	if (existingUrl) {
-		console.log("[aigw] AI Gateway already configured:", existingUrl);
-		setBedrockEnvVars(existingUrl);
-		// Users with a local aigw are typically offline; probe the public
-		// internet once and wire PI_OFFLINE accordingly. The probe is short
-		// (≤4s) and runs in parallel with no other startup work below.
+	migrateGatewayPrefs(prefs);
+
+	const enabled = getEnabledGateways(prefs);
+
+	if (enabled.length > 0) {
+		// Already configured — set/clear Bedrock env up-front (so it is correct
+		// even when re-discovery is skipped) and refresh models.json.
+		applyAigwBedrockEnv(enabled.find(g => g.type === "aigw"));
+		console.log("[aigw] gateways configured:", enabled.map(g => `${g.name} (${g.type})`).join(", "));
+
+		// Users with a local gateway are typically offline; probe the public
+		// internet once and wire PI_OFFLINE accordingly.
 		if (!process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
 			try {
 				const hasInternet = await checkInternetAvailable();
@@ -512,27 +864,21 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 				applyPiOfflineEnv(false);
 			}
 		}
+
 		if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
-			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
+			console.log("[aigw] gateways configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
 			return true;
 		}
-		try {
-			const models = await discoverAigwModels(existingUrl);
-			writeAigwModelsJson(existingUrl, models);
-			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
-		} catch (err: any) {
-			const msg = err?.message || String(err);
-			console.warn(`[aigw] gateway unreachable on startup (${msg}), keeping existing models.json`);
-		}
+
+		await syncGatewaysModelsJson(prefs);
+		console.log("[aigw] re-discovered gateway models on startup, refreshed models.json");
 		return true;
 	}
 
-	// Skip network probing + local-gateway auto-discovery when tests/CI opt out.
-	// Tests that exercise the /api/aigw/* endpoints configure the gateway
-	// explicitly and don't rely on the startup probe.
+	// No gateways configured. Skip network probing + local auto-discovery when
+	// tests/CI opt out.
 	if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) return false;
 
-	// Check internet
 	const hasInternet = await checkInternetAvailable();
 	applyPiOfflineEnv(hasInternet);
 	if (hasInternet) {
@@ -559,8 +905,16 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 		try {
 			const models = await discoverAigwModels(url);
 			if (models.length > 0) {
-				console.log(`[aigw] Found gateway at ${url} with ${models.length} models — auto-configuring`);
-				await configureAigw(url, prefs);
+				const normalizedUrl = url.replace(/\/+$/, "");
+				console.log(`[aigw] Found gateway at ${normalizedUrl} with ${models.length} models — auto-configuring`);
+				saveGateways(prefs, [{
+					id: randomUUID(),
+					name: "aigw",
+					url: normalizedUrl,
+					type: "aigw",
+					enabled: true,
+				}]);
+				await syncGatewaysModelsJson(prefs);
 				return true;
 			}
 		} catch {
@@ -688,8 +1042,10 @@ export function proxyRequest(
 // ── Public API ─────────────────────────────────────────────────────
 
 /**
- * Fetch the model list from an aigw endpoint and return structured model info.
+ * Fetch the model list from a gateway endpoint and return structured model info.
  * Hits GET {baseUrl}/v1/models (or {baseUrl}/models if baseUrl already ends with /v1).
+ * Returns raw ids (no prefix stripping) — the type-driven writers/registry decide
+ * how to normalise them.
  */
 export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
 	const url = baseUrl.replace(/\/+$/, "");
@@ -718,46 +1074,3 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
 		};
 	});
 }
-
-/**
- * Full configure flow: discover models, persist preference, write models.json.
- * Returns the discovered models.
- */
-export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
-	const rawModels = await discoverAigwModels(baseUrl);
-	const normalizedUrl = baseUrl.replace(/\/+$/, "");
-
-	// Normalize model IDs: Claude models get the provider prefix stripped
-	// (e.g. "aws/us.anthropic.claude-..." → "us.anthropic.claude-...") because
-	// they use the Bedrock API where the ID is just the Bedrock model ARN.
-	const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
-	const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
-	const models = rawModels.map(m => isClaudeModel(m.id)
-		? { ...m, id: stripPrefix(m.id), api: "bedrock-converse-stream" }
-		: m
-	);
-
-	prefs.set("aigw.url", normalizedUrl);
-	// Note: aigw.models no longer cached in preferences — model-registry discovers fresh each time
-
-	writeAigwModelsJson(normalizedUrl, models);
-	return models;
-}
-
-/**
- * Remove aigw configuration.
- */
-export function removeAigw(prefs: PreferencesStore): void {
-	prefs.remove("aigw.url");
-	prefs.remove("aigw.models");
-	removeAigwModelsJson();
-}
-
-/**
- * Get the currently configured aigw URL (if any).
- */
-export function getAigwUrl(prefs: PreferencesStore): string | undefined {
-	return prefs.get("aigw.url") as string | undefined;
-}
-
-// getAigwModels() has been removed — model-registry discovers fresh each time

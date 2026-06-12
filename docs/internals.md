@@ -1361,7 +1361,7 @@ When a session starts, the model and thinking level are resolved in this order (
 
 1. **Explicit per-session override** - the user picking a model in the composer mid-run, or callers passing `skipAutoModel: true` after pre-binding (e.g. delegate sessions with an explicit model arg).
 2. **Role override** - `role.model` / `role.thinkingLevel` from the resolved cascade.
-3. **Global defaults** - `default.sessionModel` / `default.sessionThinkingLevel` (or the AI-Gateway best-ranked fallback when no pref is set).
+3. **Global defaults** - `default.sessionModel` / `default.sessionThinkingLevel` (or, when no pref is set, the best-ranked model across the enabled gateways, each surfaced under its own provider key = gateway name; see [docs/multi-gateway-providers.md](multi-gateway-providers.md)).
 
 Layers 2 and 3 live in `tryAutoSelectModel` and `tryApplyDefaultThinkingLevel` in `session-manager.ts`. The role layer was added as a new step 0 inside both functions and binds via the `applyModelString` helper exported from `review-model-override.ts` - the same retry-and-verify path `applyReviewModelOverrides` uses, but reading a literal `<provider>/<modelId>` string instead of a prefs key.
 
@@ -1373,7 +1373,7 @@ The verification harness spawns reviewer, QA, and sub-session agents for gate st
 
 This is what makes "my `code-reviewer` role always runs on opus" work without changing `default.reviewModel` and without leaking that choice to every other reviewer step.
 
-**Naming model is explicitly unaffected** - `default.namingModel` and `pickFallbackAigwNamingModel` still drive title generation regardless of role.
+**Naming model is explicitly unaffected** - `default.namingModel` and `pickFallbackAigwNamingModel` (now gated on the first enabled `aigw`-type gateway's URL) still drive title generation regardless of role. A merged/local-only setup with no `aigw`-type gateway has no implicit Claude naming fallback and falls through to `default.sessionModel` / legacy Anthropic.
 
 ### UI
 
@@ -1402,7 +1402,7 @@ Agent processes are now spawned with the desired model and reasoning level passe
 
 1. Role override (`role.model` / `role.thinkingLevel` from the resolved cascade).
 2. `default.sessionModel` / `default.sessionThinkingLevel` preference (or `default.reviewModel` for verification sub-sessions).
-3. `undefined` - the aigw best-ranked fallback runs post-spawn via `tryAutoSelectModel` and emits a second `model_change` only on a cold cache.
+3. `undefined` - the best-ranked model across enabled gateways runs post-spawn via `tryAutoSelectModel` and emits a second `model_change` only on a cold cache.
 
 `resolveBridgeOptions` in `src/server/agent/session-setup.ts` is the single call site for the normal-create pipeline; `session-manager.ts` re-runs the helpers at the role-respawn and force-abort respawn sites; `verification-harness.ts` does it at all three reviewer/QA sub-session sites; `server.ts` does it at the continue-archived endpoint. The pinned values are stored on `session.spawnPinnedModel` and `session.spawnPinnedThinkingLevel`.
 
@@ -1440,7 +1440,9 @@ For the Pi 0.77 / Opus 4.8 compatibility contract, see [Pi 0.77 / Claude Opus 4.
 
 ## AI Gateway request headers (`User-Agent`, `x-opencode-session`)
 
-Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns:
+> **Multi-gateway:** Bobbit now talks to a list of named, typed gateways, not a single `aigw` URL. The headers and Bedrock routing described here apply **only to the `aigw`-type gateway** (whose name is pinned to `"aigw"`); `openai-compatible` gateways (ollama, llama-swap, …) get plain OpenAI requests with **no** special headers and no Bedrock. Each enabled gateway writes one `providers.<gateway-name>` block — for the `aigw` type that key is `aigw`. See [docs/multi-gateway-providers.md](multi-gateway-providers.md) for the full model.
+
+Bobbit can route model traffic through configured AI Gateways instead of directly to public providers. Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns (on the `aigw`-type gateway):
 
 - `User-Agent: Bobbit/<version>` identifies the Bobbit build. The `<version>` comes from Bobbit's current `package.json`, not a duplicated literal.
 - `x-opencode-session: <session-id>` partitions agent inference cache/routing per Bobbit session. It is emitted only when an agent subprocess has `BOBBIT_SESSION_ID` set.
@@ -1454,14 +1456,14 @@ The Bobbit AI Gateway user agent is sent only on requests whose target is the co
 | Path | How the header is applied |
 |---|---|
 | Model discovery | `discoverAigwModels()` calls the gateway `/v1/models` endpoint through `httpGet()`, which uses `aigwUserAgentHeaders()`. |
-| `/api/aigw/status` | If a gateway is configured, the route discovers fresh models, so the discovery request carries the header. |
+| `/api/aigw/status` (legacy shim) | Status of the `aigw` gateway; if configured, the route discovers fresh models, so the discovery request carries the header. |
 | `/api/aigw/test` | Tests the submitted URL by running discovery against that URL with the header. |
-| `/api/aigw/configure` | Runs discovery with the header, persists `aigw.url`, and rewrites `models.json`. |
-| `/api/aigw/refresh` | Re-runs the configure flow for the stored gateway URL, so discovery and the generated provider config are refreshed together. |
-| Startup refresh / auto-detect | `startupAigwCheck()` uses discovery for existing gateway refreshes and local gateway probing; reachable configured gateways are rewritten with the current headers. |
-| `/api/aigw/v1/*` proxy | `proxyRequest()` forwards to the configured gateway with `User-Agent: Bobbit/<version>` alongside content headers. |
+| `/api/aigw/configure` (legacy shim) | Upserts the `aigw`-type gateway into the list, runs discovery with the header, and re-syncs `models.json`. |
+| `/api/aigw/refresh` (legacy shim) | Re-discovers the `aigw` gateway, so discovery and the generated provider config are refreshed together. |
+| Startup refresh / auto-detect | `startupAigwCheck()` uses discovery for existing gateway refreshes and local gateway probing; reachable configured gateways are rewritten with the current headers via `syncGatewaysModelsJson()`. |
+| `/api/aigw/:name/v1/*` proxy (and legacy `/api/aigw/v1/*`) | `proxyRequest()` forwards to the named enabled gateway with `User-Agent: Bobbit/<version>` alongside content headers. |
 | Direct title / goal-summary generation | The gateway title paths in `title-generator.ts` use `aigwUserAgentHeaders()` for both `/v1/models` model-id resolution and `/v1/chat/completions` generation calls. |
-| Agent inference | `writeAigwModelsJson()` writes provider-level `providers.aigw.headers`, so pi-coding-agent sends the header on inference traffic routed through the generated `aigw` provider. |
+| Agent inference | The `aigw`-type writer (`buildAigwProviderBlock`, run by `syncGatewaysModelsJson()`) writes provider-level `providers.aigw.headers`, so pi-coding-agent sends the header on inference traffic routed through that gateway. `openai-compatible` gateways write no header block. |
 
 ### AI Gateway model pricing
 
@@ -1485,7 +1487,7 @@ The converted `cost` values flow through two surfaces:
 
 ### Generated `providers.aigw.headers`
 
-`writeAigwModelsJson()` writes the AI Gateway provider into `~/.bobbit/agent/models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
+The `aigw`-type writer (`buildAigwProviderBlock`, run by `syncGatewaysModelsJson()`) writes the AI Gateway provider into `~/.bobbit/agent/models.json` and preserves existing non-gateway providers and user `modelOverrides`. The generated provider-level header block contains both headers (only `aigw`-type gateways emit it):
 
 ```json
 {
@@ -1516,7 +1518,7 @@ pi-ai's Bedrock provider does not normally forward provider-level `headers` into
 
 ### Startup refresh behavior
 
-On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites `~/.bobbit/agent/models.json` with:
+On gateway startup, `startupAigwCheck()` checks whether any gateway is enabled in the `modelGateways` list (after `migrateGatewayPrefs()` has folded any legacy `aigw.url` into it). If so, Bobbit sets/clears the Bedrock environment variables for subprocesses (from the enabled `aigw`-type gateway, if present) and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models for every enabled gateway via `syncGatewaysModelsJson()`. A successful refresh rewrites `~/.bobbit/agent/models.json` with:
 
 - the current gateway model list,
 - the current gateway-derived per-model `cost` values when `/v1/models` provides pricing,
@@ -1531,8 +1533,8 @@ This means users with older `models.json` files pick up the user-agent header af
 The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It is attached only by AI Gateway-specific helpers or by the generated `providers.aigw` entry:
 
 - `aigwUserAgentHeaders()` is used for AI Gateway discovery, proxying, and gateway title/goal-summary calls.
-- `writeAigwModelsJson()` writes headers only under `providers.aigw`; non-aigw providers are preserved as-is.
-- `removeAigwModelsJson()` removes the entire `aigw` provider block and leaves no orphan AI Gateway headers on other providers.
+- The `aigw`-type writer writes headers only under `providers.aigw`; non-gateway providers and `openai-compatible` gateway blocks carry no AI Gateway headers.
+- `syncGatewaysModelsJson()` prunes the blocks of disabled/removed gateways (tracked via the internal `_managedGatewayProviders` pref, plus the legacy `"aigw"` key) and leaves no orphan AI Gateway headers on other providers.
 - Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
 - The Bedrock patch exits immediately for any model whose provider is not `aigw`.
 

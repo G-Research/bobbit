@@ -912,13 +912,15 @@ git ls-remote origin | grep -oE 'refs/heads/(session|goal|staff)[^[:space:]]*' |
 
 Full design + bug archaeology in [docs/design/orphan-remote-branch-cleanup.md](design/orphan-remote-branch-cleanup.md). Architecture summary: [docs/internals.md — Remote branch cleanup](internals.md#remote-branch-cleanup).
 
-## `models.json` stale / missing AI Gateway headers after gateway upgrade
+## `models.json` stale / missing gateway models or AI Gateway headers after gateway upgrade
 
-Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the generated header block.
+Symptom: a new gateway-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, per-session header partitioning isn't happening, or a disabled/removed gateway's models still appear for users whose `~/.bobbit/agent/models.json` predates the change.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+Bobbit talks to a list of named, typed gateways (`modelGateways` pref), each surfaced under a provider key equal to its `name`; the `aigw`-type gateway's header/Bedrock block lives under `providers.aigw`. See [docs/multi-gateway-providers.md](multi-gateway-providers.md).
 
-`BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` runs `syncGatewaysModelsJson` on every startup, which re-discovers **all enabled** gateways, (re)writes each `providers.<name>` block, and **prunes** the blocks of disabled/removed/renamed gateways (tracked via `_managedGatewayProviders` ∪ the legacy `"aigw"` key) — while preserving non-gateway providers (`anthropic`, `amazon-bedrock`, custom) and user `modelOverrides`. Look for `[aigw] re-discovered gateway models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json for "<name>"`, that gateway's HTTP probe failed and its last-good block was deliberately kept — fix connectivity and restart again.
+
+`BOBBIT_SKIP_AIGW_DISCOVERY=1` still skips only the network call (logged as `[aigw] gateways configured, skipping startup re-discovery`). Bedrock env vars are still applied (from the enabled `aigw`-type gateway, if any) and the existing `models.json` is kept untouched.
 
 See [docs/internals.md — Startup refresh behavior](internals.md#startup-refresh-behavior).
 
@@ -932,7 +934,8 @@ Troubleshooting checklist:
 2. Does the pref resolve? Open Settings → Models; if the row shows a red "Unavailable" badge, the stored pref does not match any current `/api/models` entry. Click Clear and re-pick.
 3. Does the Test button succeed for that row? Failure reveals whether the gateway rejects the model id (drift / wrong provider prefix).
 4. If Test passes but reviewers still abort: check the goal dashboard gate verification output — `applyReviewModelOverrides` (`src/server/agent/review-model-override.ts`) logs at `console.error` with the pref, normalized id, and the mismatched model id the agent actually reports.
-5. For naming-model issues under an AI Gateway: confirm the gateway exposes at least one Claude model (any tier); otherwise title generation falls back to direct `api.anthropic.com` (see `pickFallbackAigwNamingModel` in `title-generator.ts`).
+5. Confirm the stored pref's **provider matches a gateway `name`**. The provider key in `default.sessionModel` / `default.reviewModel` (`<provider>/<modelId>`) must equal an enabled gateway's `name` (for the enterprise gateway that is the pinned `"aigw"`); a renamed or disabled gateway makes the pref unresolvable. See [docs/multi-gateway-providers.md](multi-gateway-providers.md).
+6. For naming-model issues: the implicit "auto-pick cheapest Claude" fallback (`pickFallbackAigwNamingModel` in `title-generator.ts`) is now gated on the **first enabled `aigw`-type gateway**. A merged/local-only setup (no `aigw`-type gateway) has no implicit Claude naming fallback — title generation falls through to `default.sessionModel` / direct `api.anthropic.com`. When an `aigw` gateway is enabled, confirm it exposes at least one Claude model (any tier).
 
 ## Role model override not applied
 

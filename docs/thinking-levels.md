@@ -112,6 +112,24 @@ The default is closed: an unknown or mismatched provider does **not** light
 up `xhigh`, even if the id matches the family regex. This pin is covered by
 the cross-provider-collision case in `tests/thinking-levels.test.ts`.
 
+### Multi-gateway: why the guard still keys on the literal `"aigw"`
+
+With [multiple gateways](multi-gateway-providers.md), a gateway's `name` is its
+provider key. `providerMatches` runs **client-side** with only a provider
+string (no prefs access), so it cannot look up a gateway's `type`. The
+`aigw`-type gateway's name is therefore **pinned to `"aigw"`** specifically so
+this guard — and the two server-side `provider === "aigw"` guards in
+`pi-ai-bedrock-headers-patch.ts` / `model-completion.ts` — stay correct
+unchanged: an aigw-routed `claude-opus-*` keeps its `xhigh` shortcut.
+
+An `openai-compatible` gateway uses its own `name` as the provider (e.g.
+`llama-swap`), which is "anything else" to `providerMatches` — so it does **not**
+get the family-regex `xhigh` shortcut. Its models light up `xhigh` only through
+the metadata-first path (a non-null `thinkingLevelMap.xhigh`), exactly like any
+other non-`anthropic`/`openai` provider. This is intentional: a model literally
+named `claude-*` behind a local gateway is plain OpenAI, not Anthropic, so the
+family heuristic must not fire on it.
+
 ## Clamping, not rejection
 
 `clampThinkingLevel(level, model, opts?)` is the validate-or-degrade entry

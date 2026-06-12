@@ -14,7 +14,7 @@ import path from "node:path";
 
 const { PreferencesStore } = await import("../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../src/server/agent/model-registry.ts");
-const { discoverAigwModels, writeAigwModelsJson } = await import("../src/server/agent/aigw-manager.ts");
+const { discoverAigwModels, saveGateways, syncGatewaysModelsJson } = await import("../src/server/agent/aigw-manager.ts");
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const GPT_52_COST = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.5625 };
@@ -140,7 +140,9 @@ describe("AI Gateway pricing metadata", () => {
 		const mock = await startMockAigw();
 		try {
 			const prefs = new PreferencesStore(tmpDir);
-			prefs.set("aigw.url", mock.url);
+			// Migrated schema: a single `aigw`-type gateway named "aigw" behaves
+			// identically to the legacy single-URL config (provider key stays "aigw").
+			saveGateways(prefs as any, [{ id: "g-aigw", name: "aigw", url: mock.url, type: "aigw", enabled: true }]);
 			invalidateModelCache();
 
 			const models = await getAvailableModels(prefs as any);
@@ -170,10 +172,14 @@ describe("AI Gateway pricing metadata", () => {
 		try {
 			process.env.BOBBIT_AGENT_DIR = tmpAgentDir;
 			const mock = await startMockAigw([pricedOpenAiModel(), pricedClaudeModel()]);
+			const prefsDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-aigw-pricing-prefs-"));
 			try {
-				const discoveredModels = await discoverAigwModels(mock.url);
-
-				writeAigwModelsJson(`${mock.url}/v1`, discoveredModels);
+				// syncGatewaysModelsJson discovers the gateway itself and writes the
+				// providers["aigw"] block via the type-driven `aigw` writer — exercising
+				// the same cost propagation the old writeAigwModelsJson did.
+				const prefs = new PreferencesStore(prefsDir);
+				saveGateways(prefs as any, [{ id: "g-aigw", name: "aigw", url: `${mock.url}/v1`, type: "aigw", enabled: true }]);
+				await syncGatewaysModelsJson(prefs as any);
 
 				const data = readModelsJson(tmpAgentDir);
 				const persistedModels = data.providers.aigw.models;
@@ -189,6 +195,7 @@ describe("AI Gateway pricing metadata", () => {
 				assert.deepEqual(mock.requests(), ["/v1/models"]);
 			} finally {
 				await mock.close();
+				fs.rmSync(prefsDir, { recursive: true, force: true });
 			}
 		} finally {
 			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;

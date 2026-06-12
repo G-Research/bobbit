@@ -223,7 +223,15 @@ test.describe("AI Gateway Configure Flow", () => {
 
 		const res = await apiFetch("/api/preferences");
 		const prefs = await res.json();
-		expect(prefs["aigw.url"]).toBe(`http://127.0.0.1:${mockPort}`);
+		// Post multi-gateway migration: the legacy single `aigw.url` pref is
+		// superseded by the `modelGateways` list (the configure shim upserts a
+		// `{ name: "aigw", type: "aigw", enabled: true }` entry).
+		const gateways = prefs["modelGateways"];
+		expect(Array.isArray(gateways)).toBe(true);
+		expect(gateways.find((g: { name: string }) => g.name === "aigw")?.url).toBe(
+			`http://127.0.0.1:${mockPort}`,
+		);
+		expect(prefs["aigw.url"]).toBeUndefined();
 		// aigw.models is no longer cached in preferences — models are discovered fresh via GET /api/models
 	});
 

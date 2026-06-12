@@ -38,11 +38,12 @@ test.describe("GET /api/models with AI Gateway", () => {
 	});
 
 	test.afterEach(async () => {
-		await apiFetch("/api/aigw/configure", { method: "DELETE" });
-		// Reset exclusive flag to default so it doesn't leak between tests.
-		await apiFetch("/api/preferences", {
+		// Full reset: clear ALL configured gateways (aigw + openai-compatible)
+		// so none leak between tests. Exclusivity is derived from the list now
+		// (no `aigw.exclusive` pref), so emptying the list is the canonical reset.
+		await apiFetch("/api/aigw/gateways", {
 			method: "PUT",
-			body: JSON.stringify({ "aigw.exclusive": null }),
+			body: JSON.stringify({ gateways: [] }),
 		});
 	});
 
@@ -138,28 +139,30 @@ test.describe("GET /api/models with AI Gateway", () => {
 		expect(providers.has("openai")).toBe(false);
 	});
 
-	test("built-in providers return when aigw.exclusive is set to false", async () => {
-		await apiFetch("/api/aigw/configure", {
-			method: "POST",
-			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
-		});
-		await apiFetch("/api/preferences", {
+	test("built-in providers return in merged mode with an openai-compatible gateway", async () => {
+		// Exclusivity is now derived from gateway TYPE, not a manual `aigw.exclusive`
+		// toggle. An `openai-compatible` gateway runs in MERGED mode: its models AND
+		// the built-in cloud providers both contribute. (Only an enabled `aigw`-type
+		// gateway forces exclusive mode.)
+		const putRes = await apiFetch("/api/aigw/gateways", {
 			method: "PUT",
-			body: JSON.stringify({ "aigw.exclusive": false }),
+			body: JSON.stringify({
+				gateways: [
+					{ name: "local-llm", url: `http://127.0.0.1:${mockPort}`, type: "openai-compatible", enabled: true },
+				],
+			}),
 		});
+		expect(putRes.status).toBe(200);
 
 		const res = await apiFetch("/api/models");
 		const models = await res.json();
 		const providers = new Set(models.map((m: any) => m.provider));
-		expect(providers.has("aigw")).toBe(true);
+		// The openai-compatible gateway surfaces under its own name (not "aigw").
+		expect(providers.has("local-llm")).toBe(true);
+		expect(providers.has("aigw")).toBe(false);
+		// Built-ins are NOT suppressed in merged mode.
 		const hasBuiltIn = providers.has("anthropic") || providers.has("amazon-bedrock");
 		expect(hasBuiltIn).toBe(true);
-
-		// Reset to default for subsequent tests.
-		await apiFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "aigw.exclusive": null }),
-		});
 	});
 
 	test("built-in providers return once aigw is removed", async () => {
