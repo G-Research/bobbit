@@ -1746,7 +1746,7 @@ workflows:
             phase: 0
             label: Approve to proceed
             prompt: |-
-              The design doc for {{branch}} has been signalled.
+              The mock document for {{branch}} is ready for human review.
 
               Review it and approve or reject before implementation begins.
               Reject with feedback if anything needs to change.
