@@ -146,19 +146,27 @@ What disabling does:
   targets stays available** to any enabled tool/entrypoint that opens it — disabling an
   entrypoint never disables a panel.
 
+**Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
+names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
+those groups by reading the group's YAML files. The UI therefore shows and toggles concrete
+tool names such as `readonly_bash`, not just the group `pr-walkthrough`. `DisabledRefs.tools`
+is keyed by those concrete tool names, and the runtime filters compare against tool names in
+`/api/tools`, prompt docs, role effective-tool resolution, and extension/action/surface-token
+resolution. Disabling one tool in a group does not disable its siblings.
+
 **Why a catalogue/runtime split.** Toggles persist in `pack_activation` (per scope/project,
-keyed by pack name + entity kind + name; entrypoints keyed by their `contents.entrypoints`
-basename, so one toggle covers both the launcher id and the deep-link `routeId` from that
-file). The toggle UI must render from the **unfiltered catalogue** — read straight from the
-installed pack's `pack.yaml` manifest via `GET /api/marketplace/pack-activation` — *not* from
-the runtime-filtered `/api/tools` / `/api/ext/contributions`. If the UI read the filtered
-runtime endpoints, a disabled entity would vanish from the list and become impossible to
-re-enable. So the catalogue stays complete (every toggle visible, `checked = name ∉
-disabled[kind]`) while the runtime registries stay filtered (a disabled entity does not
-register/resolve). The `PUT` returns the refreshed catalogue alongside the normalized
-`disabled`, then invalidates resolver caches so the effect is live without a reload. Scope
-split mirrors `pack_order`: project activation lives in the project config, server +
-global-user in the server config.
+keyed by pack name + entity kind + name; tool refs are concrete tool names; entrypoints are
+keyed by their `contents.entrypoints` basename, so one toggle covers both the launcher id and
+the deep-link `routeId` from that file). The toggle UI must render from the **unfiltered
+catalogue** — read from the installed pack's manifest plus its declared tool-group files via
+`GET /api/marketplace/pack-activation` — *not* from the runtime-filtered `/api/tools` /
+`/api/ext/contributions`. If the UI read the filtered runtime endpoints, a disabled entity
+would vanish from the list and become impossible to re-enable. So the catalogue stays complete
+(every toggle visible, `checked = name ∉ disabled[kind]`) while the runtime registries stay
+filtered (a disabled entity does not register/resolve). The `PUT` returns the refreshed
+catalogue alongside the normalized `disabled`, then invalidates resolver caches so the effect
+is live without a reload. Scope split mirrors `pack_order`: project activation lives in the
+project config, server + global-user in the server config.
 
 **No standalone help paragraph.** An earlier version rendered an explanatory paragraph below
 the toggles; it has been removed. Once each entity carries its own one-line description (below),
@@ -218,9 +226,9 @@ The source registry persists separately to `<server-cwd>/.bobbit/config/marketpl
 
 ## Built-in (first-party) packs
 
-Bobbit ships some of its own features **as packs** rather than as bespoke built-in code. This **dogfoods the pack API**: a real shipped feature is delivered through the same `PackResolver` + Host API + activation system as any third-party pack, so the extension surface is exercised by production code and not just by tests. It also lets users **disable shipped features they don't want** from the Market UI, using the same per-entity activation toggles as installed packs. The first feature migrated this way is **`pr-walkthrough`** — see [docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the full design and rationale, and [the Extension Host authoring guide](extension-host-authoring.md#first-party-packs-dogfood-the-host-api) for how the pack re-expresses it.
+Bobbit ships some of its own features **as packs** rather than as bespoke built-in code. This **dogfoods the pack API**: a real shipped feature is delivered through the same `PackResolver` + Host API + activation system as any third-party pack, so the extension surface is exercised by production code and not just by tests. It also lets users **disable shipped features they don't want** from the Market UI, using the same per-entity activation toggles as installed packs. The first feature migrated this way is **`pr-walkthrough`**, which owns its viewer surfaces plus the reviewer tools under `market-packs/pr-walkthrough/tools/pr-walkthrough/`; its `pack.yaml` declares `contents.tools: [pr-walkthrough]`, and the Market UI expands that group into the three concrete tool toggles. See [docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md) for the full design and rationale, and [the Extension Host authoring guide](extension-host-authoring.md#first-party-packs-dogfood-the-host-api) for how the pack re-expresses it.
 
-The shipped packs live in the repo at `market-packs/<name>/`, are built by `npm run build:packs`, and are copied into `dist/server/builtin-packs/market-packs/<name>/` by `scripts/copy-builtin-packs.mjs` (an explicit allowlist — *not* every dir under `market-packs/`). At runtime they are located relative to the server module dir (`resolveBuiltinPacksDir()` in `src/server/agent/builtin-packs.ts`, overridable via `BOBBIT_BUILTIN_PACKS_DIR` for tests).
+The shipped packs live in the repo at `market-packs/<name>/`, are built by `npm run build:packs`, and are copied into `dist/server/builtin-packs/market-packs/<name>/` by `scripts/copy-builtin-packs.mjs` (an explicit allowlist — *not* every dir under `market-packs/`). At runtime they are located relative to the server module dir (`resolveBuiltinPacksDir()` in `src/server/agent/builtin-packs.ts`, overridable via `BOBBIT_BUILTIN_PACKS_DIR` for tests). Docker sandboxes mount that built-in pack tree read-only and remap pack-owned `bobbit-extension` paths into the container, so first-party pack tools resolve the same way as `.bobbit/config/tools` and shipped `dist/server/defaults/tools` extensions.
 
 ### Resolve-in-place, not copy-install
 
@@ -285,7 +293,7 @@ author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
 contents:                        # REQUIRED. roles/tools/skills required; each MAY be empty.
   roles:       [researcher]      #   Drives the browse-UI declared-entity chips.
-  tools:       [research]        #   tools[] are tool GROUP dir names under tools/.
+  tools:       [research]        #   tools[] are tool GROUP dir names under tools/; activation expands them to concrete tool names.
   skills:      [lit-review]      #   (No per-pack gate keys off tools[]; trust is
   entrypoints: [open-review]      #    decided once when adding a source.)
                                  #   OPTIONAL — entrypoints/<name>.yaml basenames (toggleable).
@@ -294,7 +302,7 @@ routes:                          # OPTIONAL top-level block — Extension-Host p
   names:  [bundle, publish]       #   exported route-name allowlist.
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected** — MCP installs are out of scope in the MVP. There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. A `contents.mcp` key is **rejected** — MCP installs are out of scope in the MVP. There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
 
 ### Generated `.pack-meta.yaml`
 
@@ -315,7 +323,7 @@ The canonical installed identity is `pack.yaml`'s `name` (not the source subdir 
 
 ## Extension contributions: tool renderers & server actions
 
-A pack can ship more than a tool implementation — it can contribute **how tool blocks look in the chat** (a renderer), **interactive server-side behavior** (action handlers), persistent **side panels**, the pack's own **server routes**, non-chat **entrypoints**, implicit pack-scoped **stores**, and **session** access. This is the **Extension Host**: a contribution model where every capability flows through one mediated Host API. Everything is shipped — `HOST_API_VERSION` is `1` and `host.capabilities` reports all flags `true`. The two built-ins re-expressed as packs are the acceptance litmus: `market-packs/artifacts/` (a tool + panel + deep-link pack) and `market-packs/pr-walkthrough/` (a **no-tools / UI-only** pack).
+A pack can ship more than a tool implementation — it can contribute **how tool blocks look in the chat** (a renderer), **interactive server-side behavior** (action handlers), persistent **side panels**, the pack's own **server routes**, non-chat **entrypoints**, implicit pack-scoped **stores**, and **session** access. This is the **Extension Host**: a contribution model where every capability flows through one mediated Host API. Everything is shipped — `HOST_API_VERSION` is `1` and `host.capabilities` reports all flags `true`. The two built-ins re-expressed as packs are the acceptance litmus: `market-packs/artifacts/` (a tool + panel + deep-link pack) and `market-packs/pr-walkthrough/` (a first-party pack with viewer surfaces, launch entrypoints, routes, a reviewer role, and reviewer tools). No-tools/UI-only coverage lives in fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
 **Where each contribution lives (V1 schema).** Contributions are declared where their runtime scope already is: tool-scoped `renderer`/`actions` on the tool YAML; pack-scoped panels in `panels/<panel>.yaml` (auto-discovered), entrypoints in `entrypoints/<ep>.yaml` (listed in `contents.entrypoints`), and routes in the top-level `routes:` block of `pack.yaml`; shared modules in `lib/`. Stores are implicit. The authoritative schema + addressing contract is [docs/design/pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md). See also [docs/design/extension-host.md](design/extension-host.md) for the design (contract adapter, isolation model), [extension-host-phase2.md](design/extension-host-phase2.md) for the build history, and the [Extension Host authoring guide](extension-host-authoring.md) for the step-by-step walkthrough.
 
@@ -380,7 +388,7 @@ The renderer module, served to the browser and imported as ESM regardless of ext
   lib/                          # shared modules (panels, routes.mjs, helpers)
 ```
 
-A **no-tools pack** (e.g. `market-packs/pr-walkthrough/`) omits `tools/` entirely and ships only `pack.yaml` + `panels/` + `entrypoints/` + `lib/` — its surfaces obtain a pack-scoped Host API through pack-bound surface tokens, with no tool in `allowedTools`.
+A **no-tools pack** omits `tools/` entirely and ships only `pack.yaml` + `panels/` + `entrypoints/` + `lib/` — its surfaces obtain a pack-scoped Host API through pack-bound surface tokens, with no tool in `allowedTools`. Current no-tools coverage is fixture/litmus coverage (`tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`); the production PR walkthrough pack is no longer no-tools because it owns the reviewer tools under `market-packs/pr-walkthrough/tools/pr-walkthrough/`.
 
 ### Precedence, project scoping, and cache invalidation
 

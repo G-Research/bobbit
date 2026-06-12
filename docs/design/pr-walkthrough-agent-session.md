@@ -410,7 +410,7 @@ The walkthrough-only tool group includes `read_pr_walkthrough_bundle` alongside 
 
 Tool name: `read_pr_walkthrough_bundle`.
 
-The extension registers only when `BOBBIT_WALKTHROUGH_JOB_ID` and `BOBBIT_SESSION_ID` are present. It calls the internal bundle endpoint with those environment-derived ids and ignores caller-supplied identity fields. The gateway validates that the session owns the job before returning data.
+The current pack-owned extension registers when `BOBBIT_SESSION_ID` is present. It calls the internal bundle endpoint with the caller's session identity; the gateway resolves the bound walkthrough job from the verified session secret and validates that the session owns the job before returning data.
 
 Internal endpoint:
 
@@ -446,14 +446,14 @@ The tool does not read arbitrary filesystem paths, does not expose raw artifact 
 
 ### Tool registration
 
-Add a walkthrough-only tool group:
+The walkthrough-only tool group is now owned by the first-party pack:
 
-- `defaults/tools/pr-walkthrough/submit.yaml`
-- `defaults/tools/pr-walkthrough/extension.ts`
+- `market-packs/pr-walkthrough/tools/pr-walkthrough/submit.yaml`
+- `market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts`
 
 Tool name: `submit_pr_walkthrough_yaml`.
 
-The extension should register only when `BOBBIT_WALKTHROUGH_JOB_ID` and `BOBBIT_SESSION_ID` are present. It posts to an internal endpoint:
+The current extension registers for sessions with `BOBBIT_SESSION_ID`; the gateway resolves the bound walkthrough job from the caller's session secret. It posts to an internal endpoint:
 
 `POST /api/internal/pr-walkthrough/submit-yaml`
 
@@ -800,7 +800,7 @@ Update `src/app/render-helpers.ts` and session types to render `parentSessionId`
 
 ### Tool policy / MCP registration
 
-- Add `defaults/tools/pr-walkthrough/*` and tool manager metadata so the new tool can be explicitly allowed.
+- Add/resolve `market-packs/pr-walkthrough/tools/pr-walkthrough/*` through the pack tool resolver so the new tool can be explicitly allowed by the `pr-reviewer` role.
 - Add command policy hook for shell execution or a dedicated read-only shell extension.
 - Update `src/server/auth/sandbox-guard.ts` to allow only `/api/internal/pr-walkthrough/submit-yaml` for the submitting scoped session.
 

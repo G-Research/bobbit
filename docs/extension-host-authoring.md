@@ -30,7 +30,7 @@ This guide is the practical how-to.
 
 **Status:** renderers, actions, panels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `host.capabilities` reports all flags `true` on a current host.
 
-The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack) and `market-packs/pr-walkthrough/` (a **no-tools / UI-only** pack).
+The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
 ## Big picture: what you are contributing, and where it lives
 
@@ -52,8 +52,8 @@ a `panelId` is opened through the Host API by any surface in the pack, routes re
 a pack-level registry keyed by the server-derived `packId`, stores are namespaced by `packId`,
 and entrypoints are launchers for the whole pack. Bolting them onto an arbitrary carrier tool
 was unintuitive and blocked clean UI-only packs. The V1 schema makes the on-disk layout match
-the actual runtime scope, which is also what lets a pack ship **no tools at all** (see the
-[no-tools pack](#worked-example-a-no-tools-pack-pr-walkthrough) below).
+the actual runtime scope, which is also what lets a pack ship **no tools at all** (covered by
+fixture/litmus packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`).
 
 The two halves talk through **one Host API**. The renderer→action flow: a renderer calls
 `host.invokeAction(tool, action, args)`; the gateway authorizes the call (like a tool call),
@@ -658,7 +658,7 @@ export const routes = {
 
 The worker terminates the handler on timeout and SIGKILLs any spawned child, but those are
 **stability** guarantees, not a security boundary against your own code. See the
-[no-tools pack case study](#worked-example-a-no-tools-pack-pr-walkthrough).
+[first-party PR walkthrough case study](#worked-example-the-pr-walkthrough-first-party-pack).
 
 ### Entrypoints — non-chat launchers + deep-link routes (`host.ui.navigate`)
 
@@ -924,11 +924,14 @@ What disabling does:
   tool/entrypoint that opens it — panels are not toggled by disabling an entrypoint.
 
 Toggles persist via `pack_activation` (per scope/project), keyed by pack name + entity kind +
-name; entrypoints are keyed by their `contents.entrypoints` basename (`listName`), so one
-toggle disables both the launcher id and the deep-link `routeId` from that file. The toggle UI
-reads an **unfiltered catalogue** straight from the installed pack's manifest (so a disabled
-entity stays visible and re-enableable across reloads), while the runtime registries stay
-filtered. See [marketplace.md](marketplace.md#activation-controls) for the endpoints and the
+name. `pack.yaml` declares tool **groups** in `contents.tools`, but the activation catalogue
+expands those groups to concrete tool names; `DisabledRefs.tools` is therefore keyed by tool
+name, not group name. Entrypoints are keyed by their `contents.entrypoints` basename
+(`listName`), so one toggle disables both the launcher id and the deep-link `routeId` from that
+file. The toggle UI reads an **unfiltered catalogue** from the installed pack's manifest plus
+its declared tool-group YAMLs (so a disabled entity stays visible and re-enableable across
+reloads), while the runtime registries stay filtered. See
+[marketplace.md](marketplace.md#activation-controls) for the endpoints and the
 catalogue/runtime split.
 
 ## Bundling npm dependencies into a pack (vendoring)
@@ -995,20 +998,29 @@ panel rehydrated from `store.get`. Real parity needs real libraries, so `highlig
 render inside a `sandbox="allow-scripts"` iframe. Tests:
 `tests/artifacts-pack-viewer.test.ts` (node) + `tests/e2e/ui/artifacts-pack.spec.ts` (browser).
 
-## Worked example: a no-tools pack (pr-walkthrough)
+## Worked example: the PR walkthrough first-party pack
 
-`market-packs/pr-walkthrough/` is the maximal example — the PR-walkthrough feature re-expressed
-as a pack with **no `tools/` dir at all**. It proves an **orphan / UI-only** pack can build a
-full surface from pack-scoped contributions + the Host API alone, through pack-bound surface
-auth, with **no tool in `allowedTools`**. It is no longer a test-only litmus: it now **ships as a
-built-in first-party pack** and is the sole provider of the viewer — its old built-in code is
-deleted (see [First-party packs dogfood the Host API](#first-party-packs-dogfood-the-host-api)
-below and [docs/marketplace.md](marketplace.md#built-in-first-party-packs)).
+`market-packs/pr-walkthrough/` is the maximal production example: the guided PR review feature
+is delivered as a built-in first-party pack, and the old bespoke viewer code is deleted. It is
+**not** a no-tools/UI-only pack anymore. It owns the reviewer tools under
+`tools/pr-walkthrough/`; `pack.yaml` declares `contents.tools: [pr-walkthrough]`, and the
+Marketplace installed catalogue expands that group into the concrete toggles
+`readonly_bash`, `read_pr_walkthrough_bundle`, and `submit_pr_walkthrough_yaml`.
+
+No-tools pack behavior is still supported and tested by fixture/litmus packs such as
+`tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`. PR walkthrough is now the
+example for combining pack-bound UI surfaces with normal role/tool-policy-resolved tools.
 
 ```
 pr-walkthrough/
-  pack.yaml                              # contents.tools: []  +  contents.roles: [pr-reviewer]  +  contents.entrypoints: [4 files]  +  routes: { module: lib/routes.mjs, names: [bundle, publish, run, status, recover] }
+  pack.yaml                              # contents.tools: [pr-walkthrough] + contents.roles: [pr-reviewer] + contents.entrypoints: [4 files] + routes: { module: lib/routes.mjs, names: [bundle, publish, run, status, recover] }
   roles/pr-reviewer.yaml                 # read-only reviewer role; allows the "PR Walkthrough" group, denies all else
+  tools/pr-walkthrough/
+    readonly_bash.yaml                   # concrete tool name: readonly_bash
+    read_pr_walkthrough_bundle.yaml      # concrete tool name: read_pr_walkthrough_bundle
+    submit.yaml                          # concrete tool name: submit_pr_walkthrough_yaml
+    extension.ts                         # shared reviewer tool implementation
+  tools/_shared/gateway.ts               # shared gateway helper for the tools
   panels/pr-walkthrough-panel.yaml       # id: pr-walkthrough.panel, entry: ../lib/panel.js
   entrypoints/
     pr-walkthrough-open.yaml             # composer-slash launcher
@@ -1023,6 +1035,7 @@ pr-walkthrough/
 | Built-in piece | Pack contribution |
 |---|---|
 | `PrWalkthroughPanel` viewer | `panels/pr-walkthrough-panel.yaml` (`pr-walkthrough.panel` → `../lib/panel.js`). Entrypoints carry **no** hard-coded `jobId`. The panel lives **only** in the reviewer child session — there is no owner-session surface. Inside the bound child pane it auto-opens (the read-only carve-out), self-polls `status`, and renders; on reload it re-renders via the child-self `recover` |
+| Reviewer tools | `tools/pr-walkthrough/*.yaml` + `extension.ts`. These are normal `bobbit-extension` agent tools, not Host API surfaces. They are granted only through role/tool-policy resolution; disabling one concrete tool in Market removes just that tool from runtime resolution |
 | Launch — spawn-on-click, a real isolated reviewer | all three launchers carry `target: { action: spawn, route: run, panelId: pr-walkthrough.panel }`. On click the platform calls the `run` route, which mints a fresh read-only child via **`host.agents.spawn({ role: "pr-reviewer", readOnly: true, lifecycle: "full", deferInitialPrompt: true, title: "PR Walkthrough", toolEnv })`** — NOT `host.session.postMessage`; the user's own agent is never driven — then opens the panel in the returned `childSessionId` (contract-v2 `host.ui.openPanel({ panelId, sessionId })`, a real session switch). A `NO_PR` / failure surfaces inline in the git-widget dropdown; nothing is spawned |
 | `handlePrWalkthroughApiRoute` endpoints | `pack.yaml` `routes:` (`lib/routes.mjs`, names `bundle`/`publish`/`run`/`status`/`recover`), reached via `host.callRoute(…)` (the route resolves the session's own job/binding; the caller does not pass a `jobId`) — **never** a raw fetch |
 | `walkthrough-store.ts` state + reviewer routing | **implicit store** → `host.store.*`, pack-scoped — holds the `binding/<child>` and `submitted/<jobId>` routing keys for the reviewer child. The old `reviewer/` dedup index and owner `last/` recovery pointer were removed (always-fresh launch + child-self recovery only) |
@@ -1030,25 +1043,21 @@ pr-walkthrough/
 | Reload recovery | the `recover` route is **child-self only**: the reviewer child pane auto-invokes it on mount (the read-only carve-out) and it resolves the persisted YAML from the child's own `binding/<childSessionId>` (`binding/<self>` → `submitted/<jobId>`). The old owner-scoped `last/<sessionId>` branch and the manual "Load walkthrough" gesture were removed with the owner-session surface |
 | Live `git diff` recompute | ambient `child_process`/`fs` → the `bundle` route runs **real `git`** live in the confined worker (`process.cwd()` = session worktree) |
 
-Two non-obvious decisions worth copying:
+Two boundaries are worth copying:
 
-1. **Pack-bound surfaces need no carrier tool.** The panel and launchers obtain a pack-scoped
-   Host API through a pack-bound surface token (`{ contributionKind, contributionId, packId }`),
-   authorized on *installed + active + own-session*. There is no dummy tool in `allowedTools` —
-   that is the whole point of the no-tools pack.
-2. **Pack-level route resolution is opener-independent.** The panel calls
-   `host.callRoute("bundle", …)`; the server resolves the route **module** through the
-   pack-level `RouteRegistry` (keyed by `packId`), so the panel-originated call reliably reaches
-   the pack's routes without the route and opener sharing a tool. (The agent still produces the
-   walkthrough **YAML** via `submit_pr_walkthrough_yaml`; the YAML→cards synthesis was extracted to
-   the shared module `src/shared/pr-walkthrough/yaml-to-cards.ts` and **bundled into the pack's
-   `publish` route**, so the pack maps the agent's YAML to review cards itself.
-   See `docs/design/pr-walkthrough-pack-deletion.md`.)
+1. **Pack-bound surfaces still need no carrier tool.** The panel, routes, and launchers obtain a
+   pack-scoped Host API through a pack-bound surface token (`{ contributionKind,
+   contributionId, packId }`), authorized on *installed + active + own-session*. `allowedTools`
+   does not authorize panels, routes, stores, or entrypoints.
+2. **Tools stay normal tools.** The reviewer tools flow through the existing tool resolver, role
+   policies, group policies, tool guard, and extension loading path. `host.agents.spawn({ role:
+   "pr-reviewer" })` grants the child the **role's** resolved tools — exactly the three PR
+   walkthrough tools — never the owner session's broader toolset.
 
 Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
 launcher click spawns the reviewer child → the bound child pane auto-renders from `callRoute` +
-store via child-self `status`/`recover` → deep-link → disable/re-enable). There is no owner-transcript
-`readToolCall` scan and no manual Load path.
+store via child-self `status`/`recover` → deep-link → concrete tool toggles and entrypoint toggles).
+There is no owner-transcript `readToolCall` scan and no manual Load path.
 
 ## First-party packs dogfood the Host API
 
@@ -1091,13 +1100,15 @@ Two pieces of the migration are worth understanding when authoring your own ambi
   implementation of the synthesis, used by both the agent path and the pack viewer, with no
   duplicated logic to drift.
 
-What stays agent-tool-side is the explicit carve-out: the `submit_pr_walkthrough_yaml` /
-`read_pr_walkthrough_bundle` / `readonly_bash` tools, the `/resolve` + `/export/*` lifecycle, and
-GitHub network/auth. Those are genuine *agent* capabilities (model-backed synthesis, credentialed
-network), not contribution surfaces. The reviewer toolset is granted by the pack-shipped
-`pr-reviewer` role, and the legacy `WalkthroughAgentManager` launcher, `/launch` route, and
-submit-proof secret were **deleted** by the `host.agents` migration. Full keep-vs-delete detail is
-in [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md),
+What stays outside the Host API is the explicit **agent-tool** carve-out: the
+`submit_pr_walkthrough_yaml` / `read_pr_walkthrough_bundle` / `readonly_bash` tools, the
+`/resolve` + `/export/*` lifecycle, and GitHub network/auth. Those are genuine *agent*
+capabilities (model-backed synthesis, credentialed network), not panel/route/entrypoint
+surfaces. The tools now ship from the pack at `market-packs/pr-walkthrough/tools/pr-walkthrough/`
+and are granted by the pack-shipped `pr-reviewer` role. The legacy `WalkthroughAgentManager`
+launcher, `/launch` route, and submit-proof secret were **deleted** by the `host.agents`
+migration. Full keep-vs-delete detail is in
+[docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md),
 [docs/design/built-in-first-party-packs.md §8](design/built-in-first-party-packs.md), and
 [docs/design/pr-walkthrough-host-agents-migration.md](design/pr-walkthrough-host-agents-migration.md).
 
@@ -1130,7 +1141,7 @@ the contract adapter, and the worker isolation model — is documented in
 
 - **Authoritative V1 schema:** `docs/design/pack-schema-v1-rationalisation.md`
 - Renderer+action example pack: `tests/fixtures/market-sources/retry-demo-src/retry-demo/`
-- Litmus packs: `market-packs/artifacts/` (tool + panel + deep-link), `market-packs/pr-walkthrough/` (no-tools / UI-only)
+- Litmus packs: `market-packs/artifacts/` (tool + panel + deep-link), `market-packs/pr-walkthrough/` (first-party reviewer tools + panel/routes/entrypoints), `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/` (no-tools / UI-only)
 - Browser E2Es: `tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, `pr-walkthrough-pack.spec.ts`
 - Frozen Host API types: `src/shared/extension-host/host-api.ts`
 - Action / route dispatch + handler ctx: `src/server/extension-host/action-dispatcher.ts`, `route-dispatcher.ts`
