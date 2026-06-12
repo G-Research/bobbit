@@ -1,10 +1,19 @@
 # Session-hosted PR walkthrough agent UX
 
-> **Superseded behaviour:** the "automatically switch the child to fullscreen
-> review configuration" steps below describe the original design. Auto-fullscreen
-> on ready has since been **removed** — the walkthrough panel now shares the HTML
-> preview panel's resize logic and fullscreen is strictly user-initiated. See
-> [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md).
+> **⚠️ SUPERSEDED — launch + lifecycle model.** Two parts below no longer reflect
+> the shipped system:
+> 1. Auto-fullscreen-on-ready was **removed** — the walkthrough panel shares the HTML
+>    preview panel's resize logic and fullscreen is user-initiated (see
+>    [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md)).
+> 2. The launch flow (a `/walkthrough-pr` command / side-panel tab in the launching
+>    session, auto-switching the child to a fullscreen review configuration) is
+>    replaced by the spawn-on-click model in
+>    [pr-walkthrough-launch-ux.md](pr-walkthrough-launch-ux.md): a launcher click
+>    spawns a fresh read-only reviewer sub-agent and auto-switches the view to it;
+>    the panel lives only inside that child session; on submit the reviewer is NOT
+>    terminated (it stays live + selectable, survives restart, user-terminated).
+>    Read [pr-walkthrough-launch-ux.md](pr-walkthrough-launch-ux.md) +
+>    [../pr-walkthrough-panel.md](../pr-walkthrough-panel.md) for the current model.
 
 ## Context from the current UI
 

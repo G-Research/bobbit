@@ -1046,7 +1046,9 @@ Two non-obvious decisions worth copying:
    See `docs/design/pr-walkthrough-pack-deletion.md`.)
 
 Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
-launcher → panel renders from `callRoute` + store → `readToolCall` → deep-link → disable/re-enable).
+launcher click spawns the reviewer child → the bound child pane auto-renders from `callRoute` +
+store via child-self `status`/`recover` → deep-link → disable/re-enable). There is no owner-transcript
+`readToolCall` scan and no manual Load path.
 
 ## First-party packs dogfood the Host API
 
@@ -1075,8 +1077,10 @@ Two pieces of the migration are worth understanding when authoring your own ambi
   [Spawning a role-carrying, scoped child](#spawning-a-role-carrying-scoped-child-the-isolated-reviewer-pattern)
   and [docs/pr-walkthrough-panel.md § Launch model](pr-walkthrough-panel.md#launch-model-the-isolated-reviewer-child)).
   The panel implements a small state machine (`running` → `submitted` → `publishing` → `rendered`,
-  with timeout/error states + a `recover`-backed Load gesture for reloads) so the launch flow is
-  resilient, not just the happy path — see `market-packs/pr-walkthrough/src/panel.js`.
+  with timeout/error states) so the launch flow is resilient, not just the happy path. There are no
+  manual `Run`/`Load` buttons: inside the bound reviewer-child pane the panel auto-opens and
+  self-drives the poll (the read-only carve-out), and on reload it auto-recovers on mount via the
+  child-self `recover` — see `market-packs/pr-walkthrough/src/panel.js`.
 - **Shared synthesis, one source of truth, bundled into the pack.** The viewer must turn the
   submitted production YAML into the same cards the deleted built-in produced. That synthesis
   (`validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + helpers)
