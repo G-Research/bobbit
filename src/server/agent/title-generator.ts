@@ -2,14 +2,15 @@
  * Generates a short session title from conversation messages.
  * Supports three modes:
  * 1. Direct Anthropic API (default - uses Claude Haiku via api.anthropic.com)
- * 2. AI Gateway proxy (when aigw is configured - routes through the gateway)
+ * 2. Gateway proxy (routes a naming model whose provider matches a configured
+ *    gateway name through that gateway's OpenAI /v1/chat/completions endpoint)
  * 3. Custom naming model (user preference - any provider/model via the gateway)
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
-import { discoverAigwModels } from "./aigw-manager.js";
+import { discoverAigwModels, type ModelGateway } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
@@ -68,7 +69,11 @@ const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 export interface TitleGenOptions {
 	/** Override model in "provider/modelId" format, e.g. "aigw/claude-haiku-4-5" */
 	namingModel?: string;
-	/** AI Gateway URL for proxying requests (used when provider is "aigw") */
+	/** Enabled gateways, for resolving a naming model's provider (gateway name) → URL. */
+	gateways?: ModelGateway[];
+	/** Implicit-fallback gateway URL (first enabled `aigw`-type gateway). Preserves
+	 *  the "auto-pick cheapest Claude" behavior when no explicit naming model is set;
+	 *  undefined for merged/local-only setups (no Claude fallback). */
 	aigwUrl?: string;
 	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" */
 	thinkingLevel?: string;
@@ -450,8 +455,13 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	if (options?.namingModel) {
 		const configured = await findConfiguredModel(options.namingModel, options);
 		if (configured) {
-			if (configured.provider === "aigw" && options.aigwUrl) {
-				return generateViaGateway(options.aigwUrl, configured.modelId, preview, "off");
+			// Route via the gateway when the naming model's provider matches an
+			// enabled gateway name. Title-gen always uses the gateway's OpenAI
+			// /v1/chat/completions path (the Bedrock distinction is irrelevant here),
+			// so this works for both `aigw` and `openai-compatible` gateways.
+			const gateway = options.gateways?.find(g => g.name === configured.provider);
+			if (gateway) {
+				return generateViaGateway(gateway.url, configured.modelId, preview, "off");
 			}
 			if (configured.model) {
 				const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
@@ -650,8 +660,9 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 	if (options?.namingModel) {
 		const configured = await findConfiguredModel(options.namingModel, options);
 		if (configured) {
-			if (configured.provider === "aigw" && options.aigwUrl) {
-				return generateGoalSummaryViaGateway(options.aigwUrl, configured.modelId, goalTitle);
+			const gateway = options.gateways?.find(g => g.name === configured.provider);
+			if (gateway) {
+				return generateGoalSummaryViaGateway(gateway.url, configured.modelId, goalTitle);
 			}
 			if (configured.model) {
 				const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;

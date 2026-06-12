@@ -586,18 +586,32 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 
 Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debug a review or naming model picking the wrong model under AI Gateway](../AGENTS.md).
 
-### AI Gateway
+### AI Gateways (multi-gateway)
+
+Bobbit manages an ordered list of named, typed, OpenAI-compatible gateways (the `modelGateways` pref). A gateway's `name` is its provider key everywhere. See [docs/multi-gateway-providers.md](multi-gateway-providers.md) for behavior and types.
+
+**Canonical list-management surface:**
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Check if AI gateway is configured, return available models |
-| `POST` | `/api/aigw/configure` | Set AI gateway URL, discover models (`{ url }`) |
-| `DELETE` | `/api/aigw/configure` | Remove AI gateway configuration |
-| `POST` | `/api/aigw/test` | Test connection to a URL without saving (`{ url }`) |
-| `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
-| `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
+| `GET` | `/api/aigw/gateways` | Full gateway list, including disabled rows |
+| `PUT` | `/api/aigw/gateways` | Replace the whole list (`{ gateways }`); validates, fills missing `id`, re-syncs `models.json`. Returns `{ gateways, modelsByGateway }` |
+| `POST` | `/api/aigw/test` | Discover a URL's models without saving (`{ url, type? }`) |
+| `POST` | `/api/aigw/gateways/:name/refresh` | Re-discover one gateway and re-sync |
+| `GET` | `/api/aigw/gateways/:name/status` | Per-gateway `{ configured, name, url, type, enabled, models }` |
+| `*` | `/api/aigw/:name/v1/*` | Proxy to the named enabled gateway's `<url>/v1/*` |
 
-Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. Model discovery also consumes `/v1/models` pricing metadata and persists converted costs into generated agent `models.json` entries. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) and [AI Gateway model pricing](internals.md#ai-gateway-model-pricing).
+**Backward-compatible shims** (single-URL era; operate on the gateway named `aigw`, or the first enabled gateway):
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/aigw/status` | Status of the `aigw` gateway, with available models |
+| `POST` | `/api/aigw/configure` | Upsert the `aigw`-type gateway (`{ url }`), discover, re-sync |
+| `DELETE` | `/api/aigw/configure` | Remove the `aigw` gateway |
+| `POST` | `/api/aigw/refresh` | Re-discover the `aigw` gateway |
+| `*` | `/api/aigw/v1/*` | Proxy to the `aigw` (or first enabled) gateway |
+
+Outbound requests that these endpoints make to a gateway carry Bobbit's canonical AI Gateway user agent (the `x-opencode-session` / Bedrock specifics apply to the `aigw`-type only). Model discovery also consumes `/v1/models` pricing metadata and persists converted costs into generated agent `models.json` entries. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) and [AI Gateway model pricing](internals.md#ai-gateway-model-pricing).
 
 ### OAuth
 

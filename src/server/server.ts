@@ -245,7 +245,24 @@ import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
+import {
+	discoverAigwModels,
+	discoverGatewayModels,
+	proxyRequest,
+	startupAigwCheck,
+	writeContextWindowOverrides,
+	inferMeta,
+	listGateways,
+	getEnabledGateways,
+	getGatewayByName,
+	saveGateways,
+	migrateGatewayPrefs,
+	syncGatewaysModelsJson,
+	isClaudeId,
+	stripProviderPrefix,
+	type ModelGateway,
+	type AigwModel,
+} from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
@@ -324,6 +341,20 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	const modelId = modelStr.slice(slash + 1);
 	const meta = inferMeta(modelId);
 	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
+}
+
+/**
+ * Shape a gateway's freshly-discovered models for an API response (the legacy
+ * configure/refresh/status shims + the per-gateway refresh/status endpoints).
+ * Mirrors what the model registry surfaces: an `aigw`-type gateway prefix-strips
+ * Claude ids and tags them `bedrock-converse-stream`; an `openai-compatible`
+ * gateway returns raw ids untouched (never Bedrock-routed, even for `claude-*`).
+ */
+function shapeGatewayModelsForDisplay(gateway: ModelGateway, models: AigwModel[]): AigwModel[] {
+	if (gateway.type !== "aigw") return models;
+	return models.map((m) =>
+		isClaudeId(m.id) ? { ...m, id: stripProviderPrefix(m.id), api: "bedrock-converse-stream" } : m,
+	);
 }
 
 async function deleteRemoteGoalBranches(
@@ -1781,6 +1812,9 @@ export function createGateway(config: GatewayConfig) {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
+			// Migrate legacy single-URL aigw prefs → modelGateways list first
+			// (idempotent; startupAigwCheck also migrates internally).
+			migrateGatewayPrefs(preferencesStore);
 			await startupAigwCheck(preferencesStore);
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
@@ -2656,7 +2690,7 @@ async function handleApiRoute(
 			status: "ok",
 			sessions: sessionManager.listSessions().length,
 			localhost: isLocalhost,
-			aigw: !!getAigwUrl(preferencesStore),
+			aigw: getEnabledGateways(preferencesStore).length > 0,
 			setupComplete: isSetupComplete(),
 			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
 		});
@@ -6894,53 +6928,51 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── AI Gateway ──
+	// ── AI Gateway(s) — multi-gateway provider management ──
+	//
+	// Canonical list-management surface (§6 of docs/design/multi-gateway-providers.md):
+	//   GET  /api/aigw/gateways                 → full list (incl. disabled)
+	//   PUT  /api/aigw/gateways                 → replace whole list (validate + sync)
+	//   POST /api/aigw/test                     → discover a URL without saving
+	//   POST /api/aigw/gateways/:name/refresh   → re-discover one gateway + re-sync
+	//   GET  /api/aigw/gateways/:name/status    → per-gateway status + models
+	// Plus backward-compat shims (single-URL era) so existing clients/tests survive:
+	//   GET /api/aigw/status, POST/DELETE /api/aigw/configure, POST /api/aigw/refresh.
+	// Proxy: /api/aigw/:name/v1/* (named) and legacy /api/aigw/v1/* live further below.
 
-	// GET /api/aigw/status — check if aigw is configured
-	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
-		const aigwUrl = getAigwUrl(preferencesStore);
-		if (!aigwUrl) {
-			json({ configured: false });
-		} else {
-			// Discover fresh models instead of reading from preferences cache
-			try {
-				const models = await discoverAigwModels(aigwUrl);
-				json({ configured: true, url: aigwUrl, models });
-			} catch {
-				json({ configured: true, url: aigwUrl, models: [] });
-			}
-		}
+	// GET /api/aigw/gateways — full gateway list (including disabled rows).
+	if (url.pathname === "/api/aigw/gateways" && req.method === "GET") {
+		json({ gateways: listGateways(preferencesStore) });
 		return;
 	}
 
-	// POST /api/aigw/configure — set aigw URL, discover models, write models.json
-	if (url.pathname === "/api/aigw/configure" && req.method === "POST") {
+	// PUT /api/aigw/gateways — replace the whole gateway list, then re-sync
+	// models.json. saveGateways validates (§1) and throws on any violation → 400.
+	if (url.pathname === "/api/aigw/gateways" && req.method === "PUT") {
 		const body = await readBody(req);
-		if (!body?.url || typeof body.url !== "string") {
-			json({ error: "Missing 'url' field" }, 400);
+		const rows = body?.gateways;
+		if (!Array.isArray(rows)) {
+			json({ error: "Missing 'gateways' array" }, 400);
 			return;
 		}
 		try {
-			const models = await configureAigw(body.url, preferencesStore);
+			saveGateways(preferencesStore, rows as ModelGateway[]);
+		} catch (err: any) {
+			json({ error: err?.message || "Invalid gateways" }, 400);
+			return;
+		}
+		try {
+			const modelsByGateway = await syncGatewaysModelsJson(preferencesStore);
 			invalidateModelCache();
 			broadcastPreferencesChanged();
-			json({ ok: true, models });
+			json({ gateways: listGateways(preferencesStore), modelsByGateway });
 		} catch (err: any) {
-			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
+			jsonError(502, err, { error: `Failed to sync gateways: ${err.message}` });
 		}
 		return;
 	}
 
-	// DELETE /api/aigw/configure — remove aigw config
-	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
-		removeAigw(preferencesStore);
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true });
-		return;
-	}
-
-	// POST /api/aigw/test — test connection to a URL without saving
+	// POST /api/aigw/test — discover a URL's models without saving anything.
 	if (url.pathname === "/api/aigw/test" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body?.url || typeof body.url !== "string") {
@@ -6956,18 +6988,118 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/aigw/refresh — re-discover models from the configured gateway
+	// POST /api/aigw/gateways/:name/refresh — re-discover ONE gateway + re-sync.
+	const gatewayRefreshMatch = url.pathname.match(/^\/api\/aigw\/gateways\/([^/]+)\/refresh$/);
+	if (gatewayRefreshMatch && req.method === "POST") {
+		const name = decodeURIComponent(gatewayRefreshMatch[1]);
+		const gw = getGatewayByName(preferencesStore, name);
+		if (!gw) {
+			json({ error: `Unknown gateway "${name}"` }, 404);
+			return;
+		}
+		try {
+			const raw = await discoverGatewayModels(gw);
+			await syncGatewaysModelsJson(preferencesStore);
+			invalidateModelCache();
+			broadcastPreferencesChanged();
+			json({ models: shapeGatewayModelsForDisplay(gw, raw) });
+		} catch (err: any) {
+			jsonError(502, err);
+		}
+		return;
+	}
+
+	// GET /api/aigw/gateways/:name/status — per-gateway "view models" affordance.
+	const gatewayStatusMatch = url.pathname.match(/^\/api\/aigw\/gateways\/([^/]+)\/status$/);
+	if (gatewayStatusMatch && req.method === "GET") {
+		const name = decodeURIComponent(gatewayStatusMatch[1]);
+		const gw = getGatewayByName(preferencesStore, name);
+		if (!gw) {
+			json({ configured: false });
+			return;
+		}
+		const meta = { configured: true, name: gw.name, url: gw.url, type: gw.type, enabled: gw.enabled };
+		try {
+			const raw = await discoverGatewayModels(gw);
+			json({ ...meta, models: shapeGatewayModelsForDisplay(gw, raw) });
+		} catch {
+			json({ ...meta, models: [] });
+		}
+		return;
+	}
+
+	// ── Backward-compat shims (single-URL era) ──
+
+	// GET /api/aigw/status — legacy: status of the singleton `aigw` gateway (or
+	// the first aigw-type gateway). { configured:false } when none exists.
+	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
+		const gw = getGatewayByName(preferencesStore, "aigw")
+			?? listGateways(preferencesStore).find((g) => g.type === "aigw");
+		if (!gw) {
+			json({ configured: false });
+			return;
+		}
+		try {
+			const models = await discoverAigwModels(gw.url);
+			json({ configured: true, url: gw.url, models });
+		} catch {
+			json({ configured: true, url: gw.url, models: [] });
+		}
+		return;
+	}
+
+	// POST /api/aigw/configure {url} — legacy: upsert the singleton `aigw` gateway,
+	// discover + sync. Mirrors the old configureAigw return shape (Claude ids
+	// prefix-stripped + api=bedrock-converse-stream).
+	if (url.pathname === "/api/aigw/configure" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.url || typeof body.url !== "string") {
+			json({ error: "Missing 'url' field" }, 400);
+			return;
+		}
+		const normalizedUrl = body.url.replace(/\/+$/, "");
+		try {
+			// Discover first so an unreachable gateway yields a 502 (old behavior).
+			const raw = await discoverAigwModels(normalizedUrl);
+			const next = listGateways(preferencesStore).filter((g) => g.name !== "aigw");
+			next.unshift({ id: randomUUID(), name: "aigw", url: normalizedUrl, type: "aigw", enabled: true });
+			saveGateways(preferencesStore, next);
+			await syncGatewaysModelsJson(preferencesStore);
+			invalidateModelCache();
+			broadcastPreferencesChanged();
+			const gw = getGatewayByName(preferencesStore, "aigw")!;
+			json({ ok: true, models: shapeGatewayModelsForDisplay(gw, raw) });
+		} catch (err: any) {
+			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
+		}
+		return;
+	}
+
+	// DELETE /api/aigw/configure — legacy: remove the `aigw` gateway + re-sync.
+	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
+		const next = listGateways(preferencesStore).filter((g) => g.name !== "aigw");
+		saveGateways(preferencesStore, next);
+		await syncGatewaysModelsJson(preferencesStore);
+		invalidateModelCache();
+		broadcastPreferencesChanged();
+		json({ ok: true });
+		return;
+	}
+
+	// POST /api/aigw/refresh — legacy: re-discover the `aigw` gateway + re-sync.
 	if (url.pathname === "/api/aigw/refresh" && req.method === "POST") {
-		const aigwUrl = getAigwUrl(preferencesStore);
-		if (!aigwUrl) {
+		const gw = getGatewayByName(preferencesStore, "aigw")
+			?? listGateways(preferencesStore).find((g) => g.type === "aigw");
+		if (!gw) {
 			json({ error: "No AI Gateway configured" }, 400);
 			return;
 		}
 		try {
-			const models = await configureAigw(aigwUrl, preferencesStore);
+			const raw = await discoverGatewayModels(gw);
+			await syncGatewaysModelsJson(preferencesStore);
 			invalidateModelCache();
 			broadcastPreferencesChanged();
-			json({ models });
+			json({ models: shapeGatewayModelsForDisplay(gw, raw) });
 		} catch (err: any) {
 			jsonError(502, err);
 		}
@@ -7001,17 +7133,15 @@ async function handleApiRoute(
 				}, 404);
 				return;
 			}
-			if (provider !== "aigw") {
+			// Is this provider one of the configured gateways? If not, fall back to
+			// the standard provider-key / direct test path.
+			const gw = getGatewayByName(preferencesStore, provider);
+			if (!gw) {
 				const result = await testModelPreference(preferencesStore, pref);
 				json(result, result.status || (result.ok ? 200 : 502));
 				return;
 			}
-			const aigwUrl = getAigwUrl(preferencesStore);
-			if (!aigwUrl) {
-				json({ ok: false, error: "No AI Gateway configured." });
-				return;
-			}
-			const baseUrl = aigwUrl.replace(/\/+$/, "");
+			const baseUrl = gw.url.replace(/\/+$/, "");
 			const chatUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
 			// The aigw registry strips the provider prefix (e.g. "aws/") from Claude
@@ -7070,13 +7200,36 @@ async function handleApiRoute(
 		return;
 	}
 
-	// Proxy: /api/aigw/v1/* → forward to configured aigw URL
-	if (url.pathname.startsWith("/api/aigw/v1/") && getAigwUrl(preferencesStore)) {
-		const aigwUrl = getAigwUrl(preferencesStore)!;
-		const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
-		const targetUrl = `${aigwUrl}${subPath}${url.search}`;
-		proxyRequest(targetUrl, req, res);
-		return;
+	// Proxy by name: /api/aigw/:name/v1/* → <gateway.url>/v1/* for the named
+	// ENABLED gateway. The browser may not resolve the gateway host directly, so
+	// it routes model discovery / completions through here.
+	const namedProxyMatch = url.pathname.match(/^\/api\/aigw\/([^/]+)\/v1\/(.*)$/);
+	if (namedProxyMatch) {
+		const name = decodeURIComponent(namedProxyMatch[1]);
+		// `/api/aigw/v1/*` (legacy, name-less) is handled below — don't treat the
+		// literal "v1" segment as a gateway name.
+		if (name !== "v1") {
+			const gw = getGatewayByName(preferencesStore, name);
+			if (gw && gw.enabled) {
+				const targetUrl = `${gw.url.replace(/\/+$/, "")}/v1/${namedProxyMatch[2]}${url.search}`;
+				proxyRequest(targetUrl, req, res);
+				return;
+			}
+			// Unknown/disabled gateway — fall through to the 404 handler.
+		}
+	}
+
+	// Legacy proxy: /api/aigw/v1/* → the gateway named `aigw` (or, failing that,
+	// the first enabled gateway) for back-compat with the single-URL client.
+	if (url.pathname.startsWith("/api/aigw/v1/")) {
+		const named = getGatewayByName(preferencesStore, "aigw");
+		const gw = named && named.enabled ? named : getEnabledGateways(preferencesStore)[0];
+		if (gw) {
+			const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
+			const targetUrl = `${gw.url.replace(/\/+$/, "")}${subPath}${url.search}`;
+			proxyRequest(targetUrl, req, res);
+			return;
+		}
 	}
 
 	// GET /api/roles/assistant/prompts — must come before :name route

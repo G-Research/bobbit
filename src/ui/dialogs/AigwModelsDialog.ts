@@ -11,22 +11,28 @@ export type AigwModelEntry = {
 	reasoning: boolean;
 };
 
+/** Mirror of aigw-manager's GatewayType (kept local — UI must not import server types). */
+export type AigwGatewayType = "aigw" | "openai-compatible";
+
 /**
- * Read-only modal that lists the raw AI Gateway model IDs so users can debug
+ * Read-only modal that lists the raw gateway model IDs so users can debug
  * provider-prefix drift. Mirrors ModelSelector's dialog chrome but is not
- * selectable. Includes a footnote about the `aws/` prefix-stripping rule
- * applied elsewhere in the UI.
+ * selectable. The `aws/` prefix-stripping footnote applies ONLY to `aigw`-type
+ * gateways (Claude→Bedrock routing); `openai-compatible` gateways return raw ids
+ * untouched, so the footnote is suppressed for them.
  */
 @customElement("aigw-models-dialog")
 export class AigwModelsDialog extends DialogBase {
 	@state() private models: AigwModelEntry[] = [];
+	@state() private gatewayType: AigwGatewayType = "aigw";
 
 	protected override modalWidth = "min(500px, 92vw)";
 	protected override modalHeight = "min(640px, 90vh)";
 
-	static open(models: AigwModelEntry[]): AigwModelsDialog {
+	static open(models: AigwModelEntry[], type: AigwGatewayType = "aigw"): AigwModelsDialog {
 		const dialog = new AigwModelsDialog();
 		dialog.models = Array.isArray(models) ? models.slice() : [];
+		dialog.gatewayType = type;
 		dialog.open();
 		return dialog;
 	}
@@ -77,7 +83,7 @@ export class AigwModelsDialog extends DialogBase {
 										</div>
 									</div>
 									<div class="text-[11px] text-muted-foreground font-mono break-all">${m.id}</div>
-									${this.strippedId(m.id)
+									${this.gatewayType === "aigw" && this.strippedId(m.id)
 										? html`<div class="text-[11px] text-muted-foreground mt-0.5">
 												UI pref ID: <code class="font-mono">${this.strippedId(m.id)}</code>
 											</div>`
@@ -86,12 +92,14 @@ export class AigwModelsDialog extends DialogBase {
 							`,
 						)}
 			</div>
-			<div class="px-4 py-3 border-t border-border text-[11px] text-muted-foreground leading-relaxed flex-shrink-0">
-				Claude model IDs have the <code>aws/</code> (or similar) provider prefix stripped
-				when surfaced to the rest of Bobbit, so that Bedrock routing works transparently.
-				If a stored default model looks like <code>aigw/aws/…</code>, it is a stale
-				preference — clear and re-pick it.
-			</div>
+			${this.gatewayType === "aigw"
+				? html`<div class="px-4 py-3 border-t border-border text-[11px] text-muted-foreground leading-relaxed flex-shrink-0">
+						Claude model IDs have the <code>aws/</code> (or similar) provider prefix stripped
+						when surfaced to the rest of Bobbit, so that Bedrock routing works transparently.
+						If a stored default model looks like <code>aigw/aws/…</code>, it is a stale
+						preference — clear and re-pick it.
+					</div>`
+				: ""}
 		`;
 	}
 }

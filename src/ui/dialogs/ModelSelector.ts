@@ -14,6 +14,29 @@ import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 
+/**
+ * localStorage key for the §9 "Has key" picker filter. Display-only — the
+ * value (`"1"` / `"0"`) lives entirely in the browser and is never sent to
+ * `/api/models` or used in server-side model resolution.
+ */
+export const HIDE_UNAUTHED_KEY = "bobbit.modelPicker.hideUnauthed";
+
+function readHideUnauthedPref(): boolean {
+	try {
+		return localStorage.getItem(HIDE_UNAUTHED_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+
+function writeHideUnauthedPref(value: boolean): void {
+	try {
+		localStorage.setItem(HIDE_UNAUTHED_KEY, value ? "1" : "0");
+	} catch {
+		/* localStorage unavailable (private mode / SSR) — filter is ephemeral */
+	}
+}
+
 function claudeOpus4Minor(id: string): number | undefined {
 	// Keep in lockstep with src/server/agent/model-registry.ts. Limit the minor
 	// capture to version-looking values so date-only IDs like
@@ -124,6 +147,7 @@ export class ModelSelector extends DialogBase {
 	@state() searchQuery = "";
 	@state() filterThinking = false;
 	@state() filterVision = false;
+	@state() filterHideUnauthed = false;
 	@state() selectedIndex = 0;
 	@state() private navigationMode: "mouse" | "keyboard" = "mouse";
 	@state() private serverModels: any[] = [];
@@ -140,6 +164,8 @@ export class ModelSelector extends DialogBase {
 		const selector = new ModelSelector();
 		selector.currentModel = currentModel;
 		selector.onSelectCallback = onSelect;
+		// §9: restore the persisted, default-OFF "Has key" filter on every open.
+		selector.filterHideUnauthed = readHideUnauthedPref();
 		selector.open();
 		selector.loadModels();
 	}
@@ -256,6 +282,16 @@ export class ModelSelector extends DialogBase {
 		if (this.filterVision) {
 			filteredModels = filteredModels.filter(({ model }) => model.input.includes("image"));
 		}
+		if (this.filterHideUnauthed) {
+			// §9 display-only filter: hide built-in models that have no API key.
+			// Correct-by-construction scoped to built-ins — the server emits
+			// gateway models (model-registry.ts:201) and custom-provider rows with
+			// `authenticated:true`, so only built-in cloud models can ever be
+			// `authenticated:false`. Keep authenticated models OR the currently
+			// selected model (never hide the current one, even if unauthenticated).
+			filteredModels = filteredModels.filter(({ model }) =>
+				(model.authenticated ?? false) || modelsAreEqual(this.currentModel, model));
+		}
 
 		// Sort: current model first, then authenticated, then by recency rank
 		filteredModels.sort((a, b) => {
@@ -339,6 +375,23 @@ export class ModelSelector extends DialogBase {
 						},
 						className: "rounded-full",
 						children: html`<span class="inline-flex items-center gap-1">${icon(ImageIcon, "sm")} ${i18n("Vision")}</span>`,
+					})}
+					${Button({
+						variant: this.filterHideUnauthed ? "default" : "secondary",
+						size: "sm",
+						onClick: () => {
+							this.filterHideUnauthed = !this.filterHideUnauthed;
+							writeHideUnauthedPref(this.filterHideUnauthed);
+							this.selectedIndex = 0;
+							if (this.scrollContainerRef.value) {
+								this.scrollContainerRef.value.scrollTop = 0;
+							}
+						},
+						className: "rounded-full",
+						// Label is a plain literal (not i18n) to keep this slice's edits
+						// confined to ModelSelector.ts — adding a catalog key would touch
+						// the shared src/ui/utils/i18n.ts, which another slice also edits.
+						children: html`<span class="inline-flex items-center gap-1" data-testid="model-filter-haskey">${icon(KeyRound, "sm")} Has key</span>`,
 					})}
 				</div>
 			</div>
