@@ -239,6 +239,96 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 		expect(bCalls.some((u: string) => u.includes("/api/ext/packs/pack_a/panels/viewer"))).toBe(false);
 	});
 
+	// ── T-1 / T-10 — SPAWN launcher dispatch (design pr-walkthrough-launch-ux.md §3). ──
+	// A spawn launcher ({action:"spawn", route, panelId}) calls its pack `route` via the
+	// launcher-bound Host API and, on ok:true, opens the returned child's panel
+	// (auto-switching). It carries a `panelId` like a PanelTarget, so the `action`-first
+	// detection must keep it OFF the openPackPanel path; the within-gesture guard must
+	// suppress a re-entrant double-click.
+
+	test("T-10 — a SpawnLaunchTarget survives registration + enumeration (registered as a launcher)", async ({ page }) => {
+		await gotoAndWait(page);
+		const ids = await page.evaluate(async () => {
+			await (window as any).__reconcile("A");
+			return (window as any).__launchers("git-widget-button");
+		});
+		// The spawn launcher is registered alongside the panel-target git-widget launcher.
+		expect(ids).toContain("tp.spawn");
+		expect(ids).toContain("tp.gitbtn");
+	});
+
+	test("T-1 — spawn launcher calls `run`, opens the panel in the returned child, mounts NO owner panel", async ({ page }) => {
+		await gotoAndWait(page);
+		const out = await page.evaluate(async () => {
+			await (window as any).__reconcile("A");
+			(window as any).__registerPanel("A"); // register thirdparty.viewer (the owner-mount fetch path)
+			(window as any).__installLauncherHost("ok");
+			(window as any).__clearCalls();
+			const result = await (window as any).__runSpawn("tp.spawn");
+			await (window as any).__flush();
+			return {
+				result,
+				callRoute: (window as any).__callRouteCalls(),
+				openPanel: (window as any).__openPanelCalls(),
+				fetches: (window as any).__calls(),
+			};
+		});
+		// `run` was called exactly once on the launcher's pack/contribution surface.
+		expect(out.callRoute).toHaveLength(1);
+		expect(out.callRoute[0].route).toBe("run");
+		// On ok:true the panel is opened IN THE CHILD session (auto-switch), exactly once.
+		expect(out.openPanel).toEqual([{ panelId: "thirdparty.viewer", sessionId: "c1" }]);
+		expect(out.result).toEqual({ ok: true });
+		// NO owner-session panel was mounted: openPackPanel (which fetches the pack-addressed
+		// /panels/ module) was never reached — the spawn path uses host.ui.openPanel only.
+		expect(out.fetches.some((u: string) => u.includes("/panels/"))).toBe(false);
+	});
+
+	test("T-1 — a NO_PR (ok:false) result flows back through onResult; no panel opens", async ({ page }) => {
+		await gotoAndWait(page);
+		const out = await page.evaluate(async () => {
+			await (window as any).__reconcile("A");
+			(window as any).__installLauncherHost("nopr");
+			const result = await (window as any).__runSpawn("tp.spawn");
+			await (window as any).__flush();
+			return { result, openPanel: (window as any).__openPanelCalls() };
+		});
+		expect(out.result.ok).toBe(false);
+		expect(out.result.code).toBe("NO_PR");
+		expect(out.result.error).toMatch(/No open GitHub PR/i);
+		// Nothing opened / no view switch on failure.
+		expect(out.openPanel).toEqual([]);
+	});
+
+	test("T-1 — a throwing callRoute surfaces the error via onResult; no panel opens", async ({ page }) => {
+		await gotoAndWait(page);
+		const out = await page.evaluate(async () => {
+			await (window as any).__reconcile("A");
+			(window as any).__installLauncherHost("throw");
+			const result = await (window as any).__runSpawn("tp.spawn");
+			return { result, openPanel: (window as any).__openPanelCalls() };
+		});
+		expect(out.result.ok).toBe(false);
+		expect(out.result.error).toMatch(/boom/);
+		expect(out.openPanel).toEqual([]);
+	});
+
+	test("T-10 — the within-gesture guard suppresses a re-entrant second click (only one `run`)", async ({ page }) => {
+		await gotoAndWait(page);
+		const callRoute = await page.evaluate(async () => {
+			await (window as any).__reconcile("A");
+			// A never-resolving `run` keeps the first dispatch in-flight, so the guard for
+			// the launcher key is still held when the second synchronous click fires.
+			(window as any).__installLauncherHost("hang");
+			(window as any).__runSpawnTwiceSync("tp.spawn");
+			await (window as any).__flush();
+			return (window as any).__callRouteCalls();
+		});
+		// Two synchronous clicks → exactly ONE callRoute (the second is the no-op guard).
+		expect(callRoute).toHaveLength(1);
+		expect(callRoute[0].route).toBe("run");
+	});
+
 	test("duplicate routeId across packs is rejected — registered by NEITHER (lookupPackRoute undefined)", async ({ page }) => {
 		await gotoAndWait(page);
 		const entry = await page.evaluate(async () => {

@@ -40,8 +40,8 @@ const PR_WALKTHROUGH_TOOLS = [
 	"submit_pr_walkthrough_yaml",
 ];
 
-function loadRole(file: string): { toolPolicies?: Record<string, GrantPolicy> } {
-	return YAML.parse(fs.readFileSync(file, "utf-8")) as { toolPolicies?: Record<string, GrantPolicy> };
+function loadRole(file: string): { name?: string; label?: string; accessory?: string; toolPolicies?: Record<string, GrantPolicy> } {
+	return YAML.parse(fs.readFileSync(file, "utf-8")) as { name?: string; label?: string; accessory?: string; toolPolicies?: Record<string, GrantPolicy> };
 }
 
 /** Group-policy provider backed by defaults/tool-group-policies.yaml. */
@@ -83,6 +83,20 @@ describe("PR Walkthrough role↔tool-group boundary (resolved)", () => {
 			);
 		});
 	}
+
+	// T-9 (unit) — launch-UX naming/visuals (design pr-walkthrough-launch-ux.md §5.3).
+	// The reviewer child's session + sidebar title is "PR Walkthrough" and its sprite
+	// is the magnifying-glass. The role drives the role display label + the generic
+	// accessory application in session-setup; the prior `review` accessory was not even
+	// a real sprite id (src/ui/bobbit-sprite-data.ts → `magnifier`). Pin both so a
+	// regression to "PR Walkthrough Reviewer"/`review` is caught at the role source.
+	it("the pr-reviewer role uses label `PR Walkthrough` and the `magnifier` accessory", () => {
+		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);
+		assert.equal(reviewer.label, "PR Walkthrough", "pr-reviewer.yaml label must be exactly `PR Walkthrough`");
+		assert.equal(reviewer.accessory, "magnifier", "pr-reviewer.yaml accessory must be `magnifier` (the real sprite id)");
+		assert.notEqual(reviewer.label, "PR Walkthrough Reviewer", "the stale `PR Walkthrough Reviewer` label must not return");
+		assert.notEqual(reviewer.accessory, "review", "the bogus `review` accessory (not a sprite) must not return");
+	});
 
 	it("the pack pr-reviewer role grants the `PR Walkthrough` group", () => {
 		const reviewer = loadRole(PR_REVIEWER_ROLE_FILE);

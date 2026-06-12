@@ -24,11 +24,14 @@
  *   • Submit authz without a secret: only the bound reviewer submits; routed to
  *     binding[sessionId].jobId; no/wrong secret → 403; unbound → 403; second
  *     submit (terminal) → 409.
- *   • Idempotency: same target twice → one reviewer (created:false on the 2nd).
+ *   • ALWAYS-FRESH (launch-ux §5.2 / Q4): same target twice → TWO distinct live
+ *     reviewers (created:true both times); the reviewerKey dedup is GONE.
  *   • No spawn/binding race: immediate read_pr_walkthrough_bundle resolves.
  *   • Status route is binding-authoritative (mismatched jobId/foreign child → error).
- *   • Cleanup: submit server-dismisses the reviewer (terminal-synchronous); a
- *     childTerminal boot-reap removes it after a restart with the parent alive.
+ *   • NO AUTO-DISMISS (launch-ux §5.1 / req 3-4; Decision-E regression guard):
+ *     submit NEVER dismisses the reviewer + stamps NO childTerminal marker; the
+ *     reviewer survives a gateway restart (owner alive) and is reaped ONLY by the
+ *     user's terminate/archive control.
  *   • Scope: the pack drives only its own reviewer child.
  */
 import { execFileSync } from "node:child_process";
@@ -298,10 +301,13 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(persisted?.childKind).toBe("host-agents");
 			expect(persisted?.readOnly).toBe(true);
 			expect(persisted?.role).toBe("pr-reviewer");
-			// The reviewer is minted with the pr-reviewer role's `review` accessory
-			// (session-setup applies the resolved role's accessory) — visible in the
-			// sidebar, pre-downgrade parity.
-			expect(persisted?.accessory).toBe("review");
+			// T-9 — launch-UX naming/visuals: the reviewer is minted with the pr-reviewer
+			// role's `magnifier` accessory (session-setup applies the resolved role's
+			// accessory) and its visible session/sidebar title is exactly "PR Walkthrough"
+			// (threaded through the host.agents.spawn `title` opt → createSession, and NOT
+			// clobbered by first-prompt auto-title generation since titleGenerated is set).
+			expect(persisted?.accessory).toBe("magnifier");
+			expect(persisted?.title).toBe("PR Walkthrough");
 
 			// Row: the reviewer's effective toolset. The reviewer carries all three
 			// walkthrough tools and read-only is enforced (no write/edit/bash/spawn).
@@ -380,16 +386,20 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			const submitted = await getPackStore().get(PACK_ID, `submitted/${started.jobId}`);
 			expect(submitted?.yaml).toBe(yaml);
 
-			// A duplicate submit from the SAME reviewer is rejected: the happy-path
-			// submit server-dismissed the reviewer (terminal-synchronous reap), which
-			// purges its session secret — so re-submitting can no longer authenticate
-			// (403). The reviewer can never overwrite its own accepted submission.
+			// A duplicate submit from the SAME reviewer is rejected with 409. NO-DISMISS
+			// (launch-ux §5.1): submit no longer reaps the reviewer, so its session secret
+			// is STILL valid and the re-submit authenticates — but the `submitted/<jobId>`
+			// marker + the terminal `binding.status:"submitted"` make it WALKTHROUGH_ALREADY_READY.
+			// The reviewer can never overwrite its own accepted submission.
 			const dup = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
 				method: "POST",
 				headers: { "X-Bobbit-Session-Secret": secret },
 				body: JSON.stringify({ yaml }),
 			});
-			expect([403, 409]).toContain(dup.status);
+			expect(dup.status).toBe(409);
+			expect((await dup.json()).code).toBe("WALKTHROUGH_ALREADY_READY");
+			// The reviewer is STILL a live, selectable session after submit (not reaped).
+			expect(gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child)).toBe(true);
 			// The original submission is untouched by the rejected duplicate.
 			expect((await getPackStore().get(PACK_ID, `submitted/${started.jobId}`))?.yaml).toBe(yaml);
 
@@ -534,8 +544,13 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
-	// ── Row: Idempotency — same target twice → one reviewer. ──
-	test("a second run for the same target returns the same reviewer (created:false)", async ({ gateway }) => {
+	// ── Row T-5: ALWAYS-FRESH — same target twice → TWO distinct reviewers. ──
+	// Launch-UX correction (Q4 / design §5.2): the target-based `reviewerKey` dedup is
+	// REMOVED. Every `run` spawns a brand-new reviewer even for the SAME PR, both
+	// created:true with distinct childSessionIds + live bindings. The ONLY double-spawn
+	// guard is the client's within-gesture guard (a single click). This regression-guards
+	// the removed dedup index (no `reviewer/<owner>/` key is ever written any more).
+	test("a second run for the same target spawns a SECOND distinct reviewer (always-fresh, no dedup)", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
@@ -547,34 +562,33 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 
 			const second = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
 			expect(second.ok).toBe(true);
-			expect(second.created).toBe(false);
-			expect(second.childSessionId).toBe(first.childSessionId);
+			expect(second.created).toBe(true);
+			expect(second.childSessionId).not.toBe(first.childSessionId);
+			createdSessionIds.push(second.childSessionId);
+			// Distinct jobs too — each reviewer carries its own freshly-minted job + binding.
+			expect(second.jobId).not.toBe(first.jobId);
 
-			// Exactly ONE host-agents reviewer is owned by the parent.
+			// BOTH host-agents reviewers are live and owned by the parent.
 			const reviewers = gateway.orchestrationCore.list(owner).filter((h: any) => h.childKind === "host-agents");
-			expect(reviewers).toHaveLength(1);
+			expect(reviewers).toHaveLength(2);
+			const ids = reviewers.map((h: any) => h.sessionId).sort();
+			expect(ids).toEqual([first.childSessionId, second.childSessionId].sort());
+
+			// Regression guard: the removed `reviewer/<owner>/` dedup index is never written.
+			const reviewerKeys = await getPackStore().list(PACK_ID, `reviewer/${owner}/`);
+			expect(reviewerKeys).toHaveLength(0);
 		} finally {
 			fixture.cleanup();
 		}
 	});
 
-	// ── Row: Concurrency dedupe — two OVERLAPPING runs → one reviewer (FINDING 3). ──
-	// Pins the ACHIEVABLE concurrency invariant. Each host.callRoute("run") runs in a
-	// FRESH worker, so the module-scoped in-flight map only dedups invokes that share
-	// a worker; across workers the `run` route's post-claim RECONCILE
-	// (launchReviewer) dismisses the losing child and converges to one live reviewer.
-	// Strict cross-worker atomicity would need a store CAS the pack store does not
-	// expose (design Decision E). So this pins the ROBUST, NON-FLAKY invariant: two
-	// near-simultaneous `run` calls for the SAME owner+target fired via Promise.all
-	// both succeed, both return a usable childSessionId, and the reviewer index
-	// resolves to a SINGLE childSessionId naming one of the two (no split-brain
-	// jobId / no crash). Strict "exactly one LIVE child" is NOT asserted: in the
-	// pathological lock-step interleaving each worker re-reads its own claim before
-	// the other's write lands, so the post-claim reconcile cannot always dismiss the
-	// loser — the residual orphan is reaped on parent archive (cascade reap). The
-	// panel's busy-guard prevents the common double-click, so this edge case is
-	// defence-in-depth, not the normal path.
-	test("two overlapping run calls for the same target keep a single reviewer index (best-effort dedup)", async ({ gateway }) => {
+	// ── Row T-5b: two OVERLAPPING runs → TWO distinct reviewers (always-fresh). ──
+	// With the `reviewerKey` dedup removed there is NO convergence to a single reviewer:
+	// two near-simultaneous `run` calls for the SAME owner+target each spawn their own
+	// reviewer (multiple reviewers per PR are allowed; the user terminates extras). This
+	// is the concurrency face of always-fresh — both succeed with distinct childSessionIds
+	// and NO `reviewer/<owner>/` dedup index is written.
+	test("two overlapping run calls for the same target spawn two distinct reviewers (no dedup index)", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
@@ -587,15 +601,15 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(b.ok).toBe(true);
 			expect(typeof a.childSessionId).toBe("string");
 			expect(typeof b.childSessionId).toBe("string");
+			expect(a.childSessionId).not.toBe(b.childSessionId);
 			createdSessionIds.push(a.childSessionId, b.childSessionId);
 
-			// No split-brain: both runs share the canonical key, so exactly ONE
-			// reviewer/<parent>/<key> entry exists and it names one of the two children.
+			// No dedup index is written for either run (the removed reviewerKey).
 			const reviewerKeys = await getPackStore().list(PACK_ID, `reviewer/${owner}/`);
-			expect(reviewerKeys).toHaveLength(1);
-			const idx = await getPackStore().get<{ childSessionId?: string }>(PACK_ID, reviewerKeys[0]);
-			expect(idx?.childSessionId).toBeTruthy();
-			expect([a.childSessionId, b.childSessionId]).toContain(idx!.childSessionId);
+			expect(reviewerKeys).toHaveLength(0);
+			// Both reviewers are live, owned by the parent.
+			const reviewers = gateway.orchestrationCore.list(owner).filter((h: any) => h.childKind === "host-agents");
+			expect(reviewers.map((h: any) => h.sessionId).sort()).toEqual([a.childSessionId, b.childSessionId].sort());
 		} finally {
 			fixture.cleanup();
 		}
@@ -653,8 +667,14 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
-	// ── Row: Cleanup — submit server-dismisses the reviewer (terminal-synchronous). ──
-	test("submit-yaml server-dismisses the reviewer child (terminal-synchronous reap)", async ({ gateway }) => {
+	// ── Row T-6: NO AUTO-DISMISS on submit (req 3/4; Decision-E regression guard). ──
+	// Launch-UX correction (design §5.1): submit persists the YAML + flips the binding to
+	// "submitted" but NEVER reaps the reviewer and stamps NO childTerminal marker. The
+	// reviewer stays a LIVE, selectable, read-only session (its child panel flips pending →
+	// cards via the child-self status/recover). `status` returns phase:"submitted" WITHOUT
+	// dismissing, and the child is STILL alive afterwards. This guards the previously-removed
+	// terminal-synchronous dismiss from creeping back.
+	test("submit-yaml NEVER dismisses the reviewer or stamps childTerminal; status reports submitted while it stays alive", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
@@ -672,22 +692,93 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 				body: JSON.stringify({ yaml }),
 			});
 			expect(submitResp.status).toBe(200);
+			expect(await submitResp.json()).toMatchObject({ ok: true, status: "submitted", jobId: started.jobId });
 
-			// The reviewer is dismissed without waiting for a panel poll, and the
-			// generic terminal marker is stamped (so a pre-poll restart still reaps it).
-			await pollUntil(() => {
-				const live = gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child);
-				return live ? null : true;
-			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer dismissed on submit" });
-			const persisted = gateway.sessionManager.getPersistedSession(child)
-				?? gateway.sessionManager.getArchivedSession?.(child);
-			expect(persisted?.childTerminal).toBe(true);
+			// The reviewer is NOT dismissed. The old terminal-synchronous reap ran INSIDE
+			// the submit handler before its 200, so the absence of any dismiss is observable
+			// the instant the submit response resolves — no wait needed (and no background
+			// reap path exists any more to race).
+			expect(gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child)).toBe(true);
+			const persisted = gateway.sessionManager.getPersistedSession(child);
+			expect(persisted, "the reviewer session is not hard-deleted").toBeTruthy();
+			expect(gateway.sessionManager.getArchivedSession?.(child), "the reviewer is not archived on submit").toBeFalsy();
+			// DECISION-E REGRESSION GUARD: no childTerminal/terminalAt marker is stamped, so a
+			// restart cannot boot-reap the live post-submit reviewer.
+			expect(persisted?.childTerminal).toBeFalsy();
+			expect(persisted?.terminalAt).toBeFalsy();
+
+			// status reports submitted (from EITHER principal) and does NOT dismiss. The
+			// awaited route round-trip is also a real async boundary: any (non-existent)
+			// deferred reap would have had its chance, and the reviewer is STILL alive after.
+			const ownerStatus = await invokeRoute(gateway, owner, "status", {
+				method: "POST",
+				body: { childSessionId: child, jobId: started.jobId },
+			}, fixture.cwd);
+			expect(ownerStatus.phase).toBe("submitted");
+			expect(ownerStatus.yaml).toBe(yaml);
+			// Still alive after the status poll (status never reaps a live reviewer).
+			expect(gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child)).toBe(true);
 		} finally {
 			fixture.cleanup();
 		}
 	});
 
-	// ── Row: No orphan reviewer after restart (generic childTerminal boot-reap). ──
+	// ── Row T-7: RESTART SURVIVAL — a post-submit reviewer is NOT boot-reaped. ──
+	// Launch-UX correction (Q5 / design §5.1): because submit stamps NO childTerminal
+	// marker, a simulated gateway restart (the per-session boot path restoreOneSession)
+	// must RESTORE the post-submit reviewer (owner alive, not kind-terminal) rather than
+	// reap it — so it stays a live, selectable session until the user terminates it. The
+	// boot-reap decision is also asserted directly (reap:false) to pin the mechanism.
+	test("a post-submit reviewer survives a simulated restart (NOT boot-reaped; owner alive, no childTerminal)", async ({ gateway }) => {
+		const sm: any = gateway.sessionManager;
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submitResp.status).toBe(200);
+
+			const persisted = sm.getPersistedSession(child);
+			expect(persisted?.childTerminal).toBeFalsy();
+			expect(persisted?.parentSessionId).toBe(owner);
+			expect(persisted?.childKind).toBe("host-agents");
+
+			// Boot-reap decision (the EXACT mechanism the restart boot path consults for
+			// every host-agents child): NOT kind-terminal + owner alive + not archived ⇒
+			// reap:false. With the submit-time childTerminal stamp removed, the post-submit
+			// reviewer is restored (kept live + selectable), never boot-reaped.
+			const ownerPersisted = sm.getPersistedSession(owner);
+			const decision = gateway.orchestrationCore.shouldReapChildOnBoot({
+				childKind: persisted?.childKind,
+				kindTerminal: persisted?.childTerminal === true,
+				ownerSessionId: persisted?.parentSessionId,
+				ownerExists: !!ownerPersisted,
+				ownerArchived: ownerPersisted?.archived === true,
+			});
+			expect(decision.reap, "a post-submit reviewer (no childTerminal, owner alive) must NOT be boot-reaped").toBe(false);
+
+			// The reviewer is a real, restorable session: still persisted, not archived, and
+			// still live + selectable through the simulated restart window.
+			expect(gateway.sessionManager.getArchivedSession?.(child)).toBeFalsy();
+			expect(gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child)).toBe(true);
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	// ── Row: GENERIC childTerminal boot-reap still works (mechanism, pack-agnostic). ──
+	// A child that genuinely IS stamped childTerminal (e.g. the user-terminate path) is
+	// boot-reaped even while the parent is alive — proving the launch-UX change removed
+	// only the SUBMIT-TIME stamp, not the generic reap mechanism itself.
 	test("a childTerminal host-agents reviewer is boot-reaped even while its parent is alive", async ({ gateway }) => {
 		const sm = gateway.sessionManager;
 		const owner = await createSession();
@@ -713,6 +804,47 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			expect(stillLive).toBe(false);
 		} finally {
 			await deleteSession(child).catch(() => {});
+		}
+	});
+
+	// ── Row T-8: the user terminates the reviewer via the standard session control. ──
+	// Launch-UX correction (req 4 / design §5.4): the reviewer is a normal selectable
+	// host-agents child; the user terminates it via the existing per-session
+	// dismiss/terminate control (DELETE /api/sessions/:id → terminateSession → archive).
+	// This is the ONLY way a post-submit reviewer goes away (cheap to re-run).
+	test("the user-facing session terminate control dismisses/archives the reviewer", async ({ gateway }) => {
+		const fixture = makeGitFixture();
+		const owner = await createSession({ cwd: fixture.cwd });
+		createdSessionIds.push(owner);
+		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
+		try {
+			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const child = started.childSessionId;
+			createdSessionIds.push(child);
+
+			// Submit so the reviewer is in its post-submit live state (the realistic case).
+			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
+				body: JSON.stringify({ yaml }),
+			});
+			expect(submitResp.status).toBe(200);
+			// Still live (no auto-dismiss) before the user acts.
+			expect(gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child)).toBe(true);
+
+			// The user-facing terminate control: DELETE /api/sessions/:id.
+			const del = await apiFetch(`/api/sessions/${child}`, { method: "DELETE" });
+			expect(del.status).toBe(200);
+
+			// The reviewer is gone: no longer a live session, and archived (terminate path).
+			await pollUntil(() => {
+				const live = gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child);
+				return live ? null : true;
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer terminated by user" });
+			expect(gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child), "the terminated reviewer leaves the live session set").toBe(false);
+			expect(gateway.sessionManager.getArchivedSession?.(child), "user-terminate archives the reviewer").toBeTruthy();
+		} finally {
+			fixture.cleanup();
 		}
 	});
 
@@ -912,7 +1044,8 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			const bindingAfterChildPoll = await getPackStore().get(PACK_ID, `binding/${child}`);
 			expect(bindingAfterChildPoll?.status).not.toBe("error");
 
-			// A real submit routes to the bound jobId and server-dismisses the reviewer.
+			// A real submit routes to the bound jobId. NO-DISMISS (launch-ux §5.1): it does
+			// NOT reap the reviewer — the child stays live so its pane can flip to cards.
 			const submitResp = await apiFetch("/api/internal/pr-walkthrough/submit-yaml", {
 				method: "POST",
 				headers: { "X-Bobbit-Session-Secret": reviewerSecret(gateway, child) },
@@ -949,15 +1082,14 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		}
 	});
 
-	// ── Row D5: a reviewer dismissed on submit stays VIEWABLE (archived, not hard-
-	//    deleted) and its pane data is recoverable. ──
-	// The pane now lives WITH the reviewer child session and must render its ready
-	// cards AFTER submit — but submit server-dismisses the reviewer (terminal-
-	// synchronous reap). The reap must ARCHIVE the session (reap worktree + mark
-	// terminal) WITHOUT removing it from the sidebar, else the child pane has nowhere
-	// to render. The pane's data (binding + submitted YAML) persists in the pack store
-	// regardless of the agent lifecycle, so `recover` re-resolves it after dismissal.
-	test("a reviewer dismissed on submit stays viewable (archived) and its pane data is recoverable", async ({ gateway }) => {
+	// ── Row D5: a reviewer stays a LIVE, selectable session after submit and its pane
+	//    data is recoverable from the child side. ──
+	// The pane lives WITH the reviewer child session and renders its ready cards AFTER
+	// submit. Launch-UX correction (design §5.1): submit does NOT dismiss/archive the
+	// reviewer — it stays LIVE + selectable (read-only, available for follow-up). The
+	// child-self `recover` re-resolves binding/<child> → the persisted submitted YAML so
+	// a reload re-renders the cards; the data also persists independently of the agent.
+	test("a reviewer stays LIVE + selectable after submit and its pane data is recoverable (child-self recover)", async ({ gateway }) => {
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
@@ -974,30 +1106,19 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			});
 			expect(submitResp.status).toBe(200);
 
-			// Submit server-dismisses the reviewer (terminal-synchronous reap).
-			await pollUntil(() => {
-				const live = gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child);
-				return live ? null : true;
-			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer dismissed on submit" });
-
-			// The dismissed reviewer is ARCHIVED, not hard-deleted: its session record is
-			// still retrievable, so the sidebar keeps it selectable/viewable and the child
-			// pane has a host view to render into.
-			await pollUntil(() => {
-				const a = gateway.sessionManager.getArchivedSession(child);
-				return a ? a : null;
-			}, { timeoutMs: 10_000, intervalMs: 50, label: "reviewer archived (not hard-deleted)" });
-			const archived = gateway.sessionManager.getArchivedSession(child);
-			expect(archived, "the dismissed reviewer must remain a viewable (archived) session").toBeTruthy();
-			expect(archived?.childTerminal).toBe(true);
-			// The session record was NOT hard-deleted (getPersistedSession resolves it too).
+			// NO-DISMISS: the reviewer is STILL a live, selectable host-agents child (not
+			// archived, not hard-deleted) — observable immediately (no background reap path).
+			expect(gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child)).toBe(true);
+			expect(gateway.sessionManager.getArchivedSession?.(child), "the reviewer must NOT be archived on submit").toBeFalsy();
 			expect(gateway.sessionManager.getPersistedSession(child)).toBeTruthy();
 
-			// Its pane data is recoverable from the child side even after the agent is
-			// gone: recover self-resolves binding/<child> → the persisted submitted YAML.
+			// Its pane data re-renders from the child side: recover self-resolves
+			// binding/<child> → the persisted submitted YAML (the reload-render seam). The
+			// awaited recover round-trip is a real async boundary; the reviewer stays live.
 			const childRecover = await invokeRoute(gateway, child, "recover", { method: "POST", body: {} }, fixture.cwd);
 			expect(childRecover.found).toBe(true);
 			expect(childRecover.yaml).toBe(yaml);
+			expect(gateway.orchestrationCore.list(owner).some((h: any) => h.sessionId === child)).toBe(true);
 		} finally {
 			fixture.cleanup();
 		}
