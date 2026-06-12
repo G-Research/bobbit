@@ -103,7 +103,12 @@ function makeHarness() {
 	const fakeSession = {
 		rpcClient: {
 			onEvent: (_fn: (event: any) => void) => () => { /* no-op unsubscribe */ },
+			waitForReady: (_ms?: number) => Promise.resolve(),
 			prompt: (_text: string) => Promise.reject(new Error("Command timed out: prompt")),
+			async promptWhenReady(text: string, _images?: unknown, opts?: { readyTimeoutMs?: number }) {
+				await this.waitForReady(opts?.readyTimeoutMs ?? 90_000);
+				return this.prompt(text);
+			},
 		},
 	};
 
