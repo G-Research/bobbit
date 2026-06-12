@@ -1,6 +1,6 @@
 name: pr-reviewer
-label: PR Walkthrough Reviewer
-accessory: review
+label: PR Walkthrough
+accessory: magnifier
 # The reviewer's allowlist is EXACTLY the three walkthrough tools (legacy
 # WALKTHROUGH_ALLOWED_TOOLS fidelity + design Decision A/B):
 #   readonly_bash, read_pr_walkthrough_bundle, submit_pr_walkthrough_yaml

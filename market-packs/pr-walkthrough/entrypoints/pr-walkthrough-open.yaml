@@ -1,8 +1,12 @@
 id: pr-walkthrough.open
 kind: composer-slash
 label: PR Walkthrough
-# A composer-slash LAUNCHER (the slash menu). Its selection IS the user gesture;
-# it navigates to the deep-link route (no auto-invoke on mount). No hard-coded
-# jobId — the panel resolves the real job from the current session.
+# A composer-slash LAUNCHER (the slash menu). Its selection IS the user gesture.
+# SPAWN-ON-CLICK model (launch UX correction): like every launch surface, it calls
+# the pack `run` route to mint a fresh read-only reviewer sub-agent, then opens the
+# panel in the returned child session and auto-switches to it. No owner-session panel
+# is ever mounted; a NO_PR / spawn failure spawns nothing.
 target:
-  route: pr-walkthrough
+  action: spawn
+  route: run
+  panelId: pr-walkthrough.panel
