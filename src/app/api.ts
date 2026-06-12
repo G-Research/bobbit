@@ -2141,7 +2141,7 @@ export interface PackEntrypointWire {
 	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
 	label?: string;
 	routeId?: string;
-	target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 	listName: string;
 }

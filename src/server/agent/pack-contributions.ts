@@ -61,7 +61,7 @@ export interface EntrypointContribution {
 	kind: "composer-slash" | "git-widget-button" | "command-palette" | "route";
 	label?: string; // required for launcher kinds
 	routeId?: string; // required for kind:"route"; host-global
-	target?: { panelId?: string; route?: string; params?: Record<string, unknown> };
+	target?: { action?: string; panelId?: string; route?: string; params?: Record<string, unknown> };
 	paramKeys?: string[];
 	/** The contents.entrypoints[] basename that lists this file — the SINGLE
 	 *  activation toggle key. Maps one toggle onto BOTH the launcher id AND the
