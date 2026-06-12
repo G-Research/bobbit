@@ -36,7 +36,7 @@
 //
 // SECURITY: the only auto-invoke is the child-pane self-poll/recover above — both
 // strictly read-only and scoped to the pane's OWN bound job. No owner agent is ever
-// driven; the reviewer child is minted by the `run` route (server-side, role-granted,
+// driven; the reviewer child is minted by the `run` route (server-side, role-scoped,
 // read-only). Theme tokens only; structured data rendered via the escaping lit toolkit.
 
 import { parse as parseYaml } from "yaml";
