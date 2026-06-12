@@ -49,11 +49,15 @@ content when available. Proposal tabs distinguish the live editable draft from
 historical revisions. Review tabs map to review documents by encoded title.
 The PR walkthrough review surface now ships as a **built-in first-party pack**
 (`market-packs/pr-walkthrough/`) reached through the generic extension route
-`#/ext/pr-walkthrough`, rather than a bespoke side-panel tab kind. A pack
-entrypoint opens the pack panel and its "Run PR walkthrough" action mints a
+`#/ext/pr-walkthrough`, rather than a bespoke side-panel tab kind. Clicking any
+pack launcher (git-widget button / composer-slash / command palette) mints a
 separate, isolated, read-only reviewer child via `host.agents.spawn` (not the
-current session's agent). See
-[pr-walkthrough-panel.md](pr-walkthrough-panel.md) and
+current session's agent) and **auto-switches the view to that child session**,
+where the panel opens; there is **no owner-session panel** and no manual
+"Run"/"Load" buttons (a no-PR / spawn failure shows an inline error in the
+git-status-widget dropdown instead). See
+[pr-walkthrough-panel.md](pr-walkthrough-panel.md),
+[pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md), and
 [built-in-first-party-packs.md](design/built-in-first-party-packs.md). Desktop
 renders a scrollable tab strip next to the chat; mobile renders the same
 side-panel tab set in the header and slider track.

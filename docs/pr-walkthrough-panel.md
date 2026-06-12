@@ -268,16 +268,17 @@ on submit — it stays a live, selectable session (see
 
 ### Target resolution — GitHub PRs only
 
-When the panel posts an empty `run` body (the normal path — every launcher just
-opens the bare panel), the `run` route resolves **the current branch's open
-GitHub PR** from the server-derived session worktree via `gh`/`git`. An explicit
-target in the body (a deep-link or test) always wins.
+When a launcher invokes `run` with an empty body (the normal path — the launcher
+surface, not any panel, calls the route on click), the `run` route resolves **the
+current branch's open GitHub PR** from the server-derived session worktree via
+`gh`/`git`. An explicit target in the body (a deep-link or test) always wins.
 
 The walkthrough is **GitHub-PR-only**. The route rejects two cases before any
 spawn:
 
-- **No PR for the branch** → `{ code: "NO_PR" }`; the panel asks the user to open
-  a PR first.
+- **No PR for the branch** → `{ code: "NO_PR" }`; the launcher dispatch surfaces
+  this as an **inline error in the git-status-widget dropdown** — no reviewer is
+  spawned and the view does not switch (there is no owner-session panel).
 - **A local-only target** (`baseSha`/`headSha` with no GitHub PR) →
   `{ code: "LOCAL_UNSUPPORTED" }`. A local target would spawn a reviewer that can
   never submit (the production YAML schema requires `pr.provider: github`), so it
@@ -667,7 +668,7 @@ Common warning/error categories:
 - **Renamed/deleted/copied files** — status and old paths are preserved so reviewers can understand the file movement and export can map valid line anchors.
 - **Empty diffs** — resolve to an orientation-only walkthrough with zero changed files.
 - **Untrusted PR hosts** — non-allowlisted hosts are rejected before fetching metadata or rendering clickable URLs (see [Trusted GitHub hosts](#trusted-github-hosts)).
-- **No PR for the current branch** (`NO_PR`) — the `run` route found no open GitHub PR for the session's branch; the panel asks the user to open a PR first.
+- **No PR for the current branch** (`NO_PR`) — the `run` route found no open GitHub PR for the session's branch; the launcher dispatch shows an inline error in the git-status-widget dropdown and spawns nothing (no session, no view switch).
 - **Local-only target** (`LOCAL_UNSUPPORTED`) — a base/head SHA pair with no GitHub PR is rejected before any reviewer is spawned (the run path is GitHub-PR-only — a local target could never submit the production YAML).
 
 Warnings are shown at the top of the panel and again in export preview when they
