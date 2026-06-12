@@ -262,5 +262,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[goal-tools] Registered 8 task/gate tools for session ${sessionId}, goal ${goalId}`);
+	if (process.env.BOBBIT_DEBUG) console.log(`[goal-tools] Registered 8 task/gate tools for session ${sessionId}, goal ${goalId}`);
 }

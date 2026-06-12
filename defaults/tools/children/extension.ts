@@ -21,7 +21,8 @@ export default function (pi: ExtensionAPI) {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const goalId = process.env.BOBBIT_GOAL_ID;
 	if (!sessionId || !goalId) {
-		console.error("[children-tools] BOBBIT_GOAL_ID / BOBBIT_SESSION_ID missing — tools not registered");
+		// Expected for every non-team-lead session — only surface under BOBBIT_DEBUG.
+		if (process.env.BOBBIT_DEBUG) console.log("[children-tools] BOBBIT_GOAL_ID / BOBBIT_SESSION_ID missing — tools not registered");
 		return;
 	}
 
@@ -404,5 +405,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[children-tools] Registered 9 children tools for session ${sessionId}, goal ${goalId}`);
+	if (process.env.BOBBIT_DEBUG) console.log(`[children-tools] Registered 9 children tools for session ${sessionId}, goal ${goalId}`);
 }

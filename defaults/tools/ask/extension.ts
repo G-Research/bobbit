@@ -102,5 +102,5 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	console.log(`[ask-tools] Registered ask_user_choices for session ${sessionId}`);
+	if (process.env.BOBBIT_DEBUG) console.log(`[ask-tools] Registered ask_user_choices for session ${sessionId}`);
 }
