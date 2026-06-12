@@ -44,11 +44,17 @@ framing is retained for the rationale, but is now historical).
 > migrated viewer + contribution + user-facing launch-gesture surface; the agent
 > lifecycle (`/launch` et al.) is the explicit carve-out, kept agent-side.
 >
-> **SUPERSEDED:** "privilege-minting → not pack-expressible" no longer holds.
-> Child-agent launch is now pack-expressible via the shipped ambient `host.agents`
-> capability (sandbox-inherited child agents through `OrchestrationCore`). Migrating
-> this pack onto `host.agents` — a real read-only child reviewer replacing the
-> `postMessage` gesture — is a separate follow-up goal. See
+> **SUPERSEDED (launch model — twice over).** "privilege-minting → not
+> pack-expressible" no longer holds, AND the interim `host.session.postMessage`
+> launch gesture described in the "Launch re-expression" box above is **no longer
+> what ships**. The `host.agents` migration has shipped, and the launch model has
+> since been corrected to **spawn-on-click**: clicking any launcher spawns a fresh
+> read-only `pr-reviewer` child via `host.agents` and auto-switches the view to it —
+> there is **no** `host.session.postMessage` gesture, **no** owner-session panel, and
+> **no** manual "Run PR walkthrough" / "Load walkthrough" button. So that box is
+> historical, not current. The authoritative current launch + lifecycle model is
+> [pr-walkthrough-launch-ux.md](pr-walkthrough-launch-ux.md) and
+> [../pr-walkthrough-panel.md](../pr-walkthrough-panel.md). See also
 > [docs/orchestration.md](../orchestration.md) and
 > [docs/marketplace.md](../marketplace.md).
 
