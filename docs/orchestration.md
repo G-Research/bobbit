@@ -208,8 +208,14 @@ giving delegates the two things workers always had: a **durable task** and **liv
 > persisted **`childTerminal`** flag (plus `terminalAt`) on the child session
 > (`SessionManager.markChildTerminal`, also stamped by `dismiss`). `shouldReapChildOnBoot`
 > reaps any child whose `childTerminal` is set — reading only that generic field, never a
-> pack store or a kind-specific branch. This is how a terminal PR-walkthrough reviewer is
-> reaped after a restart with **zero** PR-walkthrough knowledge in `OrchestrationCore`.
+> pack store or a kind-specific branch. This is how a child that finishes while its parent
+> is still alive (a caller that opts into stamping the marker) is reaped after a restart with
+> **zero** kind-specific knowledge in `OrchestrationCore`.
+>
+> **PR-walkthrough reviewers intentionally do NOT stamp `childTerminal`.** A post-submit
+> reviewer is a normal, selectable session that **survives restart** and is reaped only by
+> the owner-gone/archived rule below or explicit user termination — never by a terminal
+> marker (see [docs/pr-walkthrough-panel.md](pr-walkthrough-panel.md)).
 
 > **Why reuse the worker machinery?** Delegates and workers now share **one** restart path —
 > durable task + live restore + prompt rebuild + re-nudge — with no parallel registry. The
