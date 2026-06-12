@@ -23,7 +23,9 @@
  * Coverage:
  *   1. NO INSTALL — the pack is resolved by the built-in band: it appears in
  *      /api/ext/contributions (panel + entrypoints + routes) + the Installed list
- *      flagged `builtin:true`, and contributes NOTHING to /api/tools (no-tools pack).
+ *      flagged `builtin:true`, and contributes the three reviewer tools to /api/tools.
+ *   2. TOOL ACTIVATION — the Installed built-in card shows concrete reviewer tool
+ *      toggles; disabling one removes only that runtime tool, and re-enabling restores it.
  *   3b. PATH-TRAVERSAL PROBE — a caller-supplied `repoDir` cannot exfiltrate another
  *      repo's diff (the bundle route ignores it and runs in the session worktree).
  *   4. DISABLE/RE-ENABLE — toggling the pack's entrypoints off in the Market
@@ -64,6 +66,12 @@ const ENTRYPOINT_LIST_NAMES = [
 	"pr-walkthrough-palette",
 	"pr-walkthrough-route",
 ];
+const PRW_TOOL_NAMES = [
+	"readonly_bash",
+	"read_pr_walkthrough_bundle",
+	"submit_pr_walkthrough_yaml",
+] as const;
+const TOGGLED_TOOL = "readonly_bash";
 
 const SYNC_FILE = "src/sync/worker.ts";
 const PR_TITLE = "Add retry/backoff to the sync worker";
@@ -236,8 +244,24 @@ async function listInstalled(): Promise<Array<{ packName: string; scope: string;
 	return (await res.json()).installed as Array<{ packName: string; scope: string; builtin?: boolean }>;
 }
 
+async function resetPrWalkthroughActivation(): Promise<void> {
+	await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { roles: [], tools: [], skills: [], entrypoints: [] } }),
+	});
+}
+
+async function expectRuntimePrwTools(enabled: readonly string[], disabled: readonly string[] = []): Promise<void> {
+	const expected = new Map(PRW_TOOL_NAMES.map((name) => [name, enabled.includes(name)]));
+	for (const name of disabled) expected.set(name, false);
+	await expect.poll(async () => {
+		const names = new Set((await listToolNames()).map((t) => t.name));
+		return PRW_TOOL_NAMES.map((name) => `${name}:${names.has(name) ? "on" : "off"}`).join(",");
+	}, { timeout: 10_000 }).toBe(PRW_TOOL_NAMES.map((name) => `${name}:${expected.get(name) ? "on" : "off"}`).join(","));
+}
+
 /** Mint a server-minted pack-bound surface token for the pack's PANEL (no carrier
- *  tool — no-tools pack). Used only by the path-traversal probe below. */
+ *  tool). Used only by the path-traversal probe below. */
 async function mintSurfaceToken(sid: string): Promise<string> {
 	const res = await apiFetch("/api/ext/surface-token", {
 		method: "POST",
@@ -266,13 +290,16 @@ function liveDeepLink(): string {
 	return `#/ext/${PACK}?${params.toString()}`;
 }
 
+test.beforeEach(async () => {
+	// Server-scope activation persists between E2E runs; start every test from the
+	// shipped all-enabled state so failures do not cascade.
+	await resetPrWalkthroughActivation().catch(() => {});
+});
+
 test.afterEach(async () => {
-	// Best-effort: re-enable all entrypoints so a failed run never leaves the
-	// shipped feature disabled for the next test (server-scope activation persists).
-	await apiFetch("/api/marketplace/pack-activation", {
-		method: "PUT",
-		body: JSON.stringify({ scope: "server", packName: PACK, disabled: { entrypoints: [] } }),
-	}).catch(() => {});
+	// Best-effort: re-enable all toggles so a failed run never leaves the shipped
+	// feature partially disabled for the next test.
+	await resetPrWalkthroughActivation().catch(() => {});
 	repoDir = undefined;
 	if (outsideRepoDir) {
 		try { fs.rmSync(outsideRepoDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -285,8 +312,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		setupOutsideRepo();
 
 		// ── Step 1: NO INSTALL. The built-in band resolves the pack active-by-default. ──
-		const tools = await listToolNames();
-		expect(tools.find((t) => t.name === "pr_walkthrough"), "a no-tools pack contributes NOTHING to /api/tools").toBeFalsy();
+		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 		const packMeta = (await listContributions()).find((p) => p.packId === PACK);
 		expect(packMeta, "the built-in pr-walkthrough pack must be resolved with NO install").toBeTruthy();
 		expect(packMeta?.panels?.some((p) => p.id === PANEL_ID)).toBe(true);
@@ -325,15 +351,48 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await navigateToHash(page, "#/market");
 		const builtinGroup = page.locator('[data-testid="market-builtin-group"]');
 		await expect(builtinGroup, "the Market Installed tab must show a Built-in group").toBeVisible({ timeout: 15_000 });
-		const gitWidgetToggle = builtinGroup.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
+		const prwCard = builtinGroup.locator('[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="pr-walkthrough"]').first();
+		await expect(prwCard, "the built-in PR walkthrough card must render").toBeVisible({ timeout: 15_000 });
+
+		// The activation catalogue expands the pack's tool group to concrete tool names.
+		for (const toolName of PRW_TOOL_NAMES) {
+			const toggle = prwCard.locator(`[data-testid="market-toggle-tool-${toolName}"]`);
+			await expect(toggle, `tool toggle ${toolName} must render`).toBeVisible({ timeout: 15_000 });
+			await expect(toggle, `tool toggle ${toolName} starts enabled`).toBeChecked();
+			await expect(prwCard.getByText(toolName, { exact: true }), `tool label ${toolName} must render`).toBeVisible();
+		}
+
+		// Disabling one concrete tool removes exactly that runtime tool; siblings and
+		// pack-bound panel/routes/entrypoints remain active. Re-enable restores it.
+		const toolToggle = prwCard.locator(`[data-testid="market-toggle-tool-${TOGGLED_TOOL}"]`);
+		let put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
+		await toolToggle.click();
+		await put;
+		await expect(toolToggle, `${TOGGLED_TOOL} toggle turns off`).not.toBeChecked();
+		await expectRuntimePrwTools(PRW_TOOL_NAMES.filter((name) => name !== TOGGLED_TOOL), [TOGGLED_TOOL]);
+		for (const sibling of PRW_TOOL_NAMES.filter((name) => name !== TOGGLED_TOOL)) {
+			await expect(prwCard.locator(`[data-testid="market-toggle-tool-${sibling}"]`), `sibling tool ${sibling} stays enabled`).toBeChecked();
+		}
+		const metaAfterToolDisable = (await listContributions()).find((p) => p.packId === PACK);
+		expect(metaAfterToolDisable?.panels?.some((p) => p.id === PANEL_ID), "tool disable must not remove the pack panel").toBe(true);
+		expect(metaAfterToolDisable?.routeNames, "tool disable must not remove pack routes").toEqual(expect.arrayContaining(["bundle", "publish"]));
+		expect(metaAfterToolDisable?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER), "tool disable must not remove entrypoints").toBe(true);
+
+		put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
+		await toolToggle.click();
+		await put;
+		await expect(toolToggle, `${TOGGLED_TOOL} toggle turns back on`).toBeChecked();
+		await expectRuntimePrwTools(PRW_TOOL_NAMES);
+
+		const gitWidgetToggle = prwCard.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
 		await expect(gitWidgetToggle, "the built-in pack's entrypoint toggles must render").toBeVisible({ timeout: 15_000 });
 		for (const kind of ["Git widget", "Slash", "Command palette", "Route"]) {
-			await expect(builtinGroup.getByText(kind, { exact: true }), `entrypoint kind ${kind} must be visible`).toBeVisible();
+			await expect(prwCard.getByText(kind, { exact: true }), `entrypoint kind ${kind} must be visible`).toBeVisible();
 		}
 		for (const listName of ENTRYPOINT_LIST_NAMES) {
-			const toggle = builtinGroup.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
+			const toggle = prwCard.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
 			if (await toggle.isChecked()) {
-				const put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
+				put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
 				await toggle.click();
 				await put;
 			}
@@ -358,6 +417,10 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
 			return meta?.entrypoints?.length ?? 0;
 		}, { timeout: 10_000 }).toBe(0);
+		const metaAfterEntrypointDisable = (await listContributions()).find((p) => p.packId === PACK);
+		expect(metaAfterEntrypointDisable?.panels?.some((p) => p.id === PANEL_ID), "entrypoint disable must not remove the pack panel").toBe(true);
+		expect(metaAfterEntrypointDisable?.routeNames, "entrypoint disable must not remove pack routes").toEqual(expect.arrayContaining(["bundle", "publish"]));
+		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 
 		// Disabled state survives a reload: the server-scope activation override is
 		// persisted, so after a full reload the Market toggle is still OFF and the
@@ -365,9 +428,14 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/market`);
 		const group2 = page.locator('[data-testid="market-builtin-group"]');
 		await expect(group2).toBeVisible({ timeout: 20_000 });
-		const gitToggleAfterReload = group2.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
+		const prwCard2 = group2.locator('[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="pr-walkthrough"]').first();
+		await expect(prwCard2).toBeVisible({ timeout: 15_000 });
+		const gitToggleAfterReload = prwCard2.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
 		await expect(gitToggleAfterReload).toBeVisible({ timeout: 15_000 });
 		await expect(gitToggleAfterReload, "disable must survive reload (toggle stays off)").not.toBeChecked();
+		for (const toolName of PRW_TOOL_NAMES) {
+			await expect(prwCard2.locator(`[data-testid="market-toggle-tool-${toolName}"]`), `tool ${toolName} remains enabled after entrypoint reload`).toBeChecked();
+		}
 		await expect.poll(async () => {
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
 			return meta?.entrypoints?.length ?? 0;
@@ -375,7 +443,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 
 		// ── Re-enable → the launcher + deep-link are restored. ──
 		for (const listName of ENTRYPOINT_LIST_NAMES) {
-			const toggle = group2.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
+			const toggle = prwCard2.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
 			await expect(toggle).toBeVisible({ timeout: 10_000 });
 			if (!(await toggle.isChecked())) {
 				const put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
@@ -383,6 +451,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 				await put;
 			}
 		}
+		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 		await expect.poll(async () => {
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
 			return meta?.entrypoints?.some((e) => e.id === GIT_WIDGET_LAUNCHER) ? "ok" : "no";
