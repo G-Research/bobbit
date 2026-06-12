@@ -133,6 +133,12 @@ export class GitStatusWidget extends LitElement {
 
     @state() private _closing = false;
 
+    /** Inline error for a failed pack launcher (e.g. PR Walkthrough spawn:
+     *  NO_PR / spawn failure). Rendered beneath the matching launcher button so
+     *  the dropdown stays open and nothing is spawned / no view switch occurs
+     *  (design pr-walkthrough-launch-ux.md §3.3). `id` is the compound launcher key. */
+    @state() private _launcherError: { id: string; message: string } | null = null;
+
     private _onDocumentClick = (e: MouseEvent) => {
         const target = e.target as Node;
         if (this.expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target)) {
@@ -218,6 +224,8 @@ export class GitStatusWidget extends LitElement {
         if (this._dropdownEl && (!hasConnectedDropdown || !this.expanded)) {
             this._removeDropdown();
         }
+        // Opening fresh: clear any stale launcher error from a prior session.
+        this._launcherError = null;
         this._closeToken++;
         this._closing = false;
         this._dropdownEl?.classList.remove('git-dropdown-closing');
@@ -927,13 +935,15 @@ export class GitStatusWidget extends LitElement {
             <div class="border-t border-border pt-2 mt-2" data-testid="git-widget-launchers">
                 <div class="text-muted-foreground mb-1 font-medium">Extensions</div>
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                    ${gitButtons.map((b) => html`<button
+                    ${gitButtons.map((b) => html`<div style="display:flex;flex-direction:column;gap:2px"><button
                         type="button"
                         style=${btnStyle}
                         data-testid="git-widget-launcher"
                         data-entrypoint-id=${b.id}
                         @click=${(e: MouseEvent) => { e.stopPropagation(); this._runPackLauncher(b.id); }}
-                    >${b.label}</button>`)}
+                    >${b.label}</button>${this._launcherError?.id === b.id
+                        ? html`<div data-testid="git-widget-launcher-error" style="color:var(--negative);font-size:11px;margin-top:4px">${this._launcherError.message}</div>`
+                        : nothing}</div>`)}
                     ${hasPaletteCommands ? html`<button
                         type="button"
                         style=${btnStyle}
@@ -946,11 +956,22 @@ export class GitStatusWidget extends LitElement {
     }
 
     /** Run a pack launcher on a genuine user click (the click's transient activation
-     *  is the user gesture; no runWithUserGesture wrapper needed) and close the
-     *  dropdown. */
+     *  is the user gesture; no runWithUserGesture wrapper needed). The dropdown is
+     *  kept OPEN until the dispatch resolves: on success it closes (a spawn launcher
+     *  switches the view to the child); on failure the structured error is rendered
+     *  inline beneath the button and the dropdown stays open — nothing is spawned and
+     *  no view switch occurs (design §3.3). */
     private _runPackLauncher(id: string): void {
-        this._closeDropdown();
-        try { runLauncherEntrypoint(id); } catch { /* non-fatal */ }
+        this._launcherError = null;
+        try {
+            runLauncherEntrypoint(id, (r) => {
+                if (r.ok) { this._closeDropdown(); return; }
+                this._launcherError = { id, message: r.error || "Could not start the PR walkthrough." };
+                // Re-render the portaled dropdown content inline (the portal lives under
+                // document.body, outside this component's reactive subtree).
+                if (this._dropdownEl) render(this._renderDropdownContent(), this._dropdownEl);
+            });
+        } catch { /* non-fatal */ }
     }
 
     private _renderDropdownContent() {
