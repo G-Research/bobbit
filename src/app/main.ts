@@ -812,7 +812,7 @@ async function initApp() {
 		allowInInput: true,
 		handler: () => {
 			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
-			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
+			const hasPanel = canFullscreen || state.inboxPanelOpen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
@@ -871,7 +871,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
+			const hasPanel = state.inboxPanelOpen || (!state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || hasActiveProposalPanel()));
 			if (!hasPanel) return;
 			const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 			if (state.previewPanelFullscreen) {
@@ -895,7 +895,7 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
+			const hasPanel = state.inboxPanelOpen || (!state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || hasActiveProposalPanel()));
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				if (state.previewPanelFullscreen) {
