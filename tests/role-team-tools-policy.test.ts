@@ -163,3 +163,37 @@ describe("non-goal session resolved team-tool policy (the deliberate invariant c
 		});
 	}
 });
+
+describe("team-lead resolved policy denies the Agent-group delegation pair", () => {
+	// A team lead's ONE delegation primitive is team_spawn (isolated sub-branch
+	// worktree + team-manager worker-idle NOTIFICATIONS → spawn-then-go-idle).
+	// team_delegate (child in the lead's OWN worktree) and team_wait (block on
+	// notify-managed team workers) are NON-goal-agent verbs that broke the lead's
+	// go-idle behaviour, so team-lead.yaml denies both. The goal-only Team verbs
+	// stay allowed (Team: allow). read_session (also `group: Agent`) stays allowed.
+	const groupPolicyStore = defaultGroupPolicyProvider();
+	const leadRole = loadRole("team-lead");
+
+	for (const tool of ["team_delegate", "team_wait"]) {
+		it(`team-lead resolves ${tool} to never (stripped from the lead's tool surface)`, () => {
+			assert.equal(
+				leadRole.toolPolicies?.[tool],
+				"never",
+				`team-lead.yaml toolPolicies must set \`${tool}: never\``,
+			);
+			assert.equal(
+				resolveGrantPolicy(tool, "Agent", leadRole, undefined, groupPolicyStore),
+				"never",
+				`${tool} must resolve to never for the team lead so the model can't reach for it`,
+			);
+		});
+	}
+
+	it("team-lead still resolves read_session to allow (Agent group, not denied)", () => {
+		assert.equal(
+			resolveGrantPolicy("read_session", "Agent", leadRole, undefined, groupPolicyStore),
+			"allow",
+			"read_session must stay available to the lead — only the delegation pair is denied",
+		);
+	});
+});

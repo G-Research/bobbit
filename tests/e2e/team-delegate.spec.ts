@@ -13,8 +13,11 @@
  *   • a spawned child inherits the parent's CURRENT model (regression vs the
  *     old system-default drop) + per-call `model` override,
  *   • the non-blocking interactive flow spawn → prompt → wait → read → dismiss,
- *   • a team-lead can ALSO `team_delegate` (the Agent-group reclassification
- *     does not regress its goal `team_*` tools).
+ *   • the /orchestrate/delegate ROUTE stays functional for a team-lead caller
+ *     even though the lead's MODEL no longer sees `team_delegate`/`team_wait`
+ *     (denied at the role layer so the lead orchestrates via team_spawn +
+ *     notifications and goes idle; route authz is ownership-based, not tool-
+ *     policy-based — see role-team-tools-policy.test.ts).
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createSession, createGoal, startTeam, deleteSession, deleteGoal, teardownTeam, connectWs } from "./e2e-setup.js";
@@ -252,8 +255,14 @@ test.describe("team_delegate — non-blocking interactive flow", () => {
 });
 
 test.describe("team_delegate — team-lead parity", () => {
-	test("a team-lead can ALSO team_delegate (no regression to its goal team tools)", async ({ gateway }) => {
-		const goal = await createGoal({ title: "Orchestration delegate parity", team: true });
+	// The lead's MODEL no longer sees team_delegate/team_wait — they are denied at
+	// the role layer (team-lead.yaml; pinned by role-team-tools-policy.test.ts) so
+	// the lead orchestrates only via team_spawn + notifications and goes idle. The
+	// /orchestrate/delegate ROUTE, however, is authz'd by session ownership, NOT by
+	// tool policy, so it stays functional for a lead caller — this guards that the
+	// role-layer deny did not also break the route (defense-in-depth boundary).
+	test("the /orchestrate/delegate route stays functional for a lead (tool denied, route intact)", async ({ gateway }) => {
+		const goal = await createGoal({ title: "Orchestration delegate route intact", team: true });
 		let leadId: string | undefined;
 		try {
 			leadId = await startTeam(goal.id as string);
