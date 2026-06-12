@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import extension from "../defaults/tools/pr-walkthrough/extension.ts";
+import extension from "../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
 import { WALKTHROUGH_ALLOWED_TOOLS } from "../src/server/pr-walkthrough/walkthrough-agent-manager.ts";
 
-const groupDir = path.resolve("defaults/tools/pr-walkthrough");
+const groupDir = path.resolve("market-packs/pr-walkthrough/tools/pr-walkthrough");
 
 function readToolText(file: string): string {
 	return fs.readFileSync(path.join(groupDir, file), "utf-8");
@@ -31,6 +31,8 @@ describe("PR walkthrough bundle access tool metadata", () => {
 		assert.equal(field(text, "name"), "read_pr_walkthrough_bundle");
 		assert.equal(field(text, "group"), "PR Walkthrough");
 		assert.match(text, /params:\s*\[(mode|file|path|index|offset|limit|hunks?)/i);
+		assert.match(text, /type:\s*bobbit-extension/);
+		assert.match(text, /extension:\s*extension\.ts/);
 		assert.match(text, /manifest|summary|file/i);
 		assert.match(text, /bounded|limit|truncat/i);
 	});

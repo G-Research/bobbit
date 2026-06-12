@@ -1,7 +1,7 @@
 name: pr-walkthrough
 description: >-
-  Reviews pull requests in a dedicated walkthrough panel. UI-only built-in pack;
-  exposes no tools and uses pack-scoped Host API access.
+  Reviews pull requests in a dedicated walkthrough panel with a pack-scoped
+  reviewer role and PR walkthrough analysis tools.
 version: 1.0.0
 contents:
   # pr-reviewer: the read-only reviewer role minted by the `run` route via
@@ -9,7 +9,7 @@ contents:
   # three walkthrough tools); that group is default-deny for every other role, so
   # submit_pr_walkthrough_yaml is reachable ONLY from this role (design Decision C).
   roles: [pr-reviewer]
-  tools: []
+  tools: [pr-walkthrough]
   skills: []
   entrypoints:
     - pr-walkthrough-open
