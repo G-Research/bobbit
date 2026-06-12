@@ -158,7 +158,7 @@ function formatGatewayResponse(data: unknown): string {
 
 const extension: ExtensionFactory = (pi) => {
 	// host.agents reviewer migration (design Decision C): the boundary is now the
-	// pr-reviewer role grant + the default-deny `PR Walkthrough` tool group — NOT an
+	// pr-reviewer role policy + the default-deny `PR Walkthrough` tool group — NOT an
 	// env-gated secret. Register the tools whenever a session id is present
 	// (registration ≠ activation; allowedTools gates who can actually call them). The
 	// server resolves the job binding from the verified caller session secret, so no
