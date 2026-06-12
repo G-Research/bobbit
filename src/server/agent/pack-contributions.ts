@@ -7,16 +7,19 @@
 //   - `panels/<panel>.yaml`     → PanelContribution[]  (auto-discovered)
 //   - `entrypoints/<ep>.yaml`   → EntrypointContribution[] (filtered by
 //                                  manifest.contents.entrypoints[])
+//   - `providers/<id>.yaml`     → ProviderContribution[] (filtered by
+//                                  manifest.contents.providers[])
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
-// dropped and never crashes the scan — EXCEPT the four hard conflicts of §5.4,
+// dropped and never crashes the scan — EXCEPT the hard conflicts of §5.4,
 // which throw {@link PackContributionError}:
 //
 //   1. duplicate route name within a pack;
 //   2. (duplicate host-global routeId — detected at registry build, cross-pack);
 //   3. duplicate panel id within a pack;
-//   4. duplicate entrypoint id within a pack.
+//   4. duplicate entrypoint id within a pack;
+//   5. duplicate provider id within a pack.
 //
 // Each contribution carries its declaring `sourceFile` + the absolute `packRoot`
 // so the serve/import sites can resolve a path-bearing field RELATIVE to the
@@ -32,7 +35,10 @@ import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+const PROVIDER_KINDS = new Set(["memory", "selector", "generic"]);
+const PROVIDER_HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown"]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -79,6 +85,20 @@ export interface RouteContribution {
 	packRoot: string;
 }
 
+export interface ProviderContribution {
+	id: string;
+	kind: "memory" | "selector" | "generic";
+	module: string;
+	hooks: string[];
+	runtime?: string;
+	budget: { maxTokens: number; timeoutMs: number };
+	defaultEnabled: boolean;
+	config?: Record<string, unknown>;
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 /** All pack-scoped contributions for ONE installed pack. */
 export interface PackContributions {
 	packId: string; // structural, from the pack root dir name
@@ -86,6 +106,7 @@ export interface PackContributions {
 	packRoot: string;
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
+	providers: ProviderContribution[];
 	routes?: RouteContribution;
 }
 
@@ -116,6 +137,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		packRoot,
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
+		providers: loadProviders(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
 	if (routes) out.routes = routes;
@@ -219,6 +241,107 @@ function loadEntrypoints(packRoot: string, manifest: PackManifest): EntrypointCo
 		}
 		seenId.add(base.id);
 		out.push({ ...base, listName, sourceFile, packRoot });
+	}
+	return out;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+	return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+	const n = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+	return Math.min(max, Math.max(min, n));
+}
+
+// §0.2: providers are pack-scoped, keyed (packId, contributionId).
+// They are NOT an EntityType; two packs may each ship id "memory" and both stay active.
+export function loadProviders(packRoot: string, manifest: PackManifest): ProviderContribution[] {
+	const listNames = manifest.contents.providers ?? [];
+	const dir = path.join(packRoot, "providers");
+	const out: ProviderContribution[] = [];
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] provider listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		let sourceFile = path.join(dir, `${listName}.yaml`);
+		if (!fs.existsSync(sourceFile)) {
+			const alt = path.join(dir, `${listName}.yml`);
+			if (fs.existsSync(alt)) sourceFile = alt;
+		}
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] provider '${listName}' resolves outside providers/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed provider '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] provider '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (typeof id !== "string" || !PROVIDER_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] provider '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		const kindRaw = data.kind;
+		const kind = kindRaw === undefined ? "generic" : kindRaw;
+		if (typeof kind !== "string" || !PROVIDER_KINDS.has(kind)) {
+			console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) has invalid kind; dropping`);
+			continue;
+		}
+		const mod = data.module;
+		if (typeof mod !== "string" || !isSafeRelativePath(mod)) {
+			console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) has unsafe/missing module; dropping`);
+			continue;
+		}
+		const resolvedModule = path.resolve(path.dirname(sourceFile), mod);
+		if (!isPackPathWithinRoot(packRoot, resolvedModule)) {
+			console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) module resolves outside pack root; dropping`);
+			continue;
+		}
+		const hooksRaw = data.hooks ?? [];
+		if (!Array.isArray(hooksRaw) || !hooksRaw.every((h): h is string => typeof h === "string")) {
+			console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) has invalid hooks; dropping`);
+			continue;
+		}
+		const unknownHook = hooksRaw.find((h) => !PROVIDER_HOOKS.has(h));
+		if (unknownHook !== undefined) {
+			console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) declares unknown hook ${JSON.stringify(unknownHook)}; dropping`);
+			continue;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares provider id "${id}" more than once; provider ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		const budgetRaw = isPlainObject(data.budget) ? data.budget : {};
+		const provider: ProviderContribution = {
+			id,
+			kind: kind as ProviderContribution["kind"],
+			module: mod,
+			hooks: hooksRaw,
+			budget: {
+				maxTokens: clampNumber(budgetRaw.maxTokens, 1600, 64, 8192),
+				timeoutMs: clampNumber(budgetRaw.timeoutMs, 1500, 100, 10000),
+			},
+			defaultEnabled: data.defaultEnabled !== false,
+			listName,
+			sourceFile,
+			packRoot,
+		};
+		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
+		if (isPlainObject(data.config)) provider.config = data.config;
+		out.push(provider);
 	}
 	return out;
 }
