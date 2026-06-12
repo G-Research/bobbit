@@ -327,6 +327,9 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await expect(builtinGroup, "the Market Installed tab must show a Built-in group").toBeVisible({ timeout: 15_000 });
 		const gitWidgetToggle = builtinGroup.locator('[data-testid="market-toggle-entrypoint-pr-walkthrough-git-widget"]');
 		await expect(gitWidgetToggle, "the built-in pack's entrypoint toggles must render").toBeVisible({ timeout: 15_000 });
+		for (const kind of ["Git widget", "Slash", "Command palette", "Route"]) {
+			await expect(builtinGroup.getByText(kind, { exact: true }), `entrypoint kind ${kind} must be visible`).toBeVisible();
+		}
 		for (const listName of ENTRYPOINT_LIST_NAMES) {
 			const toggle = builtinGroup.locator(`[data-testid="market-toggle-entrypoint-${listName}"]`);
 			if (await toggle.isChecked()) {

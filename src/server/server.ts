@@ -6527,7 +6527,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string }>; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6539,20 +6539,22 @@ async function handleApiRoute(
 			}
 			if (!entry || !entry.manifest) return null;
 			const c = entry.manifest.contents;
-			// Entrypoint display labels (best-effort) from the entrypoint files.
-			const labelByListName = new Map<string, string>();
+			// Entrypoint display metadata (best-effort) from the entrypoint files.
+			// The Market UI needs the kind/route to distinguish duplicate labels such as
+			// "PR Walkthrough" in different launch surfaces.
+			const entrypointByListName = new Map<string, { label?: string; kind: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>();
 			try {
 				for (const ep of loadPackContributions(entry.path, entry.manifest).entrypoints) {
-					if (ep.label) labelByListName.set(ep.listName, ep.label);
+					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
-			} catch { /* labels are optional; listName is the stable key */ }
+			} catch { /* metadata is optional; listName is the stable key */ }
 			return {
 				roles: [...c.roles],
 				tools: [...c.tools],
 				skills: [...c.skills],
 				entrypoints: (c.entrypoints ?? []).map((listName) => {
-					const label = labelByListName.get(listName);
-					return label !== undefined ? { listName, label } : { listName };
+					const meta = entrypointByListName.get(listName);
+					return meta ? { listName, ...meta } : { listName };
 				}),
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never

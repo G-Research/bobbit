@@ -319,52 +319,160 @@
 /* ── Activation controls (pack schema V1 §9) ─────────────────────────────────
  * Per-pack toggles for user-facing entities only (roles/tools/skills/entrypoints).
  * Support surfaces (panels/routes/stores/renderers/actions/lib) are NOT toggled. */
+.market-pack-activation-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+	white-space: nowrap;
+	cursor: pointer;
+	user-select: none;
+}
+
 .market-activation {
-	margin-top: 0.5rem;
-	padding-top: 0.5rem;
+	margin-top: 0.625rem;
+	padding-top: 0.625rem;
 	border-top: 1px dashed var(--border);
-	display: flex;
-	flex-direction: column;
-	gap: 0.375rem;
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 0.5rem 0.875rem;
 }
 
 .market-activation-group {
-	display: flex;
-	flex-direction: column;
-	gap: 0.25rem;
+	display: contents;
 }
 
 .market-activation-group-title {
-	font-size: 0.625rem;
-	font-weight: 600;
+	padding-top: 0.3125rem;
+	font-size: 0.6875rem;
+	font-weight: 700;
 	text-transform: uppercase;
-	letter-spacing: 0.04em;
+	letter-spacing: 0.055em;
 	color: var(--muted-foreground);
+	white-space: nowrap;
 }
 
 .market-activation-toggles {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 0.25rem 0.625rem;
+	gap: 0.4375rem;
+	min-width: 0;
 }
 
 .market-activation-toggle {
 	display: inline-flex;
 	align-items: center;
-	gap: 0.375rem;
+	gap: 0.4375rem;
+	min-width: 0;
+	padding: 0.3125rem 0.5rem;
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	background: var(--card);
 	font-size: 0.6875rem;
+	line-height: 1.15;
 	color: var(--foreground);
 	cursor: pointer;
 	user-select: none;
-}
-
-.market-activation-toggle input {
-	accent-color: var(--primary);
-	cursor: pointer;
+	transition: background 0.15s, color 0.15s, opacity 0.15s;
 }
 
 .market-activation-toggle--off {
+	background: var(--muted);
 	color: var(--muted-foreground);
+	opacity: 0.58;
+}
+
+.market-toggle-switch {
+	position: relative;
+	display: inline-block;
+	width: 1.75rem;
+	height: 1rem;
+	flex: none;
+}
+
+.market-toggle-switch--master {
+	width: 2.125rem;
+	height: 1.25rem;
+}
+
+.market-toggle-switch input {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	margin: 0;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.market-toggle-slider {
+	position: absolute;
+	inset: 0;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: var(--muted);
+	transition: background 0.15s, border-color 0.15s;
+}
+
+.market-toggle-slider::after {
+	content: "";
+	position: absolute;
+	top: 1px;
+	left: 1px;
+	width: 0.75rem;
+	height: 0.75rem;
+	border-radius: 999px;
+	background: var(--muted-foreground);
+	transition: transform 0.15s, background 0.15s;
+}
+
+.market-toggle-switch--master .market-toggle-slider::after {
+	width: 1rem;
+	height: 1rem;
+}
+
+.market-toggle-switch input:checked + .market-toggle-slider {
+	border-color: color-mix(in oklch, var(--primary) 60%, var(--border));
+	background: var(--primary);
+}
+
+.market-toggle-switch input:checked + .market-toggle-slider::after {
+	transform: translateX(0.75rem);
+	background: var(--primary-foreground);
+}
+
+.market-toggle-switch--master input:checked + .market-toggle-slider::after {
+	transform: translateX(0.875rem);
+}
+
+.market-toggle-switch input:disabled {
+	cursor: not-allowed;
+}
+
+.market-toggle-switch input:focus-visible + .market-toggle-slider {
+	box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 55%, transparent);
+}
+
+.market-entrypoint-kind {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.125rem 0.375rem;
+	border-radius: 0.375rem;
+	background: color-mix(in oklch, var(--info) 11%, transparent);
+	color: var(--info);
+	font-size: 0.625rem;
+	font-weight: 750;
+	text-transform: uppercase;
+	letter-spacing: 0.045em;
+	white-space: nowrap;
+}
+
+.market-activation-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 14rem;
 }
 
 /* ── Status lozenges (theme tokens only) ─────────────────────────────────────

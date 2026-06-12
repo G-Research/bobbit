@@ -2721,7 +2721,12 @@ export interface PackActivationCatalogue {
 	roles: string[];
 	tools: string[];
 	skills: string[];
-	entrypoints: Array<{ listName: string; label?: string }>;
+	entrypoints: Array<{
+		listName: string;
+		label?: string;
+		kind?: PackEntrypointWire["kind"];
+		routeId?: string;
+	}>;
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }

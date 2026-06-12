@@ -56,7 +56,7 @@ Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
 **Forks**: open PRs against the fork's `master`, not the upstream repo.
 
-Full worktree story — branch namespaces, `base_ref`, the `git stash` hazard: [docs/dev-workflow.md](docs/dev-workflow.md).
+Worktree details: [docs/dev-workflow.md](docs/dev-workflow.md).
 
 ## Maintaining this file
 

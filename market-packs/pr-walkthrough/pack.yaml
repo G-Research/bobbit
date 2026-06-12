@@ -1,14 +1,7 @@
 name: pr-walkthrough
 description: >-
-  Extension Host Phase-2 MAXIMAL litmus pack — the PR-walkthrough feature
-  re-expressed as an installable market pack with NO tools. It uses only
-  pack-scoped contributions: an auto-discovered panel
-  (panels/pr-walkthrough-panel.yaml) + pack-level routes (routes:) + four
-  entrypoints (three launchers + one kind:"route" deep-link, in entrypoints/)
-  + an implicit pack-scoped store + host.session.readToolCall. Proves an
-  ORPHAN / UI-only pack can build this whole surface from public contributions
-  + the Host API alone, through pack-bound surface auth, with no tool in
-  allowedTools.
+  Reviews pull requests in a dedicated walkthrough panel. UI-only built-in pack;
+  exposes no tools and uses pack-scoped Host API access.
 version: 1.0.0
 contents:
   # pr-reviewer: the read-only reviewer role minted by the `run` route via
