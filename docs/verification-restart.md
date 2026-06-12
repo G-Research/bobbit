@@ -163,7 +163,13 @@ explicitly out of scope (see below).
   is revived by `restoreSession` and re-driven by `_tryResumeFromSession`,
   which waits for the cold agent to become ready, re-prompts with a generous
   timeout, and routes restart-induced RPC failures to a `pending` re-signal
-  rather than a hard gate failure. See
+  rather than a hard gate failure. The wait-for-ready + generous-timeout step
+  is no longer harness-specific: it is the shared
+  `RpcBridge.promptWhenReady(text, images?, opts?)` helper (with the exported
+  `COLD_REPROMPT_READY_TIMEOUT_MS` / `COLD_REPROMPT_PROMPT_TIMEOUT_MS`
+  constants), which the reviewer resume here AND the two generic
+  session-restore recovery paths (mid-turn re-prompt, boot-resume nudge) all
+  call — see [cold-restart-reprompt.md](cold-restart-reprompt.md). See
   [internals.md — Reviewer `kind` & restart resume](internals.md#reviewer-kind--restart-resume)
   for the team-store rebinding and
   [internals.md — Cold-reviewer resume: readiness wait + restart-interrupt routing](internals.md#cold-reviewer-resume-readiness-wait--restart-interrupt-routing)
