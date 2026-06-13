@@ -35,7 +35,7 @@ import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanel
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
-import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
+import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -81,6 +81,18 @@ function notifyGoalStateSubscribers(evt: GoalStateChangeEvent): void {
 	for (const cb of _goalStateSubscribers) {
 		try { cb(evt); } catch { /* swallow — one bad subscriber must not break the rest */ }
 	}
+}
+
+function isKnownOwnSessionCreatedEvent(msg: any, sessionId: string): boolean {
+	if (!sessionId || msg?.type !== "session_created") return false;
+	const createdId = typeof msg.sessionId === "string"
+		? msg.sessionId
+		: typeof msg.id === "string"
+			? msg.id
+			: typeof msg.session?.id === "string"
+				? msg.session.id
+				: "";
+	return createdId === sessionId && state.gatewaySessions.some((session: any) => session?.id === sessionId);
 }
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
@@ -1948,6 +1960,15 @@ export class RemoteAgent {
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
+
+			case "session_created":
+			case "sessions_changed": {
+				// Shared with the global viewer socket so active session sockets and
+				// non-session surfaces coalesce into one refresh burst.
+				if (isKnownOwnSessionCreatedEvent(msg, this._sessionId)) break;
+				scheduleSessionListRefreshFromPush();
+				break;
+			}
 
 			case "session_removed": {
 				// Server-pushed event: a session somewhere was terminated/archived/purged.

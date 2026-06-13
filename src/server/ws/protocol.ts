@@ -149,6 +149,11 @@ export type ServerMessage =
 	 * client should remove the session from local lists and, if the user is
 	 * currently viewing it, redirect to landing with a friendly toast. */
 	| { type: "session_removed"; sessionId: string; projectId?: string; reason: "terminated" | "archived" | "purged" }
+	/** Sent to ALL authenticated clients when a visible session is created so
+	 * session navigation can refresh immediately instead of waiting for polling. */
+	| { type: "session_created"; sessionId: string; projectId?: string }
+	/** Broad invalidation fallback for session-list changes. */
+	| { type: "sessions_changed"; projectId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }

@@ -684,6 +684,7 @@ export class SessionManager {
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
+	private _creationListeners: Array<(session: SessionInfo) => void> = [];
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
 	 * persisted `agentSessionFile` (and are newer than the most recent
@@ -731,6 +732,19 @@ export class SessionManager {
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
 	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void): void {
 		this._terminationListeners.push(fn);
+	}
+
+	/** Subscribe to newly created visible sessions. Listeners are invoked after initial persistence. */
+	addCreationListener(fn: (session: SessionInfo) => void): void {
+		this._creationListeners.push(fn);
+	}
+
+	private notifySessionCreated(session: SessionInfo): void {
+		for (const fn of this._creationListeners) {
+			try { fn(session); } catch (err) {
+				console.error(`[session-manager] session creation listener failed for ${session.id}:`, err);
+			}
+		}
 	}
 
 	setSandboxManager(manager: SandboxManager | null): void {
@@ -4092,6 +4106,7 @@ export class SessionManager {
 					repoWorktrees: Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath])),
 				});
 			}
+			this.notifySessionCreated(session);
 
 			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
 			// pass its path so executeWorktreeAsync skips createWorktree.
@@ -4150,6 +4165,7 @@ export class SessionManager {
 
 		const session = await executePlan(plan, ctx);
 		if (projectId) session.projectId = projectId;
+		this.notifySessionCreated(session);
 
 		// Persist session metadata (fire-and-forget, but tracked for terminate)
 		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
