@@ -17,7 +17,7 @@ Bobbit has three layers:
 
 1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
 
-2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing.
+2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing. Session navigation is kept cross-device by server-pushed session-list invalidations plus REST refreshes; `/api/sessions` remains authoritative.
 
 3. **UI components** (`src/ui/`) — Lit-based component library (forked from pi-web-ui). Message rendering, specialised tool call renderers, model selection, settings, and more.
 
@@ -33,6 +33,14 @@ Path-style session links are intentionally valid entrypoints. Opening or reloadi
 After the app resolves and connects a path-style session route, the visible in-app URL is canonicalized to `/#/session/<id>`. The cleanup uses history replacement rather than dispatching hash or route changes, so it does not restart or race the active `connectToSession()` flow.
 
 Hash routes take precedence over the path-style session fallback once the app has loaded. This keeps in-app navigation meaningful even from a copied path URL: `/session/old#/session/new` opens `new`, not `old`. Non-session pathnames are not treated as session deep links. Extension surfaces (e.g. the PR walkthrough pack) are reached through the generic hash route `#/ext/<routeId>` rather than a dedicated pathname route.
+
+## Session list synchronization
+
+A visible session created on one client must become selectable on every other connected client. The server broadcasts `session_created` (or the broader `sessions_changed`) whenever a visible session enters the persisted session list, including sessions created by normal REST/UI flows and `host.agents` pack launches. Browsers treat the event as an invalidation and refresh `GET /api/sessions`; they do not trust the WebSocket payload as the full session record.
+
+The app keeps this working even when no chat session is open. Active chat views receive the event on their session socket, while landing/dashboard/mobile views keep a lightweight authenticated `/ws/viewer` socket that refreshes the same session list. A backgrounded tab can still catch up through the normal visibility-triggered and periodic session refresh paths. Removals use the matching `session_removed` push so sidebars and mobile lists drop archived/terminated sessions promptly.
+
+See [websocket-protocol.md](websocket-protocol.md) for the wire contract.
 
 ## Side-panel workspace
 

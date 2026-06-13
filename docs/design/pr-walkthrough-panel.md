@@ -10,6 +10,8 @@ The captured interactive HTML prototype is checked in at [`docs/design/pr-walkth
 
 Production should be recognisably the same experience as the prototype, not merely a generic implementation of the same data model. Match the prototype's overall composition, header treatment, rail density, card hierarchy, diff presentation, comment affordances, and review controls as closely as Bobbit's shared app chrome/theme allow.
 
+Current production is the built-in first-party pack panel (`market-packs/pr-walkthrough/`). The pack migration changes where the surface lives, not the UX bar: the panel must keep the prototype's header/stats/link/progress, full and collapsed rails, guided orientation, diff modes, line/card comment workflows, and `Prev` / `Like` / `Dislike` controls. Reload recovery and malformed-hunk resilience are part of the production contract; completed cards should recover in the reviewer child session, and bad hunk metadata must not blank the whole panel. See [../pr-walkthrough-panel.md](../pr-walkthrough-panel.md) for the current architecture and test matrix.
+
 ## Core experience
 
 The walkthrough appears inside Bobbit's existing preview/side-panel surface, not inside the chat transcript.
