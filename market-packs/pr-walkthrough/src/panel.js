@@ -105,20 +105,21 @@ function deriveJobRef(yamlText, fallback) {
 	return ref;
 }
 
+// paramKey → { status, bundle?, toolCall?, error?, activeCardId?, jobId?,
+//              polling?, mountKicked?, slow?, diffMode?, reviewStatus?,
+//              sectionIndex?, cardCommentOpen? }.
+// status ∈ idle | running | publishing | rendered | error | empty.
+//   running    → pending: a reviewer child is producing the walkthrough; the pane
+//                self-polls `status` (the spinner + "PR Walkthrough: In Progress").
+//   publishing → transient: the reviewer submitted; running publish → bundle.
+//   empty      → resolved NOT a reviewer child (no binding/<self>) → neutral state.
+// Module-level so it survives panel instance re-creation within a page session.
+// Keyed by the BOUND session id (`__sessionId`) so each reviewer child gets its OWN entry.
+const byJob = globalThis.__bobbitPrWalkthroughPanelState || (globalThis.__bobbitPrWalkthroughPanelState = new Map());
+const storeEntry = (key, entry) => { byJob.set(key, entry); };
+
 export default function createPanel({ html, nothing, renderHeader }) {
 	void renderHeader;
-
-	// paramKey → { status, bundle?, toolCall?, error?, activeCardId?, jobId?,
-	//              polling?, mountKicked?, slow?, diffMode?, reviewStatus?,
-	//              sectionIndex?, cardCommentOpen? }.
-	// status ∈ idle | running | publishing | rendered | error | empty.
-	//   running    → pending: a reviewer child is producing the walkthrough; the pane
-	//                self-polls `status` (the spinner + "PR Walkthrough: In Progress").
-	//   publishing → transient: the reviewer submitted; running publish → bundle.
-	//   empty      → resolved NOT a reviewer child (no binding/<self>) → neutral state.
-	// Module-level so it survives panel re-mounts within a page session. Keyed by the
-	// BOUND session id (`__sessionId`) so each reviewer child gets its OWN entry.
-	const byJob = new Map();
 
 	const cardsOf = (entry) => (entry && entry.bundle && Array.isArray(entry.bundle.cards)) ? entry.bundle.cards : [];
 
@@ -130,7 +131,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	};
 
 	const replaceEntry = (host, key, next) => {
-		byJob.set(key, next);
+		storeEntry(key, next);
 		if (host && host.requestRender) host.requestRender();
 	};
 
@@ -545,7 +546,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						const detail = result.summary && Array.isArray(result.summary.errors) && result.summary.errors[0]
 							? `${result.summary.errors[0].path}: ${result.summary.errors[0].message}`
 							: (result.error || "validation failed");
-						byJob.set(targetKey, { status: "error", error: `Walkthrough YAML invalid — ${detail}`, jobId });
+						storeEntry(targetKey, { status: "error", error: `Walkthrough YAML invalid — ${detail}`, jobId, mountKicked: true });
 						return;
 					}
 				}
@@ -554,7 +555,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (effHeadSha) query.headSha = effHeadSha;
 				const bundle = await host.callRoute("bundle", { query });
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
-				byJob.set(targetKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode: "side" });
+				storeEntry(targetKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode: "side", mountKicked: true });
 			};
 
 			// ── CHILD-PANE self-poll loop (read-only carve-out) ─────────────────────
@@ -574,18 +575,18 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						st = await host.callRoute("status", { method: "POST", body: { childSessionId, jobId } });
 					} catch { st = undefined; }
 					if (st && st.phase === "submitted") {
-						byJob.set(key, { status: "publishing", jobId });
+						storeEntry(key, { status: "publishing", jobId, mountKicked: true });
 						if (host.requestRender) host.requestRender();
 						try {
 							await publishAndLoad({ input: { yaml: st.yaml } }, st.baseSha, st.headSha, key);
 						} catch (e) {
-							byJob.set(key, { status: "error", error: msgOf(e), jobId });
+							storeEntry(key, { status: "error", error: msgOf(e), jobId, mountKicked: true });
 						}
 						if (host.requestRender) host.requestRender();
 						return;
 					}
 					if (st && st.phase === "error") {
-						byJob.set(key, { status: "error", error: st.error || "The reviewer failed — terminate the session and run again.", jobId });
+						storeEntry(key, { status: "error", error: st.error || "The reviewer failed — terminate the session and run again.", jobId, mountKicked: true });
 						if (host.requestRender) host.requestRender();
 						return;
 					}
@@ -594,7 +595,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					// is alive) so we never re-arm a second loop.
 					if (Date.now() - startedAt > SLOW_HINT_MS) {
 						const c = byJob.get(key);
-						if (c && c.status === "running" && !c.slow) byJob.set(key, { ...c, slow: true });
+						if (c && c.status === "running" && !c.slow) storeEntry(key, { ...c, slow: true });
 					}
 					await sleep(POLL_INTERVAL_MS);
 				}
@@ -618,7 +619,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (cur.bundle || cur.status === "rendered") return; // already rendered
 				if (!binding || typeof binding !== "object") {
 					// Not a reviewer child (the panel should essentially never mount here).
-					byJob.set(paramKey, { ...cur, status: "empty" });
+					storeEntry(paramKey, { ...cur, status: "empty" });
 					if (host.requestRender) host.requestRender();
 					return;
 				}
@@ -631,12 +632,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					catch { recovered = undefined; }
 				}
 				if (recovered && recovered.found && recovered.yaml) {
-					byJob.set(paramKey, { status: "publishing", jobId });
+					storeEntry(paramKey, { status: "publishing", jobId, mountKicked: true });
 					if (host.requestRender) host.requestRender();
 					try {
 						await publishAndLoad({ input: { yaml: recovered.yaml } }, recovered.baseSha, recovered.headSha, paramKey);
 					} catch (e) {
-						byJob.set(paramKey, { status: "error", error: msgOf(e), jobId });
+						storeEntry(paramKey, { status: "error", error: msgOf(e), jobId, mountKicked: true });
 					}
 					if (host.requestRender) host.requestRender();
 					return;
@@ -644,7 +645,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				// No submitted YAML yet → pending + self-drive the poll (single-flight).
 				const c2 = byJob.get(paramKey) || {};
 				if (c2.polling || c2.status === "rendered" || c2.bundle) return;
-				byJob.set(paramKey, { ...c2, status: "running", polling: true, jobId });
+				storeEntry(paramKey, { ...c2, status: "running", polling: true, jobId, mountKicked: true });
 				if (host.requestRender) host.requestRender();
 				queueMicrotask(() => { void pollChild(paramKey, boundSessionId, jobId); });
 			};
@@ -652,8 +653,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			// Kick the mount resolver ONCE per pane. The synchronous `mountKicked` flag
 			// prevents a same-page re-render from re-entering while the async resolver
 			// runs; a rendered/polling entry is never re-kicked.
-			if (boundSessionId && !entry.mountKicked && !entry.bundle && status !== "rendered" && !entry.polling && status !== "empty") {
-				byJob.set(paramKey, { ...entry, mountKicked: true });
+			if (boundSessionId && status === "idle" && !entry.mountKicked && !entry.bundle && !entry.polling) {
+				storeEntry(paramKey, { ...entry, mountKicked: true });
 				queueMicrotask(() => { void resolveChildMount(); });
 			}
 
