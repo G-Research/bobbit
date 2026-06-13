@@ -656,7 +656,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					</div>
 					<button class="prw-ghost-button" @click=${openEditor}>Add card comment</button>
 				</div>
-				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip">${asText(s.body || s.text || s.summary || s)}</button>`)}</div>` : nothing}
+				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip"><span>Suggested concern</span>${asText(s.body || s.text || s.summary || s)}</button>`)}</div>` : nothing}
 				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-card-user-comment"><strong>Your card comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
 				${open ? html`<div class="prw-comment-editor" data-testid="prw-card-comment-editor">
 					<textarea
@@ -694,18 +694,26 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const suggestedComments = arrayOf(card.suggestedComments).filter((suggestion) => !anchoredIds.has(asText(suggestion && suggestion.id, suggestionBody(suggestion))));
 		return html`
 			<article class="prw-card" data-testid="prw-card" data-prw-card=${card.id}>
-				<div class="prw-card-topline">
-					<span>${PHASES.find((phase) => phase.id === cardPhase(card))?.label || cardPhase(card)}</span>
-					<span>${deriveNavLabel(card)}</span>
+				<section class="prw-card-story">
+					<div class="prw-card-topline">
+						<span>${PHASES.find((phase) => phase.id === cardPhase(card))?.label || cardPhase(card)}</span>
+						<span>${deriveNavLabel(card)}</span>
+					</div>
+					<h2>${card.title || "Review card"}</h2>
+					${card.summary ? html`<p class="prw-summary">${card.summary}</p>` : nothing}
+					${card.rationale ? html`<p class="prw-rationale">${card.rationale}</p>` : nothing}
+					${renderOrientationStepper(entry, host, paramKey, card)}
+					${Array.isArray(card.checklist) && card.checklist.length
+						? html`<ul class="prw-checklist">${card.checklist.map((item) => html`<li>${item}</li>`)}</ul>`
+						: nothing}
+				</section>
+				<div class="prw-diff-toolbar">
+					<div>
+						<div class="prw-section-eyebrow">Diff review</div>
+						<small>Review each grouped file hunk and leave anchored feedback.</small>
+					</div>
+					${renderDiffModeControls(entry, host, paramKey)}
 				</div>
-				<h2>${card.title || "Review card"}</h2>
-				${card.summary ? html`<p class="prw-summary">${card.summary}</p>` : nothing}
-				${card.rationale ? html`<p class="prw-rationale">${card.rationale}</p>` : nothing}
-				${renderOrientationStepper(entry, host, paramKey, card)}
-				${Array.isArray(card.checklist) && card.checklist.length
-					? html`<ul class="prw-checklist">${card.checklist.map((item) => html`<li>${item}</li>`)}</ul>`
-					: nothing}
-				${renderDiffModeControls(entry, host, paramKey)}
 				<div class="prw-diff-list">
 					${arrayOf(card.diffBlocks).length
 						? arrayOf(card.diffBlocks).map((block) => renderDiffBlock(entry, host, paramKey, card, block))
@@ -909,6 +917,66 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				|| (status === "idle" && Boolean(boundSessionId) && !entry.bundle);
 
 			const spinner = html`<span data-testid="prw-spinner" class="prw-spinner"></span>`;
+			const renderPendingShell = () => html`<div class="prw-pending" data-testid="prw-pending">
+				<header class="prw-review-header prw-pending-header">
+					<div class="prw-review-kicker">
+						<span>Reviewer child session</span>
+						<span class="prw-header-shas">${displayJob}</span>
+					</div>
+					<div class="prw-header-main">
+						<div class="prw-title-wrap">
+							<div class="prw-pr-pill">${spinner}</div>
+							<h1>PR Walkthrough: In Progress</h1>
+						</div>
+						<span class="prw-pending-badge">Generating review cards</span>
+					</div>
+					<div class="prw-header-meta">
+						<span class="prw-stat">changeset scan</span>
+						<span class="prw-stat">phase outline</span>
+						<span class="prw-stat">diff grouping</span>
+					</div>
+					<div class="prw-progress-row">
+						<div class="prw-progress-copy">Waiting for submitted walkthrough YAML</div>
+						<div class="prw-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="35">
+							<div class="prw-progress-fill prw-progress-indeterminate"></div>
+						</div>
+					</div>
+				</header>
+				<div class="prw-workspace prw-pending-workspace">
+					<nav class="prw-phase-rail" aria-label="Pending PR walkthrough phase rail">
+						${PHASES.map((phase, index) => html`<section class="prw-phase ${index === 0 ? "is-active" : ""}">
+							<div class="prw-phase-heading"><span class="prw-phase-index">${index + 1}</span><span>${phase.label}</span></div>
+							<div class="prw-pending-nav-line"></div>
+						</section>`)}
+					</nav>
+					<nav class="prw-phase-rail-collapsed" aria-label="Pending collapsed PR walkthrough phase rail">
+						${PHASES.map((phase, index) => html`<div class="prw-rail-pip-group"><span class="prw-rail-pip ${index === 0 ? "is-active" : ""}">${phase.short || index + 1}</span><span class="prw-rail-dot"></span></div>`)}
+					</nav>
+					<main class="prw-card-pane">
+						<article class="prw-card prw-pending-card">
+							<section class="prw-card-story">
+								<div class="prw-card-topline"><span>Orientation</span><span>assembling</span></div>
+								<h2>Building the guided review shell</h2>
+								<p class="prw-summary">The reviewer is grouping the PR into phases, diff-backed cards, suggested comments, and review decisions. This pane will hydrate in place when the child submits.</p>
+								<div class="prw-orientation-stepper">
+									<div class="prw-stepper-rail">
+										${["At a glance", "Why it exists", "Where to look"].map((label, index) => html`<div class="prw-step ${index === 0 ? "is-current" : ""}"><span>${index + 1}</span><small>${label}</small></div>`)}
+									</div>
+									<div class="prw-stepper-card">
+										<div class="prw-step-count">Preparing orientation beats</div>
+										<div class="prw-pending-line is-wide"></div>
+										<div class="prw-pending-line"></div>
+									</div>
+								</div>
+							</section>
+							<section class="prw-diff-block prw-pending-diff">
+								<header class="prw-diff-header"><div><strong>pending</strong><span>diff widgets will appear here</span></div></header>
+								<div class="prw-pending-code"><span></span><span></span><span></span></div>
+							</section>
+						</article>
+					</main>
+				</div>
+			</div>`;
 
 			return html`
 				<style>
@@ -1024,6 +1092,83 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						.prw-diff-mode { justify-content: flex-start; }
 						.prw-side-diff { min-width: 860px; }
 					}
+					@keyframes prw-pulse { 0%, 100% { opacity: .38; } 50% { opacity: .9; } }
+					* { box-sizing: border-box; }
+					.prw-shell { min-height: calc(100vh - 24px); background: color-mix(in oklch, var(--card) 92%, var(--background)); box-shadow: 0 22px 70px color-mix(in oklch, var(--foreground) 10%, transparent); }
+					.prw-review-header { padding: 16px 18px 14px; background: linear-gradient(135deg, color-mix(in oklch, var(--card) 88%, var(--background)), color-mix(in oklch, var(--chart-1) 10%, transparent)); }
+					.prw-review-header h1 { overflow-wrap: anywhere; }
+					.prw-pr-pill { color: var(--chart-1); border-color: color-mix(in oklch, var(--chart-1) 28%, var(--border)); }
+					.prw-gh-link, .prw-submit-button, .prw-like-button { box-shadow: 0 8px 20px color-mix(in oklch, var(--primary) 18%, transparent); }
+					.prw-progress-fill { background: linear-gradient(90deg, var(--primary), color-mix(in oklch, var(--chart-2) 65%, var(--primary))); }
+					.prw-progress-indeterminate { width: 42%; animation: prw-pulse 1.45s ease-in-out infinite; }
+					.prw-workspace { min-height: 540px; overflow: hidden; }
+					.prw-phase-rail { width: 248px; flex-basis: 248px; padding: 12px; background: color-mix(in oklch, var(--card) 62%, var(--background)); }
+					.prw-phase-rail-collapsed { background: color-mix(in oklch, var(--card) 62%, var(--background)); overflow-y: auto; overflow-x: hidden; }
+					.prw-phase { margin: 3px 0 10px; border-radius: 10px; padding: 2px; }
+					.prw-phase.is-active { background: color-mix(in oklch, var(--primary) 8%, transparent); }
+					.prw-phase-heading { margin: 0 0 5px; padding: 5px 6px; }
+					.prw-phase-index, .prw-rail-pip { font-weight: 750; }
+					.prw-nav-card { border-radius: 7px; padding: 6px 7px 6px 28px; font-size: 12px; position: relative; }
+					.prw-nav-card .prw-nav-dot { position: absolute; left: 11px; }
+					.prw-nav-card.is-reviewed .prw-nav-dot, .prw-rail-dot.is-active, .prw-rail-pip.is-active { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 18%, transparent); }
+					.prw-card-pane { padding: 24px clamp(14px, 3vw, 46px) 34px; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.prw-card { display: grid; gap: 14px; }
+					.prw-card-story, .prw-card-comments, .prw-no-diff { border: 1px solid var(--border); border-radius: 18px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 16px; box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground) 5%, transparent); }
+					.prw-card h2 { letter-spacing: -.02em; }
+					.prw-summary, .prw-rationale { max-width: 860px; line-height: 1.62; }
+					.prw-rationale { background: color-mix(in oklch, var(--chart-3) 7%, transparent); border-radius: 0 10px 10px 0; padding-top: 8px; padding-bottom: 8px; }
+					.prw-orientation-stepper { background: color-mix(in oklch, var(--background) 76%, var(--card)); }
+					.prw-stepper-card { border: 1px solid color-mix(in oklch, var(--border) 70%, transparent); border-radius: 14px; background: color-mix(in oklch, var(--card) 98%, var(--background)); padding: 12px; }
+					.prw-file-roles > div { background: color-mix(in oklch, var(--card) 88%, var(--background)); }
+					.prw-diff-toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; margin: 3px 0 -2px; }
+					.prw-diff-toolbar small { color: var(--muted-foreground); }
+					.prw-diff-mode { margin-top: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card); }
+					.prw-segment { border: 0; border-radius: 0; color: var(--muted-foreground); }
+					.prw-segment.is-active { background: var(--primary); color: var(--primary-foreground); }
+					.prw-diff-list { display: grid; gap: 12px; }
+					.prw-diff-block { margin-top: 0; border-radius: 12px; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-diff-header { padding: 9px 12px; }
+					.prw-diff-header strong { color: var(--chart-1); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; border: 1px solid color-mix(in oklch, var(--chart-1) 24%, var(--border)); border-radius: 5px; padding: 2px 6px; }
+					.prw-diff-scroll { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
+					.prw-diff-table { min-width: 680px; table-layout: fixed; }
+					.prw-side-diff { min-width: 860px; }
+					.prw-inline-diff { min-width: 640px; }
+					.prw-diff-table td { padding: 3px 6px; }
+					.prw-code { min-width: 0; overflow: visible; }
+					.prw-code code { display: block; width: max-content; min-width: 100%; background: transparent; padding: 0; }
+					.prw-line-comment-button { background: color-mix(in oklch, var(--card) 82%, transparent); }
+					.prw-line-comment-button:hover, .prw-line:focus-within .prw-line-comment-button { background: var(--primary); color: var(--primary-foreground); }
+					.prw-suggested-comment { position: relative; border-left: 4px solid color-mix(in oklch, var(--warning) 70%, var(--border)); }
+					.prw-inline-suggested-comment { margin-top: 0; background: color-mix(in oklch, var(--warning) 10%, var(--card)); }
+					.prw-card-suggestions { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 12px; }
+					.prw-suggestion-chip { display: grid; gap: 4px; text-align: left; white-space: normal; border-radius: 10px; background: color-mix(in oklch, var(--warning) 8%, var(--card)); border-color: color-mix(in oklch, var(--warning) 30%, var(--border)); line-height: 1.35; }
+					.prw-suggestion-chip span { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+					.prw-card-editor, .prw-comment-editor textarea { font: inherit; resize: vertical; }
+					.prw-review-controls { margin-top: 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 16px; background: color-mix(in oklch, var(--card) 96%, var(--background)); box-shadow: 0 10px 28px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					button { cursor: pointer; font: inherit; }
+					.prw-pending { display: block; padding: 0; color: var(--foreground); }
+					.prw-pending-header .prw-pr-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; }
+					.prw-pending-badge { border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border)); border-radius: 999px; background: color-mix(in oklch, var(--card) 78%, transparent); color: var(--primary); padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+					.prw-pending-nav-line, .prw-pending-line, .prw-pending-code span { display: block; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
+					.prw-pending-nav-line { height: 9px; margin: 8px 9px 12px 36px; }
+					.prw-pending-card .prw-card-story { border-style: dashed; }
+					.prw-pending-line { height: 10px; width: 70%; margin-top: 10px; }
+					.prw-pending-line.is-wide { width: 92%; }
+					.prw-pending-code { display: grid; gap: 8px; padding: 14px; }
+					.prw-pending-code span { height: 12px; }
+					.prw-pending-code span:nth-child(2) { width: 74%; background: color-mix(in oklch, var(--positive) 18%, transparent); }
+					.prw-pending-code span:nth-child(3) { width: 58%; background: color-mix(in oklch, var(--negative) 16%, transparent); }
+					@media (max-width: 900px) {
+						.prw-workspace { min-height: 500px; }
+						.prw-phase-rail { display: none; }
+						.prw-phase-rail-collapsed { display: block; }
+					}
+					@media (max-width: 760px) {
+						.prw-shell { min-height: 100vh; }
+						.prw-review-header { padding: 14px; }
+						.prw-card-story, .prw-card-comments, .prw-no-diff { border-radius: 14px; padding: 12px; }
+						.prw-side-diff { min-width: 840px; }
+					}
 				</style>
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>
 					<div class="prw-shell">
@@ -1032,9 +1177,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 							: status === "error" && entry.error
 								? html`<div class="prw-error" data-testid="prw-error">${entry.error}</div>`
 								: isPending
-									? html`<div class="prw-pending" data-testid="prw-pending">
-										${spinner} PR Walkthrough: In Progress
-									</div>`
+									? renderPendingShell()
 									: html`<div class="prw-neutral" data-testid="prw-neutral">
 										No PR walkthrough is available in this session.
 									</div>`}
