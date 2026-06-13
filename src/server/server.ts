@@ -1730,6 +1730,15 @@ export function createGateway(config: GatewayConfig) {
 	}
 
 	teamManager.setBroadcastToGoal(broadcastToGoal);
+	// Push session creation to ALL clients so session navigation refreshes promptly
+	// for visible sessions created through REST, UI, or host.agents full-lifecycle paths.
+	sessionManager.addCreationListener((session) => {
+		try {
+			broadcastToAll({ type: "session_created", sessionId: session.id, projectId: session.projectId });
+		} catch (err) {
+			console.error(`[broadcast] session_created failed for ${session.id}:`, err);
+		}
+	});
 	// Push a session_removed broadcast to ALL clients on terminate/archive/purge
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just

@@ -1949,6 +1949,15 @@ export class RemoteAgent {
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
 
+			case "session_created":
+			case "sessions_changed": {
+				// Server-pushed event: a visible session was created elsewhere (including
+				// host.agents full-lifecycle children). Refresh immediately instead of
+				// waiting for the 5s polling fallback.
+				refreshSessions();
+				break;
+			}
+
 			case "session_removed": {
 				// Server-pushed event: a session somewhere was terminated/archived/purged.
 				// Update local lists immediately so the sidebar / dashboard reflect it
