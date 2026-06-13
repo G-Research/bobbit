@@ -238,6 +238,46 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(missing, `PR walkthrough panel parity affordances missing: ${(missing as string[]).join(", ")}`).toEqual([]);
 	});
 
+	test("side-by-side diff pairs adjacent deletion and addition lines", async ({ page }) => {
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__renderPrwReady());
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+		await page.locator('.prw-phase-rail button[data-prw-nav="diff-review"]').click();
+
+		await expect(page.locator(".prw-segment.is-active")).toContainText("Side-by-side");
+		const firstBlock = page.locator('[data-testid="prw-diffblock"]').first();
+		const sideRows = firstBlock.locator('[data-testid="prw-side-diff-row"]');
+		await expect(sideRows).toHaveCount(3);
+
+		const paired = firstBlock.locator('[data-testid="prw-side-diff-row"][data-prw-old-line-id="L11"][data-prw-new-line-id="L12"]');
+		await expect(paired.locator(".prw-old")).toContainText("renderCompactDiff(block);");
+		await expect(paired.locator(".prw-new")).toContainText("renderReferenceDiff(block, diffMode);");
+		await expect(paired.locator(".prw-old-comment").getByRole("button", { name: "Add line comment" })).toBeVisible();
+		await expect(paired.locator(".prw-new-comment").getByRole("button", { name: "Add line comment" })).toBeVisible();
+
+		const additionOnly = firstBlock.locator('[data-testid="prw-side-diff-row"][data-prw-old-line-id=""][data-prw-new-line-id="L13"]');
+		await expect(additionOnly.locator(".prw-old")).toHaveText("");
+		await expect(additionOnly.locator(".prw-new")).toContainText("renderLineCommentButton(line);");
+	});
+
+	test("line suggestions render inline and Use suggestion prepares the target editor", async ({ page }) => {
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__renderPrwReady());
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+		await page.locator('.prw-phase-rail button[data-prw-nav="diff-review"]').click();
+
+		const inlineSuggestion = page.locator('[data-testid="prw-inline-suggested-comment"][data-prw-line="L13"]');
+		await expect(inlineSuggestion).toContainText("Consider keeping one horizontal scrollbar per diff widget.");
+		await expect(page.locator(".prw-line-suggestions")).toHaveCount(0);
+		await inlineSuggestion.getByRole("button", { name: "Use suggestion" }).click();
+
+		const editor = page.locator('[data-testid="prw-line-comment-editor"]');
+		await expect(editor).toBeVisible();
+		await expect(editor.locator("textarea")).toHaveValue("Consider keeping one horizontal scrollbar per diff widget.");
+		await page.getByRole("button", { name: "Save comment" }).click();
+		await expect(page.locator('[data-testid="prw-line-user-comment"]')).toContainText("one horizontal scrollbar");
+	});
+
 	test("ready state supports user comments, dislike gating, narrow inline default, and diff collapse", async ({ page }) => {
 		await page.setViewportSize({ width: 500, height: 800 });
 		await loadFixture(page);

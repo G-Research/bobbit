@@ -173,8 +173,38 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	};
 
 	const blockKey = (card, block) => `${asText(card && card.id, "card")}::${asText(block && (block.id || block.filePath || block.path || block.label), "diff")}`;
-	const lineKey = (card, block, line) => `${blockKey(card, block)}::${asText(line && (line.id || line.line || line.newLine || line.oldLine || line.text), "line")}::${asText(line && line.kind, "ctx")}`;
+	const lineIdentifier = (line) => asText(line && (line.id || line.lineId || line.line || line.newLine || line.oldLine || line.text), "line");
+	const lineKey = (card, block, line) => `${blockKey(card, block)}::${lineIdentifier(line)}::${asText(line && line.kind, "ctx")}`;
 	const lineDomId = (key) => `prw-line-comment-${safeDomId(key)}`;
+	const blockIdentifiers = (block) => new Set([block && block.id, block && block.filePath, block && block.path, block && block.label].map((value) => asText(value)).filter(Boolean));
+	const suggestionBody = (suggestion) => asText(suggestion && (suggestion.body || suggestion.text || suggestion.summary), suggestion);
+	const suggestionMatchesBlock = (suggestion, block) => {
+		const target = asText(suggestion && (suggestion.diffBlockId || suggestion.diff_block_id || suggestion.blockId || suggestion.filePath || suggestion.path));
+		return !target || blockIdentifiers(block).has(target);
+	};
+	const suggestionMatchesLine = (suggestion, line) => {
+		const target = asText(suggestion && (suggestion.lineId || suggestion.line_id || suggestion.line || suggestion.newLine || suggestion.oldLine));
+		if (!target) return false;
+		return target === lineIdentifier(line)
+			|| target === asText(line && line.id)
+			|| target === asText(line && line.lineId)
+			|| target === asText(line && line.line)
+			|| target === asText(line && line.newLine)
+			|| target === asText(line && line.oldLine);
+	};
+	const lineSuggestions = (card, block, line) => arrayOf(card && card.suggestedComments)
+		.filter((suggestion) => suggestionMatchesBlock(suggestion, block) && suggestionMatchesLine(suggestion, line));
+	const anchoredSuggestionIds = (card) => {
+		const ids = new Set();
+		for (const block of arrayOf(card && card.diffBlocks)) {
+			for (const hunk of arrayOf(block && block.hunks)) {
+				for (const line of arrayOf(hunk && hunk.lines)) {
+					for (const suggestion of lineSuggestions(card, block, line)) ids.add(asText(suggestion && suggestion.id, suggestionBody(suggestion)));
+				}
+			}
+		}
+		return ids;
+	};
 	const savedLineCommentsForCard = (entry, card) => Object.entries(entry.lineComments || {})
 		.filter(([key, comments]) => key.startsWith(`${asText(card && card.id, "card")}::`) && arrayOf(comments).some((comment) => asText(comment).trim()));
 	const savedCardCommentsForCard = (entry, card) => arrayOf((entry.cardComments || {})[card.id]).filter((comment) => asText(comment).trim());
@@ -360,11 +390,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
-	const openLineComment = (entry, host, paramKey, key) => {
+	const openLineComment = (entry, host, paramKey, key, draft) => {
 		const cur = byJob.get(paramKey) || entry;
 		patchEntry(host, paramKey, {
 			lineCommentOpen: { ...(cur.lineCommentOpen || {}), [key]: true },
-			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: asText((cur.lineCommentDraft || {})[key]) },
+			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: draft == null ? asText((cur.lineCommentDraft || {})[key]) : asText(draft) },
 		});
 	};
 
@@ -395,26 +425,49 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		@click=${() => openLineComment(entry, host, paramKey, key)}
 	>Add line comment</button>`;
 
-	const renderLineCommentState = (entry, host, paramKey, key, colspan) => {
+	const useSuggestedLineComment = (entry, host, paramKey, key, suggestion) => openLineComment(entry, host, paramKey, key, suggestionBody(suggestion));
+
+	const renderSuggestedLineCommentContent = (entry, host, paramKey, key, suggestions) => {
+		const usable = arrayOf(suggestions).filter((suggestion) => suggestionBody(suggestion).trim());
+		if (!usable.length) return nothing;
+		return html`<div class="prw-inline-suggestions">
+			${usable.map((suggestion) => html`<div
+				class="prw-suggested-comment prw-inline-suggested-comment"
+				data-testid="prw-inline-suggested-comment"
+				data-prw-comment=${asText(suggestion && suggestion.id, "comment")}
+				data-prw-line=${asText(suggestion && (suggestion.lineId || suggestion.line_id || suggestion.line), "line")}
+			>
+				<div class="prw-suggestion-anchor">Suggested line comment</div>
+				<div>${suggestionBody(suggestion)}</div>
+				<button class="prw-ghost-button" @click=${() => useSuggestedLineComment(entry, host, paramKey, key, suggestion)}>Use suggestion</button>
+			</div>`)}
+		</div>`;
+	};
+
+	const renderLineCommentContent = (entry, host, paramKey, key) => {
 		const saved = arrayOf((entry.lineComments || {})[key]).filter((comment) => asText(comment).trim());
 		const open = Boolean((entry.lineCommentOpen || {})[key]);
 		if (!saved.length && !open) return nothing;
-		return html`<tr class="prw-line-comment-row" id=${lineDomId(key)}>
-			<td colspan=${colspan}>
-				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-line-user-comment"><strong>Your line comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
-				${open ? html`<div class="prw-comment-editor" data-testid="prw-line-comment-editor">
-					<textarea
-						.value=${asText((entry.lineCommentDraft || {})[key])}
-						placeholder="Write a line-level review comment"
-						@input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}
-					></textarea>
-					<div class="prw-comment-actions">
-						<button class="prw-ghost-button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button>
-						<button class="prw-ghost-button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button>
-					</div>
-				</div>` : nothing}
-			</td>
-		</tr>`;
+		return html`
+			${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-line-user-comment"><strong>Your line comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
+			${open ? html`<div class="prw-comment-editor" data-testid="prw-line-comment-editor">
+				<textarea
+					.value=${asText((entry.lineCommentDraft || {})[key])}
+					placeholder="Write a line-level review comment"
+					@input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}
+				></textarea>
+				<div class="prw-comment-actions">
+					<button class="prw-ghost-button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button>
+					<button class="prw-ghost-button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button>
+				</div>
+			</div>` : nothing}
+		`;
+	};
+
+	const renderLineCommentState = (entry, host, paramKey, key, colspan) => {
+		const content = renderLineCommentContent(entry, host, paramKey, key);
+		if (content === nothing) return nothing;
+		return html`<tr class="prw-line-comment-row" id=${lineDomId(key)}><td colspan=${colspan}>${content}</td></tr>`;
 	};
 
 	const renderInlineDiff = (entry, host, paramKey, card, block) => html`
@@ -425,13 +478,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						<tr class="prw-hunk-row"><td colspan="4">${asText(hunk && hunk.header, "@@")}</td></tr>
 						${arrayOf(hunk && hunk.lines).map((ln) => {
 							const key = lineKey(card, block, ln);
+							const suggestions = lineSuggestions(card, block, ln);
 							return html`
-								<tr class=${`prw-line is-${lineTone(ln && ln.kind)}`}>
+								<tr class=${`prw-line is-${lineTone(ln && ln.kind)}`} data-prw-line-id=${lineIdentifier(ln)}>
 									<td class="prw-line-number">${asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
 									<td class="prw-prefix">${linePrefix(ln && ln.kind)}</td>
 									<td class="prw-code"><code>${asText(ln && ln.text)}</code></td>
 									<td class="prw-comment-cell">${lineCommentButton(entry, host, paramKey, key)}</td>
 								</tr>
+								${suggestions.length ? html`<tr class="prw-line-suggestion-row"><td colspan="4">${renderSuggestedLineCommentContent(entry, host, paramKey, key, suggestions)}</td></tr>` : nothing}
 								${renderLineCommentState(entry, host, paramKey, key, 4)}
 							`;
 						})}
@@ -441,26 +496,81 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		</div>
 	`;
 
+	const pairedSideRows = (lines) => {
+		const rows = [];
+		const source = arrayOf(lines);
+		for (let i = 0; i < source.length;) {
+			const line = source[i];
+			const kind = line && line.kind;
+			if (kind === "del") {
+				const dels = [];
+				const adds = [];
+				while (source[i] && source[i].kind === "del") dels.push(source[i++]);
+				while (source[i] && source[i].kind === "add") adds.push(source[i++]);
+				const count = Math.max(dels.length, adds.length);
+				for (let index = 0; index < count; index += 1) rows.push({ oldLine: dels[index], newLine: adds[index] });
+				continue;
+			}
+			if (kind === "add") {
+				rows.push({ oldLine: undefined, newLine: line });
+				i += 1;
+				continue;
+			}
+			rows.push({ oldLine: line, newLine: line, shared: true });
+			i += 1;
+		}
+		return rows;
+	};
+
+	const sideLineNumber = (line, side) => side === "old"
+		? asText(line && (line.oldLine || line.line || line.id), "")
+		: asText(line && (line.newLine || line.line || line.id), "");
+
+	const renderSideAuxRows = (entry, host, paramKey, oldKey, oldSuggestions, newKey, newSuggestions) => {
+		const sharedKey = oldKey && oldKey === newKey;
+		const oldSuggestionContent = oldKey ? renderSuggestedLineCommentContent(entry, host, paramKey, oldKey, oldSuggestions) : nothing;
+		const newSuggestionContent = newKey && !sharedKey ? renderSuggestedLineCommentContent(entry, host, paramKey, newKey, newSuggestions) : nothing;
+		const oldCommentContent = oldKey ? renderLineCommentContent(entry, host, paramKey, oldKey) : nothing;
+		const newCommentContent = newKey && !sharedKey ? renderLineCommentContent(entry, host, paramKey, newKey) : nothing;
+		return html`
+			${oldSuggestionContent !== nothing && sharedKey ? html`<tr class="prw-line-suggestion-row"><td colspan="6">${oldSuggestionContent}</td></tr>` : nothing}
+			${oldSuggestionContent !== nothing && !sharedKey ? html`<tr class="prw-line-suggestion-row prw-side-suggestion-row"><td colspan="3">${oldSuggestionContent}</td><td colspan="3"></td></tr>` : nothing}
+			${newSuggestionContent !== nothing ? html`<tr class="prw-line-suggestion-row prw-side-suggestion-row"><td colspan="3"></td><td colspan="3">${newSuggestionContent}</td></tr>` : nothing}
+			${oldCommentContent !== nothing && sharedKey ? html`<tr class="prw-line-comment-row" id=${lineDomId(oldKey)}><td colspan="6">${oldCommentContent}</td></tr>` : nothing}
+			${oldCommentContent !== nothing && !sharedKey ? html`<tr class="prw-line-comment-row prw-side-comment-row" id=${lineDomId(oldKey)}><td colspan="3">${oldCommentContent}</td><td colspan="3"></td></tr>` : nothing}
+			${newCommentContent !== nothing ? html`<tr class="prw-line-comment-row prw-side-comment-row" id=${lineDomId(newKey)}><td colspan="3"></td><td colspan="3">${newCommentContent}</td></tr>` : nothing}
+		`;
+	};
+
 	const renderSideDiff = (entry, host, paramKey, card, block) => html`
 		<div class="prw-diff-scroll">
 			<table class="prw-diff-table prw-side-diff">
 				<tbody>
 					${arrayOf(block.hunks).map((hunk) => html`
 						<tr class="prw-hunk-row"><td colspan="6">${asText(hunk && hunk.header, "@@")}</td></tr>
-						${arrayOf(hunk && hunk.lines).map((ln) => {
-							const kind = ln && ln.kind;
-							const text = asText(ln && ln.text);
-							const key = lineKey(card, block, ln);
+						${pairedSideRows(hunk && hunk.lines).map((row) => {
+							const oldLine = row.oldLine;
+							const newLine = row.newLine;
+							const oldKey = oldLine ? lineKey(card, block, oldLine) : undefined;
+							const newKey = newLine ? lineKey(card, block, newLine) : undefined;
+							const oldSuggestions = oldLine ? lineSuggestions(card, block, oldLine) : [];
+							const newSuggestions = newLine && newLine !== oldLine ? lineSuggestions(card, block, newLine) : oldSuggestions;
+							const tone = row.shared ? lineTone(oldLine && oldLine.kind) : oldLine && newLine ? "change" : oldLine ? "del" : "add";
 							return html`
-								<tr class=${`prw-line is-${lineTone(kind)}`}>
-									<td class="prw-line-number">${kind === "add" ? "" : asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
-									<td class="prw-code prw-old"><code>${kind === "add" ? "" : text}</code></td>
-									<td class="prw-comment-cell">${kind === "add" ? nothing : lineCommentButton(entry, host, paramKey, key)}</td>
-									<td class="prw-line-number">${kind === "del" ? "" : asText(ln && (ln.newLine || ln.line || ln.id), "")}</td>
-									<td class="prw-code prw-new"><code>${kind === "del" ? "" : text}</code></td>
-									<td class="prw-comment-cell">${kind === "del" ? nothing : lineCommentButton(entry, host, paramKey, key)}</td>
+								<tr
+									class=${`prw-line prw-side-row is-${tone}`}
+									data-testid="prw-side-diff-row"
+									data-prw-old-line-id=${oldLine ? lineIdentifier(oldLine) : ""}
+									data-prw-new-line-id=${newLine ? lineIdentifier(newLine) : ""}
+								>
+									<td class="prw-line-number prw-old-number">${oldLine ? sideLineNumber(oldLine, "old") : ""}</td>
+									<td class="prw-code prw-old ${oldLine ? `is-${lineTone(oldLine.kind)}` : "is-empty"}"><code>${oldLine ? asText(oldLine.text) : ""}</code></td>
+									<td class="prw-comment-cell prw-old-comment">${oldKey ? lineCommentButton(entry, host, paramKey, oldKey) : nothing}</td>
+									<td class="prw-line-number prw-new-number">${newLine ? sideLineNumber(newLine, "new") : ""}</td>
+									<td class="prw-code prw-new ${newLine ? `is-${lineTone(newLine.kind)}` : "is-empty"}"><code>${newLine ? asText(newLine.text) : ""}</code></td>
+									<td class="prw-comment-cell prw-new-comment">${newKey ? lineCommentButton(entry, host, paramKey, newKey) : nothing}</td>
 								</tr>
-								${renderLineCommentState(entry, host, paramKey, key, 6)}
+								${renderSideAuxRows(entry, host, paramKey, oldKey, oldSuggestions, newKey, newSuggestions)}
 							`;
 						})}
 					`)}
@@ -497,11 +607,15 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
-	const renderSuggestedComment = (sc) => html`
+	const renderSuggestedComment = (entry, host, paramKey, card) => (sc) => html`
 		<div class="prw-suggested-comment" data-testid="prw-suggested-comment" data-prw-comment=${asText(sc && sc.id, "comment")}>
 			<div class="prw-suggestion-anchor">${asText(sc && sc.diffBlockId, "card")}${sc && sc.lineId ? ` · ${sc.lineId}` : ""}</div>
-			<div>${asText(sc && sc.body, sc)}</div>
-			<button class="prw-ghost-button">Use suggestion</button>
+			<div>${suggestionBody(sc)}</div>
+			<button class="prw-ghost-button" @click=${() => {
+				const targetBlock = arrayOf(card && card.diffBlocks).find((block) => suggestionMatchesBlock(sc, block));
+				const targetLine = targetBlock && arrayOf(targetBlock.hunks).flatMap((hunk) => arrayOf(hunk && hunk.lines)).find((line) => suggestionMatchesLine(sc, line));
+				if (targetBlock && targetLine) useSuggestedLineComment(entry, host, paramKey, lineKey(card, targetBlock, targetLine), sc);
+			}}>Use suggestion</button>
 		</div>
 	`;
 
@@ -576,7 +690,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	};
 
 	const renderCardBody = (entry, host, paramKey, card) => {
-		const suggestedComments = arrayOf(card.suggestedComments);
+		const anchoredIds = anchoredSuggestionIds(card);
+		const suggestedComments = arrayOf(card.suggestedComments).filter((suggestion) => !anchoredIds.has(asText(suggestion && suggestion.id, suggestionBody(suggestion))));
 		return html`
 			<article class="prw-card" data-testid="prw-card" data-prw-card=${card.id}>
 				<div class="prw-card-topline">
@@ -597,7 +712,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						: html`<div class="prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}
 				</div>
 				${suggestedComments.length
-					? html`<section class="prw-line-suggestions"><div class="prw-section-eyebrow">Line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment)}</section>`
+					? html`<section class="prw-line-suggestions"><div class="prw-section-eyebrow">Other line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment(entry, host, paramKey, card))}</section>`
 					: nothing}
 				${renderCardComments(entry, host, paramKey, card)}
 				${renderReviewControls(entry, host, paramKey, card)}
@@ -872,10 +987,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-code code { white-space: pre; }
 					.prw-line.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
 					.prw-line.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.prw-side-row.is-change .prw-old.is-del, .prw-side-row.is-del .prw-old.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.prw-side-row.is-change .prw-new.is-add, .prw-side-row.is-add .prw-new.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
+					.prw-side-row .prw-code.is-empty { background: color-mix(in oklch, var(--muted-foreground) 5%, transparent); }
 					.prw-comment-cell { width: 118px; text-align: right; }
 					.prw-line-comment-button { opacity: .72; font-size: 11px; padding: 3px 7px; }
 					.prw-line-comment-button:hover, .prw-line:focus-within .prw-line-comment-button { opacity: 1; border-color: var(--primary); }
 					.prw-line-suggestions, .prw-card-comments { margin-top: 14px; }
+					.prw-line-suggestion-row td { background: color-mix(in oklch, var(--warning) 5%, transparent); padding: 8px 10px; }
+					.prw-inline-suggestions { display: grid; gap: 8px; }
+					.prw-inline-suggested-comment { margin-top: 0; }
 					.prw-suggested-comment { display: grid; gap: 6px; }
 					.prw-card-comments-head { justify-content: space-between; }
 					.prw-card-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
