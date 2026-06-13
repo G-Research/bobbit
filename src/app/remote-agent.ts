@@ -83,6 +83,53 @@ function notifyGoalStateSubscribers(evt: GoalStateChangeEvent): void {
 	}
 }
 
+const SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS = 100;
+let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionListPushRefreshInFlight = false;
+let sessionListPushRefreshQueued = false;
+
+function canRefreshSessionListFromPush(): boolean {
+	if (state.appView !== "authenticated") return false;
+	if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
+	return true;
+}
+
+function scheduleSessionListRefreshFromPush(): void {
+	if (!canRefreshSessionListFromPush()) return;
+	if (sessionListPushRefreshTimer) return;
+	if (sessionListPushRefreshInFlight) {
+		sessionListPushRefreshQueued = true;
+		return;
+	}
+
+	sessionListPushRefreshTimer = setTimeout(() => {
+		sessionListPushRefreshTimer = null;
+		if (!canRefreshSessionListFromPush()) return;
+		sessionListPushRefreshInFlight = true;
+		void refreshSessions()
+			.catch((err) => console.warn("[remote-agent] session-list push refresh failed:", err))
+			.finally(() => {
+				sessionListPushRefreshInFlight = false;
+				if (sessionListPushRefreshQueued) {
+					sessionListPushRefreshQueued = false;
+					scheduleSessionListRefreshFromPush();
+				}
+			});
+	}, SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS);
+}
+
+function isKnownOwnSessionCreatedEvent(msg: any, sessionId: string): boolean {
+	if (!sessionId || msg?.type !== "session_created") return false;
+	const createdId = typeof msg.sessionId === "string"
+		? msg.sessionId
+		: typeof msg.id === "string"
+			? msg.id
+			: typeof msg.session?.id === "string"
+				? msg.session.id
+				: "";
+	return createdId === sessionId && state.gatewaySessions.some((session: any) => session?.id === sessionId);
+}
+
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
  *  a single `this.onProposal?.(type, input, streaming)` dispatch. Until then,
@@ -1952,9 +1999,12 @@ export class RemoteAgent {
 			case "session_created":
 			case "sessions_changed": {
 				// Server-pushed event: a visible session was created elsewhere (including
-				// host.agents full-lifecycle children). Refresh immediately instead of
-				// waiting for the 5s polling fallback.
-				refreshSessions();
+				// host.agents full-lifecycle children). Coalesce across all open session
+				// sockets so one burst creates one sidebar refresh, not one refresh per
+				// cached RemoteAgent. Hidden tabs catch up via the existing visibility
+				// refresh path in main.ts.
+				if (isKnownOwnSessionCreatedEvent(msg, this._sessionId)) break;
+				scheduleSessionListRefreshFromPush();
 				break;
 			}
 
