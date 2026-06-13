@@ -59,12 +59,20 @@ const msgOf = (e) => (e && e.message ? String(e.message) : String(e));
 // Phase ordering + labels mirror the deleted PrWalkthroughPanel PHASES so the nav
 // rail groups the synthesized cards exactly as the built-in walkthrough did.
 const PHASES = [
-	{ id: "orientation", label: "Orientation" },
-	{ id: "design", label: "Key design choices" },
-	{ id: "significant", label: "Significant changes" },
-	{ id: "other", label: "Other + omissions" },
-	{ id: "audit", label: "Audit" },
+	{ id: "orientation", label: "Orientation", short: "O" },
+	{ id: "design", label: "Key design choices", short: "D" },
+	{ id: "significant", label: "Significant changes", short: "S" },
+	{ id: "other", label: "Other + omissions", short: "M" },
+	{ id: "audit", label: "Audit", short: "A" },
 ];
+
+const arrayOf = (value) => Array.isArray(value) ? value : [];
+const asText = (value, fallback = "") => value == null ? fallback : String(value);
+const linePrefix = (kind) => (kind === "add" ? "+" : kind === "del" ? "-" : " ");
+const lineTone = (kind) => kind === "add" ? "add" : kind === "del" ? "del" : "ctx";
+const compactSha = (sha) => sha ? String(sha).slice(0, 7) : "unknown";
+const deriveNavLabel = (card) => card.navLabel || card.nav_label || asText(card.title, "Card").split(/\s+/).slice(0, 3).join(" ");
+const cardPhase = (card) => card.phaseId || card.phase || "orientation";
 
 // Raw YAML text from a submit_pr_walkthrough_yaml-shaped tool call (the rich
 // production document). Returns undefined when the call is absent/unparseable.
@@ -101,7 +109,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	void renderHeader;
 
 	// paramKey → { status, bundle?, toolCall?, error?, activeCardId?, jobId?,
-	//              polling?, mountKicked?, slow? }.
+	//              polling?, mountKicked?, slow?, diffMode?, reviewStatus?,
+	//              sectionIndex?, cardCommentOpen? }.
 	// status ∈ idle | running | publishing | rendered | error | empty.
 	//   running    → pending: a reviewer child is producing the walkthrough; the pane
 	//                self-polls `status` (the spinner + "PR Walkthrough: In Progress").
@@ -110,14 +119,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	// Module-level so it survives panel re-mounts within a page session. Keyed by the
 	// BOUND session id (`__sessionId`) so each reviewer child gets its OWN entry.
 	const byJob = new Map();
-
-	const lineClass = (kind) =>
-		kind === "add"
-			? "background:color-mix(in oklch, var(--positive) 16%, transparent);color:var(--foreground);"
-			: kind === "del"
-				? "background:color-mix(in oklch, var(--negative) 16%, transparent);color:var(--foreground);"
-				: "color:var(--muted-foreground);";
-	const linePrefix = (kind) => (kind === "add" ? "+" : kind === "del" ? "-" : " ");
 
 	const cardsOf = (entry) => (entry && entry.bundle && Array.isArray(entry.bundle.cards)) ? entry.bundle.cards : [];
 
@@ -128,135 +129,376 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return found || cards[0];
 	};
 
-	const renderDiffBlock = (block) => html`
-		<div class="mt-3 rounded border border-border overflow-hidden" data-testid="prw-diffblock" data-prw-file=${block.filePath}>
-			<div class="px-2 py-1 text-xs font-mono bg-muted/40 text-foreground border-b border-border flex items-center justify-between gap-2">
-				<span>${block.status ?? "modified"} ${block.filePath}</span>
-				${block.oldPath && block.oldPath !== block.filePath
-					? html`<span class="text-muted-foreground">(was ${block.oldPath})</span>`
-					: nothing}
-			</div>
-			${(block.hunks ?? []).map(
-				(hunk) => html`
-					<div class="px-2 py-0.5 text-xs font-mono" style="color:var(--muted-foreground);background:color-mix(in oklch, var(--info) 10%, transparent);">${hunk.header}</div>
-					${(hunk.lines ?? []).map(
-						(ln) => html`<div class="px-2 font-mono text-xs whitespace-pre" style=${lineClass(ln.kind)}>${linePrefix(ln.kind)}${ln.text}</div>`,
-					)}
-				`,
-			)}
-		</div>
-	`;
+	const replaceEntry = (host, key, next) => {
+		byJob.set(key, next);
+		if (host && host.requestRender) host.requestRender();
+	};
 
-	const renderSuggestedComment = (sc) => html`
-		<div class="mt-2 rounded border-l-2 p-2 text-xs"
-			style="border-color:var(--warning);background:color-mix(in oklch, var(--warning) 7%, transparent);"
-			data-testid="prw-suggested-comment" data-prw-comment=${sc.id}>
-			<div class="font-mono text-[10px] text-muted-foreground">${sc.diffBlockId}${sc.lineId ? ` · ${sc.lineId}` : ""}</div>
-			<div class="text-foreground mt-0.5">${sc.body}</div>
-		</div>
-	`;
+	const patchEntry = (host, key, patch) => {
+		const cur = byJob.get(key) || {};
+		replaceEntry(host, key, { ...cur, ...patch });
+	};
 
-	// Orientation "beats" (the six guided sections the production synthesis attaches
-	// to the orientation card). Rendered compactly so the viewer reaches parity.
-	const renderSection = (section) => html`
-		<div class="mt-2" data-testid="prw-section" data-prw-section=${section.id}>
-			${section.eyebrow ? html`<div class="text-[10px] uppercase tracking-wide" style="color:var(--chart-2)">${section.eyebrow}</div>` : nothing}
-			<div class="text-sm font-semibold text-foreground">${section.heading}</div>
-			${section.body ? html`<div class="text-xs text-muted-foreground mt-0.5 leading-relaxed">${section.body}</div>` : nothing}
-			${section.verdict ? html`<div class="text-xs text-foreground mt-0.5">Recommendation: ${section.verdict.recommendation} (${section.verdict.confidence})</div>` : nothing}
-			${Array.isArray(section.concerns) && section.concerns.length
-				? html`<ul class="mt-1 pl-4 text-xs text-muted-foreground list-disc">${section.concerns.map((c) => html`<li>${c.severity}: ${c.text}</li>`)}</ul>`
-				: nothing}
-			${Array.isArray(section.fileRoles) && section.fileRoles.length
-				? html`<ul class="mt-1 pl-4 text-xs text-muted-foreground list-disc">${section.fileRoles.map((r) => html`<li>${r.role}: ${r.file}${r.note ? ` — ${r.note}` : ""}</li>`)}</ul>`
-				: nothing}
-		</div>
-	`;
+	const setActiveCard = (entry, host, paramKey, cardId) => {
+		patchEntry(host, paramKey, { activeCardId: cardId });
+	};
 
-	const renderCardBody = (card) => html`
-		<div data-testid="prw-card" data-prw-card=${card.id}>
-			<div class="text-[10px] font-semibold uppercase tracking-wide" style="color:var(--chart-1)">${card.phaseId}</div>
-			<div class="text-base font-semibold text-foreground mt-1">${card.title}</div>
-			${card.summary ? html`<div class="text-xs text-muted-foreground mt-1 leading-relaxed">${card.summary}</div>` : nothing}
-			${card.rationale ? html`<div class="text-xs text-muted-foreground mt-1 leading-relaxed">${card.rationale}</div>` : nothing}
-			${Array.isArray(card.sections) && card.sections.length
-				? html`<div class="mt-1">${card.sections.map(renderSection)}</div>`
-				: nothing}
-			${Array.isArray(card.checklist) && card.checklist.length
-				? html`<ul class="mt-2 pl-4 text-xs text-muted-foreground list-disc">${card.checklist.map((c) => html`<li>${c}</li>`)}</ul>`
-				: nothing}
-			${(card.diffBlocks ?? []).map(renderDiffBlock)}
-			${Array.isArray(card.suggestedComments) && card.suggestedComments.length
-				? html`<div class="mt-2"><div class="text-[10px] uppercase tracking-wide text-muted-foreground">Suggested comments</div>${card.suggestedComments.map(renderSuggestedComment)}</div>`
-				: nothing}
-		</div>
-	`;
+	const moveCard = (entry, host, paramKey, delta) => {
+		const cards = cardsOf(entry);
+		if (!cards.length) return;
+		const current = activeCard(entry) || cards[0];
+		const idx = Math.max(0, cards.findIndex((card) => card.id === current.id));
+		const next = cards[Math.max(0, Math.min(cards.length - 1, idx + delta))];
+		if (next) setActiveCard(entry, host, paramKey, next.id);
+	};
+
+	const markCard = (entry, host, paramKey, card, status) => {
+		const reviewStatus = { ...(entry.reviewStatus || {}), [card.id]: status };
+		patchEntry(host, paramKey, { reviewStatus });
+		queueMicrotask(() => moveCard({ ...entry, reviewStatus }, host, paramKey, 1));
+	};
+
+	const statsFor = (bundle, cards) => {
+		const cs = (bundle && bundle.changeset) || {};
+		if (cs.filesChanged != null || cs.additions != null || cs.deletions != null) {
+			return {
+				files: Number(cs.filesChanged || 0),
+				additions: Number(cs.additions || 0),
+				deletions: Number(cs.deletions || 0),
+			};
+		}
+		const files = new Set();
+		let additions = 0;
+		let deletions = 0;
+		for (const card of cards) {
+			for (const block of arrayOf(card.diffBlocks)) {
+				if (block && block.filePath) files.add(String(block.filePath));
+				for (const hunk of arrayOf(block && block.hunks)) {
+					for (const line of arrayOf(hunk && hunk.lines)) {
+						if (line && line.kind === "add") additions += 1;
+						if (line && line.kind === "del") deletions += 1;
+					}
+				}
+			}
+		}
+		return { files: files.size, additions, deletions };
+	};
+
+	const prUrlFor = (cs) => cs.url || (cs.owner && cs.repo && cs.number != null
+		? `https://github.com/${cs.owner}/${cs.repo}/pull/${cs.number}`
+		: undefined);
+
+	const renderHeaderBlock = (entry, host, paramKey) => {
+		const b = entry.bundle || {};
+		const cs = b.changeset || {};
+		const cards = cardsOf(entry);
+		const stats = statsFor(b, cards);
+		const reviewed = cards.filter((card) => (entry.reviewStatus || {})[card.id] === "liked" || (entry.reviewStatus || {})[card.id] === "disliked").length;
+		const total = cards.length;
+		const progress = total ? Math.round((reviewed / total) * 100) : 0;
+		const prLabel = cs.number != null ? `PR #${cs.number}` : "PR";
+		const title = cs.prTitle || cs.title || "Walkthrough";
+		const url = prUrlFor(cs);
+		return html`
+			<header class="prw-review-header" data-testid="prw-review-header">
+				<div class="prw-review-kicker">
+					<span>Review walkthrough</span>
+					<span class="prw-header-shas">${compactSha(cs.baseSha)}…${compactSha(cs.headSha)}</span>
+				</div>
+				<div class="prw-header-main">
+					<div class="prw-title-wrap">
+						<div class="prw-pr-pill">${prLabel}</div>
+						<h1 data-testid="prw-title">${title}</h1>
+					</div>
+					${url ? html`<a class="prw-gh-link" href=${url} target="_blank" rel="noreferrer">Open on GitHub</a>` : nothing}
+				</div>
+				<div class="prw-header-meta">
+					<span class="prw-stat">${stats.files} ${stats.files === 1 ? "file" : "files"}</span>
+					<span class="prw-stat prw-add">+${stats.additions}</span>
+					<span class="prw-stat prw-del">-${stats.deletions}</span>
+					<span class="prw-stat">${cs.provider || "changeset"}</span>
+				</div>
+				<div class="prw-progress-row">
+					<div class="prw-progress-copy" data-testid="prw-review-progress">${reviewed} / ${total} reviewed</div>
+					<div class="prw-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax=${total || 1} aria-valuenow=${reviewed}>
+						<div class="prw-progress-fill" style=${`width:${progress}%`}></div>
+					</div>
+					<button class="prw-submit-button" @click=${() => patchEntry(host, paramKey, { submitHint: true })}>Submit review</button>
+				</div>
+			</header>
+		`;
+	};
 
 	const renderNavRail = (entry, host, paramKey) => {
 		const cards = cardsOf(entry);
 		const active = activeCard(entry);
 		return html`
-			<div class="w-44 flex-none border-r border-border pr-2 overflow-auto" data-testid="prw-navrail">
-				${PHASES.map((phase) => {
-					const phaseCards = cards.filter((c) => c.phaseId === phase.id);
+			<nav class="prw-phase-rail" data-testid="prw-phase-rail" aria-label="PR walkthrough phase rail">
+				${PHASES.map((phase, phaseIndex) => {
+					const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
 					if (phaseCards.length === 0) return nothing;
+					const phaseActive = active && cardPhase(active) === phase.id;
 					return html`
-						<div class="mt-2 first:mt-0">
-							<div class="text-[10px] uppercase tracking-wide text-muted-foreground px-1">${phase.label}</div>
+						<section class="prw-phase ${phaseActive ? "is-active" : ""}">
+							<div class="prw-phase-heading">
+								<span class="prw-phase-index">${phaseIndex + 1}</span>
+								<span>${phase.label}</span>
+							</div>
 							${phaseCards.map((card) => {
 								const isActive = active && active.id === card.id;
-								const onSelect = () => {
-									const cur = byJob.get(paramKey) || entry;
-									byJob.set(paramKey, { ...cur, activeCardId: card.id });
-									if (host && host.requestRender) host.requestRender();
-								};
+								const status = (entry.reviewStatus || {})[card.id] || "pending";
 								return html`<button
-									class="block w-full text-left text-xs px-2 py-1 mt-0.5 rounded ${isActive ? "text-foreground" : "text-muted-foreground"} hover:bg-muted/50"
-									style=${isActive ? "background:color-mix(in oklch, var(--primary) 12%, transparent);" : ""}
+									class="prw-nav-card ${isActive ? "is-active" : ""} ${status !== "pending" ? "is-reviewed" : ""}"
 									data-testid="prw-nav-card" data-prw-nav=${card.id}
-									@click=${onSelect}
-								>${card.navLabel ?? card.title}</button>`;
+									@click=${() => setActiveCard(entry, host, paramKey, card.id)}
+									title=${asText(card.title, deriveNavLabel(card))}
+								>
+									<span class="prw-nav-dot"></span>
+									<span>${deriveNavLabel(card)}</span>
+								</button>`;
 							})}
-						</div>
+						</section>
 					`;
 				})}
+			</nav>
+			<nav class="prw-phase-rail-collapsed" data-testid="prw-phase-rail-collapsed" aria-label="Collapsed PR walkthrough phase rail">
+				${PHASES.map((phase, phaseIndex) => {
+					const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
+					if (phaseCards.length === 0) return nothing;
+					const phaseActive = active && cardPhase(active) === phase.id;
+					return html`<div class="prw-rail-pip-group">
+						<button class="prw-rail-pip ${phaseActive ? "is-active" : ""}" title=${phase.label} aria-label=${phase.label}>${phase.short || phaseIndex + 1}</button>
+						${phaseCards.map((card) => html`<button
+							class="prw-rail-dot ${active && active.id === card.id ? "is-active" : ""}"
+							title=${asText(card.title, deriveNavLabel(card))}
+							aria-label=${asText(card.title, deriveNavLabel(card))}
+							@click=${() => setActiveCard(entry, host, paramKey, card.id)}
+						></button>`)}
+					</div>`;
+				})}
+			</nav>
+		`;
+	};
+
+	const renderSection = (section) => html`
+		<div class="prw-section" data-testid="prw-section" data-prw-section=${asText(section.id, "section")}>
+			${section.eyebrow ? html`<div class="prw-section-eyebrow">${section.eyebrow}</div>` : nothing}
+			<h3>${section.heading || section.navLabel || "Orientation beat"}</h3>
+			${section.body ? html`<p>${section.body}</p>` : nothing}
+			${section.verdict ? html`<div class="prw-verdict"><strong>Recommendation:</strong> ${section.verdict.recommendation || "unclear"}${section.verdict.confidence ? ` · ${section.verdict.confidence} confidence` : ""}${section.verdict.summary ? html`<p>${section.verdict.summary}</p>` : nothing}</div>` : nothing}
+			${Array.isArray(section.concerns) && section.concerns.length
+				? html`<ul class="prw-concern-list">${section.concerns.map((c) => html`<li><strong>${c.severity || "Concern"}</strong> ${c.text || c.summary || c}</li>`)}</ul>`
+				: nothing}
+			${Array.isArray(section.fileRoles) && section.fileRoles.length
+				? html`<div class="prw-file-roles">${section.fileRoles.map((r) => html`<div><strong>${r.role || "File"}</strong><span>${r.file || r.path || "unknown"}</span>${r.note ? html`<small>${r.note}</small>` : nothing}</div>`)}</div>`
+				: nothing}
+		</div>
+	`;
+
+	const renderOrientationStepper = (entry, host, paramKey, card) => {
+		const sections = arrayOf(card.sections);
+		if (!sections.length) return nothing;
+		const sectionIndex = Math.max(0, Math.min(sections.length - 1, ((entry.sectionIndex || {})[card.id] || 0)));
+		const setStep = (next) => {
+			const cur = byJob.get(paramKey) || entry;
+			patchEntry(host, paramKey, { sectionIndex: { ...(cur.sectionIndex || {}), [card.id]: Math.max(0, Math.min(sections.length - 1, next)) } });
+		};
+		return html`
+			<div class="prw-orientation-stepper" data-testid="prw-orientation-stepper" aria-label="Guided orientation beats">
+				<div class="prw-stepper-rail">
+					${sections.map((section, index) => html`<button
+						class="prw-step ${index < sectionIndex ? "is-visited" : ""} ${index === sectionIndex ? "is-current" : ""}"
+						@click=${() => setStep(index)}
+						title=${section.heading || section.navLabel || `Step ${index + 1}`}
+						aria-label=${section.heading || section.navLabel || `Step ${index + 1}`}
+					>
+						<span>${index < sectionIndex ? "✓" : index + 1}</span>
+						<small>${section.navLabel || section.eyebrow || `Beat ${index + 1}`}</small>
+					</button>`)}
+				</div>
+				<div class="prw-stepper-card">
+					<div class="prw-step-count">Step ${sectionIndex + 1} of ${sections.length}</div>
+					${renderSection(sections[sectionIndex])}
+					<div class="prw-stepper-actions">
+						<button class="prw-ghost-button" ?disabled=${sectionIndex === 0} @click=${() => setStep(sectionIndex - 1)}>Back</button>
+						<button class="prw-ghost-button" ?disabled=${sectionIndex >= sections.length - 1} @click=${() => setStep(sectionIndex + 1)}>Next</button>
+					</div>
+				</div>
 			</div>
+		`;
+	};
+
+	const renderDiffModeControls = (entry, host, paramKey) => {
+		const mode = entry.diffMode || "side";
+		return html`
+			<div class="prw-diff-mode" aria-label="Diff display mode">
+				<button class=${`prw-segment ${mode === "side" ? "is-active" : ""}`} @click=${() => patchEntry(host, paramKey, { diffMode: "side", userSetMode: true })}>Side-by-side</button>
+				<button class=${`prw-segment ${mode === "inline" ? "is-active" : ""}`} @click=${() => patchEntry(host, paramKey, { diffMode: "inline", userSetMode: true })}>Inline</button>
+			</div>
+		`;
+	};
+
+	const lineCommentButton = (block, line) => html`<button class="prw-line-comment-button" title="Add line comment" aria-label="Add line comment">Add line comment</button>`;
+
+	const renderInlineDiff = (block) => html`
+		<div class="prw-diff-scroll">
+			<table class="prw-diff-table prw-inline-diff">
+				<tbody>
+					${arrayOf(block.hunks).map((hunk) => html`
+						<tr class="prw-hunk-row"><td colspan="4">${asText(hunk && hunk.header, "@@")}</td></tr>
+						${arrayOf(hunk && hunk.lines).map((ln) => html`
+							<tr class=${`prw-line is-${lineTone(ln && ln.kind)}`}>
+								<td class="prw-line-number">${asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
+								<td class="prw-prefix">${linePrefix(ln && ln.kind)}</td>
+								<td class="prw-code"><code>${asText(ln && ln.text)}</code></td>
+								<td class="prw-comment-cell">${lineCommentButton(block, ln)}</td>
+							</tr>
+						`)}
+					`)}
+				</tbody>
+			</table>
+		</div>
+	`;
+
+	const renderSideDiff = (block) => html`
+		<div class="prw-diff-scroll">
+			<table class="prw-diff-table prw-side-diff">
+				<tbody>
+					${arrayOf(block.hunks).map((hunk) => html`
+						<tr class="prw-hunk-row"><td colspan="6">${asText(hunk && hunk.header, "@@")}</td></tr>
+						${arrayOf(hunk && hunk.lines).map((ln) => {
+							const kind = ln && ln.kind;
+							const text = asText(ln && ln.text);
+							return html`<tr class=${`prw-line is-${lineTone(kind)}`}>
+								<td class="prw-line-number">${kind === "add" ? "" : asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
+								<td class="prw-code prw-old"><code>${kind === "add" ? "" : text}</code></td>
+								<td class="prw-comment-cell">${kind === "add" ? nothing : lineCommentButton(block, ln)}</td>
+								<td class="prw-line-number">${kind === "del" ? "" : asText(ln && (ln.newLine || ln.line || ln.id), "")}</td>
+								<td class="prw-code prw-new"><code>${kind === "del" ? "" : text}</code></td>
+								<td class="prw-comment-cell">${kind === "del" ? nothing : lineCommentButton(block, ln)}</td>
+							</tr>`;
+						})}
+					`)}
+				</tbody>
+			</table>
+		</div>
+	`;
+
+	const renderDiffBlock = (entry, block) => {
+		const mode = entry.diffMode || "side";
+		const label = block && (block.label || block.filePath || block.path) || "Diff block";
+		return html`
+			<section class="prw-diff-block" data-testid="prw-diffblock" data-prw-file=${asText(block && (block.filePath || block.path), "unknown")}>
+				<header class="prw-diff-header">
+					<div>
+						<strong>${asText(block && block.status, "modified")}</strong>
+						<span>${label}</span>
+					</div>
+					${block && block.oldPath && block.oldPath !== block.filePath ? html`<small>was ${block.oldPath}</small>` : nothing}
+				</header>
+				${mode === "inline" ? renderInlineDiff(block || {}) : renderSideDiff(block || {})}
+			</section>
+		`;
+	};
+
+	const renderSuggestedComment = (sc) => html`
+		<div class="prw-suggested-comment" data-testid="prw-suggested-comment" data-prw-comment=${asText(sc && sc.id, "comment")}>
+			<div class="prw-suggestion-anchor">${asText(sc && sc.diffBlockId, "card")}${sc && sc.lineId ? ` · ${sc.lineId}` : ""}</div>
+			<div>${asText(sc && sc.body, sc)}</div>
+			<button class="prw-ghost-button">Use suggestion</button>
+		</div>
+	`;
+
+	const renderCardComments = (entry, host, paramKey, card) => {
+		const open = Boolean((entry.cardCommentOpen || {})[card.id]);
+		const suggestions = arrayOf(card.cardSuggestions || card.suggestedConcerns || card.concerns);
+		const toggle = () => {
+			const cur = byJob.get(paramKey) || entry;
+			patchEntry(host, paramKey, { cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: !open } });
+		};
+		return html`
+			<section class="prw-card-comments" data-testid="prw-card-comments">
+				<div class="prw-card-comments-head">
+					<div>
+						<div class="prw-section-eyebrow">Card-level comments</div>
+						<strong>Suggested concerns and reviewer notes</strong>
+					</div>
+					<button class="prw-ghost-button" @click=${toggle}>Add card comment</button>
+				</div>
+				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip">${asText(s.body || s.text || s.summary || s)}</button>`)}</div>` : nothing}
+				${open ? html`<textarea class="prw-card-editor" placeholder="Write your own card-level review note"></textarea>` : nothing}
+			</section>
+		`;
+	};
+
+	const renderReviewControls = (entry, host, paramKey, card) => {
+		const cards = cardsOf(entry);
+		const idx = Math.max(0, cards.findIndex((c) => c.id === card.id));
+		const hasComments = Boolean((entry.cardCommentOpen || {})[card.id]) || arrayOf(card.suggestedComments).length > 0;
+		return html`
+			<footer class="prw-review-controls" data-testid="prw-review-controls">
+				<button class="prw-ghost-button" ?disabled=${idx <= 0} @click=${() => moveCard(entry, host, paramKey, -1)}>Prev</button>
+				<div class="prw-decision-buttons">
+					<button class="prw-dislike-button" ?disabled=${!hasComments} @click=${() => markCard(entry, host, paramKey, card, "disliked")}>Dislike</button>
+					<button class="prw-like-button" @click=${() => markCard(entry, host, paramKey, card, "liked")}>Like</button>
+				</div>
+			</footer>
+		`;
+	};
+
+	const renderCardBody = (entry, host, paramKey, card) => {
+		const suggestedComments = arrayOf(card.suggestedComments);
+		return html`
+			<article class="prw-card" data-testid="prw-card" data-prw-card=${card.id}>
+				<div class="prw-card-topline">
+					<span>${PHASES.find((phase) => phase.id === cardPhase(card))?.label || cardPhase(card)}</span>
+					<span>${deriveNavLabel(card)}</span>
+				</div>
+				<h2>${card.title || "Review card"}</h2>
+				${card.summary ? html`<p class="prw-summary">${card.summary}</p>` : nothing}
+				${card.rationale ? html`<p class="prw-rationale">${card.rationale}</p>` : nothing}
+				${renderOrientationStepper(entry, host, paramKey, card)}
+				${Array.isArray(card.checklist) && card.checklist.length
+					? html`<ul class="prw-checklist">${card.checklist.map((item) => html`<li>${item}</li>`)}</ul>`
+					: nothing}
+				${renderDiffModeControls(entry, host, paramKey)}
+				<div class="prw-diff-list">
+					${arrayOf(card.diffBlocks).length
+						? arrayOf(card.diffBlocks).map((block) => renderDiffBlock(entry, block))
+						: html`<div class="prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}
+				</div>
+				${suggestedComments.length
+					? html`<section class="prw-line-suggestions"><div class="prw-section-eyebrow">Line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment)}</section>`
+					: nothing}
+				${renderCardComments(entry, host, paramKey, card)}
+				${renderReviewControls(entry, host, paramKey, card)}
+			</article>
 		`;
 	};
 
 	const renderBundle = (entry, host, paramKey, displayJob) => {
 		const b = entry.bundle;
 		if (b && b.found === false) {
-			return html`<div class="mt-3 text-xs text-muted-foreground" data-testid="prw-empty">
-				No walkthrough has been persisted for <span class="font-mono">${displayJob}</span> yet.
+			return html`<div class="prw-empty" data-testid="prw-empty">
+				No walkthrough has been persisted for <span>${displayJob}</span> yet.
 			</div>`;
 		}
-		const cs = (b && b.changeset) || {};
 		const active = activeCard(entry);
 		const yaml = entry.toolCall && entry.toolCall.input && typeof entry.toolCall.input.yaml === "string"
 			? entry.toolCall.input.yaml
 			: undefined;
 		return html`
-			<div class="mt-2" data-testid="prw-bundle">
-				<div class="text-sm font-semibold text-foreground" data-testid="prw-title">${cs.prTitle ?? cs.title ?? "Walkthrough"}</div>
-				<div class="text-xs text-muted-foreground mt-0.5">
-					<span class="font-mono">${(cs.baseSha ?? "").slice(0, 7)}…${(cs.headSha ?? "").slice(0, 7)}</span>
-					· ${cs.filesChanged ?? 0} file(s)
-					· <span style="color:var(--positive)">+${cs.additions ?? 0}</span>
-					· <span style="color:var(--negative)">-${cs.deletions ?? 0}</span>
-					${cs.provider ? html`· <span class="font-mono">${cs.provider}</span>` : nothing}
+			<div class="prw-bundle" data-testid="prw-bundle">
+				${renderHeaderBlock(entry, host, paramKey)}
+				<div class="prw-debug-meta" aria-hidden="true">
+					<span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span>
+					<span data-testid="prw-toolcall">${yaml ? yaml.slice(0, 80) : "(none)"}</span>
 				</div>
-				<div class="text-[10px] text-muted-foreground mt-1">
-					persisted: <span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span>
-				</div>
-				<div class="text-[10px] text-muted-foreground" data-testid="prw-toolcall">
-					submit yaml: ${yaml ? yaml.slice(0, 80) : "(none)"}
-				</div>
-				<div class="flex gap-3 mt-3">
+				<div class="prw-workspace">
 					${renderNavRail(entry, host, paramKey)}
-					<div class="flex-1 min-w-0 overflow-auto">
-						${active ? renderCardBody(active) : html`<div class="text-xs text-muted-foreground" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}
-					</div>
+					<main class="prw-card-pane">
+						${active ? renderCardBody(entry, host, paramKey, active) : html`<div class="prw-no-cards" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}
+					</main>
 				</div>
 			</div>
 		`;
@@ -312,7 +554,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (effHeadSha) query.headSha = effHeadSha;
 				const bundle = await host.callRoute("bundle", { query });
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
-				byJob.set(targetKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId });
+				byJob.set(targetKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode: "side" });
 			};
 
 			// ── CHILD-PANE self-poll loop (read-only carve-out) ─────────────────────
@@ -420,26 +662,123 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			const isPending = status === "running" || status === "publishing"
 				|| (status === "idle" && Boolean(boundSessionId) && !entry.bundle);
 
-			const spinner = html`<span data-testid="prw-spinner" style="display:inline-block;width:12px;height:12px;border:2px solid var(--muted-foreground);border-top-color:transparent;border-radius:50%;animation:prw-spin 0.8s linear infinite;"></span>`;
+			const spinner = html`<span data-testid="prw-spinner" class="prw-spinner"></span>`;
 
 			return html`
-				<style>@keyframes prw-spin { to { transform: rotate(360deg); } }</style>
-				<div class="p-3" data-testid="prw-panel-root" data-prw-job=${displayJob}>
-					<div class="flex items-center justify-between gap-2">
-						<span class="text-sm font-semibold text-foreground">PR Walkthrough</span>
-						<span class="text-xs text-muted-foreground font-mono">${displayJob}</span>
-					</div>
-					${entry.bundle
-						? renderBundle(entry, host, paramKey, displayJob)
-						: status === "error" && entry.error
-							? html`<div class="mt-2 text-xs" style="color:var(--negative)" data-testid="prw-error">${entry.error}</div>`
-							: isPending
-								? html`<div class="mt-2 flex items-center gap-2 text-xs text-muted-foreground" data-testid="prw-pending">
+				<style>
+					@keyframes prw-spin { to { transform: rotate(360deg); } }
+					.prw-root { color: var(--foreground); background: var(--background); padding: 12px; min-height: 100%; box-sizing: border-box; }
+					.prw-shell { border: 1px solid var(--border); border-radius: 18px; background: var(--card); overflow: hidden; box-shadow: 0 20px 60px color-mix(in oklch, var(--foreground) 8%, transparent); }
+					.prw-review-header { padding: 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, color-mix(in oklch, var(--chart-1) 12%, transparent), color-mix(in oklch, var(--chart-2) 8%, transparent)); }
+					.prw-review-kicker, .prw-header-main, .prw-header-meta, .prw-progress-row, .prw-title-wrap, .prw-workspace, .prw-card-topline, .prw-diff-header, .prw-card-comments-head, .prw-review-controls, .prw-decision-buttons { display: flex; align-items: center; gap: 10px; }
+					.prw-review-kicker { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; }
+					.prw-header-shas, .prw-debug-meta { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+					.prw-header-main { justify-content: space-between; align-items: flex-start; margin-top: 10px; gap: 16px; }
+					.prw-title-wrap { align-items: flex-start; gap: 12px; }
+					.prw-pr-pill, .prw-stat { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 76%, transparent); padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+					.prw-review-header h1 { margin: 0; font-size: clamp(20px, 3vw, 30px); line-height: 1.08; letter-spacing: -.03em; }
+					.prw-gh-link, .prw-submit-button, .prw-like-button { border-radius: 999px; border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); padding: 7px 11px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+					.prw-header-meta { flex-wrap: wrap; margin-top: 14px; }
+					.prw-add { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 32%, var(--border)); }
+					.prw-del { color: var(--negative); border-color: color-mix(in oklch, var(--negative) 32%, var(--border)); }
+					.prw-progress-row { margin-top: 14px; }
+					.prw-progress-copy { min-width: max-content; color: var(--muted-foreground); font-size: 12px; }
+					.prw-progress-track { height: 8px; min-width: 90px; flex: 1; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); overflow: hidden; }
+					.prw-progress-fill { height: 100%; border-radius: inherit; background: var(--primary); }
+					.prw-debug-meta { display: none; }
+					.prw-workspace { align-items: stretch; min-height: 520px; }
+					.prw-phase-rail { width: 230px; flex: 0 0 230px; padding: 14px 10px; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--background) 72%, var(--card)); overflow: auto; }
+					.prw-phase-rail-collapsed { display: none; width: 42px; flex: 0 0 42px; padding: 12px 5px; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--background) 72%, var(--card)); }
+					.prw-phase { margin-bottom: 14px; }
+					.prw-phase-heading { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+					.prw-phase-index, .prw-rail-pip { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; border: 1px solid var(--border); color: var(--foreground); background: var(--card); font-size: 11px; }
+					.prw-nav-card { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 10px; padding: 7px 8px; background: transparent; color: var(--muted-foreground); text-align: left; cursor: pointer; }
+					.prw-nav-card:hover, .prw-nav-card.is-active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 12%, transparent); }
+					.prw-nav-dot, .prw-rail-dot { width: 8px; height: 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); flex: 0 0 auto; }
+					.prw-nav-card.is-reviewed .prw-nav-dot, .prw-rail-dot.is-active, .prw-rail-pip.is-active { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.prw-rail-pip-group { display: grid; justify-items: center; gap: 6px; margin-bottom: 14px; }
+					.prw-rail-dot { padding: 0; }
+					.prw-card-pane { flex: 1; min-width: 0; overflow: auto; padding: 18px; }
+					.prw-card { max-width: 1120px; margin: 0 auto; }
+					.prw-card-topline { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+					.prw-card h2 { margin: 8px 0 0; font-size: clamp(20px, 2.5vw, 28px); line-height: 1.12; }
+					.prw-summary, .prw-rationale { color: var(--muted-foreground); line-height: 1.55; }
+					.prw-rationale { border-left: 3px solid var(--chart-3); padding-left: 10px; }
+					.prw-orientation-stepper, .prw-card-comments, .prw-no-diff { border: 1px solid var(--border); border-radius: 16px; background: color-mix(in oklch, var(--card) 84%, transparent); padding: 12px; margin-top: 14px; }
+					.prw-stepper-rail { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+					.prw-step { min-width: 86px; border: 1px solid var(--border); border-radius: 14px; background: var(--background); color: var(--muted-foreground); padding: 8px; text-align: left; }
+					.prw-step span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; border: 1px solid var(--border); margin-bottom: 6px; }
+					.prw-step.is-current { color: var(--foreground); border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+					.prw-step.is-visited span { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.prw-step small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+					.prw-stepper-card { margin-top: 8px; }
+					.prw-step-count, .prw-section-eyebrow, .prw-suggestion-anchor { color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+					.prw-section h3 { margin: 6px 0; font-size: 18px; }
+					.prw-section p { color: var(--muted-foreground); line-height: 1.55; }
+					.prw-verdict, .prw-suggested-comment { border: 1px solid color-mix(in oklch, var(--warning) 34%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); border-radius: 12px; padding: 10px; margin-top: 10px; }
+					.prw-concern-list, .prw-checklist { color: var(--muted-foreground); line-height: 1.5; }
+					.prw-file-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 10px; }
+					.prw-file-roles > div { border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+					.prw-file-roles span, .prw-file-roles small { display: block; color: var(--muted-foreground); }
+					.prw-stepper-actions, .prw-diff-mode { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+					.prw-diff-mode { justify-content: flex-end; }
+					.prw-segment, .prw-ghost-button, .prw-dislike-button, .prw-line-comment-button, .prw-suggestion-chip { border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--foreground); padding: 6px 9px; }
+					.prw-segment.is-active { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); }
+					.prw-diff-block { margin-top: 12px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--background); }
+					.prw-diff-header { justify-content: space-between; padding: 9px 10px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+					.prw-diff-header div { display: flex; gap: 8px; align-items: center; min-width: 0; }
+					.prw-diff-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+					.prw-diff-scroll { overflow-x: auto; max-width: 100%; }
+					.prw-diff-table { width: 100%; min-width: 760px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+					.prw-diff-table td { border-bottom: 1px solid color-mix(in oklch, var(--border) 56%, transparent); padding: 2px 6px; vertical-align: top; }
+					.prw-hunk-row td { color: var(--info); background: color-mix(in oklch, var(--info) 9%, transparent); }
+					.prw-line-number { width: 42px; color: var(--muted-foreground); text-align: right; user-select: none; }
+					.prw-prefix { width: 20px; text-align: center; color: var(--muted-foreground); }
+					.prw-code { white-space: pre; min-width: 260px; }
+					.prw-code code { white-space: pre; }
+					.prw-line.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
+					.prw-line.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.prw-comment-cell { width: 118px; text-align: right; }
+					.prw-line-comment-button { opacity: .72; font-size: 11px; padding: 3px 7px; }
+					.prw-line-comment-button:hover, .prw-line:focus-within .prw-line-comment-button { opacity: 1; border-color: var(--primary); }
+					.prw-line-suggestions, .prw-card-comments { margin-top: 14px; }
+					.prw-suggested-comment { display: grid; gap: 6px; }
+					.prw-card-comments-head { justify-content: space-between; }
+					.prw-card-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+					.prw-suggestion-chip { background: color-mix(in oklch, var(--chart-2) 10%, transparent); }
+					.prw-card-editor { width: 100%; min-height: 72px; margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--background); color: var(--foreground); padding: 8px; }
+					.prw-review-controls { justify-content: space-between; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+					.prw-dislike-button { color: var(--foreground); }
+					.prw-dislike-button:hover:not(:disabled), .prw-dislike-button:focus-visible:not(:disabled) { border-color: var(--negative); color: var(--negative); background: color-mix(in oklch, var(--negative) 10%, transparent); }
+					button:disabled { opacity: .48; cursor: not-allowed; }
+					.prw-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted-foreground); border-top-color: transparent; border-radius: 50%; animation: prw-spin .8s linear infinite; }
+					.prw-pending, .prw-empty, .prw-neutral, .prw-error { display: flex; align-items: center; gap: 8px; padding: 18px; color: var(--muted-foreground); }
+					.prw-error { color: var(--negative); }
+					@media (max-width: 760px) {
+						.prw-root { padding: 0; }
+						.prw-shell { border-radius: 0; border-left: 0; border-right: 0; }
+						.prw-header-main, .prw-progress-row, .prw-review-controls { flex-wrap: wrap; }
+						.prw-phase-rail { display: none; }
+						.prw-phase-rail-collapsed { display: block; }
+						.prw-card-pane { padding: 12px; }
+						.prw-diff-mode { justify-content: flex-start; }
+						.prw-side-diff { min-width: 860px; }
+					}
+				</style>
+				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>
+					<div class="prw-shell">
+						${entry.bundle
+							? renderBundle(entry, host, paramKey, displayJob)
+							: status === "error" && entry.error
+								? html`<div class="prw-error" data-testid="prw-error">${entry.error}</div>`
+								: isPending
+									? html`<div class="prw-pending" data-testid="prw-pending">
 										${spinner} PR Walkthrough: In Progress
 									</div>`
-								: html`<div class="mt-2 text-xs text-muted-foreground" data-testid="prw-neutral">
+									: html`<div class="prw-neutral" data-testid="prw-neutral">
 										No PR walkthrough is available in this session.
 									</div>`}
+					</div>
 				</div>
 			`;
 		},
