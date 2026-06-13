@@ -35,7 +35,7 @@ import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanel
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
-import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
+import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -81,41 +81,6 @@ function notifyGoalStateSubscribers(evt: GoalStateChangeEvent): void {
 	for (const cb of _goalStateSubscribers) {
 		try { cb(evt); } catch { /* swallow — one bad subscriber must not break the rest */ }
 	}
-}
-
-const SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS = 100;
-let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-let sessionListPushRefreshInFlight = false;
-let sessionListPushRefreshQueued = false;
-
-function canRefreshSessionListFromPush(): boolean {
-	if (state.appView !== "authenticated") return false;
-	if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
-	return true;
-}
-
-function scheduleSessionListRefreshFromPush(): void {
-	if (!canRefreshSessionListFromPush()) return;
-	if (sessionListPushRefreshTimer) return;
-	if (sessionListPushRefreshInFlight) {
-		sessionListPushRefreshQueued = true;
-		return;
-	}
-
-	sessionListPushRefreshTimer = setTimeout(() => {
-		sessionListPushRefreshTimer = null;
-		if (!canRefreshSessionListFromPush()) return;
-		sessionListPushRefreshInFlight = true;
-		void refreshSessions()
-			.catch((err) => console.warn("[remote-agent] session-list push refresh failed:", err))
-			.finally(() => {
-				sessionListPushRefreshInFlight = false;
-				if (sessionListPushRefreshQueued) {
-					sessionListPushRefreshQueued = false;
-					scheduleSessionListRefreshFromPush();
-				}
-			});
-	}, SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS);
 }
 
 function isKnownOwnSessionCreatedEvent(msg: any, sessionId: string): boolean {
@@ -1998,11 +1963,8 @@ export class RemoteAgent {
 
 			case "session_created":
 			case "sessions_changed": {
-				// Server-pushed event: a visible session was created elsewhere (including
-				// host.agents full-lifecycle children). Coalesce across all open session
-				// sockets so one burst creates one sidebar refresh, not one refresh per
-				// cached RemoteAgent. Hidden tabs catch up via the existing visibility
-				// refresh path in main.ts.
+				// Shared with the global viewer socket so active session sockets and
+				// non-session surfaces coalesce into one refresh burst.
 				if (isKnownOwnSessionCreatedEvent(msg, this._sessionId)) break;
 				scheduleSessionListRefreshFromPush();
 				break;
