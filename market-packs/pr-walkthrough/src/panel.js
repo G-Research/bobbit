@@ -73,6 +73,14 @@ const lineTone = (kind) => kind === "add" ? "add" : kind === "del" ? "del" : "ct
 const compactSha = (sha) => sha ? String(sha).slice(0, 7) : "unknown";
 const deriveNavLabel = (card) => card.navLabel || card.nav_label || asText(card.title, "Card").split(/\s+/).slice(0, 3).join(" ");
 const cardPhase = (card) => card.phaseId || card.phase || "orientation";
+const safeDomId = (value) => asText(value, "item").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
+const defaultDiffMode = () => {
+	try {
+		return globalThis.matchMedia && globalThis.matchMedia("(max-width: 760px)").matches ? "inline" : "side";
+	} catch {
+		return "side";
+	}
+};
 
 // Raw YAML text from a submit_pr_walkthrough_yaml-shaped tool call (the rich
 // production document). Returns undefined when the call is absent/unparseable.
@@ -153,11 +161,24 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (next) setActiveCard(entry, host, paramKey, next.id);
 	};
 
+	const updateNestedMap = (entry, host, paramKey, field, itemKey, value) => {
+		const cur = byJob.get(paramKey) || entry;
+		patchEntry(host, paramKey, { [field]: { ...(cur[field] || {}), [itemKey]: value } });
+	};
+
 	const markCard = (entry, host, paramKey, card, status) => {
 		const reviewStatus = { ...(entry.reviewStatus || {}), [card.id]: status };
 		patchEntry(host, paramKey, { reviewStatus });
 		queueMicrotask(() => moveCard({ ...entry, reviewStatus }, host, paramKey, 1));
 	};
+
+	const blockKey = (card, block) => `${asText(card && card.id, "card")}::${asText(block && (block.id || block.filePath || block.path || block.label), "diff")}`;
+	const lineKey = (card, block, line) => `${blockKey(card, block)}::${asText(line && (line.id || line.line || line.newLine || line.oldLine || line.text), "line")}::${asText(line && line.kind, "ctx")}`;
+	const lineDomId = (key) => `prw-line-comment-${safeDomId(key)}`;
+	const savedLineCommentsForCard = (entry, card) => Object.entries(entry.lineComments || {})
+		.filter(([key, comments]) => key.startsWith(`${asText(card && card.id, "card")}::`) && arrayOf(comments).some((comment) => asText(comment).trim()));
+	const savedCardCommentsForCard = (entry, card) => arrayOf((entry.cardComments || {})[card.id]).filter((comment) => asText(comment).trim());
+	const hasSavedUserComments = (entry, card) => savedCardCommentsForCard(entry, card).length > 0 || savedLineCommentsForCard(entry, card).length > 0;
 
 	const statsFor = (bundle, cards) => {
 		const cs = (bundle && bundle.changeset) || {};
@@ -330,7 +351,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	};
 
 	const renderDiffModeControls = (entry, host, paramKey) => {
-		const mode = entry.diffMode || "side";
+		const mode = entry.diffMode || defaultDiffMode();
 		return html`
 			<div class="prw-diff-mode" aria-label="Diff display mode">
 				<button class=${`prw-segment ${mode === "side" ? "is-active" : ""}`} @click=${() => patchEntry(host, paramKey, { diffMode: "side", userSetMode: true })}>Side-by-side</button>
@@ -339,29 +360,88 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
-	const lineCommentButton = (block, line) => html`<button class="prw-line-comment-button" title="Add line comment" aria-label="Add line comment">Add line comment</button>`;
+	const openLineComment = (entry, host, paramKey, key) => {
+		const cur = byJob.get(paramKey) || entry;
+		patchEntry(host, paramKey, {
+			lineCommentOpen: { ...(cur.lineCommentOpen || {}), [key]: true },
+			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: asText((cur.lineCommentDraft || {})[key]) },
+		});
+	};
 
-	const renderInlineDiff = (block) => html`
+	const cancelLineComment = (entry, host, paramKey, key) => {
+		const cur = byJob.get(paramKey) || entry;
+		patchEntry(host, paramKey, {
+			lineCommentOpen: { ...(cur.lineCommentOpen || {}), [key]: false },
+			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: "" },
+		});
+	};
+
+	const saveLineComment = (entry, host, paramKey, key) => {
+		const cur = byJob.get(paramKey) || entry;
+		const draft = asText((cur.lineCommentDraft || {})[key]).trim();
+		if (!draft) return;
+		patchEntry(host, paramKey, {
+			lineComments: { ...(cur.lineComments || {}), [key]: [...arrayOf((cur.lineComments || {})[key]), draft] },
+			lineCommentOpen: { ...(cur.lineCommentOpen || {}), [key]: false },
+			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: "" },
+		});
+	};
+
+	const lineCommentButton = (entry, host, paramKey, key) => html`<button
+		class="prw-line-comment-button"
+		title="Add line comment"
+		aria-label="Add line comment"
+		aria-controls=${lineDomId(key)}
+		@click=${() => openLineComment(entry, host, paramKey, key)}
+	>Add line comment</button>`;
+
+	const renderLineCommentState = (entry, host, paramKey, key, colspan) => {
+		const saved = arrayOf((entry.lineComments || {})[key]).filter((comment) => asText(comment).trim());
+		const open = Boolean((entry.lineCommentOpen || {})[key]);
+		if (!saved.length && !open) return nothing;
+		return html`<tr class="prw-line-comment-row" id=${lineDomId(key)}>
+			<td colspan=${colspan}>
+				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-line-user-comment"><strong>Your line comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
+				${open ? html`<div class="prw-comment-editor" data-testid="prw-line-comment-editor">
+					<textarea
+						.value=${asText((entry.lineCommentDraft || {})[key])}
+						placeholder="Write a line-level review comment"
+						@input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}
+					></textarea>
+					<div class="prw-comment-actions">
+						<button class="prw-ghost-button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button>
+						<button class="prw-ghost-button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button>
+					</div>
+				</div>` : nothing}
+			</td>
+		</tr>`;
+	};
+
+	const renderInlineDiff = (entry, host, paramKey, card, block) => html`
 		<div class="prw-diff-scroll">
 			<table class="prw-diff-table prw-inline-diff">
 				<tbody>
 					${arrayOf(block.hunks).map((hunk) => html`
 						<tr class="prw-hunk-row"><td colspan="4">${asText(hunk && hunk.header, "@@")}</td></tr>
-						${arrayOf(hunk && hunk.lines).map((ln) => html`
-							<tr class=${`prw-line is-${lineTone(ln && ln.kind)}`}>
-								<td class="prw-line-number">${asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
-								<td class="prw-prefix">${linePrefix(ln && ln.kind)}</td>
-								<td class="prw-code"><code>${asText(ln && ln.text)}</code></td>
-								<td class="prw-comment-cell">${lineCommentButton(block, ln)}</td>
-							</tr>
-						`)}
+						${arrayOf(hunk && hunk.lines).map((ln) => {
+							const key = lineKey(card, block, ln);
+							return html`
+								<tr class=${`prw-line is-${lineTone(ln && ln.kind)}`}>
+									<td class="prw-line-number">${asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
+									<td class="prw-prefix">${linePrefix(ln && ln.kind)}</td>
+									<td class="prw-code"><code>${asText(ln && ln.text)}</code></td>
+									<td class="prw-comment-cell">${lineCommentButton(entry, host, paramKey, key)}</td>
+								</tr>
+								${renderLineCommentState(entry, host, paramKey, key, 4)}
+							`;
+						})}
 					`)}
 				</tbody>
 			</table>
 		</div>
 	`;
 
-	const renderSideDiff = (block) => html`
+	const renderSideDiff = (entry, host, paramKey, card, block) => html`
 		<div class="prw-diff-scroll">
 			<table class="prw-diff-table prw-side-diff">
 				<tbody>
@@ -370,14 +450,18 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						${arrayOf(hunk && hunk.lines).map((ln) => {
 							const kind = ln && ln.kind;
 							const text = asText(ln && ln.text);
-							return html`<tr class=${`prw-line is-${lineTone(kind)}`}>
-								<td class="prw-line-number">${kind === "add" ? "" : asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
-								<td class="prw-code prw-old"><code>${kind === "add" ? "" : text}</code></td>
-								<td class="prw-comment-cell">${kind === "add" ? nothing : lineCommentButton(block, ln)}</td>
-								<td class="prw-line-number">${kind === "del" ? "" : asText(ln && (ln.newLine || ln.line || ln.id), "")}</td>
-								<td class="prw-code prw-new"><code>${kind === "del" ? "" : text}</code></td>
-								<td class="prw-comment-cell">${kind === "del" ? nothing : lineCommentButton(block, ln)}</td>
-							</tr>`;
+							const key = lineKey(card, block, ln);
+							return html`
+								<tr class=${`prw-line is-${lineTone(kind)}`}>
+									<td class="prw-line-number">${kind === "add" ? "" : asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
+									<td class="prw-code prw-old"><code>${kind === "add" ? "" : text}</code></td>
+									<td class="prw-comment-cell">${kind === "add" ? nothing : lineCommentButton(entry, host, paramKey, key)}</td>
+									<td class="prw-line-number">${kind === "del" ? "" : asText(ln && (ln.newLine || ln.line || ln.id), "")}</td>
+									<td class="prw-code prw-new"><code>${kind === "del" ? "" : text}</code></td>
+									<td class="prw-comment-cell">${kind === "del" ? nothing : lineCommentButton(entry, host, paramKey, key)}</td>
+								</tr>
+								${renderLineCommentState(entry, host, paramKey, key, 6)}
+							`;
 						})}
 					`)}
 				</tbody>
@@ -385,19 +469,30 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		</div>
 	`;
 
-	const renderDiffBlock = (entry, block) => {
-		const mode = entry.diffMode || "side";
+	const renderDiffBlock = (entry, host, paramKey, card, block) => {
+		const mode = entry.diffMode || defaultDiffMode();
 		const label = block && (block.label || block.filePath || block.path) || "Diff block";
+		const key = blockKey(card, block);
+		const collapsed = Boolean((entry.collapsedDiffBlocks || {})[key]);
 		return html`
-			<section class="prw-diff-block" data-testid="prw-diffblock" data-prw-file=${asText(block && (block.filePath || block.path), "unknown")}>
+			<section class="prw-diff-block ${collapsed ? "is-collapsed" : ""}" data-testid="prw-diffblock" data-prw-file=${asText(block && (block.filePath || block.path), "unknown")}>
 				<header class="prw-diff-header">
 					<div>
 						<strong>${asText(block && block.status, "modified")}</strong>
 						<span>${label}</span>
 					</div>
-					${block && block.oldPath && block.oldPath !== block.filePath ? html`<small>was ${block.oldPath}</small>` : nothing}
+					<div class="prw-diff-header-actions">
+						${block && block.oldPath && block.oldPath !== block.filePath ? html`<small>was ${block.oldPath}</small>` : nothing}
+						<button
+							class="prw-ghost-button prw-diff-toggle"
+							type="button"
+							data-testid="prw-diff-toggle"
+							aria-expanded=${String(!collapsed)}
+							@click=${() => updateNestedMap(entry, host, paramKey, "collapsedDiffBlocks", key, !collapsed)}
+						>${collapsed ? "Expand" : "Collapse"}</button>
+					</div>
 				</header>
-				${mode === "inline" ? renderInlineDiff(block || {}) : renderSideDiff(block || {})}
+				${collapsed ? nothing : mode === "inline" ? renderInlineDiff(entry, host, paramKey, card, block || {}) : renderSideDiff(entry, host, paramKey, card, block || {})}
 			</section>
 		`;
 	};
@@ -413,9 +508,30 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	const renderCardComments = (entry, host, paramKey, card) => {
 		const open = Boolean((entry.cardCommentOpen || {})[card.id]);
 		const suggestions = arrayOf(card.cardSuggestions || card.suggestedConcerns || card.concerns);
-		const toggle = () => {
+		const saved = savedCardCommentsForCard(entry, card);
+		const openEditor = () => {
 			const cur = byJob.get(paramKey) || entry;
-			patchEntry(host, paramKey, { cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: !open } });
+			patchEntry(host, paramKey, {
+				cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: true },
+				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: asText((cur.cardCommentDraft || {})[card.id]) },
+			});
+		};
+		const cancel = () => {
+			const cur = byJob.get(paramKey) || entry;
+			patchEntry(host, paramKey, {
+				cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: false },
+				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: "" },
+			});
+		};
+		const save = () => {
+			const cur = byJob.get(paramKey) || entry;
+			const draft = asText((cur.cardCommentDraft || {})[card.id]).trim();
+			if (!draft) return;
+			patchEntry(host, paramKey, {
+				cardComments: { ...(cur.cardComments || {}), [card.id]: [...arrayOf((cur.cardComments || {})[card.id]), draft] },
+				cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: false },
+				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: "" },
+			});
 		};
 		return html`
 			<section class="prw-card-comments" data-testid="prw-card-comments">
@@ -424,10 +540,22 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						<div class="prw-section-eyebrow">Card-level comments</div>
 						<strong>Suggested concerns and reviewer notes</strong>
 					</div>
-					<button class="prw-ghost-button" @click=${toggle}>Add card comment</button>
+					<button class="prw-ghost-button" @click=${openEditor}>Add card comment</button>
 				</div>
 				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip">${asText(s.body || s.text || s.summary || s)}</button>`)}</div>` : nothing}
-				${open ? html`<textarea class="prw-card-editor" placeholder="Write your own card-level review note"></textarea>` : nothing}
+				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-card-user-comment"><strong>Your card comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
+				${open ? html`<div class="prw-comment-editor" data-testid="prw-card-comment-editor">
+					<textarea
+						class="prw-card-editor"
+						.value=${asText((entry.cardCommentDraft || {})[card.id])}
+						placeholder="Write your own card-level review note"
+						@input=${(ev) => updateNestedMap(entry, host, paramKey, "cardCommentDraft", card.id, ev.currentTarget.value)}
+					></textarea>
+					<div class="prw-comment-actions">
+						<button class="prw-ghost-button" @click=${save}>Save comment</button>
+						<button class="prw-ghost-button" @click=${cancel}>Cancel</button>
+					</div>
+				</div>` : nothing}
 			</section>
 		`;
 	};
@@ -435,7 +563,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 	const renderReviewControls = (entry, host, paramKey, card) => {
 		const cards = cardsOf(entry);
 		const idx = Math.max(0, cards.findIndex((c) => c.id === card.id));
-		const hasComments = Boolean((entry.cardCommentOpen || {})[card.id]) || arrayOf(card.suggestedComments).length > 0;
+		const hasComments = hasSavedUserComments(entry, card);
 		return html`
 			<footer class="prw-review-controls" data-testid="prw-review-controls">
 				<button class="prw-ghost-button" ?disabled=${idx <= 0} @click=${() => moveCard(entry, host, paramKey, -1)}>Prev</button>
@@ -465,7 +593,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				${renderDiffModeControls(entry, host, paramKey)}
 				<div class="prw-diff-list">
 					${arrayOf(card.diffBlocks).length
-						? arrayOf(card.diffBlocks).map((block) => renderDiffBlock(entry, block))
+						? arrayOf(card.diffBlocks).map((block) => renderDiffBlock(entry, host, paramKey, card, block))
 						: html`<div class="prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}
 				</div>
 				${suggestedComments.length
@@ -555,7 +683,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				if (effHeadSha) query.headSha = effHeadSha;
 				const bundle = await host.callRoute("bundle", { query });
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
-				storeEntry(targetKey, { status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode: "side", mountKicked: true });
+				const cur = byJob.get(targetKey) || {};
+				const diffMode = cur.userSetMode && cur.diffMode ? cur.diffMode : defaultDiffMode();
+				storeEntry(targetKey, { ...cur, status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode, mountKicked: true });
 			};
 
 			// ── CHILD-PANE self-poll loop (read-only carve-out) ─────────────────────
@@ -721,13 +851,16 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-file-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 10px; }
 					.prw-file-roles > div { border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
 					.prw-file-roles span, .prw-file-roles small { display: block; color: var(--muted-foreground); }
-					.prw-stepper-actions, .prw-diff-mode { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+					.prw-stepper-actions, .prw-diff-mode, .prw-comment-actions, .prw-diff-header-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 					.prw-diff-mode { justify-content: flex-end; }
+					.prw-comment-actions { justify-content: flex-end; }
 					.prw-segment, .prw-ghost-button, .prw-dislike-button, .prw-line-comment-button, .prw-suggestion-chip { border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--foreground); padding: 6px 9px; }
 					.prw-segment.is-active { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); }
 					.prw-diff-block { margin-top: 12px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--background); }
 					.prw-diff-header { justify-content: space-between; padding: 9px 10px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
 					.prw-diff-header div { display: flex; gap: 8px; align-items: center; min-width: 0; }
+					.prw-diff-header-actions { margin-top: 0; flex: 0 0 auto; }
+					.prw-diff-toggle { font-family: inherit; font-size: 11px; padding: 3px 7px; }
 					.prw-diff-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 					.prw-diff-scroll { overflow-x: auto; max-width: 100%; }
 					.prw-diff-table { width: 100%; min-width: 760px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
@@ -747,7 +880,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-card-comments-head { justify-content: space-between; }
 					.prw-card-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 					.prw-suggestion-chip { background: color-mix(in oklch, var(--chart-2) 10%, transparent); }
-					.prw-card-editor { width: 100%; min-height: 72px; margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--background); color: var(--foreground); padding: 8px; }
+					.prw-card-editor, .prw-comment-editor textarea { width: 100%; min-height: 72px; margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--background); color: var(--foreground); padding: 8px; box-sizing: border-box; }
+					.prw-line-comment-row td { background: color-mix(in oklch, var(--chart-1) 6%, transparent); padding: 8px 10px; }
+					.prw-user-comments { display: grid; gap: 8px; margin-top: 10px; }
+					.prw-user-comment { border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border)); border-radius: 12px; background: color-mix(in oklch, var(--primary) 7%, transparent); padding: 8px 10px; }
+					.prw-user-comment strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-foreground); }
+					.prw-user-comment p { margin: 4px 0 0; white-space: pre-wrap; color: var(--foreground); }
 					.prw-review-controls { justify-content: space-between; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 					.prw-dislike-button { color: var(--foreground); }
 					.prw-dislike-button:hover:not(:disabled), .prw-dislike-button:focus-visible:not(:disabled) { border-color: var(--negative); color: var(--negative); background: color-mix(in oklch, var(--negative) 10%, transparent); }

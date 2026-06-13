@@ -100,6 +100,20 @@ const READY_BUNDLE = {
             },
           ],
         },
+        {
+          id: "panel-styles-diff",
+          filePath: "market-packs/pr-walkthrough/src/panel.css",
+          status: "modified",
+          hunks: [
+            {
+              header: "@@ -44,3 +44,5 @@",
+              lines: [
+                { id: "S44", kind: "ctx", text: ".prw-diff { overflow-x: auto; }" },
+                { id: "S45", kind: "add", text: ".prw-diff-block { border-radius: 14px; }" },
+              ],
+            },
+          ],
+        },
       ],
       suggestedComments: [
         { id: "comment-1", diffBlockId: "panel-diff", lineId: "L13", body: "Consider keeping one horizontal scrollbar per diff widget." },
@@ -222,5 +236,42 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		const missing = await page.evaluate(() => (window as any).__prwMissingReadyParityAffordances());
 		expect(missing, `PR walkthrough panel parity affordances missing: ${(missing as string[]).join(", ")}`).toEqual([]);
+	});
+
+	test("ready state supports user comments, dislike gating, narrow inline default, and diff collapse", async ({ page }) => {
+		await page.setViewportSize({ width: 500, height: 800 });
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__renderPrwReady());
+		await expect(page.locator('[data-testid="prw-bundle"]')).toBeVisible({ timeout: 10_000 });
+
+		await page.locator('.prw-phase-rail-collapsed button[aria-label="Diff review controls and comments"]').click();
+		await expect(page.locator(".prw-segment.is-active")).toContainText("Inline");
+		await page.getByRole("button", { name: "Side-by-side" }).click();
+		await expect(page.locator(".prw-segment.is-active")).toContainText("Side-by-side");
+
+		const dislike = page.getByRole("button", { name: "Dislike" });
+		await expect(dislike).toBeDisabled();
+		await page.getByRole("button", { name: "Add line comment" }).first().click();
+		await expect(page.locator('[data-testid="prw-line-comment-editor"]')).toBeVisible();
+		await page.locator('[data-testid="prw-line-comment-editor"] textarea').fill("Please keep the line-level affordance functional.");
+		await expect(dislike).toBeDisabled();
+		await page.getByRole("button", { name: "Save comment" }).click();
+		await expect(page.locator('[data-testid="prw-line-user-comment"]')).toContainText("line-level affordance");
+		await expect(dislike).toBeEnabled();
+
+		const blocks = page.locator('[data-testid="prw-diffblock"]');
+		await expect(blocks).toHaveCount(2);
+		await blocks.nth(0).getByTestId("prw-diff-toggle").click();
+		await expect(blocks.nth(0).locator("table")).toHaveCount(0);
+		await expect(blocks.nth(1).locator("table")).toHaveCount(1);
+
+		await page.locator('.prw-phase-rail-collapsed button[aria-label="Final review controls"]').click();
+		await expect(dislike).toBeDisabled();
+		await page.getByRole("button", { name: "Add card comment" }).click();
+		await page.locator('[data-testid="prw-card-comment-editor"] textarea').fill("Needs a follow-up before approval.");
+		await expect(dislike).toBeDisabled();
+		await page.getByRole("button", { name: "Save comment" }).click();
+		await expect(page.locator('[data-testid="prw-card-user-comment"]')).toContainText("follow-up");
+		await expect(dislike).toBeEnabled();
 	});
 });
