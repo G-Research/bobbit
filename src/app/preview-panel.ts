@@ -502,7 +502,7 @@ export function startPreviewSubscription(sessionId: string): void {
 						id: LIVE_PREVIEW_PANEL_TAB_ID,
 						source: { live: true, origin: "preview-events", ...(artifactId ? { artifactId } : {}) },
 						state: artifactId ? { artifactId } : undefined,
-						select: false,
+						select: true,
 						setAssistantTab: false,
 					});
 				}

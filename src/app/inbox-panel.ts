@@ -47,7 +47,7 @@ export function startInboxSubscription(sessionId: string, staffId: string): void
 		label: "Inbox",
 		source: { type: "inbox", sessionId, staffId },
 		updatedAt: Date.now(),
-	}, { focus: true });
+	}, { focus: false });
 	const token = ++bootstrapToken;
 
 	void (async () => {
