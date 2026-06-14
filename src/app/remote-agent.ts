@@ -36,6 +36,7 @@ import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersis
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
+import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -756,6 +757,7 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
+						void hydrateSidePanelWorkspace(this._sessionId);
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
 						this._flushOutbox();
@@ -1780,6 +1782,10 @@ export class RemoteAgent {
 				// Merge any pending-unsent outbox rows so a server queue update
 				// doesn't visually drop them before they flush (S2).
 				this.onQueueUpdate?.(this.getQueue());
+				break;
+
+			case "side_panel_workspace":
+				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
 				break;
 
 			case "goal_setup_complete":
