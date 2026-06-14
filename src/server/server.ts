@@ -162,6 +162,15 @@ async function detectedRefExistsInAllComponents(
 	}
 }
 
+async function resolveBaseRefDetectRepoPath(rootPath: string, comps: Array<{ repo: string }>): Promise<string | null> {
+	const isMultiRepo = comps.some(c => c.repo !== ".");
+	const primaryRepoPath = isMultiRepo
+		? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+		: rootPath;
+	if (!(await isGitRepo(primaryRepoPath).catch(() => false))) return null;
+	return isMultiRepo ? primaryRepoPath : await getRepoRoot(primaryRepoPath);
+}
+
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
 	const normalizedPath = pathname
 		.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}(?=\/|$)/gi, "/:id")
@@ -3549,10 +3558,12 @@ async function handleApiRoute(
 		try {
 			const cfg = ctx.projectConfigStore;
 			const comps = cfg.getComponents();
-			const isMultiRepo = comps.some(c => c.repo !== ".");
-			const primaryRepoPath = isMultiRepo
-				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-				: await getRepoRoot(rootPath);
+			const primaryRepoPath = await resolveBaseRefDetectRepoPath(rootPath, comps);
+			if (!primaryRepoPath) {
+				const parsed = parseBaseRef(cfg.get("base_ref") || "");
+				json({ resolved: parsed.ref || "", detected: null });
+				return;
+			}
 			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
 			// `detected` must be SAVEABLE — null it out unless it passes the same
 			// checks add-time pinning applies (grammar + cross-component existence).
