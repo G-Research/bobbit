@@ -1,4 +1,5 @@
 import { gatewayFetch } from "./gateway-fetch.js";
+import { legacyReviewDocumentIdFromTitle, rememberReviewDocumentIdentity } from "./panel-workspace.js";
 import { selectReviewWorkspaceTab } from "./preview-panel.js";
 import {
 	activeSessionId,
@@ -18,9 +19,16 @@ import {
 
 const REVIEW_CONTEXT_STORAGE_PREFIX = "bobbit-review-contexts-v1:";
 
+declare module "./state.js" {
+	interface ReviewDocumentModel {
+		documentId?: string;
+	}
+}
+
 export interface OpenMarkdownReviewDocumentOptions {
 	title: string;
 	markdown: string;
+	documentId?: string;
 	replace?: boolean;
 	sessionId?: string;
 }
@@ -65,17 +73,50 @@ function shouldPersistReviewDocument(doc: ReviewDocumentModel): boolean {
 	return doc.source?.kind === "verification-signoff-markdown" || doc.source?.kind === "verification-signoff-pr";
 }
 
+let generatedReviewDocumentCounter = 0;
+
+function safeDocumentIdPart(value: string): string {
+	return encodeURIComponent(value || "no-session").replace(/%/g, "_").slice(0, 80) || "no-session";
+}
+
+function normalizeDocumentId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (!trimmed || trimmed.length > 160 || /[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
+	return trimmed;
+}
+
+function newReviewDocumentId(sessionId: string): string {
+	generatedReviewDocumentCounter += 1;
+	return `review-doc:${safeDocumentIdPart(sessionId)}:${Date.now().toString(36)}-${generatedReviewDocumentCounter.toString(36)}`;
+}
+
+function reviewDocumentIdForOpen(options: OpenReviewDocumentOptions, title: string, sessionId: string): string {
+	const explicit = normalizeDocumentId(options.documentId);
+	if (explicit) return explicit;
+	const existing = state.reviewDocuments instanceof Map ? state.reviewDocuments.get(title) : undefined;
+	const existingId = normalizeDocumentId(existing?.documentId);
+	if (existing) return existingId || legacyReviewDocumentIdFromTitle(title);
+	return newReviewDocumentId(sessionId);
+}
+
 export function persistReviewDocument(sessionId: string, doc: ReviewDocumentModel): void {
 	if (!shouldPersistReviewDocument(doc)) return;
 	const docs = safeReadPersisted(sessionId);
-	docs[doc.title] = doc;
+	docs[doc.documentId || doc.title] = doc;
 	safeWritePersisted(sessionId, docs);
 }
 
 export function removePersistedReviewDocument(sessionId: string, title: string): void {
 	const docs = safeReadPersisted(sessionId);
-	if (!Object.prototype.hasOwnProperty.call(docs, title)) return;
-	delete docs[title];
+	let changed = false;
+	for (const [key, doc] of Object.entries(docs)) {
+		if (key === title || doc?.title === title || doc?.documentId === title) {
+			delete docs[key];
+			changed = true;
+		}
+	}
+	if (!changed) return;
 	safeWritePersisted(sessionId, docs);
 }
 
@@ -145,12 +186,15 @@ export function openReviewDocument(options: OpenReviewDocumentOptions): ReviewDo
 	const sessionId = options.sessionId || activeSessionId() || "";
 	const source = sourceWithDefault(options.source, sessionId);
 	const title = options.title || signoffTitle(source);
-	const doc: ReviewDocumentModel = { title, markdown: options.markdown, source };
+	const documentId = reviewDocumentIdForOpen(options, title, sessionId);
+	const doc: ReviewDocumentModel = { title, markdown: options.markdown, source, documentId };
 	state.reviewDocuments = new Map(state.reviewDocuments);
 	if (options.replace !== false || !state.reviewDocuments.has(title)) {
 		state.reviewDocuments.set(title, doc);
 	}
 	const storedDoc = state.reviewDocuments.get(title) || doc;
+	if (!storedDoc.documentId) storedDoc.documentId = documentId;
+	rememberReviewDocumentIdentity(title, storedDoc.documentId);
 	state.reviewPanelOpen = true;
 	state.reviewActiveTab = title;
 	state.previewPanelActiveTab = "review";
@@ -174,7 +218,8 @@ export function openReviewDocumentFromEvent(detail: unknown, sessionId = activeS
 		? record.title.trim()
 		: source ? signoffTitle(source) : "Review";
 	const replace = typeof record.replace === "boolean" ? record.replace : true;
-	return openReviewDocument({ title, markdown, source, replace, sessionId });
+	const documentId = normalizeDocumentId(record.documentId);
+	return openReviewDocument({ title, markdown, source, documentId, replace, sessionId });
 }
 
 export function restorePersistedReviewDocuments(sessionId: string, options: { select?: boolean } = {}): void {
@@ -185,6 +230,8 @@ export function restorePersistedReviewDocuments(sessionId: string, options: { se
 	let firstTitle = "";
 	for (const doc of entries) {
 		if (!firstTitle) firstTitle = doc.title;
+		if (!doc.documentId) doc.documentId = legacyReviewDocumentIdFromTitle(doc.title);
+		rememberReviewDocumentIdentity(doc.title, doc.documentId);
 		if (!state.reviewDocuments.has(doc.title)) state.reviewDocuments.set(doc.title, doc);
 	}
 	state.reviewPanelOpen = state.reviewDocuments.size > 0;
@@ -251,7 +298,9 @@ export function reviewDocumentFromDecisionDetail(detail: unknown): ReviewDocumen
 		if (embedded && typeof embedded === "object" && !Array.isArray(embedded)) {
 			const doc = embedded as Record<string, unknown>;
 			if (typeof doc.title === "string" && typeof doc.markdown === "string") {
-				return { title: doc.title, markdown: doc.markdown, source: normalizeReviewSource(doc.source) || normalizeReviewSource(record.source) };
+				const documentId = normalizeDocumentId(doc.documentId);
+				if (documentId) rememberReviewDocumentIdentity(doc.title, documentId);
+				return { title: doc.title, markdown: doc.markdown, documentId, source: normalizeReviewSource(doc.source) || normalizeReviewSource(record.source) };
 			}
 		}
 		const title = typeof record.title === "string" ? record.title

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
 	CHAT_PANEL_TAB_ID,
+	DEFAULT_PACK_PANEL_INSTANCE_KEY,
 	INBOX_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	activePanelTabIdForSession,
@@ -14,6 +15,8 @@ import {
 	isPinnedPanelTab,
 	nextActivePanelTabId,
 	normalizeSidePanelTabs,
+	packPanelRefFromTabId,
+	packPanelTabId,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewEntryTabId,
@@ -24,6 +27,10 @@ import {
 	previewVersionedTabId,
 	registerPreviewVersion,
 	reorderSidePanelTab,
+	legacyReviewDocumentIdFromTitle,
+	rememberReviewDocumentIdentity,
+	reviewDocumentIdForTitle,
+	reviewDocumentIdFromPanelTab,
 	reviewPanelTabId,
 	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
@@ -147,6 +154,36 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID)?.id, previewEntryTabId("inline.html"));
 		assert.equal(findPanelTab(tabs, previewVersionedTabId("missing.html", 1)), undefined);
 		assert.equal(findPanelTab(tabs, reviewPanelTabId("Encoded Title"))?.id, reviewPanelTabId("Encoded Title"));
+	});
+
+	it("uses durable pack instance keys while accepting legacy two-part pack ids", () => {
+		assert.equal(packPanelTabId("demo_pack", "demo.panel"), `pack:demo_pack:demo.panel:${DEFAULT_PACK_PANEL_INSTANCE_KEY}`);
+		assert.equal(packPanelTabId("demo_pack", "demo.panel", "artifact-1"), "pack:demo_pack:demo.panel:artifact-1");
+		assert.deepEqual(packPanelRefFromTabId("pack:demo_pack:demo.panel"), {
+			packId: "demo_pack",
+			panelId: "demo.panel",
+			instanceKey: DEFAULT_PACK_PANEL_INSTANCE_KEY,
+			legacyTwoPart: true,
+		});
+		assert.deepEqual(packPanelRefFromTabId("pack:demo_pack:demo.panel:artifact-1"), {
+			packId: "demo_pack",
+			panelId: "demo.panel",
+			instanceKey: "artifact-1",
+			legacyTwoPart: undefined,
+		});
+	});
+
+	it("maps review tabs by document id with deterministic legacy-title fallback", () => {
+		const legacyId = legacyReviewDocumentIdFromTitle("Findings");
+		assert.match(legacyId, /^legacy-title-[a-f0-9]{64}$/);
+		assert.equal(reviewDocumentIdForTitle("Findings"), legacyId);
+		assert.equal(reviewPanelTabId("Findings"), `review:${encodeURIComponent(legacyId)}`);
+
+		rememberReviewDocumentIdentity("Findings", "review-doc:s1:abc");
+		const tab = reviewTab("Findings");
+		assert.equal(tab.id, "review:review-doc%3As1%3Aabc");
+		assert.equal(reviewDocumentIdFromPanelTab(tab), "review-doc:s1:abc");
+		assert.equal(findPanelTab([tab], "review:Findings")?.id, tab.id);
 	});
 
 	it("active helpers never return or store chat", () => {

@@ -269,12 +269,12 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 	// sidebar uses, NOT a bare `selectedSessionId` assignment that skips the hash
 	// route + hydration) and mounting the tab under it — without regressing the
 	// default (no `sessionId`) active-session behaviour.
-	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion === 2)", async ({ page }) => {
+	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion === 3)", async ({ page }) => {
 		await gotoAndWait(page);
 
-		// The additive field bumped the data/addressing contract 1→2.
+		// Additive addressing fields bumped the data/addressing contract to v3.
 		const cv = await page.evaluate(() => (window as any).__contractVersion());
-		expect(cv).toBe(2);
+		expect(cv).toBe(3);
 
 		// Register demo.panel for a project, install the switcher stub (the production
 		// hook is `connectToSession`), and start from an "owner" session view.
@@ -297,7 +297,7 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 			};
 		});
 
-		const expectedTabId = "pack:demo_pack:demo.panel";
+		const expectedTabId = "pack:demo_pack:demo.panel:default";
 		// (a) the REAL switch path was invoked for the child session — openPackPanel
 		//     delegated to the canonical switcher, not a bare selectedSessionId set.
 		expect(result.switchTarget).toBe("child-session");
@@ -326,6 +326,24 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 		// No session retargeting: selection is untouched and the tab mounts under the
 		// active session exactly as before.
 		expect(result.selected).toBe("active-session");
-		expect(result.activeTabs).toContain("pack:demo_pack:demo.panel");
+		expect(result.activeTabs).toContain("pack:demo_pack:demo.panel:default");
+	});
+
+	test("PanelTarget.instanceKey and allowlisted params create distinct pack panel tabs", async ({ page }) => {
+		await gotoAndWait(page);
+
+		const result = await page.evaluate(async () => {
+			await (window as any).__reconcile("D5");
+			(window as any).__setSelectedSessionId("active-session");
+			(window as any).__openWithParams("demo.panel", { artifactId: "artifact-a" });
+			(window as any).__openWithParams("demo.panel", { artifactId: "artifact-b" });
+			(window as any).__openWithInstanceKey("demo.panel", "explicit-key", { artifactId: "artifact-c" });
+			await (window as any).__flush();
+			return (window as any).__tabIdsForSession("active-session");
+		});
+
+		expect(result).toContain("pack:demo_pack:demo.panel:artifact-a");
+		expect(result).toContain("pack:demo_pack:demo.panel:artifact-b");
+		expect(result).toContain("pack:demo_pack:demo.panel:explicit-key");
 	});
 });
