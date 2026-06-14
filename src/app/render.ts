@@ -764,6 +764,11 @@ export async function setSidePanelSizeMode(mode: SidePanelSizeMode, sessionId: s
 	state.previewPanelFullscreen = mode === "fullscreen";
 	if (!sid || sid === "__no-session__") return;
 	try {
+		const legacyKey = `bobbit-preview-collapsed-${sid}`;
+		if (mode === "collapsed") localStorage.setItem(legacyKey, "true");
+		else localStorage.removeItem(legacyKey);
+	} catch { /* localStorage is only a compatibility mirror, never authoritative */ }
+	try {
 		await setServerSidePanelSizeMode(mode, { sessionId: sid });
 	} catch (err) {
 		console.warn("[side-panel] resize mutation failed", err);
@@ -1961,9 +1966,10 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
-	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
-		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
-	);
+	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => {
+		if (tab.kind === "review") return tab.title || tab.label || "Review";
+		return tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "");
+	};
 
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
 		const label = panelTabButtonLabel(tab);
@@ -2155,6 +2161,13 @@ export function doRenderApp(): void {
 					if (agent) {
 						agent.prompt(e.detail.feedback);
 						const sid = activeSessionId() || "";
+						const reviewTabIds = [...new Set([
+							...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
+							...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
+						])];
+						const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
+						setPanelTabsForSession(state, sid, remainingLegacyTabs);
+						setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
 						clearAllAnnotations(sid);
 						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
@@ -2162,6 +2175,7 @@ export function doRenderApp(): void {
 						state.reviewDocuments = new Map();
 						state.reviewPanelOpen = false;
 						state.reviewActiveTab = "";
+						await Promise.allSettled(reviewTabIds.map((tabId) => closeServerSidePanelTab(tabId, { sessionId: sid })));
 						renderApp();
 					}
 				}}
@@ -2205,15 +2219,23 @@ export function doRenderApp(): void {
 						renderApp();
 					}
 				}}
-				@review-dismiss=${() => {
+				@review-dismiss=${async () => {
 					const sid = activeSessionId() || "";
+					const reviewTabIds = [...new Set([
+						...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
+						...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
+					])];
 					const hasMarkdownReview = [...state.reviewDocuments.values()].some((doc) => !doc.source || doc.source.kind === "markdown-review");
+					const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
+					setPanelTabsForSession(state, sid, remainingLegacyTabs);
+					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
 					clearAllAnnotations(sid);
 					clearPersistedReviewDocuments(sid);
 					if (hasMarkdownReview) markReviewSubmitted(sid);
 					state.reviewDocuments = new Map();
 					state.reviewPanelOpen = false;
 					state.reviewActiveTab = "";
+					await Promise.allSettled(reviewTabIds.map((tabId) => closeServerSidePanelTab(tabId, { sessionId: sid })));
 					renderApp();
 				}}
 			></review-pane>

@@ -16,6 +16,7 @@ import {
 	panelTabsForSession,
 	previewContentHashFromTab,
 	proposalPanelTabId,
+	assistantProposalType,
 	reviewDocumentIdForTitle,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
@@ -377,7 +378,8 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 		: undefined;
 	const activeRev = requestedRev != null ? activeProposalRevForSession(type, sessionId) : undefined;
 	const rev = activeRev === requestedRev ? undefined : requestedRev;
-	if (rev == null && !hasCurrentProposalSlotForSession(state as any, type, sessionId)) {
+	const isCurrentAssistantProposal = type === assistantProposalType(state.assistantType);
+	if (rev == null && !hasCurrentProposalSlotForSession(state as any, type, sessionId) && !isCurrentAssistantProposal) {
 		removePanelWorkspaceTabs([proposalPanelTabId(type)], { sessionId, select: false, clearCollapse: false });
 		return;
 	}
