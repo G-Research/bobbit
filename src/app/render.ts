@@ -100,6 +100,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { renderPackPanelContent } from "./pack-panels.js";
+import { reorderSidePanelTabs } from "./side-panel-workspace.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -1508,15 +1509,19 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 				}
 
 				if (!samePanelTabOrder(currentTabs, reordered)) {
-					setPanelTabsForSession(state, sid, reordered);
+					const orderedIds = reordered.map((tab) => tab.id);
+					void reorderSidePanelTabs(orderedIds, undefined, { sessionId: sid }).catch((err) => {
+						console.warn("[side-panel] failed to persist tab reorder", err);
+					});
 				}
 			} finally {
 				setRenderSuppressed(false);
 				// Always trigger a render: when we took an early `return` above
 				// (pinned-blocked or invariant-violation revert), state was not
 				// mutated and lit-html will restore the canonical DOM order.
-				// When we committed setPanelTabsForSession, it already triggers a
-				// render — an extra one here is harmless.
+				// When we commit through reorderSidePanelTabs, its optimistic mirror
+				// update may have rendered while suppression was active — an extra
+				// render here is harmless and makes the committed order visible.
 				renderApp();
 			}
 		},

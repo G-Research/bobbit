@@ -375,6 +375,17 @@ function nextActiveAfterClose(tabsBeforeClose: SidePanelWorkspaceTab[], closedId
 	return remaining[Math.min(closedIndex, remaining.length - 1)]?.id || remaining[remaining.length - 1]?.id || "";
 }
 
+function isPinnedSidePanelWorkspaceTab(tab: SidePanelWorkspaceTab): boolean {
+	return tab.kind === "inbox" || tab.id === INBOX_PANEL_TAB_ID;
+}
+
+function pinnedFirstWorkspaceTabs(tabs: SidePanelWorkspaceTab[]): SidePanelWorkspaceTab[] {
+	const pinned: SidePanelWorkspaceTab[] = [];
+	const unpinned: SidePanelWorkspaceTab[] = [];
+	for (const tab of tabs) (isPinnedSidePanelWorkspaceTab(tab) ? pinned : unpinned).push(tab);
+	return [...pinned, ...unpinned];
+}
+
 async function readJsonSafe(res: Response): Promise<unknown> {
 	try { return await res.json(); } catch { return undefined; }
 }
@@ -523,13 +534,23 @@ export async function reorderSidePanelTabs(tabIds: string[], baseRevision?: numb
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
 	const base = getSidePanelWorkspace(sessionId);
 	const byId = new Map(base.tabs.map((tab) => [tab.id, tab]));
-	const ordered = tabIds.map((id) => byId.get(id)).filter((tab): tab is SidePanelWorkspaceTab => !!tab);
-	for (const tab of base.tabs) if (!tabIds.includes(tab.id)) ordered.push(tab);
+	const seen = new Set<string>();
+	const orderedInputIds: string[] = [];
+	for (const id of tabIds) {
+		if (!byId.has(id) || seen.has(id)) continue;
+		seen.add(id);
+		orderedInputIds.push(id);
+	}
+	let ordered = orderedInputIds.map((id) => byId.get(id)).filter((tab): tab is SidePanelWorkspaceTab => !!tab);
+	for (const tab of base.tabs) if (!seen.has(tab.id)) ordered.push(tab);
+	ordered = pinnedFirstWorkspaceTabs(ordered);
+	const orderedIds = ordered.map((tab) => tab.id);
+	const revision = baseRevision ?? options.baseRevision ?? base.revision;
 	const optimistic = withWorkspaceUpdate(base, { tabs: ordered, activeTabId: ordered.some((tab) => tab.id === base.activeTabId) ? base.activeTabId : ordered[0]?.id || "" });
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, "/reorder", {
 		method: "POST",
-		body: mutationBody({ tabIds, baseRevision: baseRevision ?? options.baseRevision ?? base.revision }, base, { ...options, baseRevision: baseRevision ?? options.baseRevision ?? base.revision }),
+		body: mutationBody({ tabIds: orderedIds, baseRevision: revision }, base, { ...options, baseRevision: revision }),
 	}));
 }
 
