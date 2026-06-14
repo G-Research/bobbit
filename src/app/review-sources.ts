@@ -1,6 +1,7 @@
 import { gatewayFetch } from "./gateway-fetch.js";
-import { legacyReviewDocumentIdFromTitle, rememberReviewDocumentIdentity } from "./panel-workspace.js";
+import { legacyReviewDocumentIdFromTitle, rememberReviewDocumentIdentity, reviewPanelTabId } from "./panel-workspace.js";
 import { selectReviewWorkspaceTab } from "./preview-panel.js";
+import { closeSidePanelTab } from "./side-panel-workspace.js";
 import {
 	activeSessionId,
 	renderApp,
@@ -201,7 +202,6 @@ export function openReviewDocument(options: OpenReviewDocumentOptions): ReviewDo
 	state.previewPanelTab = "review";
 	selectReviewWorkspaceTab(title, { sessionId, select: true });
 	if (sessionId) {
-		localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`);
 		persistReviewDocument(sessionId, storedDoc);
 	}
 	renderApp();
@@ -222,7 +222,7 @@ export function openReviewDocumentFromEvent(detail: unknown, sessionId = activeS
 	return openReviewDocument({ title, markdown, source, documentId, replace, sessionId });
 }
 
-export function restorePersistedReviewDocuments(sessionId: string, options: { select?: boolean } = {}): void {
+export function restorePersistedReviewDocuments(sessionId: string, _options: { select?: boolean } = {}): void {
 	const docs = safeReadPersisted(sessionId);
 	const entries = Object.values(docs).filter((doc) => doc?.title && typeof doc.markdown === "string" && shouldPersistReviewDocument(doc));
 	if (entries.length === 0) return;
@@ -236,11 +236,6 @@ export function restorePersistedReviewDocuments(sessionId: string, options: { se
 	}
 	state.reviewPanelOpen = state.reviewDocuments.size > 0;
 	if (!state.reviewActiveTab && firstTitle) state.reviewActiveTab = firstTitle;
-	if (options.select !== false && state.reviewActiveTab) {
-		state.previewPanelActiveTab = "review";
-		state.previewPanelTab = "review";
-		selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId, select: true });
-	}
 	renderApp();
 }
 
@@ -407,8 +402,6 @@ export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayloa
 		state.reviewActiveTab = [...state.reviewDocuments.keys()][0] || "";
 	}
 	state.reviewPanelOpen = state.reviewDocuments.size > 0;
-	if (state.reviewPanelOpen && state.reviewActiveTab) {
-		selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId, select: true });
-	}
+	if (doc.documentId) void closeSidePanelTab(reviewPanelTabId(doc.documentId), { sessionId });
 	renderApp();
 }

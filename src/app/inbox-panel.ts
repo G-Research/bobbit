@@ -21,6 +21,8 @@
  */
 
 import { state, renderApp } from "./state.js";
+import { openSidePanelTab } from "./side-panel-workspace.js";
+import { INBOX_PANEL_TAB_ID } from "./panel-workspace.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 
 let currentSid: string | null = null;
@@ -38,6 +40,14 @@ export function startInboxSubscription(sessionId: string, staffId: string): void
 	currentStaffId = staffId;
 	state.inboxPanelOpen = true;
 	state.inboxEntries = [];
+	void openSidePanelTab({
+		id: INBOX_PANEL_TAB_ID,
+		kind: "inbox",
+		title: "Inbox",
+		label: "Inbox",
+		source: { type: "inbox", sessionId, staffId },
+		updatedAt: Date.now(),
+	}, { focus: true });
 	const token = ++bootstrapToken;
 
 	void (async () => {

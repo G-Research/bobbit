@@ -4,7 +4,6 @@ import {
 	CHAT_PANEL_TAB_ID,
 	INBOX_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
-	activePanelTabIdForSession,
 	isHistoricalPreviewTab,
 	previewEntryLabel,
 	previewEntryTabId,
@@ -15,13 +14,19 @@ import {
 	panelTabsForSession,
 	previewContentHashFromTab,
 	proposalPanelTabId,
+	reviewDocumentIdForTitle,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
-	setActivePanelTabIdForSession,
-	setPanelTabsForSession,
 	type LegacyPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import {
+	closeSidePanelTab,
+	getSidePanelWorkspace,
+	openSidePanelTab,
+	updateSidePanelTab,
+	type SidePanelWorkspaceTab,
+} from "./side-panel-workspace.js";
 
 // WP-E: SSE subscription to per-session preview mount events.
 // The gateway watches <stateDir>/preview/<sid>/ and emits a `preview-changed`
@@ -58,17 +63,6 @@ function activeProposalRevForSession(type: string, sessionId: string): number | 
 	if (sessionId && typeof slot.sessionId === "string" && slot.sessionId && slot.sessionId !== sessionId) return undefined;
 	const rev = slot.rev;
 	return typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
-}
-
-function mutablePanelTabs(s: any, sessionId: string): PanelWorkspaceTab[] {
-	return panelTabsForSession(s, sessionId);
-}
-
-function upsertPanelTabState(s: any, sessionId: string, tab: PanelWorkspaceTab): void {
-	const tabs = mutablePanelTabs(s, sessionId);
-	const idx = tabs.findIndex(t => t?.id === tab.id);
-	if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
-	else tabs.push(tab);
 }
 
 function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWorkspaceOptions): void {
@@ -110,11 +104,6 @@ function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWork
 	}
 }
 
-function clearCollapseKey(sessionId: string | undefined): void {
-	if (!sessionId) return;
-	try { localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`); } catch { /* ignore */ }
-}
-
 function emitPanelWorkspaceEvent(action: "select" | "close", detail: Record<string, unknown>): void {
 	try {
 		if (typeof window === "undefined" || typeof CustomEvent === "undefined") return;
@@ -124,45 +113,107 @@ function emitPanelWorkspaceEvent(action: "select" | "close", detail: Record<stri
 	} catch { /* ignore */ }
 }
 
-async function notifyOptionalPanelWorkspaceModule(action: "select" | "close", detail: Record<string, unknown>): Promise<void> {
-	try {
-		const spec = "./" + "panel-workspace.js";
-		const mod: any = await import(/* @vite-ignore */ spec);
-		const payload = { action, ...detail };
-		const fn = action === "close"
-			? mod.closePanelTab ?? mod.removePanelTab ?? mod.applyPanelWorkspaceSelection
-			: mod.selectPanelTab ?? mod.openPanelTab ?? mod.upsertPanelTab ?? mod.applyPanelWorkspaceSelection;
-		if (typeof fn === "function") await fn(payload);
-	} catch { /* optional integration point; absent until core workspace lands */ }
+function sidePanelTabFromLegacy(tab: PanelWorkspaceTab, sessionId: string): SidePanelWorkspaceTab | undefined {
+	const updatedAt = Date.now();
+	if (tab.kind === "preview") {
+		const source = tab.source as Record<string, unknown>;
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const entry = previewEntryLabel(typeof tabState.entry === "string" ? tabState.entry : typeof source.entry === "string" ? source.entry : tab.title);
+		const version = typeof source.version === "number" ? source.version : typeof tabState.version === "number" ? tabState.version : undefined;
+		const contentHash = normalizePreviewContentHash(source.contentHash) || normalizePreviewContentHash(tabState.contentHash);
+		const historical = source.historical === true || tabState.historical === true || (typeof version === "number" && version > 0);
+		return {
+			id: tab.id,
+			kind: "preview",
+			title: tab.title,
+			label: tab.label,
+			source: {
+				type: "preview",
+				sessionId,
+				entry,
+				...(historical ? { historical: true } : { live: source.live === true }),
+				...(typeof version === "number" && version > 0 ? { version: Math.trunc(version) } : {}),
+				...(typeof source.artifactId === "string" ? { artifactId: source.artifactId } : {}),
+				...(contentHash ? { contentHash } : {}),
+				...(typeof source.path === "string" ? { path: source.path } : {}),
+				...(typeof source.url === "string" ? { url: source.url } : {}),
+				...(typeof source.toolUseId === "string" ? { toolUseId: source.toolUseId } : {}),
+				...(typeof source.blockIndex === "number" ? { blockIndex: source.blockIndex } : {}),
+			},
+			state: tab.state,
+			updatedAt,
+		};
+	}
+	if (tab.kind === "proposal" && tab.source.type === "proposal") {
+		const source = tab.source as Record<string, unknown>;
+		const proposalType = typeof source.proposalType === "string" ? source.proposalType : "goal";
+		const rev = typeof source.rev === "number" && Number.isFinite(source.rev) && source.rev > 0 ? Math.trunc(source.rev) : undefined;
+		return {
+			id: tab.id,
+			kind: "proposal",
+			title: tab.title,
+			label: tab.label,
+			source: { type: "proposal", sessionId, proposalType: proposalType as any, ...(rev ? { rev, historical: true } : {}) },
+			state: tab.state,
+			updatedAt,
+		};
+	}
+	if (tab.kind === "review") {
+		const title = reviewTitleFromPanelTab(tab) || tab.title.replace(/^Review:\s*/, "") || "Review";
+		const documentId = typeof (tab.source as any).documentId === "string" && (tab.source as any).documentId
+			? (tab.source as any).documentId
+			: reviewDocumentIdForTitle(title);
+		return {
+			id: reviewPanelTabId(documentId),
+			kind: "review",
+			title: `Review: ${title}`,
+			label: `Review: ${title}`,
+			source: { type: "review", sessionId, documentId, title },
+			state: tab.state,
+			updatedAt,
+		};
+	}
+	if (tab.kind === "inbox") {
+		return { id: INBOX_PANEL_TAB_ID, kind: "inbox", title: tab.title || "Inbox", label: tab.label || "Inbox", source: { type: "inbox", sessionId }, state: tab.state, updatedAt };
+	}
+	if (tab.kind === "pack" && tab.source.type === "pack") {
+		return {
+			id: tab.id,
+			kind: "pack",
+			title: tab.title,
+			label: tab.label,
+			source: { type: "pack", sessionId, packId: tab.source.packId, panelId: tab.source.panelId, instanceKey: tab.source.instanceKey || "default", singleton: tab.source.singleton, params: tab.source.params },
+			state: tab.state,
+			updatedAt,
+		};
+	}
+	return undefined;
+}
+
+function isSidePanelTabOpen(sessionId: string, tabId: string): boolean {
+	return getSidePanelWorkspace(sessionId).tabs.some((tab) => tab.id === tabId);
 }
 
 export function selectPanelWorkspaceTab(tab: PanelWorkspaceTab, options: PanelWorkspaceOptions = {}): void {
 	const s = state as any;
 	const sessionId = panelSessionId(options.sessionId);
-	upsertPanelTabState(s, sessionId, tab);
-	if (options.select !== false) {
-		setActivePanelTabIdForSession(s, sessionId, tab.id);
-	}
 	applyLegacySelection(s, tab, options);
-	if (options.clearCollapse !== false) clearCollapseKey(sessionId || undefined);
-	const detail = { tab, activeTabId: options.select === false ? activePanelTabIdForSession(s, sessionId) : tab.id, options };
-	emitPanelWorkspaceEvent("select", detail);
-	void notifyOptionalPanelWorkspaceModule("select", detail);
+	const sideTab = tab.kind === "chat" ? undefined : sidePanelTabFromLegacy(tab, sessionId);
+	if (sideTab) {
+		if (options.select === false) {
+			if (isSidePanelTabOpen(sessionId, sideTab.id)) void updateSidePanelTab(sideTab.id, sideTab, { sessionId });
+		} else {
+			void openSidePanelTab(sideTab, { focus: true });
+		}
+	}
+	const activeTabId = options.select === false ? getSidePanelWorkspace(sessionId).activeTabId : tab.id;
+	emitPanelWorkspaceEvent("select", { tab, activeTabId, options });
 }
 
 export function removePanelWorkspaceTabs(ids: string[], options: PanelWorkspaceOptions = {}): void {
-	const s = state as any;
 	const sessionId = panelSessionId(options.sessionId);
-	const idSet = new Set(ids);
-	const tabs = panelTabsForSession(s, sessionId);
-	const kept = tabs.filter((tab: PanelWorkspaceTab) => !idSet.has(tab.id));
-	setPanelTabsForSession(s, sessionId, kept);
-	if (s.panelWorkspace && typeof s.panelWorkspace === "object" && Array.isArray(s.panelWorkspace.tabs)) {
-		s.panelWorkspace.tabs = kept;
-	}
-	const detail = { tabIds: ids, options };
-	emitPanelWorkspaceEvent("close", detail);
-	void notifyOptionalPanelWorkspaceModule("close", detail);
+	for (const id of ids) void closeSidePanelTab(id, { sessionId });
+	emitPanelWorkspaceEvent("close", { tabIds: ids, options });
 }
 
 export function selectHtmlPreviewTab(args: {
@@ -291,16 +342,16 @@ export function selectHtmlPreviewTab(args: {
 		state: tabState,
 	};
 	if (!isVersionedHistorical && args.select !== false) {
-		for (let i = 0; i < existingTabs.length; i++) {
-			const candidate = existingTabs[i];
+		for (const candidate of existingTabs) {
 			if (candidate.kind !== "preview" || candidate.id === tab.id) continue;
 			const candidateSource = { ...candidate.source as Record<string, unknown> };
 			if (candidateSource.live === true) {
 				delete candidateSource.live;
-				existingTabs[i] = { ...candidate, source: candidateSource as PanelWorkspaceTab["source"] };
+				const next = { ...candidate, source: candidateSource as PanelWorkspaceTab["source"] };
+				const sideTab = sidePanelTabFromLegacy(next, sessionId);
+				if (sideTab && isSidePanelTabOpen(sessionId, sideTab.id)) void updateSidePanelTab(sideTab.id, sideTab, { sessionId, skipRender: true });
 			}
 		}
-		setPanelTabsForSession(s, sessionId, existingTabs);
 	}
 	selectPanelWorkspaceTab(tab, {
 		sessionId,
@@ -362,35 +413,12 @@ export function closeReviewWorkspaceTabs(titles?: string[], options: PanelWorksp
 }
 
 export function selectSensiblePanelWorkspaceTab(options: PanelWorkspaceOptions = {}): void {
-	const s = state as any;
 	const sessionId = options.sessionId || activeSessionId() || "";
-	if (s.reviewPanelOpen && s.reviewDocuments instanceof Map && s.reviewDocuments.size > 0) {
-		const title = s.reviewActiveTab || [...s.reviewDocuments.keys()][0];
-		if (title) {
-			selectReviewWorkspaceTab(title, { ...options, sessionId });
-			return;
-		}
-	}
-	if (s.isPreviewSession) {
-		selectHtmlPreviewTab({
-			sessionId,
-			entry: s.previewPanelEntry || "index.html",
-			mtime: s.previewPanelMtime,
-			contentHash: s.previewPanelContentHash,
-			id: LIVE_PREVIEW_PANEL_TAB_ID,
-			select: options.select,
-			setAssistantTab: options.setAssistantTab,
-		});
-		return;
-	}
-	for (const type of ["goal", "project", "role", "tool", "staff"]) {
-		if (s.activeProposals?.[type]) {
-			selectProposalWorkspaceTab(type, { ...options, sessionId });
-			return;
-		}
-	}
-	if (s.inboxPanelOpen || (Array.isArray(s.inboxEntries) && s.inboxEntries.length > 0)) {
-		selectPanelWorkspaceTab({ id: INBOX_PANEL_TAB_ID, kind: "inbox", title: "Inbox", label: "Inbox", legacyTab: "inbox", source: { type: "inbox", sessionId } }, { ...options, sessionId });
+	const workspace = getSidePanelWorkspace(sessionId);
+	const existing = workspace.tabs.find((tab) => tab.id === workspace.activeTabId) || workspace.tabs[0];
+	const legacy = existing ? panelTabsForSession(state, sessionId).find((tab) => tab.id === existing.id) : undefined;
+	if (legacy) {
+		selectPanelWorkspaceTab(legacy, { ...options, sessionId });
 		return;
 	}
 	selectPanelWorkspaceTab({ id: CHAT_PANEL_TAB_ID, kind: "chat", title: "Chat", label: "Chat", legacyTab: "chat", source: { type: "chat", sessionId } }, { ...options, sessionId, clearCollapse: false });
@@ -436,7 +464,7 @@ export function startPreviewSubscription(sessionId: string): void {
 					id: LIVE_PREVIEW_PANEL_TAB_ID,
 					source: { live: true, origin: "preview-bootstrap", ...(artifactId ? { artifactId } : {}) },
 					state: artifactId ? { artifactId } : undefined,
-					select: state.previewPanelTab === "preview" || state.previewPanelActiveTab === "preview",
+					select: false,
 				});
 			}
 			renderApp();
@@ -474,7 +502,8 @@ export function startPreviewSubscription(sessionId: string): void {
 						id: LIVE_PREVIEW_PANEL_TAB_ID,
 						source: { live: true, origin: "preview-events", ...(artifactId ? { artifactId } : {}) },
 						state: artifactId ? { artifactId } : undefined,
-						select: activeSessionId() === sessionId,
+						select: false,
+						setAssistantTab: false,
 					});
 				}
 				renderApp();

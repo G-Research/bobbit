@@ -34,11 +34,9 @@ import {
 	DEFAULT_PACK_PANEL_INSTANCE_KEY,
 	packPanelRefFromTabId,
 	packPanelTabId,
-	panelTabsForSession,
-	setPanelTabsForSession,
-	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import { closeSidePanelTab, openSidePanelTab } from "./side-panel-workspace.js";
 import type { HostApi, PanelTarget } from "../shared/extension-host/host-api.js";
 
 /** Host toolkit handed to a pack panel's factory — keeps the pack on the app's
@@ -288,7 +286,7 @@ export function panelInfosFromContributions(packs: ReadonlyArray<PackContributio
 		for (const panel of p.panels) {
 			const panelId = typeof panel?.id === "string" ? panel.id : undefined;
 			if (!panelId) continue;
-			const raw = panel as Record<string, unknown>;
+			const raw = panel as unknown as Record<string, unknown>;
 			out.push({
 				packId,
 				panelId,
@@ -461,26 +459,19 @@ function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown
 			}
 		}
 		const sid = sessionId || s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
+		if (!sid) return;
 		const id = packPanelTabId(reg.packId, reg.panelId, instanceKey);
 		const title = reg.title || reg.panelId;
 		const singleton = reg.instanceMode !== "parameterized";
-		const tab: PanelWorkspaceTab = {
+		void openSidePanelTab({
 			id,
 			kind: "pack",
 			title,
 			label: title,
-			legacyTab: "pack",
 			source: { type: "pack", packId: reg.packId, panelId: reg.panelId, instanceKey, singleton, params, sessionId: sid },
 			state: { packId: reg.packId, panelId: reg.panelId, instanceKey, singleton, params },
-		};
-		const tabs = panelTabsForSession(state, sid);
-		const idx = tabs.findIndex((t) => t?.id === id);
-		const nextTabs = idx >= 0
-			? tabs.map((t) => (t.id === id ? { ...t, ...tab } : t))
-			: [...tabs, tab];
-		setPanelTabsForSession(state, sid, nextTabs);
-		setActivePanelTabIdForSession(state, sid, id);
-		try { renderApp(); } catch { /* non-DOM */ }
+			updatedAt: Date.now(),
+		}, { focus: true });
 	} catch {
 		/* no app state (unit fixtures) — the registry/load path still ran */
 	}
@@ -494,15 +485,14 @@ function removePackPanelTab(packId: string, panelId: string): void {
 		if (!bySession || typeof bySession !== "object") return;
 		for (const [sid, tabs] of Object.entries(bySession)) {
 			if (!Array.isArray(tabs)) continue;
-			const nextTabs = tabs.filter((t) => {
-				const ref = packPanelRefFromTabId(t?.id);
-				return !(ref?.packId === packId && ref.panelId === panelId);
-			});
-			if (nextTabs.length === tabs.length) continue;
-			const key = sid === "__no-session__" ? undefined : sid;
-			setPanelTabsForSession(state, key, nextTabs);
+			for (const tab of tabs) {
+				const ref = packPanelRefFromTabId(tab?.id);
+				if (ref?.packId === packId && ref.panelId === panelId) {
+					const key = sid === "__no-session__" ? undefined : sid;
+					void closeSidePanelTab(tab.id, { sessionId: key });
+				}
+			}
 		}
-		try { renderApp(); } catch { /* non-DOM */ }
 	} catch {
 		/* best-effort */
 	}

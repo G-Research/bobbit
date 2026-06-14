@@ -7,12 +7,6 @@
 // shared `renderGoalForm` builder live here. Loaded on first proposal-panel
 // view via `proposal-panels-lazy.ts`.
 //
-// IMPORTANT: this module pulls in render.ts via the three workspace helpers
-// below (`unifiedPanelTabs`, `setUnifiedActiveTab`, `workspaceSessionId`).
-// That's only safe because this module is itself dynamic-imported — render.ts
-// never statically references this file. Don't add a static import from
-// render.ts to here or you'll re-bloat the entry chunk.
-
 import { html, nothing, type TemplateResult } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { icon } from "@mariozechner/mini-lit";
@@ -71,24 +65,18 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
-	activeSidePanelTabIdForSession,
-	findPanelTab,
 	isHistoricalProposalTab,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
-	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import { closeSidePanelTab } from "./side-panel-workspace.js";
 import "../ui/components/CommentableMarkdown.js";
 import type {
 	ViewMode as ProjectViewMode,
 	ProposalComponent,
 	ProposalWorkflow,
 } from "./project-proposal-views.js";
-// Workspace helpers that still live in render.ts. Importing them back is safe
-// because proposal-panels.ts is itself only dynamic-imported from render.ts —
-// the static graph never resolves this edge.
-import { unifiedPanelTabs, setUnifiedActiveTab, workspaceSessionId } from "./render.js";
 // Triggers editor (lazy). Only the `TriggerDef` type is needed here; the
 // runtime module is dynamic-imported below.
 import type { TriggerDef as _TriggerDef } from "./render-triggers.js";
@@ -406,15 +394,9 @@ function clearProposalReviewState(sessionId: string | null | undefined, type: Pr
 	}
 }
 
-function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
-	const tabs = unifiedPanelTabs();
-	const removedId = proposalPanelTabId(type);
-	const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
-	if (activeId === removedId || !findPanelTab(tabs, activeId)) {
-		const fallback = tabs[0];
-		if (fallback) setUnifiedActiveTab(fallback);
-		else setActivePanelTabIdForSession(state, workspaceSessionId(), "");
-	}
+function closeCurrentProposalPanel(type: ProposalType, sessionId: string | null | undefined): void {
+	if (!sessionId) return;
+	void closeSidePanelTab(proposalPanelTabId(type), { sessionId });
 }
 
 function dismissTypedProposal(type: ProposalType): void {
@@ -430,7 +412,7 @@ function dismissTypedProposal(type: ProposalType): void {
 	if (sessionId && slot?.fields) markProposalDismissed(sessionId, type, slot.fields);
 	delete state.activeProposals[type];
 	recomputeAssistantHasProposal();
-	clampUnifiedTabsAfterProposalRemoved(type);
+	closeCurrentProposalPanel(type, sessionId);
 	if (sessionId) void deleteProposalFile(sessionId, type);
 	renderApp();
 }
@@ -1601,7 +1583,7 @@ function rolePreviewPanel() {
 		clearProposalReviewState(proposalSessionId, "role");
 		delete state.activeProposals.role;
 		recomputeAssistantHasProposal();
-		clampUnifiedTabsAfterProposalRemoved("role");
+		closeCurrentProposalPanel("role", proposalSessionId);
 		if (proposalSessionId) {
 			deleteRoleDraft(proposalSessionId);
 			void deleteProposalFile(proposalSessionId, "role");
@@ -2070,7 +2052,7 @@ function staffPreviewPanel() {
 			clearProposalReviewState(proposalSessionId, "staff");
 			delete state.activeProposals.staff;
 			recomputeAssistantHasProposal();
-			clampUnifiedTabsAfterProposalRemoved("staff");
+			closeCurrentProposalPanel("staff", proposalSessionId);
 			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "staff");
 
 			if (isStaffAssistant) {
