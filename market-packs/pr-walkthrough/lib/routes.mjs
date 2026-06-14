@@ -824,7 +824,7 @@ function hasExplicitTarget(body) {
 // Returns { ok:false, code:"NO_PR" } when the branch has no open GitHub PR so the
 // panel can surface a clear "open a PR first" message. The walkthrough is
 // GitHub-PR-only; local base/head targets are not resolved here.
-async function resolveCurrentBranchTarget(cwd) {
+async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 	const noPr = {
 		ok: false,
 		retryable: false,
@@ -834,7 +834,7 @@ async function resolveCurrentBranchTarget(cwd) {
 
 	let pr;
 	try {
-		const out = await gh(cwd, ["pr", "view", "--json", "number,url,headRefOid,baseRefName,headRefName"]);
+		const out = await io.gh(cwd, ["pr", "view", "--json", "number,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
 		pr = JSON.parse(String(out).trim());
 	} catch {
 		return noPr; // gh non-zero / no PR for branch / gh unavailable
@@ -845,7 +845,7 @@ async function resolveCurrentBranchTarget(cwd) {
 	let owner;
 	let repo;
 	try {
-		const repoOut = await gh(cwd, ["repo", "view", "--json", "owner,name"]);
+		const repoOut = await io.gh(cwd, ["repo", "view", "--json", "owner,name"]);
 		const repoJson = JSON.parse(String(repoOut).trim());
 		owner = repoJson && repoJson.owner ? strOf(repoJson.owner.login) : undefined;
 		repo = repoJson ? strOf(repoJson.name) : undefined;
@@ -861,17 +861,19 @@ async function resolveCurrentBranchTarget(cwd) {
 	// headSha: the PR head commit (headRefOid), else the worktree HEAD.
 	let headSha = strOf(pr.headRefOid);
 	if (!headSha) {
-		headSha = await git(cwd, ["rev-parse", "HEAD"]).then((s) => s.trim()).catch(() => undefined);
+		headSha = await io.git(cwd, ["rev-parse", "HEAD"]).then((s) => s.trim()).catch(() => undefined);
 	}
-	// baseSha: the PR base branch tip — prefer origin/<base>, else the local ref,
-	// else the merge-base with HEAD.
-	let baseSha;
+	// baseSha: the PR comparison base GitHub reports for the PR. This is the
+	// pre-merge base OID for merged PRs, so the launch-time bundle matches the
+	// Files changed diff GitHub shows instead of diffing against the current
+	// origin/<base> tip (which may already contain the PR and produce an empty diff).
+	let baseSha = strOf(pr.baseRefOid);
 	const baseRef = strOf(pr.baseRefName);
-	if (baseRef) {
-		baseSha = await git(cwd, ["rev-parse", `origin/${baseRef}`]).then((s) => s.trim()).catch(() => undefined);
-		if (!baseSha) baseSha = await git(cwd, ["rev-parse", baseRef]).then((s) => s.trim()).catch(() => undefined);
+	if (!baseSha && baseRef) {
+		baseSha = await io.git(cwd, ["rev-parse", `origin/${baseRef}`]).then((s) => s.trim()).catch(() => undefined);
+		if (!baseSha) baseSha = await io.git(cwd, ["rev-parse", baseRef]).then((s) => s.trim()).catch(() => undefined);
 		if (!baseSha && headSha) {
-			baseSha = await git(cwd, ["merge-base", `origin/${baseRef}`, "HEAD"]).then((s) => s.trim()).catch(() => undefined);
+			baseSha = await io.git(cwd, ["merge-base", `origin/${baseRef}`, "HEAD"]).then((s) => s.trim()).catch(() => undefined);
 		}
 	}
 
@@ -975,6 +977,8 @@ async function inferGithubRepository(cwd) {
 		return undefined;
 	}
 }
+
+export const __test = { resolveCurrentBranchTarget };
 
 function parseGithubRemoteUrl(url) {
 	if (!url) return undefined;
