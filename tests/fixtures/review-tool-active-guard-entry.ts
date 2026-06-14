@@ -38,9 +38,10 @@ import { state } from "../../src/app/state.js";
 	docCount: state.reviewDocuments.size,
 	docTitles: [...state.reviewDocuments.keys()],
 });
-(window as any).__deliverReviewToolResult = (a: any, action: string, payload: any) => {
-	// Build a tool-result-shaped message that matches what the review tool
-	// extension produces — a content block whose text is a JSON envelope.
+(window as any).__deliverReviewToolResult = (a: any, action: string, payload: any, isLive = true) => {
+	// Build a live tool-result-shaped message that matches what the review tool
+	// extension produces — a content block whose text is a JSON envelope. Replays
+	// only reopen when the server workspace already has a matching review tab.
 	const json = JSON.stringify({ action, ...payload });
 	const msg = {
 		role: "toolResult",
@@ -49,7 +50,7 @@ import { state } from "../../src/app/state.js";
 			{ type: "text", text: json },
 		],
 	};
-	(a as any)._checkReviewToolResult(msg);
+	(a as any)._checkReviewToolResult(msg, isLive);
 };
 
 (window as any).__ready = true;
