@@ -321,8 +321,9 @@ export function selectHtmlPreviewTab(args: {
 		source.contentHash = contentHash;
 		tabState.contentHash = contentHash;
 	}
-	if (isVersionedHistorical && version != null) {
-		source.version = version;
+	if (version != null) {
+		if (isVersionedHistorical) source.version = version;
+		else delete source.version;
 		tabState.version = version;
 	} else {
 		delete source.version;

@@ -1,6 +1,7 @@
 import { html } from "lit";
 import { doRenderApp, setSelectedWorkflowId } from "../../src/app/render.js";
 import { renderApp, setProjects, setRenderApp, state, type GatewaySession, type Project } from "../../src/app/state.js";
+import { selectReviewWorkspaceTab } from "../../src/app/preview-panel.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
@@ -422,7 +423,7 @@ function openReviewDoc(doc: ReviewDoc): void {
 	ws.reviews = next;
 	ws.reviewActiveTab = doc.title;
 	applyWorkspace(currentSessionId());
-	setActivePanelTabIdForSession(state, currentSessionId(), `review:${encodeURIComponent(doc.title)}`);
+	selectReviewWorkspaceTab(doc.title, { sessionId: currentSessionId(), select: true });
 	renderNow();
 }
 

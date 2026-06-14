@@ -2,12 +2,17 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { activeSessionId, renderApp, state } from "./state.js";
 import {
 	INBOX_PANEL_TAB_ID,
+	assistantProposalType,
+	buildPanelWorkspaceTabs,
 	panelWorkspaceSessionKey,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewTabDisplayTitle,
 	previewTabEntryFromId,
 	previewTabVersionFromId,
+	proposalPanelTabId,
+	reviewDocumentIdFromPanelTab,
+	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
@@ -56,6 +61,7 @@ export interface OpenSidePanelTabOptions {
 	placeAfterActive?: boolean;
 	baseRevision?: number;
 	strictRevision?: boolean;
+	skipRender?: boolean;
 }
 
 export interface SidePanelMutationOptions {
@@ -408,6 +414,127 @@ class WorkspaceRequestError extends Error {
 	}
 }
 
+function useServerWorkspaceApi(): boolean {
+	// Unit browser fixtures run from file:// with a mocked fetch layer and no
+	// gateway REST API. Keep those fixtures optimistic/in-memory only; the real
+	// app is served by the gateway and remains server-authoritative.
+	return typeof window === "undefined" || window.location.protocol !== "file:";
+}
+
+function applyFixtureWorkspace(workspace: SidePanelWorkspace, options?: { skipRender?: boolean }): SidePanelWorkspace {
+	state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(workspace.sessionId)] = workspace;
+	syncCompatibilityMirrors(workspace);
+	if (!options?.skipRender) renderApp();
+	return workspace;
+}
+
+function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string): SidePanelWorkspaceTab | null {
+	const updatedAt = now();
+	if (tab.kind === "preview") {
+		const source = asRecord(tab.source) || {};
+		const tabState = asRecord(tab.state) || {};
+		const entry = previewEntryLabel(stringValue(tabState.entry) || stringValue(source.entry) || previewTabEntryFromId(tab.id) || tab.title || undefined);
+		const idVersion = previewTabVersionFromId(tab.id);
+		const version = idVersion ?? positiveInt(source.version) ?? positiveInt(tabState.version);
+		const historical = source.historical === true || tabState.historical === true || idVersion != null;
+		const contentHash = previewContentHashFromTab(tab);
+		const id = historical && version ? `preview:entry:${encodeComponent(entry)}:v:${version}` : `preview:entry:${encodeComponent(entry)}`;
+		return {
+			id,
+			kind: "preview",
+			title: tab.title || previewTabDisplayTitle(entry, version, historical),
+			label: tab.label || tab.title || previewTabDisplayTitle(entry, version, historical),
+			source: {
+				type: "preview",
+				sessionId,
+				entry,
+				...(historical ? { historical: true } : { live: true }),
+				...(historical && version ? { version } : {}),
+				...(stringValue(source.artifactId) ? { artifactId: stringValue(source.artifactId) } : {}),
+				...(contentHash ? { contentHash } : {}),
+				...(stringValue(source.path) ? { path: stringValue(source.path) } : {}),
+				...(stringValue(source.url) ? { url: stringValue(source.url) } : {}),
+				...(stringValue(source.toolUseId) ? { toolUseId: stringValue(source.toolUseId) } : {}),
+				...(typeof source.blockIndex === "number" ? { blockIndex: source.blockIndex } : {}),
+			},
+			state: cloneJsonRecord(tab.state),
+			updatedAt,
+		};
+	}
+	if (tab.kind === "proposal") {
+		const source = asRecord(tab.source) || {};
+		const proposalType = stringValue(source.proposalType) as SidePanelProposalType;
+		if (!isProposalType(proposalType)) return null;
+		const rev = positiveInt(source.rev) ?? positiveInt(tab.state?.rev);
+		return {
+			id: proposalPanelTabId(proposalType, rev),
+			kind: "proposal",
+			title: tab.title,
+			label: tab.label,
+			source: { type: "proposal", sessionId, proposalType, ...(rev ? { rev, historical: true } : {}) },
+			state: cloneJsonRecord(tab.state),
+			updatedAt,
+		};
+	}
+	if (tab.kind === "review") {
+		const title = reviewTitleFromPanelTab(tab) || tab.title.replace(/^Review:\s*/, "") || "Review";
+		const documentId = reviewDocumentIdFromPanelTab(tab) || title;
+		return {
+			id: reviewPanelTabId(documentId),
+			kind: "review",
+			title: `Review: ${title}`,
+			label: `Review: ${title}`,
+			source: { type: "review", sessionId, documentId, title },
+			state: cloneJsonRecord(tab.state),
+			updatedAt,
+		};
+	}
+	if (tab.kind === "inbox") return { id: INBOX_PANEL_TAB_ID, kind: "inbox", title: tab.title || "Inbox", label: tab.label || "Inbox", source: { type: "inbox", sessionId }, state: cloneJsonRecord(tab.state), updatedAt };
+	if (tab.kind === "pack") {
+		const source = asRecord(tab.source) || {};
+		const packId = stringValue(source.packId);
+		const panelId = stringValue(source.panelId);
+		const instanceKey = stringValue(source.instanceKey) || "default";
+		if (!packId || !panelId) return null;
+		return { id: `pack:${encodeComponent(packId)}:${encodeComponent(panelId)}:${encodeComponent(instanceKey)}`, kind: "pack", title: tab.title || panelId, label: tab.label || tab.title || panelId, source: { type: "pack", sessionId, packId, panelId, instanceKey, params: cloneJsonRecord(source.params) }, state: cloneJsonRecord(tab.state), updatedAt };
+	}
+	return null;
+}
+
+function fixtureInitialWorkspace(sessionId: string): SidePanelWorkspace | undefined {
+	if (useServerWorkspaceApi()) return undefined;
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const legacyTabs = Array.isArray(state.panelTabsBySession?.[sid]) ? state.panelTabsBySession[sid] as PanelWorkspaceTab[] : [];
+	const derivedTabs = buildPanelWorkspaceTabs({
+		sessionId,
+		isPreviewSession: !!state.isPreviewSession,
+		previewEntry: stringValue(state.previewPanelEntry),
+		previewContentHash: stringValue((state as any).previewPanelContentHash),
+		activeProposalTypes: Object.keys(state.activeProposals || {}) as any,
+		assistantProposalType: assistantProposalType(state.assistantType),
+		reviewTitles: state.reviewDocuments instanceof Map ? [...state.reviewDocuments.keys()] : [],
+		reviewPanelOpen: !!state.reviewPanelOpen,
+		inboxPanelOpen: !!state.inboxPanelOpen,
+		inboxHasPending: Array.isArray(state.inboxEntries) && state.inboxEntries.length > 0,
+	});
+	const tabs: SidePanelWorkspaceTab[] = [];
+	for (const legacy of [...legacyTabs, ...derivedTabs]) {
+		const tab = sidePanelTabFromLegacyMirror(legacy, sessionId);
+		if (tab && !tabs.some((existing) => existing.id === tab.id)) tabs.push(tab);
+	}
+	if (tabs.length === 0) return undefined;
+	const requestedActive = stringValue(state.panelWorkspaceActiveBySession?.[sid]) || stringValue(state.activePanelTabId);
+	return {
+		version: 1,
+		sessionId,
+		revision: 0,
+		tabs,
+		activeTabId: tabs.some((tab) => tab.id === requestedActive) ? requestedActive : tabs[0]?.id || "",
+		sizeMode: "split",
+		updatedAt: now(),
+	};
+}
+
 async function workspaceRequest(sessionId: string, path: string, init: RequestInit = {}): Promise<SidePanelWorkspace> {
 	const res = await gatewayFetch(`/api/sessions/${encodeComponent(sessionId)}/side-panel-workspace${path}`, init);
 	const body = await readJsonSafe(res);
@@ -464,6 +591,13 @@ function mutationBody(extra: Record<string, unknown>, workspace: SidePanelWorksp
 
 export async function hydrateSidePanelWorkspace(sessionId: string): Promise<SidePanelWorkspace> {
 	mutationState.delete(panelWorkspaceSessionKey(sessionId));
+	if (!useServerWorkspaceApi()) {
+		const workspace = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
+		state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] = workspace;
+		syncCompatibilityMirrors(workspace);
+		renderApp();
+		return workspace;
+	}
 	try {
 		const fetched = await fetchWorkspace(sessionId);
 		if (!fetched) {
@@ -485,11 +619,17 @@ export async function hydrateSidePanelWorkspace(sessionId: string): Promise<Side
 	}
 }
 
+function mutationBaseWorkspace(sessionId: string): SidePanelWorkspace {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	return state.sidePanelWorkspaceBySession[sid] || fixtureInitialWorkspace(sessionId) || getSidePanelWorkspace(sessionId);
+}
+
 export async function openSidePanelTab(tab: SidePanelWorkspaceTab, options: OpenSidePanelTabOptions = {}): Promise<SidePanelWorkspace> {
 	const sessionId = tab.source.sessionId;
-	const base = getSidePanelWorkspace(sessionId);
+	const base = mutationBaseWorkspace(sessionId);
 	const focus = options.focus !== false;
 	const optimistic = upsertTab(base, tab, focus, options.placeAfterActive !== false);
+	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(sessionId, mutationId, workspaceRequest(sessionId, "/open", {
 		method: "POST",
@@ -499,9 +639,10 @@ export async function openSidePanelTab(tab: SidePanelWorkspaceTab, options: Open
 
 export async function updateSidePanelTab(tabId: string, patch: Partial<SidePanelWorkspaceTab>, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
-	const base = getSidePanelWorkspace(sessionId);
+	const base = mutationBaseWorkspace(sessionId);
 	const tabs = base.tabs.map((tab) => tab.id === tabId ? normalizeTab({ ...tab, ...patch, id: tab.id, source: patch.source || tab.source }, base.sessionId) || tab : tab);
 	const optimistic = withWorkspaceUpdate(base, { tabs });
+	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, `/tabs/${encodeComponent(tabId)}`, {
 		method: "PATCH",
@@ -511,18 +652,20 @@ export async function updateSidePanelTab(tabId: string, patch: Partial<SidePanel
 
 export async function closeSidePanelTab(tabId: string, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
-	const base = getSidePanelWorkspace(sessionId);
+	const base = mutationBaseWorkspace(sessionId);
 	const tabs = base.tabs.filter((tab) => tab.id !== tabId);
 	const optimistic = withWorkspaceUpdate(base, { tabs, activeTabId: nextActiveAfterClose(base.tabs, tabId, base.activeTabId) });
+	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, `/tabs/${encodeComponent(tabId)}`, { method: "DELETE" }));
 }
 
 export async function setActiveSidePanelTab(tabId: string, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
-	const base = getSidePanelWorkspace(sessionId);
+	const base = mutationBaseWorkspace(sessionId);
 	const activeTabId = tabId && base.tabs.some((tab) => tab.id === tabId) ? tabId : "";
 	const optimistic = withWorkspaceUpdate(base, { activeTabId });
+	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, "/active", {
 		method: "POST",
@@ -532,7 +675,7 @@ export async function setActiveSidePanelTab(tabId: string, options: SidePanelMut
 
 export async function reorderSidePanelTabs(tabIds: string[], baseRevision?: number, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
-	const base = getSidePanelWorkspace(sessionId);
+	const base = mutationBaseWorkspace(sessionId);
 	const byId = new Map(base.tabs.map((tab) => [tab.id, tab]));
 	const seen = new Set<string>();
 	const orderedInputIds: string[] = [];
@@ -547,6 +690,7 @@ export async function reorderSidePanelTabs(tabIds: string[], baseRevision?: numb
 	const orderedIds = ordered.map((tab) => tab.id);
 	const revision = baseRevision ?? options.baseRevision ?? base.revision;
 	const optimistic = withWorkspaceUpdate(base, { tabs: ordered, activeTabId: ordered.some((tab) => tab.id === base.activeTabId) ? base.activeTabId : ordered[0]?.id || "" });
+	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, "/reorder", {
 		method: "POST",
@@ -556,8 +700,9 @@ export async function reorderSidePanelTabs(tabIds: string[], baseRevision?: numb
 
 export async function setSidePanelSizeMode(sizeMode: SidePanelSizeMode, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
-	const base = getSidePanelWorkspace(sessionId);
+	const base = mutationBaseWorkspace(sessionId);
 	const optimistic = withWorkspaceUpdate(base, { sizeMode });
+	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
 	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, "/resize", {
 		method: "POST",

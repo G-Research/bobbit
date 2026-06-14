@@ -142,6 +142,12 @@ const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 
 function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
 	const id = proposalPanelTabId(type);
+	const s = getState();
+	if (s?.panelTabsBySession && Array.isArray(s.panelTabsBySession[sessionId])) {
+		s.panelTabsBySession[sessionId] = s.panelTabsBySession[sessionId].filter((tab: { id?: string }) => tab?.id !== id);
+	}
+	if (s?.panelWorkspaceActiveBySession?.[sessionId] === id) s.panelWorkspaceActiveBySession[sessionId] = "";
+	if (s?.activePanelTabId === id) s.activePanelTabId = "";
 	void import("./side-panel-workspace.js")
 		.then((mod) => mod.closeSidePanelTab(id, { sessionId }))
 		.catch(() => { /* optional browser-only integration */ });
