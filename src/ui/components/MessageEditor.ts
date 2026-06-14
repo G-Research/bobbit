@@ -234,9 +234,13 @@ export class MessageEditor extends LitElement {
 			}
 			this._slashTokenStart = cursorPos - match[2].length - 1; // position of "/"
 			const query = match[2].toLowerCase();
+			// Pack entrypoints reconcile asynchronously after session/project changes.
+			// Re-merge them at filter time so the slash menu never shows stale launcher ids
+			// (or misses newly-registered launchers) because the base skill list loaded early.
+			const slashSkills = this._withPackEntrypoints(this._slashSkills.filter((s) => s.source !== "pack"));
 			this._slashFilteredSkills = query
-				? this._slashSkills.filter((s) => s.name.toLowerCase().includes(query))
-				: this._slashSkills;
+				? slashSkills.filter((s) => s.name.toLowerCase().includes(query))
+				: slashSkills;
 			this._slashMenuOpen = this._slashFilteredSkills.length > 0;
 			this._slashSelectedIndex = 0;
 		} else {
@@ -266,12 +270,37 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	private _clearSlashToken(): void {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return;
+		const cursorPos = textarea.selectionStart;
+		const before = this.value.substring(0, this._slashTokenStart);
+		const after = this.value.substring(cursorPos);
+		this.value = before + after;
+		this.onInput?.(this.value);
+		textarea.value = this.value;
+		const newPos = before.length;
+		textarea.focus();
+		textarea.setSelectionRange(newPos, newPos);
+	}
+
+	private _showLauncherError(message: string): void {
+		void import("../../app/render.js")
+			.then((m) => m.showHeaderToast(message))
+			.catch(() => { /* best-effort */ });
+	}
+
 	private _selectSlashSkill(skill: SlashSkillInfo) {
 		// Slice C1 — a pack composer-slash ENTRYPOINT runs its launcher (open panel /
 		// navigate) on selection (the user gesture) instead of inserting text.
 		if (skill.entrypointId) {
 			this._slashMenuOpen = false;
-			try { runLauncherEntrypoint(skill.entrypointId); } catch { /* non-fatal */ }
+			this._clearSlashToken();
+			try {
+				runLauncherEntrypoint(skill.entrypointId, (r) => {
+					if (!r.ok) this._showLauncherError(r.error || "Could not start the PR walkthrough.");
+				});
+			} catch { /* non-fatal */ }
 			return;
 		}
 		const textarea = this.textareaRef.value;
