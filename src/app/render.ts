@@ -731,6 +731,30 @@ export function workspaceSessionId(): string {
 	return panelWorkspaceSessionKey(activeSessionId());
 }
 
+type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
+
+function sidePanelSizeModeBySession(): Record<string, SidePanelSizeMode> {
+	const holder = state as any;
+	if (!holder.sidePanelSizeModeBySession || typeof holder.sidePanelSizeModeBySession !== "object") {
+		holder.sidePanelSizeModeBySession = {};
+	}
+	return holder.sidePanelSizeModeBySession as Record<string, SidePanelSizeMode>;
+}
+
+export function getSidePanelSizeMode(sessionId: string = workspaceSessionId()): SidePanelSizeMode {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const stored = sidePanelSizeModeBySession()[sid];
+	if (stored === "collapsed" || stored === "split" || stored === "fullscreen") return stored;
+	return state.previewPanelFullscreen ? "fullscreen" : "split";
+}
+
+export function setSidePanelSizeMode(mode: SidePanelSizeMode, sessionId: string = workspaceSessionId()): void {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	sidePanelSizeModeBySession()[sid] = mode;
+	// Compatibility mirror until the server-backed controller owns all callers.
+	state.previewPanelFullscreen = mode === "fullscreen";
+}
+
 let mountedPreviewTabId = "";
 const previewRestoreInFlight = new Set<string>();
 let mobileSelectedPaneIndex = 0;
@@ -1158,9 +1182,14 @@ function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
 	setUnifiedActiveTab(tab);
 }
 
+/** Whether the unified side-panel workspace is active for the current session. */
+export function hasActiveSidePanel(): boolean {
+	return unifiedPanelContentTabs().length > 0;
+}
+
 /** Whether the unified panel is active for the current session. */
 function hasUnifiedPanel(): boolean {
-	return unifiedPanelContentTabs().length > 0;
+	return hasActiveSidePanel();
 }
 
 function mobileChatPaneTab(): MobilePaneTab {
@@ -1219,7 +1248,7 @@ function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
 
-	const getTrack = () => document.querySelector(".preview-slider__track") as HTMLElement | null;
+	const getTrack = () => document.querySelector(".side-panel-slider__track, .preview-slider__track") as HTMLElement | null;
 
 	// === iframe -> parent: swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
@@ -1924,14 +1953,15 @@ export function doRenderApp(): void {
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${dataTitle}
 			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
-			data-testid=${testId}
+			data-testid="side-panel-tab"
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
-		><span class="goal-tab-pill-label">${label}</span>${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
+		>${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
 				class="goal-tab-close"
 				role="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
+				data-testid="side-panel-close"
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
 			>${icon(X, "xs")}</span>` : ""}</div>
 	`;
@@ -1985,13 +2015,12 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const previewCollapseKey = () => `bobbit-preview-collapsed-${workspaceSessionId()}`;
-	const isPreviewCollapsed = () => localStorage.getItem(previewCollapseKey()) === "true";
-	const togglePreviewCollapse = () => {
-		const next = !isPreviewCollapsed();
-		localStorage.setItem(previewCollapseKey(), String(next));
+	const sidePanelSizeMode = () => getSidePanelSizeMode(workspaceSessionId());
+	const setSidePanelModeAndRender = (mode: SidePanelSizeMode) => {
+		setSidePanelSizeMode(mode, workspaceSessionId());
 		renderApp();
 	};
+	const isSidePanelCollapsed = () => sidePanelSizeMode() === "collapsed";
 
 	const previewRestoreErrorContent = (tab: UnifiedContentTab) => {
 		const restoreError = previewRestoreError(tab);
@@ -2158,23 +2187,72 @@ export function doRenderApp(): void {
 		</div>
 	`;
 
-	const previewControlButtons = () => {
-		const sid = activeSessionId() || "";
-		const entry = state.previewPanelEntry || "";
-		return html`
-			<a
-				href=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`}
-				target="_blank"
-				rel="noopener noreferrer"
-				class="text-muted-foreground hover:text-foreground"
-				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
-				title="Open preview in new tab"
-			>${icon(ExternalLink, "sm")}</a>
-			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Refresh preview">
-				${icon(RotateCw, "sm")}
-			</button>
-		`;
+	const sidePanelChromeButtonClass = "text-muted-foreground hover:text-foreground";
+	const sidePanelChromeButtonStyle = "background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;";
+
+	const previewUrlForTab = (tab?: UnifiedContentTab | null) => {
+		const sid = activeSessionId() || workspaceSessionId();
+		let entry = state.previewPanelEntry || "inline.html";
+		let artifactId = "";
+		if (tab?.kind === "preview") {
+			const tabState = (tab.state || {}) as Record<string, unknown>;
+			const source = tab.source as Record<string, unknown>;
+			const tabEntry = previewEntryFromTab(tab);
+			if (tabEntry) entry = tabEntry;
+			artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+		}
+		return artifactId
+			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}`
+			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`;
 	};
+
+	const sidePanelPopoutUrl = (tab: UnifiedContentTab) => {
+		if (tab.kind === "preview") return previewUrlForTab(tab);
+		const sid = ((tab.source as Record<string, unknown> | undefined)?.sessionId as string | undefined) || activeSessionId() || workspaceSessionId();
+		return `#/session/${encodeURIComponent(sid)}/panel/${encodeURIComponent(tab.id)}`;
+	};
+
+	const previewControlButtons = (tab?: UnifiedContentTab | null) => html`
+		<a
+			href=${previewUrlForTab(tab)}
+			target="_blank"
+			rel="noopener noreferrer"
+			class=${sidePanelChromeButtonClass}
+			style=${sidePanelChromeButtonStyle}
+			title="Open preview in new tab"
+		>${icon(ExternalLink, "sm")}</a>
+		<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
+			${icon(RotateCw, "sm")}
+		</button>
+	`;
+
+	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
+		${tab.kind === "preview" && state.previewPanelEntry ? previewControlButtons(tab) : ""}
+	`;
+
+	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => html`
+		${mode === "fullscreen" ? html`
+			<button @click=${() => setSidePanelModeAndRender("split")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Restore side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-restore">
+				${icon(PanelRightOpen, "sm")}
+			</button>
+		` : html`
+			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Fullscreen side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-fullscreen">
+				${icon(PanelRightOpen, "sm")}
+			</button>
+		`}
+		<a
+			href=${sidePanelPopoutUrl(tab)}
+			target="_blank"
+			rel="noopener noreferrer"
+			class=${sidePanelChromeButtonClass}
+			style=${sidePanelChromeButtonStyle}
+			title="Open side panel in new tab"
+			data-testid="side-panel-popout"
+		>${icon(ExternalLink, "sm")}</a>
+		<button @click=${() => setSidePanelModeAndRender("collapsed")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Collapse side panel${shortcutHint("toggle-preview")}`} data-testid="side-panel-collapse">
+			${icon(PanelRightClose, "sm")}
+		</button>
+	`;
 
 	const inboxPaneContent = () => {
 		const sid = activeSessionId() || "";
@@ -2252,9 +2330,9 @@ export function doRenderApp(): void {
 		tab.kind === "inbox" ? "inbox-tab-unified" : "",
 	);
 
-	const unifiedPreviewPanel = () => {
+	const activeSidePanelContentTab = (): UnifiedContentTab | null => {
 		const contentTabs = unifiedPanelContentTabs();
-		if (contentTabs.length === 0) return "";
+		if (contentTabs.length === 0) return null;
 
 		let activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 		let activeTab = contentTabs.find((tab) => tab.id === activeId) ?? contentTabs[0];
@@ -2263,15 +2341,21 @@ export function doRenderApp(): void {
 			activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 			activeTab = contentTabs.find((tab) => tab.id === activeId) ?? activeTab;
 		}
-		const activeTabCanFullscreen = activeTab.kind === "preview";
+		return activeTab;
+	};
+
+	const renderSidePanelWorkspace = (mode: SidePanelSizeMode = "split") => {
+		const contentTabs = unifiedPanelContentTabs();
+		const activeTab = activeSidePanelContentTab();
+		if (!activeTab) return "";
 
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
+			<div class="side-panel-workspace goal-preview-panel flex-1 flex flex-col ${mode === "split" ? "border-l border-border" : ""} min-h-0" data-panel-workspace="content" data-side-panel-mode=${mode}>
 				<!-- Chrome-style tab strip: muted bg distinct from the panel below.
 				     Tabs sit flush at the strip's bottom via items-end + no pb.
 				     The active tab's background matches the panel so it visually
 				     bridges the color boundary (curve pseudo-elements in CSS do
-				     the outward-curve flourish at the bottom corners). */ -->
+				     the outward-curve flourish at the bottom corners). -->
 				<div class="flex items-end justify-between px-3 pt-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
 					<div class="flex-1 min-w-0">
 						<div class="flex items-end gap-1" data-panel-tab-bar="true">
@@ -2279,14 +2363,8 @@ export function doRenderApp(): void {
 						</div>
 					</div>
 					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
-						${activeTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-						${activeTabCanFullscreen ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`} data-testid="preview-fullscreen">
-							${icon(PanelRightOpen, "sm")}
-						</button>` : ""}
-						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
-							${icon(PanelRightClose, "sm")}
-						</button>
+						${sidePanelActionButtons(activeTab)}
+						${sidePanelWindowControls(activeTab, mode)}
 					</div>
 				</div>
 				<!-- Tab content -->
@@ -2295,8 +2373,8 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const previewExpandButton = () => html`
-		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand preview${shortcutHint("toggle-sidebar")}`}>
+	const sidePanelRestoreButton = () => html`
+		<button @click=${() => setSidePanelModeAndRender("split")} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-restore">
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
@@ -2304,7 +2382,7 @@ export function doRenderApp(): void {
 	const mobilePaneContent = (tab: MobilePaneTab) => {
 		if (tab.kind === "chat") return state.chatPanel;
 		const content = unifiedPanelContent(tab);
-		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
+		return html`<div class="side-panel-pane goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
 
 	const mainArea = () => {
@@ -2350,40 +2428,26 @@ export function doRenderApp(): void {
 		}
 
 		if (connected && hasUnifiedPanel()) {
-			const fullscreenTabs = unifiedPanelContentTabs();
-			const fullscreenActiveId = activeSidePanelTabIdForSession(state, workspaceSessionId());
-			const fullscreenTab = fullscreenTabs.find((tab) => tab.id === fullscreenActiveId) ?? fullscreenTabs[0];
-			const fullscreenContent = htmlPreviewContent();
-			if (desktop && state.previewPanelFullscreen && fullscreenTab?.kind === "preview") {
+			const mode = sidePanelSizeMode();
+			if (desktop && mode === "fullscreen") {
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
-						<!-- Fullscreen preview header -->
-						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
-							<span class="text-xs font-medium text-muted-foreground">Preview</span>
-							<div class="flex items-center gap-0.5">
-								${fullscreenTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
-									${icon(PanelRightClose, "sm")}
-								</button>
-							</div>
-						</div>
-						<!-- Preview content fills available space -->
-						${fullscreenContent}
+						${renderSidePanelWorkspace("fullscreen")}
 						<!-- Compact prompt bar at bottom -->
-						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
+						<div class="side-panel-fullscreen-prompt preview-fullscreen-prompt shrink-0 border-t border-border">
 							${state.chatPanel}
 						</div>
 					</div>
 				`;
 			}
 			if (desktop) {
-				const collapsed = isPreviewCollapsed();
+				const collapsed = isSidePanelCollapsed();
 				return html`
 					${reconnectBanner()}
-					<div class="goal-split-layout flex-1 flex min-h-0 overflow-hidden">
-						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
-						${collapsed ? previewExpandButton() : unifiedPreviewPanel()}
+					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
+						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
+						${collapsed ? sidePanelRestoreButton() : renderSidePanelWorkspace("split")}
 					</div>
 				`;
 			}
@@ -2395,8 +2459,8 @@ export function doRenderApp(): void {
 			const paneW = 100 / count;
 			return html`
 				${reconnectBanner()}
-				<div class="preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
-					<div class="preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
+				<div class="side-panel-slider preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
+					<div class="side-panel-slider__track preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
 						${panes.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
 					</div>
 				</div>
