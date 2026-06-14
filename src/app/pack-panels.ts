@@ -31,6 +31,8 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { fetchContributions, type PackContributionsWire } from "./api.js";
 import { state, renderApp } from "./state.js";
 import {
+	DEFAULT_PACK_PANEL_INSTANCE_KEY,
+	packPanelRefFromTabId,
 	packPanelTabId,
 	panelTabsForSession,
 	setPanelTabsForSession,
@@ -141,15 +143,24 @@ export interface PackPanelInfo {
 	panelId: string;
 	entry?: string;
 	title?: string;
+	/** Optional tab identity mode. Omitted defaults to singleton compatibility. */
+	instanceMode?: "singleton" | "parameterized";
+	/** Allowlisted param name used as the instanceKey for parameterized panels. */
+	instanceParam?: string;
 }
 
 /** A registered panel: the owning `packId` (used to build the pack-addressed
  *  serving URL + mint the pack-bound surface token) plus the `projectId` the
  *  registration was driven for (so the lazy loader fetches the SAME winning
  *  provider the metadata fetch saw — no split-brain, design §4b). */
-interface RegisteredPanel {
+export interface PackPanelInstanceIdentityInfo {
 	packId: string;
 	panelId: string;
+	instanceMode: "singleton" | "parameterized";
+	instanceParam?: string;
+}
+
+interface RegisteredPanel extends PackPanelInstanceIdentityInfo {
 	title?: string;
 	projectId?: string;
 }
@@ -209,7 +220,9 @@ export function registerPackPanels(
 	const next = new Map<string, RegisteredPanel>();
 	for (const info of list) {
 		if (!info?.packId || !info.panelId) continue;
-		next.set(panelKey(info.packId, info.panelId), { packId: info.packId, panelId: info.panelId, title: info.title, projectId });
+		const instanceMode = info.instanceMode === "parameterized" ? "parameterized" : "singleton";
+		const instanceParam = typeof info.instanceParam === "string" && info.instanceParam.trim() ? info.instanceParam.trim() : undefined;
+		next.set(panelKey(info.packId, info.panelId), { packId: info.packId, panelId: info.panelId, title: info.title, projectId, instanceMode, instanceParam });
 	}
 	// RECONCILE: compare prior registry to the fresh one.
 	for (const [key, prev] of panels) {
@@ -275,7 +288,14 @@ export function panelInfosFromContributions(packs: ReadonlyArray<PackContributio
 		for (const panel of p.panels) {
 			const panelId = typeof panel?.id === "string" ? panel.id : undefined;
 			if (!panelId) continue;
-			out.push({ packId, panelId, title: typeof panel?.title === "string" ? panel.title : undefined });
+			const raw = panel as Record<string, unknown>;
+			out.push({
+				packId,
+				panelId,
+				title: typeof panel?.title === "string" ? panel.title : undefined,
+				instanceMode: raw.instanceMode === "parameterized" ? "parameterized" : raw.instanceMode === "singleton" ? "singleton" : undefined,
+				instanceParam: typeof raw.instanceParam === "string" ? raw.instanceParam : undefined,
+			});
 		}
 	}
 	return out;
@@ -353,6 +373,38 @@ function resolveOpenPanel(callerPackId: string | undefined, panelId: string): Re
 	return matches.length === 1 ? matches[0] : undefined;
 }
 
+const ALLOWLISTED_INSTANCE_PARAMS = ["artifactId", "documentId"] as const;
+
+function safeInstanceKey(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (!trimmed || trimmed.length > 128) return undefined;
+	if (/[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
+	return trimmed;
+}
+
+export function packPanelInstanceKeyForTarget(reg: PackPanelInstanceIdentityInfo, target: Pick<PanelTarget, "instanceKey" | "params">): string | undefined {
+	const explicit = safeInstanceKey(target.instanceKey);
+	if (explicit) return explicit;
+	const params = target.params && typeof target.params === "object" && !Array.isArray(target.params) ? target.params : undefined;
+	if (params && reg.instanceParam) {
+		const fromDeclaredParam = safeInstanceKey(params[reg.instanceParam]);
+		if (fromDeclaredParam) return fromDeclaredParam;
+	}
+	if (params) {
+		for (const key of ALLOWLISTED_INSTANCE_PARAMS) {
+			const fromAllowlist = safeInstanceKey(params[key]);
+			if (fromAllowlist) return fromAllowlist;
+		}
+	}
+	if (reg.instanceMode === "parameterized") {
+		// eslint-disable-next-line no-console
+		console.warn(`[pack-panels] openPanel: parameterized panel "${reg.packId}/${reg.panelId}" requires instanceKey${reg.instanceParam ? ` or params.${reg.instanceParam}` : ""}`);
+		return undefined;
+	}
+	return DEFAULT_PACK_PANEL_INSTANCE_KEY;
+}
+
 /**
  * Load + mount a pack panel by id (design §6.3). PACK-RELATIVE: the caller's bound
  * `callerPackId` (threaded from the host factory / launcher registration) resolves
@@ -370,8 +422,10 @@ export function openPackPanel(target: PanelTarget, callerPackId?: string): void 
 		console.warn(`[pack-panels] openPanel: no registered panel "${callerPackId ?? "?"}/${panelId}"`);
 		return;
 	}
+	const instanceKey = packPanelInstanceKeyForTarget(reg, target);
+	if (!instanceKey) return;
 	void loadPanelModule(panelKey(reg.packId, reg.panelId), reg);
-	mountPackPanelTab(reg, target.params, target.sessionId);
+	mountPackPanelTab(reg, target.params, target.sessionId, instanceKey);
 }
 
 /** Add or focus the side-panel tab for `{packId, panelId}`, carrying `params`.
@@ -389,7 +443,7 @@ export function openPackPanel(target: PanelTarget, callerPackId?: string): void 
  *  the tab still keys correctly. Omitted `sessionId` ⇒ the active session (v1
  *  behaviour, unchanged). Reusing `connectToSession` keeps the pack pure — no
  *  platform navigation code is reimplemented here. */
-function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown>, sessionId?: string): void {
+function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown>, sessionId?: string, instanceKey = DEFAULT_PACK_PANEL_INSTANCE_KEY): void {
 	try {
 		const s = state as unknown as { selectedSessionId?: string; remoteAgent?: { gatewaySessionId?: string } };
 		// v2: an explicit target session is SWITCHED to via the canonical full-switch
@@ -407,16 +461,17 @@ function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown
 			}
 		}
 		const sid = sessionId || s.selectedSessionId || s.remoteAgent?.gatewaySessionId || undefined;
-		const id = packPanelTabId(reg.packId, reg.panelId);
+		const id = packPanelTabId(reg.packId, reg.panelId, instanceKey);
 		const title = reg.title || reg.panelId;
+		const singleton = reg.instanceMode !== "parameterized";
 		const tab: PanelWorkspaceTab = {
 			id,
 			kind: "pack",
 			title,
 			label: title,
 			legacyTab: "pack",
-			source: { type: "pack", packId: reg.packId, panelId: reg.panelId, params, sessionId: sid },
-			state: { packId: reg.packId, panelId: reg.panelId, params },
+			source: { type: "pack", packId: reg.packId, panelId: reg.panelId, instanceKey, singleton, params, sessionId: sid },
+			state: { packId: reg.packId, panelId: reg.panelId, instanceKey, singleton, params },
 		};
 		const tabs = panelTabsForSession(state, sid);
 		const idx = tabs.findIndex((t) => t?.id === id);
@@ -435,13 +490,17 @@ function mountPackPanelTab(reg: RegisteredPanel, params?: Record<string, unknown
  *  it open (reconcile-on-uninstall). Best-effort + guarded. */
 function removePackPanelTab(packId: string, panelId: string): void {
 	try {
-		const id = packPanelTabId(packId, panelId);
 		const bySession = (state as unknown as { panelTabsBySession?: Record<string, PanelWorkspaceTab[]> }).panelTabsBySession;
 		if (!bySession || typeof bySession !== "object") return;
 		for (const [sid, tabs] of Object.entries(bySession)) {
-			if (!Array.isArray(tabs) || !tabs.some((t) => t?.id === id)) continue;
+			if (!Array.isArray(tabs)) continue;
+			const nextTabs = tabs.filter((t) => {
+				const ref = packPanelRefFromTabId(t?.id);
+				return !(ref?.packId === packId && ref.panelId === panelId);
+			});
+			if (nextTabs.length === tabs.length) continue;
 			const key = sid === "__no-session__" ? undefined : sid;
-			setPanelTabsForSession(state, key, tabs.filter((t) => t?.id !== id));
+			setPanelTabsForSession(state, key, nextTabs);
 		}
 		try { renderApp(); } catch { /* non-DOM */ }
 	} catch {

@@ -30,16 +30,18 @@ export interface PanelWorkspaceTab {
 			[key: string]: unknown;
 		}
 		| { type: "proposal"; proposalType: ProposalType; sessionId?: string; rev?: number; historical?: boolean; [key: string]: unknown }
-		| { type: "review"; title?: string; reviewTitle?: string; sessionId?: string }
+		| { type: "review"; documentId?: string; title?: string; reviewTitle?: string; sessionId?: string }
 		| { type: "inbox"; sessionId?: string }
 		| {
-			/** A pack-contributed side panel (pack schema V1 §8.1). `{packId, panelId}`
-			 *  is the COMPOUND key into the client pack-panel registry (panel ids are
-			 *  only pack-unique now); `params` is the typed PanelTarget.params the panel
-			 *  rehydrates from (e.g. `{ artifactId }`). */
+			/** A pack-contributed side panel (pack schema V1 §8.1). `{packId, panelId,
+			 *  instanceKey}` is the COMPOUND key into the client pack-panel registry
+			 *  (panel ids are only pack-unique now); `params` is the typed
+			 *  PanelTarget.params the panel rehydrates from (e.g. `{ artifactId }`). */
 			type: "pack";
 			packId: string;
 			panelId: string;
+			instanceKey?: string;
+			singleton?: boolean;
 			params?: Record<string, unknown>;
 			sessionId?: string;
 			[key: string]: unknown;
@@ -51,6 +53,7 @@ export const CHAT_PANEL_TAB_ID = "chat";
 export const LIVE_PREVIEW_PANEL_TAB_ID = "preview:live";
 export const LEGACY_LIVE_PREVIEW_PANEL_TAB_ID = "preview";
 export const INBOX_PANEL_TAB_ID = "inbox";
+export const DEFAULT_PACK_PANEL_INSTANCE_KEY = "default";
 export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
 const PANEL_TABS_STORAGE_KEY = "bobbit-panel-tabs-by-session";
 const PANEL_ACTIVE_STORAGE_KEY = "bobbit-panel-active-by-session";
@@ -127,9 +130,9 @@ const PROPOSAL_LABELS: Record<ProposalType, string> = {
 
 const PREVIEW_ENTRY_ID_RE = /^preview:entry:([^:]+)(?::v:(\d+))?$/;
 const PROPOSAL_ID_RE = /^proposal:([^:]+)(?::rev:(\d+))?$/;
-// Pack side-panel tab id scheme `pack:<encoded packId>:<encoded panelId>` (pack
-// schema V1 §8.1 — panel ids are only pack-unique, so the tab id carries BOTH).
-const PACK_PANEL_ID_RE = /^pack:([^:]+):(.+)$/;
+// Pack side-panel tab id scheme `pack:<encoded packId>:<encoded panelId>:<encoded instanceKey>`.
+// Legacy two-part ids are accepted for migration compatibility.
+const PACK_PANEL_ID_RE = /^pack:([^:]+):([^:]+)(?::([^:]+))?$/;
 
 function isLegacyPreviewPanelTabId(id: string | null | undefined): boolean {
 	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || id === LIVE_PREVIEW_PANEL_TAB_ID;
@@ -207,27 +210,37 @@ function isReviewPanelTabId(id: string): boolean {
 	return typeof decoded === "string" && decoded.length > 0;
 }
 
-/** A `{packId, panelId}` reference into the client pack-panel registry. */
+/** A `{packId, panelId, instanceKey}` reference into the client pack-panel registry.
+ *  `legacyTwoPart` is true only for migrated `pack:<packId>:<panelId>` ids; callers
+ *  should canonicalize those to instanceKey `default` when writing new state. */
 export interface PackPanelRef {
 	packId: string;
 	panelId: string;
+	instanceKey: string;
+	legacyTwoPart?: boolean;
 }
 
 /** Build the side-panel tab id for a pack panel (pack schema V1 §8.1) — encodes
- *  BOTH packId and panelId since panel ids are only pack-unique. */
-export function packPanelTabId(packId: string, panelId: string): string {
-	return `pack:${encodeURIComponent(packId)}:${encodeURIComponent(panelId)}`;
+ *  packId, panelId, and durable instanceKey because panel ids are pack-unique and
+ *  a panel may have multiple parameterized instances. */
+export function packPanelTabId(packId: string, panelId: string, instanceKey: string = DEFAULT_PACK_PANEL_INSTANCE_KEY): string {
+	const key = instanceKey && typeof instanceKey === "string" ? instanceKey : DEFAULT_PACK_PANEL_INSTANCE_KEY;
+	return `pack:${encodeURIComponent(packId)}:${encodeURIComponent(panelId)}:${encodeURIComponent(key)}`;
 }
 
-/** Extract the `{packId, panelId}` from a `pack:<packId>:<panelId>` tab id, or
- *  undefined if not one. */
+/** Extract the `{packId, panelId, instanceKey}` from a pack tab id, or undefined
+ *  if not one. Legacy two-part `pack:<packId>:<panelId>` ids are accepted and
+ *  returned with instanceKey `default` for one-time migration compatibility. */
 export function packPanelRefFromTabId(id: string | null | undefined): PackPanelRef | undefined {
 	if (!id) return undefined;
 	const match = PACK_PANEL_ID_RE.exec(id);
 	if (!match) return undefined;
 	const packId = decodeTabComponent(match[1]);
 	const panelId = decodeTabComponent(match[2]);
-	return packId && panelId ? { packId, panelId } : undefined;
+	const decodedInstanceKey = match[3] == null ? DEFAULT_PACK_PANEL_INSTANCE_KEY : decodeTabComponent(match[3]);
+	return packId && panelId && decodedInstanceKey
+		? { packId, panelId, instanceKey: decodedInstanceKey, legacyTwoPart: match[3] == null || undefined }
+		: undefined;
 }
 
 function isPackPanelTabId(id: string): boolean {
@@ -514,8 +527,86 @@ export function isHistoricalProposalTab(tab: PanelWorkspaceTab | undefined | nul
 	return tab?.kind === "proposal" && proposalRevisionFromPanelTab(tab) != null;
 }
 
-export function reviewPanelTabId(title: string): string {
-	return `review:${encodeURIComponent(title)}`;
+const reviewDocumentIdsByTitle = new Map<string, string>();
+let reviewHashK: number[] | undefined;
+
+function sha256Hex(input: string): string {
+	const bytes = typeof TextEncoder !== "undefined"
+		? Array.from(new TextEncoder().encode(input))
+		: Array.from(unescape(encodeURIComponent(input)), (ch) => ch.charCodeAt(0));
+	const k = reviewHashK ||= (() => {
+		const out: number[] = [];
+		let n = 2;
+		while (out.length < 64) {
+			let prime = true;
+			for (let i = 2; i * i <= n; i++) if (n % i === 0) { prime = false; break; }
+			if (prime) out.push(Math.floor((Math.cbrt(n) % 1) * 0x100000000) >>> 0);
+			n++;
+		}
+		return out;
+	})();
+	const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+	const bitLen = bytes.length * 8;
+	bytes.push(0x80);
+	while (bytes.length % 64 !== 56) bytes.push(0);
+	for (let i = 7; i >= 0; i--) bytes.push(Math.floor(bitLen / 2 ** (i * 8)) & 0xff);
+	const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+	for (let i = 0; i < bytes.length; i += 64) {
+		const w = new Array<number>(64);
+		for (let j = 0; j < 16; j++) w[j] = ((bytes[i + j * 4] << 24) | (bytes[i + j * 4 + 1] << 16) | (bytes[i + j * 4 + 2] << 8) | bytes[i + j * 4 + 3]) >>> 0;
+		for (let j = 16; j < 64; j++) {
+			const s0 = rotr(w[j - 15], 7) ^ rotr(w[j - 15], 18) ^ (w[j - 15] >>> 3);
+			const s1 = rotr(w[j - 2], 17) ^ rotr(w[j - 2], 19) ^ (w[j - 2] >>> 10);
+			w[j] = (w[j - 16] + s0 + w[j - 7] + s1) >>> 0;
+		}
+		let [a, b, c, d, e, f, g, hh] = h;
+		for (let j = 0; j < 64; j++) {
+			const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+			const ch = (e & f) ^ (~e & g);
+			const temp1 = (hh + s1 + ch + k[j] + w[j]) >>> 0;
+			const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+			const maj = (a & b) ^ (a & c) ^ (b & c);
+			const temp2 = (s0 + maj) >>> 0;
+			hh = g; g = f; f = e; e = (d + temp1) >>> 0; d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+		}
+		h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+		h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0; h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+	}
+	return h.map((x) => x.toString(16).padStart(8, "0")).join("");
+}
+
+export function legacyReviewDocumentIdFromTitle(title: string): string {
+	return `legacy-title-${sha256Hex(title || "Review")}`;
+}
+
+export function rememberReviewDocumentIdentity(title: string, documentId: string): void {
+	if (!title || !documentId) return;
+	reviewDocumentIdsByTitle.set(title, documentId);
+}
+
+export function reviewDocumentIdForTitle(title: string): string {
+	return reviewDocumentIdsByTitle.get(title) || legacyReviewDocumentIdFromTitle(title);
+}
+
+function looksLikeReviewDocumentId(value: string): boolean {
+	return value.startsWith("review-doc:") || value.startsWith("legacy-title-");
+}
+
+export function reviewPanelTabId(documentIdOrTitle: string): string {
+	const documentId = looksLikeReviewDocumentId(documentIdOrTitle)
+		? documentIdOrTitle
+		: reviewDocumentIdForTitle(documentIdOrTitle);
+	return `review:${encodeURIComponent(documentId)}`;
+}
+
+export function reviewDocumentIdFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
+	if (!tab) return "";
+	if (tab.source?.type === "review" && typeof tab.source.documentId === "string" && tab.source.documentId) return tab.source.documentId;
+	const encoded = tab.id.startsWith("review:") ? tab.id.slice("review:".length) : "";
+	if (encoded) {
+		try { return decodeURIComponent(encoded); } catch { return encoded; }
+	}
+	return "";
 }
 
 export function reviewTitleFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
@@ -524,10 +615,8 @@ export function reviewTitleFromPanelTab(tab: PanelWorkspaceTab | undefined | nul
 		if (typeof tab.source.reviewTitle === "string") return tab.source.reviewTitle;
 		if (typeof tab.source.title === "string") return tab.source.title;
 	}
-	const encoded = tab.id.startsWith("review:") ? tab.id.slice("review:".length) : "";
-	if (encoded) {
-		try { return decodeURIComponent(encoded); } catch { return encoded; }
-	}
+	const decodedId = reviewDocumentIdFromPanelTab(tab);
+	if (decodedId && !looksLikeReviewDocumentId(decodedId)) return decodedId;
 	return tab.title.replace(/^Review:\s*/, "");
 }
 
@@ -612,13 +701,14 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 
 	if (input.reviewPanelOpen) {
 		for (const title of input.reviewTitles) {
+			const documentId = reviewDocumentIdForTitle(title);
 			tabs.push({
-				id: reviewPanelTabId(title),
+				id: reviewPanelTabId(documentId),
 				kind: "review",
 				title: `Review: ${title}`,
 				label: `Review: ${title}`,
 				legacyTab: "review",
-				source: { type: "review", title, reviewTitle: title, sessionId: input.sessionId },
+				source: { type: "review", documentId, title, reviewTitle: title, sessionId: input.sessionId },
 			});
 		}
 	}
@@ -665,17 +755,24 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 		};
 	}
 	if (kind === "review") {
+		const source = (rawTab.source || {}) as Record<string, unknown>;
 		const encoded = id.slice("review:".length);
-		let title = encoded;
-		try { title = decodeURIComponent(encoded); } catch { /* keep encoded */ }
+		let decoded = encoded;
+		try { decoded = decodeURIComponent(encoded); } catch { /* keep encoded */ }
+		const sourceTitle = typeof source.reviewTitle === "string" ? source.reviewTitle : typeof source.title === "string" ? source.title : undefined;
+		const documentId = typeof source.documentId === "string" && source.documentId
+			? source.documentId
+			: looksLikeReviewDocumentId(decoded) ? decoded : legacyReviewDocumentIdFromTitle(decoded);
+		const title = sourceTitle || (!looksLikeReviewDocumentId(decoded) ? decoded : rawTab.title.replace(/^Review:\s*/, "") || "Review");
+		if (title && documentId) rememberReviewDocumentIdentity(title, documentId);
 		return {
 			...rawTab,
-			id,
+			id: reviewPanelTabId(documentId),
 			kind: "review",
 			title: `Review: ${title}`,
 			label: `Review: ${title}`,
 			legacyTab: "review",
-			source: { ...(rawTab.source as Record<string, unknown>), type: "review", title, reviewTitle: title } as PanelWorkspaceTab["source"],
+			source: { ...source, type: "review", documentId, title, reviewTitle: title } as PanelWorkspaceTab["source"],
 		};
 	}
 	if (kind === "pack") {
@@ -688,16 +785,20 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 		const panelId = ref?.panelId
 			|| (typeof source.panelId === "string" ? source.panelId : "")
 			|| (typeof tabState.panelId === "string" ? tabState.panelId : "");
+		const instanceKey = ref?.instanceKey
+			|| (typeof source.instanceKey === "string" ? source.instanceKey : "")
+			|| (typeof tabState.instanceKey === "string" ? tabState.instanceKey : "")
+			|| DEFAULT_PACK_PANEL_INSTANCE_KEY;
 		const title = rawTab.title || panelId || "Panel";
 		return {
 			...rawTab,
-			id,
+			id: packPanelTabId(packId, panelId, instanceKey),
 			kind: "pack",
 			title,
 			label: rawTab.label || title,
 			legacyTab: "pack",
-			source: { ...source, type: "pack", packId, panelId } as PanelWorkspaceTab["source"],
-			state: { ...tabState, packId, panelId },
+			source: { ...source, type: "pack", packId, panelId, instanceKey } as PanelWorkspaceTab["source"],
+			state: { ...tabState, packId, panelId, instanceKey },
 		};
 	}
 	return {
@@ -788,10 +889,10 @@ export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | unde
 	const exact = tabs.find((tab) => tab.id === id && isSidePanelTabId(tab.id));
 	if (exact) return exact;
 	if (id.startsWith("review:")) {
-		const rawTitle = id.slice("review:".length);
-		let decodedTitle = rawTitle;
-		try { decodedTitle = decodeURIComponent(rawTitle); } catch { /* keep raw */ }
-		return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === decodedTitle);
+		const raw = id.slice("review:".length);
+		let decoded = raw;
+		try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ }
+		return tabs.find((tab) => tab.kind === "review" && (reviewDocumentIdFromPanelTab(tab) === decoded || reviewTitleFromPanelTab(tab) === decoded));
 	}
 	return undefined;
 }

@@ -61,9 +61,9 @@ test.describe("getHostApi — durable v1 capabilities (extension-host §3)", () 
 		const caps = await page.evaluate(() => (window as any).__caps());
 
 		expect(caps.version).toBe(1);
-		// Contract v2: the additive `PanelTarget.sessionId` field bumped
-		// HOST_CONTRACT_VERSION 1→2 (HOST_API_VERSION stays 1 — purely additive).
-		expect(caps.contractVersion).toBe(2);
+		// Contract v3: additive PanelTarget addressing fields bumped
+		// HOST_CONTRACT_VERSION (HOST_API_VERSION stays 1 — purely additive).
+		expect(caps.contractVersion).toBe(3);
 
 		// Phase-1 — implemented.
 		expect(caps.invokeAction).toBe(true);
