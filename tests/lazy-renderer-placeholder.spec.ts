@@ -15,9 +15,8 @@
  *      leaving the placeholder forever.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/lazy-renderer-placeholder.html");
 const BUNDLE = path.resolve("tests/fixtures/lazy-renderer-placeholder-bundle.js");
@@ -26,26 +25,7 @@ const REGISTRY_SRC = path.resolve("src/ui/tools/renderer-registry.ts");
 const MESSAGES_SRC = path.resolve("src/ui/components/Messages.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(REGISTRY_SRC).mtimeMs,
-		fs.statSync(MESSAGES_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, REGISTRY_SRC, MESSAGES_SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;

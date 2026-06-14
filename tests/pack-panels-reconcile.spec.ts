@@ -20,37 +20,18 @@
  * fake panel module.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/pack-panels-reconcile.html");
 const BUNDLE = path.resolve("tests/fixtures/pack-panels-reconcile-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/pack-panels-reconcile-entry.ts");
 const PACK_SRC = path.resolve("src/app/pack-panels.ts");
 const WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
+const SIDE_PANEL_WORKSPACE_SRC = path.resolve("src/app/side-panel-workspace.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(PACK_SRC).mtimeMs,
-		fs.statSync(WORKSPACE_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, PACK_SRC, WORKSPACE_SRC, SIDE_PANEL_WORKSPACE_SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;
