@@ -56,6 +56,7 @@ import { loadPackContributions } from "./agent/pack-contributions.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
+import { handleSidePanelWorkspaceRoute } from "./side-panel-workspace-routes.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -2547,6 +2548,13 @@ async function handleApiRoute(
 		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
 		return false;
 	}
+
+	if (await handleSidePanelWorkspaceRoute(url, req, res, {
+		sessionManager,
+		readBody,
+		broadcastToSession: _broadcastToSession,
+		packContributionRegistry,
+	})) return;
 
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
 		defaultCwd: config.defaultCwd,
