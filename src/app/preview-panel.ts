@@ -401,25 +401,36 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 
 export function selectReviewWorkspaceTab(title: string, options: PanelWorkspaceOptions = {}): void {
 	const sessionId = panelSessionId(options.sessionId);
+	const documentId = reviewDocumentIdForTitle(title);
 	selectPanelWorkspaceTab({
-		id: reviewPanelTabId(title),
+		id: reviewPanelTabId(documentId),
 		kind: "review",
 		title: `Review: ${title}`,
 		label: `Review: ${title}`,
 		legacyTab: "review",
-		source: { type: "review", title, reviewTitle: title, sessionId },
+		source: { type: "review", title, reviewTitle: title, documentId, sessionId },
 	}, { ...options, sessionId });
 }
 
 export function closeReviewWorkspaceTabs(titles?: string[], options: PanelWorkspaceOptions = {}): void {
 	const s = state as any;
 	const sessionId = panelSessionId(options.sessionId);
-	const existingTabs = panelTabsForSession(s, sessionId);
-	const ids = titles && titles.length > 0
-		? titles.map(reviewPanelTabId)
-		: existingTabs
-			.filter((tab: PanelWorkspaceTab) => tab?.kind === "review" || tab?.id?.startsWith("review:"))
-			.map((tab: PanelWorkspaceTab) => tab.id);
+	const titleSet = titles && titles.length > 0 ? new Set(titles) : null;
+	const allTabs: PanelWorkspaceTab[] = [
+		...panelTabsForSession(s, sessionId),
+		...(getSidePanelWorkspace(sessionId).tabs as unknown as PanelWorkspaceTab[]),
+	];
+	const ids = [...new Set(allTabs
+		.filter((tab: PanelWorkspaceTab) => {
+			if (!(tab?.kind === "review" || tab?.id?.startsWith("review:"))) return false;
+			if (!titleSet) return true;
+			const source = tab.source as Record<string, unknown> | undefined;
+			const tabTitle = typeof source?.reviewTitle === "string" ? source.reviewTitle
+				: typeof source?.title === "string" ? source.title
+				: tab.title.replace(/^Review:\s*/, "");
+			return titleSet.has(tabTitle);
+		})
+		.map((tab: PanelWorkspaceTab) => tab.id))];
 	if (ids.length > 0) removePanelWorkspaceTabs(ids, options);
 }
 

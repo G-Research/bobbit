@@ -18,6 +18,7 @@ import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromSe
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
+import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
@@ -1232,6 +1233,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
+		await hydrateSidePanelWorkspace(sessionId);
+		if (isStale()) { remote.disconnect(); return; }
 
 		// ── Fire the transcript snapshot request the INSTANT the WS is
 		// authenticated — before the refreshSessions()/setAgent() awaits below.
@@ -2199,6 +2202,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					delete state.activeProposals.project;
 					state.assistantHasProposal = false;
 				}
+				selectProposalWorkspaceTab("project", { sessionId, select: true });
 			}
 		})();
 
@@ -2575,6 +2579,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	invalidateProjectScopeConfig(projectId);
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
+	removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	if (proposal.sessionId) {
 		deleteProjectDraft(proposal.sessionId);
 		// Slice E: drop the on-disk proposal file once accepted.
@@ -2681,6 +2686,8 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
+	const keepAssistantPanelOpen = (state.assistantType === "project" || state.assistantType === "project-scaffolding") && propSessionId === activeSessionId();
+	if (!keepAssistantPanelOpen) removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.

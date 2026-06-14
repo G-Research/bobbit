@@ -65,6 +65,7 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
+	assistantProposalType,
 	isHistoricalProposalTab,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
@@ -412,7 +413,8 @@ function dismissTypedProposal(type: ProposalType): void {
 	if (sessionId && slot?.fields) markProposalDismissed(sessionId, type, slot.fields);
 	delete state.activeProposals[type];
 	recomputeAssistantHasProposal();
-	closeCurrentProposalPanel(type, sessionId);
+	const keepAssistantPanelOpen = type === assistantProposalType(state.assistantType);
+	if (!keepAssistantPanelOpen) closeCurrentProposalPanel(type, sessionId);
 	if (sessionId) void deleteProposalFile(sessionId, type);
 	renderApp();
 }

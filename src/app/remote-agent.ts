@@ -36,7 +36,7 @@ import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersis
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
-import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -1629,6 +1629,8 @@ export class RemoteAgent {
 						for (const m of this._state.messages) {
 							this._checkReviewToolResult(m);
 						}
+					} else {
+						closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId || "", select: false });
 					}
 					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
@@ -2257,6 +2259,16 @@ export class RemoteAgent {
 			try { data = JSON.parse(trimmed); } catch { continue; }
 
 			if (data.action === "review_open" && data.title && data.markdown) {
+				if (this._sessionId) {
+					const title = String(data.title);
+					const hasOpenWorkspaceTab = getSidePanelWorkspace(this._sessionId).tabs.some((tab) => {
+						if (tab.kind !== "review") return false;
+						const source = tab.source as Record<string, unknown> | undefined;
+						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
+						return tabTitle === title;
+					});
+					if (!hasOpenWorkspaceTab && (!isLive || isReviewSubmitted(this._sessionId))) return;
+				}
 				// If the user already submitted this review, suppress reopening it on
 				// REPLAY paths (snapshot loop / non-live message_end). The submitted
 				// flag is per-session and persisted server-side; without this gate, a

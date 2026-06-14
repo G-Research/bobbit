@@ -276,13 +276,13 @@ export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boo
 	const tabState = tab.state as Record<string, unknown> | undefined;
 	const hasArtifact = typeof source?.artifactId === "string" && source.artifactId
 		|| typeof tabState?.artifactId === "string" && tabState.artifactId;
-	// Current filename tabs are "live" only while they have no immutable artifact
-	// backing. Once a preview_open artifact is attached, selecting the current tab
-	// should render that tab's own bytes directly instead of whatever another
-	// historical restore left in the single live mount slot.
-	if (isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab)) return !hasArtifact;
+	const hasLiveSource = source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
+	// Current filename tabs are live when the preview event explicitly marks them
+	// live, even if the server also attached an immutable artifact for historical
+	// restore. Historical/versioned tabs keep using their artifact-backed URLs.
+	if (isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab)) return hasLiveSource || !hasArtifact;
 	if (hasArtifact) return false;
-	return source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
+	return hasLiveSource;
 }
 
 export function normalizePreviewContentHash(value: unknown): string {

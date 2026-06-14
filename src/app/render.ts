@@ -2171,11 +2171,18 @@ export function doRenderApp(): void {
 						clearAllAnnotations(sid);
 						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
+						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
+							method: "PUT",
+							body: JSON.stringify({ submitted: true }),
+						}).catch(() => undefined);
 						await flushPendingWrites();
 						state.reviewDocuments = new Map();
 						state.reviewPanelOpen = false;
 						state.reviewActiveTab = "";
-						await Promise.allSettled(reviewTabIds.map((tabId) => closeServerSidePanelTab(tabId, { sessionId: sid })));
+						for (const tabId of reviewTabIds) {
+							try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
+							catch { /* best-effort */ }
+						}
 						renderApp();
 					}
 				}}
@@ -2231,11 +2238,20 @@ export function doRenderApp(): void {
 					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
 					clearAllAnnotations(sid);
 					clearPersistedReviewDocuments(sid);
-					if (hasMarkdownReview) markReviewSubmitted(sid);
+					if (hasMarkdownReview) {
+						markReviewSubmitted(sid);
+						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
+							method: "PUT",
+							body: JSON.stringify({ submitted: true }),
+						}).catch(() => undefined);
+					}
 					state.reviewDocuments = new Map();
 					state.reviewPanelOpen = false;
 					state.reviewActiveTab = "";
-					await Promise.allSettled(reviewTabIds.map((tabId) => closeServerSidePanelTab(tabId, { sessionId: sid })));
+					for (const tabId of reviewTabIds) {
+						try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
+						catch { /* best-effort */ }
+					}
 					renderApp();
 				}}
 			></review-pane>
@@ -2254,7 +2270,7 @@ export function doRenderApp(): void {
 			const source = tab.source as Record<string, unknown>;
 			const tabEntry = previewEntryFromTab(tab);
 			if (tabEntry) entry = tabEntry;
-			artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+			if (!isLivePreviewTab(tab)) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 		}
 		return artifactId
 			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}`
@@ -2285,13 +2301,20 @@ export function doRenderApp(): void {
 		${tab.kind === "preview" && state.previewPanelEntry ? previewControlButtons(tab) : ""}
 	`;
 
-	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => html`
+	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {
+		const fullscreenTitle = tab.kind === "preview"
+			? `Fullscreen preview${shortcutHint("toggle-sidebar")}`
+			: `Fullscreen side panel${shortcutHint("toggle-sidebar")}`;
+		const restoreTitle = tab.kind === "preview"
+			? `Collapse preview${shortcutHint("toggle-sidebar")}`
+			: `Restore side panel${shortcutHint("toggle-sidebar")}`;
+		return html`
 		${mode === "fullscreen" ? html`
-			<button @click=${() => setSidePanelModeAndRender("split")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Restore side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-restore">
+			<button @click=${() => setSidePanelModeAndRender("split")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${restoreTitle} data-testid="side-panel-restore">
 				${icon(PanelRightOpen, "sm")}
 			</button>
 		` : html`
-			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Fullscreen side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-fullscreen">
+			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${fullscreenTitle} data-testid="side-panel-fullscreen">
 				${icon(PanelRightOpen, "sm")}
 			</button>
 		`}
@@ -2308,6 +2331,7 @@ export function doRenderApp(): void {
 			${icon(PanelRightClose, "sm")}
 		</button>
 	`;
+	};
 
 	const inboxPaneContent = () => {
 		const sid = activeSessionId() || "";
