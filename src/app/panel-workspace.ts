@@ -272,8 +272,16 @@ export function isPinnedPanelTab(tab: PanelWorkspaceTab | undefined | null): boo
 export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
 	if (!tab || tab.kind !== "preview") return false;
 	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) return true;
-	if (isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab)) return true;
 	const source = tab.source as Record<string, unknown> | undefined;
+	const tabState = tab.state as Record<string, unknown> | undefined;
+	const hasArtifact = typeof source?.artifactId === "string" && source.artifactId
+		|| typeof tabState?.artifactId === "string" && tabState.artifactId;
+	// Current filename tabs are "live" only while they have no immutable artifact
+	// backing. Once a preview_open artifact is attached, selecting the current tab
+	// should render that tab's own bytes directly instead of whatever another
+	// historical restore left in the single live mount slot.
+	if (isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab)) return !hasArtifact;
+	if (hasArtifact) return false;
 	return source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
 }
 

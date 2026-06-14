@@ -8,7 +8,9 @@ import {
 	previewEntryLabel,
 	previewEntryTabId,
 	previewTabIdentityForContent,
+	previewTabVersionFromId,
 	previewVersionRecordFor,
+	previewVersionedTabId,
 	normalizePreviewContentHash,
 	isPreviewContentDismissed,
 	panelTabsForSession,
@@ -119,11 +121,14 @@ function sidePanelTabFromLegacy(tab: PanelWorkspaceTab, sessionId: string): Side
 		const source = tab.source as Record<string, unknown>;
 		const tabState = (tab.state || {}) as Record<string, unknown>;
 		const entry = previewEntryLabel(typeof tabState.entry === "string" ? tabState.entry : typeof source.entry === "string" ? source.entry : tab.title);
-		const version = typeof source.version === "number" ? source.version : typeof tabState.version === "number" ? tabState.version : undefined;
+		const idVersion = previewTabVersionFromId(tab.id);
+		const rawVersion = typeof source.version === "number" ? source.version : typeof tabState.version === "number" ? tabState.version : undefined;
+		const version = idVersion ?? ((source.historical === true || tabState.historical === true) ? rawVersion : undefined);
 		const contentHash = normalizePreviewContentHash(source.contentHash) || normalizePreviewContentHash(tabState.contentHash);
-		const historical = source.historical === true || tabState.historical === true || (typeof version === "number" && version > 0);
+		const historical = source.historical === true || tabState.historical === true || idVersion != null;
+		const id = historical && typeof version === "number" && version > 0 ? previewVersionedTabId(entry, version) : tab.id;
 		return {
-			id: tab.id,
+			id,
 			kind: "preview",
 			title: tab.title,
 			label: tab.label,
@@ -278,7 +283,7 @@ export function selectHtmlPreviewTab(args: {
 	const isLiveEvent = (args.source as Record<string, unknown> | undefined)?.live === true
 		|| (args.source as Record<string, unknown> | undefined)?.origin === "preview-events"
 		|| (args.source as Record<string, unknown> | undefined)?.origin === "preview-bootstrap";
-	if (isLiveEvent && !requestedHistorical && contentHash && currentFilenameTab) {
+	if (isLiveEvent && !requestedHistorical && contentHash) {
 		const record = previewVersionRecordFor(s, sessionId, entry);
 		const latestVersion = record?.latestVersion ?? 0;
 		const hashVersion = record?.hashToVersion?.[contentHash];
@@ -316,9 +321,12 @@ export function selectHtmlPreviewTab(args: {
 		source.contentHash = contentHash;
 		tabState.contentHash = contentHash;
 	}
-	if (version != null) {
+	if (isVersionedHistorical && version != null) {
 		source.version = version;
 		tabState.version = version;
+	} else {
+		delete source.version;
+		delete tabState.version;
 	}
 	if (isVersionedHistorical) {
 		source.historical = true;
