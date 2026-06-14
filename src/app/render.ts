@@ -100,7 +100,13 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { renderPackPanelContent } from "./pack-panels.js";
-import { reorderSidePanelTabs } from "./side-panel-workspace.js";
+import {
+	closeSidePanelTab as closeServerSidePanelTab,
+	getSidePanelWorkspace,
+	reorderSidePanelTabs,
+	setActiveSidePanelTab as setServerActiveSidePanelTab,
+	setSidePanelSizeMode as setServerSidePanelSizeMode,
+} from "./side-panel-workspace.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -744,16 +750,24 @@ function sidePanelSizeModeBySession(): Record<string, SidePanelSizeMode> {
 
 export function getSidePanelSizeMode(sessionId: string = workspaceSessionId()): SidePanelSizeMode {
 	const sid = panelWorkspaceSessionKey(sessionId);
+	const workspace = state.sidePanelWorkspaceBySession?.[sid];
+	if (workspace?.sizeMode === "collapsed" || workspace?.sizeMode === "split" || workspace?.sizeMode === "fullscreen") return workspace.sizeMode;
 	const stored = sidePanelSizeModeBySession()[sid];
 	if (stored === "collapsed" || stored === "split" || stored === "fullscreen") return stored;
 	return state.previewPanelFullscreen ? "fullscreen" : "split";
 }
 
-export function setSidePanelSizeMode(mode: SidePanelSizeMode, sessionId: string = workspaceSessionId()): void {
+export async function setSidePanelSizeMode(mode: SidePanelSizeMode, sessionId: string = workspaceSessionId()): Promise<void> {
 	const sid = panelWorkspaceSessionKey(sessionId);
 	sidePanelSizeModeBySession()[sid] = mode;
 	// Compatibility mirror until the server-backed controller owns all callers.
 	state.previewPanelFullscreen = mode === "fullscreen";
+	if (!sid || sid === "__no-session__") return;
+	try {
+		await setServerSidePanelSizeMode(mode, { sessionId: sid });
+	} catch (err) {
+		console.warn("[side-panel] resize mutation failed", err);
+	}
 }
 
 let mountedPreviewTabId = "";
@@ -1112,6 +1126,10 @@ export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
 	setActivePanelTabIdForSession(state, sid, tab.id);
+	const workspace = getSidePanelWorkspace(sid);
+	if (sid !== "__no-session__" && workspace.tabs.some((candidate) => candidate.id === tab.id) && workspace.activeTabId !== tab.id) {
+		void setServerActiveSidePanelTab(tab.id, { sessionId: sid });
+	}
 	(state as any).previewPanelTab = tab.legacyTab;
 	(state as any).previewPanelActiveTab = tab.kind === "preview" ? "preview" : tab.legacyTab;
 	if (state.assistantType) state.assistantTab = "preview";
@@ -1143,6 +1161,8 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 /** Ordered list of available unified panel tabs for the current session. */
 export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	const sessionId = workspaceSessionId();
+	const serverWorkspace = state.sidePanelWorkspaceBySession?.[sessionId];
+	if (serverWorkspace) return panelContentTabs(panelTabsForSession(state, sessionId));
 	const derivedTabs = buildPanelWorkspaceTabs({
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
@@ -1855,15 +1875,29 @@ export function doRenderApp(): void {
 		const tabsBefore = unifiedPanelTabs();
 		const nextId = nextActivePanelTabId(tabsBefore, tab.id);
 		const nextCandidate = nextId ? findPanelTab(tabsBefore, nextId) : undefined;
+		const closeServerTab = () => {
+			void (async () => {
+				if (wasActive) setActivePanelTabIdForSession(state, sid, nextId || "");
+				await closeServerSidePanelTab(tab.id, { sessionId: sid });
+				// The user can close a locally-active tab before the prior active-tab REST
+				// mutation settles. Commit the Chrome-style successor from the UI order so
+				// the server and other browser contexts converge on the same active tab.
+				if (wasActive && nextId) await setServerActiveSidePanelTab(nextId, { sessionId: sid });
+			})().catch((err) => {
+				console.warn("[side-panel] close mutation failed", err);
+				// Fallback for no-session/test harnesses that do not have the server workspace API.
+				setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
+				if (wasActive) {
+					if (nextCandidate) setUnifiedActiveTab(nextCandidate);
+					else setActivePanelTabIdForSession(state, sid, "");
+				}
+				renderApp();
+			});
+		};
 
 		if (tab.kind === "proposal" && tab.source.type === "proposal" && !isHistoricalProposalTab(tab)) {
 			lazyProposalPanels.dismissTypedProposal(tab.source.proposalType);
-			setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
-			if (wasActive) {
-				if (nextCandidate) setUnifiedActiveTab(nextCandidate);
-				else setActivePanelTabIdForSession(state, sid, "");
-			}
-			renderApp();
+			closeServerTab();
 			return;
 		}
 		if (tab.kind === "review") {
@@ -1917,12 +1951,7 @@ export function doRenderApp(): void {
 			}
 		}
 
-		setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
-		if (wasActive) {
-			if (nextCandidate) setUnifiedActiveTab(nextCandidate);
-			else setActivePanelTabIdForSession(state, sid, "");
-		}
-		renderApp();
+		closeServerTab();
 	};
 
 	const panelTabHasDot = (tab: UnifiedPanelTab): boolean => {
@@ -2022,8 +2051,7 @@ export function doRenderApp(): void {
 
 	const sidePanelSizeMode = () => getSidePanelSizeMode(workspaceSessionId());
 	const setSidePanelModeAndRender = (mode: SidePanelSizeMode) => {
-		setSidePanelSizeMode(mode, workspaceSessionId());
-		renderApp();
+		void setSidePanelSizeMode(mode, workspaceSessionId());
 	};
 	const isSidePanelCollapsed = () => sidePanelSizeMode() === "collapsed";
 
