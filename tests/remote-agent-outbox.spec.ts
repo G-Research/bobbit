@@ -35,8 +35,13 @@ test.beforeAll(() => {
 
 const PAGE = `file://${FIXTURE}`;
 async function ready(page: any) {
-	await page.goto(PAGE);
-	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
+	// `waitUntil: "load"` guarantees the synchronous bundle <script> has executed
+	// (so `__ready` is already set) before we poll. The generous timeout absorbs
+	// CPU-saturation spikes during the concurrent full unit run, where a fixed 10s
+	// budget was occasionally exceeded on loaded machines (macOS/CI) even though the
+	// flag is set effectively immediately — see the flake fixed alongside G1.2.
+	await page.goto(PAGE, { waitUntil: "load" });
+	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 30_000 });
 }
 
 test.describe("RemoteAgent send outbox (S2)", () => {
