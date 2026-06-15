@@ -127,15 +127,15 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 // back through onResult; a never-resolving `callRoute` proves the within-gesture guard
 // suppresses a second concurrent click.
 type SpawnBehavior = "ok" | "nopr" | "throw" | "hang";
-const callRouteCalls: Array<{ route: string; sessionId: string | undefined; packId: string; contributionId: string }> = [];
+const callRouteCalls: Array<{ route: string; sessionId: string | undefined; packId: string; contributionId: string; body?: unknown }> = [];
 const openPanelCalls: Array<{ panelId?: string; sessionId?: string }> = [];
 (window as any).__installLauncherHost = (behavior: SpawnBehavior): void => {
 	callRouteCalls.length = 0;
 	openPanelCalls.length = 0;
 	setLauncherHostFactory((sessionId, packId, contributionId) => ({
 		capabilities: { callRoute: true } as any,
-		callRoute: async (route: string) => {
-			callRouteCalls.push({ route, sessionId, packId, contributionId });
+		callRoute: async (route: string, init?: { body?: unknown }) => {
+			callRouteCalls.push({ route, sessionId, packId, contributionId, body: init?.body });
 			if (behavior === "nopr") return { ok: false, code: "NO_PR", error: "No open GitHub PR for the current branch." };
 			if (behavior === "throw") throw new Error("spawn boom");
 			if (behavior === "hang") return await new Promise(() => { /* never resolves */ });
@@ -149,6 +149,11 @@ const openPanelCalls: Array<{ panelId?: string; sessionId?: string }> = [];
 (window as any).__runSpawn = (keyOrId: string): Promise<any> => new Promise((resolve) => {
 	let settled = false;
 	runLauncherEntrypoint(keyOrId, (r) => { settled = true; resolve(r); });
+	setTimeout(() => { if (!settled) resolve(null); }, 250);
+});
+(window as any).__runSpawnWithBody = (keyOrId: string, body: Record<string, unknown>): Promise<any> => new Promise((resolve) => {
+	let settled = false;
+	(runLauncherEntrypoint as any)(keyOrId, (r: any) => { settled = true; resolve(r); }, { body });
 	setTimeout(() => { if (!settled) resolve(null); }, 250);
 });
 // Fire the SAME launcher twice synchronously (a re-entrant double-click) — the
