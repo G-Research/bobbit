@@ -331,27 +331,21 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
 - Regression test: [`tests/e2e/ui/goal-empty-workflows-banner.spec.ts`](../tests/e2e/ui/goal-empty-workflows-banner.spec.ts).
 - Full convention: [docs/goals-workflows-tasks.md — Goal creation in a zero-workflow project](goals-workflows-tasks.md#goal-creation-in-a-zero-workflow-project).
 
-## Goal proposal dismissed but reappears
+## Closed proposal tab reappears after navigation / reload / reconnect
 
-- Proposals now use `propose_*` tool calls (e.g. `propose_goal`), which persist in message history as tool result blocks. Each completed proposal block includes an "Open proposal" button for re-access — proposals are no longer lost on reconnect or cache eviction.
-- localStorage key: `bobbit-goal-proposal-dismissed-<sessionId>` stores djb2 hash of `title + "\n" + spec`
-- Check: (1) key exists for session, (2) hash matches, (3) session is not goal-assistant type (those use IndexedDB)
-- Cleanup: `clearDismissedProposal()` in `terminateSession()`
-- Legacy XML proposal parsing (`proposal-parsers.ts`) still works as a deprecated fallback — check console for `[proposal] Detected legacy XML proposal block` warnings
+**Symptom:** A current proposal tab (`goal`, `project`, `role`, `tool`, or `staff`) is closed by the tab X, Dismiss, Create/Accept, or registered-project Apply Changes. After navigating away/back, reloading, reconnecting, or rehydrating, the same proposal tab reappears without the user clicking Open Proposal, Resubmit Proposal, or another explicit reopen action.
 
-## Dismissed proposal restored on reload
+**First check the server workspace.** Query `GET /api/sessions/:id/side-panel-workspace`. A closed proposal must be absent from `tabs`; it is not enough for the client to hide it locally. If `proposal:<type>` is still present after close, the close path failed to commit the workspace delete. Inspect the tab close handler plus the proposal-specific close path that was used (`Dismiss`, accept/save, or registered-project apply).
 
-**Symptom:** User dismisses a goal/role/project proposal panel. Reload the page (or trigger a WS reconnect/rehydrate) without any further agent activity. The panel reappears with the same content. The dismissal fingerprint check (`isProposalDismissedTyped`) works for fresh `proposal_update` events but is bypassed when the slot is rehydrated from the persisted server-side draft.
+**If the workspace is correct but the tab renders anyway**, the UI is deriving tabs from content/cache state. Rendered side-panel tabs must come from the server workspace, not from `state.activeProposals`, draft files, legacy `previewPanelTab` mirrors, localStorage, or transcript rescans. `state.activeProposals[type]` is content only.
 
-**Root cause:** The draft `restore` callbacks in `src/app/session-manager.ts` (`goalDraft`, `roleDraft`, `projectDraft`) used to unconditionally write `state.activeProposals.<type> = { fields: draft.active<Type>Proposal, ... }` whenever the draft contained a serialized proposal. The dismissal fingerprint stored in localStorage by `markProposalDismissed` was never consulted at restore time, so the slot was rebuilt and the panel re-opened. Dismiss only deletes the in-memory slot — it intentionally does NOT delete the on-disk draft (see below) — which made the persisted draft a silent re-open path on every reload.
+**If rehydrate resurrects it**, the proposal source gate is wrong. `proposal_update {source:"rehydrate"}` and `GET /api/sessions/:id/proposals` hydrate content slots only. They may refresh an already-open tab, but must not create or focus `proposal:<type>`.
 
-**Fix location:** `src/app/session-manager.ts` — each draft's `restore` callback now calls `isProposalDismissedTyped(sessionId, type, fields)` before populating `state.activeProposals.<type>`. When the fingerprint matches, the slot is left undefined and the proposal-mirror preview fields (`previewTitle`, `previewSpec`, etc.) are zeroed so the form doesn't flash dismissed content. The same gate is applied in three places: `goalDraft.restore`, `roleDraft.restore`, `projectDraft.restore`. First-emit dismissal short-circuits were also added to the legacy `onGoalProposal` / `onRoleProposal` callbacks fired during the post-attach message rescan, so the rescan can't re-fill the form fields after restore correctly zeroed them.
+**If `edit_proposal` resurrects it**, treat it the same way: `/proposal/:type/edit` is content-only. It writes the draft, bumps the content rev, and broadcasts `source:"edit"`; it must not open the workspace tab.
 
-**Why we don't delete the draft on dismiss:** The draft is more than just the proposal — it carries the form-mirror state (edited flags, `previewTitle`, in-progress edits) and is the rehydration source if the agent later calls `edit_proposal` or the user clicks "Open proposal" on a tool card. Deleting on dismiss would lose that work. Gating at the restore path keeps the draft intact while honouring the dismissal until content actually changes (fingerprint mismatch) or the user explicitly re-opens the panel.
+**Expected reopen paths:** fresh `propose_*` output (`seed`), explicit snapshot `restore`, legacy live proposal discovery, Open Proposal / Resubmit Proposal renderers, and historical revision open buttons may create or focus proposal tabs. Those are user- or tool-explicit opens, not cache-derived rehydrates.
 
-**Affected proposal types:** Only `goal`, `role`, and `project` have `createDraftManager` / restore paths. `staff`, `tool`, and `workflow` have no draft persistence — their slots are transient and cleared unconditionally on session attach, so they were never affected.
-
-**Regression test:** `tests/e2e/ui/goal-proposal-dismiss-reload.spec.ts` (browser E2E) — emits a `propose_goal`, dismisses the panel, reloads, asserts panel stays closed, then emits a fresh `propose_goal` with different content and asserts the panel reopens.
+See [docs/side-panel-workspace.md — Proposal lifecycle](side-panel-workspace.md#proposal-lifecycle) and [docs/internals.md — Panel routing and tabs](internals.md#panel-routing-and-tabs).
 
 ## Re-attempt project binding
 

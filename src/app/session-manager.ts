@@ -1,7 +1,7 @@
 import { ChatPanel } from "../ui/index.js";
 import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorkspaceTab, startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
-import type { ConnectionStatus } from "./remote-agent.js";
+import type { ConnectionStatus, ProposalSource } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
 import {
 	state,
@@ -198,6 +198,10 @@ function resolveProjectMode(sessionId: string): "provisional" | "registered" {
 
 function isAssistantProposalType(type: ProposalType): boolean {
 	return state.assistantType === type || (type === "project" && state.assistantType === "project-scaffolding");
+}
+
+function shouldRevealProposalForSource(source: ProposalSource | undefined): boolean {
+	return source === "tool" || source === "legacy" || source === "seed" || source === "restore";
 }
 
 function revealActiveProposalPanel(type: ProposalType, sessionId: string): void {
@@ -1660,15 +1664,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Slice E gap-closure: unified onProposal callback. Runs IN ADDITION to
 		// the legacy onXProposal callbacks above so:
-		//   • `proposal_update` from edit_proposal broadcasts hits the UI.
-		//   • `proposal_update {source: "rehydrate"}` on WS attach restores the panel
-		//     across server restarts.
+		//   • `proposal_update` from edit_proposal broadcasts hits the UI content.
+		//   • `proposal_update {source: "rehydrate"}` on WS attach restores cached
+		//     proposal content without recreating closed workspace tabs.
 		//   • `proposal_cleared` after DELETE clears the in-memory slot.
 		// The legacy callbacks still own the bespoke side-effects (project mode
 		// resolution, goal title summarisation, workflow JSON parse → populateFromProposal,
 		// per-type form-mirror state). The plugin.mergeFields shallow-merge guarantees
 		// the second invocation per propose_* tool-use is idempotent.
-		remote.onProposal = (type, fields, streaming, serverRev?: number) => {
+		remote.onProposal = (type, fields, streaming, serverRev?: number, source?: ProposalSource) => {
 			if (activeSessionId() !== sessionId) return;
 			if (fields === null) {
 				// proposal_cleared event from DELETE / accept
@@ -1749,20 +1753,22 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				delete state.projectProposalAcceptedBySessionId[sessionId];
 			}
 			const isMatchingAssistant = isAssistantProposalType(type);
+			const shouldRevealProposal = shouldRevealProposalForSource(source);
 			if (isFirstEmit) {
-				plugin.onFirstEmit(slot, {
-					isAssistant: isMatchingAssistant,
-					isMobile: !isDesktop(),
-				});
-				if (state.assistantType && !isMatchingAssistant && !isDesktop()) {
-					state.assistantTab = "preview";
+				if (shouldRevealProposal) {
+					plugin.onFirstEmit(slot, {
+						isAssistant: isMatchingAssistant,
+						isMobile: !isDesktop(),
+					});
+					if (state.assistantType && !isMatchingAssistant && !isDesktop()) {
+						state.assistantTab = "preview";
+					}
 				}
-			} else {
-				// Side-panel tab contract: "Agent-driven events may create/update a
-				// tab and make it active." When a proposal is updated (not just
-				// created), re-focus its existing side-pane tab in place. The id
-				// upsert merges into the existing tab row without reordering, so
-				// preview/review tabs keep their visible positions.
+			} else if (shouldRevealProposal) {
+				// Only fresh explicit proposal outputs may create/focus workspace tabs.
+				// Content-only sources (`rehydrate`, ordinary `edit`) still update the
+				// active proposal slot above, so already-open panels refresh naturally
+				// without resurrecting tabs the user closed.
 				revealProposalPanel(type, { sessionId }, {
 					isAssistant: isMatchingAssistant,
 					isMobile: !isDesktop(),
@@ -1818,7 +1824,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				const cb = callbackMap[type];
 				if (cb) cb(liveFields, /* streaming */ false);
 				if (remote.onProposal) {
-					remote.onProposal(type, liveFields, false, liveRev);
+					remote.onProposal(type, liveFields, false, liveRev, "tool");
 				}
 			};
 
@@ -2706,9 +2712,9 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
-	const keepAssistantPanelOpen = (state.assistantType === "project" || state.assistantType === "project-scaffolding") && propSessionId === activeSessionId();
-	if (keepAssistantPanelOpen) openAssistantProposalWorkspaceTab("project", propSessionId);
-	else removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
+	// Apply/Accept is a proposal-specific close path: the server workspace's
+	// absence is authoritative, so accepted saved-state must not reopen the tab.
+	removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.
@@ -2867,7 +2873,7 @@ async function rehydrateProposalsForSession(sessionId: string): Promise<void> {
 		for (const p of body.proposals) {
 			if (p.proposalType === "goal" || p.proposalType === "role" || p.proposalType === "staff"
 				|| p.proposalType === "project" || p.proposalType === "tool") {
-				onProposal(p.proposalType, p.fields, false, p.rev);
+				onProposal(p.proposalType, p.fields, false, p.rev, "rehydrate");
 			}
 		}
 	} catch { /* best-effort */ }

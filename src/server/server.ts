@@ -10200,6 +10200,22 @@ async function handleApiRoute(
 					json(parsed, 400);
 					return;
 				}
+				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
+				await openSidePanelWorkspaceTab({
+					sessionManager,
+					readBody,
+					broadcastToSession: _broadcastToSession,
+					packContributionRegistry,
+				}, sessionId, {
+					id: `proposal:${proposalType}`,
+					kind: "proposal",
+					title: `${proposalLabel} Proposal`,
+					label: proposalLabel,
+					source: { type: "proposal", sessionId, proposalType },
+					updatedAt: Date.now(),
+				}, { focus: true, placeAfterActive: true }).catch((err) => {
+					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
+				});
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -10237,6 +10253,22 @@ async function handleApiRoute(
 					json(result, status);
 					return;
 				}
+				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
+				await openSidePanelWorkspaceTab({
+					sessionManager,
+					readBody,
+					broadcastToSession: _broadcastToSession,
+					packContributionRegistry,
+				}, sessionId, {
+					id: `proposal:${proposalType}`,
+					kind: "proposal",
+					title: `${proposalLabel} Proposal`,
+					label: proposalLabel,
+					source: { type: "proposal", sessionId, proposalType },
+					updatedAt: Date.now(),
+				}, { focus: true, placeAfterActive: true }).catch((err) => {
+					console.warn(`[proposal/restore] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
+				});
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",

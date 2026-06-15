@@ -4,10 +4,11 @@ import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createSession, defaultProject, nonGitCwd } from "../e2e-setup.js";
-import { openApp, navigateToHash, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, navigateToHash, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const PREVIEW_OPEN_BUTTON_SELECTOR = '[data-testid="preview-open-button"]';
+const PROPOSAL_OPEN_BUTTON_SELECTOR = '[data-testid="proposal-open-button"]';
 const SIDE_PANEL_FULLSCREEN = '[data-testid="side-panel-fullscreen"]';
 const SIDE_PANEL_COLLAPSE = '[data-testid="side-panel-collapse"]';
 const SIDE_PANEL_RESTORE = '[data-testid="side-panel-restore"]';
@@ -47,6 +48,18 @@ function previewHtml(bodyText: string): string {
 
 async function createRegularSessionViaApi(page: Page): Promise<string> {
 	const sid = await createSession({ cwd: nonGitCwd() });
+	await navigateToSession(page, sid);
+	return sid;
+}
+
+async function createGoalAssistantSessionViaApi(page: Page): Promise<string> {
+	const resp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd: nonGitCwd(), assistantType: "goal" }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `create goal assistant session: ${text}`).toBe(201);
+	const sid = JSON.parse(text).id as string;
 	await navigateToSession(page, sid);
 	return sid;
 }
@@ -99,6 +112,25 @@ async function expectPanelTabs(page: Page, expectedIds: string[], message: strin
 	await expectNoChatTab(page);
 }
 
+async function settleClosedTabRehydratePath(page: Page): Promise<void> {
+	await page.evaluate(() => new Promise<void>((resolve) => {
+		requestAnimationFrame(() => requestAnimationFrame(() => window.setTimeout(resolve, 150)));
+	}));
+}
+
+async function expectClosedSidePanelTabAbsent(page: Page, sessionId: string, tabId: string, message: string): Promise<void> {
+	await expect.poll(async () => {
+		await settleClosedTabRehydratePath(page);
+		return {
+			visible: (await visiblePanelTabIds(page)).filter((id) => id === tabId),
+			server: (await workspace(sessionId)).tabs.map((tab: any) => tab.id).filter((id: string) => id === tabId),
+		};
+	}, {
+		timeout: 5_000,
+		message: `closed side-panel tab should remain absent (${message})`,
+	}).toEqual({ visible: [], server: [] });
+}
+
 async function tabById(page: Page, id: string) {
 	return page.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="${id}"]`).first();
 }
@@ -117,6 +149,16 @@ async function closeTabById(page: Page, id: string, message: string): Promise<vo
 	await expect(tab.locator(".goal-tab-close"), `${message}: tab should be closable`).toBeVisible({ timeout: 5_000 });
 	await tab.locator(".goal-tab-close").click();
 	await expect.poll(async () => (await visiblePanelTabIds(page)).includes(id), {
+		timeout: 10_000,
+		message: `${message}: closed tab should disappear`,
+	}).toBe(false);
+}
+
+async function closeWorkspaceTabViaApi(page: Page, sessionId: string, tabId: string, message: string): Promise<void> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent(tabId)}`, { method: "DELETE" });
+	const text = await resp.text();
+	expect(resp.status, `${message}: workspace DELETE should succeed: ${text}`).toBe(200);
+	await expect.poll(async () => (await visiblePanelTabIds(page)).includes(tabId), {
 		timeout: 10_000,
 		message: `${message}: closed tab should disappear`,
 	}).toBe(false);
@@ -302,6 +344,38 @@ async function openPreviewToolCard(page: Page, ordinal: number, message: string)
 	await expect(button, message).toBeEnabled({ timeout: 10_000 });
 	await button.click();
 	await expect(button, `${message}: button should acknowledge open`).toHaveText(/Open|Opened/, { timeout: 10_000 });
+}
+
+async function openProposalToolCard(page: Page, expectedTabId: string, message: string): Promise<void> {
+	const button = page.locator(PROPOSAL_OPEN_BUTTON_SELECTOR).last();
+	await button.scrollIntoViewIfNeeded();
+	await expect(button, `${message}: Open Proposal renderer should be visible`).toBeEnabled({ timeout: 10_000 });
+	await button.click();
+	await expect(page.locator('input[placeholder="Goal title"]').first(), `${message}: explicit Open Proposal should render the proposal panel`).toHaveValue(/Parity Goal A|E2E Test Goal/, { timeout: 15_000 });
+	await expectPanelTabs(page, [expectedTabId], `${message}: explicit Open Proposal should reopen the durable-closed proposal workspace tab`);
+	await expectActivePanelTabId(page, expectedTabId, `${message}: explicit Open Proposal should focus the reopened tab`);
+}
+
+async function navigateAwayAndBackToSession(page: Page, sessionId: string, message: string): Promise<void> {
+	await navigateToHash(page, "#/settings");
+	await expect(page.getByText("Settings").first(), `${message}: settings route should be visible before returning`).toBeVisible({ timeout: 10_000 });
+	await navigateToSession(page, sessionId);
+}
+
+async function goalIdsByTitle(title: string): Promise<Set<string>> {
+	const resp = await apiFetch("/api/goals");
+	const text = await resp.text();
+	expect(resp.status, `list goals for cleanup: ${text}`).toBe(200);
+	const parsed = JSON.parse(text);
+	const goals = Array.isArray(parsed) ? parsed : parsed.goals || [];
+	return new Set((goals as any[]).filter((goal) => goal?.title === title && goal?.id).map((goal) => String(goal.id)));
+}
+
+async function cleanupNewGoalsByTitle(title: string, before: Set<string>): Promise<void> {
+	const after = await goalIdsByTitle(title).catch(() => new Set<string>());
+	for (const id of after) {
+		if (!before.has(id)) await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+	}
 }
 
 async function openGoalProposal(page: Page): Promise<string> {
@@ -872,7 +946,7 @@ test.describe("Side-panel tab contract", () => {
 		expect(refetched.tabs.map((tab: any) => tab.id)).toEqual([]);
 	});
 
-	test("9b. Closing review tab preserves content but keeps closed workspace state across reload", async ({ page }) => {
+	test("9b. Closing review tab preserves content but keeps closed workspace state across navigation and reload", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);
 		const sessionId = await createRegularSessionViaApi(page);
@@ -880,19 +954,134 @@ test.describe("Side-panel tab contract", () => {
 		const reviewId = await openReview(page);
 		await closeTabById(page, reviewId, "closing review workspace tab should not delete review content");
 		await expectPanelTabs(page, [], "closed review tab should disappear immediately");
+		await expect.poll(() => page.evaluate(() => ((window as any).bobbitState?.reviewDocuments?.size ?? 0)), {
+			timeout: 5_000,
+			message: "closed review tab should preserve the cached review document for explicit reopen",
+		}).toBeGreaterThan(0);
 		await expect.poll(async () => (await workspace(sessionId)).tabs.map((tab: any) => tab.id), {
 			timeout: 10_000,
 			message: "server workspace should persist the closed review tab absence",
 		}).toEqual([]);
 
+		await navigateAwayAndBackToSession(page, sessionId, "closed review durable close");
+		await expectPanelTabs(page, [], "closed review tab must not be re-derived from cached review documents after navigation away/back");
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await navigateToSession(page, sessionId);
-		await expectPanelTabs(page, [], "closed review tab must not be re-derived from restored review document caches");
+		await expectPanelTabs(page, [], "closed review tab must not be re-derived from restored review document caches after reload");
 		await expect(page.locator("review-document")).toHaveCount(0);
 
 		const reopenedId = await openReview(page);
 		expect(reopenedId).toBe(reviewId);
 		await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("Persist Closed Panels: explicit Open Proposal reopens after durable close but draft rehydrate does not", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createGoalAssistantSessionViaApi(page);
+		const proposalId = await openGoalProposal(page);
+		let draft: { fields: Record<string, unknown>; rev: number } | undefined;
+		await expect.poll(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}/proposals`);
+			if (!resp.ok) return [];
+			const body = await resp.json() as { proposals?: Array<{ proposalType?: string; fields?: Record<string, unknown>; rev?: number }> };
+			const goalDraft = (body.proposals || []).find((proposal) => proposal.proposalType === "goal" && typeof proposal.rev === "number" && proposal.fields);
+			if (goalDraft?.fields && typeof goalDraft.rev === "number") draft = { fields: goalDraft.fields, rev: goalDraft.rev };
+			return (body.proposals || []).map((proposal) => `${proposal.proposalType}:${proposal.rev}`);
+		}, {
+			timeout: 10_000,
+			message: "goal proposal draft should be persisted before closing its workspace tab",
+		}).toContain("goal:1");
+		expect(draft, "goal proposal draft should be available for rehydrate replay").toBeTruthy();
+
+		await closeWorkspaceTabViaApi(page, sessionId, proposalId, "closing proposal workspace tab before draft rehydrate");
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "proposal tab immediately after workspace close");
+
+		await page.evaluate(({ fields, rev }) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			if (state?.activeProposals) delete state.activeProposals.goal;
+			const remote = state?.remoteAgent;
+			remote?.onProposal?.("goal", fields, false, rev, "rehydrate");
+		}, draft!);
+
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "proposal tab after non-explicit draft rehydrate replay");
+		await navigateAwayAndBackToSession(page, sessionId, "proposal durable close after draft rehydrate");
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "proposal tab after navigate away/back with draft still present");
+
+		await openProposalToolCard(page, proposalId, "proposal durable close explicit reopen");
+	});
+
+	test("Persist Closed Panels: proposal Dismiss close path does not resurrect after navigation or reload", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const proposalId = await openGoalProposal(page);
+
+		const dismiss = page.locator("button").filter({ hasText: "Dismiss" }).first();
+		await expect(dismiss, "regular-session proposal should expose Dismiss close path").toBeVisible({ timeout: 10_000 });
+		await dismiss.click();
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "proposal tab after Dismiss close path");
+		await expect(page.locator('input[placeholder="Goal title"]').first(), "Dismissed proposal form should disappear immediately").not.toBeVisible({ timeout: 5_000 });
+
+		await navigateAwayAndBackToSession(page, sessionId, "dismissed proposal durable close");
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "dismissed proposal tab after navigation away/back");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "dismissed proposal tab after reload/reconnect");
+	});
+
+	test("Persist Closed Panels: proposal Create Goal close path does not resurrect after returning to the source session", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createSessionViaUI(page);
+		const proposalId = await openGoalProposal(page);
+		const beforeGoals = await goalIdsByTitle("Parity Goal A");
+		try {
+			const createResp = page.waitForResponse(
+				(resp) => resp.url().includes("/api/goals") && resp.request().method() === "POST",
+				{ timeout: 30_000 },
+			);
+			const create = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(create, "proposal Create Goal action should be available").toBeVisible({ timeout: 10_000 });
+			await create.click();
+			const response = await createResp;
+			expect(response.ok(), `Create Goal should succeed: ${await response.text().catch(() => "")}`).toBe(true);
+			await expect(page, "Create Goal should navigate away from the source session").toHaveURL(/#\/goal(?:-dashboard)?\//, { timeout: 20_000 });
+
+			await navigateToSession(page, sessionId);
+			await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "accepted proposal tab after returning to source session");
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToSession(page, sessionId);
+			await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "accepted proposal tab after source session reload/reconnect");
+		} finally {
+			await cleanupNewGoalsByTitle("Parity Goal A", beforeGoals);
+		}
+	});
+
+	test("Persist Closed Panels: preview close survives bootstrap/reload and explicit preview Open reopens", async ({ page, gateway }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const mounted = await mountPreviewHtml(page, sessionId, "durable-preview.html", "Durable Preview Mount");
+		const previewTab = previewId("durable-preview.html");
+
+		await closeTabById(page, previewTab, "closing preview while its mount still exists");
+		await expectClosedSidePanelTabAbsent(page, sessionId, previewTab, "preview tab immediately after close with mount still present");
+
+		await navigateAwayAndBackToSession(page, sessionId, "preview durable close with mount still present");
+		await expectClosedSidePanelTabAbsent(page, sessionId, previewTab, "preview tab after navigation away/back with mount still present");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectClosedSidePanelTabAbsent(page, sessionId, previewTab, "preview tab after reload/bootstrap with mount still present");
+		await expect(page.locator(".goal-preview-panel"), "closed preview tab should not be re-rendered from preview bootstrap metadata").toHaveCount(0);
+
+		await setMockTranscript(gateway, sessionId, [
+			...v3PreviewToolCardMessages("tool-durable-preview", mounted, { entry: "durable-preview.html", html: previewHtml("Durable Preview Mount") }),
+		]);
+		await refreshTranscriptFromGateway(page, 1, "preview_open card should hydrate for explicit reopen after durable close");
+		await openPreviewToolCard(page, 0, "explicit preview Open should reopen a durable-closed preview tab");
+		await expectPanelTabs(page, [previewTab], "explicit preview Open should recreate only the requested preview tab");
+		await expectPreviewContains(page, "Durable Preview Mount", "reopened durable-close preview");
 	});
 
 	test("10. Size mode persists across reload for collapsed, split, and fullscreen preview states", async ({ page }) => {
