@@ -42,7 +42,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list}` (pack-namespaced) |
-| **Providers** *(schema 2; core landed, not yet wired)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Providers** *(schema 2; `sessionSetup` wired, per-turn pending)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
 and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
@@ -784,24 +784,27 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
   packs declaring the same `routeId` is a hard rejection at registry build). Panel ids referenced
   by `target.panelId` are pack-local.
 
-### Providers (`providers/<id>.yaml`) — schema 2; core landed, not yet wired into sessions
+### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
 **Status:** a `schema: 2` pack may ship **provider** contributions — a pack-scoped
 contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes.
 Schema-1 packs ignore `contents.providers` and keep the old activation-catalogue shape.
 
-Provider **dispatch infrastructure now exists**: a server-core `LifecycleHub` can resolve
-enabled providers via `PackContributionRegistry.listProviders(projectId)`, run a named hook on
-the Extension Host worker tier with a per-provider timeout, collect the returned
-`ContextBlock`s, apply token budgets, fence the content, and record a trace. See
-[docs/lifecycle-hub.md](lifecycle-hub.md) for the full Hub contract.
+The `LifecycleHub` resolves enabled providers via
+`PackContributionRegistry.listProviders(projectId)`, runs a named hook on the Extension Host
+worker tier with a per-provider timeout, collects the returned `ContextBlock`s, applies token
+budgets, fences the content, and records a trace. See [docs/lifecycle-hub.md](lifecycle-hub.md)
+for the full Hub contract.
 
-**But nothing calls the Hub from any session path yet, so authoring a provider still has no
-runtime effect in production today.** The `sessionSetup` wiring lands in a later goal (G1.3) and
-the per-turn `beforePrompt` wiring after that (G1.4). Author providers now to get validation,
-catalogue listing, and activation toggles — and to be ready for when the wiring lands — but
-expect no observable behaviour until then beyond appearing in `listProviders(projectId)`
-(installed + active + enabled).
+**The `sessionSetup` hook is now wired into the session runtime.** When a new session is
+created, the Hub dispatches `sessionSetup` and the returned blocks render as a final
+**Dynamic Context** prompt section (visible in the prompt-sections inspector with
+`source: "providers"` provenance) — so a provider that declares `sessionSetup` and is installed +
+active + enabled for the session's scope contributes context today. A provider fault never blocks
+the spawn. The per-turn `beforePrompt` hook and the rest of the hook set are **not wired yet**
+(G1.4 and later), and **no built-in production provider ships yet** (G1.6), so an out-of-the-box
+install produces no Dynamic Context section. See
+[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub

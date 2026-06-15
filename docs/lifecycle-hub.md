@@ -1,11 +1,13 @@
 # The Lifecycle Hub
 
-> **Status — server core, not yet wired (Extension Platform G1.2).** The `LifecycleHub`
-> exists and is fully tested, but **nothing in any session path calls it yet**. Authoring a
-> provider has **no runtime effect in production today**. Session-setup wiring lands in G1.3
-> and per-turn (`beforePrompt`) wiring in G1.4. See [Status / not-yet-wired](#status--not-yet-wired)
-> at the end of this doc. This page documents the core so the wiring goals (and provider
-> authors) have a stable contract to build against.
+> **Status — `sessionSetup` wired (Extension Platform G1.3); per-turn hooks still pending.**
+> New sessions now dispatch the `sessionSetup` hook through the `LifecycleHub`, and the blocks
+> it returns render as a **Dynamic Context** prompt section — see
+> [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` dispatch
+> and the `afterTurn` / `beforeCompact` / `sessionShutdown` dispatches are still **not wired**
+> (G1.4 and later). **No built-in production provider ships yet** (G1.6), so an out-of-the-box
+> install produces no Dynamic Context section; the behaviour is proven by a fixture pack. This
+> page documents the Hub core and its first session wiring.
 
 ## What it is, and why
 
@@ -51,17 +53,17 @@ The three core modules live under `src/server/agent/`:
 
 A **lifecycle hook** is a named moment in a session's life. The hook set is:
 
-| Hook | Intended dispatch point | Wiring goal |
-|---|---|---|
-| `sessionSetup` | Once, when a session is created — seed durable context. | G1.3 |
-| `beforePrompt` | Before each user prompt is sent to the model. | G1.4 |
-| `afterTurn` | After a turn completes. | later |
-| `beforeCompact` | Before transcript compaction. | later |
-| `sessionShutdown` | When a session is torn down. | later |
+| Hook | Dispatch point | Wiring goal | Status |
+|---|---|---|---|
+| `sessionSetup` | Once, when a session is created — seed durable context. | G1.3 | **wired** |
+| `beforePrompt` | Before each user prompt is sent to the model. | G1.4 | pending |
+| `afterTurn` | After a turn completes. | later | pending |
+| `beforeCompact` | Before transcript compaction. | later | pending |
+| `sessionShutdown` | When a session is torn down. | later | pending |
 
 A provider declares which hooks it wants in its YAML `hooks:` list; the Hub only dispatches a
-hook to providers that declared it. **None of these dispatch points are wired into the session
-runtime yet** — the table records *intent*, not current behaviour.
+hook to providers that declared it. **Only `sessionSetup` is wired into the session runtime**
+(see below); the remaining rows record *intent*, not current behaviour.
 
 ## The `ContextBlock` contract
 
@@ -254,6 +256,81 @@ This is why the worker's member-resolution has an explicit `providers` branch: f
 group is still `mod[exportKind] ?? mod.default?.[exportKind]` — that path is unchanged, so the
 existing route/action dispatchers are unaffected.
 
+## Session-setup wiring (G1.3)
+
+This is the **first** place the Hub is actually called from a live session path. The wiring has
+three moving parts; the goal was to add session behaviour without changing the prompt for any
+session that has no active provider.
+
+### Where the Hub is constructed
+
+Exactly **one** `LifecycleHub` instance lives for the gateway's lifetime. It is built in the
+server bootstrap (`src/server/server.ts`) right after the `PackContributionRegistry`, because the
+Hub's dependencies (`registry`, `moduleHost`) only exist at that point, and assigned to the
+already-constructed `SessionManager` via a public `lifecycleHub` field (the same
+assigned-post-construction pattern as `sandboxTokenStore` / `configCascade`). Its `gatewayInfo`
+callback reads the gateway base URL and admin token the same way the tool-guard does
+(`BOBBIT_GATEWAY_URL` env or `state/gateway-url`; token from `state/token`), guarded so a missing
+file never throws.
+
+### Where the hook is dispatched
+
+The session-setup pipeline (`src/server/agent/session-setup.ts`) gains one new async step,
+`resolveDynamicContext`, dispatched immediately **before** `resolvePrompt` in both the synchronous
+(`executePlan`) and worktree-async (`executeWorktreeAsync`) paths. It:
+
+1. **Short-circuits to zero cost when no Hub is configured** (`if (!ctx.lifecycleHub) return;`).
+   A session with no providers therefore pays nothing — this is what keeps spawn latency unchanged
+   and the prompt byte-identical for the no-provider / schema-1 case.
+2. Otherwise calls `lifecycleHub.dispatch("sessionSetup", { sessionId, projectId, scope, cwd,
+   goalId, roleName, prompt })` (scope is `"project"` when the plan has a `projectId`, else
+   `"global"`; `prompt` is the delegate task prompt when present, best-effort otherwise) and
+   stashes the returned `blocks` on the plan as `dynamicContextBlocks`.
+3. **Wraps the whole step in try/catch — a provider fault is logged and the spawn proceeds.**
+   Dynamic context is ambient and optional; a throwing or slow provider must never block a session
+   from starting. (The Hub already fault-isolates *individual* providers into diagnostics; this
+   outer guard covers the dispatch call itself.)
+
+The blocks are stashed on the **plan**, not applied directly, because `resolvePrompt` is
+re-invoked on the cwd-rebind path. `_resolvePrompt` copies `plan.dynamicContextBlocks` into
+`PromptParts.dynamicContext` on **every** invocation, so the blocks survive the re-calls —
+dispatch once, re-apply many.
+
+### How the blocks reach the prompt and the inspector
+
+`system-prompt.ts` renders `PromptParts.dynamicContext` (when non-empty) as a **final** section,
+after every existing section. It is placed last deliberately: provider-supplied ambient context is
+the freshest, **lowest-authority** content, so it sits at the tail where it least disturbs the
+cache-friendly stable prefix. Each block is wrapped with `fenceBlock` (the `<context-block …>`
+envelope carrying `source` / `authority` / `reason` provenance) and the blocks are joined with
+`\n\n`.
+
+The section is added in **both** prompt builders, mirroring the skills-catalog duality:
+
+- `_assembleSystemPrompt` (the actual system prompt) prepends a `## Dynamic Context` header.
+- `getPromptSections` (the source for the prompt-sections inspector) emits
+  `{ label: "Dynamic Context", source: "providers", content, tokens }`, where `content` is exactly
+  the fenced blocks (no header) and `tokens` is the host-side estimate. Because
+  `persistPromptSections` consumes `getPromptSections`, the section appears in the inspector
+  (`GET /api/sessions/:id/prompt-sections`) **for free**, with `source: "providers"` provenance and
+  a token count; per-block `provider` / `reason` / token live inside the fence attributes.
+
+**Empty / absent `dynamicContext` adds zero sections**, so a session with no contributing provider
+produces a byte-identical prompt to before this wiring — the invariant a unit test pins.
+
+### What does NOT ship yet
+
+No built-in production provider is installed (that is G1.6). The wiring is therefore exercised by a
+deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
+`DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
+E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
+server-scope market-packs dir** (`.bobbit/config/market-packs/provider-demo/`) and toggles it via
+pack activation (`PUT /api/marketplace/pack-activation`), which invalidates the resolver caches.
+This layers the fixture *on top of* the real built-in band rather than replacing it — the earlier
+approach of pointing `BOBBIT_BUILTIN_PACKS_DIR` at the fixtures dir wiped the built-in band for
+the whole worker-scoped gateway and broke sibling specs. Installing any schema-2 pack that ships a
+`sessionSetup` provider will likewise contribute a Dynamic Context section.
+
 ## The trace store
 
 `ContextTraceStore` records each dispatch as one JSON line, so you can reconstruct exactly what
@@ -284,22 +361,22 @@ ambient context a session received and why blocks were dropped.
   rewritten keeping only the newest lines that fit (drop-oldest), via a temp-file rename so a
   reader never sees a half-written file.
 
-## Status / not-yet-wired
+## Status / wiring roadmap
 
-This goal (G1.2) delivers **pure server core**: the modules above plus the `"providers"`
-`exportKind` branch on the Extension Host worker seam. It is intentionally **inert in
-production** — no session lifecycle path constructs or calls the `LifecycleHub`, so installing
-or authoring a provider changes nothing at runtime today.
-
-The wiring is sequenced in later goals:
-
-- **G1.3** constructs the Hub and calls `dispatch("sessionSetup", …)` during session setup,
-  and integrates kept blocks into the system prompt (`PromptParts.dynamicContext`).
-- **G1.4** adds the per-turn `beforePrompt` dispatch and the REST/provider-bridge surface.
+- **G1.2** delivered the **server core**: the modules above plus the `"providers"` `exportKind`
+  branch on the Extension Host worker seam.
+- **G1.3 (done)** constructs the single Hub at gateway bootstrap and calls
+  `dispatch("sessionSetup", …)` during session setup, rendering kept blocks as the
+  `PromptParts.dynamicContext` → **Dynamic Context** system-prompt section — see
+  [Session-setup wiring (G1.3)](#session-setup-wiring-g13).
+- **G1.4** adds the per-turn `beforePrompt` dispatch and the REST/provider-bridge surface
+  (`/provider-hooks/*`, `/context-trace`).
+- **G1.6** ships the first built-in production provider; until then only fixture / installed
+  packs contribute blocks.
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
-Until then, treat this page as the contract those goals build against, and treat provider
-authoring as "validated and catalogued, but not yet executed."
+The `afterTurn` / `beforeCompact` / `sessionShutdown` dispatches remain unwired — a provider may
+declare those hooks for forward compatibility, but the Hub is not yet called at those moments.
 
 ## See also
 
