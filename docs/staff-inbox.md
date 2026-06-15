@@ -256,9 +256,11 @@ Clients filter by `staffId` and reconcile against the entry list in
 
 ## UI
 
-The inbox panel is a split-pane peer of the preview pane and the review
-pane. It is mounted in `src/app/render.ts` whenever the active session has
-`staffId` set, and `data-testid="inbox-panel-root"` wraps the host.
+The inbox panel is a first-class tab in the server-backed side-panel workspace,
+next to preview, proposal, review, and pack tabs. It is opened through
+`src/app/inbox-panel.ts::openInboxPanel()` and rendered by `src/app/render.ts`
+when the session workspace contains the `inbox` tab. `data-testid="inbox-panel-root"`
+wraps the host.
 
 - **Pending section** at the top: each entry shows title, source badge, age,
   and a Cancel button (transitions to `cancelled`).
@@ -267,11 +269,12 @@ pane. It is mounted in `src/app/render.ts` whenever the active session has
   `DELETE /api/staff/:id/inbox/:entryId`.
 - **"+ Add to inbox" button** opens `<add-to-inbox-dialog>` — a Title + Prompt
   composer that POSTs to `/api/staff/:id/inbox` with `source.type = "manual_ui"`.
-- **Keyboard shortcuts**: `Ctrl+]` collapses the panel one level (full → half
-  → collapsed); `Ctrl+[` expands one level. Same surface as the preview and
-  review panes; wired in `src/app/main.ts` alongside `state.inboxPanelOpen`.
-- **Per-session open state** is hydrated from `localStorage`. Reloading the
-  page keeps the panel open or collapsed exactly as you left it.
+- **Keyboard shortcuts** use the shared side-panel controls: collapse moves
+  `fullscreen → split → collapsed`, expand moves `collapsed → split → fullscreen`.
+- **Per-session open state** is server-authoritative. Reloading or opening the
+  session on another device keeps the inbox open/closed and preserves the shared
+  size mode from the workspace. Legacy localStorage is migration input only; see
+  [Side-panel workspace](side-panel-workspace.md).
 
 ### Mobile add dialog scoping
 

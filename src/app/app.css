@@ -98,6 +98,7 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * non-chat panes, offset only the mobile slider pane root. Proposal/review/
  * preview renderers often contain nested .goal-preview-panel elements; padding
  * every descendant stacks the header offset and creates a large blank gap. */
+[data-mobile-header] .side-panel-pane[data-panel-tab-id],
 [data-mobile-header] .goal-preview-panel[data-panel-tab-id] {
 	padding-top: var(--mobile-header-height, 60px) !important;
 }
@@ -493,23 +494,22 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * .goal-preview-panel inside the right workspace, and those must fill the
  * workspace rather than inheriting a second 50% constraint. */
 @media (min-width: 768px) {
+	.side-panel-split-layout > .side-panel-chat-pane,
 	.goal-split-layout > .goal-chat-panel {
 		flex: 0 0 50%;
 		max-width: 50%;
 		overflow: hidden;
 	}
+	.side-panel-split-layout > .side-panel-workspace,
 	.goal-split-layout > .goal-preview-panel {
 		flex: 0 0 50%;
 		max-width: 50%;
 		overflow: hidden;
 	}
-	/* When a preview panel is nested inside another (the unified preview panel
-	   tab content rendering goalPreviewPanel / rolePreviewPanel /
-	   toolPreviewPanel / staffPreviewPanel), the inner panel must fill its
-	   parent — the outer panel already supplies the 50% width and the left
-	   border. Without this reset, the inner panel keeps its own `flex: 0 0
-	   50%` and `overflow: hidden`, which clips the System Prompt textarea
-	   and other long content. */
+	/* When a proposal/preview panel is nested inside the shared side-panel
+	   workspace, the inner panel must fill its parent — the outer panel already
+	   supplies the 50% width and the left border. */
+	.side-panel-workspace .goal-preview-panel,
 	.goal-preview-panel .goal-preview-panel {
 		flex: 1 1 auto;
 		max-width: 100%;
@@ -519,17 +519,25 @@ details.wf-proposal-workflow .wf-proposal-gates {
 
 /* On mobile, remove the left border when shown as a tab */
 @media (max-width: 767px) {
+	.side-panel-workspace,
+	.side-panel-pane,
 	.goal-preview-panel {
 		border-left: none !important;
 	}
 }
 
-/* ── Fullscreen preview: show only the message editor ─────────────── */
+/* ── Fullscreen side panel: show only the message editor ─────────────── */
+.side-panel-fullscreen-prompt,
 .preview-fullscreen-prompt {
 	overflow: hidden;
 	max-height: 150px;
 }
 /* Hide chat messages, streaming container, context bar, stats, artifacts */
+.side-panel-fullscreen-prompt message-list,
+.side-panel-fullscreen-prompt streaming-message-container,
+.side-panel-fullscreen-prompt git-status-widget,
+.side-panel-fullscreen-prompt .bobbit-stats,
+.side-panel-fullscreen-prompt .flex.flex-col.gap-3,
 .preview-fullscreen-prompt message-list,
 .preview-fullscreen-prompt streaming-message-container,
 .preview-fullscreen-prompt git-status-widget,
@@ -538,6 +546,7 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	display: none !important;
 }
 /* The scroll container must not scroll — just show the editor at the bottom */
+.side-panel-fullscreen-prompt .overflow-y-auto,
 .preview-fullscreen-prompt .overflow-y-auto {
 	overflow: hidden !important;
 	display: flex !important;

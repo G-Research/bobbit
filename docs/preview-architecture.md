@@ -39,17 +39,21 @@ Old paths and concepts that are gone:
 
 ## Side-panel workspace integration
 
-The UI treats the side pane as a Chrome-style tab strip beside the chat
-(never above it). The shared strip can hold HTML preview, proposal,
-review, PR walkthrough, and inbox tabs at the same time. Chat is **not**
-a tab — there is no `chat` side-pane id, no Chat pill in the strip, and
-the side pane hides entirely when a non-staff session has no side-pane
-tabs. The full rules — id grammar, focus and ordering, drag reorder,
-pinned inbox, walkthrough tab identity, immutable artifact restore,
-per-filename version assignment — live in
-[`design/side-panel-tab-contract.md`](./design/side-panel-tab-contract.md).
+The UI treats the side pane as a server-backed Chrome-style tab strip beside the
+chat (never above it). The shared strip can hold HTML preview, proposal, review,
+pack/PR-walkthrough, artifact-viewer, and inbox tabs at the same time. Chat is
+**not** a tab — there is no `chat` side-pane id, no Chat pill in the strip, and
+the side pane hides entirely when a non-staff session has no side-pane tabs.
 
-Preview tab identity in that contract:
+The side-panel workspace is authoritative for whether a preview tab is open. A
+preview mount, immutable artifact, bootstrap response, or SSE event may update
+content caches, but it must not resurrect a closed tab. Explicit preview tool
+mount/open events and historical preview-card Open buttons create or focus tabs;
+bootstrap and SSE updates patch only already-open tabs when they are not an
+explicit open. Full workspace rules live in
+[`side-panel-workspace.md`](./side-panel-workspace.md).
+
+Preview tab identity:
 
 - The **current** preview tab for a filename is
   `preview:entry:<encoded-filename>`. Label is unversioned (e.g.
@@ -598,9 +602,11 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot`, 250-byte v3 cap |
 | `src/server/preview/artifacts.ts` | Immutable artifact store — capture, restore, hash-based dedupe, orphan sweep |
 | `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; artifact restore → source remount → recorded-entry fallback; live-hash remount skip; filename-keyed tab dispatch |
-| `src/app/panel-workspace.ts` | Side-pane tab id grammar (`preview:entry:<file>[:v:N]`, `proposal:<type>[:rev:N]`, `review:<title>`, `inbox`), per-filename version ledger, pinned-first ordering, drag reorder, persistence |
-| `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, current-vs-historical upsert, older-version-rehydration guard |
-| `src/app/render.ts` | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos), mobile pane bar with pinned Chat pill, SortableJS drag integration with X-axis lock, active-content lookup by id only, artifact-id derived from active tab so iframe src never desyncs from state.previewPanelEntry |
+| `src/shared/side-panel-workspace.ts` | Server/client workspace model shared by preview and other panel kinds |
+| `src/app/side-panel-workspace.ts` | Server hydrate/mutate controller, optimistic in-memory updates, localStorage migration, popout URL helper |
+| `src/app/panel-workspace.ts` | Preview/proposal/review/pack tab id helpers and per-filename preview version ledger; file-fixture fallback only |
+| `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, explicit preview tab open/update, older-version-rehydration guard |
+| `src/app/render.ts` | Shared side-panel shell, tab strip, mobile slider, shared controls, active-content lookup by server workspace tab id |
 
 ## Acceptance properties
 
@@ -622,11 +628,11 @@ back the preview tree sees the same bytes the gateway just wrote.
 - "Open in new tab" works because the cookie has `Path=/`.
 - Edits to the mount fan out via SSE within ~50 ms (debounce window in
   `watchMount`).
-- The side-pane tab strip never contains a Chat pill; chat is rendered
-  outside the strip (see
-  [`design/side-panel-tab-contract.md`](./design/side-panel-tab-contract.md)).
-- The current preview tab for a filename is updated in place by new
-  `preview_open` calls and SSE — no duplicate, no reorder.
+- The side-pane tab strip never contains a Chat pill; chat is rendered outside
+  the strip (see [`side-panel-workspace.md`](./side-panel-workspace.md)).
+- The current preview tab for a filename is updated in place by explicit
+  preview open events; bootstrap/SSE metadata updates patch only already-open
+  tabs and do not resurrect closed tabs.
 - Opening a historical v3 card whose `contentHash` matches the current
   filename tab collapses to that tab and skips the remount POST; otherwise it
   opens `preview:entry:<file>:v:N` keyed off the per-filename version ledger.

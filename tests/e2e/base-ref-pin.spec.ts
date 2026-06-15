@@ -108,6 +108,17 @@ test.describe("base_ref add-time pinning", () => {
 		expect(cfg.base_ref === undefined || cfg.base_ref === "").toBe(true);
 	});
 
+	test("GET /base-ref/detect degrades gracefully for a non-git project root", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-nongit-"));
+		fs.writeFileSync(path.join(root, "README.md"), "not a git repo\n");
+		const proj = await registerProjectShared({ name: `baseref-nongit-${Date.now()}`, rootPath: root });
+
+		const res = await fetch(`${base()}/api/projects/${proj.id}/base-ref/detect`, { headers: headers() });
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body).toEqual({ resolved: "", detected: null });
+	});
+
 	test("GET /base-ref/detect returns resolved + detected for a repo with a remote", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-detect-"));
 		const repo = makeRepoWithRemote(root, "master");

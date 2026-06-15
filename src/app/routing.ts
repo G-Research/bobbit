@@ -10,6 +10,8 @@ export type SettingsTabId = "shortcuts" | "general" | "project" | "components" |
 export interface AppRoute {
 	view: RouteView;
 	sessionId?: string;
+	/** Side-panel standalone deep link parsed from `#/session/<id>/panel/<tabId>`. */
+	panelTabId?: string;
 	goalId?: string;
 	roleName?: string;
 	toolName?: string;
@@ -51,6 +53,12 @@ export function getRouteFromHash(): AppRoute {
 			for (const [k, v] of new URLSearchParams(hash.slice(qIdx + 1))) params[k] = v;
 		}
 		return { view: "ext", extRouteId: routeId || undefined, extParams: params };
+	}
+	const sessionPanelMatch = hash.match(/^#\/session\/([a-zA-Z0-9_-]+)\/panel\/(.+)$/i);
+	if (sessionPanelMatch) {
+		let panelTabId = sessionPanelMatch[2];
+		try { panelTabId = decodeURIComponent(panelTabId); } catch { /* keep encoded id */ }
+		return { view: "session", sessionId: sessionPanelMatch[1], panelTabId };
 	}
 	const sessionMatch = hash.match(/^#\/session\/([a-zA-Z0-9_-]+)$/i);
 	if (sessionMatch) {

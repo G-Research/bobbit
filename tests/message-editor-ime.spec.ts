@@ -7,9 +7,8 @@
  * Bundles the REAL component (not the vanilla replica in message-editor-send.html).
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/message-editor-ime.html");
 const BUNDLE = path.resolve("tests/fixtures/message-editor-ime-bundle.js");
@@ -17,21 +16,7 @@ const ENTRY = path.resolve("tests/fixtures/message-editor-ime-entry.ts");
 const SRC = path.resolve("src/ui/components/MessageEditor.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(fs.statSync(ENTRY).mtimeMs, fs.statSync(SRC).mtimeMs);
-	const stale = fs.existsSync(BUNDLE) && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!fs.existsSync(BUNDLE) || stale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;

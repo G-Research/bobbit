@@ -17,6 +17,10 @@ Non-2xx JSON responses follow:
 
 Client call sites use the shared helpers `errorFromResponse(res, fallback)` and `errorDetails(err)` from `src/app/error-helpers.ts` to parse this body, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })`, which renders via the `<error-details>` component (`src/ui/components/ErrorDetails.ts`). The set of modal call sites that must forward `{ code, stack }` is pinned by `tests/error-modal-call-sites.test.ts`; the helper contract is pinned by `tests/error-helpers.test.ts`.
 
+### Quiet optional probes
+
+A small set of UI probe endpoints accept `optional=1` to represent expected absence without producing browser-console-noisy `404` responses. In quiet mode, an existing session or goal with no optional data returns `204 No Content` and no body; genuinely missing sessions or goals still return `404`. Bare endpoints keep the legacy `404` absence contract. See [Quiet optional probes](quiet-204-probes.md).
+
 ### Health & Info
 
 | Method | Path | Description |
@@ -51,8 +55,9 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a byte-for-byte clone of the archived session's `.jsonl`. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
+| `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
-| `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
+| `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
 | `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
@@ -64,6 +69,23 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
+
+### Side-panel workspace
+
+The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/sessions/:id/side-panel-workspace` | Return the canonical workspace, creating an empty default (`tabs: []`, `activeTabId: ""`, `sizeMode: "split"`, `revision: 0`) if none was persisted. |
+| `POST` | `/api/sessions/:id/side-panel-workspace/open` | Validate and upsert a tab by id. Body `{ tab, focus?, placeAfterActive?, baseRevision?, baseActiveTabId?, strictRevision? }`. Opening an already-open id updates/focuses that tab instead of duplicating it. When an open request is rebased over a newer workspace revision, `baseActiveTabId` lets the server detect that another device changed the active tab and open/update without stealing focus. |
+| `PATCH` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Patch an already-open tab. Body may be `{ patch }` or direct `title` / `label` / `source` / `state` fields. Returns `404 TAB_NOT_FOUND` for a closed/missing tab; this route never creates tabs. |
+| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. |
+| `POST` | `/api/sessions/:id/side-panel-workspace/active` | Body `{ activeTabId }`. The id must be open, or empty. |
+| `POST` | `/api/sessions/:id/side-panel-workspace/reorder` | Body `{ tabIds, baseRevision }`; `If-Match: <revision>` is also accepted. The request must include each open tab exactly once. Stale revisions return `409` with the latest workspace. |
+| `POST` | `/api/sessions/:id/side-panel-workspace/resize` | Body `{ sizeMode }`, where size mode is `collapsed`, `split`, or `fullscreen`. |
+| `POST` | `/api/sessions/:id/side-panel-workspace/migrate` | One-time import from legacy localStorage keys. Ignored once the workspace has tabs or `metadata.migratedFromLocalStorageAt`. |
+
+Each committed mutation increments `revision`, persists on the session record, and emits `side_panel_workspace` on the session WebSocket.
 
 ### Fork session endpoint
 
@@ -213,7 +235,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
+| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
 

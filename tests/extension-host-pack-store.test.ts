@@ -171,6 +171,15 @@ describe("createPackStore — per-pack quotas (Fix C)", () => {
 		await store.put("pack-q4", "prefs", { theme: "dark", items: [1, 2, 3] });
 		assert.deepEqual(await store.get("pack-q4", "prefs"), { theme: "dark", items: [1, 2, 3] });
 	});
+
+	it("default quota allows multi-MiB persisted viewer payloads below the pack total", async () => {
+		assert.ok(DEFAULT_PACK_STORE_QUOTA.maxValueBytes >= 3 * 1024 * 1024);
+		assert.ok(DEFAULT_PACK_STORE_QUOTA.maxTotalBytes >= DEFAULT_PACK_STORE_QUOTA.maxValueBytes);
+		const store = createPackStore({ rootDir });
+		const payload = { kind: "viewer-payload", text: "x".repeat(2 * 1024 * 1024) };
+		await store.put("pack-q5", "cards/large", payload);
+		assert.deepEqual(await store.get("pack-q5", "cards/large"), payload);
+	});
 });
 
 describe("createPackStore — concurrent put does NOT exceed quota (per-pack mutex)", () => {
@@ -212,6 +221,34 @@ describe("createPackStore — atomic writes + corrupt-file quarantine", () => {
 		const names = fs.readdirSync(dir);
 		assert.equal(names.filter((n) => n.endsWith(".json")).length, 1, "exactly one .json key file");
 		assert.equal(names.filter((n) => n.endsWith(".tmp")).length, 0, "no temp files left behind after an atomic write");
+	});
+
+	it("falls back when Windows rejects rename-over-existing during overwrite", async () => {
+		const store = createPackStore({ rootDir });
+		const pack = "pack-atomic-windows-replace";
+		await store.put(pack, "k", { a: 1 });
+		const originalRename = fs.promises.rename;
+		let injected = false;
+		fs.promises.rename = (async (from: fs.PathLike, to: fs.PathLike) => {
+			if (!injected && String(from).endsWith(".tmp") && fs.existsSync(to)) {
+				injected = true;
+				const err = new Error("simulated Windows EPERM on replace") as NodeJS.ErrnoException;
+				err.code = "EPERM";
+				throw err;
+			}
+			return originalRename(from, to);
+		}) as typeof fs.promises.rename;
+		try {
+			await store.put(pack, "k", { a: 2 });
+		} finally {
+			fs.promises.rename = originalRename;
+		}
+		assert.equal(injected, true, "test must exercise the EPERM fallback path");
+		assert.deepEqual(await store.get(pack, "k"), { a: 2 });
+		const dir = path.join(rootDir, "ext-store", pack);
+		const names = fs.readdirSync(dir);
+		assert.equal(names.filter((n) => n.endsWith(".json")).length, 1, "exactly one .json key file");
+		assert.equal(names.filter((n) => n.endsWith(".tmp")).length, 0, "failed replace temp file is cleaned up");
 	});
 
 	it("quarantines a corrupt file on get (moves it aside, returns null, list ignores it)", async () => {

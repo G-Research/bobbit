@@ -513,6 +513,30 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		return sid!;
 	}
 
+	// ── T-1: the composer slash command is `/pr-walkthrough` (not the internal
+	//    launcher filename/id suffix) and selecting it invokes the same run route. ──
+	test("T-1 — slash launcher is /pr-walkthrough and invokes run", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
+
+		const textarea = page.locator("textarea").first();
+		await textarea.fill("/pr-walkthrough");
+		const command = page.getByTestId("slash-command-pr-walkthrough");
+		await expect(command, "slash autocomplete must expose /pr-walkthrough").toBeVisible({ timeout: 10_000 });
+		await expect(page.getByTestId("slash-command-pr-walkthrough.open"), "the old .open-suffixed command must not render").toHaveCount(0);
+
+		const runResp = page.waitForResponse(
+			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
+			{ timeout: 20_000 },
+		);
+		await textarea.press("Enter");
+		const resp = await runResp;
+		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
+		await expect(textarea, "selecting the launcher should consume the typed slash token").toHaveValue("");
+		await expect(page.getByTestId("header-toast")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
+	});
+
 	// ── T-2: a NO_PR launch surfaces an INLINE error in the GitStatusWidget dropdown,
 	//    spawns NO reviewer child, and does NOT switch the view. ──
 	test("T-2 — NO_PR launch shows an inline git-widget error, spawns no reviewer, no view switch", async ({ page, gateway }) => {
@@ -673,7 +697,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 			// There is NO manual Load button — the pane auto-renders.
 			await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
 			// The READY cards render in THIS (child) session's pane.
-			await expect(page.locator('[data-testid="prw-navrail"]').first()).toBeVisible({ timeout: 10_000 });
+			await expect(page.locator('[data-testid="prw-navrail"], [aria-label="PR walkthrough phase rail"]').first()).toBeVisible({ timeout: 10_000 });
 			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
 			await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"]').first()).toBeVisible();
 			return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();

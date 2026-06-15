@@ -12,7 +12,7 @@ import {
 // `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
 // dependency-free) so utility modules like `fetch-tool-content.ts` can
 // import it without pulling the entire app-shell graph.
-import { gatewayFetch } from "./gateway-fetch.js";
+import { gatewayFetch, GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
 export { gatewayFetch };
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
@@ -270,8 +270,138 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 	}
 }
 
+const SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS = 100;
+const SESSION_LIST_PUSH_RECONNECT_MS = 3_000;
+let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionListPushRefreshInFlight = false;
+let sessionListPushRefreshQueued = false;
+let sessionListPushWs: WebSocket | null = null;
+let sessionListPushReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionListPushIntentionalClose = false;
+let sessionListPushVisibilityHandlerInstalled = false;
+
+function canRefreshSessionListFromPush(): boolean {
+	if (state.appView !== "authenticated") return false;
+	if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
+	return true;
+}
+
+function canConnectSessionListPush(): boolean {
+	if (state.appView !== "authenticated") return false;
+	if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
+	return !!localStorage.getItem(GW_TOKEN_KEY);
+}
+
+export function scheduleSessionListRefreshFromPush(): void {
+	if (!canRefreshSessionListFromPush()) return;
+	if (sessionListPushRefreshTimer) return;
+	if (sessionListPushRefreshInFlight) {
+		sessionListPushRefreshQueued = true;
+		return;
+	}
+
+	sessionListPushRefreshTimer = setTimeout(() => {
+		sessionListPushRefreshTimer = null;
+		if (!canRefreshSessionListFromPush()) return;
+		sessionListPushRefreshInFlight = true;
+		void refreshSessions()
+			.catch((err) => console.warn("[session-list-push] refresh failed:", err))
+			.finally(() => {
+				sessionListPushRefreshInFlight = false;
+				if (sessionListPushRefreshQueued) {
+					sessionListPushRefreshQueued = false;
+					scheduleSessionListRefreshFromPush();
+				}
+			});
+	}, SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS);
+}
+
+function sessionListPushWsUrl(): string {
+	const configured = localStorage.getItem(GW_URL_KEY) || window.location.origin;
+	return `${configured.replace(/\/$/, "").replace(/^http/i, "ws")}/ws/viewer`;
+}
+
+function clearSessionListPushReconnect(): void {
+	if (sessionListPushReconnectTimer) {
+		clearTimeout(sessionListPushReconnectTimer);
+		sessionListPushReconnectTimer = null;
+	}
+}
+
+function scheduleSessionListPushReconnect(): void {
+	clearSessionListPushReconnect();
+	if (sessionListPushIntentionalClose) return;
+	if (!canConnectSessionListPush()) return;
+	sessionListPushReconnectTimer = setTimeout(() => {
+		sessionListPushReconnectTimer = null;
+		startSessionListPushSync();
+	}, SESSION_LIST_PUSH_RECONNECT_MS);
+}
+
+export function startSessionListPushSync(): void {
+	if (!canConnectSessionListPush()) return;
+	const token = localStorage.getItem(GW_TOKEN_KEY)!;
+	if (sessionListPushWs && (sessionListPushWs.readyState === WebSocket.OPEN || sessionListPushWs.readyState === WebSocket.CONNECTING)) return;
+
+	sessionListPushIntentionalClose = false;
+	clearSessionListPushReconnect();
+
+	const ws = new WebSocket(sessionListPushWsUrl());
+	sessionListPushWs = ws;
+
+	ws.addEventListener("open", () => {
+		try { ws.send(JSON.stringify({ type: "auth", token })); } catch { /* close handler reconnects */ }
+	});
+
+	ws.addEventListener("message", (event) => {
+		try {
+			const msg = JSON.parse(event.data as string);
+			if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
+				scheduleSessionListRefreshFromPush();
+			}
+		} catch {
+			// ignore malformed frames
+		}
+	});
+
+	ws.addEventListener("close", () => {
+		if (sessionListPushWs === ws) sessionListPushWs = null;
+		scheduleSessionListPushReconnect();
+	});
+
+	ws.addEventListener("error", () => {
+		// close follows error and owns reconnection
+	});
+}
+
+export function stopSessionListPushSync(): void {
+	sessionListPushIntentionalClose = true;
+	clearSessionListPushReconnect();
+	if (sessionListPushRefreshTimer) {
+		clearTimeout(sessionListPushRefreshTimer);
+		sessionListPushRefreshTimer = null;
+	}
+	sessionListPushRefreshQueued = false;
+	if (sessionListPushWs && (sessionListPushWs.readyState === WebSocket.OPEN || sessionListPushWs.readyState === WebSocket.CONNECTING)) {
+		sessionListPushWs.close();
+	}
+	sessionListPushWs = null;
+}
+
+function installSessionListPushVisibilityHandler(): void {
+	if (sessionListPushVisibilityHandlerInstalled || typeof document === "undefined") return;
+	sessionListPushVisibilityHandlerInstalled = true;
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState !== "visible") return;
+		if (state.appView !== "authenticated") return;
+		startSessionListPushSync();
+	});
+}
+
 export function startSessionPolling(): void {
 	stopSessionPolling();
+	installSessionListPushVisibilityHandler();
+	startSessionListPushSync();
 	state.sessionPollTimer = setInterval(() => {
 		if (state.appView === "authenticated" && document.visibilityState === "visible") {
 			refreshSessions();
@@ -284,6 +414,7 @@ export function stopSessionPolling(): void {
 		clearInterval(state.sessionPollTimer);
 		state.sessionPollTimer = null;
 	}
+	stopSessionListPushSync();
 }
 
 /**
@@ -1128,8 +1259,8 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
 			try {
-				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
-				if (res.status === 404) return { goalId: g.id, pr: null, noPr: true };
+				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1`);
+				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
 				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
 				const data = await res.json();
 				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string }, noPr: false };
@@ -2416,8 +2547,8 @@ export async function saveDraftToServer(sessionId: string, type: string, data: u
 /** Load a draft from the server. Returns null if not found or on error. */
 export async function loadDraftFromServer(sessionId: string, type: string): Promise<unknown | null> {
 	try {
-		const res = await gatewayFetch(`/api/sessions/${sessionId}/draft?type=${encodeURIComponent(type)}`);
-		if (!res.ok) return null;
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/draft?type=${encodeURIComponent(type)}&optional=1`);
+		if (res.status === 204 || !res.ok) return null;
 		const body = await res.json();
 		return body.data ?? null;
 	} catch (err) {

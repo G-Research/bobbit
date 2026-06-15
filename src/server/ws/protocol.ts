@@ -1,4 +1,5 @@
 import type { InboxEntry } from "../agent/inbox-store.js";
+import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
@@ -149,10 +150,16 @@ export type ServerMessage =
 	 * client should remove the session from local lists and, if the user is
 	 * currently viewing it, redirect to landing with a friendly toast. */
 	| { type: "session_removed"; sessionId: string; projectId?: string; reason: "terminated" | "archived" | "purged" }
+	/** Sent to ALL authenticated clients when a visible session is created so
+	 * session navigation can refresh immediately instead of waiting for polling. */
+	| { type: "session_created"; sessionId: string; projectId?: string }
+	/** Broad invalidation fallback for session-list changes. */
+	| { type: "sessions_changed"; projectId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
+	| { type: "side_panel_workspace"; sessionId: string; workspace: SidePanelWorkspace }
 	| { type: "task_changed"; task: unknown }
 	| { type: "tasks_list"; tasks: unknown[] }
 	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: "running" | "exited" | "unrecoverable"; exitCode: number | null; terminalReason: "normal" | "killed" | "unrecoverable" | null; startTime: number; endTime: number | null } }

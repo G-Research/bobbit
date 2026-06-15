@@ -35,7 +35,8 @@ import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanel
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
-import { scheduleGateStatusRefreshForGoal, refreshSessions } from "./api.js";
+import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush } from "./api.js";
+import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -81,6 +82,18 @@ function notifyGoalStateSubscribers(evt: GoalStateChangeEvent): void {
 	for (const cb of _goalStateSubscribers) {
 		try { cb(evt); } catch { /* swallow — one bad subscriber must not break the rest */ }
 	}
+}
+
+function isKnownOwnSessionCreatedEvent(msg: any, sessionId: string): boolean {
+	if (!sessionId || msg?.type !== "session_created") return false;
+	const createdId = typeof msg.sessionId === "string"
+		? msg.sessionId
+		: typeof msg.id === "string"
+			? msg.id
+			: typeof msg.session?.id === "string"
+				? msg.session.id
+				: "";
+	return createdId === sessionId && state.gatewaySessions.some((session: any) => session?.id === sessionId);
 }
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
@@ -744,6 +757,7 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
+						void hydrateSidePanelWorkspace(this._sessionId);
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
 						this._flushOutbox();
@@ -1615,6 +1629,8 @@ export class RemoteAgent {
 						for (const m of this._state.messages) {
 							this._checkReviewToolResult(m);
 						}
+					} else {
+						closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId || "", select: false });
 					}
 					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
@@ -1768,6 +1784,10 @@ export class RemoteAgent {
 				// Merge any pending-unsent outbox rows so a server queue update
 				// doesn't visually drop them before they flush (S2).
 				this.onQueueUpdate?.(this.getQueue());
+				break;
+
+			case "side_panel_workspace":
+				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
 				break;
 
 			case "goal_setup_complete":
@@ -1948,6 +1968,15 @@ export class RemoteAgent {
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
 				break;
+
+			case "session_created":
+			case "sessions_changed": {
+				// Shared with the global viewer socket so active session sockets and
+				// non-session surfaces coalesce into one refresh burst.
+				if (isKnownOwnSessionCreatedEvent(msg, this._sessionId)) break;
+				scheduleSessionListRefreshFromPush();
+				break;
+			}
 
 			case "session_removed": {
 				// Server-pushed event: a session somewhere was terminated/archived/purged.
@@ -2230,6 +2259,16 @@ export class RemoteAgent {
 			try { data = JSON.parse(trimmed); } catch { continue; }
 
 			if (data.action === "review_open" && data.title && data.markdown) {
+				if (this._sessionId) {
+					const title = String(data.title);
+					const hasOpenWorkspaceTab = getSidePanelWorkspace(this._sessionId).tabs.some((tab) => {
+						if (tab.kind !== "review") return false;
+						const source = tab.source as Record<string, unknown> | undefined;
+						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
+						return tabTitle === title;
+					});
+					if (!hasOpenWorkspaceTab && (!isLive || isReviewSubmitted(this._sessionId))) return;
+				}
 				// If the user already submitted this review, suppress reopening it on
 				// REPLAY paths (snapshot loop / non-live message_end). The submitted
 				// flag is per-session and persisted server-side; without this gate, a

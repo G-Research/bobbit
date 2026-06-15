@@ -20,37 +20,18 @@
  * fake panel module.
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/pack-panels-reconcile.html");
 const BUNDLE = path.resolve("tests/fixtures/pack-panels-reconcile-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/pack-panels-reconcile-entry.ts");
 const PACK_SRC = path.resolve("src/app/pack-panels.ts");
 const WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
+const SIDE_PANEL_WORKSPACE_SRC = path.resolve("src/app/side-panel-workspace.ts");
 
 test.beforeAll(() => {
-	const entryMtime = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(PACK_SRC).mtimeMs,
-		fs.statSync(WORKSPACE_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
-	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, PACK_SRC, WORKSPACE_SRC, SIDE_PANEL_WORKSPACE_SRC] });
 });
 
 const PAGE = `file://${FIXTURE}`;
@@ -269,12 +250,12 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 	// sidebar uses, NOT a bare `selectedSessionId` assignment that skips the hash
 	// route + hydration) and mounting the tab under it — without regressing the
 	// default (no `sessionId`) active-session behaviour.
-	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion === 2)", async ({ page }) => {
+	test("PanelTarget.sessionId drives the real session switch and mounts the tab under the chosen session (contractVersion === 3)", async ({ page }) => {
 		await gotoAndWait(page);
 
-		// The additive field bumped the data/addressing contract 1→2.
+		// Additive addressing fields bumped the data/addressing contract to v3.
 		const cv = await page.evaluate(() => (window as any).__contractVersion());
-		expect(cv).toBe(2);
+		expect(cv).toBe(3);
 
 		// Register demo.panel for a project, install the switcher stub (the production
 		// hook is `connectToSession`), and start from an "owner" session view.
@@ -297,7 +278,7 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 			};
 		});
 
-		const expectedTabId = "pack:demo_pack:demo.panel";
+		const expectedTabId = "pack:demo_pack:demo.panel:default";
 		// (a) the REAL switch path was invoked for the child session — openPackPanel
 		//     delegated to the canonical switcher, not a bare selectedSessionId set.
 		expect(result.switchTarget).toBe("child-session");
@@ -326,6 +307,24 @@ test.describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 		// No session retargeting: selection is untouched and the tab mounts under the
 		// active session exactly as before.
 		expect(result.selected).toBe("active-session");
-		expect(result.activeTabs).toContain("pack:demo_pack:demo.panel");
+		expect(result.activeTabs).toContain("pack:demo_pack:demo.panel:default");
+	});
+
+	test("PanelTarget.instanceKey and allowlisted params create distinct pack panel tabs", async ({ page }) => {
+		await gotoAndWait(page);
+
+		const result = await page.evaluate(async () => {
+			await (window as any).__reconcile("D5");
+			(window as any).__setSelectedSessionId("active-session");
+			(window as any).__openWithParams("demo.panel", { artifactId: "artifact-a" });
+			(window as any).__openWithParams("demo.panel", { artifactId: "artifact-b" });
+			(window as any).__openWithInstanceKey("demo.panel", "explicit-key", { artifactId: "artifact-c" });
+			await (window as any).__flush();
+			return (window as any).__tabIdsForSession("active-session");
+		});
+
+		expect(result).toContain("pack:demo_pack:demo.panel:artifact-a");
+		expect(result).toContain("pack:demo_pack:demo.panel:artifact-b");
+		expect(result).toContain("pack:demo_pack:demo.panel:explicit-key");
 	});
 });

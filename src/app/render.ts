@@ -22,11 +22,10 @@ import {
 	setRenderSuppressed,
 } from "./state.js";
 import { gatewayFetch, retryLoadSessions } from "./api.js";
-import { clearAllAnnotations, clearAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import {
 	clearPersistedReviewDocuments,
 	openReviewDocumentFromEvent,
-	removePersistedReviewDocument,
 	reviewDecisionPayloadFromDetail,
 	reviewDocumentFromDecisionDetail,
 	submitReviewDecision,
@@ -81,7 +80,6 @@ import {
 	isHistoricalProposalTab,
 	isLivePreviewTab,
 	isPinnedPanelTab,
-	markPreviewContentDismissed,
 	nextActivePanelTabId,
 	normalizePreviewContentHash,
 	normalizeSidePanelTabs,
@@ -92,6 +90,7 @@ import {
 	previewTabDisplayTitle,
 	previewTabVersion,
 	previewVersionRecordFor,
+	reviewDocumentIdFromPanelTab,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
@@ -99,7 +98,15 @@ import {
 	packPanelRefFromTabId,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import { openInboxPanel } from "./inbox-panel.js";
 import { renderPackPanelContent } from "./pack-panels.js";
+import {
+	closeSidePanelTab as closeServerSidePanelTab,
+	getSidePanelWorkspace,
+	reorderSidePanelTabs,
+	setActiveSidePanelTab as setServerActiveSidePanelTab,
+	setSidePanelSizeMode as setServerSidePanelSizeMode,
+} from "./side-panel-workspace.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -731,6 +738,38 @@ export function workspaceSessionId(): string {
 	return panelWorkspaceSessionKey(activeSessionId());
 }
 
+type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
+
+function sidePanelSizeModeBySession(): Record<string, SidePanelSizeMode> {
+	const holder = state as any;
+	if (!holder.sidePanelSizeModeBySession || typeof holder.sidePanelSizeModeBySession !== "object") {
+		holder.sidePanelSizeModeBySession = {};
+	}
+	return holder.sidePanelSizeModeBySession as Record<string, SidePanelSizeMode>;
+}
+
+export function getSidePanelSizeMode(sessionId: string = workspaceSessionId()): SidePanelSizeMode {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const workspace = state.sidePanelWorkspaceBySession?.[sid];
+	if (workspace?.sizeMode === "collapsed" || workspace?.sizeMode === "split" || workspace?.sizeMode === "fullscreen") return workspace.sizeMode;
+	const stored = sidePanelSizeModeBySession()[sid];
+	if (stored === "collapsed" || stored === "split" || stored === "fullscreen") return stored;
+	return state.previewPanelFullscreen ? "fullscreen" : "split";
+}
+
+export async function setSidePanelSizeMode(mode: SidePanelSizeMode, sessionId: string = workspaceSessionId()): Promise<void> {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	sidePanelSizeModeBySession()[sid] = mode;
+	// Compatibility mirror until the server-backed controller owns all callers.
+	state.previewPanelFullscreen = mode === "fullscreen";
+	if (!sid || sid === "__no-session__") return;
+	try {
+		await setServerSidePanelSizeMode(mode, { sessionId: sid });
+	} catch (err) {
+		console.warn("[side-panel] resize mutation failed", err);
+	}
+}
+
 let mountedPreviewTabId = "";
 const previewRestoreInFlight = new Set<string>();
 let mobileSelectedPaneIndex = 0;
@@ -1024,10 +1063,10 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 		restoreUrl = `/api/preview/artifacts/${encodeURIComponent(artifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`;
 		body = { artifactId };
 	} else if (snapshotKind === "inline" && snapshotHtml) {
-		body = { html: snapshotHtml };
+		body = { html: snapshotHtml, workspaceTab: false, internalRestore: true };
 		if (entry && !entry.includes("/") && !entry.includes("\\")) body.entry = entry;
 	} else if (snapshotKind === "file" && snapshotFile) {
-		body = { file: snapshotFile };
+		body = { file: snapshotFile, workspaceTab: false, internalRestore: true };
 	}
 
 	if (!body) {
@@ -1083,10 +1122,20 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	})();
 }
 
+function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
+	const documentId = reviewDocumentIdFromPanelTab(tab);
+	if (documentId && state.reviewDocuments.has(documentId)) return documentId;
+	return reviewTitleFromPanelTab(tab) || documentId;
+}
+
 export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
 	setActivePanelTabIdForSession(state, sid, tab.id);
+	const workspace = getSidePanelWorkspace(sid);
+	if (sid !== "__no-session__" && workspace.tabs.some((candidate) => candidate.id === tab.id) && workspace.activeTabId !== tab.id) {
+		void setServerActiveSidePanelTab(tab.id, { sessionId: sid });
+	}
 	(state as any).previewPanelTab = tab.legacyTab;
 	(state as any).previewPanelActiveTab = tab.kind === "preview" ? "preview" : tab.legacyTab;
 	if (state.assistantType) state.assistantTab = "preview";
@@ -1095,7 +1144,7 @@ export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 		restoreHistoricalPreviewTab(tab);
 	}
 	if (tab.kind === "review") {
-		state.reviewActiveTab = reviewTitleFromPanelTab(tab);
+		state.reviewActiveTab = reviewDocumentKeyFromPanelTab(tab);
 	}
 }
 
@@ -1115,9 +1164,20 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 	setActivePanelTabIdForSession(state, sid, "");
 }
 
+export function shouldDerivePanelTabsInRender(protocol = typeof window !== "undefined" ? window.location.protocol : ""): boolean {
+	// file:// browser fixtures have no gateway REST API and intentionally exercise
+	// legacy cache-derived panel setup. The real gateway render path is server-
+	// authoritative: missing workspace state means "not hydrated yet", never
+	// "recreate tabs from proposal/review/preview/inbox caches".
+	return protocol === "file:";
+}
+
 /** Ordered list of available unified panel tabs for the current session. */
 export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	const sessionId = workspaceSessionId();
+	const serverWorkspace = state.sidePanelWorkspaceBySession?.[sessionId];
+	if (serverWorkspace) return panelContentTabs(panelTabsForSession(state, sessionId));
+	if (!shouldDerivePanelTabsInRender()) return [];
 	const derivedTabs = buildPanelWorkspaceTabs({
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
@@ -1142,6 +1202,19 @@ export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	return tabs;
 }
 
+function findReviewPanelTabByTitle(title: string): UnifiedPanelTab | undefined {
+	const doc = state.reviewDocuments.get(title);
+	const candidateIds = [doc?.documentId, title]
+		.filter((value): value is string => typeof value === "string" && value.length > 0)
+		.map((documentId) => reviewPanelTabId(documentId));
+	const tabs = unifiedPanelTabs();
+	for (const id of candidateIds) {
+		const tab = findPanelTab(tabs, id);
+		if (tab?.kind === "review") return tab;
+	}
+	return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === title);
+}
+
 function unifiedPanelContentTabs(): UnifiedContentTab[] {
 	return panelContentTabs(unifiedPanelTabs());
 }
@@ -1158,9 +1231,14 @@ function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
 	setUnifiedActiveTab(tab);
 }
 
+/** Whether the unified side-panel workspace is active for the current session. */
+export function hasActiveSidePanel(): boolean {
+	return unifiedPanelContentTabs().length > 0;
+}
+
 /** Whether the unified panel is active for the current session. */
 function hasUnifiedPanel(): boolean {
-	return unifiedPanelContentTabs().length > 0;
+	return hasActiveSidePanel();
 }
 
 function mobileChatPaneTab(): MobilePaneTab {
@@ -1219,7 +1297,7 @@ function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
 
-	const getTrack = () => document.querySelector(".preview-slider__track") as HTMLElement | null;
+	const getTrack = () => document.querySelector(".side-panel-slider__track, .preview-slider__track") as HTMLElement | null;
 
 	// === iframe -> parent: swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
@@ -1383,6 +1461,11 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 		forceFallback: true,
 		fallbackTolerance: 4,
 		delay: 0,
+		onChoose: (evt) => {
+			const id = (evt.item as HTMLElement).getAttribute("data-panel-tab-id") || "";
+			const tab = findPanelTab(panelTabsForSession(state, workspaceSessionId()), id);
+			if (tab && !isPinnedPanelTab(tab)) setUnifiedActiveTab(tab);
+		},
 		onMove: (evt) => {
 			// Forbid dropping in front of (or onto) a pinned tab. Returning false
 			// cancels this candidate move; SortableJS keeps trying as the cursor
@@ -1479,15 +1562,19 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 				}
 
 				if (!samePanelTabOrder(currentTabs, reordered)) {
-					setPanelTabsForSession(state, sid, reordered);
+					const orderedIds = reordered.map((tab) => tab.id);
+					void reorderSidePanelTabs(orderedIds, undefined, { sessionId: sid }).catch((err) => {
+						console.warn("[side-panel] failed to persist tab reorder", err);
+					});
 				}
 			} finally {
 				setRenderSuppressed(false);
 				// Always trigger a render: when we took an early `return` above
 				// (pinned-blocked or invariant-violation revert), state was not
 				// mutated and lit-html will restore the canonical DOM order.
-				// When we committed setPanelTabsForSession, it already triggers a
-				// render — an extra one here is harmless.
+				// When we commit through reorderSidePanelTabs, its optimistic mirror
+				// update may have rendered while suppression was active — an extra
+				// render here is harmless and makes the committed order visible.
 				renderApp();
 			}
 		},
@@ -1814,45 +1901,58 @@ export function doRenderApp(): void {
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
 		event?.preventDefault();
 		event?.stopPropagation();
-		if ((tab as any).kind === "chat" || isPinnedPanelTab(tab)) return;
+		if ((tab as any).kind === "chat") return;
 		const sid = workspaceSessionId();
 		const activeId = activeSidePanelTabIdForSession(state, sid);
 		const wasActive = activeId === tab.id;
 		const tabsBefore = unifiedPanelTabs();
 		const nextId = nextActivePanelTabId(tabsBefore, tab.id);
 		const nextCandidate = nextId ? findPanelTab(tabsBefore, nextId) : undefined;
+		const closeServerTab = () => {
+			void (async () => {
+				if (wasActive) setActivePanelTabIdForSession(state, sid, nextId || "");
+				await closeServerSidePanelTab(tab.id, { sessionId: sid });
+				// The user can close a locally-active tab before the prior active-tab REST
+				// mutation settles. Commit the Chrome-style successor from the UI order so
+				// the server and other browser contexts converge on the same active tab.
+				if (wasActive && nextId) await setServerActiveSidePanelTab(nextId, { sessionId: sid });
+			})().catch((err) => {
+				console.warn("[side-panel] close mutation failed", err);
+				// Fallback for no-session/test harnesses that do not have the server workspace API.
+				setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
+				if (wasActive) {
+					if (nextCandidate) setUnifiedActiveTab(nextCandidate);
+					else setActivePanelTabIdForSession(state, sid, "");
+				}
+				renderApp();
+			});
+		};
 
 		if (tab.kind === "proposal" && tab.source.type === "proposal" && !isHistoricalProposalTab(tab)) {
 			lazyProposalPanels.dismissTypedProposal(tab.source.proposalType);
-			setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
-			if (wasActive) {
-				if (nextCandidate) setUnifiedActiveTab(nextCandidate);
-				else setActivePanelTabIdForSession(state, sid, "");
-			}
-			renderApp();
+			closeServerTab();
 			return;
 		}
 		if (tab.kind === "review") {
 			const title = reviewTitleFromPanelTab(tab);
-			if (title) {
+			const key = reviewDocumentKeyFromPanelTab(tab);
+			if (key) {
 				const sid = activeSessionId() || "";
 				if (event?.type !== "review-close-tab") {
-					const count = reviewPaneUnsentCountForDocument(sid, title);
-					if (count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+					const count = reviewPaneUnsentCountForDocument(sid, key);
+					if (count > 0 && !confirm(`Close "${title || key}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
 				}
-				clearAnnotations(sid, title);
-				removePersistedReviewDocument(sid, title);
-				state.reviewDocuments = new Map(state.reviewDocuments);
-				state.reviewDocuments.delete(title);
-				if (state.reviewActiveTab === title) {
-					const nextReview = nextCandidate?.kind === "review" ? reviewTitleFromPanelTab(nextCandidate) : "";
-					state.reviewActiveTab = nextReview || [...state.reviewDocuments.keys()][0] || "";
+				if (state.reviewActiveTab === key) {
+					const nextReview = nextCandidate?.kind === "review" ? reviewDocumentKeyFromPanelTab(nextCandidate) : "";
+					if (nextReview) state.reviewActiveTab = nextReview;
 				}
-				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 			}
 		}
+		if (tab.kind === "inbox") {
+			state.inboxPanelOpen = false;
+			state.inboxAddDialogOpen = false;
+		}
 		if (tab.kind === "preview") {
-			if (!isHistoricalPreviewTab(tab)) markPreviewContentDismissed(sid, previewEntryFromTab(tab), previewContentHashFromTab(tab));
 			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
 			if (remainingPreviewTabs.length === 0) {
 				state.isPreviewSession = false;
@@ -1883,12 +1983,7 @@ export function doRenderApp(): void {
 			}
 		}
 
-		setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
-		if (wasActive) {
-			if (nextCandidate) setUnifiedActiveTab(nextCandidate);
-			else setActivePanelTabIdForSession(state, sid, "");
-		}
-		renderApp();
+		closeServerTab();
 	};
 
 	const panelTabHasDot = (tab: UnifiedPanelTab): boolean => {
@@ -1898,9 +1993,10 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
-	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
-		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
-	);
+	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => {
+		if (tab.kind === "review") return tab.title || tab.label || "Review";
+		return tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "");
+	};
 
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
 		const label = panelTabButtonLabel(tab);
@@ -1924,14 +2020,17 @@ export function doRenderApp(): void {
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${dataTitle}
 			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
-			data-testid=${testId}
+			data-testid="side-panel-tab"
+			@mousedown=${(e: MouseEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
+			@pointerup=${(e: PointerEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
-		><span class="goal-tab-pill-label">${label}</span>${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
+		>${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
 				class="goal-tab-close"
 				role="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
+				data-testid="side-panel-close"
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
 			>${icon(X, "xs")}</span>` : ""}</div>
 	`;
@@ -1985,13 +2084,11 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const previewCollapseKey = () => `bobbit-preview-collapsed-${workspaceSessionId()}`;
-	const isPreviewCollapsed = () => localStorage.getItem(previewCollapseKey()) === "true";
-	const togglePreviewCollapse = () => {
-		const next = !isPreviewCollapsed();
-		localStorage.setItem(previewCollapseKey(), String(next));
-		renderApp();
+	const sidePanelSizeMode = () => getSidePanelSizeMode(workspaceSessionId());
+	const setSidePanelModeAndRender = (mode: SidePanelSizeMode) => {
+		void setSidePanelSizeMode(mode, workspaceSessionId());
 	};
+	const isSidePanelCollapsed = () => sidePanelSizeMode() === "collapsed";
 
 	const previewRestoreErrorContent = (tab: UnifiedContentTab) => {
 		const restoreError = previewRestoreError(tab);
@@ -2084,7 +2181,7 @@ export function doRenderApp(): void {
 				@review-tab-change=${(e: CustomEvent) => {
 					const title = e.detail.title as string;
 					state.reviewActiveTab = title;
-					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					const tab = findReviewPanelTabByTitle(title);
 					if (tab) setUnifiedActiveTab(tab);
 					renderApp();
 				}}
@@ -2093,13 +2190,28 @@ export function doRenderApp(): void {
 					if (agent) {
 						agent.prompt(e.detail.feedback);
 						const sid = activeSessionId() || "";
+						const reviewTabIds = [...new Set([
+							...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
+							...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
+						])];
+						const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
+						setPanelTabsForSession(state, sid, remainingLegacyTabs);
+						setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
 						clearAllAnnotations(sid);
 						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
+						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
+							method: "PUT",
+							body: JSON.stringify({ submitted: true }),
+						}).catch(() => undefined);
 						await flushPendingWrites();
 						state.reviewDocuments = new Map();
 						state.reviewPanelOpen = false;
 						state.reviewActiveTab = "";
+						for (const tabId of reviewTabIds) {
+							try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
+							catch { /* best-effort */ }
+						}
 						renderApp();
 					}
 				}}
@@ -2127,53 +2239,117 @@ export function doRenderApp(): void {
 				}}
 				@review-close-tab=${(e: CustomEvent) => {
 					const title = e.detail.title as string;
-					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					const tab = findReviewPanelTabByTitle(title);
 					if (tab) closeUnifiedPanelTab(tab, e);
 					else {
-						const sid = activeSessionId() || "";
-						clearAnnotations(sid, title);
-						removePersistedReviewDocument(sid, title);
-						state.reviewDocuments = new Map(state.reviewDocuments);
-						state.reviewDocuments.delete(title);
-						if (state.reviewActiveTab === title) {
-							const keys = [...state.reviewDocuments.keys()];
-							state.reviewActiveTab = keys[0] || "";
-						}
-						state.reviewPanelOpen = state.reviewDocuments.size > 0;
+						const keys = [...state.reviewDocuments.keys()].filter((key) => key !== title);
+						if (state.reviewActiveTab === title) state.reviewActiveTab = keys[0] || title;
 						renderApp();
 					}
 				}}
-				@review-dismiss=${() => {
+				@review-dismiss=${async () => {
 					const sid = activeSessionId() || "";
+					const reviewTabIds = [...new Set([
+						...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
+						...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
+					])];
 					const hasMarkdownReview = [...state.reviewDocuments.values()].some((doc) => !doc.source || doc.source.kind === "markdown-review");
+					const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
+					setPanelTabsForSession(state, sid, remainingLegacyTabs);
+					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
 					clearAllAnnotations(sid);
 					clearPersistedReviewDocuments(sid);
-					if (hasMarkdownReview) markReviewSubmitted(sid);
+					if (hasMarkdownReview) {
+						markReviewSubmitted(sid);
+						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
+							method: "PUT",
+							body: JSON.stringify({ submitted: true }),
+						}).catch(() => undefined);
+					}
 					state.reviewDocuments = new Map();
 					state.reviewPanelOpen = false;
 					state.reviewActiveTab = "";
+					for (const tabId of reviewTabIds) {
+						try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
+						catch { /* best-effort */ }
+					}
 					renderApp();
 				}}
 			></review-pane>
 		</div>
 	`;
 
-	const previewControlButtons = () => {
-		const sid = activeSessionId() || "";
-		const entry = state.previewPanelEntry || "";
+	const sidePanelChromeButtonClass = "text-muted-foreground hover:text-foreground";
+	const sidePanelChromeButtonStyle = "background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;";
+
+	const previewUrlForTab = (tab?: UnifiedContentTab | null) => {
+		const sid = activeSessionId() || workspaceSessionId();
+		let entry = state.previewPanelEntry || "inline.html";
+		let artifactId = "";
+		if (tab?.kind === "preview") {
+			const tabState = (tab.state || {}) as Record<string, unknown>;
+			const source = tab.source as Record<string, unknown>;
+			const tabEntry = previewEntryFromTab(tab);
+			if (tabEntry) entry = tabEntry;
+			if (!isLivePreviewTab(tab)) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+		}
+		return artifactId
+			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}`
+			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`;
+	};
+
+	const sidePanelPopoutUrl = (tab: UnifiedContentTab) => {
+		if (tab.kind === "preview") return previewUrlForTab(tab);
+		const sid = ((tab.source as Record<string, unknown> | undefined)?.sessionId as string | undefined) || activeSessionId() || workspaceSessionId();
+		return `#/session/${encodeURIComponent(sid)}/panel/${encodeURIComponent(tab.id)}`;
+	};
+
+	const previewControlButtons = (tab?: UnifiedContentTab | null) => html`
+		<a
+			href=${previewUrlForTab(tab)}
+			target="_blank"
+			rel="noopener noreferrer"
+			class=${sidePanelChromeButtonClass}
+			style=${sidePanelChromeButtonStyle}
+			title="Open preview in new tab"
+		>${icon(ExternalLink, "sm")}</a>
+		<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
+			${icon(RotateCw, "sm")}
+		</button>
+	`;
+
+	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
+		${tab.kind === "preview" && state.previewPanelEntry ? previewControlButtons(tab) : ""}
+	`;
+
+	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {
+		const fullscreenTitle = tab.kind === "preview"
+			? `Fullscreen preview${shortcutHint("toggle-sidebar")}`
+			: `Fullscreen side panel${shortcutHint("toggle-sidebar")}`;
+		const restoreTitle = `Restore side panel${shortcutHint("toggle-sidebar")}`;
 		return html`
-			<a
-				href=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`}
-				target="_blank"
-				rel="noopener noreferrer"
-				class="text-muted-foreground hover:text-foreground"
-				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
-				title="Open preview in new tab"
-			>${icon(ExternalLink, "sm")}</a>
-			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Refresh preview">
-				${icon(RotateCw, "sm")}
+		${mode === "fullscreen" ? html`
+			<button @click=${() => setSidePanelModeAndRender("split")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${restoreTitle} data-testid="side-panel-restore">
+				${icon(PanelRightOpen, "sm")}
 			</button>
-		`;
+		` : html`
+			<button @click=${() => setSidePanelModeAndRender("fullscreen")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${fullscreenTitle} data-testid="side-panel-fullscreen">
+				${icon(PanelRightOpen, "sm")}
+			</button>
+		`}
+		<a
+			href=${sidePanelPopoutUrl(tab)}
+			target="_blank"
+			rel="noopener noreferrer"
+			class=${sidePanelChromeButtonClass}
+			style=${sidePanelChromeButtonStyle}
+			title="Open side panel in new tab"
+			data-testid="side-panel-popout"
+		>${icon(ExternalLink, "sm")}</a>
+		<button @click=${() => setSidePanelModeAndRender("collapsed")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${`Collapse side panel${shortcutHint("toggle-preview")}`} data-testid="side-panel-collapse">
+			${icon(PanelRightClose, "sm")}
+		</button>
+	`;
 	};
 
 	const inboxPaneContent = () => {
@@ -2233,9 +2409,9 @@ export function doRenderApp(): void {
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
-			const reviewTitle = reviewTitleFromPanelTab(tab);
-			if (reviewTitle && state.reviewActiveTab !== reviewTitle) {
-				state.reviewActiveTab = reviewTitle;
+			const reviewKey = reviewDocumentKeyFromPanelTab(tab);
+			if (reviewKey && state.reviewActiveTab !== reviewKey) {
+				state.reviewActiveTab = reviewKey;
 			}
 			return reviewPaneContent();
 		}
@@ -2252,9 +2428,9 @@ export function doRenderApp(): void {
 		tab.kind === "inbox" ? "inbox-tab-unified" : "",
 	);
 
-	const unifiedPreviewPanel = () => {
+	const activeSidePanelContentTab = (): UnifiedContentTab | null => {
 		const contentTabs = unifiedPanelContentTabs();
-		if (contentTabs.length === 0) return "";
+		if (contentTabs.length === 0) return null;
 
 		let activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 		let activeTab = contentTabs.find((tab) => tab.id === activeId) ?? contentTabs[0];
@@ -2263,15 +2439,21 @@ export function doRenderApp(): void {
 			activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 			activeTab = contentTabs.find((tab) => tab.id === activeId) ?? activeTab;
 		}
-		const activeTabCanFullscreen = activeTab.kind === "preview";
+		return activeTab;
+	};
+
+	const renderSidePanelWorkspace = (mode: SidePanelSizeMode = "split") => {
+		const contentTabs = unifiedPanelContentTabs();
+		const activeTab = activeSidePanelContentTab();
+		if (!activeTab) return "";
 
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
+			<div class="side-panel-workspace goal-preview-panel flex-1 flex flex-col ${mode === "split" ? "border-l border-border" : ""} min-h-0" data-panel-workspace="content" data-side-panel-mode=${mode}>
 				<!-- Chrome-style tab strip: muted bg distinct from the panel below.
 				     Tabs sit flush at the strip's bottom via items-end + no pb.
 				     The active tab's background matches the panel so it visually
 				     bridges the color boundary (curve pseudo-elements in CSS do
-				     the outward-curve flourish at the bottom corners). */ -->
+				     the outward-curve flourish at the bottom corners). -->
 				<div class="flex items-end justify-between px-3 pt-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
 					<div class="flex-1 min-w-0">
 						<div class="flex items-end gap-1" data-panel-tab-bar="true">
@@ -2279,14 +2461,8 @@ export function doRenderApp(): void {
 						</div>
 					</div>
 					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
-						${activeTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-						${activeTabCanFullscreen ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`} data-testid="preview-fullscreen">
-							${icon(PanelRightOpen, "sm")}
-						</button>` : ""}
-						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
-							${icon(PanelRightClose, "sm")}
-						</button>
+						${sidePanelActionButtons(activeTab)}
+						${sidePanelWindowControls(activeTab, mode)}
 					</div>
 				</div>
 				<!-- Tab content -->
@@ -2295,8 +2471,8 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const previewExpandButton = () => html`
-		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand preview${shortcutHint("toggle-sidebar")}`}>
+	const sidePanelRestoreButton = () => html`
+		<button @click=${() => setSidePanelModeAndRender("split")} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand side panel${shortcutHint("toggle-sidebar")}`} data-testid="side-panel-restore">
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
@@ -2304,7 +2480,7 @@ export function doRenderApp(): void {
 	const mobilePaneContent = (tab: MobilePaneTab) => {
 		if (tab.kind === "chat") return state.chatPanel;
 		const content = unifiedPanelContent(tab);
-		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
+		return html`<div class="side-panel-pane goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
 
 	const mainArea = () => {
@@ -2349,41 +2525,64 @@ export function doRenderApp(): void {
 			lazyPageCall("search", () => import("./search-page.js"), "resetSearchPage", false);
 		}
 
-		if (connected && hasUnifiedPanel()) {
-			const fullscreenTabs = unifiedPanelContentTabs();
-			const fullscreenActiveId = activeSidePanelTabIdForSession(state, workspaceSessionId());
-			const fullscreenTab = fullscreenTabs.find((tab) => tab.id === fullscreenActiveId) ?? fullscreenTabs[0];
-			const fullscreenContent = htmlPreviewContent();
-			if (desktop && state.previewPanelFullscreen && fullscreenTab?.kind === "preview") {
+		if (route.view === "session" && route.panelTabId) {
+			if (!connected) return html`${reconnectBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+			const sid = workspaceSessionId();
+			const workspace = state.sidePanelWorkspaceBySession?.[sid];
+			if (!workspace) return html`${reconnectBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+			const tab = workspace.tabs.find((candidate) => candidate.id === route.panelTabId);
+			if (!tab) {
 				return html`
 					${reconnectBanner()}
-					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
-						<!-- Fullscreen preview header -->
-						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
-							<span class="text-xs font-medium text-muted-foreground">Preview</span>
-							<div class="flex items-center gap-0.5">
-								${fullscreenTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
-									${icon(PanelRightClose, "sm")}
-								</button>
-							</div>
+					<div class="flex-1 min-h-0 flex items-center justify-center p-8 text-center" data-testid="side-panel-route-missing">
+						<div class="max-w-sm rounded-lg border border-border bg-card p-5 shadow-sm">
+							<div class="text-sm font-semibold text-foreground mb-2">Panel is closed</div>
+							<div class="text-sm text-muted-foreground mb-4">This side-panel tab is not open for this session anymore.</div>
+							<a class="text-sm text-primary hover:underline" href=${`#/session/${encodeURIComponent(sid)}`}>Back to session</a>
 						</div>
-						<!-- Preview content fills available space -->
-						${fullscreenContent}
+					</div>
+				`;
+			}
+			if (workspace.activeTabId !== tab.id) setActivePanelTabIdForSession(state, sid, tab.id);
+			return html`${reconnectBanner()}<div class="flex-1 flex flex-col min-h-0 overflow-hidden" data-testid="side-panel-route-content">${renderSidePanelWorkspace("fullscreen")}</div>`;
+		}
+
+		const staffInboxOpenAffordance = () => {
+			const sid = activeSessionId() || "";
+			const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
+			const hasInboxTab = !!sid && getSidePanelWorkspace(sid).tabs.some((tab) => tab.id === "inbox" && tab.kind === "inbox");
+			if (!sess?.staffId || hasInboxTab) return "";
+			return html`
+				<div class="shrink-0 border-b border-border bg-muted/30 px-3 py-2 flex items-center justify-between gap-3" style=${isDesktop() ? "" : "margin-top:var(--mobile-header-height,60px);"} data-testid="staff-inbox-reopen-bar">
+					<span class="text-xs text-muted-foreground">Staff inbox is closed for this session.</span>
+					<button class="text-xs rounded border border-border px-2 py-1 hover:bg-accent" data-testid="staff-inbox-open" @click=${() => openInboxPanel(sid, sess.staffId!)}>Open inbox</button>
+				</div>
+			`;
+		};
+
+		if (connected && hasUnifiedPanel()) {
+			const mode = sidePanelSizeMode();
+			if (desktop && mode === "fullscreen") {
+				return html`
+					${reconnectBanner()}
+					${staffInboxOpenAffordance()}
+					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
+						${renderSidePanelWorkspace("fullscreen")}
 						<!-- Compact prompt bar at bottom -->
-						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
+						<div class="side-panel-fullscreen-prompt preview-fullscreen-prompt shrink-0 border-t border-border">
 							${state.chatPanel}
 						</div>
 					</div>
 				`;
 			}
 			if (desktop) {
-				const collapsed = isPreviewCollapsed();
+				const collapsed = isSidePanelCollapsed();
 				return html`
 					${reconnectBanner()}
-					<div class="goal-split-layout flex-1 flex min-h-0 overflow-hidden">
-						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
-						${collapsed ? previewExpandButton() : unifiedPreviewPanel()}
+					${staffInboxOpenAffordance()}
+					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
+						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
+						${collapsed ? sidePanelRestoreButton() : renderSidePanelWorkspace("split")}
 					</div>
 				`;
 			}
@@ -2395,14 +2594,15 @@ export function doRenderApp(): void {
 			const paneW = 100 / count;
 			return html`
 				${reconnectBanner()}
-				<div class="preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
-					<div class="preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
+				${staffInboxOpenAffordance()}
+				<div class="side-panel-slider preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
+					<div class="side-panel-slider__track preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
 						${panes.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
 					</div>
 				</div>
 			`;
 		}
-		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
+		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${staffInboxOpenAffordance()}${state.chatPanel}`;
 
 		if (desktop) {
 			return html`

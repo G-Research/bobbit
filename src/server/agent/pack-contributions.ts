@@ -55,6 +55,10 @@ export interface PanelContribution {
 	id: string; // unique within the pack (dotted allowed)
 	title?: string;
 	entry: string; // path relative to sourceFile, contained in packRoot
+	/** Durable tab identity mode. Omitted/default is singleton compatibility. */
+	instanceMode?: "singleton" | "parameterized";
+	/** Allowlisted params key that must match the tab instanceKey for parameterized panels. */
+	instanceParam?: string;
 	/** Absolute path of the declaring YAML (panels/<file>.yaml). */
 	sourceFile: string;
 	/** Absolute pack root (market-packs/<name>). */
@@ -187,6 +191,8 @@ function loadPanels(packRoot: string): PanelContribution[] {
 		seen.add(id);
 		const panel: PanelContribution = { id, entry, sourceFile, packRoot };
 		if (typeof obj.title === "string" && obj.title.length > 0) panel.title = obj.title;
+		if (obj.instanceMode === "singleton" || obj.instanceMode === "parameterized") panel.instanceMode = obj.instanceMode;
+		if (typeof obj.instanceParam === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(obj.instanceParam)) panel.instanceParam = obj.instanceParam;
 		out.push(panel);
 	}
 	return out;

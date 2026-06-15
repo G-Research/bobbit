@@ -14,7 +14,9 @@ review, and export preview for every provider.
 
 The checked-in prototype in
 [`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html)
-remains the UX reference for the ready-state review surface.
+remains the UX reference for the ready-state review surface. The pack panel must
+stay recognisably the same walkthrough experience as that prototype, not a
+compact alternate rendering of the same data.
 
 ## How it works now (built-in first-party pack)
 
@@ -121,6 +123,15 @@ capability. The walkthrough **pane lives only with that reviewer child session**
 it shows a pending state while analysis runs and the ready cards after submit,
 beside the child's chat. There is **no owner-session walkthrough surface** of any
 kind (see [The pane lives only with the reviewer child](#the-pane-lives-only-with-the-reviewer-child)).
+
+Because the reviewer is a normal visible session, launch also participates in the
+gateway-wide session-list sync contract. `SessionManager.createSession` persists
+the child and the server pushes `session_created` to authenticated clients; active
+session sockets and the global `/ws/viewer` listener refresh `GET /api/sessions`.
+That makes a walkthrough started on mobile promptly discoverable and selectable
+from desktop, and vice versa, without waiting for the periodic poll. Selecting the
+row opens the reviewer child session itself; the owner session never gains a
+walkthrough pane.
 
 ### Spawn-on-click from every launch surface
 
@@ -269,6 +280,28 @@ same cards re-render with the same `persistedAt`. The reviewer is **not** dismis
 on submit — it stays a live, selectable session (see
 [Lifecycle: no auto-dismiss](#lifecycle-no-auto-dismiss-restart-survival-and-termination)).
 
+### Pack panel parity and recovery contract
+
+The production viewer is now `market-packs/pr-walkthrough/src/panel.js` (built to
+`lib/panel.js`), but the UX target did not change. The first-party pack must
+preserve the prototype's review workflow and visual hierarchy:
+
+- prominent PR/title header, GitHub link affordance, file/addition/deletion stats,
+  and review progress;
+- full and collapsed/narrow phase rails, including guided orientation beats;
+- multi-card hierarchy with summaries, rationale, checklists, suggested concerns,
+  and card-level comments;
+- inline and side-by-side diff modes with one horizontal scrollbar per diff widget;
+- line-level suggested comments, user comment editors, and saved-comment markers;
+- `Prev` / `Like` / `Dislike` controls with the same interaction semantics as the
+  prototype.
+
+Recovery is part of parity, not a separate fallback UI. Malformed or incomplete
+hunk/header data must degrade to warnings or unmapped suggestions rather than
+blanking the panel. Pending reviews remain in the in-progress state while the
+reviewer is alive, completed reviews re-render through `recover` after reload, and
+long-running reviews show non-error progress hints instead of timing out early.
+
 ### Target resolution — GitHub PRs only
 
 When a launcher invokes `run` with an empty body (the normal path — the launcher
@@ -385,14 +418,14 @@ reaps it automatically.
 
 ## Panel sizing: fullscreen, collapse, and shortcuts
 
-The pack panel opened at `#/ext/pr-walkthrough` uses the **same** resize logic as
-the HTML preview panel — there is no walkthrough-specific resize code path. It
-renders the shared unified toolbar with a fullscreen (wide review) button and a
-collapse button, and it honors `state.previewPanelFullscreen` plus the per-session
-collapse key (`bobbit-preview-collapsed-<id>`) identically to the preview panel.
-The same keyboard shortcuts drive it: `toggle-sidebar` (Ctrl+[, expand one level),
-`toggle-preview` (Ctrl+], collapse one level), and `toggle-fullscreen-preview`
-(Ctrl+#, jump to fullscreen or collapsed). State persists across reload.
+The PR walkthrough is a normal `pack` tab in the server-backed side-panel
+workspace. It uses the same shared controls as every side panel: fullscreen,
+collapse/restore, split view, and popout. There is no walkthrough-specific resize
+code path, and no preview-specific localStorage collapse key; size mode persists
+as `sidePanelWorkspace.sizeMode` on the reviewer session and syncs across reloads
+and browser contexts. The shared keyboard shortcuts expand one level
+(`collapsed → split → fullscreen`), collapse one level (`fullscreen → split → collapsed`),
+and toggle fullscreen/collapsed.
 
 The panel **never auto-enters fullscreen**. Fullscreen is strictly user-initiated,
 via a toolbar button or one of those shortcuts. This matches the preview panel and
@@ -431,9 +464,10 @@ and the user-terminate control are pinned in the API spec
 `tests/e2e/pr-walkthrough-host-agents.spec.ts` (whose mock agent cannot resolve a
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
 browser spec).
-HTML-preview-panel sizing is independently pinned by
-`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (the panel-sizing logic does
-not touch the preview panel). See
+Preview panel sizing through the shared side-panel controls is independently pinned by
+`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (preview is one workspace
+panel kind using the same sizing logic as pack, proposal, review, and inbox
+panels). See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design.
 
@@ -885,16 +919,17 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 
 - YAML schema validation and YAML-to-card mapping (`src/shared/pr-walkthrough/yaml-to-cards.ts`);
 - read-only command policy and walkthrough tool metadata;
+- session-list synchronization: visible session creation emits `session_created` or `sessions_changed` before the polling fallback (`tests/e2e/session-created-sync.spec.ts`), and the mobile landing page keeps an authenticated `/ws/viewer` listener that refreshes the session list without creating a `RemoteAgent` (`tests/e2e/ui/session-created-push-sync.spec.ts`);
 - the isolated reviewer child: `run` mints a `host-agents` / `pr-reviewer` read-only child with the `magnifier` accessory and the `PR Walkthrough` session title and the owner's agent is never prompted, the reviewer's allowlist is exactly the three walkthrough tools, always-fresh launch (two `run` calls for the same PR → two distinct reviewers), and owner-gone cascade cleanup (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
 - binding-routed submit/bundle authorization by `X-Bobbit-Session-Secret` (no submit proof anywhere in the tree), and submit/validation behavior;
 - the agent-side resolve/export routes;
 - the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the three walkthrough tools and its system prompt carries the YAML schema, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + schema across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after submit the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
-- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the spawn-on-click launchers, the no-PR inline `git-widget-launcher-error` (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards on submit, and surviving reload via the child-self `recover`; plus validation retry state and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
+- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR inline `git-widget-launcher-error` (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards on submit, and surviving reload via the child-self `recover`; plus validation retry state and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
+- pack-panel parity with the prototype/reference UX: pending state, prominent header/stats/link/progress, full and collapsed rails, inline + side-by-side diffs, one-scrollbar diff behavior, line/card comment workflows, and `Prev` / `Like` / `Dislike` gating (`tests/pr-walkthrough-panel-parity.spec.ts`);
 - panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
-Use these tests as the pinning contract when changing the pack viewer, agent-side
-launch/resolver behavior, YAML mapping, persistence, readonly policy, or panel UX.
+When the visual PR walkthrough shell changes, QA should include side-by-side screenshots comparing the prototype/reference (`docs/design/pr-walkthrough-panel-prototype.html`) with the delivered pack panel. Cover desktop side-panel, wide/full panel, narrow/mobile, pending state, ready state with multiple cards/diffs/comments, and light/dark themes. Use these tests and screenshots as the pinning contract when changing the pack viewer, agent-side launch/resolver behavior, YAML mapping, persistence, readonly policy, or panel UX.
 
 ## Historical (pre-pack-migration) — retained for rationale
 

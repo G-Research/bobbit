@@ -36,10 +36,11 @@ export const HOST_API_VERSION = 1 as const;
  *  breaking packs. */
 //
 // v2 (additive): added the optional `PanelTarget.sessionId` field — open/focus a
-// panel in a CHOSEN session's view. Purely additive (a new optional field), so
-// packs that don't read it are unaffected; packs that rely on it feature-detect via
-// `host.contractVersion >= 2` and fall back to the active view. See PanelTarget.
-export const HOST_CONTRACT_VERSION = 2 as const;
+// panel in a CHOSEN session's view.
+// v3 (additive): added optional `PanelTarget.instanceKey` for durable, parameterized
+// side-panel tab identity. Packs feature-detect via `host.contractVersion >= 3` and
+// fall back to host-derived singleton/allowlisted param identity. See PanelTarget.
+export const HOST_CONTRACT_VERSION = 3 as const;
 
 /**
  * The single, versioned, capability-scoped object through which ALL extension code
@@ -196,6 +197,10 @@ export interface HostStoreApi {
 export interface PanelTarget {
 	panelId: string;
 	params?: Record<string, unknown>;
+	/** CONTRACT v3: durable instance identity for parameterized panel tabs. Omitted
+	 *  ⇒ the host derives from the panel's allowlisted instance param, then from
+	 *  allowlisted params such as `artifactId`, then `default` for singleton panels. */
+	instanceKey?: string;
 	/** CONTRACT v2: open/focus the panel in THIS session's view (selecting it if
 	 *  needed), instead of the currently-active session. Omitted ⇒ active session
 	 *  (v1 behaviour). Packs feature-detect via host.contractVersion >= 2. */

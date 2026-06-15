@@ -16,6 +16,8 @@ After `auth_ok`, a viewer socket is authenticated but not associated with a sess
 
 Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only when they are subscribed to the matching `goalId`. Session sockets for agents that belong to that goal still receive those same events. Search/index broadcasts (`index:*`) are project broadcasts rather than goal broadcasts, so they still reach authenticated viewer sockets regardless of goal subscription.
 
+Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Treat these messages as refresh triggers only; the session list REST response remains the source of truth.
+
 ## Client → Server
 
 | Type | Fields | Description |
@@ -58,12 +60,16 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `resume_gap` | `lastSeq` | Server's reply to a `resume` whose `fromSeq` is older than the retained EventBuffer window. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
+| `session_created` | `sessionId`, `projectId?` | A visible session was created through REST, UI, or `host.agents`; clients should refresh the session list immediately. |
+| `sessions_changed` | `projectId?` | Broad session-list invalidation fallback; clients should refresh the session list. |
+| `session_removed` | `sessionId`, `projectId?`, `reason` | A session was terminated, archived, or purged; clients should remove or refresh the matching row promptly. |
 | `client_joined` | `clientId` | Another client connected |
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |
 | `pong` | — | Keepalive response |
 | `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. Current servers include `cost.cacheHitRate`; see [Cost update shape](#cost-update-shape). |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
+| `side_panel_workspace` | `sessionId`, `workspace` | The server-authoritative side-panel workspace for the session changed. Clients replace their local mirror only when `workspace.revision` is newer; see [side-panel-workspace.md](side-panel-workspace.md). |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
 | `session_archived` | `sessionId`, `archivedAt` | Session was archived |

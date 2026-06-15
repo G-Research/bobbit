@@ -210,7 +210,7 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await expect(page.locator('[data-panel="staff-proposal"]').first()).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("review panel tabs render, switch, close, and keep submit disabled without annotations", async ({ page }) => {
+	test("review panel tabs render, switch, close workspace tab without deleting content, and keep submit disabled without annotations", async ({ page }) => {
 		await page.evaluate(() => (window as any).__setReviewFixture([
 			{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
 			{ title: "Document B", markdown: "# Document B\n\nSecond document content." },
@@ -228,7 +228,7 @@ test.describe("Proposal/review lightweight fixture", () => {
 
 		await page.locator('review-pane button.review-tab[title="Document B"] .review-tab-close').click();
 		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 5_000 });
-		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document C"]);
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document B", "Document C"]);
 	});
 
 	test("proposal pane styles stay eagerly imported and apply their discriminating rules", async ({ page }) => {

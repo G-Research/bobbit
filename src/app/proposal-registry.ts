@@ -10,7 +10,7 @@
  * unused for Slice E and reserved for future work.
  */
 
-import { activePanelTabIdForSession, panelTabsForSession, proposalPanelTabId, setActivePanelTabIdForSession, setPanelTabsForSession, type PanelWorkspaceTab } from "./panel-workspace.js";
+import { proposalPanelTabId } from "./panel-workspace.js";
 
 // NOTE: We do NOT import `./state.js` at module load — state.ts touches
 // `localStorage` at module init which would break node-only unit tests of
@@ -125,14 +125,6 @@ function goalMerge(
 
 // ---- onFirstEmit lifters ----
 
-function clearCollapseKey(sessionId: string): void {
-	try {
-		if (typeof localStorage !== "undefined") {
-			localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`);
-		}
-	} catch { /* ignore */ }
-}
-
 /** Lazily resolve the mutable state singleton at call time so this module's
  *  load-time graph stays node-safe. */
 function getState(): any {
@@ -148,35 +140,36 @@ const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 	staff: "Staff Proposal",
 };
 
-function dropCurrentProposalWorkspaceTab(s: any, type: ProposalType, sessionId: string): void {
+function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
 	const id = proposalPanelTabId(type);
-	const tabs = panelTabsForSession(s, sessionId);
-	if (!tabs.some((tab: any) => tab?.id === id)) return;
-	setPanelTabsForSession(s, sessionId, tabs.filter((tab: any) => tab?.id !== id));
-	if (activePanelTabIdForSession(s, sessionId) === id) {
-		setActivePanelTabIdForSession(s, sessionId, "");
+	const s = getState();
+	if (s?.panelTabsBySession && Array.isArray(s.panelTabsBySession[sessionId])) {
+		s.panelTabsBySession[sessionId] = s.panelTabsBySession[sessionId].filter((tab: { id?: string }) => tab?.id !== id);
 	}
+	if (s?.panelWorkspaceActiveBySession?.[sessionId] === id) s.panelWorkspaceActiveBySession[sessionId] = "";
+	if (s?.activePanelTabId === id) s.activePanelTabId = "";
+	void import("./side-panel-workspace.js")
+		.then((mod) => mod.closeSidePanelTab(id, { sessionId }))
+		.catch(() => { /* optional browser-only integration */ });
 }
 
-function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): boolean {
+function openCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): boolean {
 	const s = getState();
 	if (!hasCurrentProposalSlotForSession(s, type, sessionId)) {
-		dropCurrentProposalWorkspaceTab(s, type, sessionId);
+		dropCurrentProposalWorkspaceTab(type, sessionId);
 		return false;
 	}
-	const tab: PanelWorkspaceTab = {
+	const tab = {
 		id: proposalPanelTabId(type),
-		kind: "proposal",
+		kind: "proposal" as const,
 		title: PROPOSAL_TAB_LABELS[type],
 		label: PROPOSAL_TAB_LABELS[type].replace(/ Proposal$/, ""),
-		legacyTab: type,
-		source: { type: "proposal", proposalType: type, sessionId },
+		source: { type: "proposal" as const, proposalType: type, sessionId },
+		updatedAt: Date.now(),
 	};
-	const tabs = panelTabsForSession(s, sessionId);
-	const idx = tabs.findIndex((t: any) => t?.id === tab.id);
-	if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
-	else tabs.push(tab);
-	setActivePanelTabIdForSession(s, sessionId, tab.id);
+	void import("./side-panel-workspace.js")
+		.then((mod) => mod.openSidePanelTab(tab, { focus: true }))
+		.catch(() => { /* optional browser-only integration */ });
 	try {
 		if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
 			window.dispatchEvent(new CustomEvent("bobbit-panel-workspace:select", { detail: { action: "select", tab, activeTabId: tab.id } }));
@@ -186,10 +179,9 @@ function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): bool
 }
 
 function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAssistantTab: boolean): void {
-	if (!upsertProposalWorkspaceTab(type, sessionId)) return;
-	void import("./preview-panel.js")
-		.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab }))
-		.catch(() => { /* optional browser-only integration */ });
+	if (!openCurrentProposalWorkspaceTab(type, sessionId)) return;
+	const s = getState();
+	if (setAssistantTab && s.assistantType) s.assistantTab = "preview";
 }
 
 /**
@@ -209,7 +201,6 @@ export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot,
 	s.previewPanelActiveTab = type;
 	s.previewPanelTab = type;
 	selectProposalWorkspaceTab(type, slot.sessionId, !opts.isAssistant || opts.isMobile);
-	clearCollapseKey(slot.sessionId);
 }
 
 function proposalFirstEmit(type: ProposalType): ProposalTypePlugin["onFirstEmit"] {

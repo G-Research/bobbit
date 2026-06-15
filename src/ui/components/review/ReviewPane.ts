@@ -124,6 +124,10 @@ export class ReviewPane extends LitElement {
     this._refreshCounts();
   }
 
+  private _displayTitle(key: string): string {
+    return this.documents.get(key)?.title || key;
+  }
+
   private _switchTab(title: string): void {
     this._overflowOpen = false;
     this._validationError = "";
@@ -198,8 +202,9 @@ export class ReviewPane extends LitElement {
   private _closeTab(title: string, e: Event): void {
     e.stopPropagation();
     const count = this._unsentCommentCountForDocument(title);
+    const displayTitle = this._displayTitle(title);
     if (count > 0) {
-      if (!confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+      if (!confirm(`Close "${displayTitle}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
     }
     this._deleteFinalComment(title);
     this.dispatchEvent(
@@ -250,9 +255,9 @@ export class ReviewPane extends LitElement {
               <button
                 class="review-tab ${title === this.activeTab ? "review-tab--active" : ""}"
                 @click=${() => this._switchTab(title)}
-                title=${title}
+                title=${this._displayTitle(title)}
               >
-                <span class="review-tab-label">${title}</span>
+                <span class="review-tab-label">${this._displayTitle(title)}</span>
                 ${count > 0
                   ? html`<span class="review-tab-badge">${count}</span>`
                   : ""}
@@ -282,7 +287,7 @@ export class ReviewPane extends LitElement {
                                 class="review-tab-overflow-item ${title === this.activeTab ? "review-tab--active" : ""}"
                                 @click=${() => this._switchTab(title)}
                               >
-                                ${title}
+                                ${this._displayTitle(title)}
                                 ${count > 0
                                   ? html`<span class="review-tab-badge">${count}</span>`
                                   : ""}

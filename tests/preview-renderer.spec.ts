@@ -6,9 +6,16 @@ const FIXTURE = path.resolve("tests/fixtures/preview-renderer.html");
 const BUNDLE = path.resolve("tests/fixtures/preview-renderer-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/preview-renderer-entry.ts");
 const RENDERER_SRC = path.resolve("src/ui/tools/renderers/PreviewRenderer.ts");
+const PREVIEW_PANEL_SRC = path.resolve("src/app/preview-panel.ts");
+const PANEL_WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
+const SIDE_PANEL_WORKSPACE_SRC = path.resolve("src/app/side-panel-workspace.ts");
 
 test.beforeAll(() => {
-	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, RENDERER_SRC] });
+	buildBundle({
+		entry: ENTRY,
+		outfile: BUNDLE,
+		deps: [ENTRY, RENDERER_SRC, PREVIEW_PANEL_SRC, PANEL_WORKSPACE_SRC, SIDE_PANEL_WORKSPACE_SRC],
+	});
 });
 
 const PAGE = `file://${FIXTURE}`;

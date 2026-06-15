@@ -17,7 +17,7 @@ Bobbit has three layers:
 
 1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
 
-2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing.
+2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing. Session navigation is kept cross-device by server-pushed session-list invalidations plus REST refreshes; `/api/sessions` remains authoritative.
 
 3. **UI components** (`src/ui/`) — Lit-based component library (forked from pi-web-ui). Message rendering, specialised tool call renderers, model selection, settings, and more.
 
@@ -34,39 +34,43 @@ After the app resolves and connects a path-style session route, the visible in-a
 
 Hash routes take precedence over the path-style session fallback once the app has loaded. This keeps in-app navigation meaningful even from a copied path URL: `/session/old#/session/new` opens `new`, not `old`. Non-session pathnames are not treated as session deep links. Extension surfaces (e.g. the PR walkthrough pack) are reached through the generic hash route `#/ext/<routeId>` rather than a dedicated pathname route.
 
+## Session list synchronization
+
+A visible session created on one client must become selectable on every other connected client. The server broadcasts `session_created` (or the broader `sessions_changed`) whenever a visible session enters the persisted session list, including sessions created by normal REST/UI flows and `host.agents` pack launches. Browsers treat the event as an invalidation and refresh `GET /api/sessions`; they do not trust the WebSocket payload as the full session record.
+
+The app keeps this working even when no chat session is open. Active chat views receive the event on their session socket, while landing/dashboard/mobile views keep a lightweight authenticated `/ws/viewer` socket that refreshes the same session list. A backgrounded tab can still catch up through the normal visibility-triggered and periodic session refresh paths. Removals use the matching `session_removed` push so sidebars and mobile lists drop archived/terminated sessions promptly.
+
+See [websocket-protocol.md](websocket-protocol.md) for the wire contract.
+
 ## Side-panel workspace
 
-Every chat session owns a dynamic side-panel workspace. The workspace is shared
-by regular sessions and assistant sessions, so HTML previews, proposals, review
-documents, PR walkthroughs, and the staff inbox are selected by the same tab
-dispatcher instead of by assistant-specific branches. Chat stays outside the
-strip; when a non-staff session has no side-panel tabs, the side pane hides and
-chat fills the layout.
+Every chat session owns a server-backed side-panel workspace for the right side
+of the chat view. The workspace is shared by regular sessions and assistant
+sessions, so HTML previews, pack panels such as PR walkthrough and artifact
+viewers, proposals, review documents, and the staff inbox all use the same tab
+strip and window controls. Chat stays outside the strip; when a non-staff
+session has no side-panel tabs, the side pane hides and chat fills the layout.
 
-Tabs are derived from their artifact source. Preview tabs represent current or
-historical `preview_open` artifacts and use `contentHash` to collapse duplicate
-content when available. Proposal tabs distinguish the live editable draft from
-historical revisions. Review tabs map to review documents by encoded title.
-The PR walkthrough review surface now ships as a **built-in first-party pack**
-(`market-packs/pr-walkthrough/`) reached through the generic extension route
-`#/ext/pr-walkthrough`, rather than a bespoke side-panel tab kind. Clicking any
-pack launcher (git-widget button / composer-slash / command palette) mints a
-separate, isolated, read-only reviewer child via `host.agents.spawn` (not the
-current session's agent) and **auto-switches the view to that child session**,
-where the panel opens; there is **no owner-session panel** and no manual
-"Run"/"Load" buttons (a no-PR / spawn failure shows an inline error in the
-git-status-widget dropdown instead). See
-[pr-walkthrough-panel.md](pr-walkthrough-panel.md),
-[pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md), and
-[built-in-first-party-packs.md](design/built-in-first-party-packs.md). Desktop
-renders a scrollable tab strip next to the chat; mobile renders the same
-side-panel tab set in the header and slider track.
+The server is authoritative for open tabs, active tab, tab order, and size mode
+(`split`, `fullscreen`, or `collapsed`). Closed tabs are durable absence: render,
+refresh, reconnect, content caches, and localStorage must not recreate a tab just
+because the underlying preview artifact, proposal draft, review document, inbox,
+or pack panel still exists. Tabs open only through explicit workspace open or
+reopen events.
 
-The main client modules are `src/app/panel-workspace.ts` for tab identity and
-persistence, `src/app/preview-panel.ts` for preview selection helpers and SSE
-wiring, and `src/app/render.ts` for the shared dispatcher and responsive layout. See
-[Side-Panel Tab Contract](design/side-panel-tab-contract.md) for the full id /
-ordering contract and [Embedded HTML preview — architecture](preview-architecture.md)
+Desktop renders the workspace beside chat or fullscreen with a compact prompt
+dock; mobile renders the same tab set in the header and slider track. Popout
+links either use the preview content route or the safe app deep link
+`#/session/<sessionId>/panel/<tabId>`, which renders only already-open server
+workspace tabs.
+
+Main modules: `src/shared/side-panel-workspace.ts` defines the shared model,
+`src/server/side-panel-workspace*.ts` canonicalizes and mutates persisted
+workspaces, `src/app/side-panel-workspace.ts` hydrates and mutates the client
+mirror, `src/app/panel-workspace.ts` keeps tab id helpers and fixture fallback,
+and `src/app/render.ts` renders the shared shell. See
+[Side-panel workspace](side-panel-workspace.md) for the invariant, lifecycle,
+API, popout, and migration rules, and [Embedded HTML preview — architecture](preview-architecture.md)
 for the preview mount and `contentHash` contract.
 
 ## Build structure

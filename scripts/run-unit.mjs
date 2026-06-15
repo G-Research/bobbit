@@ -65,25 +65,49 @@ const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || String(half)
 // Passed to Playwright via --workers (CLI overrides the config's default).
 const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(half);
 
+const failureTailLines = Math.max(20, Number.parseInt(process.env.BOBBIT_UNIT_FAILURE_TAIL_LINES || "240", 10) || 240);
+
+function appendTail(tail, chunk) {
+	for (const line of String(chunk).split(/\r?\n/)) {
+		if (!line) continue;
+		tail.push(line);
+		if (tail.length > failureTailLines) tail.shift();
+	}
+}
+
 function run(label, args) {
 	return new Promise((res) => {
 		const start = Date.now();
+		const tail = [];
+		let settled = false;
 		const child = spawn(npx, args, {
 			cwd: projectRoot,
-			stdio: ["ignore", "inherit", "inherit"],
+			stdio: ["ignore", "pipe", "pipe"],
 			// npx is a .cmd shim on Windows → needs a shell. The args are short
 			// (globs are NOT pre-expanded), so the shell command line stays tiny.
 			shell: isWin,
 			env: process.env,
 		});
-		child.on("exit", (code, signal) => {
+		child.stdout?.on("data", (chunk) => {
+			process.stdout.write(chunk);
+			appendTail(tail, chunk);
+		});
+		child.stderr?.on("data", (chunk) => {
+			process.stderr.write(chunk);
+			appendTail(tail, chunk);
+		});
+		child.on("close", (code, signal) => {
+			if (settled) return;
+			settled = true;
 			const secs = ((Date.now() - start) / 1000).toFixed(1);
 			console.log(`\n[run-unit] ${label} finished in ${secs}s (exit ${code ?? signal ?? "?"})`);
-			res({ label, code: code ?? (signal ? 1 : 0) });
+			res({ label, code: code ?? (signal ? 1 : 0), tail });
 		});
 		child.on("error", (err) => {
+			if (settled) return;
+			settled = true;
 			console.error(`[run-unit] ${label} failed to start:`, err);
-			res({ label, code: 1 });
+			res({ label, code: 1, tail: [String(err?.stack || err)] });
 		});
 	});
 }
@@ -106,6 +130,18 @@ const results = await Promise.all([
 	run("browser-fixtures", browserArgs),
 ]);
 const totalSecs = ((Date.now() - overallStart) / 1000).toFixed(1);
+const failed = results.filter((r) => r.code !== 0);
 console.log(`\n[run-unit] total wall time ${totalSecs}s`);
+console.log(`[run-unit] result summary: ${results.map((r) => `${r.label}=${r.code === 0 ? "pass" : `fail(${r.code})`}`).join(", ")}`);
 
-process.exit(results.some((r) => r.code !== 0) ? 1 : 0);
+if (failed.length > 0) {
+	console.error(`\n[run-unit] ${failed.length} runner(s) failed. Replaying last ${failureTailLines} non-empty output lines per failed runner so gate tails include the useful error:`);
+	for (const result of failed) {
+		console.error(`\n[run-unit] ---- ${result.label} failure output tail ----`);
+		if (result.tail.length > 0) console.error(result.tail.join("\n"));
+		else console.error("(no output captured)");
+		console.error(`[run-unit] ---- end ${result.label} failure output tail ----`);
+	}
+}
+
+process.exit(failed.length > 0 ? 1 : 0);

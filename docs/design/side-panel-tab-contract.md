@@ -5,6 +5,14 @@ Companion to [`preview-architecture.md`](../preview-architecture.md) (v3 mount,
 SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-widgets.md)
 (historical preview tab UX).
 
+> **Current contract:** the product workspace is server-authoritative.
+> Open tabs, active tab, tab order, and size mode live on the session's persisted
+> `sidePanelWorkspace`. Closed tabs are durable absence: render/content caches,
+> preview mounts, proposal state, review documents, inbox state, and localStorage
+> must not recreate them. See [`side-panel-workspace.md`](../side-panel-workspace.md)
+> for the implementation contract. Historical sections in this design note are
+> explicitly labelled and describe pre-workspace behavior only.
+
 > **Current model — PR walkthrough is no longer a bespoke side-panel tab.** The
 > PR-walkthrough viewer now ships as a built-in first-party **pack**
 > (`market-packs/pr-walkthrough/`) rendered through the **generic `ext` route**
@@ -25,13 +33,14 @@ SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-
 Bobbit's UI has two main areas: the **chat** (transcript + prompt textarea)
 and a **side pane** that hosts everything else the agent might surface
 alongside the chat — HTML previews, draft proposals, review documents,
-PR walkthroughs, and the staff-agent inbox. Before this contract there
-were several parallel sources of truth for what the side pane was showing:
+pack panels such as PR walkthrough, and the staff-agent inbox. The current
+contract exists because older builds had several parallel sources of truth
+for what the side pane was showing:
 
-- `activePanelTabId` (id-keyed)
-- `assistantTab` / `previewPanelTab` (kind-keyed legacy state)
-- A `legacyRequestedTab` fallback inside the render loop
-- A `previewWorkspaceKey` shortcut for preview-only sessions
+- id-keyed active tab state;
+- kind-keyed preview/proposal/review state;
+- render-time fallback tab derivation;
+- preview-specific collapse/fullscreen state and localStorage keys.
 
 Different events updated different fields, and the render path consulted
 them in a partly-ordered cascade. Two surprising classes of bug fell out of
@@ -53,73 +62,76 @@ outside the strip.
 The side-pane tab strip is a **Chrome-style tab bar that lives next to
 chat**, not above the whole window. Chat is always the main area.
 
-- The strip renders only side-pane tabs (preview / proposal / review /
-  walkthrough / inbox). It never renders a `Chat` pill.
+- The strip renders only side-panel workspace tabs: preview, proposal,
+  review, pack, and inbox. It never renders a persisted `Chat` pill.
 - Chat cannot be reordered, dismissed, or selected from the strip — there
   is no exposed `chat` tab id.
-- If a non-staff session has zero side-pane tabs, the side pane is
-  **hidden** and chat fills the main area. The strip itself disappears.
-- Switching to a staff-agent session always shows the strip, because the
-  pinned **Inbox** tab is always present for staff sessions.
+- If a session has zero open side-panel tabs, the side pane is **hidden**
+  and chat fills the main area. The strip itself disappears.
+- The staff inbox is a normal workspace tab (`inbox`). It opens through
+  explicit inbox/session actions, can be closed like other tabs, and stays
+  closed across refresh until explicitly reopened.
 
-On mobile the same model holds: the side-pane tab bar at the top of the
-side pane only contains side-pane tabs, never a Chat pill. The existing
-horizontal swipe still reveals the chat pane and the side pane as separate
-slides — no touch drag reorder in this iteration.
+On mobile the same persisted model holds: the workspace contains only side-pane
+tabs. The UI may expose a chat affordance for the slider, but that affordance is
+not a persisted workspace tab. The existing horizontal swipe still reveals the
+chat pane and the side pane as separate slides — no touch drag reorder in this
+iteration.
 
 ## 3. Tab id is the address
 
 Every side-pane tab has exactly one canonical id, and that id is the only
-thing the renderer consults when deciding what to draw.
+thing the renderer consults when deciding what to draw. The authoritative
+model is `SidePanelWorkspace` in
+[`src/shared/side-panel-workspace.ts`](../../src/shared/side-panel-workspace.ts),
+persisted on the session as `sidePanelWorkspace`.
 
-Valid side-pane tab ids (sources of truth in
-[`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts)):
+Valid side-pane tab ids:
 
 | Id | Meaning |
 |---|---|
 | `preview:entry:<encoded-filename>` | Current / latest preview for `<filename>`. Label is unversioned, e.g. `report.html`. |
 | `preview:entry:<encoded-filename>:v:<N>` | Historical immutable preview artifact. Label is `report.html (vN)`. |
-| `proposal:<type>` | Active proposal of `<type>` (`goal`, `project`, `role`, `tool`, `staff`). |
-| `proposal:<type>:rev:<N>` | Historical proposal revision. |
-| `review:<encoded-title>` | Review document by title. |
-| ~~`walkthrough:<changeset-id>`~~ *(historical — deleted)* | Former PR / changeset walkthrough tab kind. **Removed**: the walkthrough viewer is now the built-in pack at the generic `#/ext/pr-walkthrough` route, not a bespoke side-pane tab id. |
-| `inbox` | Staff-agent inbox. Pinned, no close button, no drag handle. |
+| `proposal:<type>` | Current proposal of `<type>` (`goal`, `project`, `role`, `tool`, `staff`). |
+| `proposal:<type>:rev:<N>` | Historical proposal revision opened by an explicit reopen action. |
+| `review:<encoded-documentId>` | Review document by stable document id. Title is display metadata only. |
+| `pack:<encoded-packId>:<encoded-panelId>:<encoded-instanceKey>` | Pack-hosted panel instance, including PR walkthrough and artifact viewers. |
+| `inbox` | Staff-agent inbox. Normal closeable/reorderable workspace tab. |
+| ~~`walkthrough:<changeset-id>`~~ *(historical - deleted)* | Former PR / changeset walkthrough tab kind. **Removed**: the walkthrough viewer is now a first-party pack panel, not a bespoke side-pane tab id. |
 
-`isSidePanelTabId(id)` is the single guard the rest of the app uses.
-Anything that does not parse as one of the shapes above is **not** a
-side-pane tab and cannot become the active side-pane tab.
+Anything that does not canonicalize to one of the supported shapes is **not** a
+side-pane tab and cannot become the active side-pane tab. Server validation also
+checks that each tab's `source.sessionId` matches the route session and that pack
+panel ids/instance keys are valid for a registered panel.
 
-### Legacy ids dropped on load
+### Legacy ids are migration input only
 
-Two legacy artefacts are migrated/dropped when `loadPersistedPanelWorkspace`
-hydrates `panelTabsBySession` / `panelWorkspaceActiveBySession` from
-`localStorage`:
+Legacy localStorage keys are read only during the one-time workspace migration,
+and only when the server workspace is empty and has no migration stamp:
 
-| Legacy id | Resolution |
+| Legacy id/key | Resolution |
 |---|---|
-| `chat` (tab row or active id) | **Dropped.** `normalizeStoredPanelTab` filters chat rows and `normalizeActivePanelTabId` maps `"chat"` to `""`. No Chat pill survives the migration. |
-| `preview` / `preview:live` | Mapped to `previewEntryTabId(currentEntry)` — the unversioned filename tab for whatever entry the live mount currently has. |
+| `chat` (tab row or active id) | **Dropped.** Chat is not a side-panel tab. |
+| `preview` / `preview:live` | Mapped to the current filename preview tab when the current entry is known. |
+| `review:<encoded-title>` | Mapped to a deterministic legacy document id so future identity is document-based. |
+| `pack:<packId>:<panelId>` | Mapped to `pack:<packId>:<panelId>:default` only for valid singleton panels. |
+| `bobbit-preview-collapsed-<sessionId>` | Migrates to `sidePanelWorkspace.sizeMode = "collapsed"`. |
+| `bobbit-panel-active-by-session` / `bobbit-panel-tabs-by-session` | Seed the initial server workspace order/active id during migration only. |
 
-The migration is one-way: the in-memory model never re-introduces a chat
-tab row. `previewPanel.ts::selectSensiblePanelWorkspaceTab` still has a
-branch that *would* upsert a chat row as a last-resort fallback, but the
-panel-workspace normaliser strips it back out, so it never makes it onto
-the visible strip.
+After migration, the product app does not write workspace state to localStorage.
+Closed tabs are not inferred from proposal/review/preview/inbox caches. File-based
+fixtures may keep local fallbacks so browser unit fixtures can run without a
+gateway; those fallbacks are not the product source of truth.
 
-### Activation is a pure id setter
+### Activation is a server workspace mutation
 
-`setActivePanelTabIdForSession(state, sessionId, tabId)`:
-
-1. Normalises `tabId` (`chat` / unknown ids → `""`, legacy preview ids →
-   current filename id).
-2. Writes that string into `panelWorkspaceActiveBySession[sid]`.
-3. Mirrors into `state.activePanelTabId` only when this session is the
-   active one in the UI.
-
-The render path then looks up the active tab by id and draws its content.
-There is no second pass, no kind-based fallback, no
-`assistantTab → preview` cascade. Aliasing cannot happen because there is
-only one consulted authority.
+`setActiveSidePanelTab(tabId)` posts to the session workspace API and may point
+only to an open tab or to empty. The committed server response replaces any
+optimistic in-memory state and is broadcast to other clients. The render path
+then looks up the active tab by id in `workspace.tabs` and draws that exact
+content. There is no second pass, no kind-based fallback, and no
+`assistantTab -> preview` cascade. Aliasing cannot happen because there is only
+one consulted authority.
 
 ## 4. Preview tabs
 
@@ -148,10 +160,9 @@ When the agent calls `preview_open(file.html)`:
 2. If it already exists, update it in place (label, content hash, version,
    artifact id, mtime) and take focus. Do not duplicate. Do not reorder.
 
-This is enforced by `selectHtmlPreviewTab` in
-[`src/app/preview-panel.ts`](../../src/app/preview-panel.ts), which finds the
-existing current filename tab via `previewEntryTabId(entry)` before deciding
-whether to upsert or split into a historical tab.
+The preview opener computes the target id via the preview tab helpers, then
+calls the server workspace open/update API. Metadata patches for SSE/bootstrap
+must target an already-open tab; they do not recreate a tab the user closed.
 
 ### 4.2 Version assignment
 
@@ -265,124 +276,111 @@ may remain the render target if each tab has an immutable restore source" —
 is preserved: each historical tab restores its artifact into the same live
 mount before the iframe renders it.
 
-## 5. Proposal, review, walkthrough, and inbox tabs
+## 5. Proposal, review, pack, and inbox tabs
 
-All four kinds share the id-keyed activation and ordering model with
-preview.
+All side-panel kinds share the server-backed id-keyed activation and ordering
+model with preview.
 
-**Proposal tabs** are minted from the active-proposal slot for a session.
-`proposal:<type>` (no `:rev:` suffix) is the editable slot for an active
-proposal. `proposal:<type>:rev:<N>` tabs are historical immutable
-revisions (snapshots committed earlier in the session). Active proposal
-slots upsert their tab on creation; closing the tab dismisses the
-proposal via the existing proposal-dismiss flow. Historical revisions
-close cleanly on their own and never touch the active slot.
+**Proposal tabs** open from proposal events or explicit reopen affordances.
+`proposal:<type>` (no `:rev:` suffix) is the editable current slot for an active
+proposal. `proposal:<type>:rev:<N>` tabs are historical revisions and are opened
+only by explicit historical/reopen UI. A new current revision updates/focuses
+the matching current tab instead of creating a duplicate. Closing a proposal tab
+removes only the workspace tab unless the business action also dismisses the
+proposal; refresh must not recreate it from `activeProposals`.
 
-**Review tabs** use `review:<encoded-title>` and map 1:1 to entries in
-the session's `reviewDocuments` map. Closing a review tab fires the
-existing review-close behaviour.
+**Review tabs** use `review:<encoded-documentId>`. `documentId` is stable and
+survives title changes; title is display metadata. Review content/annotations
+may remain cached after close, but restoring those caches must not open a tab
+unless the server workspace already contains it or the user explicitly reopens
+it.
 
-**Walkthrough tabs** *(historical — deleted)*. The PR/changeset walkthrough
-formerly used a `walkthrough:<changeset-id>` side-pane tab kind: slash-command,
-Git Status Widget, and PR-link metadata launch paths upserted the matching tab
-and took focus, with the same tab rendering in the side panel, fullscreen/wide
-surface, or a standalone `/walkthrough?...` route. **That tab kind, those launch
-paths, and the standalone route are removed.** The walkthrough viewer now ships
-as the built-in first-party pack at the generic `#/ext/pr-walkthrough` route; a
-pack entrypoint opens the pack panel and the pack persists its review state
-through its own pack-namespaced `host.store`. See
+**Pack tabs** use `pack:<packId>:<panelId>:<instanceKey>`. The PR walkthrough is
+a singleton pack panel; artifact-style pack panels can use distinct instance
+keys so multiple artifacts coexist. Pack panel popout/deep links render only an
+already-open server tab and reuse the session-scoped Host API.
+
+**Walkthrough tabs** *(historical - deleted)*. The PR/changeset walkthrough
+formerly used a `walkthrough:<changeset-id>` side-pane tab kind. **That tab kind,
+those launch paths, and the standalone route are removed.** The walkthrough
+viewer now ships as the built-in first-party pack at the generic
+`#/ext/pr-walkthrough` route; a pack entrypoint opens the pack panel and the pack
+persists its review state through its own pack-namespaced `host.store`. See
 [docs/design/pr-walkthrough-pack-deletion.md](./pr-walkthrough-pack-deletion.md).
 
-**Inbox** is special. For staff-agent sessions it is an always-present,
-pinned side-pane tab:
-
-- The tab is created whenever `inboxPanelOpen` is true.
-- `isPinnedPanelTab(tab)` returns true only for `id === "inbox"` and
-  `kind === "inbox"`.
-- The render path omits the close button (`closable = !isPinnedPanelTab`)
-  and the drag handle (`draggable = isDesktop() && !isPinnedPanelTab`).
-- `pinnedFirst()` always pulls Inbox to index 0 of the strip; reorder
-  cannot drop another tab before it (see § 7).
-- Inbox is unaffected by "close last side-pane tab in a non-staff
-  session hides the pane" — staff sessions always keep the pane open.
+**Inbox** is a normal workspace tab with id `inbox`. Staff sessions can open or
+focus it through explicit inbox/session actions. Closing the tab deletes it from
+the server workspace and preserves that closed state across reload, restart, and
+other devices until an explicit inbox action reopens it. It uses the same shared
+close, reorder, collapse, fullscreen, restore, and popout controls as other tab
+kinds.
 
 ## 6. Activation and ordering rules
 
 ### Focus and activation
 
-- Activating a tab is a **pure id setter** —
-  `setActivePanelTabIdForSession(state, sid, tab.id)`.
-- The render path resolves the active id back to a `PanelWorkspaceTab` via
-  `findPanelTab(tabs, activeId)` and draws that exact content. No
-  kind-based fallback. No second-chance derivation.
-- Agent-driven events (new `preview_open`, new proposal, new review, new
-  walkthrough) are allowed to **create or update** a tab and take focus.
+- Activating a tab is a server workspace mutation (`active`) against an
+  already-open tab id.
+- The render path resolves the active id back to a workspace tab and draws that
+  exact content. No kind-based fallback. No second-chance derivation.
+- Agent/tool/UI events (`preview_open`, proposal, review, pack open, inbox open)
+  may **create or update** a tab only by calling the workspace open/update APIs.
   That is the natural "the agent opened a tab and it took focus" UX.
-- Selection, content arrival, and focus changes **never reorder** existing
-  tabs. Order only changes when:
-  - The user drags a tab (§ 7), or
-  - A new tab is appended (always at the end of non-pinned tabs).
+- Selection, content arrival, and focus changes **never reorder** existing tabs.
+  Order only changes when the user drags/reorders a tab or when a new tab is
+  inserted by an explicit open mutation.
 
 ### Closing the active tab
 
-`nextActivePanelTabId(tabs, closedId)`:
+The server chooses the next active tab like a browser tab strip:
 
-1. List the side-pane tabs (`panelContentTabs` — anything `isSidePanelTabId`).
+1. List the open workspace tabs.
 2. Find the index of the closed tab.
-3. If found, activate `tabs[index + 1]` (right neighbour) else
-   `tabs[index - 1]` (left neighbour).
-4. If no side-pane tabs remain, return `""` — the side pane hides and
-   chat fills the main area. In staff sessions the pinned Inbox keeps
-   the pane open.
+3. If found, activate the right neighbour; otherwise activate the left neighbour.
+4. If no side-pane tabs remain, return `""` - the side pane hides and chat fills
+   the main area.
 
 ### Session switching
 
-The active side-pane tab id is stored **per session** in
-`panelWorkspaceActiveBySession[sid]` and persisted to `localStorage` under
-`bobbit-panel-active-by-session`. Selecting a different session restores
-its own last active id; it never borrows another session's active tab.
+The active side-pane tab id is stored **per session** in the server workspace.
+Selecting a different session hydrates that session's workspace and restores its
+own active id, order, and size mode; it never borrows another session's active
+tab. Workspace changes broadcast over WebSocket so multiple browser contexts
+converge on the same active tab and order.
 
 ## 7. Drag reorder
 
-Source of truth: [SortableJS](https://github.com/SortableJS/Sortable) bound
-to the tab-bar container in [`src/app/render.ts`](../../src/app/render.ts)
-(`ensurePanelSortable`), plus `reorderSidePanelTab` in
-[`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) for any
-programmatic reorder paths (drag commits a fresh order directly off the DOM).
+Source of truth: [SortableJS](https://github.com/SortableJS/Sortable) bound to
+the tab-bar container in the side-panel shell. Drag commits a complete ordered id
+list to the server workspace reorder API, using the latest workspace revision so
+stale reorders cannot drop tabs opened by another device.
 
 - Desktop pointer drag reorders side-pane tab pills horizontally via a
   SortableJS instance attached after every render to the inner tab-bar
-  container (`[data-panel-tab-bar]`). `ensurePanelSortable` is idempotent
-  — it re-uses the existing instance unless the container element
-  changes (workspace switch).
-- `forceFallback: true` is on so SortableJS uses its own pointer
-  emulator instead of native HTML5 DnD. This:
-  - lets it work with `<div role="button">` pills (button elements
-    swallow `pointerdown` and break native DnD);
-  - gives us a JS-positioned floating clone (`Sortable.ghost`) we can
-    re-style and constrain via inline `transform`;
+  container (`[data-panel-tab-bar]`). The binding is idempotent - it reuses the
+  existing instance unless the container element changes.
+- `forceFallback: true` is on so SortableJS uses its own pointer emulator instead
+  of native HTML5 DnD. This:
+  - lets it work with `<div role="button">` pills (button elements swallow
+    `pointerdown` and break native DnD);
+  - gives us a JS-positioned floating clone (`Sortable.ghost`) we can re-style
+    and constrain via inline `transform`;
   - keeps drag-detect responsive on touch devices.
-- **Chrome-style Y-axis lock**: `startPanelDragYLock` runs a
-  `requestAnimationFrame` loop while a drag is in progress. Each frame
-  it reads the floating clone's `transform: matrix(a,b,c,d,e,f)` and
-  rewrites `f` (translateY) to `0`. The dragged tab tracks the cursor
-  horizontally; vertical cursor wander has no visual effect.
-- Pinned tabs (Inbox, mobile Chat pill) are skipped via the SortableJS
-  `filter: ".goal-tab-pill--pinned, .goal-tab-close"` selector —
-  attempting to pick one up does nothing. The `onMove` handler also
-  returns `false` when the related drop target is pinned, blocking
-  drops in front of the pinned slot.
-- `setRenderSuppressed(true)` is invoked in `onStart` so any
-  `renderApp()` calls during the drag are buffered. SortableJS owns the
-  DOM during the drag; on `onEnd` the new tab id order is read off the
-  DOM children, committed to `panelTabsBySession[sid]`, and renders
-  resume with a single flush.
-- Non-pinned tabs persist their stored order in `panelTabsBySession[sid]`
-  (saved under the `bobbit-panel-tabs-by-session` localStorage key) and
-  survive reload / session switch.
-- New agent-opened tabs append at the **end** of the non-pinned tabs.
-- Touch devices fall through SortableJS's touch emulator. The existing
-  main-chat ↔ side-pane swipe gesture remains.
+- **Chrome-style Y-axis lock**: the drag loop rewrites the floating clone's
+  translateY to `0`. The dragged tab tracks the cursor horizontally; vertical
+  cursor wander has no visual effect.
+- Close controls are filtered out of drag starts so clicking a close button never
+  begins a reorder. Mobile-only chat affordances are UI-only and are not
+  persisted as workspace tabs.
+- Renders are suppressed while SortableJS owns the DOM. On drag end, the new tab
+  id order is read from the DOM, posted to the server workspace, and the
+  committed workspace response resumes rendering.
+- Tab order persists in `sidePanelWorkspace.tabs` on the server and survives
+  reload, restart, session switch, and another browser context joining later.
+- New agent-opened tabs are inserted by the explicit open mutation; default UX is
+  append/after-active without reordering existing tabs.
+- Touch devices fall through SortableJS's touch emulator. The existing main-chat
+  <-> side-pane swipe gesture remains.
 - No keyboard reorder shortcuts in this iteration.
 
 ## 7a. Historical proposal tabs
@@ -417,48 +415,42 @@ preview tabs:
 
 ## 8. Cross-kind harmony
 
-> *(Historical: the `walkthrough` references in this section describe the
-> deleted `walkthrough:<changeset-id>` side-pane tab kind. The walkthrough viewer
-> is now the built-in pack at `#/ext/pr-walkthrough` and is no longer a side-pane
-> tab; the harmony invariants still hold for preview, proposal, review, and inbox
-> tabs.)*
+The point of the contract is that preview, proposal, review, pack, and inbox
+tabs all share the same model:
 
-The point of the contract is that preview, proposal, review, walkthrough,
-and inbox tabs all share the same model:
-
-- One id-keyed activation authority.
+- One server-authoritative id-keyed activation authority.
 - One stored order per session.
-- One render path that resolves content by id.
+- One shared render shell that resolves content by tab id.
 
 So:
 
-- A new `preview_open` never removes, reorders, or mutates proposal /
-  review / walkthrough / inbox tabs.
-- A proposal update never reorders preview, review, walkthrough, or inbox
-  tabs or mints duplicates.
-- Opening a PR walkthrough appends the tab at the end of the non-pinned
-  tabs, or focuses and updates the existing `walkthrough:<changeset-id>`
-  tab. It does not bucket walkthroughs away from other kinds.
-- User drag reorder persists the mixed-kind order exactly as stored in
-  `panelTabsBySession[sid]`; only pinned Inbox is pulled to the front by
-  `pinnedFirst`.
-- Active selection persists by id in `panelWorkspaceActiveBySession[sid]`,
-  so reload and session switch restore the selected walkthrough just like
-  preview, proposal, and review tabs. Walkthrough-internal persistence is
-  keyed by the same tab id to keep each changeset isolated.
+- A new `preview_open` never removes, reorders, or mutates proposal / review /
+  pack / inbox tabs.
+- A proposal update never reorders preview, review, pack, or inbox tabs or mints
+  duplicates.
+- Opening a PR walkthrough opens or focuses the normal singleton pack tab. It
+  does not have bespoke walkthrough resize state or a bespoke tab kind.
+- User drag reorder persists the mixed-kind order exactly as committed to the
+  server workspace.
+- Active selection persists by id in `sidePanelWorkspace.activeTabId`, so reload,
+  restart, session switch, and another browser context restore the same active
+  preview/proposal/review/pack/inbox tab.
 
 ## 9. Implementation hot spots
 
 | File | Responsibility |
 |---|---|
-| [`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) | Tab id grammar, normalization, persistence, version ledger, pinned ordering, `nextActivePanelTabId`, `reorderSidePanelTab`. |
-| [`src/app/preview-panel.ts`](../../src/app/preview-panel.ts) | `selectHtmlPreviewTab` (upsert / split / collapse), SSE bootstrap and live update, older-version-rehydration guard. |
+| [`src/shared/side-panel-workspace.ts`](../../src/shared/side-panel-workspace.ts) | Shared workspace/tab model, size modes, and tab source records. |
+| [`src/server/side-panel-workspace.ts`](../../src/server/side-panel-workspace.ts) | Server canonicalization, validation, mutation application, and concurrency rules. |
+| [`src/app/side-panel-workspace.ts`](../../src/app/side-panel-workspace.ts) | Client hydrate/open/update/close/active/reorder/resize controller, optimistic state, and migration client. |
+| [`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) | Preview tab id/display helpers and legacy fixture fallback; not product workspace persistence. |
+| [`src/app/preview-panel.ts`](../../src/app/preview-panel.ts) | Preview mount/SSE/bootstrap, preview opener integration, older-version-rehydration guard. |
 | ~~`src/app/pr-walkthrough.ts`~~ *(deleted)* | Former owner of slash-command parsing, changeset-derived walkthrough tab id / title, tab upsert, and active-id selection. **Removed** with the bespoke walkthrough tab kind; the viewer is now the built-in pack at `#/ext/pr-walkthrough`. |
-| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos for active tab), mobile pane bar with pinned Chat pill, SortableJS attach (`ensurePanelSortable`) + X-axis lock raF loop, render suppression during drag, `_proposalOverride` for editable historical proposal tabs, active-content lookup by id only. *(The deleted walkthrough panel branch no longer renders here.)* |
-| [`src/ui/tools/renderers/PreviewRenderer.ts`](../../src/ui/tools/renderers/PreviewRenderer.ts) | Tool-card Open button; chooses between artifact restore, source remount, and recorded-entry select; computes collapse-to-current before invoking `selectHtmlPreviewTab`. |
+| [`src/app/render.ts`](../../src/app/render.ts) | Shared side-panel workspace shell, tab strip, controls, active-content lookup by id only, mobile slider integration. |
+| [`src/ui/tools/renderers/PreviewRenderer.ts`](../../src/ui/tools/renderers/PreviewRenderer.ts) | Tool-card Open button; chooses between artifact restore, source remount, and recorded-entry select. |
 | [`src/server/preview/artifacts.ts`](../../src/server/preview/artifacts.ts) | `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash`, `sweepOrphanArtifacts`. |
-| [`src/server/server.ts`](../../src/server/server.ts) (`/api/preview/mount`, `/api/preview/artifacts/:id/restore`, SSE) | Capture artifact on mount; include `artifactId` in mount responses, SSE bootstrap, and live events. |
-| [`defaults/tools/html/snapshot.ts`](../../defaults/tools/html/snapshot.ts) | v3 marker builder — emits `artifactId` and other artifact metadata when they fit the 250-byte cap. |
+| [`src/server/server.ts`](../../src/server/server.ts) | Side-panel workspace REST routes plus preview mount/artifact/SSE routes. |
+| [`defaults/tools/html/snapshot.ts`](../../defaults/tools/html/snapshot.ts) | v3 marker builder - emits `artifactId` and other artifact metadata when they fit the 250-byte cap. |
 
 ## 10. Tests
 
@@ -481,18 +473,17 @@ spec):
    to current with no duplicate / no unnecessary remount.
 4. **Dismiss + next-active behaviour** — close a middle preview tab; only
    that tab disappears. Close active tabs across preview / proposal /
-   review and verify next-right / next-left activation. Close the last
-   non-pinned side-pane tab in a non-staff session — the pane hides.
-5. **Pinned Inbox** — in a staff-agent session, Inbox is always present,
-   pinned first, has no close button, cannot be dragged, and remains
-   when other tabs are closed. Other tabs open beside it and close
-   normally.
-6. **Drag reorder persistence** — drag non-pinned tabs (SortableJS), assert
-   stored order, reload, assert the same order. Verify drag cannot move a
-   tab before pinned Inbox.
+   review / inbox / pack and verify next-right / next-left activation.
+   Close the last side-pane tab — the pane hides and closed state persists
+   across reload.
+5. **Inbox workspace tab** — in a staff-agent session, Inbox opens as `inbox`,
+   uses the same close/reorder/fullscreen/collapse/popout controls as other
+   side-panel tabs, and stays closed across reload until explicitly reopened.
+6. **Drag reorder persistence** — drag tabs (SortableJS), assert server stored
+   order, reload or open a second browser context, assert the same order.
    Y-axis is locked during the drag: the floating clone tracks the cursor
-   only horizontally regardless of vertical movement.
-   The mobile Chat pill is pinned (filtered) and cannot be dragged.
+   only horizontally regardless of vertical movement. Mobile chat affordances
+   remain UI-only and are never persisted as workspace tabs.
 7. **Tab id == rendered content** — with preview + proposal + review +
    inbox visible, click every tab and assert `activePanelTabId` equals
    the clicked id and the rendered content matches that id. Repeat after
@@ -501,18 +492,16 @@ spec):
    firing a new `preview_open` appends-or-updates the preview tab and
    takes focus. Subsequent updates / refreshes never reorder existing
    tabs unless a brand-new tab is appended.
-9. **Mobile** — at phone viewport, the side-pane tab bar leads with a
-   pinned Chat pill that swipes the slider to the chat pane on tap; the
-   remaining tabs are the side-pane tabs (preview / proposal / review /
-   inbox). The Chat pill is NOT persisted in `panelTabsBySession[sid]`
-   — it's a pure UI affordance rendered only when the bar is visible.
-   The existing swipe gesture reveals chat and the side pane; no touch
-   drag reorder.
+9. **Mobile** — at phone viewport, the side-pane tab bar may expose a chat
+   affordance that swipes the slider to the chat pane on tap; persisted workspace
+   tabs remain preview / proposal / review / pack / inbox only. Chat is never
+   persisted in the server workspace. The existing swipe gesture reveals chat and
+   the side pane; no touch drag reorder.
 
-Helper / reducer behaviour (id normalisation, version assignment, pinned
-ordering, next-active selection) is covered by unit tests against the
-pure functions in `panel-workspace.ts` and `preview-panel.ts`. Existing
-preview regression coverage stays green:
+Helper / reducer behaviour (id normalisation, version assignment, server
+canonicalization, reorder revision checks, migration, and next-active selection)
+is covered by unit tests against the side-panel workspace helpers plus preview
+helpers. Existing preview regression coverage stays green:
 
 - [`tests/preview-renderer.spec.ts`](../../tests/preview-renderer.spec.ts)
 - [`tests/e2e/ui/dynamic-chat-tabs.spec.ts`](../../tests/e2e/ui/dynamic-chat-tabs.spec.ts)
