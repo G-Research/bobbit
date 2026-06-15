@@ -13,7 +13,6 @@
  */
 import { test, expect } from "@playwright/test";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	FlexSearchStore,
@@ -21,9 +20,10 @@ import {
 	recencyMultiplier,
 	type FlexDoc,
 } from "../../src/server/search/flex-store.ts";
+import { makeTmpDir } from "../helpers/tmp.ts";
 
 function tmp(prefix = "flex-store-"): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	return makeTmpDir(prefix);
 }
 
 function doc(overrides: Partial<FlexDoc> & { id: string; text: string }): FlexDoc {

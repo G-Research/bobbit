@@ -269,4 +269,51 @@ test.describe("Subgoals (Experimental) toggle", () => {
 		// Restore the harness default for subsequent specs/tests.
 		await resetFlag(true);
 	});
+
+	test("Sub-goals tab is visible for a top-level proposal when subgoals are ON", async ({ page }) => {
+		// Locks the decoupling: with the system flag ON, the tab appears for a
+		// top-level proposal (no parentGoalId). Tab visibility tracks the flag —
+		// it does NOT require a parent. This passes on the unmodified tree too;
+		// the assertion exists to prevent a regression of the ON path.
+		await resetFlag(true);
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+
+		await expect(
+			page.locator("[data-testid='goal-proposal-tab-subgoals']"),
+		).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("Sub-goals tab is absent when subgoals are OFF with parentGoalId set", async ({ page }) => {
+		// RED repro: tab visibility must be a pure function of the system flag.
+		// With the flag OFF, a child-goal proposal (parentGoalId set) must NOT
+		// render the Sub-goals tab. On the unmodified tree showSubgoalsTab returns
+		// `!!(config.subgoalsEnabled || config.parentGoalId)`, so the truthy
+		// parentGoalId forces the tab on even though the flag is OFF — this
+		// assertion FAILS (expected 0, received 1) until the `|| parentGoalId`
+		// clause is removed.
+		await unsetFlag();
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "Please create a GOAL_PROPOSAL_WITH_PARENT for testing");
+
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("Child Goal", { timeout: 15_000 });
+
+		// Flag OFF ⇒ no Sub-goals tab, regardless of parentGoalId.
+		await expect(
+			page.locator("[data-testid='goal-proposal-tab-subgoals']"),
+		).toHaveCount(0);
+
+		// Restore the harness default for subsequent specs/tests.
+		await resetFlag(true);
+	});
 });

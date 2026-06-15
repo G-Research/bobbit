@@ -49,7 +49,7 @@ const fakeDraftStore = new Map<string, unknown>();
 		if (call.method === "DELETE") {
 			const type = u.searchParams.get("type");
 			fakeDraftStore.delete(`${sid}|${type}`);
-			return new Response("", { status: 204 });
+			return new Response(null, { status: 204 });
 		}
 		const type = u.searchParams.get("type");
 		const data = fakeDraftStore.get(`${sid}|${type}`);

@@ -706,9 +706,9 @@ function renderSubgoalsToggle(config: GoalFormConfig): TemplateResult | string {
 	`;
 }
 
-/** Whether the dedicated Sub-goals tab should be shown for this proposal. */
+/** Whether the dedicated Sub-goals tab should be shown: it tracks only the system Subgoals (Experimental) preference. */
 function showSubgoalsTab(config: GoalFormConfig): boolean {
-	return !!(config.subgoalsEnabled || config.parentGoalId);
+	return !!config.subgoalsEnabled;
 }
 
 /** Walk parentGoalId links up to the top-level (root) goal of the tree. */
@@ -899,7 +899,7 @@ function renderGoalForm(config: GoalFormConfig) {
 					</div>
 				` : ""}
 			</div>
-			${!tabbed && (config.subgoalsEnabled || config.parentGoalId) ? renderParentPickerRow(config, lblCls) : ""}
+			${!tabbed && config.subgoalsEnabled ? renderParentPickerRow(config, lblCls) : ""}
 			${!tabbed ? renderSubgoalBreadcrumb(config) : ""}
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">

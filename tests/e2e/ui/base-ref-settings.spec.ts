@@ -40,7 +40,7 @@ function uniqueProjectDir(prefix: string): string {
 	return mkdtempSync(join(tmpdir(), `bobbit-baseref-ui-${prefix}-`));
 }
 
-async function createProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
+async function createProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<{ id: string; name: string }> {
 	const body: Record<string, unknown> = { name, rootPath };
 	if (components) body.components = components;
 	const resp = await apiFetch("/api/projects", {
@@ -49,11 +49,15 @@ async function createProject(name: string, rootPath: string, components?: Array<
 	});
 	expect(resp.ok, `project create failed: ${resp.status}`).toBe(true);
 	const proj = await resp.json();
-	return proj.id;
+	return { id: proj.id, name };
 }
 
-async function openBaseRefSettings(page: BrowserPage, projectId: string) {
-	await navigateToHash(page, `#/settings/${projectId}/general`);
+async function openBaseRefSettings(page: BrowserPage, project: { id: string; name: string }) {
+	await navigateToHash(page, `#/settings/${project.id}/general`);
+	// The base-ref input is shared by every project settings page. Wait for the
+	// project-specific heading so fills/saves cannot race against the previous
+	// settings render after only the hash has changed.
+	await expect(page.locator("h3").filter({ hasText: project.name }).first()).toBeVisible({ timeout: 10_000 });
 	const input = page.locator("[data-testid='base-ref-input']");
 	await expect(input).toBeVisible({ timeout: 10_000 });
 	return input;
@@ -67,6 +71,14 @@ async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus:
 	);
 	await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
 	await savePromise;
+	await expect(page.locator("button").filter({ hasText: /^Saving\.\.\.$/ })).toHaveCount(0, { timeout: 10_000 });
+}
+
+async function expectBaseRefError(page: BrowserPage, expectedText: string) {
+	const errBox = page.locator("[data-testid='base-ref-error']");
+	await expect.poll(async () => (await errBox.textContent())?.trim() ?? "", { timeout: 10_000 })
+		.toContain(expectedText);
+	return errBox;
 }
 
 async function deleteProjects(projectIds: string[]): Promise<void> {
@@ -81,20 +93,20 @@ test.describe("Settings → Base Ref field", () => {
 		try {
 			const dir = uniqueProjectDir("happy");
 			gitInit(dir, { remoteRefs: ["develop"] });
-			const projectId = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
-			projectIds.push(projectId);
+			const project = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
+			projectIds.push(project.id);
 
 			await openApp(page);
-			const input = await openBaseRefSettings(page, projectId);
+			const input = await openBaseRefSettings(page, project);
 			await input.fill("origin/develop");
-			await saveBaseRef(page, projectId, 200);
+			await saveBaseRef(page, project.id, 200);
 
 			// Reload — value should persist.
 			await page.reload();
 			await expect(
 				page.locator("button").filter({ hasText: "Settings" }).first(),
 			).toBeVisible({ timeout: 15_000 });
-			const inputAfter = await openBaseRefSettings(page, projectId);
+			const inputAfter = await openBaseRefSettings(page, project);
 			await expect(inputAfter).toHaveValue("origin/develop");
 		} finally {
 			await deleteProjects(projectIds);
@@ -106,20 +118,20 @@ test.describe("Settings → Base Ref field", () => {
 		try {
 			const tagDir = uniqueProjectDir("tag");
 			gitInit(tagDir, { tags: ["v1.2.3"] });
-			const tagProjectId = await createProject(`baseref-ui-tag-${Date.now()}`, tagDir);
-			projectIds.push(tagProjectId);
+			const tagProject = await createProject(`baseref-ui-tag-${Date.now()}`, tagDir);
+			projectIds.push(tagProject.id);
 
 			const grammarDir = uniqueProjectDir("grammar");
 			gitInit(grammarDir);
-			const grammarProjectId = await createProject(`baseref-ui-grammar-${Date.now()}`, grammarDir);
-			projectIds.push(grammarProjectId);
+			const grammarProject = await createProject(`baseref-ui-grammar-${Date.now()}`, grammarDir);
+			projectIds.push(grammarProject.id);
 
 			const sandboxDir = uniqueProjectDir("sandbox");
 			gitInit(sandboxDir);
-			const sandboxProjectId = await createProject(`baseref-ui-sandbox-${Date.now()}`, sandboxDir);
-			projectIds.push(sandboxProjectId);
+			const sandboxProject = await createProject(`baseref-ui-sandbox-${Date.now()}`, sandboxDir);
+			projectIds.push(sandboxProject.id);
 			// Pre-set sandbox=docker via API so the UI only needs to drive base_ref.
-			const putRes = await apiFetch(`/api/projects/${sandboxProjectId}/config`, {
+			const putRes = await apiFetch(`/api/projects/${sandboxProject.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ sandbox: "docker" }),
 			});
@@ -132,7 +144,7 @@ test.describe("Settings → Base Ref field", () => {
 			gitInit(repoA, { remoteRefs: ["develop"] });
 			gitInit(repoB); // missing origin/develop
 			gitInit(repoC); // missing origin/develop
-			const multiProjectId = await createProject(
+			const multiProject = await createProject(
 				`baseref-ui-multi-${Date.now()}`,
 				root,
 				[
@@ -141,45 +153,40 @@ test.describe("Settings → Base Ref field", () => {
 					{ name: "shared", repo: "shared" },
 				],
 			);
-			projectIds.push(multiProjectId);
+			projectIds.push(multiProject.id);
 
 			await openApp(page);
 
-			let input = await openBaseRefSettings(page, tagProjectId);
+			let input = await openBaseRefSettings(page, tagProject);
 			await input.fill("v1.2.3");
-			await saveBaseRef(page, tagProjectId, 400);
-			let errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText(
+			await saveBaseRef(page, tagProject.id, 400);
+			let errBox = await expectBaseRefError(
+				page,
 				"base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: v1.2.3",
 			);
 
 			// Typing into the input clears the inline error immediately.
 			await input.fill("master");
-			await expect(errBox).toHaveCount(0);
+			await expect(input).toHaveValue("master");
+			await expect(errBox).toHaveCount(0, { timeout: 10_000 });
 
-			input = await openBaseRefSettings(page, grammarProjectId);
+			input = await openBaseRefSettings(page, grammarProject);
 			await input.fill("feature foo");
-			await saveBaseRef(page, grammarProjectId, 400);
-			errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText("base_ref must be a valid branch name. Got: feature foo");
+			await saveBaseRef(page, grammarProject.id, 400);
+			errBox = await expectBaseRefError(page, "base_ref must be a valid branch name. Got: feature foo");
 
-			input = await openBaseRefSettings(page, sandboxProjectId);
+			input = await openBaseRefSettings(page, sandboxProject);
 			await input.fill("master");
-			await saveBaseRef(page, sandboxProjectId, 400);
-			errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText(
+			await saveBaseRef(page, sandboxProject.id, 400);
+			errBox = await expectBaseRefError(
+				page,
 				"base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: master",
 			);
 
-			input = await openBaseRefSettings(page, multiProjectId);
+			input = await openBaseRefSettings(page, multiProject);
 			await input.fill("origin/develop");
-			await saveBaseRef(page, multiProjectId, 400);
-			errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText("base_ref 'origin/develop' is not present in 2 of 3 component repos");
+			await saveBaseRef(page, multiProject.id, 400);
+			errBox = await expectBaseRefError(page, "base_ref 'origin/develop' is not present in 2 of 3 component repos");
 			const bullets = errBox.locator("li");
 			await expect(bullets).toHaveCount(2);
 			await expect(bullets.filter({ hasText: "web" })).toContainText("ref not found");
