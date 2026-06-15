@@ -476,13 +476,15 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
-		const ctx = {
-			host: buildHostProxy(msg.ctx),
-			sessionId: msg.ctx.sessionId,
-			toolUseId: msg.ctx.toolUseId,
-			tool: msg.ctx.tool,
-			workingDir: msg.ctx.workingDir,
-		};
+		const ctx = msg.exportKind === "providers"
+			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
+			: {
+				host: buildHostProxy(msg.ctx),
+				sessionId: msg.ctx.sessionId,
+				toolUseId: msg.ctx.toolUseId,
+				tool: msg.ctx.tool,
+				workingDir: msg.ctx.workingDir,
+			};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
 	} catch (err) {

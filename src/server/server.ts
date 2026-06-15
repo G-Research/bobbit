@@ -53,6 +53,8 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions } from "./agent/pack-contributions.js";
+import { LifecycleHub } from "./agent/lifecycle-hub.js";
+import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -1178,6 +1180,20 @@ export function createGateway(config: GatewayConfig) {
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
 	);
+	sessionManager.lifecycleHub = new LifecycleHub({
+		registry: packContributionRegistry,
+		moduleHost,
+		trace: new ContextTraceStore(bobbitStateDir()),
+		gatewayInfo: () => {
+			try {
+				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				return { baseUrl, token };
+			} catch {
+				return { baseUrl: "", token: "" };
+			}
+		},
+	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a

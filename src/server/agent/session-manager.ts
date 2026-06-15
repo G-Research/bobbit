@@ -73,6 +73,7 @@ import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from 
 import { shouldReapChildOnBoot, type OrchestrationCore } from "./orchestration-core.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
+import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
@@ -664,6 +665,7 @@ export class SessionManager {
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
+	lifecycleHub?: LifecycleHub;
 	/**
 	 * S1 — per-session capability secret store. Injected into the owning
 	 * session's env as `BOBBIT_SESSION_SECRET` and used by the orchestration
@@ -1198,6 +1200,7 @@ export class SessionManager {
 			sessionSecretStore: this.sessionSecretStore,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
+			lifecycleHub: this.lifecycleHub,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
