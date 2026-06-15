@@ -5,6 +5,14 @@ Companion to [`preview-architecture.md`](../preview-architecture.md) (v3 mount,
 SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-widgets.md)
 (historical preview tab UX).
 
+> **Implementation note:** the current product workspace is server-authoritative.
+> Open tabs, active tab, order, and size mode live on the session's persisted
+> `sidePanelWorkspace`; closed tabs must not be re-derived from render/content
+> caches or localStorage. See [`side-panel-workspace.md`](../side-panel-workspace.md)
+> for the current implementation contract. This older design note remains useful
+> for preview versioning/history rationale, but some localStorage-era details are
+> historical.
+
 > **Current model — PR walkthrough is no longer a bespoke side-panel tab.** The
 > PR-walkthrough viewer now ships as a built-in first-party **pack**
 > (`market-packs/pr-walkthrough/`) rendered through the **generic `ext` route**
