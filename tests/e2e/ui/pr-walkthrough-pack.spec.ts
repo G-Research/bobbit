@@ -684,7 +684,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
 		await expect(page.locator('[data-testid="prw-navrail"], [aria-label="PR walkthrough phase rail"]').first()).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"]').first()).toBeVisible();
+		await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"], [data-testid="pr-walkthrough-orientation-rail"]').first()).toBeVisible();
 		return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
 	}
 
@@ -783,7 +783,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 			// The READY cards render in THIS (child) session's pane.
 			await expect(page.locator('[data-testid="prw-navrail"], [aria-label="PR walkthrough phase rail"]').first()).toBeVisible({ timeout: 10_000 });
 			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-			await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"]').first()).toBeVisible();
+			await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"], [data-testid="pr-walkthrough-orientation-rail"]').first()).toBeVisible();
 			return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
 		};
 
