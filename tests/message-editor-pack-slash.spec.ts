@@ -39,6 +39,7 @@ async function sendTypedComposerValue(page: any, text: string) {
 			sendCalls: w.__getSendCalls(),
 			callRoute: w.__getCallRouteCalls(),
 			messageSendEvents: w.__getMessageSendEvents(),
+			launcherFeedbackEvents: w.__getLauncherFeedbackEvents(),
 		};
 	}, text);
 }
@@ -58,6 +59,7 @@ test.describe("MessageEditor pack composer slash dispatch", () => {
 			body: { prUrl },
 		});
 		expect(out.messageSendEvents).toHaveLength(1);
+		expect(out.launcherFeedbackEvents).toContainEqual({ kind: "pending", message: "Starting PR walkthrough…" });
 	});
 
 	test("typed /pr-walkthrough <pr-number> launches the PR walkthrough route and does not call onSend", async ({ page }) => {

@@ -21,8 +21,8 @@ interface SlashSkillInfo {
 	argumentHint?: string;
 	source: "project" | "personal" | "legacy" | "built-in" | "pack";
 	/** Slice C1 — set when this slash entry is a pack `composer-slash` ENTRYPOINT.
-	 *  Selecting it RUNS the launcher (openPanel/navigate) instead of inserting text
-	 *  (the launch is the user gesture — no auto-invoke on mount). */
+	 *  Selecting it only inserts the completed command; send-time dispatch runs the
+	 *  launcher once the user has supplied any required arguments. */
 	entrypointId?: string;
 }
 
@@ -250,9 +250,10 @@ export class MessageEditor extends LitElement {
 
 	/** Slice C1 — append the registered pack `composer-slash` ENTRYPOINTS (from the
 	 *  reconciled client pack-entrypoints registry) to the slash list as synthetic
-	 *  entries. The trigger name is the entrypoint id; selecting one runs the
-	 *  launcher (see `_selectSlashSkill`). Best-effort + synchronous — the registry
-	 *  is already populated by the project reconcile; a load failure is non-fatal. */
+	 *  entries. The trigger name is the entrypoint id; selecting one completes the
+	 *  token and send-time dispatch runs the launcher. Best-effort + synchronous —
+	 *  the registry is already populated by the project reconcile; a load failure is
+	 *  non-fatal. */
 	private _withPackEntrypoints(skills: SlashSkillInfo[]): SlashSkillInfo[] {
 		try {
 			const eps = listLauncherEntrypoints("composer-slash");
@@ -270,10 +271,19 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
-	private _showLauncherError(message: string): void {
+	private _showLauncherFeedback(message: string, kind: "pending" | "error"): void {
+		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", { detail: { kind, message } }));
 		void import("../../app/render.js")
 			.then((m) => m.showHeaderToast(message))
 			.catch(() => { /* best-effort */ });
+	}
+
+	private _showLauncherError(message: string): void {
+		this._showLauncherFeedback(message, "error");
+	}
+
+	private _showLauncherPending(message = "Starting PR walkthrough…"): void {
+		this._showLauncherFeedback(message, "pending");
 	}
 
 	private _selectSlashSkill(skill: SlashSkillInfo) {
@@ -706,6 +716,7 @@ export class MessageEditor extends LitElement {
 			this._savedDraft = "";
 			void this.addToHistory(text);
 
+			this._showLauncherPending();
 			runLauncherEntrypoint(packSlashLaunch.entrypointId, (r) => {
 				if (!r.ok) this._showLauncherError(r.error || "Could not start the PR walkthrough.");
 			}, { body: packSlashLaunch.body });

@@ -514,7 +514,8 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 	}
 
 	// ── T-1: the composer slash command is `/pr-walkthrough` (not the internal
-	//    launcher filename/id suffix) and selecting it invokes the same run route. ──
+	//    launcher filename/id suffix). Autocomplete completes the token only; the
+	//    completed slash command invokes the same run route on send. ──
 	test("T-1 — slash launcher is /pr-walkthrough and invokes run", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
@@ -526,6 +527,9 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect(command, "slash autocomplete must expose /pr-walkthrough").toBeVisible({ timeout: 10_000 });
 		await expect(page.getByTestId("slash-command-pr-walkthrough.open"), "the old .open-suffixed command must not render").toHaveCount(0);
 
+		await textarea.press("Enter");
+		await expect(textarea, "selecting autocomplete should complete the command so args can be typed").toHaveValue("/pr-walkthrough ");
+
 		const runResp = page.waitForResponse(
 			(r) => /\/api\/ext\/route\/run\b/.test(r.url()) && r.request().method() === "POST",
 			{ timeout: 20_000 },
@@ -533,7 +537,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await textarea.press("Enter");
 		const resp = await runResp;
 		expect(resp.status(), `run route failed: ${await resp.text().catch(() => "")}`).toBe(200);
-		await expect(textarea, "selecting the launcher should consume the typed slash token").toHaveValue("");
+		await expect(textarea, "sending the completed slash command should consume the composer value").toHaveValue("");
 		await expect(page.getByTestId("header-toast")).toContainText(/No open GitHub PR/i, { timeout: 10_000 });
 	});
 

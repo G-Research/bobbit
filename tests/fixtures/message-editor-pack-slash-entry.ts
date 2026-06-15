@@ -19,6 +19,11 @@ const sendCalls: Array<{ text: string; attachmentCount: number }> = [];
 const inputCalls: string[] = [];
 const callRouteCalls: CallRouteCall[] = [];
 const messageSendEvents: string[] = [];
+const launcherFeedbackEvents: Array<{ kind?: string; message?: string }> = [];
+window.addEventListener("bobbit-launcher-feedback", (event) => {
+	const detail = (event as CustomEvent).detail || {};
+	launcherFeedbackEvents.push({ kind: detail.kind, message: detail.message });
+});
 
 function installPrWalkthroughLauncher(): void {
 	callRouteCalls.length = 0;
@@ -99,11 +104,13 @@ function mount(container: HTMLElement): any {
 (window as any).__getInputCalls = () => inputCalls.slice();
 (window as any).__getCallRouteCalls = () => callRouteCalls.slice();
 (window as any).__getMessageSendEvents = () => messageSendEvents.slice();
+(window as any).__getLauncherFeedbackEvents = () => launcherFeedbackEvents.slice();
 (window as any).__getValue = (el: any): string => textarea(el).value;
 (window as any).__resetCalls = () => {
 	sendCalls.length = 0;
 	inputCalls.length = 0;
 	callRouteCalls.length = 0;
 	messageSendEvents.length = 0;
+	launcherFeedbackEvents.length = 0;
 };
 (window as any).__ready = true;

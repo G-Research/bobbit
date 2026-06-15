@@ -23,6 +23,7 @@ const SRCS = [
 	path.resolve("src/ui/components/CommandPalette.ts"),
 	path.resolve("src/ui/components/GitStatusWidget.ts"),
 	path.resolve("src/app/pack-entrypoints.ts"),
+	path.resolve("src/app/pack-panels.ts"),
 	path.resolve("src/app/routing.ts"),
 ];
 
@@ -132,6 +133,28 @@ test.describe("Git-widget launcher surface (C1 git-widget-button)", () => {
 			return w.__paletteOpen();
 		});
 		expect(opened).toBe(true);
+	});
+
+	test("spawn launcher shows immediate pending feedback while route request is in flight", async ({ page }) => {
+		await ready(page);
+		const out = await page.evaluate(async () => {
+			const w = window as any;
+			w.__registerSpawn();
+			const key = w.__packKey("pr-walkthrough", "gw.spawn");
+			const el = await w.__mountGit();
+			await w.__openGitDropdown(el);
+			w.__clickGitLauncher(key);
+			return {
+				pending: w.__gitLauncherPending(),
+				disabled: w.__gitLauncherDisabled(key),
+				calls: w.__getSpawnRouteCalls(),
+			};
+		});
+
+		expect(out.pending).toBe("Starting PR walkthrough…");
+		expect(out.disabled).toBe(true);
+		expect(out.calls).toHaveLength(1);
+		expect(out.calls[0]).toMatchObject({ route: "run", packId: "pr-walkthrough", contributionId: "gw.spawn" });
 	});
 
 	test("empty registry (uninstall) yields no launchers + no opener", async ({ page }) => {
