@@ -150,22 +150,21 @@ describe("missing live messages after dormant revive", () => {
 
 		assert.equal(manager.addClient(sessionId, firstAttachedClient as any), true);
 		assert.equal(manager.addClient(sessionId, secondAttachedClient as any), true);
-		assert.ok(restoreGates.length >= 1, "dormant addClient must start a restore");
+		assert.equal(restoreGates.length, 1, "concurrent dormant addClient calls must join exactly one restore");
+		assert.equal(manager.restoreSession.mock.callCount(), 1, "coordinator must invoke restoreSession exactly once");
 
-		// Resolve all restore attempts in call order. Current HEAD starts two restores
-		// and each addClient .then() attaches its ws to whichever SessionInfo is in
-		// the map when that restore completes, splitting clients across objects.
-		for (let i = 0; i < restoreGates.length; i++) {
-			restoreGates[i].resolve();
-			await flushMicrotasks();
-		}
-		// If a fixed implementation coalesces the second addClient into the first
-		// in-flight promise, only one gate exists; both clients should now be on it.
+		restoreGates[0].resolve();
+		await flushMicrotasks();
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		await flushMicrotasks();
 
 		const current = manager.sessions.get(sessionId);
 		assert.ok(current, "restored session should be present");
+		assert.equal(restoredSessions.length, 1, "only one canonical SessionInfo should be created");
+		assert.equal(current, restoredSessions[0], "canonical map entry should be the single restored SessionInfo");
+		assert.ok(current.clients.has(firstAttachedClient as any), "first client should be attached to the live restored session");
 		assert.ok(current.clients.has(secondAttachedClient as any), "second client should be attached to the live restored session");
+		assert.equal(current.clients.size, 2, "every attached client should be on the canonical SessionInfo");
 
 		await manager.enqueuePrompt(sessionId, "wake the dormant session");
 
@@ -175,5 +174,52 @@ describe("missing live messages after dormant revive", () => {
 			true,
 			"attached client must receive assistant frame produced after dormant revive; current addClient split-brain drops it",
 		);
+	});
+
+	it("stale generation recover/drain writers no-op without bumping status or dispatching", () => {
+		const manager: any = new SessionManager();
+		managers.push(manager);
+
+		const sessionId = "s-stale-generation";
+		const makeSession = (generation: number, promptCalls: any[] = []) => ({
+			id: sessionId,
+			title: `generation ${generation}`,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 0,
+			lifecycleGeneration: generation,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: new PromptQueue(),
+			streamingStartedAt: undefined,
+			unsubscribe: () => {},
+			isCompacting: false,
+			titleGenerated: true,
+			rpcClient: {
+				prompt: mock.fn(async (text: string) => {
+					promptCalls.push(text);
+					return { success: true };
+				}),
+				stop: mock.fn(async () => {}),
+			},
+		});
+
+		const stalePromptCalls: any[] = [];
+		const stale = makeSession(0, stalePromptCalls);
+		const current = makeSession(1);
+		manager.sessions.set(sessionId, current);
+		manager._sessionRespawnGenerations.set(sessionId, 1);
+
+		stale.promptQueue.enqueue("queued on stale session");
+		manager.drainQueue(stale);
+		assert.equal(stalePromptCalls.length, 0, "stale drainQueue must not dispatch");
+		assert.equal(stale.statusVersion, 0, "stale drainQueue must not bump statusVersion");
+		assert.equal(stale.promptQueue.toArray().length, 1, "stale drainQueue must not mutate the queue");
+
+		manager.recoverPromptDispatch(stale, [{ text: "recover stale row" }], "Agent is already processing", "test");
+		assert.equal(stale.statusVersion, 0, "stale recoverPromptDispatch must not bump statusVersion");
+		assert.equal(stale.promptQueue.toArray().length, 1, "stale recoverPromptDispatch must not mutate the queue");
 	});
 });

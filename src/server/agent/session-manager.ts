@@ -281,6 +281,10 @@ export interface SessionInfo {
 	consecutiveErrorTurns?: number;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
 	pendingAutoRetryTimer?: ReturnType<typeof setTimeout>;
+	/** Per-session lifecycle generation used to fence stale SessionInfo writers after restore/respawn. */
+	lifecycleGeneration?: number;
+	/** True once this SessionInfo has been replaced or is being replaced by a restore/respawn. */
+	lifecycleFenced?: boolean;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -631,6 +635,11 @@ export interface SessionManagerOptions {
 	prStatusStore?: PrStatusStore;
 }
 
+type RestoreCoordinator = {
+	generation: number;
+	promise: Promise<SessionInfo | undefined>;
+};
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -704,6 +713,10 @@ export class SessionManager {
 	 *  See docs/design/unify-session-status.md §3.4. */
 	private _statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private static readonly STATUS_HEARTBEAT_INTERVAL_MS = 15_000;
+	/** Per-session restore/respawn mutex. Concurrent revive triggers join this promise instead of replacing each other. */
+	private _restoreCoordinators = new Map<string, RestoreCoordinator>();
+	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
+	private _sessionRespawnGenerations = new Map<string, number>();
 	/** Cached aigw model discovery result (url → { models, timestamp }) */
 	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
@@ -719,6 +732,59 @@ export class SessionManager {
 	 *  nudge to avoid double-prompting a cold agent. */
 	wasBootReprompted(sessionId: string): boolean {
 		return this._bootRepromptedSessions.has(sessionId);
+	}
+
+	private _currentRespawnGeneration(sessionId: string): number {
+		return this._sessionRespawnGenerations.get(sessionId) ?? 0;
+	}
+
+	private _nextRespawnGeneration(sessionId: string): number {
+		const next = this._currentRespawnGeneration(sessionId) + 1;
+		this._sessionRespawnGenerations.set(sessionId, next);
+		return next;
+	}
+
+	private _sessionWriterIsCurrent(session: SessionInfo): boolean {
+		if (session.lifecycleFenced) return false;
+		const canonical = this.sessions.get(session.id);
+		if (canonical && canonical !== session) return false;
+		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
+	}
+
+	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
+		session.lifecycleFenced = true;
+		session.lifecycleGeneration = replacingGeneration - 1;
+		session.dormant = true;
+		session.status = "terminated";
+		session.clients.clear();
+		this.cancelPendingAutoRetry(session, "terminated");
+		this._untrackConnectedSession(session);
+	}
+
+	private _coalesceRestore(
+		sessionId: string,
+		restore: (generation: number) => Promise<SessionInfo | undefined>,
+	): Promise<SessionInfo | undefined> {
+		const inFlight = this._restoreCoordinators.get(sessionId);
+		if (inFlight) return inFlight.promise;
+
+		const generation = this._nextRespawnGeneration(sessionId);
+		const promise = (async () => restore(generation))()
+			.finally(() => {
+				const current = this._restoreCoordinators.get(sessionId);
+				if (current?.generation === generation) this._restoreCoordinators.delete(sessionId);
+			});
+		this._restoreCoordinators.set(sessionId, { generation, promise });
+		return promise;
+	}
+
+	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
+		return this._coalesceRestore(ps.id, async (generation) => {
+			await this.restoreSession(ps);
+			const restored = this.sessions.get(ps.id);
+			if (restored) restored.lifecycleGeneration = generation;
+			return restored;
+		});
 	}
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
@@ -2246,6 +2312,7 @@ export class SessionManager {
 		attachments?: unknown[];
 		isSteered?: boolean;
 	}>, reason: string, source: string): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
 		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
 		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
 			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
@@ -2282,7 +2349,11 @@ export class SessionManager {
 			return;
 		}
 		session.recoverDrainAttempts = attempts;
-		setTimeout(() => { this.drainQueue(session); }, 0);
+		const generation = session.lifecycleGeneration ?? 0;
+		setTimeout(() => {
+			if ((session.lifecycleGeneration ?? 0) !== generation) return;
+			this.drainQueue(session);
+		}, 0);
 	}
 
 	private async dispatchDirectPrompt(
@@ -2331,6 +2402,7 @@ export class SessionManager {
 	 * enqueuePrompt call sees idle+empty and dispatches a second concurrent prompt.
 	 */
 	private drainQueue(session: SessionInfo): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
 		if (session.promptQueue.isEmpty) return;
 
 		// Batch all steered messages at the front into a single prompt
@@ -2729,10 +2801,12 @@ export class SessionManager {
 		emitSessionEvent(session, pendingEvent);
 
 		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
+		const generation = session.lifecycleGeneration ?? 0;
 		session.pendingAutoRetryTimer = setTimeout(() => {
 			session.pendingAutoRetryTimer = undefined;
-			// Session may have been terminated in the meantime
-			if (!this.sessions.has(session.id)) return;
+			// Session may have been terminated or replaced in the meantime.
+			if ((session.lifecycleGeneration ?? 0) !== generation) return;
+			if (!this._sessionWriterIsCurrent(session)) return;
 			if (session.status !== "idle") return; // user sent something, or already retrying
 			// Auto path: preserve `transientRetryAttempts` so successive overload
 			// failures continue growing the backoff toward the 5-minute cap.
@@ -3104,31 +3178,34 @@ export class SessionManager {
 		ps: PersistedSession,
 		opts?: { mutatePs?: (ps: PersistedSession) => void; finalStatus?: SessionStatus },
 	): Promise<SessionInfo | undefined> {
-		const savedClients = new Set(session.clients);
-		// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
-		session.unsubscribe();
-		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
-		try { await session.rpcClient.stop(); } catch { /* already dead */ }
+		return this._coalesceRestore(session.id, async (generation) => {
+			const savedClients = new Set(session.clients);
+			// Snapshot AFTER unsubscribe so no in-flight event races past lastSeq.
+			session.unsubscribe();
+			const frameOfRef = this._snapshotStreamingFrameOfReference(session);
+			this._fenceReplacedSession(session, generation);
+			try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
-		this._untrackConnectedSession(session);
-		this.sessions.delete(session.id);
-		(ps as any)._restartFrameOfReference = frameOfRef;
-		opts?.mutatePs?.(ps);
-		try {
-			await this.restoreSession(ps);
-		} finally {
-			delete (ps as any)._restartFrameOfReference;
-			delete (ps as any)._overrideAllowedTools;
-		}
-		const restored = this.sessions.get(session.id);
-		if (restored) {
-			for (const ws of savedClients) {
-				if ((ws as any).readyState === 1) restored.clients.add(ws);
+			this.sessions.delete(session.id);
+			(ps as any)._restartFrameOfReference = frameOfRef;
+			opts?.mutatePs?.(ps);
+			try {
+				await this.restoreSession(ps);
+			} finally {
+				delete (ps as any)._restartFrameOfReference;
+				delete (ps as any)._overrideAllowedTools;
 			}
-			broadcastStatus(restored, opts?.finalStatus ?? "idle");
-			this._trackConnectedSession(restored);
-		}
-		return restored;
+			const restored = this.sessions.get(session.id);
+			if (restored) {
+				restored.lifecycleGeneration = generation;
+				for (const ws of savedClients) {
+					if ((ws as any).readyState === 1) restored.clients.add(ws);
+				}
+				broadcastStatus(restored, opts?.finalStatus ?? "idle");
+				this._trackConnectedSession(restored);
+			}
+			return restored;
+		});
 	}
 
 	/**
@@ -3510,7 +3587,7 @@ export class SessionManager {
 			}
 		}
 		try {
-			await this.restoreSession(ps);
+			await this._restoreSessionCoalesced(ps);
 			// Per-session restore detail is debug-only — the `Restoring N session(s)`
 			// summary above covers the routine boot case; failures still log loudly.
 			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Restored: "${ps.title}" (${ps.id})`);
@@ -3802,6 +3879,7 @@ export class SessionManager {
 			cwd: ps.cwd,
 			status: "starting",
 			statusVersion: initialStatusVersion,
+			lifecycleGeneration: this._currentRespawnGeneration(ps.id),
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
@@ -5563,7 +5641,7 @@ export class SessionManager {
 		} else {
 			// Cold restore — no in-memory session, no live clients, fresh
 			// `_highestSeq=0` baseline on whoever connects next.
-			await this.restoreSession(persisted);
+			await this._restoreSessionCoalesced(persisted);
 		}
 		console.log(`[session-manager] Restored session ${sessionId} via ensureSessionAlive`);
 	}
@@ -6402,10 +6480,10 @@ export class SessionManager {
 			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
 			if (ps && ps.agentSessionFile) {
 				console.log(`[session-manager] Client connected to dormant session "${session.title}" — attempting restore`);
-				this.restoreSession(ps)
+				this._restoreSessionCoalesced(ps)
 					.then(() => {
 						console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
-						// restoreSession replaces the map entry — add client to the new one
+						// restoreSession replaces the map entry — add client to the canonical one.
 						const revived = this.sessions.get(sessionId);
 						if (revived && (ws as any).readyState === 1) {
 							revived.clients.add(ws);
@@ -6541,7 +6619,9 @@ export class SessionManager {
 
 		// Restart the agent process
 		try {
-			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+			await this._coalesceRestore(id, async (generation) => {
+				session.lifecycleGeneration = generation;
+				const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -6640,10 +6720,12 @@ export class SessionManager {
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
-			// Drain any queued messages (steered first, then normal). Fresh
-			// retry budget — the old process (and its busy guard) is gone.
-			session.recoverDrainAttempts = 0;
-			this.drainQueue(session);
+				// Drain any queued messages (steered first, then normal). Fresh
+				// retry budget — the old process (and its busy guard) is gone.
+				session.recoverDrainAttempts = 0;
+				this.drainQueue(session);
+				return session;
+			});
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			broadcastStatus(session, "terminated");
