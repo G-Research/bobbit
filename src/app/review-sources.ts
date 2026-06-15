@@ -100,10 +100,30 @@ function documentIdFromReviewTabId(tabId: string): string | undefined {
 	catch { return undefined; }
 }
 
+function reviewDocumentKey(doc: ReviewDocumentModel): string {
+	return normalizeDocumentId(doc.documentId) || doc.title;
+}
+
+function reviewDocumentMapKey(doc: ReviewDocumentModel): string {
+	const documentId = normalizeDocumentId(doc.documentId);
+	if (documentId && state.reviewDocuments.has(documentId)) return documentId;
+	if (state.reviewDocuments.has(doc.title)) return doc.title;
+	return reviewDocumentKey(doc);
+}
+
+function findReviewDocumentEntryByTitle(title: string): [string, ReviewDocumentModel] | undefined {
+	if (!(state.reviewDocuments instanceof Map)) return undefined;
+	for (const entry of state.reviewDocuments.entries()) {
+		if (entry[1]?.title === title) return entry;
+	}
+	return undefined;
+}
+
 function reviewDocumentIdForOpen(options: OpenReviewDocumentOptions, title: string, sessionId: string): string {
 	const explicit = normalizeDocumentId(options.documentId);
 	if (explicit) return explicit;
-	const existing = state.reviewDocuments instanceof Map ? state.reviewDocuments.get(title) : undefined;
+	if (options.replace === false) return newReviewDocumentId(sessionId);
+	const existing = findReviewDocumentEntryByTitle(title)?.[1];
 	const existingId = normalizeDocumentId(existing?.documentId);
 	if (existing) return existingId || legacyReviewDocumentIdFromTitle(title);
 	if (sessionId) {
@@ -111,15 +131,6 @@ function reviewDocumentIdForOpen(options: OpenReviewDocumentOptions, title: stri
 		const persistedId = normalizeDocumentId(persisted?.documentId);
 		if (persistedId) return persistedId;
 	}
-	const matchingWorkspaceTab = getSidePanelWorkspace(sessionId).tabs.find((tab) => {
-		if (tab.kind !== "review") return false;
-		const source = tab.source as Record<string, unknown> | undefined;
-		const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
-		return tabTitle === title;
-	});
-	const workspaceId = normalizeDocumentId((matchingWorkspaceTab?.source as Record<string, unknown> | undefined)?.documentId)
-		|| (matchingWorkspaceTab ? documentIdFromReviewTabId(matchingWorkspaceTab.id) : undefined);
-	if (workspaceId) return workspaceId;
 	return newReviewDocumentId(sessionId);
 }
 
@@ -212,25 +223,19 @@ export function openReviewDocument(options: OpenReviewDocumentOptions): ReviewDo
 	const documentId = reviewDocumentIdForOpen(options, title, sessionId);
 	const doc: ReviewDocumentModel = { title, markdown: options.markdown, source, documentId };
 	state.reviewDocuments = new Map(state.reviewDocuments);
-	if (options.replace !== false || !state.reviewDocuments.has(title)) {
-		state.reviewDocuments.set(title, doc);
+	const existingEntry = options.replace !== false ? findReviewDocumentEntryByTitle(title) : undefined;
+	const key = existingEntry?.[0] || (options.documentId || options.replace === false ? documentId : title);
+	if (options.replace !== false || !state.reviewDocuments.has(key)) {
+		state.reviewDocuments.set(key, doc);
 	}
-	const storedDoc = state.reviewDocuments.get(title) || doc;
+	const storedDoc = state.reviewDocuments.get(key) || doc;
 	if (!storedDoc.documentId) storedDoc.documentId = documentId;
 	rememberReviewDocumentIdentity(title, storedDoc.documentId);
 	state.reviewPanelOpen = true;
-	state.reviewActiveTab = title;
+	state.reviewActiveTab = key;
 	state.previewPanelActiveTab = "review";
 	state.previewPanelTab = "review";
-	selectReviewWorkspaceTab(title, { sessionId, select: true });
-	if (options.replace !== false) {
-		for (const tab of getSidePanelWorkspace(sessionId).tabs) {
-			if (tab.kind !== "review" || tab.id === reviewPanelTabId(storedDoc.documentId || documentId)) continue;
-			const source = tab.source as Record<string, unknown> | undefined;
-			const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
-			if (tabTitle === title) void closeSidePanelTab(tab.id, { sessionId });
-		}
-	}
+	selectReviewWorkspaceTab(title, { sessionId, select: true, documentId: storedDoc.documentId });
 	if (sessionId) {
 		persistReviewDocument(sessionId, storedDoc);
 	}
@@ -256,19 +261,16 @@ export function restorePersistedReviewDocuments(sessionId: string, _options: { s
 	const workspaceReviewTabs = getSidePanelWorkspace(sessionId).tabs.filter((tab) => tab.kind === "review");
 	if (workspaceReviewTabs.length === 0) return;
 	const openDocumentIds = new Set<string>();
-	const openTitles = new Set<string>();
 	for (const tab of workspaceReviewTabs) {
 		const source = tab.source as Record<string, unknown> | undefined;
 		const documentId = typeof source?.documentId === "string" ? source.documentId : documentIdFromReviewTabId(tab.id);
-		const title = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
 		if (documentId) openDocumentIds.add(documentId);
-		if (title) openTitles.add(title);
 	}
 	const docs = safeReadPersisted(sessionId);
 	const entries = Object.values(docs).filter((doc) => {
 		if (!doc?.title || typeof doc.markdown !== "string" || !shouldPersistReviewDocument(doc)) return false;
 		const documentId = doc.documentId || legacyReviewDocumentIdFromTitle(doc.title);
-		return openDocumentIds.has(documentId) || openTitles.has(doc.title);
+		return openDocumentIds.has(documentId);
 	});
 	if (entries.length === 0) return;
 	state.reviewDocuments = new Map(state.reviewDocuments);
@@ -277,34 +279,40 @@ export function restorePersistedReviewDocuments(sessionId: string, _options: { s
 		if (!firstTitle) firstTitle = doc.title;
 		if (!doc.documentId) doc.documentId = legacyReviewDocumentIdFromTitle(doc.title);
 		rememberReviewDocumentIdentity(doc.title, doc.documentId);
-		if (!state.reviewDocuments.has(doc.title)) state.reviewDocuments.set(doc.title, doc);
+		const key = reviewDocumentKey(doc);
+		if (!state.reviewDocuments.has(key)) state.reviewDocuments.set(key, doc);
 	}
 	state.reviewPanelOpen = state.reviewDocuments.size > 0;
-	if (!state.reviewActiveTab && firstTitle) state.reviewActiveTab = firstTitle;
+	if (!state.reviewActiveTab && firstTitle) {
+		const firstDoc = entries.find((doc) => doc.title === firstTitle);
+		state.reviewActiveTab = firstDoc ? reviewDocumentKey(firstDoc) : firstTitle;
+	}
 	renderApp();
 }
 
-function reviewWorkspaceTabMatchesTitle(tab: unknown, title: string): boolean {
+function reviewWorkspaceTabMatchesDocument(tab: unknown, doc: ReviewDocumentModel): boolean {
 	if (!tab || typeof tab !== "object") return false;
 	const record = tab as Record<string, unknown>;
 	if (record.kind !== "review") return false;
 	const source = record.source && typeof record.source === "object" && !Array.isArray(record.source)
 		? record.source as Record<string, unknown>
 		: undefined;
+	const documentId = normalizeDocumentId(source?.documentId) || (typeof record.id === "string" ? documentIdFromReviewTabId(record.id) : undefined);
+	if (doc.documentId) return documentId === doc.documentId;
 	const tabTitle = typeof source?.title === "string" ? source.title
 		: typeof record.title === "string" ? record.title.replace(/^Review:\s*/, "")
 		: "";
-	return tabTitle === title;
+	return tabTitle === doc.title;
 }
 
-async function deleteReviewWorkspaceTabsFromServer(sessionId: string, title: string): Promise<void> {
+async function deleteReviewWorkspaceTabsFromServer(sessionId: string, doc: ReviewDocumentModel): Promise<void> {
 	if (!sessionId) return;
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		const response = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/side-panel-workspace`).catch(() => null);
 		if (!response?.ok) return;
 		const workspace = await response.json().catch(() => null) as { tabs?: unknown[] } | null;
 		const staleIds = (Array.isArray(workspace?.tabs) ? workspace!.tabs : [])
-			.filter((tab) => reviewWorkspaceTabMatchesTitle(tab, title))
+			.filter((tab) => reviewWorkspaceTabMatchesDocument(tab, doc))
 			.map((tab) => (tab as Record<string, unknown>).id)
 			.filter((id): id is string => typeof id === "string" && id.startsWith("review:"));
 		if (staleIds.length === 0) return;
@@ -373,10 +381,12 @@ export function reviewDocumentFromDecisionDetail(detail: unknown): ReviewDocumen
 				return { title: doc.title, markdown: doc.markdown, documentId, source: normalizeReviewSource(doc.source) || normalizeReviewSource(record.source) };
 			}
 		}
+		const documentId = normalizeDocumentId(record.documentId);
+		if (documentId) return state.reviewDocuments.get(documentId);
 		const title = typeof record.title === "string" ? record.title
 			: typeof record.documentTitle === "string" ? record.documentTitle
 			: state.reviewActiveTab;
-		if (title) return state.reviewDocuments.get(title);
+		if (title) return state.reviewDocuments.get(title) || findReviewDocumentEntryByTitle(title)?.[1];
 	}
 	return state.reviewActiveTab ? state.reviewDocuments.get(state.reviewActiveTab) : undefined;
 }
@@ -478,8 +488,9 @@ export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayloa
 	}
 	await flushPendingWrites();
 	state.reviewDocuments = new Map(state.reviewDocuments);
-	state.reviewDocuments.delete(doc.title);
-	if (state.reviewActiveTab === doc.title) {
+	const docKey = reviewDocumentMapKey(doc);
+	state.reviewDocuments.delete(docKey);
+	if (state.reviewActiveTab === docKey) {
 		state.reviewActiveTab = [...state.reviewDocuments.keys()][0] || "";
 	}
 	state.reviewPanelOpen = state.reviewDocuments.size > 0;
@@ -487,14 +498,12 @@ export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayloa
 	if (doc.documentId) tabIdsToClose.add(reviewPanelTabId(doc.documentId));
 	for (const tab of getSidePanelWorkspace(sessionId).tabs) {
 		if (tab.kind !== "review") continue;
-		const source = tab.source as Record<string, unknown> | undefined;
-		const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
-		if (tabTitle === doc.title) tabIdsToClose.add(tab.id);
+		if (reviewWorkspaceTabMatchesDocument(tab, doc)) tabIdsToClose.add(tab.id);
 	}
 	for (const tabId of tabIdsToClose) {
 		try { await closeSidePanelTab(tabId, { sessionId }); }
 		catch { /* best-effort; local review state is already cleared */ }
 	}
-	await deleteReviewWorkspaceTabsFromServer(sessionId, doc.title);
+	await deleteReviewWorkspaceTabsFromServer(sessionId, doc);
 	renderApp();
 }

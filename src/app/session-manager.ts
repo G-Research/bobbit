@@ -2197,7 +2197,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
 				resetStaffProposalPreview(sessionId);
-				selectProposalWorkspaceTab("staff", { sessionId, select: true });
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;
@@ -2206,7 +2205,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 					delete state.activeProposals.project;
 					state.assistantHasProposal = false;
 				}
-				selectProposalWorkspaceTab("project", { sessionId, select: true });
 			}
 		})();
 

@@ -19,11 +19,17 @@ const FIXTURE = path.resolve("tests/fixtures/review-tool-active-guard.html");
 const BUNDLE = path.resolve("tests/fixtures/review-tool-active-guard-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/review-tool-active-guard-entry.ts");
 const REMOTE_AGENT_SRC = path.resolve("src/app/remote-agent.ts");
+const REVIEW_SOURCES_SRC = path.resolve("src/app/review-sources.ts");
+const PREVIEW_PANEL_SRC = path.resolve("src/app/preview-panel.ts");
+const PANEL_WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
 
 test.beforeAll(() => {
 	const entryMtime = Math.max(
 		fs.statSync(ENTRY).mtimeMs,
 		fs.statSync(REMOTE_AGENT_SRC).mtimeMs,
+		fs.statSync(REVIEW_SOURCES_SRC).mtimeMs,
+		fs.statSync(PREVIEW_PANEL_SRC).mtimeMs,
+		fs.statSync(PANEL_WORKSPACE_SRC).mtimeMs,
 	);
 	const bundleExists = fs.existsSync(BUNDLE);
 	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;

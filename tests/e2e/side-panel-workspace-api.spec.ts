@@ -167,6 +167,29 @@ test.describe("side-panel workspace API", () => {
 		expect(workspace.tabs.map((tab: any) => tab.id).sort()).toEqual(["preview:entry:index.html", "proposal:goal"]);
 	});
 
+	test("empty migration stamps metadata once", async () => {
+		const sessionId = await createSession();
+		cleanup.push(sessionId);
+		const migrate = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/migrate`, {
+			method: "POST",
+			body: JSON.stringify({ tabs: [], activeTabId: "", sizeMode: "split" }),
+		});
+		expect(migrate.status).toBe(200);
+		const migrated = await migrate.json();
+		expect(migrated.revision).toBe(1);
+		expect(migrated.tabs).toEqual([]);
+		expect(migrated.metadata.migratedFromLocalStorageAt).toBeGreaterThan(0);
+
+		const second = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/migrate`, {
+			method: "POST",
+			body: JSON.stringify({ tabs: [previewTab(sessionId)] }),
+		});
+		expect(second.status).toBe(200);
+		const ignored = await second.json();
+		expect(ignored.revision).toBe(1);
+		expect(ignored.tabs).toEqual([]);
+	});
+
 	test("migration canonicalizes legacy tabs once and stamps metadata", async () => {
 		const sessionId = await createSession();
 		cleanup.push(sessionId);

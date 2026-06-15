@@ -332,7 +332,7 @@ export function applySidePanelWorkspaceFromServer(rawWorkspace: unknown, options
 	const workspace = normalizeWorkspace(rawWorkspace, rawSessionId);
 	const sid = panelWorkspaceSessionKey(workspace.sessionId);
 	const currentRevision = state.lastWorkspaceRevisionBySession[sid];
-	const force = options.source === "hydrate" || options.force === true;
+	const force = options.force === true;
 	if (!force && typeof currentRevision === "number" && workspace.revision <= currentRevision) {
 		return state.sidePanelWorkspaceBySession[sid] || workspace;
 	}
@@ -562,7 +562,7 @@ async function settleMutation(sessionId: string, mutationId: string, request: Pr
 		if (latest) return applySidePanelWorkspaceFromServer(latest, { source: "rest", force: ownsPending });
 		try {
 			const refetched = await fetchWorkspace(sessionId);
-			if (refetched) return applySidePanelWorkspaceFromServer(refetched, { source: "hydrate" });
+			if (refetched) return applySidePanelWorkspaceFromServer(refetched, { source: "hydrate", force: ownsPending });
 		} catch { /* fall through to local rollback */ }
 		if (pending && ownsPending) {
 			state.sidePanelWorkspaceBySession[sid] = pending.baseWorkspace;
@@ -790,7 +790,6 @@ export async function migrateLegacySidePanelLocalStorage(sessionId: string): Pro
 		try { return typeof localStorage !== "undefined" ? localStorage.getItem(`bobbit-preview-collapsed-${sessionId}`) : null; } catch { return null; }
 	})();
 	const sizeMode: SidePanelSizeMode = oldCollapsedRaw === "true" ? "collapsed" : existing.sizeMode;
-	if (tabs.length === 0 && sizeMode === existing.sizeMode) return undefined;
 	const requestedActive = stringValue(activeBySession?.[sid]);
 	const activeTabId = tabs.some((tab) => tab.id === requestedActive) ? requestedActive : tabs[0]?.id || "";
 	try {

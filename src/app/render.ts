@@ -80,7 +80,6 @@ import {
 	isHistoricalProposalTab,
 	isLivePreviewTab,
 	isPinnedPanelTab,
-	markPreviewContentDismissed,
 	nextActivePanelTabId,
 	normalizePreviewContentHash,
 	normalizeSidePanelTabs,
@@ -91,6 +90,7 @@ import {
 	previewTabDisplayTitle,
 	previewTabVersion,
 	previewVersionRecordFor,
+	reviewDocumentIdFromPanelTab,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
@@ -1122,6 +1122,12 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	})();
 }
 
+function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
+	const documentId = reviewDocumentIdFromPanelTab(tab);
+	if (documentId && state.reviewDocuments.has(documentId)) return documentId;
+	return reviewTitleFromPanelTab(tab) || documentId;
+}
+
 export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
@@ -1138,7 +1144,7 @@ export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 		restoreHistoricalPreviewTab(tab);
 	}
 	if (tab.kind === "review") {
-		state.reviewActiveTab = reviewTitleFromPanelTab(tab);
+		state.reviewActiveTab = reviewDocumentKeyFromPanelTab(tab);
 	}
 }
 
@@ -1924,14 +1930,15 @@ export function doRenderApp(): void {
 		}
 		if (tab.kind === "review") {
 			const title = reviewTitleFromPanelTab(tab);
-			if (title) {
+			const key = reviewDocumentKeyFromPanelTab(tab);
+			if (key) {
 				const sid = activeSessionId() || "";
 				if (event?.type !== "review-close-tab") {
-					const count = reviewPaneUnsentCountForDocument(sid, title);
-					if (count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
+					const count = reviewPaneUnsentCountForDocument(sid, key);
+					if (count > 0 && !confirm(`Close "${title || key}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
 				}
-				if (state.reviewActiveTab === title) {
-					const nextReview = nextCandidate?.kind === "review" ? reviewTitleFromPanelTab(nextCandidate) : "";
+				if (state.reviewActiveTab === key) {
+					const nextReview = nextCandidate?.kind === "review" ? reviewDocumentKeyFromPanelTab(nextCandidate) : "";
 					if (nextReview) state.reviewActiveTab = nextReview;
 				}
 			}
@@ -1941,7 +1948,6 @@ export function doRenderApp(): void {
 			state.inboxAddDialogOpen = false;
 		}
 		if (tab.kind === "preview") {
-			if (!isHistoricalPreviewTab(tab)) markPreviewContentDismissed(sid, previewEntryFromTab(tab), previewContentHashFromTab(tab));
 			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
 			if (remainingPreviewTabs.length === 0) {
 				state.isPreviewSession = false;
@@ -2396,9 +2402,9 @@ export function doRenderApp(): void {
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
-			const reviewTitle = reviewTitleFromPanelTab(tab);
-			if (reviewTitle && state.reviewActiveTab !== reviewTitle) {
-				state.reviewActiveTab = reviewTitle;
+			const reviewKey = reviewDocumentKeyFromPanelTab(tab);
+			if (reviewKey && state.reviewActiveTab !== reviewKey) {
+				state.reviewActiveTab = reviewKey;
 			}
 			return reviewPaneContent();
 		}

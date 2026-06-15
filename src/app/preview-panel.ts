@@ -12,11 +12,10 @@ import {
 	previewVersionRecordFor,
 	previewVersionedTabId,
 	normalizePreviewContentHash,
-	isPreviewContentDismissed,
 	panelTabsForSession,
 	previewContentHashFromTab,
 	proposalPanelTabId,
-	assistantProposalType,
+	reviewDocumentIdFromPanelTab,
 	reviewDocumentIdForTitle,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
@@ -43,6 +42,7 @@ type PanelWorkspaceOptions = {
 	clearCollapse?: boolean;
 	rev?: number;
 	fields?: Record<string, unknown>;
+	documentId?: string;
 };
 
 const PROPOSAL_LABELS: Record<string, string> = {
@@ -93,9 +93,10 @@ function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWork
 		return;
 	}
 	if (tab.kind === "review") {
+		const documentId = reviewDocumentIdFromPanelTab(tab);
 		const title = reviewTitleFromPanelTab(tab);
 		s.reviewPanelOpen = true;
-		s.reviewActiveTab = title;
+		s.reviewActiveTab = documentId && state.reviewDocuments.has(documentId) ? documentId : title || documentId;
 		s.previewPanelActiveTab = "review";
 		s.previewPanelTab = "review";
 		if (s.assistantType && setAssistantTab) s.assistantTab = "preview";
@@ -378,8 +379,7 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 		: undefined;
 	const activeRev = requestedRev != null ? activeProposalRevForSession(type, sessionId) : undefined;
 	const rev = activeRev === requestedRev ? undefined : requestedRev;
-	const isCurrentAssistantProposal = type === assistantProposalType(state.assistantType);
-	if (rev == null && !hasCurrentProposalSlotForSession(state as any, type, sessionId) && !isCurrentAssistantProposal) {
+	if (rev == null && !hasCurrentProposalSlotForSession(state as any, type, sessionId)) {
 		removePanelWorkspaceTabs([proposalPanelTabId(type)], { sessionId, select: false, clearCollapse: false });
 		return;
 	}
@@ -401,7 +401,7 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 
 export function selectReviewWorkspaceTab(title: string, options: PanelWorkspaceOptions = {}): void {
 	const sessionId = panelSessionId(options.sessionId);
-	const documentId = reviewDocumentIdForTitle(title);
+	const documentId = options.documentId || reviewDocumentIdForTitle(title);
 	selectPanelWorkspaceTab({
 		id: reviewPanelTabId(documentId),
 		kind: "review",
@@ -477,7 +477,7 @@ export function startPreviewSubscription(sessionId: string): void {
 			}
 			contentHash = normalizePreviewContentHash(data?.contentHash);
 			(state as any).previewPanelContentHash = contentHash;
-			if (entry && !isPreviewContentDismissed(sessionId, entry, contentHash)) {
+			if (entry) {
 				selectHtmlPreviewTab({
 					sessionId,
 					entry,
@@ -515,7 +515,7 @@ export function startPreviewSubscription(sessionId: string): void {
 				const contentHash = normalizePreviewContentHash(data?.contentHash);
 				const artifactId = typeof data?.artifactId === "string" && data.artifactId ? data.artifactId : undefined;
 				(state as any).previewPanelContentHash = contentHash;
-				if (entry && !isPreviewContentDismissed(sessionId, entry, contentHash)) {
+				if (entry) {
 					selectHtmlPreviewTab({
 						sessionId,
 						entry,
@@ -524,7 +524,7 @@ export function startPreviewSubscription(sessionId: string): void {
 						id: LIVE_PREVIEW_PANEL_TAB_ID,
 						source: { live: true, origin: "preview-events", ...(artifactId ? { artifactId } : {}) },
 						state: artifactId ? { artifactId } : undefined,
-						select: true,
+						select: false,
 						setAssistantTab: false,
 					});
 				}

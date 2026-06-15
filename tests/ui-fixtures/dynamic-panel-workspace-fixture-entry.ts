@@ -3,7 +3,7 @@ import { doRenderApp, setSelectedWorkflowId, shouldDerivePanelTabsInRender } fro
 import { renderApp, setProjects, setRenderApp, state, type GatewaySession, type Project } from "../../src/app/state.js";
 import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-workspace.js";
 import type { SidePanelWorkspace } from "../../src/shared/side-panel-workspace.js";
-import { selectReviewWorkspaceTab } from "../../src/app/preview-panel.js";
+import { selectHtmlPreviewTab, selectReviewWorkspaceTab } from "../../src/app/preview-panel.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
@@ -11,13 +11,14 @@ import {
 	previewTabDisplayTitle,
 	previewVersionedTabId,
 	registerPreviewVersion,
+	rememberReviewDocumentIdentity,
 	setActivePanelTabIdForSession,
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
 } from "../../src/app/panel-workspace.js";
 import { clearAllAnnotations } from "../../src/ui/components/review/AnnotationStore.js";
 
-type ReviewDoc = { title: string; markdown: string };
+type ReviewDoc = { title: string; markdown: string; documentId?: string };
 type HistoricalPreviewInput = { toolId: string; entry: string; bodyText: string; contentHash: string; title?: string; label?: string };
 type LivePreviewInput = { entry: string; bodyText?: string; contentHash: string };
 type WorkspaceState = {
@@ -255,8 +256,8 @@ function applyWorkspace(sessionId: string): void {
 	state.previewPanelMtime = ws.livePreview ? 1000 : 0;
 	(state as any).previewPanelContentHash = ws.livePreview?.contentHash || "";
 	state.previewPanelFullscreen = false;
-	state.reviewDocuments = new Map((ws.reviews || []).map((doc) => [doc.title, doc]));
-	state.reviewActiveTab = ws.reviewActiveTab || ws.reviews?.[0]?.title || "";
+	state.reviewDocuments = new Map((ws.reviews || []).map((doc) => [doc.documentId || doc.title, doc]));
+	state.reviewActiveTab = ws.reviewActiveTab || ws.reviews?.[0]?.documentId || ws.reviews?.[0]?.title || "";
 	state.reviewPanelOpen = (ws.reviews || []).length > 0;
 	state.inboxEntries = [];
 	state.inboxPanelOpen = false;
@@ -420,28 +421,32 @@ function setHistoricalPreviews(sessionId: string, previews: HistoricalPreviewInp
 function openReviewDoc(doc: ReviewDoc): void {
 	const ws = currentWorkspace();
 	const existing = ws.reviews || [];
-	const next = existing.filter((candidate) => candidate.title !== doc.title);
+	const key = doc.documentId || doc.title;
+	const next = existing.filter((candidate) => (candidate.documentId || candidate.title) !== key);
 	next.push(doc);
 	ws.reviews = next;
-	ws.reviewActiveTab = doc.title;
+	ws.reviewActiveTab = key;
+	if (doc.documentId) rememberReviewDocumentIdentity(doc.title, doc.documentId);
 	applyWorkspace(currentSessionId());
-	selectReviewWorkspaceTab(doc.title, { sessionId: currentSessionId(), select: true });
+	selectReviewWorkspaceTab(doc.title, { sessionId: currentSessionId(), select: true, documentId: doc.documentId });
 	renderNow();
 }
 
 function setReviewDocs(docs: ReviewDoc[]): void {
 	const ws = currentWorkspace();
 	ws.reviews = docs.map((doc) => ({ ...doc }));
-	ws.reviewActiveTab = docs[0]?.title || "";
+	for (const doc of docs) if (doc.documentId) rememberReviewDocumentIdentity(doc.title, doc.documentId);
+	ws.reviewActiveTab = docs[0]?.documentId || docs[0]?.title || "";
 	applyWorkspace(currentSessionId());
-	if (docs[0]) setActivePanelTabIdForSession(state, currentSessionId(), `review:${encodeURIComponent(docs[0].title)}`);
+	if (docs[0]) setActivePanelTabIdForSession(state, currentSessionId(), `review:${encodeURIComponent(docs[0].documentId || docs[0].title)}`);
 	renderNow();
 }
 
 function setReviewDocsForSession(sessionId: string, docs: ReviewDoc[]): void {
 	workspaces[sessionId] ||= {};
 	workspaces[sessionId].reviews = docs.map((doc) => ({ ...doc }));
-	workspaces[sessionId].reviewActiveTab = docs[0]?.title || "";
+	for (const doc of docs) if (doc.documentId) rememberReviewDocumentIdentity(doc.title, doc.documentId);
+	workspaces[sessionId].reviewActiveTab = docs[0]?.documentId || docs[0]?.title || "";
 	if (currentSessionId() === sessionId) applyWorkspace(sessionId);
 	renderNow();
 }
@@ -458,6 +463,33 @@ function getFixtureState(): Record<string, unknown> {
 		reviewTitles: [...state.reviewDocuments.keys()],
 		fetchLog: fetchLog.slice(),
 		promptLog: promptLog.slice(),
+	};
+}
+
+function exercisePreviewMountUpdateDoesNotCreateClosedTab(): Record<string, unknown> {
+	const sid = currentSessionId();
+	applySidePanelWorkspaceFromServer({
+		version: 1,
+		sessionId: sid,
+		revision: 3,
+		tabs: [],
+		activeTabId: "",
+		sizeMode: "split",
+		metadata: { migratedFromLocalStorageAt: 1 },
+		updatedAt: 1,
+	}, { source: "hydrate", skipRender: true });
+	state.previewPanelEntry = "closed-preview.html";
+	(state as any).previewPanelContentHash = fallbackHash("closed-preview");
+	selectHtmlPreviewTab({
+		sessionId: sid,
+		entry: "closed-preview.html",
+		contentHash: fallbackHash("closed-preview"),
+		source: { live: true, origin: "preview-bootstrap" },
+		select: false,
+	});
+	return {
+		tabIds: state.sidePanelWorkspaceBySession[workspaceKey(sid)]?.tabs.map((tab) => tab.id) ?? [],
+		legacyTabIds: state.panelTabsBySession[workspaceKey(sid)]?.map((tab) => tab.id) ?? [],
 	};
 }
 
@@ -498,9 +530,12 @@ function exerciseSameRevisionWorkspaceRollback(): Record<string, unknown> {
 	applySidePanelWorkspaceFromServer(base, { source: "hydrate", skipRender: true });
 	state.sidePanelWorkspaceBySession[workspaceKey(sid)] = optimistic;
 	const ignored = applySidePanelWorkspaceFromServer(base, { source: "rest", skipRender: true });
+	state.sidePanelWorkspaceBySession[workspaceKey(sid)] = optimistic;
+	const hydrateIgnored = applySidePanelWorkspaceFromServer(base, { source: "hydrate", skipRender: true });
 	const forced = applySidePanelWorkspaceFromServer(base, { source: "rest", force: true, skipRender: true });
 	return {
 		ignoredIds: ignored.tabs.map((tab) => tab.id),
+		hydrateIgnoredIds: hydrateIgnored.tabs.map((tab) => tab.id),
 		forcedIds: forced.tabs.map((tab) => tab.id),
 		storedIds: state.sidePanelWorkspaceBySession[workspaceKey(sid)]?.tabs.map((tab) => tab.id) ?? [],
 		storedRevision: state.lastWorkspaceRevisionBySession[workspaceKey(sid)],
@@ -560,6 +595,7 @@ setRenderApp(doRenderApp);
 (window as any).__setDynamicReviewDocsForSession = setReviewDocsForSession;
 (window as any).__openDynamicReviewDoc = openReviewDoc;
 (window as any).__getDynamicPanelWorkspaceState = getFixtureState;
+(window as any).__exercisePreviewMountUpdateDoesNotCreateClosedTab = exercisePreviewMountUpdateDoesNotCreateClosedTab;
 (window as any).__exerciseSameRevisionWorkspaceRollback = exerciseSameRevisionWorkspaceRollback;
 (window as any).__shouldDerivePanelTabsInRender = shouldDerivePanelTabsInRender;
 (window as any).__dynamicPanelWorkspaceReady = true;

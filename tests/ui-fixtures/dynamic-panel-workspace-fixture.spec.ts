@@ -282,10 +282,18 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 		expect(result).toEqual({ file: true, http: false, https: false });
 	});
 
+	test("preview mount updates and stale hydrate do not resurrect closed server tabs", async ({ page }) => {
+		expect(await page.evaluate(() => (window as any).__exercisePreviewMountUpdateDoesNotCreateClosedTab())).toEqual({
+			tabIds: [],
+			legacyTabIds: [],
+		});
+	});
+
 	test("same-revision server rollback force-replaces optimistic workspace", async ({ page }) => {
 		const result = await page.evaluate(() => (window as any).__exerciseSameRevisionWorkspaceRollback());
 		expect(result).toEqual({
 			ignoredIds: ["proposal:goal", "review:optimistic"],
+			hydrateIgnoredIds: ["proposal:goal", "review:optimistic"],
 			forcedIds: ["proposal:goal"],
 			storedIds: ["proposal:goal"],
 			storedRevision: 7,
@@ -348,6 +356,21 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 
 		await page.evaluate((sessionId) => (window as any).__selectDynamicWorkspaceSession(sessionId), b);
 		await expectReviewDocumentAccessible(page, "Test Document", "Some important text", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switch back to session B");
+	});
+
+	test("duplicate review titles use distinct document-id tabs", async ({ page }) => {
+		await page.evaluate(() => {
+			(window as any).__openDynamicReviewDoc({ documentId: "review-doc:dup:a", title: "Duplicate Review", markdown: "# Duplicate Review\n\nFirst duplicate body." });
+			(window as any).__openDynamicReviewDoc({ documentId: "review-doc:dup:b", title: "Duplicate Review", markdown: "# Duplicate Review\n\nSecond duplicate body." });
+		});
+		await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "review" && /Duplicate Review/.test(tab.label)).length, {
+			timeout: 5_000,
+			message: "DYNAMIC_CHAT_TABS_DUPLICATE_REVIEW_TITLE_BUG: duplicate titles should render as distinct top-level tabs",
+		}).toBe(2);
+		await clickTopLevelTabById(page, "review:review-doc%3Adup%3Aa", "DYNAMIC_CHAT_TABS_DUPLICATE_REVIEW_TITLE_BUG: first duplicate");
+		await expect(page.locator("review-document").getByText("First duplicate body.").first()).toBeVisible({ timeout: 5_000 });
+		await clickTopLevelTabById(page, "review:review-doc%3Adup%3Ab", "DYNAMIC_CHAT_TABS_DUPLICATE_REVIEW_TITLE_BUG: second duplicate");
+		await expect(page.locator("review-document").getByText("Second duplicate body.").first()).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("review document titles with reserved characters stay selectable after close and reopen", async ({ page }) => {
