@@ -37,14 +37,18 @@ The current end-to-end flow:
   SPA route and no standalone `/walkthrough?...` pathname route.
 - **Launch (spawn-on-click).** A pack **entrypoint** — a git-widget button, a
   composer-slash launcher, a command-palette launcher, and a `kind:"route"`
-  deep-link — drives the feature. The three **launchers** all do the **same**
-  thing on click: they spawn a fresh read-only reviewer sub-agent and
-  auto-switch the user's view to it. **No panel or tab is ever mounted in the
-  current (owner) session** — there is no owner-session walkthrough surface at
-  all. The launchers carry **no** hard-coded `jobId`. A no-PR / spawn failure
-  surfaces as an inline error in the git-status-widget dropdown and spawns
-  nothing (no session, no view switch). Every click is a **fresh** reviewer
-  (there is no target dedup), so multiple reviewers per PR are allowed. See
+  deep-link — drives the feature. The launchers spawn a fresh read-only reviewer
+  sub-agent and auto-switch the user's view to it. **No panel or tab is ever
+  mounted in the current (owner) session** — there is no owner-session
+  walkthrough surface at all. The launchers carry **no** hard-coded `jobId`.
+  Selecting `/pr-walkthrough` from composer autocomplete/menu, using the
+  git-widget button, or using the command-palette launcher calls `run` with an
+  empty body and resolves the current branch's open PR. Typed composer forms can
+  pass an explicit PR target: `/pr-walkthrough <github-pr-url>` or
+  `/pr-walkthrough <pr-number>`. A no-PR / spawn failure surfaces as an inline
+  error in the git-status-widget dropdown and spawns nothing (no session, no view
+  switch). Every click is a **fresh** reviewer (there is no target dedup), so
+  multiple reviewers per PR are allowed. See
   [Launch model: the isolated reviewer child](#launch-model-the-isolated-reviewer-child).
 - **Run.** The launcher click calls the pack's **`run`** route, which mints a
   **real, isolated, read-only reviewer child** (`host.agents.spawn`) — it does
@@ -138,14 +142,27 @@ walkthrough pane.
 All three launchers — the **git-widget button**, the **composer-slash** launcher,
 and the **command-palette** launcher — carry the same declarative target
 `{ action: "spawn", route: "run", panelId: "pr-walkthrough.panel" }`
-(`entrypoints/pr-walkthrough-*.yaml`). On click the platform launcher dispatch
-(`src/app/pack-entrypoints.ts`) calls the pack's **`run`** route (POST, empty
-body) through the versioned Host API, and on `{ ok: true, childSessionId }` opens
-`panelId` **in that child session** via `host.ui.openPanel({ panelId, sessionId })`
+(`entrypoints/pr-walkthrough-*.yaml`). The platform launcher dispatch
+(`src/app/pack-entrypoints.ts`) calls the pack's **`run`** route (POST) through
+the versioned Host API, and on `{ ok: true, childSessionId }` opens `panelId`
+**in that child session** via `host.ui.openPanel({ panelId, sessionId })`
 (contract-v2 `PanelTarget.sessionId`), which performs a real session switch so the
 sidebar and main view follow. See
 [docs/extension-host-authoring.md](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)
 for the `SpawnLaunchTarget` entrypoint shape.
+
+Composer slash supports two full-line typed forms that use the same spawn path but
+provide an explicit target to `run`:
+
+- `/pr-walkthrough <github-pr-url>` sends `{ prUrl: "<github-pr-url>" }`.
+- `/pr-walkthrough <pr-number>` sends `{ prNumber: <pr-number> }`.
+
+These forms only change target resolution; they still spawn a fresh isolated
+reviewer child and switch the view to that child on success. Selecting
+`/pr-walkthrough` from the composer autocomplete/menu, typing `/pr-walkthrough`
+without an argument, clicking the git-widget launcher, and using the
+command-palette launcher all keep the empty-body behavior (`{}`), so `run`
+resolves the current branch's open GitHub PR.
 
 **Why spawn-on-click and not navigate-then-autorun?** The previous model navigated
 the *owner* session to the deep-link, transiently mounted the panel there, autoran
@@ -342,10 +359,11 @@ retired.
 
 ### Target resolution — GitHub PRs only
 
-When a launcher invokes `run` with an empty body (the normal path — the launcher
-surface, not any panel, calls the route on click), the `run` route resolves **the
-current branch's open GitHub PR** from the server-derived session worktree via
-`gh`/`git`. An explicit target in the body (a deep-link or test) always wins.
+When a launcher invokes `run` with an empty body (composer autocomplete/menu,
+git-widget, command palette, or typed `/pr-walkthrough` without an argument), the
+`run` route resolves **the current branch's open GitHub PR** from the
+server-derived session worktree via `gh`/`git`. An explicit target in the body
+(typed composer URL/number, a deep-link, or test) always wins.
 
 The walkthrough is **GitHub-PR-only**. The route rejects two cases before any
 spawn:

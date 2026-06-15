@@ -324,6 +324,27 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	private _packSlashLaunchFromText(text: string): { entrypointId: string; body: Record<string, unknown> } | undefined {
+		const trimmed = text.trim();
+		const match = trimmed.match(/^\/([A-Za-z0-9_.-]+)(?:\s+([\s\S]+))?$/);
+		if (!match) return undefined;
+
+		const name = match[1];
+		const launcher = listLauncherEntrypoints("composer-slash").find((l) => l.id === name);
+		if (!launcher) return undefined;
+
+		const arg = (match[2] ?? "").trim();
+		if (!arg) return { entrypointId: launcher.key, body: {} };
+
+		// PR walkthrough's run route already accepts these argument fields.
+		if (launcher.packId === "pr-walkthrough" || launcher.id === "pr-walkthrough") {
+			if (/^\d+$/.test(arg)) return { entrypointId: launcher.key, body: { prNumber: Number(arg) } };
+			return { entrypointId: launcher.key, body: { prUrl: arg } };
+		}
+
+		return { entrypointId: launcher.key, body: { input: arg } };
+	}
+
 	/** Fetch the file list for the current `@` query from the server (debounced).
 	 *  Mirrors `_loadSlashSkills` but is query-scoped because the file tree can be
 	 *  large/remote, so the server does the filtering + ranking. */
@@ -701,6 +722,26 @@ export class MessageEditor extends LitElement {
 			}
 		}
 		this._sendSizeError = "";
+		const packSlashLaunch = this.attachments.length === 0 ? this._packSlashLaunchFromText(text) : undefined;
+		if (packSlashLaunch) {
+			this._slashMenuOpen = false;
+			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+			this.value = "";
+			this.onInput?.(this.value);
+			const textarea = this.textareaRef.value;
+			if (textarea) {
+				textarea.value = this.value;
+				textarea.focus();
+			}
+			this._historyIndex = -1;
+			this._savedDraft = "";
+			void this.addToHistory(text);
+
+			runLauncherEntrypoint(packSlashLaunch.entrypointId, (r) => {
+				if (!r.ok) this._showLauncherError(r.error || "Could not start the PR walkthrough.");
+			}, { body: packSlashLaunch.body });
+			return;
+		}
 		// Dispatch a composed event that escapes shadow DOM — used by
 		// session-manager for draft cleanup without monkey-patching.
 		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
