@@ -139,8 +139,8 @@ user-facing entities are toggleable:** roles, tools, skills, and entrypoints. Su
 > **Extension Platform (`schema: 2`).** The activation system also covers the new pack-scoped
 > kinds — `providers` plus the reserved siblings `hooks` / `mcp` / `piExtensions` / `runtimes`
 > / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
-> `pack-activation` catalogue includes their arrays, so the toggles round-trip through the same
-> REST. Of these, only **providers** currently has a loader, so disabling a provider actually
+> `pack-activation` catalogue includes their arrays only for schema-2 packs, so the toggles round-trip through the same
+> REST without changing schema-1 catalogue shapes. Of these, only **providers** currently has a loader, so disabling a provider actually
 > removes it from `PackContributionRegistry.listProviders(...)`; the other five toggle purely as
 > catalogue metadata until their loaders land. See
 > [pack.yaml schema 2 → Per-provider activation](#per-provider-activation).
@@ -331,7 +331,9 @@ have them load, validate, and toggle, even though they do nothing until the disp
 #### The `schema` field and back-compat
 
 - **`schema?: number`** — a positive integer. Absent ⇒ **1** (every existing pack). Schema 1
-  keeps verbatim v1 validation, including the `contents.mcp` rejection below.
+  keeps verbatim v1 validation, including the `contents.mcp` rejection below. Other stray
+  schema-2 `contents` keys and top-level `provides`/`requires` are ignored, so v1 packs cannot
+  load providers and their `pack-activation` catalogue remains the old shape.
 - **`schema: 2`** unlocks the six new `contents` keys and the `provides`/`requires` arrays.
 - **`schema: 3` or higher** is *not* fatal: the pack loads its **schema-2 subset** and one
   forward-compat warning is recorded (`pack.yaml: schema N is newer than supported (2)`).
@@ -409,7 +411,6 @@ runtime: node                 # OPTIONAL free-form runtime hint
 budget:                       # OPTIONAL; both fields clamped
   maxTokens: 2000             #   clamped to [64, 8192];  default 1600
   timeoutMs: 1500             #   clamped to [100, 10000]; default 1500
-defaultEnabled: true          # default true (only an explicit `false` disables by default)
 config:                       # OPTIONAL opaque mapping handed to the provider verbatim
   maxEntries: 50
 ```
@@ -432,7 +433,6 @@ Field rules and defaults:
   `maxTokens` is clamped to `[64, 8192]` and `timeoutMs` to `[100, 10000]`. The budget exists
   so the (future) dispatch tier can bound how much a provider may contribute and how long it
   may run — defined now, enforced when dispatch lands.
-- **`defaultEnabled`** — default `true`; only an explicit `false` opts out by default.
 - **`runtime?`** / **`config?`** — optional pass-through fields for the future dispatch tier.
 
 **Providers are inert in this PR.** The loader validates them and the registry indexes them,
@@ -440,22 +440,21 @@ but nothing reads `module`, runs a `hook`, or applies the `budget` yet — provi
 later goal (the lifecycle hub). Authoring a provider today gets you validation, catalogue
 listing, and activation toggles, and nothing else.
 
-#### Why providers are pack-scoped, *not* a new `EntityType`
+#### Why providers are pack-scoped, *not* name-merged
 
-Providers are keyed `(packId, contributionId)` and loaded through the pack-contribution path —
-they are deliberately **not** added to the `EntityType` union (`roles`/`tools`/`skills`) that
-the `PackResolver` name-merges. This is the binding design decision for **all** future
-pack-scoped entity types, so it is worth stating the why:
+Provider contributions are keyed `(packId, contributionId)` and loaded through the pack-contribution path —
+they are deliberately **not** added to the role/tool/skill union that the `PackResolver`
+name-merges. This is the binding design decision for **all** future pack-scoped entity types,
+so it is worth stating the why:
 
-`EntityType` resolution merges by **name across packs**, with higher-priority packs shadowing
-lower ones of the same name. That is exactly the wrong semantics for providers: two different
-packs may each legitimately ship a provider with id `memory`, and **both must stay active** —
+The role/tool/skill resolver merges by **name across packs**, with higher-priority packs
+shadowing lower ones of the same name. That is exactly the wrong semantics here: two different
+packs may each legitimately ship a contribution with id `memory`, and **both must stay active** —
 there is no "winner". Provider identity is therefore the *pair* `(packId, contributionId)`, not
 a global name, which is precisely what the `pack-contributions.ts` registry already gives
-panels/entrypoints/routes (keyed by `packId`). Reusing that path — rather than extending
-`EntityType` — keeps two same-named providers from collapsing into one. Future pack-scoped
-entity types should follow the same rule: load via the pack-contribution registry, never the
-name-merging resolver.
+panels/entrypoints/routes (keyed by `packId`). Reusing that path keeps two same-named
+contributions from collapsing into one. Future pack-scoped entity types should follow the same
+rule: load via the pack-contribution registry, never the name-merging resolver.
 
 #### Per-provider activation
 
@@ -466,8 +465,8 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
 - **`DisabledRefs`** gains `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
   `workflows` arrays, and all six are added to `ACTIVATION_KINDS` so normalisation, hydration,
   and `getPackActivation` cover them automatically (one constant drives all three).
-- The **activation catalogue** in the `pack-activation` response includes the new arrays
-  (read straight from the installed pack's `contents`), so a disabled provider stays visible in
+- The **activation catalogue** in the `pack-activation` response includes the new arrays only
+  for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
   the unfiltered catalogue and can be re-enabled — the same
   [catalogue/runtime split](#activation-controls) invariant that applies to every other kind.
 - A provider is toggled by its **`listName`** (its `contents.providers` basename), exactly like

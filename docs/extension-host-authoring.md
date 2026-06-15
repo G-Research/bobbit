@@ -787,7 +787,8 @@ a fresh read-only reviewer sub-agent and the panel lives only in that child sess
 ### Providers (`providers/<id>.yaml`) — schema 2, loaded but inert
 
 **Status:** a `schema: 2` pack may ship **provider** contributions — a new pack-scoped
-contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes. In
+contribution loaded into the same `PackContributionRegistry` as panels/entrypoints/routes. Schema-1
+packs ignore `contents.providers` and keep the old activation-catalogue shape. In
 this PR they are **loaded, validated, catalogued, and per-entity toggleable, but never
 dispatched**: nothing imports a provider `module`, runs a `hook`, or applies its `budget`.
 Provider *dispatch* (the lifecycle hub) is a later Extension-Platform goal. Author them now to
@@ -804,8 +805,8 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
 - Only files whose basename is in **`contents.providers`** load (`providers/<name>.yaml`;
   `.yml` tolerated), exactly like `contents.entrypoints` gates `entrypoints/`.
 - `id` is unique **within the pack** — two packs may each ship id `memory` and both stay
-  active, because providers are keyed `(packId, contributionId)`, **not** name-merged like an
-  `EntityType` (see the [pack-scoped rationale](marketplace.md#why-providers-are-pack-scoped-not-a-new-entitytype)).
+  active, because providers are keyed `(packId, contributionId)`, **not** name-merged
+  (see the [pack-scoped rationale](marketplace.md#why-providers-are-pack-scoped-not-name-merged)).
   A duplicate id *within one pack* is a hard `PackContributionError`.
 - `module` resolves relative to the provider YAML and is containment-checked against the pack
   root — the same guard as routes/entrypoints.

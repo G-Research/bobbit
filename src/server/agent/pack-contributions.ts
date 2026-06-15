@@ -96,7 +96,7 @@ export interface ProviderContribution {
 	hooks: string[];
 	runtime?: string;
 	budget: { maxTokens: number; timeoutMs: number };
-	defaultEnabled: boolean;
+	// Activation is governed solely by DisabledRefs for now; default-on/off semantics are deferred to provider dispatch/activation work.
 	config?: Record<string, unknown>;
 	listName: string;
 	sourceFile: string;
@@ -263,6 +263,7 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 // §0.2: providers are pack-scoped, keyed (packId, contributionId).
 // They are NOT an EntityType; two packs may each ship id "memory" and both stay active.
 export function loadProviders(packRoot: string, manifest: PackManifest): ProviderContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
 	const listNames = manifest.contents.providers ?? [];
 	const dir = path.join(packRoot, "providers");
 	const out: ProviderContribution[] = [];
@@ -340,7 +341,6 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 				maxTokens: clampNumber(budgetRaw.maxTokens, 1600, 64, 8192),
 				timeoutMs: clampNumber(budgetRaw.timeoutMs, 1500, 100, 10000),
 			},
-			defaultEnabled: data.defaultEnabled !== false,
 			listName,
 			sourceFile,
 			packRoot,

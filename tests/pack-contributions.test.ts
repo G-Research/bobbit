@@ -84,6 +84,31 @@ describe("validateManifest (§1.2)", () => {
 		assert.equal((m.contents as Record<string, unknown>).stores, undefined);
 	});
 
+	it("schema 1 ignores schema-2 capabilities and new contents keys except mcp", () => {
+		const m = validateManifest({
+			...ok,
+			provides: ["x"],
+			requires: ["Bad_Name"],
+			contents: {
+				...ok.contents,
+				providers: ["memory"],
+				hooks: ["../unsafe"],
+				"pi-extensions": ["pi"],
+				runtimes: ["node"],
+				workflows: ["review"],
+			},
+		});
+		assert.ok(m);
+		assert.equal(m.provides, undefined);
+		assert.equal(m.requires, undefined);
+		assert.deepEqual(m.contents.providers, []);
+		assert.deepEqual(m.contents.hooks, []);
+		assert.deepEqual(m.contents.mcp, []);
+		assert.deepEqual(m.contents.piExtensions, []);
+		assert.deepEqual(m.contents.runtimes, []);
+		assert.deepEqual(m.contents.workflows, []);
+	});
+
 	it("schema 2 accepts and normalizes new contents keys plus capabilities", () => {
 		const m = validateManifest({
 			...ok,
@@ -311,7 +336,7 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
 		w(path.join(root, "providers", "memory.yaml"), "id: memory\nmodule: ../lib/provider.js\nhooks: [beforePrompt]\n");
 		w(path.join(root, "lib", "provider.js"), "export default {};\n");
-		const m = manifest("memory-pack", { providers: ["memory"] });
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
 		const enabled = new PackContributionRegistry(() => [entry(root, "server", m)]);
 		assert.deepEqual(enabled.listProviders(undefined).map((p) => p.id), ["memory"]);
 
