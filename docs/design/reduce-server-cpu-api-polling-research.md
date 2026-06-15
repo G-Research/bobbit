@@ -25,7 +25,7 @@ Each tick calls `refreshSessions()`, which issues these in parallel:
 Additional sidebar badge work:
 
 - On initial load or goal-list changes, `refreshGateStatusCache()` sends one `GET /api/goals/:id/gates` per live goal with a workflow.
-- PR badge polling is throttled client-side to 60s and only considers active, non-archived, non-complete goals with branches; it sends one `GET /api/goals/:id/pr-status` per eligible goal.
+- PR badge polling is throttled client-side to 60s and only considers active, non-archived, non-complete goals with branches; it sends one quiet optional `GET /api/goals/:id/pr-status?optional=1` per eligible goal.
 - On `visibilitychange -> visible`, `main.ts` resets the PR throttle and calls `refreshSessions()` immediately.
 - Initial load hydrates PR data from `GET /api/pr-status-cache` once.
 
@@ -43,7 +43,7 @@ Initial dashboard fetches:
 - `GET /api/goals/:id/gates`
 - `GET /api/goals/:id/git-status`
 - `GET /api/goals/:id/cost`
-- `GET /api/goals/:id/pr-status`
+- `GET /api/goals/:id/pr-status?optional=1`
 - then `GET /api/goals/:id/team`
 - plus `GET /api/goals/:id/team/agents` from `startAgentPolling()`
 - plus `GET /api/goals/:id/verifications/active` after data load
@@ -56,7 +56,7 @@ Steady dashboard pollers:
 | Tasks | `/tasks` | every 10s | No |
 | Gates | `/gates`, `/verifications/active` | every 8s | No |
 | Cost | `/cost` | every 15s | No |
-| Goal git/PR | `/git-status`, `/pr-status` | every 60s | Yes |
+| Goal git/PR | `/git-status`, `/pr-status?optional=1` | every 60s | Yes |
 | Setup banner | `/api/goals/:id` | every 3s while `setupStatus === "preparing"` | No |
 
 A single open goal dashboard adds roughly **51 REST requests/minute** in steady state, excluding the global sidebar poll and excluding retries. Most of these dashboard pollers keep running in hidden tabs; browsers may throttle timers, but the code itself does not pause them.
@@ -66,7 +66,7 @@ A single open goal dashboard adds roughly **51 REST requests/minute** in steady 
 The active session widget has its own safety poll in `session-manager.ts`:
 
 - `GET /api/sessions/:id/git-status` every 30s for the active session, visible tabs only, with a 10s coalesce window after event-driven refreshes.
-- Every session git-status refresh is followed by a PR status refresh: `GET /api/goals/:goalId/pr-status` when the session has a goal, otherwise `GET /api/sessions/:id/pr-status`.
+- Every session git-status refresh is followed by a quiet optional PR status refresh: `GET /api/goals/:goalId/pr-status?optional=1` when the session has a goal, otherwise `GET /api/sessions/:id/pr-status?optional=1`.
 - Visibility changes to visible trigger an immediate git refresh.
 - Event-driven refreshes happen on active session connect, reconnect, idle status, and user git actions.
 - `runGitStatusRefresh()` retries transient failures up to 4 attempts at delays `[0, 500, 2000, 5000]`; `not-a-repo` is terminal.
