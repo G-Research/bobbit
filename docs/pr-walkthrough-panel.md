@@ -464,9 +464,10 @@ and the user-terminate control are pinned in the API spec
 `tests/e2e/pr-walkthrough-host-agents.spec.ts` (whose mock agent cannot resolve a
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
 browser spec).
-HTML-preview-panel sizing is independently pinned by
-`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (the panel-sizing logic does
-not touch the preview panel). See
+Preview panel sizing through the shared side-panel controls is independently pinned by
+`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (preview is one workspace
+panel kind using the same sizing logic as pack, proposal, review, and inbox
+panels). See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design.
 

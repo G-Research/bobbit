@@ -50,6 +50,12 @@ Every committed mutation increments `revision`, persists the whole workspace thr
 | Review | `review:<encoded-documentId>` | stable `documentId`, display `title` | Title is metadata. Renames do not change identity. Closing the tab preserves content/annotations for explicit reopen. |
 | Inbox | `inbox` | session id and optional `staffId` | Staff inbox opens/focuses through the same workspace APIs as other panels. |
 
+### Legacy chat artifacts exclusion
+
+`src/ui/ChatPanel.ts` and `src/ui/tools/artifacts/artifacts.ts` are not product-active right-side workspace surfaces in the current app. `ChatPanel.ts` is the older standalone/package-facing chat component that embeds its own `AgentInterface`, and `src/ui/tools/artifacts/artifacts.ts` is the legacy tool-renderer artifact model used by that component path. The app-level artifact experience is now served through pack panels, including the built-in artifacts pack, opened with `host.ui.openPanel()` and persisted as `pack:<packId>:<panelId>:<instanceKey>` workspace tabs.
+
+Because those legacy files are superseded by pack artifact panels, they are excluded from the shared workspace migration instead of being migrated. The acceptance surface is the pack artifact panel path: artifact panels use the shared side-panel shell, server-backed tab identity, shared sizing controls, and popout/deep-link behavior. Do not reintroduce a second right-side split/collapse implementation in `ChatPanel.ts` for the current app workspace.
+
 ### Preview lifecycle
 
 `preview_open` still writes the per-session preview mount and streams updates via preview SSE. Workspace tab creation is separate:
@@ -87,6 +93,7 @@ Mutation endpoints are serialized per session with an async lock. Clients may op
 Rules:
 
 - `open` upserts by tab id and focuses by default;
+- stale `open` requests that include `baseActiveTabId` do not steal focus when they are rebased over a newer active-tab change from another device; the tab is still opened or updated, but the newer active tab remains active;
 - `update` patches an already-open tab only and returns `404` if it is closed;
 - `close` deletes the tab and chooses the next active tab like a browser tab strip;
 - `active` may point only to an open tab or empty;
@@ -103,7 +110,7 @@ REST endpoints are session-scoped:
 | Method | Path | Behavior |
 |---|---|---|
 | `GET` | `/api/sessions/:sessionId/side-panel-workspace` | Return the canonical workspace, creating an empty default if none was persisted. |
-| `POST` | `/api/sessions/:sessionId/side-panel-workspace/open` | Validate and upsert a tab; focus by default. |
+| `POST` | `/api/sessions/:sessionId/side-panel-workspace/open` | Validate and upsert a tab; focus by default except stale `baseActiveTabId` rebases that would steal focus. |
 | `PATCH` | `/api/sessions/:sessionId/side-panel-workspace/tabs/:tabId` | Update an already-open tab. Does not create closed tabs. |
 | `DELETE` | `/api/sessions/:sessionId/side-panel-workspace/tabs/:tabId` | Close a tab and preserve underlying content. |
 | `POST` | `/api/sessions/:sessionId/side-panel-workspace/active` | Set the active tab id. |
