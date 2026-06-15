@@ -446,6 +446,7 @@ interface OpenSidebarActionsPopover {
 }
 
 let _openSidebarActionsPopover: OpenSidebarActionsPopover | null = null;
+let _sidebarActionsPopoverRequestId = 0;
 
 function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: string): boolean {
 	return _openSidebarActionsPopover?.kind === kind
@@ -464,6 +465,7 @@ function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActions
 }
 
 function closeSidebarActionsPopover(render = true): void {
+	_sidebarActionsPopoverRequestId++;
 	const current = _openSidebarActionsPopover;
 	if (!current) return;
 	_openSidebarActionsPopover = null;
@@ -497,7 +499,9 @@ async function openSidebarActionsPopover(input: {
 		return;
 	}
 	closeSidebarActionsPopover(false);
+	const requestId = ++_sidebarActionsPopoverRequestId;
 	await import("../ui/components/SidebarActionsPopover.js");
+	if (requestId !== _sidebarActionsPopoverRequestId || !input.trigger.isConnected) return;
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
 	element.anchorEl = input.trigger;
 	element.items = sidebarActionPopoverItems(input.actions);
