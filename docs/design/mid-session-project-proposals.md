@@ -1,11 +1,19 @@
 # Mid-session project proposals
 
+> **Historical implementation plan.** This design predates the unified
+> server-backed side-panel workspace. Proposal tab behavior now follows
+> [docs/side-panel-workspace.md](../side-panel-workspace.md): a project proposal
+> opens or updates `proposal:project` through the workspace API, shared controls
+> own fullscreen/collapse/restore/popout, and closed tabs are not recreated from
+> proposal state or localStorage. Hardcoded source locations and preview-specific
+> wiring below are historical planning context, not current side-panel guidance.
+
 ## Goal
 
 Let **any** agent session (regular, goal, staff, and non-project assistants) submit
 `propose_project` to edit the **currently registered** project's config, and give
-the user a first-class "Project" tab in the preview panel to review and accept the
-change without leaving the session.
+the user a first-class `proposal:project` tab in the side-panel workspace to
+review and accept the change without leaving the session.
 
 The existing provisional-project flow (project assistant → promote → terminate →
 navigate) must continue to work unchanged.
@@ -14,14 +22,14 @@ navigate) must continue to work unchanged.
 
 ### Client
 - State shape: `state.activeProjectProposal: undefined | { sessionId: string; fields: Record<string,string> }`
-  at `src/app/state.ts:166`.
+  at `src/app/state.ts`.
 - Server → client callback: `remote.onProjectProposal` is wired **for every session**
-  regardless of assistantType (`src/app/session-manager.ts:1186-1195`) and also from
-  the `proposal-open` button dispatch (`src/app/session-manager.ts:1214`).
-- Proposal parser: `src/app/proposal-parsers.ts:52-55` (`project_proposal`, required
+  regardless of assistantType (`src/app/session-manager.ts`) and also from
+  the `proposal-open` button dispatch (`src/app/session-manager.ts`).
+- Proposal parser: `src/app/proposal-parsers.ts` (`project_proposal`, required
   `name` + `root_path`).
 - **Bug #1 — proposal is wiped for non-project sessions.** Around
-  `src/app/session-manager.ts:1475`:
+  `src/app/session-manager.ts`:
   ```ts
   if (state.assistantType !== "project" && state.assistantType !== "project-scaffolding")
       state.activeProjectProposal = undefined;
@@ -29,18 +37,18 @@ navigate) must continue to work unchanged.
   This clears the proposal during draft-restore on any session whose assistantType
   isn't `project`/`project-scaffolding`, so a `propose_project` from a regular
   session never survives a navigate-back.
-- **Bug #2 — `projectProposalPanel()` is only mounted via the assistant preview
-  router.** `src/app/render.ts:1785` defines the panel; `getAssistantPreviewPanel()`
-  at `src/app/render.ts:1883-1889` dispatches `case "project" | "project-scaffolding"`.
-  Non-assistant sessions use `unifiedPreviewPanel()` (`src/app/render.ts:2650…`),
-  whose tab header only knows about `preview`, `review`, `goal` — no `project` tab.
+- **Bug #2 (historical) — `projectProposalPanel()` was only mounted via the
+  assistant preview router.** In the current workspace model, project proposals
+  open or update the `proposal:project` tab through the side-panel workspace API;
+  the shared side-panel shell, not preview-specific render wiring, decides which
+  tabs are visible.
 - **Bug #3 — accept is hard-coded to the provisional flow.** `acceptProjectProposal()`
-  at `src/app/session-manager.ts:1767-1830` calls `promoteProject()` (which fails for
+  at `src/app/session-manager.ts` calls `promoteProject()` (which fails for
   non-provisional projects), writes config, then terminates the session and navigates
   to landing.
 
 ### Server
-- `PUT /api/projects/:id/config` lives at `src/server/server.ts:1922-1945`. It is a
+- `PUT /api/projects/:id/config` lives at `src/server/server.ts`. It is a
   **generic** string-KV writer: it validates keys (no dots) and writes every entry
   into `ctx.projectConfigStore` via `.set(key, value)`. It already accepts any
   scalar project.yaml field — `build_command`, `test_command`, `typecheck_command`,
@@ -48,14 +56,14 @@ navigate) must continue to work unchanged.
   `qa_start_command`, etc. **No extension needed for command / sandbox / qa fields.**
 - `name` is **not** a project.yaml field — it lives in `.bobbit/state/projects.json`
   via `ProjectRegistry`. The rename endpoint is `PUT /api/projects/:id` at
-  `src/server/server.ts:1807-1823` which accepts `{ name, color, rootPath, palette,
+  `src/server/server.ts` which accepts `{ name, color, rootPath, palette,
   colorLight, colorDark }` and calls `projectRegistry.update(id, updates)`
-  (`src/server/agent/project-registry.ts:162`).
+  (`src/server/agent/project-registry.ts`).
 - Model preferences (`session_model`, `review_model`, `naming_model`) are **not**
   project-scoped — they live in the preferences store as `default.sessionModel` /
-  `default.reviewModel` / `default.namingModel` (`src/app/settings-page.ts:1142-1144`,
-  `src/app/render.ts:1571-1573`). The existing agent-side `propose_project` tool
-  schema (`defaults/tools/proposals/extension.ts:151-165`) does **not** accept
+  `default.reviewModel` / `default.namingModel` (`src/app/settings-page.ts`,
+  `src/app/render.ts`). The existing agent-side `propose_project` tool
+  schema (`defaults/tools/proposals/extension.ts`) does **not** accept
   these fields. `propose_setup` is the tool for model prefs.
 - `onProjectProposal` is a **client-side** callback derived from parsing
   `<project_proposal>` tool-call blocks in assistant messages
@@ -66,7 +74,7 @@ navigate) must continue to work unchanged.
 
 ### 1. Client state shape (`src/app/state.ts`)
 
-Update `activeProjectProposal` at line 166:
+Update `activeProjectProposal`:
 
 ```ts
 activeProjectProposal: undefined as undefined | {
@@ -86,14 +94,13 @@ activeProjectProposal: undefined as undefined | {
 },
 ```
 
-Draft storage (`projectDraft` serialize/restore at `src/app/session-manager.ts:
-328-345`) keeps `activeProjectProposal` whole, so the new fields persist free.
+Draft storage (`projectDraft` serialize/restore in `src/app/session-manager.ts`) keeps `activeProjectProposal` whole, so the new fields persist free.
 
 ### 2. `session-manager.ts` changes
 
 #### 2a. Stop wiping the proposal for non-project sessions
 
-Change `src/app/session-manager.ts:1475` from:
+Change `src/app/session-manager.ts` from:
 
 ```ts
 if (state.assistantType !== "project" && state.assistantType !== "project-scaffolding")
@@ -109,8 +116,7 @@ to:
 
 #### 2b. Auto-select the `project` tab on first arrival (mirror goal pattern)
 
-In `remote.onProjectProposal` (currently `src/app/session-manager.ts:1186-1195`),
-mirror the `onGoalProposal` branching at lines 995-1044 exactly:
+In `remote.onProjectProposal`, mirror the existing goal-proposal branching:
 
 ```ts
 remote.onProjectProposal = async (fields: Record<string, string>) => {
@@ -129,11 +135,9 @@ remote.onProjectProposal = async (fields: Record<string, string>) => {
         // Existing assistant-tab behaviour
         if (state.assistantTab === "chat" && !isDesktop()) state.assistantTab = "preview";
     } else if (isFirstProposal) {
-        // Non-assistant session: first proposal auto-selects the new tab
-        state.previewPanelActiveTab = "project";
-        const collapseKey = `bobbit-preview-collapsed-${sessionId}`;
-        localStorage.removeItem(collapseKey);
-        if (!isDesktop()) state.previewPanelTab = "project";
+        // Non-assistant session: first proposal explicitly opens/focuses
+        // the server-backed proposal workspace tab.
+        await openSidePanelTab(buildProposalSidePanelTab(sessionId, "project"));
     }
 
     // Lazy-load current config snapshot for the diff view (registered mode only)
@@ -170,7 +174,7 @@ async function loadCurrentProjectConfig(projectId: string, sessionId: string) {
 
 #### 2c. Split `acceptProjectProposal()`
 
-Replace the body at `src/app/session-manager.ts:1767-1830` with a dispatcher:
+Replace the body at `src/app/session-manager.ts` with a dispatcher:
 
 ```ts
 export async function acceptProjectProposal(): Promise<void> {
@@ -242,117 +246,35 @@ async function acceptRegisteredProjectProposal(proposal: ActiveProjectProposal):
 
 #### 2d. Dismiss path — unchanged
 
-The dismiss handler in `projectProposalPanel()` (`render.ts:1814-1819`) clears
+The dismiss handler in `projectProposalPanel()` (`render.ts`) clears
 `state.activeProjectProposal` and deletes the draft. This remains identical.
 No change.
 
-### 3. Preview panel wiring (`src/app/render.ts`)
+### 3. Side-panel workspace wiring
 
-#### 3a. Tab visibility in `unifiedPreviewPanel()`
+Current side-panel behavior is not wired through preview-specific tabs. A
+project proposal is represented by the shared proposal tab id `proposal:project`
+in the server-backed workspace.
 
-At `src/app/render.ts:2128-2136` (tab registration), alongside:
+Required behavior:
 
-```ts
-const showPreviewTab = state.isPreviewSession;
-const showGoalTab = state.activeGoalProposal != null;
-const showReviewTab = state.reviewPanelOpen;
-```
+- First proposal arrival calls the side-panel workspace open API for
+  `proposal:project` and focuses it.
+- Later current revisions update the same `proposal:project` tab in place; they
+  do not create duplicates or reorder unrelated preview/review/pack/inbox tabs.
+- Dismiss closes the workspace tab and clears the project proposal draft. Reload
+  must not recreate the tab from proposal state.
+- Historical/reopened revisions, if exposed, use `proposal:project:rev:<N>` and
+  are created only by explicit reopen UI.
+- The shared side-panel shell supplies fullscreen, collapse, restore, reorder,
+  close, keyboard shortcuts, and popout. Project proposal code should keep only
+  proposal-specific actions such as Apply Changes and Dismiss.
 
-add:
+#### 3a. Proposal panel content
 
-```ts
-const showProjectTab = state.activeProjectProposal != null;
-```
-
-and extend `hasUnifiedPanel()` at `src/app/render.ts:2128`:
-
-```ts
-function hasUnifiedPanel(): boolean {
-    return !state.assistantType && (
-        state.isPreviewSession ||
-        state.activeGoalProposal != null ||
-        state.activeProjectProposal != null ||   // new
-        state.reviewPanelOpen
-    );
-}
-```
-
-and `unifiedPanelTabs()` at `src/app/render.ts:2132-2139`:
-
-```ts
-function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project"> {
-    const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
-    if (state.isPreviewSession) tabs.push("preview");
-    if (state.reviewPanelOpen) tabs.push("review");
-    if (state.activeGoalProposal != null) tabs.push("goal");
-    if (state.activeProjectProposal != null) tabs.push("project"); // new
-    return tabs;
-}
-```
-
-Extend the `previewPanelTab` / `previewPanelActiveTab` unions in `src/app/state.ts`
-to include `"project"`.
-
-#### 3b. Auto-correct logic (`unifiedPreviewPanel()` ~line 2697-2703)
-
-Currently:
-
-```ts
-if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-    state.previewPanelActiveTab = state.isPreviewSession ? "preview" :
-        (state.activeGoalProposal != null ? "goal" : "preview");
-} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeGoalProposal != null) {
-    state.previewPanelActiveTab = "goal";
-} else if (state.previewPanelActiveTab === "goal" && state.activeGoalProposal == null && state.isPreviewSession) {
-    state.previewPanelActiveTab = "preview";
-}
-```
-
-Add a parallel branch:
-
-```ts
-} else if (state.previewPanelActiveTab === "project" && state.activeProjectProposal == null) {
-    state.previewPanelActiveTab = state.isPreviewSession ? "preview"
-        : (state.activeGoalProposal != null ? "goal"
-        : (state.reviewPanelOpen ? "review" : "preview"));
-}
-```
-
-#### 3c. Tab pill in the unified tab-bar (lines 2706-2713 and mirror at 2736-2744)
-
-After the `showGoalTab` button:
-
-```ts
-${showProjectTab ? html`
-    <button
-        class="goal-tab-pill ${state.previewPanelActiveTab === "project" ? "goal-tab-pill--active" : ""}"
-        title="Project"
-        @click=${() => { state.previewPanelActiveTab = "project"; renderApp(); }}
-    >Project <span class="goal-tab-dot"></span></button>
-` : ""}
-```
-
-#### 3d. Tab-content dispatch (lines 2748-2754)
-
-Extend the content switcher:
-
-```ts
-${state.previewPanelActiveTab === "review" && showReviewTab ? reviewPaneContent()
-    : state.previewPanelActiveTab === "preview" && showPreviewTab ? htmlPreviewContent()
-    : state.previewPanelActiveTab === "goal" && showGoalTab ? goalProposalPanel()
-    : state.previewPanelActiveTab === "project" && showProjectTab ? projectProposalPanel()
-    : ""}
-```
-
-Also mirror in `unifiedTabBar()` (lines 2588-2613) and `mobilePaneContent()`
-(lines ~2765-2776) — add a `"project"` branch rendering `projectProposalPanel()`.
-
-#### 3e. Generalise `projectProposalPanel()` (line 1785)
-
-Rewrite to render a **diff view**. The panel must work outside
-`getAssistantPreviewPanel` — it already does structurally (it imports nothing from
-the assistant router). No changes to the import graph are required; just replace
-the body.
+`projectProposalPanel()` still owns the proposal-specific diff UI. It must render
+inside the shared proposal panel slot instead of depending on assistant-only
+preview routing.
 
 Field set (editable):
 
@@ -404,12 +326,13 @@ Accept button label:
 - Registered: "Apply Changes" with a badge showing diff count
   (`N fields changed`).
 
-Dismiss button: unchanged.
+Dismiss button: closes the `proposal:project` workspace tab, clears
+`state.activeProjectProposal`, and deletes the draft.
 
 ### 4. Server
 
 #### 4a. `PUT /api/projects/:id/config`
-Already accepts arbitrary string KV pairs (`src/server/server.ts:1922-1945`). Keys
+Already accepts arbitrary string KV pairs (`src/server/server.ts`). Keys
 in scope that are already supported:
 `build_command`, `test_command`, `typecheck_command`, `test_unit_command`,
 `test_e2e_command`, `worktree_setup_command`, `qa_start_command`, `sandbox`,
@@ -417,7 +340,7 @@ plus any unknown passthrough. **No extension required.** The existing validation
 (`key.includes(".")` reject) is correct and kept.
 
 #### 4b. Name changes
-Use the existing `PUT /api/projects/:id` (`src/server/server.ts:1807-1823`) which
+Use the existing `PUT /api/projects/:id` (`src/server/server.ts`) which
 already accepts `{ name }`. **No extension required.**
 
 #### 4c. Model fields
@@ -436,16 +359,16 @@ Recommendation: **option 1**, so the panel gives one coherent surface. Server-si
 
 #### 4d. Tool schema extension
 
-`defaults/tools/proposals/extension.ts:151-165` — add optional
+`defaults/tools/proposals/extension.ts` — add optional
 `qa_start_command`, `sandbox`, `session_model`, `review_model`, `naming_model`
 to the `propose_project` `Type.Object`. Mirror in
-`src/app/proposal-parsers.ts:52-55` (`fields` array) so the client parser surfaces
+`src/app/proposal-parsers.ts` (`fields` array) so the client parser surfaces
 them.
 
 #### 4e. `onProjectProposal` — no server fix
 
 Client-side only. Already fires for any assistantType (proof:
-`src/app/session-manager.ts:1186` has no assistantType guard). **No change.**
+`src/app/session-manager.ts` has no assistantType guard). **No change.**
 
 ### 5. Testing plan
 
@@ -453,7 +376,7 @@ Client-side only. Already fires for any assistantType (proof:
 | --- | --- | --- |
 | Unit (Playwright `file://`) | `tests/ui/project-proposal-panel.spec.ts` | `projectProposalPanel()` renders diff: changed rows show "Changed" pill; unchanged rows collapse into a `<details>` group; `root_path` is read-only; unknown keys render in "Custom fields"; provisional mode (no `currentConfig`) still renders legacy UI. |
 | API E2E (in-process harness) | `tests/e2e/project-config-api.spec.ts` | `PUT /api/projects/:id/config` accepts every field in §3e (config-sourced ones); `PUT /api/projects/:id` accepts `name`; `PUT /api/preferences` accepts the three model keys. |
-| Browser E2E (REQUIRED) | `tests/e2e/ui/mid-session-project-proposal.spec.ts` | Spawned gateway + mock agent. Flow: create regular session in a registered project; mock agent emits `<project_proposal>` with diffed fields; assert (1) Project tab appears in the unified preview panel, (2) diff rows rendered with "Changed" pills, (3) Apply Changes calls `PUT /api/projects/:id/config` + (if name changed) `PUT /api/projects/:id`, (4) session stays connected (no landing nav), (5) reload — proposal cleared, config persisted (GET returns new values), (6) Dismiss path: emit proposal, click Dismiss, tab disappears, reload → still gone, config untouched. Pattern: `tests/e2e/ui/settings.spec.ts`. |
+| Browser E2E (REQUIRED) | `tests/e2e/ui/mid-session-project-proposal.spec.ts` | Spawned gateway + mock agent. Flow: create regular session in a registered project; mock agent emits `<project_proposal>` with diffed fields; assert (1) `proposal:project` appears in the shared side-panel workspace, (2) diff rows rendered with "Changed" pills, (3) Apply Changes calls `PUT /api/projects/:id/config` + (if name changed) `PUT /api/projects/:id`, (4) session stays connected (no landing nav), (5) reload — proposal cleared, config persisted (GET returns new values), (6) Dismiss path: emit proposal, click Dismiss, tab disappears, reload → still gone, config untouched. Pattern: `tests/e2e/ui/settings.spec.ts`. |
 | Regression | `tests/e2e/ui/project-assistant.spec.ts` | Must stay green: provisional promote + terminate + navigate-to-landing flow unchanged. |
 
 ### 6. Non-goals (per spec)
@@ -468,11 +391,11 @@ Client-side only. Already fires for any assistantType (proof:
 
 | File | Change |
 | --- | --- |
-| `src/app/state.ts` | Add `mode` + `currentConfig` to `activeProjectProposal`; add `"project"` to `previewPanelTab` / `previewPanelActiveTab` unions. |
-| `src/app/session-manager.ts` | L1475: drop the project-proposal wipe. L1186: expand `onProjectProposal` (mode inference, first-proposal tab auto-select, lazy config load). L1767: split `acceptProjectProposal` into provisional (existing body) + registered (new). |
-| `src/app/render.ts` | L1785: rewrite `projectProposalPanel()` as a diff view. L2128/2132/2697/2706/2748/2765: extend `hasUnifiedPanel` / `unifiedPanelTabs` / auto-correct / tab pill / content dispatch / mobile pane to include `"project"`. |
-| `src/app/proposal-parsers.ts` | L52-55: add `qa_start_command`, `sandbox`, `session_model`, `review_model`, `naming_model` to `fields`. |
-| `defaults/tools/proposals/extension.ts` | L151-165: add the five optional fields to `propose_project` schema. |
+| `src/app/state.ts` | Add `mode` + `currentConfig` to `activeProjectProposal`; workspace tab state remains in `sidePanelWorkspace`. |
+| `src/app/session-manager.ts` | Drop the project-proposal wipe; expand `onProjectProposal` (mode inference, explicit workspace tab open, lazy config load); split `acceptProjectProposal` into provisional (existing body) + registered (new). |
+| `src/app/render.ts` | Render `projectProposalPanel()` as a diff view inside the shared proposal panel slot. Do not add preview-specific tab/chrome state. |
+| `src/app/proposal-parsers.ts` | Add `qa_start_command`, `sandbox`, `session_model`, `review_model`, `naming_model` to `fields`. |
+| `defaults/tools/proposals/extension.ts` | Add the five optional fields to `propose_project` schema. |
 | `src/server/server.ts` | No change — existing `PUT /api/projects/:id/config` + `PUT /api/projects/:id` cover all registered-mode writes. |
 | `src/server/agent/project-registry.ts` | No change. |
 | `tests/ui/project-proposal-panel.spec.ts` | New — unit test for diff rendering. |
