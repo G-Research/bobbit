@@ -265,8 +265,13 @@ export function listLauncherEntrypoints(kind?: LauncherKind): RegisteredLauncher
  * success (backward-compatible).
  */
 export interface LauncherDispatchResult { ok: boolean; error?: string; code?: string; }
+export interface LauncherDispatchOptions { body?: Record<string, unknown>; }
 
-export function runLauncherEntrypoint(keyOrId: string, onResult?: (r: LauncherDispatchResult) => void): void {
+export function runLauncherEntrypoint(
+	keyOrId: string,
+	onResult?: (r: LauncherDispatchResult) => void,
+	options?: LauncherDispatchOptions,
+): void {
 	let l = launchers.get(keyOrId);
 	if (!l) {
 		// Narrow fallback: a bare id that matches exactly ONE launcher resolves it.
@@ -283,7 +288,7 @@ export function runLauncherEntrypoint(keyOrId: string, onResult?: (r: LauncherDi
 	}
 	// Spawn launcher FIRST (it also carries a `panelId`, so an `action`-first check
 	// keeps it from being mis-routed to `openPackPanel`; design §3.1 / R3).
-	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult); return; }
+	if (isSpawnLaunchTarget(l.target)) { void runSpawnLauncher(l, l.target, onResult, options?.body); return; }
 	if (isPanelTarget(l.target)) { openPackPanel(l.target, l.packId); onResult?.({ ok: true }); return; }
 	navigateToTarget(l.target as RouteTarget);
 	onResult?.({ ok: true });
@@ -295,15 +300,16 @@ export function runLauncherEntrypoint(keyOrId: string, onResult?: (r: LauncherDi
  *  reviewer (always-fresh, Q4). */
 const inFlightSpawnLaunch = new Set<string>();
 
-/** Dispatch a SpawnLaunchTarget: call the pack `route` (POST, empty body) on the
- *  active (owner) session via the launcher-bound Host API; on `ok:true` open the
- *  returned child's panel (which selects + switches). `ok:false` / errors flow back
- *  through `onResult` so the surface renders them inline — nothing is spawned on the
- *  owner session and the view never switches on failure. */
+/** Dispatch a SpawnLaunchTarget: call the pack `route` (POST) on the active
+ *  (owner) session via the launcher-bound Host API; on `ok:true` open the returned
+ *  child's panel (which selects + switches). `ok:false` / errors flow back through
+ *  `onResult` so the surface renders them inline — nothing is spawned on the owner
+ *  session and the view never switches on failure. */
 async function runSpawnLauncher(
 	l: RegisteredLauncher,
 	target: SpawnLaunchTarget,
 	onResult?: (r: LauncherDispatchResult) => void,
+	body?: Record<string, unknown>,
 ): Promise<void> {
 	if (inFlightSpawnLaunch.has(l.key)) return;      // ignore re-entrant click
 	inFlightSpawnLaunch.add(l.key);
@@ -312,7 +318,7 @@ async function runSpawnLauncher(
 		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: "PR Walkthrough is unavailable." }); return; }
 		let res: { ok?: boolean; childSessionId?: string; error?: string; code?: string } | undefined;
 		try {
-			res = await host.callRoute(target.route, { method: "POST", body: {} });
+			res = await host.callRoute(target.route, { method: "POST", body: body ?? {} });
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
 			onResult?.({ ok: false, error: message });
