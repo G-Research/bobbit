@@ -5586,7 +5586,13 @@ async function handleApiRoute(
 		const packs = packContributionRegistry.list(contribProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
-			panels: p.panels.map((panel) => (panel.title !== undefined ? { id: panel.id, title: panel.title } : { id: panel.id })),
+			panels: p.panels.map((panel) => {
+				const out: Record<string, unknown> = { id: panel.id };
+				if (panel.title !== undefined) out.title = panel.title;
+				if (panel.instanceMode !== undefined) out.instanceMode = panel.instanceMode;
+				if (panel.instanceParam !== undefined) out.instanceParam = panel.instanceParam;
+				return out;
+			}),
 			entrypoints: p.entrypoints.map((e) => {
 				const out: Record<string, unknown> = { id: e.id, kind: e.kind, listName: e.listName };
 				if (e.label !== undefined) out.label = e.label;

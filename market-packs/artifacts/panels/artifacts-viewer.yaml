@@ -1,5 +1,7 @@
 id: artifacts.viewer
 title: Artifact
+instanceMode: parameterized
+instanceParam: artifactId
 # `entry` resolves relative to THIS yaml (panels/) and stays inside the pack
 # root. The built panel bundle lives in the shared lib/ dir.
 entry: ../lib/ArtifactViewerPanel.js

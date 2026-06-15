@@ -10,8 +10,14 @@ import type {
 } from "../shared/side-panel-workspace.js";
 import { isSidePanelKind, isSidePanelProposalType, isSidePanelSizeMode } from "../shared/side-panel-workspace.js";
 
+export interface PackPanelValidationInfo {
+	instanceMode?: "singleton" | "parameterized";
+	instanceParam?: string;
+}
+
 export interface SidePanelWorkspaceValidators {
 	isKnownPackPanel?: (packId: string, panelId: string) => boolean;
+	getPackPanelInfo?: (packId: string, panelId: string) => PackPanelValidationInfo | undefined;
 }
 
 export type WorkspaceMutation =
@@ -247,9 +253,22 @@ function canonicalizePack(raw: Record<string, unknown>, id: string, sessionId: s
 	const sourceInstance = typeof source.instanceKey === "string" && source.instanceKey ? source.instanceKey : (legacy ? "default" : "");
 	if (sourceInstance !== instanceKey) return null;
 	if (!isRouteSafePart(packId) || !isRouteSafePart(panelId) || !isRouteSafePart(instanceKey)) return null;
-	if (validators?.isKnownPackPanel && !validators.isKnownPackPanel(packId, panelId)) return null;
+	const panelInfo = validators?.getPackPanelInfo?.(packId, panelId);
+	if (validators?.getPackPanelInfo && !panelInfo) return null;
+	if (!panelInfo && validators?.isKnownPackPanel && !validators.isKnownPackPanel(packId, panelId)) return null;
 	const params = cloneJsonObject(source.params);
 	if (source.params !== undefined && params === undefined) return null;
+	if (panelInfo) {
+		const mode = panelInfo.instanceMode === "parameterized" ? "parameterized" : "singleton";
+		if (mode === "singleton" && instanceKey !== "default") return null;
+		if (mode === "parameterized") {
+			if (instanceKey === "default") return null;
+			if (panelInfo.instanceParam) {
+				const paramValue = params?.[panelInfo.instanceParam];
+				if (typeof paramValue !== "string" || paramValue !== instanceKey || !isRouteSafePart(paramValue)) return null;
+			}
+		}
+	}
 	const canonicalId = `pack:${encodeComponent(packId)}:${encodeComponent(panelId)}:${encodeComponent(instanceKey)}`;
 	return {
 		id: canonicalId,

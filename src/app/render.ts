@@ -22,11 +22,10 @@ import {
 	setRenderSuppressed,
 } from "./state.js";
 import { gatewayFetch, retryLoadSessions } from "./api.js";
-import { clearAllAnnotations, clearAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import {
 	clearPersistedReviewDocuments,
 	openReviewDocumentFromEvent,
-	removePersistedReviewDocument,
 	reviewDecisionPayloadFromDetail,
 	reviewDocumentFromDecisionDetail,
 	submitReviewDecision,
@@ -1159,11 +1158,20 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 	setActivePanelTabIdForSession(state, sid, "");
 }
 
+export function shouldDerivePanelTabsInRender(protocol = typeof window !== "undefined" ? window.location.protocol : ""): boolean {
+	// file:// browser fixtures have no gateway REST API and intentionally exercise
+	// legacy cache-derived panel setup. The real gateway render path is server-
+	// authoritative: missing workspace state means "not hydrated yet", never
+	// "recreate tabs from proposal/review/preview/inbox caches".
+	return protocol === "file:";
+}
+
 /** Ordered list of available unified panel tabs for the current session. */
 export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	const sessionId = workspaceSessionId();
 	const serverWorkspace = state.sidePanelWorkspaceBySession?.[sessionId];
 	if (serverWorkspace) return panelContentTabs(panelTabsForSession(state, sessionId));
+	if (!shouldDerivePanelTabsInRender()) return [];
 	const derivedTabs = buildPanelWorkspaceTabs({
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
@@ -1186,6 +1194,19 @@ export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	setPanelTabsForSession(state, sessionId, tabs);
 	ensureUnifiedActiveTab(tabs);
 	return tabs;
+}
+
+function findReviewPanelTabByTitle(title: string): UnifiedPanelTab | undefined {
+	const doc = state.reviewDocuments.get(title);
+	const candidateIds = [doc?.documentId, title]
+		.filter((value): value is string => typeof value === "string" && value.length > 0)
+		.map((documentId) => reviewPanelTabId(documentId));
+	const tabs = unifiedPanelTabs();
+	for (const id of candidateIds) {
+		const tab = findPanelTab(tabs, id);
+		if (tab?.kind === "review") return tab;
+	}
+	return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === title);
 }
 
 function unifiedPanelContentTabs(): UnifiedContentTab[] {
@@ -1907,17 +1928,12 @@ export function doRenderApp(): void {
 				const sid = activeSessionId() || "";
 				if (event?.type !== "review-close-tab") {
 					const count = reviewPaneUnsentCountForDocument(sid, title);
-					if (count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+					if (count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
 				}
-				clearAnnotations(sid, title);
-				removePersistedReviewDocument(sid, title);
-				state.reviewDocuments = new Map(state.reviewDocuments);
-				state.reviewDocuments.delete(title);
 				if (state.reviewActiveTab === title) {
 					const nextReview = nextCandidate?.kind === "review" ? reviewTitleFromPanelTab(nextCandidate) : "";
-					state.reviewActiveTab = nextReview || [...state.reviewDocuments.keys()][0] || "";
+					if (nextReview) state.reviewActiveTab = nextReview;
 				}
-				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 			}
 		}
 		if (tab.kind === "inbox") {
@@ -2152,7 +2168,7 @@ export function doRenderApp(): void {
 				@review-tab-change=${(e: CustomEvent) => {
 					const title = e.detail.title as string;
 					state.reviewActiveTab = title;
-					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					const tab = findReviewPanelTabByTitle(title);
 					if (tab) setUnifiedActiveTab(tab);
 					renderApp();
 				}}
@@ -2210,19 +2226,11 @@ export function doRenderApp(): void {
 				}}
 				@review-close-tab=${(e: CustomEvent) => {
 					const title = e.detail.title as string;
-					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					const tab = findReviewPanelTabByTitle(title);
 					if (tab) closeUnifiedPanelTab(tab, e);
 					else {
-						const sid = activeSessionId() || "";
-						clearAnnotations(sid, title);
-						removePersistedReviewDocument(sid, title);
-						state.reviewDocuments = new Map(state.reviewDocuments);
-						state.reviewDocuments.delete(title);
-						if (state.reviewActiveTab === title) {
-							const keys = [...state.reviewDocuments.keys()];
-							state.reviewActiveTab = keys[0] || "";
-						}
-						state.reviewPanelOpen = state.reviewDocuments.size > 0;
+						const keys = [...state.reviewDocuments.keys()].filter((key) => key !== title);
+						if (state.reviewActiveTab === title) state.reviewActiveTab = keys[0] || title;
 						renderApp();
 					}
 				}}

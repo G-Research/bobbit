@@ -106,6 +106,11 @@ function reviewDocumentIdForOpen(options: OpenReviewDocumentOptions, title: stri
 	const existing = state.reviewDocuments instanceof Map ? state.reviewDocuments.get(title) : undefined;
 	const existingId = normalizeDocumentId(existing?.documentId);
 	if (existing) return existingId || legacyReviewDocumentIdFromTitle(title);
+	if (sessionId) {
+		const persisted = Object.values(safeReadPersisted(sessionId)).find((doc) => doc?.title === title);
+		const persistedId = normalizeDocumentId(persisted?.documentId);
+		if (persistedId) return persistedId;
+	}
 	const matchingWorkspaceTab = getSidePanelWorkspace(sessionId).tabs.find((tab) => {
 		if (tab.kind !== "review") return false;
 		const source = tab.source as Record<string, unknown> | undefined;

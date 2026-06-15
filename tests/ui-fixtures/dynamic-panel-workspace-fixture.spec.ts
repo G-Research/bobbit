@@ -10,6 +10,7 @@ const BUNDLE = path.join(BUNDLE_DIR, "dynamic-panel-workspace-fixture-bundle.js"
 
 const APP_RENDER_SRC = path.resolve("src/app/render.ts");
 const APP_STATE_SRC = path.resolve("src/app/state.ts");
+const SIDE_PANEL_WORKSPACE_SRC = path.resolve("src/app/side-panel-workspace.ts");
 const PANEL_WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
 const PREVIEW_RENDERER_SRC = path.resolve("src/ui/tools/renderers/PreviewRenderer.ts");
 const REVIEW_PANE_SRC = path.resolve("src/ui/components/review/ReviewPane.ts");
@@ -46,6 +47,7 @@ test.beforeAll(() => {
 			ENTRY,
 			APP_RENDER_SRC,
 			APP_STATE_SRC,
+			SIDE_PANEL_WORKSPACE_SRC,
 			PANEL_WORKSPACE_SRC,
 			PREVIEW_RENDERER_SRC,
 			REVIEW_PANE_SRC,
@@ -269,6 +271,25 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await loadFixture(page);
+	});
+
+	test("render derivation is restricted to file fixtures", async ({ page }) => {
+		const result = await page.evaluate(() => ({
+			file: (window as any).__shouldDerivePanelTabsInRender("file:"),
+			http: (window as any).__shouldDerivePanelTabsInRender("http:"),
+			https: (window as any).__shouldDerivePanelTabsInRender("https:"),
+		}));
+		expect(result).toEqual({ file: true, http: false, https: false });
+	});
+
+	test("same-revision server rollback force-replaces optimistic workspace", async ({ page }) => {
+		const result = await page.evaluate(() => (window as any).__exerciseSameRevisionWorkspaceRollback());
+		expect(result).toEqual({
+			ignoredIds: ["proposal:goal", "review:optimistic"],
+			forcedIds: ["proposal:goal"],
+			storedIds: ["proposal:goal"],
+			storedRevision: 7,
+		});
 	});
 
 	test("multiple historical preview tabs reopen independently without hiding a goal proposal", async ({ page }) => {

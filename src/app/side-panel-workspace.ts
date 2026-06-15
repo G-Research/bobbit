@@ -327,12 +327,12 @@ export function getSidePanelWorkspace(sessionId?: string | null): SidePanelWorks
 	return state.sidePanelWorkspaceBySession[sid] || emptyWorkspace(sid === "__no-session__" ? "" : sid);
 }
 
-export function applySidePanelWorkspaceFromServer(rawWorkspace: unknown, options: { source?: "hydrate" | "rest" | "ws"; skipRender?: boolean } = {}): SidePanelWorkspace {
+export function applySidePanelWorkspaceFromServer(rawWorkspace: unknown, options: { source?: "hydrate" | "rest" | "ws"; skipRender?: boolean; force?: boolean } = {}): SidePanelWorkspace {
 	const rawSessionId = stringValue(asRecord(rawWorkspace)?.sessionId) || activeSessionId() || state.selectedSessionId || "";
 	const workspace = normalizeWorkspace(rawWorkspace, rawSessionId);
 	const sid = panelWorkspaceSessionKey(workspace.sessionId);
 	const currentRevision = state.lastWorkspaceRevisionBySession[sid];
-	const force = options.source === "hydrate";
+	const force = options.source === "hydrate" || options.force === true;
 	if (!force && typeof currentRevision === "number" && workspace.revision <= currentRevision) {
 		return state.sidePanelWorkspaceBySession[sid] || workspace;
 	}
@@ -559,7 +559,7 @@ async function settleMutation(sessionId: string, mutationId: string, request: Pr
 		const ownsPending = pending?.id === mutationId;
 		if (ownsPending) mutationState.delete(sid);
 		const latest = err instanceof WorkspaceRequestError ? err.workspace : undefined;
-		if (latest) return applySidePanelWorkspaceFromServer(latest, { source: "rest" });
+		if (latest) return applySidePanelWorkspaceFromServer(latest, { source: "rest", force: ownsPending });
 		try {
 			const refetched = await fetchWorkspace(sessionId);
 			if (refetched) return applySidePanelWorkspaceFromServer(refetched, { source: "hydrate" });

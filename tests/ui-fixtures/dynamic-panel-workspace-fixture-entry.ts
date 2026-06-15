@@ -1,6 +1,8 @@
 import { html } from "lit";
-import { doRenderApp, setSelectedWorkflowId } from "../../src/app/render.js";
+import { doRenderApp, setSelectedWorkflowId, shouldDerivePanelTabsInRender } from "../../src/app/render.js";
 import { renderApp, setProjects, setRenderApp, state, type GatewaySession, type Project } from "../../src/app/state.js";
+import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-workspace.js";
+import type { SidePanelWorkspace } from "../../src/shared/side-panel-workspace.js";
 import { selectReviewWorkspaceTab } from "../../src/app/preview-panel.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -459,6 +461,52 @@ function getFixtureState(): Record<string, unknown> {
 	};
 }
 
+function exerciseSameRevisionWorkspaceRollback(): Record<string, unknown> {
+	const sid = currentSessionId();
+	const base: SidePanelWorkspace = {
+		version: 1,
+		sessionId: sid,
+		revision: 7,
+		tabs: [{
+			id: "proposal:goal",
+			kind: "proposal",
+			title: "Goal Proposal",
+			label: "Goal",
+			source: { type: "proposal", sessionId: sid, proposalType: "goal" },
+			updatedAt: 1,
+		}],
+		activeTabId: "proposal:goal",
+		sizeMode: "split",
+		updatedAt: 1,
+	};
+	const optimistic: SidePanelWorkspace = {
+		...base,
+		tabs: [
+			...base.tabs,
+			{
+				id: "review:optimistic",
+				kind: "review",
+				title: "Review: optimistic",
+				label: "Review",
+				source: { type: "review", sessionId: sid, documentId: "optimistic", title: "optimistic" },
+				updatedAt: 2,
+			},
+		],
+		activeTabId: "review:optimistic",
+		updatedAt: 2,
+	};
+	applySidePanelWorkspaceFromServer(base, { source: "hydrate", skipRender: true });
+	state.sidePanelWorkspaceBySession[workspaceKey(sid)] = optimistic;
+	const ignored = applySidePanelWorkspaceFromServer(base, { source: "rest", skipRender: true });
+	const forced = applySidePanelWorkspaceFromServer(base, { source: "rest", force: true, skipRender: true });
+	return {
+		ignoredIds: ignored.tabs.map((tab) => tab.id),
+		forcedIds: forced.tabs.map((tab) => tab.id),
+		storedIds: state.sidePanelWorkspaceBySession[workspaceKey(sid)]?.tabs.map((tab) => tab.id) ?? [],
+		storedRevision: state.lastWorkspaceRevisionBySession[workspaceKey(sid)],
+	};
+}
+
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const url = requestPath(input);
 	const method = (init?.method || "GET").toUpperCase();
@@ -512,4 +560,6 @@ setRenderApp(doRenderApp);
 (window as any).__setDynamicReviewDocsForSession = setReviewDocsForSession;
 (window as any).__openDynamicReviewDoc = openReviewDoc;
 (window as any).__getDynamicPanelWorkspaceState = getFixtureState;
+(window as any).__exerciseSameRevisionWorkspaceRollback = exerciseSameRevisionWorkspaceRollback;
+(window as any).__shouldDerivePanelTabsInRender = shouldDerivePanelTabsInRender;
 (window as any).__dynamicPanelWorkspaceReady = true;

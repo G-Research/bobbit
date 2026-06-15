@@ -66,6 +66,12 @@ function validatorsFor(deps: SidePanelWorkspaceRouteDeps, sessionId: string): Si
 		isKnownPackPanel: deps.packContributionRegistry
 			? (packId: string, panelId: string) => !!deps.packContributionRegistry?.getPanel(projectId, packId, panelId)
 			: undefined,
+		getPackPanelInfo: deps.packContributionRegistry
+			? (packId: string, panelId: string) => {
+				const panel = deps.packContributionRegistry?.getPanel(projectId, packId, panelId);
+				return panel ? { instanceMode: panel.instanceMode, instanceParam: panel.instanceParam } : undefined;
+			}
+			: undefined,
 	};
 }
 

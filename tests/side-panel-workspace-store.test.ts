@@ -107,6 +107,66 @@ describe("side-panel workspace canonicalization", () => {
 		}, sessionId);
 		assert.equal(bad, null);
 	});
+
+	it("enforces pack panel instance metadata when server validators provide it", () => {
+		const validators = {
+			getPackPanelInfo(packId: string, panelId: string) {
+				if (packId === "artifacts" && panelId === "artifacts.viewer") return { instanceMode: "parameterized" as const, instanceParam: "artifactId" };
+				if (packId === "pr-walkthrough" && panelId === "pr-walkthrough.panel") return { instanceMode: "singleton" as const };
+				return undefined;
+			},
+		};
+		const goodArtifact = canonicalizeTab({
+			id: "pack:artifacts:artifacts.viewer:art-1",
+			kind: "pack",
+			title: "Artifact",
+			label: "Artifact",
+			source: { type: "pack", sessionId, packId: "artifacts", panelId: "artifacts.viewer", instanceKey: "art-1", params: { artifactId: "art-1" } },
+			updatedAt: 1,
+		}, sessionId, validators);
+		assert.ok(goodArtifact);
+		assert.equal(goodArtifact.id, "pack:artifacts:artifacts.viewer:art-1");
+
+		const missingParam = canonicalizeTab({
+			id: "pack:artifacts:artifacts.viewer:art-1",
+			kind: "pack",
+			title: "Artifact",
+			label: "Artifact",
+			source: { type: "pack", sessionId, packId: "artifacts", panelId: "artifacts.viewer", instanceKey: "art-1", params: {} },
+			updatedAt: 1,
+		}, sessionId, validators);
+		assert.equal(missingParam, null);
+
+		const mismatchedParam = canonicalizeTab({
+			id: "pack:artifacts:artifacts.viewer:art-1",
+			kind: "pack",
+			title: "Artifact",
+			label: "Artifact",
+			source: { type: "pack", sessionId, packId: "artifacts", panelId: "artifacts.viewer", instanceKey: "art-1", params: { artifactId: "other" } },
+			updatedAt: 1,
+		}, sessionId, validators);
+		assert.equal(mismatchedParam, null);
+
+		const singletonDefault = canonicalizeTab({
+			id: "pack:pr-walkthrough:pr-walkthrough.panel:default",
+			kind: "pack",
+			title: "PR Walkthrough",
+			label: "PR Walkthrough",
+			source: { type: "pack", sessionId, packId: "pr-walkthrough", panelId: "pr-walkthrough.panel", instanceKey: "default", singleton: true, params: {} },
+			updatedAt: 1,
+		}, sessionId, validators);
+		assert.ok(singletonDefault);
+
+		const singletonBypass = canonicalizeTab({
+			id: "pack:pr-walkthrough:pr-walkthrough.panel:forged",
+			kind: "pack",
+			title: "PR Walkthrough",
+			label: "PR Walkthrough",
+			source: { type: "pack", sessionId, packId: "pr-walkthrough", panelId: "pr-walkthrough.panel", instanceKey: "forged", singleton: true, params: {} },
+			updatedAt: 1,
+		}, sessionId, validators);
+		assert.equal(singletonBypass, null);
+	});
 });
 
 describe("side-panel workspace mutations", () => {

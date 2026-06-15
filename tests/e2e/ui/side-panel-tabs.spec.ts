@@ -320,11 +320,15 @@ async function updateGoalProposal(page: Page): Promise<void> {
 async function openReview(page: Page): Promise<string> {
 	await sendMessage(page, "REVIEW_OPEN");
 	await waitForAgentResponse(page, { text: "Done. Used review_open tool.", timeout: 20_000 });
-	const review = (await visiblePanelTabs(page)).find((tab) => tab.kind === "review" && tab.id.startsWith("review:"));
-	expect(review, `review tab should be visible; tabs=${JSON.stringify(await visiblePanelTabs(page))}`).toBeTruthy();
-	await clickTabById(page, review!.id, "review tab should be selectable");
+	let reviewId = "";
+	await expect.poll(async () => {
+		const review = (await visiblePanelTabs(page)).find((tab) => tab.kind === "review" && tab.id.startsWith("review:"));
+		reviewId = review?.id ?? "";
+		return reviewId;
+	}, { timeout: 10_000, message: "review tab should be visible after review_open" }).toMatch(/^review:/);
+	await clickTabById(page, reviewId, "review tab should be selectable");
 	await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 10_000 });
-	return review!.id;
+	return reviewId;
 }
 
 // Wait until a tab's bounding box is stable across two animation frames before
@@ -866,6 +870,29 @@ test.describe("Side-panel tab contract", () => {
 		await expect(page.locator('input[placeholder="Goal title"]')).toHaveCount(0);
 		const refetched = await workspace(sessionId);
 		expect(refetched.tabs.map((tab: any) => tab.id)).toEqual([]);
+	});
+
+	test("9b. Closing review tab preserves content but keeps closed workspace state across reload", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+
+		const reviewId = await openReview(page);
+		await closeTabById(page, reviewId, "closing review workspace tab should not delete review content");
+		await expectPanelTabs(page, [], "closed review tab should disappear immediately");
+		await expect.poll(async () => (await workspace(sessionId)).tabs.map((tab: any) => tab.id), {
+			timeout: 10_000,
+			message: "server workspace should persist the closed review tab absence",
+		}).toEqual([]);
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectPanelTabs(page, [], "closed review tab must not be re-derived from restored review document caches");
+		await expect(page.locator("review-document")).toHaveCount(0);
+
+		const reopenedId = await openReview(page);
+		expect(reopenedId).toBe(reviewId);
+		await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 10_000 });
 	});
 
 	test("10. Size mode persists across reload for collapsed, split, and fullscreen preview states", async ({ page }) => {
