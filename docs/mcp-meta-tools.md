@@ -221,6 +221,15 @@ Both the server and tool selects route through `updateGroupPolicy(key, value)`
 top-level tool count visible to the user matches the model's view, with the
 option to drill into any server when needed.
 
+Sub-namespace rows mirror the runtime MCP policy cascade for display: when
+`mcp__<server>` is explicitly set and `mcp__<server>__<sub>` is unset, the row
+shows the inherited parent policy (for example, `Never (inherited from mcp__gr)`)
+while the select value remains empty. Empty still means "no stored
+sub-key". Selecting Allow, Ask, or Never writes an explicit sub-namespace key;
+clearing the select sends `policy: null`, removes that key, and returns the row
+to the inherited parent display. Flat servers keep using only `mcp__<server>`
+and do not show a synthetic inherited sub-policy.
+
 The page reads the structured `/api/mcp-servers` payload directly: each
 operation entry carries `subNamespace?` + `op`, so the UI groups by
 sub-namespace without re-parsing names. A small client-side fallback
