@@ -65,7 +65,6 @@ import { cwdCombobox } from "./cwd-combobox.js";
 import { ACCESSORY_IDS, getAccessory, statusBobbit } from "./session-colors.js";
 import { reloadStaffList } from "./sidebar.js";
 import {
-	assistantProposalType,
 	isHistoricalProposalTab,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
@@ -395,9 +394,13 @@ function clearProposalReviewState(sessionId: string | null | undefined, type: Pr
 	}
 }
 
-function closeCurrentProposalPanel(type: ProposalType, sessionId: string | null | undefined): void {
+async function closeCurrentProposalPanel(type: ProposalType, sessionId: string | null | undefined): Promise<void> {
 	if (!sessionId) return;
-	void closeSidePanelTab(proposalPanelTabId(type), { sessionId });
+	try {
+		await closeSidePanelTab(proposalPanelTabId(type), { sessionId });
+	} catch (err) {
+		console.warn("[proposal] failed to close workspace tab", { type, sessionId, err });
+	}
 }
 
 function dismissTypedProposal(type: ProposalType): void {
@@ -413,8 +416,7 @@ function dismissTypedProposal(type: ProposalType): void {
 	if (sessionId && slot?.fields) markProposalDismissed(sessionId, type, slot.fields);
 	delete state.activeProposals[type];
 	recomputeAssistantHasProposal();
-	const keepAssistantPanelOpen = type === assistantProposalType(state.assistantType);
-	if (!keepAssistantPanelOpen) closeCurrentProposalPanel(type, sessionId);
+	void closeCurrentProposalPanel(type, sessionId);
 	if (sessionId) void deleteProposalFile(sessionId, type);
 	renderApp();
 }
@@ -1412,6 +1414,8 @@ function goalPreviewPanel() {
 			return;
 		}
 
+		const closeProposalTab = closeCurrentProposalPanel("goal", sessionId);
+
 		// --- Success path: now tear down the assistant. ---
 		if (state.remoteAgent) {
 			state.remoteAgent.disconnect();
@@ -1422,6 +1426,7 @@ function goalPreviewPanel() {
 		if (sessionId) clearProposalAnnotations(sessionId, "goal");
 		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
+		recomputeAssistantHasProposal();
 		state.previewProjectId = "";
 		_selectedWorkflowId = "";
 		_goalSandboxed = false;
@@ -1433,7 +1438,9 @@ function goalPreviewPanel() {
 		localStorage.removeItem("gateway.sessionId");
 		state.appView = "authenticated";
 
-		// Slice E: drop the on-disk proposal file once accepted.
+		// Slice E: close the workspace tab before deleting/navigating the source
+		// assistant session, then drop the on-disk proposal file once accepted.
+		await closeProposalTab;
 		if (sessionId) void deleteProposalFile(sessionId, "goal");
 
 		// If this is a re-attempt, archive the old goal and link the new one
@@ -1585,7 +1592,7 @@ function rolePreviewPanel() {
 		clearProposalReviewState(proposalSessionId, "role");
 		delete state.activeProposals.role;
 		recomputeAssistantHasProposal();
-		closeCurrentProposalPanel("role", proposalSessionId);
+		void closeCurrentProposalPanel("role", proposalSessionId);
 		if (proposalSessionId) {
 			deleteRoleDraft(proposalSessionId);
 			void deleteProposalFile(proposalSessionId, "role");
@@ -2054,7 +2061,7 @@ function staffPreviewPanel() {
 			clearProposalReviewState(proposalSessionId, "staff");
 			delete state.activeProposals.staff;
 			recomputeAssistantHasProposal();
-			closeCurrentProposalPanel("staff", proposalSessionId);
+			void closeCurrentProposalPanel("staff", proposalSessionId);
 			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "staff");
 
 			if (isStaffAssistant) {
@@ -2970,8 +2977,13 @@ function goalProposalPanel() {
 			}
 			if (!goal) return;
 
+			const proposalSessionId = state.activeProposals.goal?.sessionId ?? activeSessionId();
+
 			// --- Success: clear the proposal and navigate. ---
+			if (proposalSessionId) clearProposalAnnotations(proposalSessionId, "goal");
+			resetProposalAnnCount("goal");
 			delete state.activeProposals.goal;
+			recomputeAssistantHasProposal();
 			_proposalEnabledOptionalSteps = [];
 			_proposalInitializedFrom = null;
 			_proposalSandboxed = false;
@@ -2982,6 +2994,8 @@ function goalProposalPanel() {
 			_proposalDivergencePolicy = null;
 			_proposalMaxConcurrentChildren = null;
 			resetProposalTabsState();
+			await closeCurrentProposalPanel("goal", proposalSessionId);
+			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "goal");
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -2997,13 +3011,14 @@ function goalProposalPanel() {
 	};
 
 	const handleDismiss = () => {
+		const proposalSessionId = state.activeProposals.goal?.sessionId ?? activeSessionId();
 		const dismissed = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
 		// Suppress the in-flight streaming block so later deltas don't re-open
 		// the just-dismissed goal proposal (see dismissStreamingProposal).
 		if (isProposalStreaming("goal_proposal")) {
 			state.remoteAgent?.dismissStreamingProposal("goal_proposal");
 		}
-		const sidEarly = activeSessionId();
+		const sidEarly = proposalSessionId;
 		if (sidEarly) clearProposalAnnotations(sidEarly, "goal");
 		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
@@ -3017,12 +3032,13 @@ function goalProposalPanel() {
 		_proposalMaxConcurrentChildren = null;
 		resetProposalTabsState();
 		// Persist dismiss so it survives reconnect
-		const sid = activeSessionId();
+		const sid = proposalSessionId;
 		if (sid && dismissed) {
 			markProposalDismissed(sid, dismissed);
 			void deleteProposalFile(sid, "goal");
 		}
 		recomputeAssistantHasProposal();
+		void closeCurrentProposalPanel("goal", sid);
 		// If preview tab still available, switch to it; otherwise back to chat
 		if (state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
