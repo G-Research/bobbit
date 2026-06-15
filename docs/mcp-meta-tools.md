@@ -230,6 +230,11 @@ clearing the select sends `policy: null`, removes that key, and returns the row
 to the inherited parent display. Flat servers keep using only `mcp__<server>`
 and do not show a synthetic inherited sub-policy.
 
+Access-tab effective policy and source hints use the same MCP keys for MCP
+operation and meta-tool rows before falling back to generic display group
+labels: `mcp__<server>__<sub>` first, then `mcp__<server>` (and role-level
+`mcp__` wildcard), then labels such as `MCP: <server>`.
+
 The page reads the structured `/api/mcp-servers` payload directly: each
 operation entry carries `subNamespace?` + `op`, so the UI groups by
 sub-namespace without re-parsing names. A small client-side fallback
