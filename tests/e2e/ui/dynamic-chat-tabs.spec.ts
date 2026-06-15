@@ -7,7 +7,7 @@
  * spawned app, live preview mount, reload, and transcript hydration.
  */
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
@@ -437,23 +437,42 @@ async function expectOnlyLivePreviewTab(page: Page, errorPrefix: string): Promis
 	).toBe("preview:entry:inline.html");
 }
 
-async function expectLegacyPreviewTabsRemainSeparate(page: Page, expectedTexts: string[], errorPrefix: string): Promise<void> {
+async function expectLegacyPreviewTabsRemainSeparate(
+	page: Page,
+	expectedPreviews: Array<{ entry: string; text: string }>,
+	errorPrefix: string,
+): Promise<void> {
 	await expect.poll(async () => (await visiblePanelTabs(page))
 		.filter((tab) => tab.kind === "preview").length, {
 		timeout: 10_000,
 		message: `${errorPrefix}: legacy preview snapshots should remain available as one tab per filename`,
-	}).toBeGreaterThanOrEqual(expectedTexts.length);
+	}).toBeGreaterThanOrEqual(expectedPreviews.length);
 	const previewTabs = (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview");
 	expect(
 		previewTabs.map((tab) => tab.id),
 		`${errorPrefix}: legacy preview tabs collapsed incorrectly; tabs=${JSON.stringify(previewTabs)}`,
 	).not.toEqual(["preview:entry:inline.html"]);
-	const previewTabTexts = await collectAllPreviewTabTexts(page, errorPrefix);
-	for (const expectedText of expectedTexts) {
+	for (const expected of expectedPreviews) {
+		const tabId = `preview:entry:${encodeURIComponent(expected.entry)}`;
 		expect(
-			previewTabTexts.some((text) => text.includes(expectedText)),
-			`${errorPrefix}: no legacy preview tab restored ${expectedText}; texts=${JSON.stringify(previewTabTexts)}`,
+			previewTabs.some((tab) => tab.id === tabId),
+			`${errorPrefix}: expected legacy preview tab ${tabId}; tabs=${JSON.stringify(previewTabs)}`,
 		).toBe(true);
+		await clickTopLevelTabById(page, tabId, errorPrefix);
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activePanelTabId ?? ""),
+			{ timeout: 5_000, message: `${errorPrefix}: expected legacy preview tab ${tabId} to become active` },
+		).toBe(tabId);
+		// The previous iframe document remains readable briefly after a tab click;
+		// wait for the navigation target before asserting the frame body.
+		await expect(
+			page.locator(".goal-preview-panel iframe").first(),
+			`${errorPrefix}: iframe src should switch to ${expected.entry} before reading its body`,
+		).toHaveAttribute("src", new RegExp(escapeRegExp(encodeURIComponent(expected.entry))), { timeout: 10_000 });
+		await expect(
+			page.frameLocator(".goal-preview-panel iframe").locator("body"),
+			`${errorPrefix}: legacy preview tab ${tabId} should render ${expected.text}`,
+		).toContainText(expected.text, { timeout: 10_000 });
 	}
 }
 
@@ -475,24 +494,8 @@ async function openLegacyPreviewToolCardAndExpectMountHash(page: Page, ordinal: 
 	return contentHash;
 }
 
-async function collectAllPreviewTabTexts(page: Page, errorPrefix: string): Promise<string[]> {
-	const previewTabIds = (await visiblePanelTabs(page))
-		.filter((tab) => tab.kind === "preview" && PREVIEW_TAB_RE.test(tab.label))
-		.map((tab) => tab.id);
-	if (previewTabIds.length === 0) {
-		const labels = await visiblePanelTabLabels(page);
-		throw new Error(`${errorPrefix}: expected at least one preview tab; visible tabs were: ${labels.join(", ") || "<none>"}`);
-	}
-	const texts: string[] = [];
-	for (const id of previewTabIds) {
-		await clickTopLevelTabById(page, id, errorPrefix);
-		await expect.poll(() => rawPreviewBodyText(page), {
-			timeout: 10_000,
-			message: `${errorPrefix}: preview tab ${id} should render non-empty iframe content`,
-		}).not.toBe("");
-		texts.push(await rawPreviewBodyText(page));
-	}
-	return texts;
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function reloadAndNavigateToSession(page: Page, sessionId: string): Promise<void> {
@@ -588,6 +591,11 @@ test.describe("Dynamic chat tabs", () => {
 		const legacyInlineText = "Legacy V1 Inline Preview Content";
 		const legacyFileText = "Legacy V2 File Preview Content";
 		const legacyFilePath = testInfo.outputPath("legacy-v2-preview.html");
+		const legacyFileEntry = basename(legacyFilePath);
+		const expectedLegacyPreviews = [
+			{ entry: "inline.html", text: legacyInlineText },
+			{ entry: legacyFileEntry, text: legacyFileText },
+		];
 		await mkdir(dirname(legacyFilePath), { recursive: true });
 		await writeFile(legacyFilePath, previewHtmlForBodyText(legacyFileText), "utf8");
 
@@ -600,19 +608,18 @@ test.describe("Dynamic chat tabs", () => {
 		const firstHash = await openLegacyPreviewToolCardAndExpectMountHash(page, 0, legacyInlineText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
 		const secondHash = await openLegacyPreviewToolCardAndExpectMountHash(page, 1, legacyFileText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
 		expect(firstHash, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: fixtures should produce distinct legacy remount hashes").not.toBe(secondHash);
-		await expectLegacyPreviewTabsRemainSeparate(page, [legacyInlineText, legacyFileText], "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
+		await expectLegacyPreviewTabsRemainSeparate(page, expectedLegacyPreviews, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
 
 		await reloadAndNavigateToSession(page, sessionId);
 		await refreshTranscriptFromGateway(page, 2, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
 		await openLegacyPreviewToolCardAndExpectMountHash(page, 0, legacyInlineText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
 		await openLegacyPreviewToolCardAndExpectMountHash(page, 1, legacyFileText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
-		await expectLegacyPreviewTabsRemainSeparate(page, [legacyInlineText, legacyFileText], "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
-
+		await expectLegacyPreviewTabsRemainSeparate(page, expectedLegacyPreviews, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
 		// Preview tabs currently have no per-tab close affordance. Switching away
 		// and back is the available cleanup/non-collapse path for legacy history.
 		await ensureChatInput(page, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: cleanup/no-collapse check");
 		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: Preview should remain selectable for cleanup check");
-		await expectLegacyPreviewTabsRemainSeparate(page, [legacyInlineText, legacyFileText], "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: cleanup/no-collapse check");
+		await expectLegacyPreviewTabsRemainSeparate(page, expectedLegacyPreviews, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: cleanup/no-collapse check");
 	});
 
 	test("same-content historical v3 first-open collapses to the live preview tab", async ({ page, gateway }) => {
