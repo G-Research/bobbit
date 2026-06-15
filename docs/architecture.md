@@ -44,37 +44,33 @@ See [websocket-protocol.md](websocket-protocol.md) for the wire contract.
 
 ## Side-panel workspace
 
-Every chat session owns a dynamic side-panel workspace. The workspace is shared
-by regular sessions and assistant sessions, so HTML previews, proposals, review
-documents, PR walkthroughs, and the staff inbox are selected by the same tab
-dispatcher instead of by assistant-specific branches. Chat stays outside the
-strip; when a non-staff session has no side-panel tabs, the side pane hides and
-chat fills the layout.
+Every chat session owns a server-backed side-panel workspace for the right side
+of the chat view. The workspace is shared by regular sessions and assistant
+sessions, so HTML previews, pack panels such as PR walkthrough and artifact
+viewers, proposals, review documents, and the staff inbox all use the same tab
+strip and window controls. Chat stays outside the strip; when a non-staff
+session has no side-panel tabs, the side pane hides and chat fills the layout.
 
-Tabs are derived from their artifact source. Preview tabs represent current or
-historical `preview_open` artifacts and use `contentHash` to collapse duplicate
-content when available. Proposal tabs distinguish the live editable draft from
-historical revisions. Review tabs map to review documents by encoded title.
-The PR walkthrough review surface now ships as a **built-in first-party pack**
-(`market-packs/pr-walkthrough/`) reached through the generic extension route
-`#/ext/pr-walkthrough`, rather than a bespoke side-panel tab kind. Clicking any
-pack launcher (git-widget button / composer-slash / command palette) mints a
-separate, isolated, read-only reviewer child via `host.agents.spawn` (not the
-current session's agent) and **auto-switches the view to that child session**,
-where the panel opens; there is **no owner-session panel** and no manual
-"Run"/"Load" buttons (a no-PR / spawn failure shows an inline error in the
-git-status-widget dropdown instead). See
-[pr-walkthrough-panel.md](pr-walkthrough-panel.md),
-[pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md), and
-[built-in-first-party-packs.md](design/built-in-first-party-packs.md). Desktop
-renders a scrollable tab strip next to the chat; mobile renders the same
-side-panel tab set in the header and slider track.
+The server is authoritative for open tabs, active tab, tab order, and size mode
+(`split`, `fullscreen`, or `collapsed`). Closed tabs are durable absence: render,
+refresh, reconnect, content caches, and localStorage must not recreate a tab just
+because the underlying preview artifact, proposal draft, review document, inbox,
+or pack panel still exists. Tabs open only through explicit workspace open or
+reopen events.
 
-The main client modules are `src/app/panel-workspace.ts` for tab identity and
-persistence, `src/app/preview-panel.ts` for preview selection helpers and SSE
-wiring, and `src/app/render.ts` for the shared dispatcher and responsive layout. See
-[Side-Panel Tab Contract](design/side-panel-tab-contract.md) for the full id /
-ordering contract and [Embedded HTML preview — architecture](preview-architecture.md)
+Desktop renders the workspace beside chat or fullscreen with a compact prompt
+dock; mobile renders the same tab set in the header and slider track. Popout
+links either use the preview content route or the safe app deep link
+`#/session/<sessionId>/panel/<tabId>`, which renders only already-open server
+workspace tabs.
+
+Main modules: `src/shared/side-panel-workspace.ts` defines the shared model,
+`src/server/side-panel-workspace*.ts` canonicalizes and mutates persisted
+workspaces, `src/app/side-panel-workspace.ts` hydrates and mutates the client
+mirror, `src/app/panel-workspace.ts` keeps tab id helpers and fixture fallback,
+and `src/app/render.ts` renders the shared shell. See
+[Side-panel workspace](side-panel-workspace.md) for the invariant, lifecycle,
+API, popout, and migration rules, and [Embedded HTML preview — architecture](preview-architecture.md)
 for the preview mount and `contentHash` contract.
 
 ## Build structure

@@ -579,8 +579,7 @@ export function renderRolePickerDropdown() {
 						class="text-muted-foreground cursor-help" style="font-size: 0.75em;">ⓘ</span>
 				</label>
 			</div>
-			<!-- Sandbox checkbox (only when docker sandbox is configured) -->
-			${state.sandboxStatus?.configured ? html`
+			<!-- Sandbox checkbox -->
 			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
 				<label class="flex items-center gap-2 cursor-pointer">
 					${(() => {
@@ -601,7 +600,6 @@ export function renderRolePickerDropdown() {
 					})()}
 				</label>
 			</div>
-			` : ""}
 			<!-- Create button (pinned at bottom) -->
 			<div class="border-t border-border/50 px-3 py-2 shrink-0">
 				<button

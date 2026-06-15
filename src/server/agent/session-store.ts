@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { QueuedMessage } from "../ws/protocol.js";
+import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
 /** 24h in ms — recency threshold for `shouldKeepDespiteOrphan`. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -129,6 +130,8 @@ export interface PersistedSession {
 	sandboxed?: boolean;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
+	/** Server-authoritative right-hand side-panel workspace. */
+	sidePanelWorkspace?: SidePanelWorkspace;
 }
 
 /**
@@ -178,6 +181,7 @@ export type UpdatableSessionFields = Pick<
 	| "sandboxed"
 	| "projectId"
 	| "repoWorktrees"
+	| "sidePanelWorkspace"
 >;
 
 /**
@@ -531,6 +535,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId",
+		"sidePanelWorkspace",
 	];
 
 	/** Update a subset of fields for an existing session */

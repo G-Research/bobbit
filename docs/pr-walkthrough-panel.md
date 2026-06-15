@@ -418,14 +418,14 @@ reaps it automatically.
 
 ## Panel sizing: fullscreen, collapse, and shortcuts
 
-The pack panel opened at `#/ext/pr-walkthrough` uses the **same** resize logic as
-the HTML preview panel — there is no walkthrough-specific resize code path. It
-renders the shared unified toolbar with a fullscreen (wide review) button and a
-collapse button, and it honors `state.previewPanelFullscreen` plus the per-session
-collapse key (`bobbit-preview-collapsed-<id>`) identically to the preview panel.
-The same keyboard shortcuts drive it: `toggle-sidebar` (Ctrl+[, expand one level),
-`toggle-preview` (Ctrl+], collapse one level), and `toggle-fullscreen-preview`
-(Ctrl+#, jump to fullscreen or collapsed). State persists across reload.
+The PR walkthrough is a normal `pack` tab in the server-backed side-panel
+workspace. It uses the same shared controls as every side panel: fullscreen,
+collapse/restore, split view, and popout. There is no walkthrough-specific resize
+code path, and no preview-specific localStorage collapse key; size mode persists
+as `sidePanelWorkspace.sizeMode` on the reviewer session and syncs across reloads
+and browser contexts. The shared keyboard shortcuts expand one level
+(`collapsed → split → fullscreen`), collapse one level (`fullscreen → split → collapsed`),
+and toggle fullscreen/collapsed.
 
 The panel **never auto-enters fullscreen**. Fullscreen is strictly user-initiated,
 via a toolbar button or one of those shortcuts. This matches the preview panel and
@@ -464,9 +464,10 @@ and the user-terminate control are pinned in the API spec
 `tests/e2e/pr-walkthrough-host-agents.spec.ts` (whose mock agent cannot resolve a
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
 browser spec).
-HTML-preview-panel sizing is independently pinned by
-`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (the panel-sizing logic does
-not touch the preview panel). See
+Preview panel sizing through the shared side-panel controls is independently pinned by
+`tests/e2e/ui/preview-fullscreen-controls.spec.ts` (preview is one workspace
+panel kind using the same sizing logic as pack, proposal, review, and inbox
+panels). See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design.
 

@@ -18,6 +18,7 @@ import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromSe
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
+import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
@@ -209,6 +210,21 @@ function revealActiveProposalPanel(type: ProposalType, sessionId: string): void 
 		state.assistantHasProposal = true;
 		if (!isDesktop()) state.assistantTab = "preview";
 	}
+}
+
+function openAssistantProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
+	const title = type === "project" ? "Project Proposal"
+		: type === "staff" ? "Staff Proposal"
+		: `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
+	selectPanelWorkspaceTab({
+		id: proposalPanelTabId(type),
+		kind: "proposal",
+		title,
+		label: title.replace(/ Proposal$/, ""),
+		legacyTab: type as any,
+		source: { type: "proposal", proposalType: type, sessionId },
+		state: {},
+	}, { sessionId, select: true, setAssistantTab: true });
 }
 
 function liveProposalSlotForSession(type: ProposalType, sessionId: string): ProposalSlot | undefined {
@@ -965,8 +981,12 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	state.chatPanel = null;
 	state.cwdDropdownOpen = false;
 
-	// Update hash route synchronously
-	setHashRoute("session", sessionId, replaceHistory);
+	// Update hash route synchronously. Preserve an existing standalone
+	// side-panel route for this same session while the connection hydrates it.
+	const currentRoute = getRouteFromHash();
+	if (!(currentRoute.view === "session" && currentRoute.sessionId === sessionId && currentRoute.panelTabId)) {
+		setHashRoute("session", sessionId, replaceHistory);
+	}
 
 	// Update hue rotation synchronously
 	document.documentElement.style.setProperty("--bobbit-hue-rotate", `${sessionHueRotation(sessionId)}deg`);
@@ -1231,6 +1251,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		})();
 
 		await remote.connect(url, token, sessionId);
+		if (isStale()) { remote.disconnect(); return; }
+		await hydrateSidePanelWorkspace(sessionId);
 		if (isStale()) { remote.disconnect(); return; }
 
 		// ── Fire the transcript snapshot request the INSTANT the WS is
@@ -2190,6 +2212,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
 				resetStaffProposalPreview(sessionId);
+				if (options?.isStaffAssistant && !isExisting) openAssistantProposalWorkspaceTab("staff", sessionId);
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;
@@ -2574,6 +2597,7 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	invalidateProjectScopeConfig(projectId);
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
+	removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	if (proposal.sessionId) {
 		deleteProjectDraft(proposal.sessionId);
 		// Slice E: drop the on-disk proposal file once accepted.
@@ -2680,6 +2704,9 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
+	const keepAssistantPanelOpen = (state.assistantType === "project" || state.assistantType === "project-scaffolding") && propSessionId === activeSessionId();
+	if (keepAssistantPanelOpen) openAssistantProposalWorkspaceTab("project", propSessionId);
+	else removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.

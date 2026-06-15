@@ -225,24 +225,36 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		await quiesceAutoStartedChildTeam(gateway, childId, projectId);
 		await quiesceAutoStartedChildTeam(gateway, grandId, projectId);
 
-		// Seed distinct, easy-to-read costs on each goal directly through the
-		// cost tracker. Picked so each subtree total has a unique two-decimal
-		// rendering AND every level is strictly less than its ancestor:
-		//   grandchild only        =        0.05
-		//   child + grandchild     = 0.20 + 0.05 = 0.25
-		//   parent + child + grand = 0.50 + 0.20 + 0.05 = 0.75
-		const costTracker = (gateway.sessionManager as any).getCostTracker(projectId);
-		const seedRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-		costTracker.recordUsage(`tc-seed-parent-${seedRunId}`, { cost: 0.50, inputTokens: 1_000, outputTokens: 500 }, parent.id);
-		costTracker.recordUsage(`tc-seed-child-${seedRunId}`,  { cost: 0.20, inputTokens:   400, outputTokens: 200 }, childId);
-		costTracker.recordUsage(`tc-seed-grand-${seedRunId}`,  { cost: 0.05, inputTokens:   100, outputTokens:  50 }, grandId);
-
 		// ── REST sanity: endpoint must root the rollup at the requested goal ──
 		async function fetchTree(goalId: string): Promise<{ rootGoalId: string; totalCostUsd: number; breakdown: Array<{ goalId: string }> }> {
 			const r = await apiFetch(`/api/goals/${goalId}/tree-cost`);
 			expect(r.status, `GET /tree-cost ${goalId}`).toBe(200);
 			return r.json();
 		}
+
+		// Capture the requested-subtree baselines after auto-started teams are
+		// quiesced. Some harness paths can leave a tiny, valid team/session cost
+		// (for example $0.00075) on one goal; the invariant here is that the
+		// endpoint roots at the requested subtree and rolls up our seeded deltas.
+		const parentBaseline = await fetchTree(parent.id);
+		const childBaseline  = await fetchTree(childId);
+		const grandBaseline  = await fetchTree(grandId);
+
+		// Seed distinct, easy-to-read costs on each goal directly through the
+		// cost tracker. Picked so each subtree delta has a unique two-decimal
+		// rendering AND every level is strictly less than its ancestor:
+		//   grandchild only        =        0.05
+		//   child + grandchild     = 0.20 + 0.05 = 0.25
+		//   parent + child + grand = 0.50 + 0.20 + 0.05 = 0.75
+		const SEEDED_PARENT_DELTA = 0.75;
+		const SEEDED_CHILD_DELTA = 0.25;
+		const SEEDED_GRAND_DELTA = 0.05;
+		const costTracker = (gateway.sessionManager as any).getCostTracker(projectId);
+		const seedRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		costTracker.recordUsage(`tc-seed-parent-${seedRunId}`, { cost: 0.50, inputTokens: 1_000, outputTokens: 500 }, parent.id);
+		costTracker.recordUsage(`tc-seed-child-${seedRunId}`,  { cost: 0.20, inputTokens:   400, outputTokens: 200 }, childId);
+		costTracker.recordUsage(`tc-seed-grand-${seedRunId}`,  { cost: 0.05, inputTokens:   100, outputTokens:  50 }, grandId);
+
 		const parentTree = await fetchTree(parent.id);
 		const childTree  = await fetchTree(childId);
 		const grandTree  = await fetchTree(grandId);
@@ -252,15 +264,21 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		expect(childTree.rootGoalId, "child request must root rollup at the child, not the parent").toBe(childId);
 		expect(grandTree.rootGoalId, "grandchild request must root rollup at the grandchild, not an ancestor").toBe(grandId);
 
-		// Subtree totals (within float-rounding tolerance).
-		expect(parentTree.totalCostUsd).toBeCloseTo(0.75, 6);
-		expect(childTree.totalCostUsd).toBeCloseTo(0.25, 6);
-		expect(grandTree.totalCostUsd).toBeCloseTo(0.05, 6);
+		const expectedParentTotal = parentBaseline.totalCostUsd + SEEDED_PARENT_DELTA;
+		const expectedChildTotal = childBaseline.totalCostUsd + SEEDED_CHILD_DELTA;
+		const expectedGrandTotal = grandBaseline.totalCostUsd + SEEDED_GRAND_DELTA;
 
-		// Strict ordering: each descendant's subtree total must be < its ancestor's.
-		expect(childTree.totalCostUsd).toBeLessThan(parentTree.totalCostUsd);
-		expect(grandTree.totalCostUsd).toBeLessThan(childTree.totalCostUsd);
-		expect(grandTree.totalCostUsd).toBeLessThan(parentTree.totalCostUsd);
+		// Subtree seeded deltas (within float-rounding tolerance). This keeps the
+		// exact rollup invariant without coupling the fixture to unrelated harness
+		// cost noise recorded before we seed this test's rows.
+		expect(parentTree.totalCostUsd - parentBaseline.totalCostUsd).toBeCloseTo(SEEDED_PARENT_DELTA, 6);
+		expect(childTree.totalCostUsd - childBaseline.totalCostUsd).toBeCloseTo(SEEDED_CHILD_DELTA, 6);
+		expect(grandTree.totalCostUsd - grandBaseline.totalCostUsd).toBeCloseTo(SEEDED_GRAND_DELTA, 6);
+
+		// Strict ordering: each descendant's requested-subtree total must be < its ancestor's.
+		expect(expectedChildTotal).toBeLessThan(expectedParentTotal);
+		expect(expectedGrandTotal).toBeLessThan(expectedChildTotal);
+		expect(expectedGrandTotal).toBeLessThan(expectedParentTotal);
 
 		// Breakdown shape: grandchild sees only itself; child sees itself + grand;
 		// parent sees all three. Confirms `computeTreeCost` walked from the requested
@@ -292,9 +310,10 @@ test.describe("Phase 5b — tree cost rollup", () => {
 			return (await total.textContent() ?? "").trim();
 		}
 
-		const parentText = await assertTreeCostTotal(parent.id, "$0.75");
-		const childText  = await assertTreeCostTotal(childId,  "$0.25");
-		const grandText  = await assertTreeCostTotal(grandId,  "$0.05");
+		function formatUsd(n: number): string { return `$${n.toFixed(2)}`; }
+		const parentText = await assertTreeCostTotal(parent.id, formatUsd(expectedParentTotal));
+		const childText  = await assertTreeCostTotal(childId,  formatUsd(expectedChildTotal));
+		const grandText  = await assertTreeCostTotal(grandId,  formatUsd(expectedGrandTotal));
 
 		// Strict-less-than parsed against the rendered text — guards against a
 		// regression where every descendant displays the parent's value.

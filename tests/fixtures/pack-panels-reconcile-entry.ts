@@ -75,6 +75,8 @@ const PANEL_MODULE = "export default function(){ return { render(){ return ''; }
 // A tool-renderer caller now ALSO carries its own packId (threaded from /api/tools);
 // pass the packId explicitly here to exercise the exact {packId, panelId} lookup.
 (window as any).__open = (panelId: string, packId?: string) => { openPackPanel({ panelId }, packId ?? "demo_pack"); };
+(window as any).__openWithParams = (panelId: string, params: Record<string, unknown>, packId?: string) => { openPackPanel({ panelId, params }, packId ?? "demo_pack"); };
+(window as any).__openWithInstanceKey = (panelId: string, instanceKey: string, params?: Record<string, unknown>, packId?: string) => { openPackPanel({ panelId, instanceKey, params }, packId ?? "demo_pack"); };
 (window as any).__openByPanelId = (panelId: string) => { openPackPanel({ panelId }); };
 // CONTRACT v2: open the panel in a CHOSEN session's view (PanelTarget.sessionId).
 (window as any).__openInSession = (panelId: string, sessionId: string, packId?: string) => {

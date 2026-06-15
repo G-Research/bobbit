@@ -97,7 +97,7 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	it("parses panels + entrypoints (filtered by contents.entrypoints, listName carried) + routes", () => {
 		const root = packRoot("s1", "artifacts");
 		w(path.join(root, "pack.yaml"), "name: artifacts\n");
-		w(path.join(root, "panels", "artifacts-viewer.yaml"), "id: artifacts.viewer\ntitle: Artifact\nentry: ../lib/Viewer.js\n");
+		w(path.join(root, "panels", "artifacts-viewer.yaml"), "id: artifacts.viewer\ntitle: Artifact\ninstanceMode: parameterized\ninstanceParam: artifactId\nentry: ../lib/Viewer.js\n");
 		w(path.join(root, "entrypoints", "artifacts-deeplink.yaml"), "id: artifacts.deeplink\nkind: route\nrouteId: artifacts\ntarget:\n  panelId: artifacts.viewer\nparamKeys: [artifactId]\n");
 		// An entrypoint file NOT listed in contents.entrypoints must be ignored.
 		w(path.join(root, "entrypoints", "unlisted.yaml"), "id: unlisted\nkind: composer-slash\nlabel: X\ntarget:\n  panelId: artifacts.viewer\n");
@@ -108,7 +108,7 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		const c = loadPackContributions(root, m);
 
 		assert.equal(c.packId, "artifacts");
-		assert.deepEqual(c.panels.map((p) => ({ id: p.id, title: p.title, entry: p.entry })), [{ id: "artifacts.viewer", title: "Artifact", entry: "../lib/Viewer.js" }]);
+		assert.deepEqual(c.panels.map((p) => ({ id: p.id, title: p.title, entry: p.entry, instanceMode: p.instanceMode, instanceParam: p.instanceParam })), [{ id: "artifacts.viewer", title: "Artifact", entry: "../lib/Viewer.js", instanceMode: "parameterized", instanceParam: "artifactId" }]);
 		assert.equal(c.panels[0].packRoot, root);
 		assert.equal(c.entrypoints.length, 1);
 		assert.equal(c.entrypoints[0].id, "artifacts.deeplink");

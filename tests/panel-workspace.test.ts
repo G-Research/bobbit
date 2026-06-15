@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
 	CHAT_PANEL_TAB_ID,
+	DEFAULT_PACK_PANEL_INSTANCE_KEY,
 	INBOX_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	activePanelTabIdForSession,
@@ -14,6 +15,8 @@ import {
 	isPinnedPanelTab,
 	nextActivePanelTabId,
 	normalizeSidePanelTabs,
+	packPanelRefFromTabId,
+	packPanelTabId,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewEntryTabId,
@@ -24,6 +27,10 @@ import {
 	previewVersionedTabId,
 	registerPreviewVersion,
 	reorderSidePanelTab,
+	legacyReviewDocumentIdFromTitle,
+	rememberReviewDocumentIdentity,
+	reviewDocumentIdForTitle,
+	reviewDocumentIdFromPanelTab,
 	reviewPanelTabId,
 	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
@@ -103,7 +110,7 @@ const hashB = "b".repeat(64);
 const hashC = "c".repeat(64);
 
 describe("panel workspace side-pane tab contract", () => {
-	it("buildPanelWorkspaceTabs emits side-pane tabs only and pins Inbox first", () => {
+	it("buildPanelWorkspaceTabs emits side-pane tabs only with closable Inbox", () => {
 		const tabs = buildPanelWorkspaceTabs({
 			sessionId: "s1",
 			isPreviewSession: true,
@@ -125,7 +132,7 @@ describe("panel workspace side-pane tab contract", () => {
 		]);
 		assert.equal(tabs.some((tab) => tab.id === CHAT_PANEL_TAB_ID || tab.kind === "chat"), false);
 		assert.equal(tabs[0].kind, "inbox");
-		assert.equal(isPinnedPanelTab(tabs[0]), true);
+		assert.equal(isPinnedPanelTab(tabs[0]), false);
 		assert.equal(firstContentPanelTab(tabs)?.id, INBOX_PANEL_TAB_ID);
 	});
 
@@ -147,6 +154,36 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID)?.id, previewEntryTabId("inline.html"));
 		assert.equal(findPanelTab(tabs, previewVersionedTabId("missing.html", 1)), undefined);
 		assert.equal(findPanelTab(tabs, reviewPanelTabId("Encoded Title"))?.id, reviewPanelTabId("Encoded Title"));
+	});
+
+	it("uses durable pack instance keys while accepting legacy two-part pack ids", () => {
+		assert.equal(packPanelTabId("demo_pack", "demo.panel"), `pack:demo_pack:demo.panel:${DEFAULT_PACK_PANEL_INSTANCE_KEY}`);
+		assert.equal(packPanelTabId("demo_pack", "demo.panel", "artifact-1"), "pack:demo_pack:demo.panel:artifact-1");
+		assert.deepEqual(packPanelRefFromTabId("pack:demo_pack:demo.panel"), {
+			packId: "demo_pack",
+			panelId: "demo.panel",
+			instanceKey: DEFAULT_PACK_PANEL_INSTANCE_KEY,
+			legacyTwoPart: true,
+		});
+		assert.deepEqual(packPanelRefFromTabId("pack:demo_pack:demo.panel:artifact-1"), {
+			packId: "demo_pack",
+			panelId: "demo.panel",
+			instanceKey: "artifact-1",
+			legacyTwoPart: undefined,
+		});
+	});
+
+	it("maps review tabs by document id with deterministic legacy-title fallback", () => {
+		const legacyId = legacyReviewDocumentIdFromTitle("Findings");
+		assert.match(legacyId, /^legacy-title-[a-f0-9]{64}$/);
+		assert.equal(reviewDocumentIdForTitle("Findings"), legacyId);
+		assert.equal(reviewPanelTabId("Findings"), `review:${encodeURIComponent(legacyId)}`);
+
+		rememberReviewDocumentIdentity("Findings", "review-doc:s1:abc");
+		const tab = reviewTab("Findings");
+		assert.equal(tab.id, "review:review-doc%3As1%3Aabc");
+		assert.equal(reviewDocumentIdFromPanelTab(tab), "review-doc:s1:abc");
+		assert.equal(findPanelTab([tab], "review:Findings")?.id, tab.id);
 	});
 
 	it("active helpers never return or store chat", () => {
@@ -183,7 +220,7 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(state.panelWorkspaceActiveBySession.s1, previewEntryTabId("legacy.html"));
 	});
 
-	it("normalizeSidePanelTabs drops legacy chat/invalid rows, normalizes live preview, merges metadata, dedupes, and pins Inbox", () => {
+	it("normalizeSidePanelTabs drops legacy chat/invalid rows, normalizes live preview, merges metadata, and dedupes", () => {
 		const state = {
 			selectedSessionId: "s1",
 			panelTabsBySession: {
@@ -207,12 +244,12 @@ describe("panel workspace side-pane tab contract", () => {
 		const normalized = normalizeSidePanelTabs(state, "s1", derived);
 
 		assert.deepEqual(normalized.map((tab) => tab.id), [
-			INBOX_PANEL_TAB_ID,
 			previewEntryTabId("a.html"),
 			"proposal:goal",
+			INBOX_PANEL_TAB_ID,
 			reviewPanelTabId("Review A"),
 		]);
-		assert.equal(previewContentHashFromTab(normalized[1]), hashB);
+		assert.equal(previewContentHashFromTab(normalized[0]), hashB);
 		assert.equal(normalized.some((tab) => tab.id === CHAT_PANEL_TAB_ID || tab.id.startsWith("preview:tool")), false);
 
 		const staleInbox = normalizeSidePanelTabs(
@@ -304,7 +341,7 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(nextActivePanelTabId([tabs[0]], tabs[0].id), "");
 	});
 
-	it("reorders only non-pinned side-pane tabs and never before pinned Inbox", () => {
+	it("reorders all side-pane tabs including Inbox", () => {
 		const tabs = [chatTab(), inboxTab(), previewTab(previewEntryTabId("a.html"), { entry: "a.html" }), proposalTab(), reviewTab("Notes")];
 
 		assert.deepEqual(
@@ -313,11 +350,11 @@ describe("panel workspace side-pane tab contract", () => {
 		);
 		assert.deepEqual(
 			reorderSidePanelTab(tabs, reviewPanelTabId("Notes"), INBOX_PANEL_TAB_ID).map((tab) => tab.id),
-			[INBOX_PANEL_TAB_ID, reviewPanelTabId("Notes"), previewEntryTabId("a.html"), "proposal:goal"],
+			[reviewPanelTabId("Notes"), INBOX_PANEL_TAB_ID, previewEntryTabId("a.html"), "proposal:goal"],
 		);
 		assert.deepEqual(
 			reorderSidePanelTab(tabs, INBOX_PANEL_TAB_ID, 3).map((tab) => tab.id),
-			[INBOX_PANEL_TAB_ID, previewEntryTabId("a.html"), "proposal:goal", reviewPanelTabId("Notes")],
+			[previewEntryTabId("a.html"), "proposal:goal", reviewPanelTabId("Notes"), INBOX_PANEL_TAB_ID],
 		);
 	});
 });

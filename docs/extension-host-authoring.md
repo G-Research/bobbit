@@ -515,7 +515,11 @@ entry: ../lib/ArtifactViewerPanel.js   # relative to THIS file; contained in pac
 
 ```js
 // From a renderer's click handler:
-host.ui.openPanel({ panelId: "artifacts.viewer", params: { artifactId } });
+host.ui.openPanel({
+  panelId: "artifacts.viewer",
+  params: { artifactId },
+  instanceKey: artifactId, // contract v3; preserves one tab per artifact
+});
 ```
 
 The panel module's factory is handed the host toolkit **plus a `host`** bound to the active
@@ -524,11 +528,31 @@ So a panel can call `host.store.*`, `host.callRoute`, and `host.session.*` — e
 renderer can except `invokeAction` (which is tool-call-scoped).
 
 **Addressing.** Panel ids are only **pack-unique**, so the client keys its registry and the
-serving URL by `{packId, panelId}`. The bytes are served bearer-only (static-asset-equivalent)
+serving URL by `{packId, panelId}`. Side-panel tab identity is the compound key
+`{packId, panelId, instanceKey}` so singleton tools and parameterized content viewers can coexist
+in the same server-backed workspace. The bytes are served bearer-only (static-asset-equivalent)
 by the **pack-addressed** `GET /api/ext/packs/:packId/panels/:panelId`. The client reconciles
 panels from `GET /api/ext/contributions` (pack-scoped), not `/api/tools`.
 `host.ui.openPanel({ panelId })` stays **pack-relative** — the caller surface's bound `packId`
 resolves `panelId` → `{packId, panelId}` before fetching bytes.
+
+Panel YAML can declare durable instance behavior:
+
+```yaml
+id: artifacts.viewer
+title: Artifact
+entry: ../lib/ArtifactViewerPanel.js
+instanceMode: parameterized
+instanceParam: artifactId
+```
+
+- `instanceMode: singleton` (or omitted) uses `instanceKey = "default"`.
+- `instanceMode: parameterized` requires a safe `instanceKey` or a string `params[instanceParam]`.
+- If `instanceParam` is omitted, the host may derive from allowlisted params such as `artifactId`; it never hashes arbitrary params silently.
+- Parameterized panels without a safe key are not opened, because they would not have durable tab identity.
+
+The workspace validates pack panel ids and instance metadata server-side. A popout/deep link renders
+only an already-open server workspace tab; it does not let a URL invent arbitrary pack params.
 
 **Open a panel in a chosen session's view (`PanelTarget.sessionId`, contract v2).** By default
 `openPanel` mounts/focuses the tab in the **currently-active** session. A pack that has just
@@ -562,7 +586,10 @@ This addition bumped **`HOST_CONTRACT_VERSION` 1 → 2** (the data/addressing-co
 `HOST_API_VERSION` stays `1` because no method signature changed). Adding an optional field is
 additive, but the version bump lets a pack **feature-detect field support** via
 `host.contractVersion >= 2` and degrade gracefully (open in the active view) on an older host.
-No new capability flag is added — `openPanel` already lives under the `ui` capability.
+Contract v3 later added optional `PanelTarget.instanceKey` for durable parameterized side-panel
+identity; packs can feature-detect it with `host.contractVersion >= 3` and otherwise rely on
+host-derived identity from declared/allowlisted params. No new capability flag was added for
+either field — `openPanel` already lives under the `ui` capability.
 This capability was added so the PR-walkthrough pack could open its pane in a freshly
 spawned reviewer-child session; see
 [docs/design/pr-walkthrough-launch-ux.md](design/pr-walkthrough-launch-ux.md) for the
@@ -574,7 +601,8 @@ for how the pack consumes it.
 > in v2. The launch-UX correction added an optional `title` to the **server-side**
 > `host.agents.spawn` surface (so the spawned child gets a visible session title), which is an
 > additive field on a server capability — **not** part of the frozen versioned `PanelTarget` /
-> `HostApi` data contract — so `HOST_CONTRACT_VERSION` stays at `2`.
+> `HostApi` data contract — so it did not change the host contract. The later v3 bump is only
+> for `PanelTarget.instanceKey`.
 
 **Panel conventions (enforced — identical to renderer rules):** theme tokens only; preserve any
 embedded iframe `sandbox` attribute (untrusted/LLM content goes in a `sandbox`ed iframe);

@@ -1,6 +1,13 @@
 # Staff Inbox Queue — Design
 
-> **Status: shipped.** Operational documentation lives in [docs/staff-inbox.md](../staff-inbox.md). This page is the original design record — kept verbatim for historical reference. Where this doc and the operator doc disagree, the operator doc and the source code win.
+> **Historical design record.** Operational documentation lives in
+> [docs/staff-inbox.md](../staff-inbox.md). Older side-panel details about local
+> inbox-open booleans, preview-era shortcut gates, hardcoded source locations,
+> and localStorage persistence are superseded by the server-authoritative
+> side-panel workspace described in
+> [docs/side-panel-workspace.md](../side-panel-workspace.md). The current inbox
+> panel is a normal closeable `inbox` workspace tab; the server workspace owns
+> open/closed state, active tab, tab order, and size mode.
 
 Goal: introduce a first-class **inbox** for staff agents — a persistent, per-staff ordered queue of work items that decouples triggers from agent wakes.
 
@@ -14,7 +21,7 @@ Today the path from a trigger to a staff agent processing the work is:
 TriggerEngine.tick()  →  fireTrigger()  →  staffManager.wake()  →  sessionManager.enqueuePrompt()
 ```
 
-`fireTrigger` in `src/server/agent/staff-trigger-engine.ts:227` calls `staffManager.wake()` directly. The trigger engine guards against a busy session by skipping firing when `session.status === "streaming" | "starting"` (`staff-trigger-engine.ts:130`). When the engine skips, **the trigger event is silently dropped**: cron triggers `lastFired`-gate per-minute (`staff-trigger-engine.ts:166`), and git triggers update `lastSeenSha` before checking status (`staff-trigger-engine.ts:204`), so the work is gone. The agent has no record that it was ever signalled.
+`fireTrigger` in `src/server/agent/staff-trigger-engine.ts` calls `staffManager.wake()` directly. The trigger engine guards against a busy session by skipping firing when `session.status === "streaming" | "starting"` (`staff-trigger-engine.ts`). When the engine skips, **the trigger event is silently dropped**: cron triggers `lastFired`-gate per-minute (`staff-trigger-engine.ts`), and git triggers update `lastSeenSha` before checking status (`staff-trigger-engine.ts`), so the work is gone. The agent has no record that it was ever signalled.
 
 This has three operational problems:
 
@@ -64,7 +71,7 @@ No coalescing — every enqueue produces a new entry. Two triggers firing 100 ms
 
 ### 2.2 Persistence
 
-One JSON file per staff: `<projectStateDir>/inbox/<staffId>.json`. Mirrors `StaffStore` (`src/server/agent/staff-store.ts`) — synchronous JSON load/save, no migrations, lazy directory creation. `projectStateDir` is `<project-root>/.bobbit/state/` as set by `ProjectContext` (`src/server/agent/project-context.ts:67-68`).
+One JSON file per staff: `<projectStateDir>/inbox/<staffId>.json`. Mirrors `StaffStore` (`src/server/agent/staff-store.ts`) — synchronous JSON load/save, no migrations, lazy directory creation. `projectStateDir` is `<project-root>/.bobbit/state/` as set by `ProjectContext` (`src/server/agent/project-context.ts`).
 
 File schema:
 
@@ -103,7 +110,7 @@ Add one field to `PersistedStaff` in `src/server/agent/staff-store.ts`:
 contextPolicy: "preserve" | "compact";
 ```
 
-`StaffStore.load()` normalises missing records to `"compact"` (the same pattern used for `sandboxed` in `staff-store.ts:73-77`).
+`StaffStore.load()` normalises missing records to `"compact"` (the same pattern used for `sandboxed` in `staff-store.ts`).
 
 ---
 
@@ -188,7 +195,7 @@ Responsibilities:
 
 ### 3.3 `src/server/agent/inbox-nudger.ts` (NEW)
 
-15-second tick loop. Mirrors `TeamManager.startIdleNudgeTimer` / `shouldSkipNudge` / `nudgePending` (`src/server/agent/team-manager.ts:148, 384, 419`).
+15-second tick loop. Mirrors `TeamManager.startIdleNudgeTimer` / `shouldSkipNudge` / `nudgePending` in `src/server/agent/team-manager.ts`.
 
 ```ts
 export class InboxNudger {
@@ -224,7 +231,7 @@ Mirrors `defaults/tools/tasks/` structure: one YAML manifest per tool + a single
 | `defaults/tools/inbox/inbox_dismiss.yaml` | manifest — params: `entry_id`, `outcome`, `reason` |
 | `defaults/tools/inbox/extension.ts` | runtime registration + HTTP calls to REST API |
 
-Target descriptions (≤ 150 chars each, per `tests/tool-description-budget.test.ts:47`):
+Target descriptions (≤ 150 chars each, per `tests/tool-description-budget.test.ts`):
 
 | Tool | description (≤150) |
 |---|---|
@@ -232,9 +239,9 @@ Target descriptions (≤ 150 chars each, per `tests/tool-description-budget.test
 | `inbox_complete` | `Mark an inbox entry as completed with an optional result summary.` (~66) |
 | `inbox_dismiss` | `Dismiss an inbox entry as failed or cancelled with a reason.` (~62) |
 
-Parameter descriptions ≤ 80 chars (per `tests/tool-description-budget.test.ts:48`).
+Parameter descriptions ≤ 80 chars (per `tests/tool-description-budget.test.ts`).
 
-Add `"inbox"` to `EXTENSION_FILES` in `tests/tool-description-budget.test.ts:30` so the new group is included in the budget pin.
+Add `"inbox"` to `EXTENSION_FILES` in `tests/tool-description-budget.test.ts` so the new group is included in the budget pin.
 
 Gating: §6.
 
@@ -242,15 +249,15 @@ Gating: §6.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `src/app/inbox-panel.ts` | NEW | Mirrors `src/app/preview-panel.ts`. Owns the per-session subscription lifecycle, maps WS `inbox.entry.*` events into `state.inboxEntries`, exposes `startInboxSubscription(sessionId)` / `stopInboxSubscription()`. |
+| `src/app/inbox-panel.ts` | NEW | Owns per-session inbox subscription/bootstrap and explicitly opens/focuses the `inbox` side-panel workspace tab. |
 | `src/ui/inbox/InboxPanel.ts` | NEW | LitElement `<inbox-panel>`. Renders Pending section + History section + Add-to-inbox button. Mirrors `src/ui/components/review/ReviewPane.ts` shape. |
 | `src/ui/inbox/InboxEntry.ts` | NEW | Single-row item: title, source badge, age, cancel/delete affordances. |
 | `src/ui/inbox/AddToInboxDialog.ts` | NEW | Composer dialog opened from the panel's "Add to inbox" button. Posts to `POST /api/staff/:id/inbox` with `source.type = "manual_ui"`. |
-| `src/app/staff-page.ts` | EDIT | Adds the `contextPolicy` radio group in the edit form (between "Pinned Context" and the save bar; see §8). |
-| `src/app/state.ts` | EDIT | New fields: `inboxEntries`, `inboxPanelOpen` (mirrors `reviewPanelOpen`, `state.ts:328`). |
-| `src/app/main.ts` | EDIT | Extends `canFullscreen` / `hasPanel` checks (`main.ts:548-549, 608, 632`) to include `state.inboxPanelOpen` so the existing `Ctrl+]` / `Ctrl+[` shortcuts treat inbox as a peer of preview/review/proposal. |
-| `src/app/render.ts` | EDIT | Renders `<inbox-panel>` in the split-pane slot when the active session has `staffId` set. |
-| `src/app/session-manager.ts` | EDIT | On session select: clear `state.inboxEntries`; if `session.staffId` set, call `startInboxSubscription(session.id)`. Resets on session switch (matches the `state.reviewDocuments = new Map()` pattern at `session-manager.ts:860-862`). |
+| `src/app/staff-page.ts` | EDIT | Adds the `contextPolicy` radio group in the edit form. |
+| `src/app/state.ts` | EDIT | Adds inbox entry/dialog content state. Open/closed tab state is not stored here; it lives in `sidePanelWorkspace`. |
+| `src/app/main.ts` | EDIT | Uses shared side-panel workspace helpers for shortcuts; no inbox-specific fullscreen gate. |
+| `src/app/render.ts` | EDIT | Renders `<inbox-panel>` when the server workspace contains the `inbox` tab. |
+| `src/app/session-manager.ts` | EDIT | On session select: clear `state.inboxEntries`; if `session.staffId` set, call `startInboxSubscription(session.id)`. |
 
 ### 3.6 Test files (NEW)
 
@@ -269,7 +276,7 @@ Gating: §6.
 ### 4.1 Trigger fires → entry processed
 
 ```
-TriggerEngine.tick (60s, staff-trigger-engine.ts:122)
+TriggerEngine.tick (60s, staff-trigger-engine.ts)
   └─ checkScheduleTrigger / checkGitTrigger
        └─ fireTrigger(staff, trigger, extraContext)
             └─ inboxManager.enqueue(staff.id, { title, prompt, context, source: {type:"trigger", triggerId}})
@@ -322,7 +329,7 @@ Tick T+k:  staff idle.
 
 NO exponential backoff. Inbox nudges only fire against idle agents (no productive
 work is being interrupted), so unbounded re-nudge is safe. Contrast with
-TeamManager (team-manager.ts:447-451) where backoff caps interruption pressure
+TeamManager (team-manager.ts) where backoff caps interruption pressure
 on a working lead.
 ```
 
@@ -361,7 +368,7 @@ class InboxNudger {
     if (!staff || staff.state !== "active") return;
     if (!staff.currentSessionId) return;
     const session = this.sessionManager.getSession(staff.currentSessionId);
-    if (!session || session.status !== "idle") return;        // mirrors team-manager.ts:388
+    if (!session || session.status !== "idle") return;        // mirrors team-manager.ts
     if (this.nudgePending.get(staff.id)) return;
     const pending = this.inboxStore.listPending(staff.id);
     if (pending.length === 0) return;
@@ -388,7 +395,7 @@ class InboxNudger {
   private async runCompact(sessionId: string) {
     const session = this.sessionManager.getSession(sessionId);
     if (!session || session.status !== "idle") return;        // double-check race
-    // Same call surface as ws/handler.ts:600 — bypass the WS handler, no sidecar
+    // Same call surface as ws/handler.ts — bypass the WS handler, no sidecar
     // accounting needed here (compact-as-prelude isn't a user-visible operation).
     await session.rpcClient.compact(120_000);
   }
@@ -397,7 +404,7 @@ class InboxNudger {
 
 ### 5.2 `agent_start` hook wiring
 
-`SessionManager.handleEvent` already routes `agent_start` (`src/server/agent/session-manager.ts:1853`). Wire an event subscription matching `TeamManager.subscribeTeamLeadEvents` (`team-manager.ts:543-560`):
+`SessionManager.handleEvent` already routes `agent_start` (`src/server/agent/session-manager.ts`). Wire an event subscription matching `TeamManager.subscribeTeamLeadEvents` (`team-manager.ts`):
 
 - Subscribe to `session.rpcClient.onEvent` once per staff session at `InboxNudger.start()` and re-subscribe lazily inside `tickOne` when the session pointer changes.
 - On `event.type === "agent_start"`: `this.nudgePending.delete(staffId)`.
@@ -424,13 +431,13 @@ A session can't be both (staff sessions have `staffId` set, team-lead sessions h
 
 Inbox tools are useless and dangerous on non-staff sessions: they'd point at no `staffId` and either 400 or silently mutate an unrelated staff's inbox.
 
-**Gating lives in the extension entry-point.** Pattern (mirrors `defaults/tools/tasks/extension.ts:18-22` which early-returns when `goalId` is missing):
+**Gating lives in the extension entry-point.** Pattern (mirrors `defaults/tools/tasks/extension.ts` which early-returns when `goalId` is missing):
 
 ```ts
 // defaults/tools/inbox/extension.ts
 export default function (pi: ExtensionAPI) {
   const sessionId = process.env.BOBBIT_SESSION_ID;
-  const staffId   = process.env.BOBBIT_STAFF_ID;        // already set in session-manager.ts:2749
+  const staffId   = process.env.BOBBIT_STAFF_ID;        // already set in session-manager.ts
   if (!sessionId || !staffId) {
     return;                                              // tools not registered
   }
@@ -438,7 +445,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-The agent process for a non-staff session never has `BOBBIT_STAFF_ID` in its env (see `session-manager.ts:2748-2750`), so the extension is a no-op there and the tools are not exposed in the tool catalogue. No further server-side check needed.
+The agent process for a non-staff session never has `BOBBIT_STAFF_ID` in its env (see `session-manager.ts`), so the extension is a no-op there and the tools are not exposed in the tool catalogue. No further server-side check needed.
 
 For defence-in-depth, the REST handlers behind the tools (POST `/api/staff/:id/inbox/:entryId/complete`, `…/dismiss`) re-verify that the calling session's `staffId` matches the path `:id`. See §7 for the exact body shape.
 
@@ -446,7 +453,7 @@ For defence-in-depth, the REST handlers behind the tools (POST `/api/staff/:id/i
 
 ## 7. REST + WebSocket surface
 
-### 7.1 Routes (added to `server.ts::handleApiRoute()`, beside the existing staff routes at `server.ts:8025-8152`)
+### 7.1 Routes (added to `server.ts::handleApiRoute()`, beside the existing staff routes at `server.ts`)
 
 | Method | Path | Body | 2xx response | Errors |
 |---|---|---|---|---|
@@ -460,11 +467,11 @@ The `complete` / `dismiss` POSTs are the API surface the inbox tools hit. `sessi
 
 ### 7.2 Removal of legacy `POST /api/staff/:id/wake`
 
-`server.ts:8131-8145` is deleted. UI's "Wake Now" button (`src/app/staff-page.ts:504` — `handleWake` calls `wakeStaffAgent`) is rewired to call `POST /api/staff/:id/inbox` with `source.type = "manual_ui"`, title = `"Manual wake"`, prompt = the existing optional wake message. The `api.ts::wakeStaffAgent` helper is renamed `enqueueInboxManual` and its return shape changes from `{ sessionId }` to `{ entry }`.
+The legacy wake route is deleted. UI's "Wake Now" button (`src/app/staff-page.ts`) is rewired to call `POST /api/staff/:id/inbox` with `source.type = "manual_ui"`, title = `"Manual wake"`, prompt = the existing optional wake message. The `api.ts::wakeStaffAgent` helper is renamed `enqueueInboxManual` and its return shape changes from `{ sessionId }` to `{ entry }`.
 
 ### 7.3 WebSocket events
 
-Three new events broadcast via `broadcastToAll` (mirrors `task_changed`, `gate_status_changed`). Add to `ServerMessage` union in `src/server/ws/protocol.ts:64-101`:
+Three new events broadcast via `broadcastToAll` (mirrors `task_changed`, `gate_status_changed`). Add to `ServerMessage` union in `src/server/ws/protocol.ts`:
 
 ```ts
 | { type: "inbox.entry.added";   staffId: string; entry: InboxEntry }
@@ -480,53 +487,65 @@ Clients filter by `staffId` (the staff page's inbox panel and the staff session 
 
 ## 8. UI architecture
 
-### 8.1 Panel parallelism with `preview-panel.ts`
+### 8.1 Panel subscription and workspace tab
 
-`src/app/inbox-panel.ts` (NEW) mirrors `src/app/preview-panel.ts` 1:1:
+`src/app/inbox-panel.ts` owns inbox content loading and the explicit workspace
+open path:
 
 ```ts
-// State
-let currentSid: string | null = null;
-
-// API
+export function openInboxPanel(sessionId: string): Promise<void>;
 export function startInboxSubscription(sessionId: string): void;
 export function stopInboxSubscription(): void;
 ```
 
-Differences:
-- No SSE; the WebSocket already carries the events. The subscription is just a session-id pointer + a render reset.
-- Bootstrap fetch: `GET /api/staff/:id/inbox?state=pending` then `GET /api/staff/:id/inbox?state=completed&limit=100` for history. Result populates `state.inboxEntries`.
-- WS handler in `src/app/remote-agent.ts` adds a case for `inbox.entry.*` that mutates `state.inboxEntries` and calls `renderApp()` (mirrors the existing `review_open` handler at `remote-agent.ts:1763-1792`).
+The subscription still bootstraps content with REST and applies
+`inbox.entry.*` WebSocket events to `state.inboxEntries`. Open/closed UI state is
+separate: opening the inbox calls the side-panel workspace open API for the
+`inbox` tab, and rendering happens only when the server workspace contains that
+tab.
+
+Differences from the original plan:
+
+- No local inbox-open boolean is authoritative.
+- Closing the inbox removes the `inbox` tab from `sidePanelWorkspace.tabs`; it
+  does not delete inbox entries.
+- Refresh/reconnect loads the server workspace exactly. A closed inbox stays
+  closed until an explicit inbox action opens it again.
+- The inbox uses the shared side-panel controls for close, reorder, fullscreen,
+  collapse, restore, and popout.
 
 ### 8.2 App state additions (`src/app/state.ts`)
 
-Add next to `reviewPanelOpen` (`state.ts:328`):
+Current app state keeps inbox **content** and dialog state only:
 
 ```ts
-/** Inbox panel (per-session split panel for staff session views) */
-inboxEntries: [] as InboxEntry[],          // pending + recent terminal, populated on session select
-inboxPanelOpen: false,                     // collapsed/open toggle, persisted per-session via localStorage
-inboxAddDialogOpen: false,                 // manual enqueue dialog
+/** Inbox panel content for staff session views. */
+inboxEntries: [] as InboxEntry[],
+inboxAddDialogOpen: false,
 ```
 
-`inboxPanelOpen` is hydrated from `localStorage` keyed by session id (mirror `bobbit-preview-collapsed-${sid}` pattern in `main.ts:551`).
+The side-panel workspace owns the tab record, active tab, tab order, and size
+mode:
+
+```ts
+sidePanelWorkspaceBySession: Record<string, SidePanelWorkspace>;
+```
+
+Legacy localStorage keys are migration input only. The product app does not use
+preview-era collapse keys or an inbox boolean as the load-bearing open/closed
+state.
 
 ### 8.3 Keyboard shortcut wiring (`src/app/main.ts`)
 
-Three sites at `main.ts:548-559`, `main.ts:608`, `main.ts:632-643`. Extend the existing predicates by treating the inbox as another panel-bearing session type:
+Keyboard shortcuts target the active side-panel workspace tab, regardless of
+kind. There is no inbox-specific fullscreen eligibility branch.
 
-```ts
-// Before
-const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen);
-const hasPanel = canFullscreen || (!state.assistantType && state.activeProposals.goal != null);
+- collapse: `fullscreen -> split -> collapsed`;
+- expand: `collapsed -> split -> fullscreen`;
+- fullscreen toggle: non-fullscreen -> `fullscreen`, fullscreen -> `collapsed`.
 
-// After
-const isInboxSession = !!state.activeSession?.staffId;
-const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || isInboxSession);
-const hasPanel = canFullscreen || (!state.assistantType && state.activeProposals.goal != null);
-```
-
-`Ctrl+]` collapses one level; `Ctrl+[` expands one level; per-session collapse state is stored under the existing `bobbit-preview-collapsed-${activeSessionId()}` key (the panels are mutually exclusive on a given session — a session is either preview-bearing, review-bearing, or inbox-bearing).
+Handlers call the shared side-panel workspace resize API so the resulting
+`sizeMode` persists on the server and broadcasts to other browser contexts.
 
 ### 8.4 Manual-enqueue dialog
 
@@ -538,7 +557,7 @@ Submits `POST /api/staff/:id/inbox` with `{ title, prompt, source: { type: "manu
 
 ### 8.5 `contextPolicy` radio in staff edit form
 
-Insert into `src/app/staff-page.ts::renderEditView` between the "Pinned Context" textarea (`staff-page.ts:670-678`) and the save bar (`staff-page.ts:680-694`):
+Insert into `src/app/staff-page.ts::renderEditView` between the "Pinned Context" textarea (`staff-page.ts`) and the save bar (`staff-page.ts`):
 
 ```html
 <div>
@@ -553,7 +572,7 @@ Insert into `src/app/staff-page.ts::renderEditView` between the "Pinned Context"
 </div>
 ```
 
-`editContextPolicy` is added to the page-local state (`staff-page.ts:22-39`) and threaded through `handleSave` (which `PUT`s to `/api/staff/:id`). Add `contextPolicy` to the body accepted by `server.ts:8107-8121` and the `StaffStore.update` `Partial` type.
+`editContextPolicy` is added to the page-local state (`staff-page.ts`) and threaded through `handleSave` (which `PUT`s to `/api/staff/:id`). Add `contextPolicy` to the body accepted by `server.ts` and the `StaffStore.update` `Partial` type.
 
 ### 8.6 Sidebar — explicit non-change
 
@@ -564,9 +583,9 @@ No sidebar badge. No pending-count affordance anywhere. The staff session contin
 There is no top-level `userstories/review-pane.md` in the repo (verified). The closest references are:
 - `src/ui/components/review/ReviewPane.ts` — the `<review-pane>` LitElement.
 - `src/ui/components/review/review-pane.css` — collapsible split-pane layout.
-- `src/app/remote-agent.ts:1763-1792` — the agent → WS → panel-open flow used by `review_open`.
+- `src/app/remote-agent.ts` — the agent → WS → panel-open flow used by `review_open`.
 
-The inbox panel is structurally identical: tabbed/sectioned LitElement, collapsible split, per-session open/closed state in localStorage, reload-persistent because state is rehydrated from REST on session select.
+The inbox panel is structurally similar at the content level: a tabbed/sectioned LitElement with Pending and History sections. Its open/closed state is no longer localStorage-backed; the `inbox` tab lives in the server-side side-panel workspace, while REST/WS restore only the entry content.
 
 ---
 
@@ -574,7 +593,7 @@ The inbox panel is structurally identical: tabbed/sectioned LitElement, collapsi
 
 `staffManager.wake()` is **deleted**, not deprecated. Three in-tree call sites must be migrated:
 
-### 9.1 `src/server/agent/staff-trigger-engine.ts:227`
+### 9.1 `src/server/agent/staff-trigger-engine.ts`
 
 **Before**
 
@@ -612,11 +631,11 @@ private fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?:
 }
 ```
 
-Also drop `wakingInProgress` (the field at `staff-trigger-engine.ts:104`) and the streaming/starting skip at `staff-trigger-engine.ts:130-133` — both exist solely because `wake()` was racey. `inboxManager.enqueue()` is synchronous against the JSON file and always safe.
+Also drop `wakingInProgress` (the field at `staff-trigger-engine.ts`) and the streaming/starting skip at `staff-trigger-engine.ts` — both exist solely because `wake()` was racey. `inboxManager.enqueue()` is synchronous against the JSON file and always safe.
 
 Constructor signature gains `inboxManager: InboxManager` (passed from `server.ts` boot).
 
-### 9.2 `src/server/server.ts:8131-8145`
+### 9.2 `src/server/server.ts`
 
 **Before**
 
@@ -640,7 +659,7 @@ if (staffWakeMatch && req.method === "POST") {
 
 The whole block is **deleted**. The new `POST /api/staff/:id/inbox` route from §7 supersedes it. UI's "Wake Now" button switches to that endpoint (§7.2).
 
-### 9.3 `src/server/agent/staff-manager.ts:426-430`
+### 9.3 `src/server/agent/staff-manager.ts`
 
 **Before** (inside `wake()`, legacy-migration branch):
 
@@ -668,7 +687,7 @@ async ensureSessionForStaff(staffId: string, sessionManager: SessionManager): Pr
   const { store, staff } = found;
 
   if (!staff.currentSessionId) {
-    // ... existing legacy-migration createSession block from staff-manager.ts:391-417 ...
+    // ... existing legacy-migration createSession block from staff-manager.ts ...
     return session.id;
   }
 
@@ -687,11 +706,11 @@ async ensureSessionForStaff(staffId: string, sessionManager: SessionManager): Pr
 
 `InboxNudger.tickOne` calls `ensureSessionForStaff` *only when it has decided to nudge*, ensuring the subprocess is alive before `applyPolicyThenNudge`. Trigger-engine enqueues without touching session state at all — entries accumulate against a dead session and the nudger picks them up after recovery.
 
-`StaffManager.refreshWorktree` (`staff-manager.ts:283-340`) moves into `ensureSessionForStaff` as the rebase step (preserve its current call-before-wake semantics).
+`StaffManager.refreshWorktree` (`staff-manager.ts`) moves into `ensureSessionForStaff` as the rebase step (preserve its current call-before-wake semantics).
 
 `createStaff` keeps `currentSessionId` initialisation as-is; no change.
 
-The `lastWakeAt` update at `staff-manager.ts:413, 456` moves to `InboxNudger.applyPolicyThenNudge` (set right before the `enqueuePrompt` call).
+The `lastWakeAt` update in `staff-manager.ts` moves to `InboxNudger.applyPolicyThenNudge` (set right before the `enqueuePrompt` call).
 
 ### 9.4 Confirmed deletions
 
@@ -709,7 +728,7 @@ Restated from the goal spec for the implementer's convenience:
 
 - **`contextPolicy: "clear"`** — terminate + respawn subprocess with fresh jsonl. Deferred; the enum is forward-compatible.
 - **Coalescing / dedup** of pending entries. Every enqueue produces a new entry. Agent dedupes via `inbox_list`.
-- **Memory-editing tool for staff.** Memory remains editable only via the UI (`staff-page.ts:672-678`).
+- **Memory-editing tool for staff.** Memory remains editable only via the UI (`staff-page.ts`).
 - **Auto-cancel / "stuck entry" surfacing.** Pending is pending. Only the agent or the user resolves entries.
 - **Exponential backoff for re-nudges.** Add later if observed spamming.
 - **Search index ingestion of completed inbox entries.** Entries are addressable via REST but not in the cross-project search.
@@ -721,12 +740,12 @@ Restated from the goal spec for the implementer's convenience:
 | # | Question | Working answer |
 |---|---|---|
 | 1 | Does `runCompact` block too long? `session.rpcClient.compact(120_000)` can take seconds-to-minutes. | Awaiting it serially is correct — the digest message must be delivered *into* a freshly-compacted context. The 15 s tick is non-overlapping per-staff via `nudgePending`. If a compact stalls past 120 s the RPC rejects and the catch in `applyPolicyThenNudge` clears `nudgePending` for retry on next tick. |
-| 2 | What if the staff session is `"starting"` (not `"idle"`)? | The nudger only fires on `status === "idle"` (matches `team-manager.ts:388`). `"starting"` returns false and the nudger retries next tick. No drop — entries remain pending. |
+| 2 | What if the staff session is `"starting"` (not `"idle"`)? | The nudger only fires on `status === "idle"` (matches `team-manager.ts`). `"starting"` returns false and the nudger retries next tick. No drop — entries remain pending. |
 | 3 | What if an inbox entry references a deleted staff? | `StaffManager.deleteStaff` calls `inboxManager.removeAll(staffId)` (via the WS-broadcast wrapper). No dangling files. If somehow an entry survives (manual file edit), `InboxNudger.tickOne` returns early via the `staffManager.getStaff()` null check; tools 404 the entry. |
 | 4 | Concurrent enqueue from trigger + manual UI on the same idle staff? | Both append distinct entries (no coalescing). Both call `nudger.poke()`. The poke microtask is idempotent — one tick processes the batch (count = 2) with one digest. |
 | 5 | Does `poke` race the 15 s `setInterval`? | The `queueMicrotask`-scheduled `tickOne(staffId)` and the periodic `tick()` both consult `nudgePending` first. Worst case: one redundant call, gated to a no-op by the `nudgePending.get(...)` check. |
 | 6 | What happens during server restart with a streaming staff session? | Restart restores sessions to `idle` (assuming graceful) and `inboxStore.load()` reads pending entries off disk. First tick after boot nudges. |
-| 7 | Sandboxed staff — does compact work? | Yes; compact is an RPC over the bridge, not a host-side filesystem op. Sidecar entries land at `<projectStateDir>/compaction-sidecar/<sessionId>.jsonl` regardless of sandbox (per `compaction-sidecar.ts:11-13`). |
+| 7 | Sandboxed staff — does compact work? | Yes; compact is an RPC over the bridge, not a host-side filesystem op. Sidecar entries land at `<projectStateDir>/compaction-sidecar/<sessionId>.jsonl` regardless of sandbox (per `compaction-sidecar.ts`). |
 
 ---
 
@@ -753,7 +772,7 @@ Cross-references the goal spec's step 9.
 | `tests/inbox-manager.spec.ts` | unit | `enqueue` emits `inbox.entry.added` and calls `nudger.poke(staffId)` exactly once. `transitionToCompleted` rejects non-pending. `transitionToTerminal` rejects unknown id with 404 semantics. `remove` emits `inbox.entry.removed`. Reject unknown staff id. |
 | `tests/inbox-nudger.spec.ts` | unit (fake clock via `node:test` `mock.timers`) | Idle staff + pending → wake exactly once until `agent_start` clears `nudgePending`. Streaming staff → no wake. Starting staff → no wake. `contextPolicy="compact"` calls `session.rpcClient.compact(120_000)` before `enqueuePrompt`. `contextPolicy="preserve"` skips compact. `poke()` fast-paths a wake within one microtask. Empty inbox → no wake. |
 | `tests/e2e/inbox-api.spec.ts` | API E2E (in-process gateway) | `POST /api/staff/:id/inbox` returns 201 with pending entry. `GET /api/staff/:id/inbox?state=pending` lists it. `GET ?state=completed` excludes it. `POST /api/staff/:id/inbox/:entryId/complete` (with valid `sessionId.staffId === :id`) transitions state. `…/dismiss` with `outcome="failed"` and `reason` transitions. `DELETE /api/staff/:id/inbox/:entryId` prunes. 403 on `sessionId` whose `staffId` doesn't match. 404 on unknown staff/entry. 409 on non-pending entry transition. |
-| `tests/e2e/ui/staff-inbox.spec.ts` | Browser E2E (spawned gateway) | Open app → navigate to a staff session (created via REST in the `beforeAll`) → inbox panel visible → "+ Add to inbox" opens dialog → submit → entry appears in Pending section → reload page → entry still there (persistence) → click Cancel on entry → entry moves to History section (state=cancelled) → click delete in history → entry removed. Toggle Ctrl+] to collapse the panel; reload; assert collapsed state is restored from localStorage. Required by AGENTS.md ("every user-facing feature MUST have a browser E2E"). |
+| `tests/e2e/ui/staff-inbox.spec.ts` | Browser E2E (spawned gateway) | Open app → navigate to a staff session (created via REST in the `beforeAll`) → explicitly open the `inbox` workspace tab → "+ Add to inbox" opens dialog → submit → entry appears in Pending section → reload page → entry still there (content persistence) and the tab/size state matches the server workspace → click Cancel on entry → entry moves to History section (state=cancelled) → click delete in history → entry removed. Close the `inbox` tab, reload, and assert it stays closed until explicitly reopened. Required by AGENTS.md ("every user-facing feature MUST have a browser E2E"). |
 | `tests/tool-description-budget.test.ts` | unit (existing — extended) | Add `"inbox"` to `EXTENSION_FILES`. Existing assertions automatically enforce the 150-char / 80-char budgets on the three new tools. |
 | `tests/staff-trigger-engine.test.ts` | unit (existing — updated) | Replace `wake()` assertions with `inboxManager.enqueue()` assertions. Confirm the streaming/starting skip is gone (trigger always enqueues regardless of session state). |
 
@@ -783,11 +802,11 @@ Run order:
 | `defaults/tools/inbox/inbox_complete.yaml` | NEW | Tool manifest. |
 | `defaults/tools/inbox/inbox_dismiss.yaml` | NEW | Tool manifest. |
 | `defaults/tools/inbox/extension.ts` | NEW | Tool runtime + REST plumbing. Gates on `BOBBIT_STAFF_ID`. |
-| `src/app/state.ts` | EDIT | `inboxEntries`, `inboxPanelOpen`, `inboxAddDialogOpen`. |
-| `src/app/inbox-panel.ts` | NEW | Subscription lifecycle, REST bootstrap, WS event → state diff. |
-| `src/app/main.ts` | EDIT | Extend `canFullscreen` / `hasPanel` to include inbox sessions. |
+| `src/app/state.ts` | EDIT | `inboxEntries`, `inboxAddDialogOpen`; workspace tab state lives in `sidePanelWorkspace`. |
+| `src/app/inbox-panel.ts` | NEW | Subscription lifecycle, REST bootstrap, WS event → state diff, and explicit `inbox` workspace open/focus. |
+| `src/app/main.ts` | EDIT | Use shared side-panel workspace shortcut helpers; no inbox-specific fullscreen gate. |
 | `src/app/remote-agent.ts` | EDIT | Handle `inbox.entry.*` WS events. |
-| `src/app/render.ts` | EDIT | Mount `<inbox-panel>` for staff sessions. |
+| `src/app/render.ts` | EDIT | Mount `<inbox-panel>` when the server workspace contains the `inbox` tab. |
 | `src/app/session-manager.ts` | EDIT | Start/stop inbox subscription on session select. |
 | `src/app/staff-page.ts` | EDIT | `contextPolicy` radio + thread through `handleSave`. Rewire "Wake Now" to `/inbox` POST. |
 | `src/app/api.ts` | EDIT | Replace `wakeStaffAgent` with inbox enqueue helpers. |

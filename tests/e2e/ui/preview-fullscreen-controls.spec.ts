@@ -63,8 +63,8 @@ test.describe("Preview fullscreen header controls (Bug 1)", () => {
 		}, { baseUrl, sessionId });
 		expect(mountResp.status).toBe(200);
 
-		// Half-panel: Fullscreen button should be visible.
-		const fullscreenBtn = page.locator('button[title^="Fullscreen preview"]').first();
+		// Half-panel: generic side-panel fullscreen button should be visible.
+		const fullscreenBtn = page.getByTestId("side-panel-fullscreen").first();
 		await expect(fullscreenBtn).toBeVisible({ timeout: 10_000 });
 		await fullscreenBtn.click();
 
@@ -77,9 +77,10 @@ test.describe("Preview fullscreen header controls (Bug 1)", () => {
 			{ timeout: 5_000 },
 		).toBe(true);
 
-		// Exit-fullscreen button must be visible (sanity).
-		const exitBtn = page.locator('button[title^="Collapse preview"]').first();
-		await expect(exitBtn).toBeVisible({ timeout: 5_000 });
+		// Restore button must be visible in the generic shared side-panel chrome (sanity).
+		const restoreBtn = page.getByTestId("side-panel-restore").first();
+		await expect(restoreBtn).toBeVisible({ timeout: 5_000 });
+		await expect(restoreBtn).toHaveAttribute("title", /Restore side panel/);
 
 		// THE BUG: in fullscreen mode the Open-in-new-tab and Refresh controls
 		// are missing. After the fix they must be present.

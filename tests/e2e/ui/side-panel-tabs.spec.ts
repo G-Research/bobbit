@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createSession, defaultProject, nonGitCwd } from "../e2e-setup.js";
@@ -7,6 +8,16 @@ import { openApp, navigateToHash, sendMessage, waitForAgentResponse } from "./ui
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const PREVIEW_OPEN_BUTTON_SELECTOR = '[data-testid="preview-open-button"]';
+const SIDE_PANEL_FULLSCREEN = '[data-testid="side-panel-fullscreen"]';
+const SIDE_PANEL_COLLAPSE = '[data-testid="side-panel-collapse"]';
+const SIDE_PANEL_RESTORE = '[data-testid="side-panel-restore"]';
+const SIDE_PANEL_POPOUT = '[data-testid="side-panel-popout"]';
+const PRW_PACK = "pr-walkthrough";
+const PRW_PANEL_ID = "pr-walkthrough.panel";
+const PRW_TAB_ID = `pack:${PRW_PACK}:${PRW_PANEL_ID}:default`;
+const ARTIFACTS_PACK = "artifacts";
+const ARTIFACTS_PANEL_ID = "artifacts.viewer";
+const ARTIFACTS_SOURCE_DIR = fileURLToPath(new URL("../../../market-packs", import.meta.url));
 
 type PanelTab = {
 	index: number;
@@ -309,11 +320,15 @@ async function updateGoalProposal(page: Page): Promise<void> {
 async function openReview(page: Page): Promise<string> {
 	await sendMessage(page, "REVIEW_OPEN");
 	await waitForAgentResponse(page, { text: "Done. Used review_open tool.", timeout: 20_000 });
-	const review = (await visiblePanelTabs(page)).find((tab) => tab.kind === "review" && tab.id.startsWith("review:"));
-	expect(review, `review tab should be visible; tabs=${JSON.stringify(await visiblePanelTabs(page))}`).toBeTruthy();
-	await clickTabById(page, review!.id, "review tab should be selectable");
+	let reviewId = "";
+	await expect.poll(async () => {
+		const review = (await visiblePanelTabs(page)).find((tab) => tab.kind === "review" && tab.id.startsWith("review:"));
+		reviewId = review?.id ?? "";
+		return reviewId;
+	}, { timeout: 10_000, message: "review tab should be visible after review_open" }).toMatch(/^review:/);
+	await clickTabById(page, reviewId, "review tab should be selectable");
 	await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 10_000 });
-	return review!.id;
+	return reviewId;
 }
 
 // Wait until a tab's bounding box is stable across two animation frames before
@@ -448,6 +463,13 @@ async function expectPanelHidden(page: Page): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
 }
 
+async function openStaffInboxPanel(page: Page): Promise<void> {
+	await expect(page.locator('[data-testid="staff-inbox-open"]')).toBeVisible({ timeout: 15_000 });
+	await page.locator('[data-testid="staff-inbox-open"]').click();
+	await expectPanelTabs(page, ["inbox"], "explicit Staff Inbox action should open a side-panel tab");
+	await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 10_000 });
+}
+
 async function expectContentForTab(page: Page, tab: PanelTab, previewText: string): Promise<string> {
 	await clickTabById(page, tab.id, `click ${tab.id}`);
 	if (tab.kind === "preview") {
@@ -467,6 +489,122 @@ async function expectContentForTab(page: Page, tab: PanelTab, previewText: strin
 		return "inbox:panel";
 	}
 	throw new Error(`unsupported tab kind ${tab.kind}`);
+}
+
+async function workspace(sessionId: string): Promise<any> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`);
+	const text = await resp.text();
+	expect(resp.status, `workspace GET failed: ${text}`).toBe(200);
+	return JSON.parse(text);
+}
+
+async function expectSizeMode(page: Page, sessionId: string, expected: "collapsed" | "split" | "fullscreen", message: string): Promise<void> {
+	await expect.poll(async () => ({
+		server: (await workspace(sessionId)).sizeMode,
+		client: await page.evaluate((sid) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
+			return state.sidePanelWorkspaceBySession?.[sid]?.sizeMode ?? state.panelWorkspace?.sizeMode ?? "";
+		}, sessionId),
+	}), { timeout: 10_000, message }).toEqual({ server: expected, client: expected });
+}
+
+async function openWorkspaceTab(sessionId: string, tab: any): Promise<void> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/open`, {
+		method: "POST",
+		body: JSON.stringify({ tab: { ...tab, updatedAt: Date.now() } }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `open workspace tab failed: ${text}`).toBe(200);
+}
+
+async function openPrWalkthroughPanel(page: Page, sessionId: string): Promise<void> {
+	await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => {});
+	await openWorkspaceTab(sessionId, {
+		id: PRW_TAB_ID,
+		kind: "pack",
+		title: "PR Walkthrough",
+		label: "PR Walkthrough",
+		source: { type: "pack", sessionId, packId: PRW_PACK, panelId: PRW_PANEL_ID, instanceKey: "default", singleton: true, params: {} },
+	});
+	await expectPanelTabs(page, [PRW_TAB_ID], "PR walkthrough pack tab should open from the server workspace");
+	await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
+}
+
+async function expectPopoutOpens(page: Page, tabId: string, message: string): Promise<void> {
+	const kind = await page.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="${tabId}"]`).first().getAttribute("data-panel-tab-kind");
+	const popout = page.locator(SIDE_PANEL_POPOUT).first();
+	await expect(popout, `${message}: popout control`).toBeVisible({ timeout: 10_000 });
+	const href = await popout.getAttribute("href");
+	expect(href, `${message}: popout href`).toBeTruthy();
+	const popupPromise = page.context().waitForEvent("page");
+	await popout.click();
+	const popup = await popupPromise;
+	try {
+		await popup.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => {});
+		if (tabId.startsWith("preview:")) {
+			expect(popup.url(), `${message}: preview popout route`).toContain("/preview/");
+		} else {
+			const encoded = encodeURIComponent(tabId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			await expect.poll(() => popup.url(), { timeout: 15_000, message: `${message}: app popout route` })
+				.toMatch(new RegExp(`/panel/${encoded}`));
+			await expect(popup.locator('[data-testid="side-panel-route-content"]'), `${message}: standalone panel content shell`).toBeVisible({ timeout: 20_000 });
+			await expect(popup.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="${tabId}"]`).first(), `${message}: standalone active tab`).toBeVisible({ timeout: 20_000 });
+			if (kind === "inbox") await expect(popup.locator("inbox-panel"), `${message}: inbox popout content`).toBeVisible({ timeout: 20_000 });
+			else if (kind === "review") await expect(popup.locator("review-pane"), `${message}: review popout content`).toBeVisible({ timeout: 20_000 });
+			else if (kind === "proposal") await expect(popup.locator('input[placeholder="Goal title"]').first(), `${message}: proposal popout content`).toBeVisible({ timeout: 20_000 });
+			else if (kind === "pack") await expect(popup.locator('[data-testid="pack-panel-root"], [data-testid="prw-panel-root"]').first(), `${message}: pack popout content`).toBeVisible({ timeout: 20_000 });
+		}
+	} finally {
+		await popup.close().catch(() => {});
+	}
+}
+
+async function exerciseSharedWindowControls(page: Page, sessionId: string, tabId: string, message: string): Promise<void> {
+	await clickTabById(page, tabId, `${message}: tab should be selectable`);
+	await expect(page.locator(SIDE_PANEL_FULLSCREEN).first(), `${message}: fullscreen control`).toBeVisible({ timeout: 10_000 });
+	await expect(page.locator(SIDE_PANEL_COLLAPSE).first(), `${message}: collapse control`).toBeVisible({ timeout: 10_000 });
+	await expectPopoutOpens(page, tabId, message);
+
+	await page.locator(SIDE_PANEL_FULLSCREEN).first().click();
+	await expect(page.locator(SIDE_PANEL_RESTORE).first(), `${message}: restore after fullscreen`).toBeVisible({ timeout: 10_000 });
+	await expectSizeMode(page, sessionId, "fullscreen", `${message}: fullscreen persists to server`);
+
+	await page.locator(SIDE_PANEL_RESTORE).first().click();
+	await expect(page.locator(SIDE_PANEL_FULLSCREEN).first(), `${message}: fullscreen returns after restore`).toBeVisible({ timeout: 10_000 });
+	await expectSizeMode(page, sessionId, "split", `${message}: split persists to server`);
+
+	await page.locator(SIDE_PANEL_COLLAPSE).first().click();
+	await expect(page.locator(SIDE_PANEL_RESTORE).first(), `${message}: restore after collapse`).toBeVisible({ timeout: 10_000 });
+	await expectSizeMode(page, sessionId, "collapsed", `${message}: collapse persists to server`);
+
+	await page.locator(SIDE_PANEL_RESTORE).first().click();
+	await expect(page.locator(SIDE_PANEL_FULLSCREEN).first(), `${message}: restored split controls`).toBeVisible({ timeout: 10_000 });
+	await expectSizeMode(page, sessionId, "split", `${message}: final split persists to server`);
+}
+
+async function installArtifactsPack(): Promise<string> {
+	const addRes = await apiFetch("/api/marketplace/sources", {
+		method: "POST",
+		body: JSON.stringify({ url: ARTIFACTS_SOURCE_DIR }),
+	});
+	const addBody = await addRes.text();
+	expect(addRes.status, addBody).toBe(201);
+	const sourceId = (JSON.parse(addBody) as { source: { id: string } }).source.id;
+	const instRes = await apiFetch("/api/marketplace/install", {
+		method: "POST",
+		body: JSON.stringify({ sourceId, dirName: ARTIFACTS_PACK, scope: "server" }),
+	});
+	const instBody = await instRes.text();
+	expect(instRes.status, instBody).toBe(201);
+	return sourceId;
+}
+
+async function cleanupArtifactsPack(sourceId?: string): Promise<void> {
+	await apiFetch("/api/marketplace/installed", {
+		method: "DELETE",
+		body: JSON.stringify({ scope: "server", packName: ARTIFACTS_PACK }),
+	}).catch(() => {});
+	if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
 }
 
 test.describe("Side-panel tab contract", () => {
@@ -599,41 +737,30 @@ test.describe("Side-panel tab contract", () => {
 		await expectPanelHidden(page);
 	});
 
-	test("5. Staff Inbox is pinned first, non-closable, non-draggable, and survives closing other tabs", async ({ page }) => {
+	test("5. Staff Inbox opens explicitly, is closable, and stays closed across reload", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		const staff = await createStaff(`SidePanelInbox-${Date.now()}`);
 		staffCleanup.push(staff.id);
 		await openApp(page);
 		await navigateToSession(page, staff.currentSessionId);
 
-		await expect.poll(async () => (await visiblePanelTabs(page))[0] ?? null, { timeout: 20_000, message: "staff sessions should always expose Inbox" })
-			.toMatchObject({ id: "inbox", kind: "inbox" });
+		await expect.poll(() => visiblePanelTabs(page), { timeout: 10_000, message: "staff session should not auto-open Inbox" }).toEqual([]);
+		await openStaffInboxPanel(page);
 		let tabs = await visiblePanelTabs(page);
 		expect(tabs[0]).toMatchObject({ id: "inbox", kind: "inbox" });
-		expect(tabs[0].closable, "Inbox must not render a close control").toBe(false);
-		await expect(page.locator('[data-panel-tab-id="inbox"] .goal-tab-close')).toHaveCount(0);
+		expect(tabs[0].closable, "Inbox must render a close control").toBe(true);
 
 		await mountPreviewHtml(page, staff.currentSessionId, "staff.html", "Staff Preview");
-		await expectPanelTabs(page, ["inbox", previewId("staff.html")], "preview should open beside pinned Inbox");
-		const beforeDrag = await visiblePanelTabIds(page);
-		await dragTab(page, "inbox", previewId("staff.html"));
-		await expectPanelTabs(page, beforeDrag, "dragging pinned Inbox should not change order");
-
-		await closeTabById(page, previewId("staff.html"), "closing staff preview tab");
-		await expectPanelTabs(page, ["inbox"], "Inbox should remain after every other tab closes");
-		await expectActivePanelTabId(page, "inbox", "Inbox should be active after other tabs close");
-		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 10_000 });
+		await expectPanelTabs(page, ["inbox", previewId("staff.html")], "preview should open beside explicit Inbox tab");
+		await closeTabById(page, "inbox", "closing staff inbox tab");
+		await expectPanelTabs(page, [previewId("staff.html")], "closing Inbox should delete only the Inbox tab");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, staff.currentSessionId);
+		await expectPanelTabs(page, [previewId("staff.html")], "closed Inbox should not auto-reopen after reload");
+		await expect(page.locator('[data-testid="staff-inbox-open"]')).toBeVisible({ timeout: 10_000 });
 	});
 
-	// The product pinned-tab guard (render.ts::ensurePanelSortable onMove/onEnd) is
-	// correct; this test was a *contention* flake, not a product bug. Under heavy
-	// Chromium load the synthesised drag could resolve mouse-up before SortableJS's
-	// fallback loop evaluated the onMove over the pinned Inbox, so an earlier
-	// non-pinned swap committed and the order assertion failed (~1/5). The fix is in
-	// `dragTab`: it now settles on stable tab boxes, nudges past fallbackTolerance to
-	// start the drag, glides in fine steps so every crossed tab gets an onMove, and
-	// dwells on the destination so the final drop is evaluated deterministically.
-	test("6. Desktop drag reorder persists and cannot move tabs before pinned Inbox", async ({ page }) => {
+	test("6. Desktop drag reorder persists for all side-panel tabs", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);
 		const sessionId = await createRegularSessionViaApi(page);
@@ -660,13 +787,12 @@ test.describe("Side-panel tab contract", () => {
 		const staff = await createStaff(`SidePanelDrag-${Date.now()}`);
 		staffCleanup.push(staff.id);
 		await navigateToSession(page, staff.currentSessionId);
-		await mountPreviewHtml(page, staff.currentSessionId, "pinned-a.html", "Pinned A");
-		await mountPreviewHtml(page, staff.currentSessionId, "pinned-b.html", "Pinned B");
-		const pinnedA = previewId("pinned-a.html");
-		const pinnedB = previewId("pinned-b.html");
-		await expectPanelTabs(page, ["inbox", pinnedA, pinnedB], "staff drag test should start with pinned Inbox first");
-		await dragTab(page, pinnedB, "inbox", { toLeftEdge: true });
-		await expectPanelTabs(page, ["inbox", pinnedA, pinnedB], "non-pinned tabs cannot be dropped before pinned Inbox");
+		await openStaffInboxPanel(page);
+		await mountPreviewHtml(page, staff.currentSessionId, "inbox-a.html", "Inbox A");
+		const inboxA = previewId("inbox-a.html");
+		await expectPanelTabs(page, ["inbox", inboxA], "staff drag test should start with explicit Inbox and preview");
+		await dragTab(page, inboxA, "inbox", { toLeftEdge: true });
+		await expectPanelTabs(page, [inboxA, "inbox"], "preview tabs can be dropped before Inbox because Inbox is a normal tab");
 		await expectNoChatTab(page);
 	});
 
@@ -676,6 +802,7 @@ test.describe("Side-panel tab contract", () => {
 		staffCleanup.push(staff.id);
 		await openApp(page);
 		await navigateToSession(page, staff.currentSessionId);
+		await openStaffInboxPanel(page);
 
 		const previewText = "Identity Preview";
 		await mountPreviewHtml(page, staff.currentSessionId, "identity.html", previewText);
@@ -725,7 +852,233 @@ test.describe("Side-panel tab contract", () => {
 		await expectActivePanelTabId(page, proposalId, "proposal update should focus its existing tab in place");
 	});
 
-	test("9. Mobile side-pane tabs include pinned Chat pill (not persisted), swipes reveal chat/panel, and touch does not reorder tabs", async ({ page }) => {
+	test("9. Server workspace is authoritative across close/open reloads", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+
+		const proposalId = await openGoalProposal(page);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectPanelTabs(page, [proposalId], "leaving a proposal tab open should survive reload/reconnect");
+		await expect(page.locator('input[placeholder="Goal title"]').first()).toHaveValue("Parity Goal A", { timeout: 20_000 });
+
+		await closeTabById(page, proposalId, "closing proposal before reload");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectPanelTabs(page, [], "closed proposal tabs must not be re-derived from activeProposals on reload");
+		await expect(page.locator('input[placeholder="Goal title"]')).toHaveCount(0);
+		const refetched = await workspace(sessionId);
+		expect(refetched.tabs.map((tab: any) => tab.id)).toEqual([]);
+	});
+
+	test("9b. Closing review tab preserves content but keeps closed workspace state across reload", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+
+		const reviewId = await openReview(page);
+		await closeTabById(page, reviewId, "closing review workspace tab should not delete review content");
+		await expectPanelTabs(page, [], "closed review tab should disappear immediately");
+		await expect.poll(async () => (await workspace(sessionId)).tabs.map((tab: any) => tab.id), {
+			timeout: 10_000,
+			message: "server workspace should persist the closed review tab absence",
+		}).toEqual([]);
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectPanelTabs(page, [], "closed review tab must not be re-derived from restored review document caches");
+		await expect(page.locator("review-document")).toHaveCount(0);
+
+		const reopenedId = await openReview(page);
+		expect(reopenedId).toBe(reviewId);
+		await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("10. Size mode persists across reload for collapsed, split, and fullscreen preview states", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const previewTab = previewId("size.html");
+		await mountPreviewHtml(page, sessionId, "size.html", "Size Persistence Preview");
+		await exerciseSharedWindowControls(page, sessionId, previewTab, "preview shared controls");
+
+		await page.locator(SIDE_PANEL_COLLAPSE).first().click();
+		await expectSizeMode(page, sessionId, "collapsed", "collapsed state should be stored before reload");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectSizeMode(page, sessionId, "collapsed", "collapsed state should survive reload");
+		await expect(page.locator(SIDE_PANEL_RESTORE).first()).toBeVisible({ timeout: 10_000 });
+
+		await page.locator(SIDE_PANEL_RESTORE).first().click();
+		await expectSizeMode(page, sessionId, "split", "split state should be stored before reload");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectSizeMode(page, sessionId, "split", "split state should survive reload");
+		await expectPreviewContains(page, "Size Persistence Preview", "split preview after reload");
+
+		await page.locator(SIDE_PANEL_FULLSCREEN).first().click();
+		await expectSizeMode(page, sessionId, "fullscreen", "fullscreen state should be stored before reload");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectSizeMode(page, sessionId, "fullscreen", "fullscreen state should survive reload");
+		await expect(page.locator(SIDE_PANEL_RESTORE).first()).toBeVisible({ timeout: 10_000 });
+		await expectPreviewContains(page, "Size Persistence Preview", "fullscreen preview after reload");
+	});
+
+	test("11. Cross-device contexts sync open, close, active, reorder, and size mode", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const browser = page.context().browser();
+		expect(browser, "browser instance should be available for a second device context").toBeTruthy();
+		const context2 = await browser!.newContext({ viewport: { width: 1280, height: 800 } });
+		const page2 = await context2.newPage();
+		try {
+			await openApp(page2);
+			await navigateToSession(page2, sessionId);
+
+			await mountPreviewHtml(page, sessionId, "sync.html", "Cross Device Preview");
+			const proposalId = await openGoalProposal(page);
+			const previewTab = previewId("sync.html");
+			await expectPanelTabs(page2, [previewTab, proposalId], "second device should receive opened tabs over WS");
+
+			await clickTabById(page, previewTab, "first device activates preview");
+			const activeResp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/active`, {
+				method: "POST",
+				body: JSON.stringify({ activeTabId: previewTab }),
+			});
+			expect(activeResp.status, await activeResp.text()).toBe(200);
+			await expectActivePanelTabId(page2, previewTab, "second device should receive active-tab changes");
+
+			const beforeReorder = await workspace(sessionId);
+			const reorderResp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/reorder`, {
+				method: "POST",
+				body: JSON.stringify({ baseRevision: beforeReorder.revision, tabIds: [proposalId, previewTab] }),
+			});
+			expect(reorderResp.status, await reorderResp.text()).toBe(200);
+			await expectPanelTabs(page, [proposalId, previewTab], "first device should render server reorder");
+			await expectPanelTabs(page2, [proposalId, previewTab], "second device should receive reorder over WS");
+
+			await page.locator(SIDE_PANEL_FULLSCREEN).first().click();
+			await expectSizeMode(page2, sessionId, "fullscreen", "second device should receive fullscreen size mode");
+			await page.locator(SIDE_PANEL_RESTORE).first().click();
+			await expectSizeMode(page2, sessionId, "split", "second device should receive split size mode");
+
+			await closeTabById(page, previewTab, "first device closes preview");
+			await expectPanelTabs(page2, [proposalId], "second device should receive tab close over WS");
+		} finally {
+			await context2.close().catch(() => {});
+		}
+	});
+
+	test("12. Proposal, review, and staff inbox tabs expose shared controls and popout", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		const staff = await createStaff(`SidePanelControls-${Date.now()}`);
+		staffCleanup.push(staff.id);
+		await openApp(page);
+		await navigateToSession(page, staff.currentSessionId);
+		await openStaffInboxPanel(page);
+
+		await exerciseSharedWindowControls(page, staff.currentSessionId, "inbox", "staff inbox shared controls");
+		const proposalId = await openGoalProposal(page);
+		await exerciseSharedWindowControls(page, staff.currentSessionId, proposalId, "proposal shared controls");
+		const reviewId = await openReview(page);
+		await exerciseSharedWindowControls(page, staff.currentSessionId, reviewId, "review shared controls");
+	});
+
+	test("13. PR walkthrough pack panel uses shared controls and popout", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		await openPrWalkthroughPanel(page, sessionId);
+		await exerciseSharedWindowControls(page, sessionId, PRW_TAB_ID, "PR walkthrough pack shared controls");
+	});
+
+	test("14. Artifact-style pack viewer opens multiple independent panel instances", async ({ page }) => {
+		await page.setViewportSize({ width: 1400, height: 900 });
+		let sourceId: string | undefined;
+		try {
+			sourceId = await installArtifactsPack();
+			await openApp(page);
+			const sessionId = await createRegularSessionViaApi(page);
+			await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.()).catch(() => {});
+
+			await sendMessage(page, "ARTIFACT_DEMO_TOOL please");
+			await expect(page.locator('[data-testid="artifact-pill"][data-artifact-id="art-demo-1"]').first()).toBeVisible({ timeout: 25_000 });
+			await sendMessage(page, "ARTIFACT_DEMO_MD please");
+			await expect(page.locator('[data-testid="artifact-pill"][data-artifact-id="art-demo-md"]').first()).toBeVisible({ timeout: 25_000 });
+
+			await page.locator('[data-testid="artifact-pill"][data-artifact-id="art-demo-1"]').first().click();
+			await expect(page.locator('[data-testid="artifact-viewer-content"][data-artifact-id="art-demo-1"]').first()).toBeVisible({ timeout: 15_000 });
+			await page.locator('[data-testid="artifact-pill"][data-artifact-id="art-demo-md"]').first().click();
+			await expect(page.locator('[data-testid="artifact-viewer-content"][data-artifact-id="art-demo-md"]').first()).toBeVisible({ timeout: 15_000 });
+
+			await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "pack" && tab.id.includes(`${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}`)).map((tab) => tab.id).sort(), {
+				timeout: 15_000,
+				message: "two artifact viewer instances should coexist as independent pack tabs",
+			}).toEqual([
+				`pack:${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}:art-demo-1`,
+				`pack:${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}:art-demo-md`,
+			].sort());
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToSession(page, sessionId);
+			await expectPanelTabs(page, [
+				`pack:${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}:art-demo-1`,
+				`pack:${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}:art-demo-md`,
+			], "artifact pack tabs should persist independently across reload");
+			await clickTabById(page, `pack:${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}:art-demo-md`, "markdown artifact tab after reload");
+			await expect(page.locator('[data-testid="artifact-viewer-content"][data-artifact-id="art-demo-md"]').first()).toBeVisible({ timeout: 20_000 });
+			await exerciseSharedWindowControls(page, sessionId, `pack:${ARTIFACTS_PACK}:${ARTIFACTS_PANEL_ID}:art-demo-md`, "artifact pack shared controls");
+		} finally {
+			await cleanupArtifactsPack(sourceId);
+		}
+	});
+
+	test("15. Legacy localStorage workspace keys migrate once and stop being authoritative", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		const sessionId = await createSession({ cwd: nonGitCwd() });
+		const legacyPreviewId = previewId("legacy.html");
+		await page.addInitScript(({ sid, tabId }) => {
+			const tab = {
+				id: tabId,
+				kind: "preview",
+				title: "legacy.html",
+				label: "legacy.html",
+				source: { type: "preview", entry: "legacy.html", live: true },
+			};
+			localStorage.setItem("bobbit-panel-tabs-by-session", JSON.stringify({ [sid]: [tab] }));
+			localStorage.setItem("bobbit-panel-active-by-session", JSON.stringify({ [sid]: tabId }));
+			localStorage.setItem(`bobbit-preview-collapsed-${sid}`, "true");
+		}, { sid: sessionId, tabId: legacyPreviewId });
+
+		await openApp(page);
+		await navigateToSession(page, sessionId);
+		await expectSizeMode(page, sessionId, "collapsed", "legacy collapsed key should migrate to server size mode");
+		await expect.poll(async () => {
+			const migrated = await workspace(sessionId);
+			return { ids: migrated.tabs.map((tab: any) => tab.id), active: migrated.activeTabId, stamped: migrated.metadata?.migratedFromLocalStorageAt > 0 };
+		}, { timeout: 15_000, message: "legacy localStorage tabs should migrate into the server workspace" })
+			.toEqual({ ids: [legacyPreviewId], active: legacyPreviewId, stamped: true });
+		await page.locator(SIDE_PANEL_RESTORE).first().click();
+		await expectPanelTabs(page, [legacyPreviewId], "restoring migrated collapsed workspace should reveal migrated tab");
+
+		await page.evaluate(({ sid }) => {
+			localStorage.setItem("bobbit-panel-tabs-by-session", JSON.stringify({ [sid]: [{ id: "proposal:goal", kind: "proposal", title: "Goal", label: "Goal", source: { type: "proposal", proposalType: "goal" } }] }));
+			localStorage.setItem("bobbit-panel-active-by-session", JSON.stringify({ [sid]: "proposal:goal" }));
+		}, { sid: sessionId });
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expect.poll(async () => {
+			const migrated = await workspace(sessionId);
+			return { ids: migrated.tabs.map((tab: any) => tab.id), active: migrated.activeTabId };
+		}, { timeout: 15_000, message: "post-migration localStorage edits must not replace server workspace" })
+			.toEqual({ ids: [legacyPreviewId], active: legacyPreviewId });
+		await expectActivePanelTabId(page, legacyPreviewId, "post-migration localStorage edits must not replace client active tab");
+	});
+
+	test("16. Mobile side-pane tabs include pinned Chat pill (not persisted), swipes reveal chat/panel, and touch does not reorder tabs", async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 800 });
 		await openApp(page);
 		const sessionId = await createRegularSessionViaApi(page);

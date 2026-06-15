@@ -35,15 +35,16 @@ import {
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
+import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
-import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable } from "./render.js";
+import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable, hasActiveSidePanel, getSidePanelSizeMode, setSidePanelSizeMode } from "./render.js";
+import { getSidePanelWorkspace, hydrateSidePanelWorkspace, setActiveSidePanelTab } from "./side-panel-workspace.js";
 import { renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { toggleShowArchived, toggleShowBusy, toggleShowRead } from "../ui/components/sidebar-filters.js";
-import { PROPOSAL_TYPES } from "./proposal-registry.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
 let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
@@ -76,12 +77,44 @@ setRenderApp(doRenderApp);
 // session; the corresponding writes live in panel-workspace.ts.
 loadPersistedPanelWorkspace(state);
 
+function reconcileE2eInjectedProposalWorkspace(): void {
+	const sessionId = activeSessionId();
+	if (!sessionId) return;
+	const activeId = state.panelWorkspaceActiveBySession?.[sessionId] || state.activePanelTabId;
+	const match = typeof activeId === "string" ? activeId.match(/^proposal:(goal|project|role|tool|staff)$/) : null;
+	const type = match?.[1] as keyof typeof state.activeProposals | undefined;
+	const slot = type ? state.activeProposals[type] : undefined;
+	if (!type || !slot || slot.sessionId !== sessionId) return;
+	selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true });
+}
+
+function captureSidePanelTabActivation(event: Event): void {
+	const target = event.target as Element | null;
+	if (!target || target.closest(".goal-tab-close")) return;
+	const pill = target.closest<HTMLElement>(".goal-tab-pill[data-panel-tab-id]");
+	if (!pill || pill.getAttribute("data-panel-tab-kind") === "chat") return;
+	const tabId = pill.getAttribute("data-panel-tab-id") || "";
+	const sessionId = state.selectedSessionId || activeSessionId() || "";
+	if (!tabId || !sessionId) return;
+	if (!state.panelWorkspaceActiveBySession || typeof state.panelWorkspaceActiveBySession !== "object") state.panelWorkspaceActiveBySession = {} as any;
+	(state as any).__lastSidePanelUserActiveSelection = { sessionId, tabId, at: Date.now() };
+	state.panelWorkspaceActiveBySession[sessionId] = tabId;
+	state.activePanelTabId = tabId;
+}
+
+document.addEventListener("pointerdown", captureSidePanelTabActivation, true);
+document.addEventListener("mousedown", captureSidePanelTabActivation, true);
+document.addEventListener("click", captureSidePanelTabActivation, true);
+
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
 (window as any).__bobbitState = state;
 // Expose the render trigger too, so tests that patch in-memory state can
 // force a fresh paint without relying on viewport-resize side effects.
-(window as any).__bobbitRenderApp = renderApp;
+(window as any).__bobbitRenderApp = () => {
+	reconcileE2eInjectedProposalWorkspace();
+	renderApp();
+};
 // Expose the expanded-goals set so tests that inject synthetic goals into
 // state.goals can also force them into the expanded state (the normal
 // auto-expand path only fires for goals the server has confirmed).
@@ -115,10 +148,6 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 	const { runLauncherEntrypoint } = await import("./pack-entrypoints.js");
 	runLauncherEntrypoint(id);
 };
-
-function hasActiveProposalPanel(): boolean {
-	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
-}
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
@@ -210,6 +239,23 @@ function clearActiveExtRoute(): void {
 	dismissExtRouteUnavailable();
 }
 
+async function restoreSessionPanelRoute(sessionId: string, panelTabId: string | undefined): Promise<void> {
+	if (!panelTabId) return;
+	try {
+		const workspace = getSidePanelWorkspace(sessionId).sessionId === sessionId
+			? getSidePanelWorkspace(sessionId)
+			: await hydrateSidePanelWorkspace(sessionId);
+		const latest = workspace.tabs.length > 0 ? workspace : await hydrateSidePanelWorkspace(sessionId);
+		if (latest.tabs.some((tab) => tab.id === panelTabId)) {
+			await setActiveSidePanelTab(panelTabId, { sessionId });
+		}
+	} catch {
+		/* render.ts shows the closed/missing-panel state */
+	} finally {
+		renderApp();
+	}
+}
+
 async function restoreExtRoute(routeId: string | undefined, params: Record<string, string> | undefined): Promise<void> {
 	if (!routeId) { clearActiveExtRoute(); return; }
 	try {
@@ -298,10 +344,8 @@ async function handleHashChange(): Promise<void> {
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
 			clearDashboardState();
-			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId) {
-				return;
-			}
-			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
+			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId || state.remoteAgent?.gatewaySessionId === route.sessionId) {
+				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				return;
 			}
 			if (state.remoteAgent) {
@@ -313,6 +357,7 @@ async function handleHashChange(): Promise<void> {
 			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 			if (checkRes.ok) {
 				await connectToSession(route.sessionId, true);
+				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 			} else {
 				setHashRoute("landing");
 				state.appView = "authenticated";
@@ -688,6 +733,7 @@ async function initApp() {
 				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 				if (checkRes.ok) {
 					await connectToSession(route.sessionId, true);
+					await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				}
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;
@@ -804,27 +850,17 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		// Ctrl+[ — expand preview panel one level (collapsed → half → full) when a
-		// preview/review/proposal panel is visible. Falls back to toggling the
-		// sidebar when no such panel exists.
-		id: "toggle-sidebar", label: "Expand preview / toggle sidebar", category: "UI",
+		// Ctrl+[ — expand the active side panel one level (collapsed → split → fullscreen).
+		// Falls back to toggling the sidebar when no side panel exists.
+		id: "toggle-sidebar", label: "Expand side panel / toggle sidebar", category: "UI",
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
-			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
-			if (hasPanel) {
-				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
-				const collapsed = localStorage.getItem(key) === "true";
-				if (collapsed) {
-					// level 0 → 1: uncollapse to half view
-					localStorage.setItem(key, "false");
-				} else if (!state.previewPanelFullscreen && canFullscreen) {
-					// level 1 → 2: enter fullscreen
-					sessionStorage.setItem("bobbit-pre-fullscreen-collapsed", "false");
-					state.previewPanelFullscreen = true;
-				}
-				// already at level 2 — no-op
+			if (hasActiveSidePanel()) {
+				const mode = getSidePanelSizeMode(workspaceSessionId());
+				if (mode === "collapsed") setSidePanelSizeMode("split", workspaceSessionId());
+				else if (mode === "split") setSidePanelSizeMode("fullscreen", workspaceSessionId());
+				// already fullscreen — no-op
 				renderApp();
 				return;
 			}
@@ -866,54 +902,30 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		// Ctrl+] — collapse preview panel one level (full → half → collapsed).
-		id: "toggle-preview", label: "Collapse preview panel", category: "UI",
+		// Ctrl+] — collapse the active side panel one level (fullscreen → split → collapsed).
+		id: "toggle-preview", label: "Collapse side panel", category: "UI",
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
-			if (!hasPanel) return;
-			const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
-			if (state.previewPanelFullscreen) {
-				// level 2 → 1: exit fullscreen, keep half view
-				state.previewPanelFullscreen = false;
-				localStorage.setItem(key, "false");
-				sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-			} else if (localStorage.getItem(key) !== "true") {
-				// level 1 → 0: collapse
-				localStorage.setItem(key, "true");
-			}
-			// already at level 0 — no-op
+			if (!hasActiveSidePanel()) return;
+			const mode = getSidePanelSizeMode(workspaceSessionId());
+			if (mode === "fullscreen") setSidePanelSizeMode("split", workspaceSessionId());
+			else if (mode === "split") setSidePanelSizeMode("collapsed", workspaceSessionId());
+			// already collapsed — no-op
 			renderApp();
 		},
 	});
 
 	registerShortcut({
-		// Ctrl+# — jump straight to fullscreen (level 2). If already fullscreen,
-		// jump straight to collapsed (level 0).
-		id: "toggle-fullscreen-preview", label: "Fullscreen ↔ collapsed preview", category: "UI",
+		// Ctrl+# — jump straight to fullscreen. If already fullscreen, jump straight to collapsed.
+		id: "toggle-fullscreen-preview", label: "Fullscreen ↔ collapsed side panel", category: "UI",
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
-			if (hasPanel) {
-				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
-				if (state.previewPanelFullscreen) {
-					// level 2 → 0: exit fullscreen and collapse
-					state.previewPanelFullscreen = false;
-					localStorage.setItem(key, "true");
-					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-				} else if (state.isPreviewSession) {
-					// any non-fullscreen level → 2: jump to fullscreen
-					localStorage.setItem(key, "false");
-					state.previewPanelFullscreen = true;
-				} else {
-					// Proposal/review/inbox-only panels have no fullscreen surface.
-					const collapsed = localStorage.getItem(key) === "true";
-					localStorage.setItem(key, collapsed ? "false" : "true");
-				}
-				renderApp();
-			}
+			if (!hasActiveSidePanel()) return;
+			const mode = getSidePanelSizeMode(workspaceSessionId());
+			setSidePanelSizeMode(mode === "fullscreen" ? "collapsed" : "fullscreen", workspaceSessionId());
+			renderApp();
 		},
 	});
 

@@ -56,6 +56,7 @@ import { loadPackContributions } from "./agent/pack-contributions.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
+import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -159,6 +160,15 @@ async function detectedRefExistsInAllComponents(
 	} catch {
 		return false;
 	}
+}
+
+async function resolveBaseRefDetectRepoPath(rootPath: string, comps: Array<{ repo: string }>): Promise<string | null> {
+	const isMultiRepo = comps.some(c => c.repo !== ".");
+	const primaryRepoPath = isMultiRepo
+		? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+		: rootPath;
+	if (!(await isGitRepo(primaryRepoPath).catch(() => false))) return null;
+	return isMultiRepo ? primaryRepoPath : await getRepoRoot(primaryRepoPath);
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -2548,6 +2558,13 @@ async function handleApiRoute(
 		return false;
 	}
 
+	if (await handleSidePanelWorkspaceRoute(url, req, res, {
+		sessionManager,
+		readBody,
+		broadcastToSession: _broadcastToSession,
+		packContributionRegistry,
+	})) return;
+
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
 		defaultCwd: config.defaultCwd,
 		readBody,
@@ -3541,10 +3558,12 @@ async function handleApiRoute(
 		try {
 			const cfg = ctx.projectConfigStore;
 			const comps = cfg.getComponents();
-			const isMultiRepo = comps.some(c => c.repo !== ".");
-			const primaryRepoPath = isMultiRepo
-				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-				: await getRepoRoot(rootPath);
+			const primaryRepoPath = await resolveBaseRefDetectRepoPath(rootPath, comps);
+			if (!primaryRepoPath) {
+				const parsed = parseBaseRef(cfg.get("base_ref") || "");
+				json({ resolved: parsed.ref || "", detected: null });
+				return;
+			}
 			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
 			// `detected` must be SAVEABLE — null it out unless it passes the same
 			// checks add-time pinning applies (grammar + cross-component existence).
@@ -5567,7 +5586,13 @@ async function handleApiRoute(
 		const packs = packContributionRegistry.list(contribProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
-			panels: p.panels.map((panel) => (panel.title !== undefined ? { id: panel.id, title: panel.title } : { id: panel.id })),
+			panels: p.panels.map((panel) => {
+				const out: Record<string, unknown> = { id: panel.id };
+				if (panel.title !== undefined) out.title = panel.title;
+				if (panel.instanceMode !== undefined) out.instanceMode = panel.instanceMode;
+				if (panel.instanceParam !== undefined) out.instanceParam = panel.instanceParam;
+				return out;
+			}),
 			entrypoints: p.entrypoints.map((e) => {
 				const out: Record<string, unknown> = { id: e.id, kind: e.kind, listName: e.listName };
 				if (e.label !== undefined) out.label = e.label;
@@ -11435,6 +11460,57 @@ async function handleApiRoute(
 	// ── Preview mount endpoints ──────────────────────────────────────
 	const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
+	const previewEntryLabelForWorkspace = (entry: string | undefined | null): string => {
+		const clean = (entry || "inline.html").split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "inline.html";
+		return clean.split("/").filter(Boolean).pop() || clean || "inline.html";
+	};
+
+	const openPreviewMountWorkspaceTab = async (sessionId: string, result: {
+		entry?: string;
+		mtime?: number;
+		url?: string;
+		path?: string;
+		contentHash?: string;
+		artifactId?: string;
+	}): Promise<void> => {
+		const entry = previewEntryLabelForWorkspace(result.entry);
+		try {
+			await openSidePanelWorkspaceTab({
+				sessionManager,
+				readBody,
+				broadcastToSession: _broadcastToSession,
+				packContributionRegistry,
+			}, sessionId, {
+				id: `preview:entry:${encodeURIComponent(entry)}`,
+				kind: "preview",
+				title: entry,
+				label: entry,
+				source: {
+					type: "preview",
+					sessionId,
+					entry,
+					live: true,
+					...(typeof result.contentHash === "string" && result.contentHash ? { contentHash: result.contentHash } : {}),
+					...(typeof result.path === "string" && result.path ? { path: result.path } : {}),
+					...(typeof result.url === "string" && result.url ? { url: result.url } : {}),
+					...(typeof result.artifactId === "string" && result.artifactId ? { artifactId: result.artifactId } : {}),
+				},
+				state: {
+					entry,
+					origin: "preview-mount",
+					...(typeof result.mtime === "number" ? { mtime: result.mtime } : {}),
+					...(typeof result.url === "string" && result.url ? { url: result.url } : {}),
+					...(typeof result.path === "string" && result.path ? { path: result.path } : {}),
+					...(typeof result.contentHash === "string" && result.contentHash ? { contentHash: result.contentHash } : {}),
+					...(typeof result.artifactId === "string" && result.artifactId ? { artifactId: result.artifactId } : {}),
+				},
+				updatedAt: Date.now(),
+			}, { focus: true, placeAfterActive: true });
+		} catch (err) {
+			console.warn(`[preview/mount] failed to open side-panel workspace tab for ${sessionId}:`, err);
+		}
+	};
+
 	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
 	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
 	// {url, path, entry, mtime, contentHash}. See docs/design/embedded-html-preview-rewrite.md §6.
@@ -11449,6 +11525,10 @@ async function handleApiRoute(
 			return;
 		}
 		const body = await readBody(req).catch(() => ({}));
+		const shouldOpenWorkspaceTab = body?.workspaceTab !== false
+			&& body?.openWorkspaceTab !== false
+			&& body?.internalRestore !== true
+			&& url.searchParams.get("workspaceTab") !== "false";
 		const hasArtifact = typeof body?.artifactId === "string" && body.artifactId.length > 0;
 		const hasHtml = typeof body?.html === "string";
 		const hasFile = typeof body?.file === "string" && body.file.length > 0;
@@ -11470,6 +11550,7 @@ async function handleApiRoute(
 			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
 			if (hasArtifact) {
 				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
+				if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, restored);
 				broadcastPreviewChanged(sessionId, {
 					entry: restored.entry,
 					mtime: restored.mtime,
@@ -11572,6 +11653,7 @@ async function handleApiRoute(
 			}
 			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
 			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
+			if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,
 				mtime: result.mtime,

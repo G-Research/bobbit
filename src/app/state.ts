@@ -2,6 +2,7 @@ import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
+import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
 
@@ -439,6 +440,10 @@ export const state = {
 	panelWorkspaceActiveBySession: {} as Record<string, string>,
 	panelWorkspacePreviewKeyBySession: {} as Record<string, string>,
 	previewVersionsBySession: {} as Record<string, Record<string, { latestVersion: number; latestContentHash?: string; hashToVersion: Record<string, number> }>>,
+	// Server-authoritative side-panel workspace mirrors. Optimistic updates live
+	// only in memory here and are replaced by REST/WS workspace payloads.
+	sidePanelWorkspaceBySession: {} as Record<string, SidePanelWorkspace>,
+	lastWorkspaceRevisionBySession: {} as Record<string, number>,
 
 	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
 	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
