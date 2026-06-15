@@ -31,7 +31,7 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 |-------|-------|-------|---------|-------------|
 | Unit · node (node:test logic) | ~340 | ~3.4k | long pole of the ~90s unit wall | `--test-concurrency=N/2` |
 | Unit · browser (file:// fixtures) | ~120 | ~1.3k | finishes ~76s within the unit wall | `--workers=N/2` |
-| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5–7 min (retries add ~0; browser project ~5.2 min standalone) | api 4 / browser 3 workers |
+| E2E (in-process API + spawned browser) | ~330 | ~1.3k | ~6.5–7 min typical, longer under verification/concurrent load | api 2 / browser 3 workers |
 | Manual integration (real agent/LLM + Docker) | ~11 | serial | ~5 min | **None** |
 
 (Counts are order-of-magnitude; the authoritative membership is the phase-invariant guard, not this table.)
@@ -625,7 +625,7 @@ not come from over-parallelising a shared filesystem.
 Configured in `playwright-e2e.config.ts`:
 
 - Top-level: `workers: 4`, `retries: 3`, `fullyParallel: true`.
-- `api` project: `workers: 4` and inherited `fullyParallel: true`.
+- `api` project: `workers: 2` and inherited `fullyParallel: true`.
 - `api-realpush` project: `workers: 1`, `fullyParallel: false`.
 - `browser` project: `workers: 3`, `fullyParallel: false`.
 
@@ -633,7 +633,8 @@ Each worker owns a full gateway state directory; browser workers add Chromium
 and static UI serving. The browser and real-push projects stay spec-serial
 inside their project workers because their setup costs and filesystem side
 effects are heavier. The API project remains fully parallel because it uses the
-in-process harness and benefits from all four workers.
+in-process harness, but its worker budget is capped at two to avoid stacking too
+many gateway/git-heavy setup paths on Windows.
 
 **`retries: 3` is the deliberate current policy, not debt.** The flake-hardening
 effort root-caused the browser flake floor in place (see [Flake hardening](#flake-hardening-deterministic-waits)),
@@ -698,6 +699,33 @@ The inventory also corrected a stale suspect list: `goal-creation`,
 `stories-goal-routing`, and `verification-progress-indicator` were named as
 intermittent offenders but did **not** flake under retry-free runs; all
 previously-named specs are now hardened and de-labelled.
+
+#### RCA-driven infra fixes
+
+Recent stabilization work addressed contention at the scheduler, fixture, and
+suite-layout layers:
+
+- **Verification command scheduling.** Command verification steps serialize
+  within a phase while non-command steps remain parallel. This prevents one gate
+  from starting multiple full suites against the same worktree at the same time.
+  Component-linked `command: unit` steps also default to 1200s when no explicit
+  timeout is set; other command steps keep the generic 300s default. Pinned by
+  `tests/verification-harness-command-scheduling.test.ts`.
+- **Activate-skill renderer fixture readiness.** The fixture used to let
+  fully-parallel workers rebuild the same esbuild output file in place. A worker
+  could load the bundle while another had truncated but not finished writing it,
+  then hang waiting for `window.__ready`. The test now builds to a per-worker
+  temp bundle and atomically replaces the shared bundle with retry-on-Windows
+  rename handling.
+- **E2E hotspot serialization.** The API project worker budget is two. Specs
+  that create many git repositories or slow verification commands, such as the
+  base-ref API/pinning specs and cancel-verification specs, opt into
+  file-local serial mode so broad runs do not stack their hottest filesystem and
+  child-process work.
+
+Validation for the PR walkthrough polish branch passed at `b92418df`: build,
+type-check, targeted PR walkthrough sidebar E2E (`T-5`), unit suite, and full
+E2E suite were green; optional QA was not enabled for that goal.
 
 ### Playwright transform-cache isolation
 
@@ -812,8 +840,9 @@ target for the committed config.
 
 ### What not to change without re-measuring
 
-- Don't raise the top-level worker budget above 4, or the `browser` budget above
-  3, as a speed strategy. The budget is sized so up to ~4 suites can run
+- Don't raise the top-level worker budget above 4, the `api` budget above 2, or
+  the `browser` budget above 3 as a speed strategy. The budget is sized so up
+  to ~4 suites can run
   concurrently without mutual contention; raising it to chase a faster
   single-suite wall manufactures exactly the cross-suite flakes the budget
   exists to prevent. A sub-5-min single-suite wall is explicitly out of scope.
@@ -821,8 +850,9 @@ target for the committed config.
   concurrent-robustness margin, not temporary debt — see
   [Worker and retry counts](#worker-and-retry-counts).
 - Don't set `fullyParallel: true` on the `browser` or `api-realpush` projects.
-- Don't serialise the `api` project; it is the lightweight in-process lane and
-  benefits from its 4-worker budget.
+- Don't serialise the whole `api` project; keep targeted hotspot specs serial
+  instead. The in-process lane still benefits from limited parallelism at its
+  current worker budget.
 - Don't remove the wrapper-backed `npm run test:e2e` path or replace it with raw
   `npx` as the primary command.
 - Don't remove `BOBBIT_E2E_TMP_ROOT`, `BOBBIT_E2E_PWTEST_CACHE_ROOT`, or the

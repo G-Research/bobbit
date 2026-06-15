@@ -110,6 +110,39 @@ For the pack model, see
 [docs/design/built-in-first-party-packs.md](design/built-in-first-party-packs.md),
 and [docs/design/pr-walkthrough-pack-deletion.md](design/pr-walkthrough-pack-deletion.md).
 
+## Sidebar polish contract
+
+The walkthrough rail is a navigation aid, not the main review surface. It should
+use enough structure to orient the reviewer while leaving most space for the
+active card and its diff.
+
+Current contract:
+
+- **Orientation is single-sourced.** When an orientation card has beat sections,
+  the rail renders those beats in the orientation rail and skips the normal
+  `orientation` phase row/pip in both labelled and collapsed modes. The
+  orientation card must not appear a second time as a regular card button.
+- **Phase counters mirror gate counters.** Phase progress renders as compact
+  parenthesized text, e.g. `(2/5)`, with non-wrapping semibold styling and
+  state colour. The intent is visual parity with Bobbit gate progress badges,
+  without importing app-shell code into the pack panel.
+- **Rows reserve fixed indicator space.** Phase pips, reviewed dots, and count
+  text are fixed-width/non-shrinking. Labels use `min-width: 0`, ellipsis, and
+  flex/grid tracks so titles truncate instead of rendering underneath icons or
+  counters at default, resized, narrow, and collapsed widths.
+- **Chrome stays compact.** Header height, rail padding, card padding, gaps,
+  borders, shadows, and sticky action controls are intentionally reduced so the
+  human reviewer sees more of the active card and diff without making line
+  review controls cramped.
+
+The regression coverage lives in
+`tests/e2e/ui/pr-walkthrough-pack.spec.ts` (`T-5`). It seeds a ready walkthrough,
+asserts orientation de-duplication in labelled and collapsed rails, checks the
+`(done/total)` counter format/style, and verifies row geometry at default and
+constrained rail widths. The implementation gate for the polish passed at
+`b92418df` with build, type-check, targeted PR walkthrough E2E, unit, and full
+E2E verification green.
+
 ## Launch model: the isolated reviewer child
 
 > **Launch UX correction.** This section describes the **shipped** spawn-on-click
