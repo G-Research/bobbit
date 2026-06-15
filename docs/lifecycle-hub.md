@@ -321,10 +321,15 @@ produces a byte-identical prompt to before this wiring — the invariant a unit 
 ### What does NOT ship yet
 
 No built-in production provider is installed (that is G1.6). The wiring is therefore exercised by a
-deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, loaded by pointing
-`BOBBIT_BUILTIN_PACKS_DIR` at the fixtures dir; its `sessionSetup` returns a `DEMO_SETUP_BLOCK`
-and a throwing variant proves the failure path still spawns the session. Installing any
-schema-2 pack that ships a `sessionSetup` provider will now contribute a Dynamic Context section.
+deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
+`DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
+E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
+server-scope market-packs dir** (`.bobbit/config/market-packs/provider-demo/`) and toggles it via
+pack activation (`PUT /api/marketplace/pack-activation`), which invalidates the resolver caches.
+This layers the fixture *on top of* the real built-in band rather than replacing it — the earlier
+approach of pointing `BOBBIT_BUILTIN_PACKS_DIR` at the fixtures dir wiped the built-in band for
+the whole worker-scoped gateway and broke sibling specs. Installing any schema-2 pack that ships a
+`sessionSetup` provider will likewise contribute a Dynamic Context section.
 
 ## The trace store
 
