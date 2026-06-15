@@ -124,10 +124,10 @@ async function waitForActiveNavId(page: Page, expected: string | null): Promise<
 }
 
 // Deterministic settle: gate on the concrete presence/absence of the specific
-// nav-id rows the caller cares about using Playwright's auto-retrying locator
-// matchers, then read the DOM order once. This replaces the rAF-spin stability
-// scan (waitForStableNavOrder) for the heavy archived-toggle/reload tests —
-// no per-frame polling, no 2-stable-frame requirement, no 10s spin budget.
+// nav-id rows the caller cares about, then require the full DOM order to be
+// stable before it is used as the expected keyboard cycle. This prevents the
+// archived-toggle tests from sampling an intermediate render and then walking
+// a stale order.
 async function waitForNavRows(
 	page: Page,
 	requiredIds: string[],
@@ -139,7 +139,7 @@ async function waitForNavRows(
 	for (const id of absentIds) {
 		await expect(page.locator(`[data-nav-id="${id}"]`), `${MARK}: nav row ${id} must be absent`).toHaveCount(0, { timeout: 10_000 });
 	}
-	return navIdsInDomOrder(page);
+	return waitForStableNavOrder(page, requiredIds, absentIds);
 }
 
 async function resetNavStart(page: Page): Promise<void> {
