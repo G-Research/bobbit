@@ -1,4 +1,4 @@
-id: pr-walkthrough.open
+id: pr-walkthrough
 kind: composer-slash
 label: PR Walkthrough
 # A composer-slash LAUNCHER (the slash menu). Its selection IS the user gesture.

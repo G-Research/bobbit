@@ -203,7 +203,7 @@ paramKeys: [artifactId]
 
 ```yaml
 # entrypoints/pr-walkthrough-open.yaml
-id: pr-walkthrough.open
+id: pr-walkthrough
 kind: composer-slash
 label: PR Walkthrough                  # required for launcher kinds
 target:
