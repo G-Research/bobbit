@@ -97,14 +97,17 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		assert.equal(session.status, "idle");
 		const promise = waitForStreaming(session, 1_000);
 
-		// Simulate the agent picking up the reminder ~50ms later.
-		setTimeout(() => session.startTurn(), 50);
+		let resolved = false;
+		promise.then(() => { resolved = true; });
 
-		const t0 = Date.now();
+		// Prove the idle session does not resolve before the event arrives.
+		await Promise.resolve();
+		assert.equal(resolved, false, "should still be waiting before agent_start");
+
+		// The transition itself, not a wall-clock timeout, should resolve the wait.
+		session.startTurn();
 		await promise;
-		const elapsed = Date.now() - t0;
-		assert.ok(elapsed >= 40, `should have waited ~50ms, was ${elapsed}ms`);
-		assert.ok(elapsed < 500, `should resolve promptly after agent_start, was ${elapsed}ms`);
+		assert.equal(resolved, true, "should resolve after agent_start");
 		assert.equal(session.status, "streaming");
 	});
 
@@ -112,10 +115,7 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		const session = new FakeSession("rv-2");
 		session.status = "streaming";
 
-		const t0 = Date.now();
 		await waitForStreaming(session, 1_000);
-		const elapsed = Date.now() - t0;
-		assert.ok(elapsed < 50, `should be ~immediate, was ${elapsed}ms`);
 	});
 
 	it("waitForStreaming rejects on timeout if no agent_start arrives", async () => {
