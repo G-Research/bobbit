@@ -33,6 +33,8 @@ import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
+import type { LifecycleHub } from "./lifecycle-hub.js";
+import type { ContextBlock } from "./context-blocks.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -169,6 +171,7 @@ export interface SessionSetupPlan {
 	bridgeOptions: RpcBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
+	dynamicContextBlocks?: ContextBlock[];
 
 	// Options passed through from caller
 	agentArgs?: string[];
@@ -232,6 +235,7 @@ export interface PipelineContext {
 	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
+	lifecycleHub?: LifecycleHub;
 	costTracker: CostTracker;
 	store: SessionStore;
 	searchIndex: SearchService;
@@ -474,6 +478,24 @@ function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext):
 	return ctx.roleManager?.getRole(name);
 }
 
+export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
+	if (!ctx.lifecycleHub) return;
+	try {
+		const { blocks } = await ctx.lifecycleHub.dispatch("sessionSetup", {
+			sessionId: plan.id,
+			projectId: plan.projectId,
+			scope: plan.projectId ? "project" : "global",
+			cwd: plan.cwd,
+			goalId: plan.goalId,
+			roleName: plan.roleName,
+			prompt: plan.instructions,
+		});
+		plan.dynamicContextBlocks = blocks;
+	} catch (err) {
+		console.error(`[session-setup] sessionSetup dynamic context failed for ${plan.id}:`, err);
+	}
+}
+
 /** Step 4: Assemble system prompt (handles assistant, normal, delegate variants). */
 export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	return profile("resolvePrompt", () => _resolvePrompt(plan, ctx));
@@ -517,6 +539,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
+			dynamicContext: plan.dynamicContextBlocks,
 			// Include the base system prompt so assistant sessions
 			// (goal/project/tool assistants) get it by default.
 			baseSystemPromptPath: ctx.systemPromptPath,
@@ -540,6 +563,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
+			dynamicContext: plan.dynamicContextBlocks,
 			// Delegates still get the global base system prompt. The task spec is
 			// layered on top as goalSpec; AGENTS.md from the worktree is also included.
 			baseSystemPromptPath: ctx.systemPromptPath,
@@ -588,6 +612,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			: undefined;
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
+			dynamicContext: plan.dynamicContextBlocks,
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
@@ -729,6 +754,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	resolveBridgeOptions(plan, ctx);
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
+	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
@@ -920,6 +946,7 @@ export async function executeWorktreeAsync(
 	resolveBridgeOptions(plan, ctx);
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
+	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
 
