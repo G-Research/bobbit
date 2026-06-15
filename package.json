@@ -77,12 +77,12 @@
     "@types/ws": "^8.5.14",
     "c8": "^11.0.0",
     "concurrently": "^10.0.3",
-    "esbuild": "^0.27.7",
+    "esbuild": "^0.28.1",
     "highlight.js": "^11.11.1",
     "knip": "^6.1.0",
     "rollup-plugin-visualizer": "^7.0.1",
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
-    "vite": "^7.1.6"
+    "vite": "^8.0.16"
   }
 }

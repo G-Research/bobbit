@@ -15,9 +15,9 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import yaml from "yaml";
 import { ProjectConfigStore } from "../src/server/agent/project-config-store.js";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 let tmpDir: string;
 
@@ -31,7 +31,7 @@ function writeYaml(content: string) {
 
 describe("ProjectConfigStore — native-YAML migrated fields", () => {
 	beforeEach(() => {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-native-"));
+		tmpDir = makeTmpDir("pcs-native-");
 	});
 	afterEach(() => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });

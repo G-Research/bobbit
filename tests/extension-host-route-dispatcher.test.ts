@@ -16,7 +16,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
 	RouteDispatcher,
@@ -26,6 +25,7 @@ import {
 import { ActionError } from "../src/server/extension-host/action-dispatcher.ts";
 import type { PackContributions } from "../src/server/agent/pack-contributions.ts";
 import type { PackContributionResolver } from "../src/server/extension-host/pack-contribution-registry.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 let tmp: string;
 
@@ -45,7 +45,7 @@ function writeRoutesModule(root: string, packName: string, rel: string, src: str
 	return { modulePath: abs, packRoot };
 }
 
-before(() => { tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-route-"))); });
+before(() => { tmp = makeTmpDir("ext-host-route-"); });
 after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 describe("RouteDispatcher — resolution + happy path (pack-level module)", () => {

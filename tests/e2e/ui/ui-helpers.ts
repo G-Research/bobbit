@@ -23,13 +23,42 @@ export async function openApp(page: Page): Promise<void> {
 	).toBeVisible({ timeout: 20_000 });
 }
 
+export async function activeSessionId(page: Page): Promise<string | null> {
+	return page.evaluate(() => {
+		const selected = (window as any).bobbitState?.selectedSessionId;
+		if (typeof selected === "string" && selected) return selected;
+		const match = window.location.hash.match(/^#\/session\/([\w-]+)/);
+		return match?.[1] ?? null;
+	});
+}
+
 /**
- * Click "New session" button in the sidebar and wait for the chat textarea.
+ * Click "New session" button in the sidebar and wait for the newly-created
+ * session to become the active route/session, not just for the already-visible
+ * chat textarea from the previous session.
  */
-export async function createSessionViaUI(page: Page): Promise<void> {
+export async function createSessionViaUI(page: Page): Promise<string> {
+	const previousSessionId = await activeSessionId(page);
 	// In multi-project mode the button title is "New session in <project>"
 	await page.locator("button[title^='New session']").first().click();
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	const handle = await page.waitForFunction(
+		(previous: string | null) => {
+			const selected = (window as any).bobbitState?.selectedSessionId;
+			if (typeof selected !== "string" || !selected || selected === previous) return null;
+			const routeSession = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1] ?? null;
+			if (routeSession !== selected) return null;
+			const textarea = Array.from(document.querySelectorAll("textarea"))
+				.find((el) => {
+					const rect = el.getBoundingClientRect();
+					const style = window.getComputedStyle(el);
+					return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+				});
+			return textarea ? selected : null;
+		},
+		previousSessionId,
+		{ timeout: 20_000 },
+	);
+	return await handle.jsonValue() as string;
 }
 
 /**

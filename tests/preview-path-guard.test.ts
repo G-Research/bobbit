@@ -4,10 +4,10 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import path from "node:path";
 import { resolveAssetPath } from "../src/server/preview/path-guard.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 let baseDir: string;
 let outsideFile: string;
@@ -15,7 +15,7 @@ let workspaceRoot: string;
 let supportsSymlink = true;
 
 before(() => {
-	workspaceRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "bobbit-pg-")));
+	workspaceRoot = makeTmpDir("bobbit-pg-");
 	baseDir = path.join(workspaceRoot, "preview");
 	mkdirSync(baseDir, { recursive: true });
 	mkdirSync(path.join(baseDir, "gifs"), { recursive: true });

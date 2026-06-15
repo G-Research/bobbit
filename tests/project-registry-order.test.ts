@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { makeTmpDir } from "./helpers/tmp.ts";
+
 import {
   ProjectOrderError,
   ProjectRegistry,
@@ -12,7 +14,7 @@ import {
 } from "../src/server/agent/project-registry.js";
 
 function makeStateDir(): string {
-  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-project-order-state-")));
+  return makeTmpDir("bobbit-project-order-state-");
 }
 
 function cleanup(dir: string): void {
@@ -112,7 +114,7 @@ test("ProjectRegistry register and registerProvisional append after a custom ord
   const stateDir = makeStateDir();
   const roots: string[] = [];
   const makeRoot = (name: string) => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-project-order-${name}-`)));
+    const root = makeTmpDir(`bobbit-project-order-${name}-`);
     roots.push(root);
     return root;
   };

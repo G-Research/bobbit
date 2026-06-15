@@ -167,6 +167,50 @@ test.describe("Tools page → MCP section fixture", () => {
 		});
 	});
 
+	test("shows inherited parent MCP policy for unset sub-namespace rows without storing override", async ({ page }) => {
+		await setupMcp(page, GATEWAY_SERVERS, { "mcp__gr": "never" });
+
+		const section = page.locator('[data-testid="mcp-section"]');
+		const gr = section.locator('[data-server-name="gr"]');
+		await expect(gr.locator('[data-testid="mcp-server-policy"]').first()).toHaveValue("never");
+		await gr.locator('[data-testid="mcp-server-toggle"]').click();
+
+		const jiraPolicy = gr.locator('[data-testid="mcp-tool-row"][data-tool-name="jira"] [data-testid="mcp-tool-policy"]');
+		await expect(jiraPolicy).toHaveValue("");
+		await expect(jiraPolicy.locator("option:checked")).toHaveText(/Never.*inherited/i);
+
+		await jiraPolicy.selectOption("ask");
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
+			url: "/api/tool-group-policies/mcp__gr__jira",
+			method: "PUT",
+			body: { policy: "ask" },
+		});
+		await expect(jiraPolicy).toHaveValue("ask");
+		await expect(jiraPolicy.locator("option:checked")).toHaveText("Ask");
+
+		await jiraPolicy.selectOption("");
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
+			url: "/api/tool-group-policies/mcp__gr__jira",
+			method: "PUT",
+			body: { policy: null },
+		});
+		await expect(jiraPolicy).toHaveValue("");
+		await expect(jiraPolicy.locator("option:checked")).toHaveText(/Never.*inherited/i);
+
+		await reloadWithMcp(page, GATEWAY_SERVERS, { "mcp__gr": "never" });
+		const reloadedGr = page.locator('[data-testid="mcp-section"] [data-server-name="gr"]');
+		await reloadedGr.locator('[data-testid="mcp-server-toggle"]').click();
+		const reloadedJiraPolicy = reloadedGr.locator('[data-testid="mcp-tool-row"][data-tool-name="jira"] [data-testid="mcp-tool-policy"]');
+		await expect(reloadedJiraPolicy).toHaveValue("");
+		await expect(reloadedJiraPolicy.locator("option:checked")).toHaveText(/Never.*inherited/i);
+
+		const playwright = page.locator('[data-testid="mcp-section"] [data-server-name="playwright"]');
+		await playwright.locator('[data-testid="mcp-server-toggle"]').click();
+		const flatPolicy = playwright.locator('[data-testid="mcp-tool-row"][data-tool-name="playwright"] [data-testid="mcp-tool-policy"]');
+		await expect(flatPolicy).toHaveValue("");
+		await expect(flatPolicy.locator("option:checked")).toHaveText("Allow (default)");
+	});
+
 	test("loads default and persisted policies, and reset persists empty", async ({ page }) => {
 		await setupMcp(page, GATEWAY_SERVERS);
 		let gr = page.locator('[data-testid="mcp-section"] [data-server-name="gr"]');

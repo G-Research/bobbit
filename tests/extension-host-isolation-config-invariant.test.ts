@@ -25,7 +25,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
 	ActionDispatcher,
@@ -34,6 +33,7 @@ import {
 	type ActionToolLocationResolver,
 	type ActionDispatcherOptions,
 } from "../src/server/extension-host/action-dispatcher.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 let tmp: string;
 
@@ -84,7 +84,7 @@ const BYPASS_ENV_KEYS = [
 ];
 
 before(() => {
-	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-iso-cfg-")));
+	tmp = makeTmpDir("ext-host-iso-cfg-");
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }

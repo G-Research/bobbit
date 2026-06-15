@@ -1,10 +1,10 @@
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-no-precreate-"));
+const tmpRoot = makeTmpDir("session-no-precreate-");
 process.env.BOBBIT_DIR = tmpRoot;
 
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");

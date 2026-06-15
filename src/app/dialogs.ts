@@ -1359,6 +1359,7 @@ function showGoalEditDialog(existingGoal: Goal): void {
 	let specValue = existingGoal.spec;
 	let stateValue: GoalState = existingGoal.state;
 	let saving = false;
+	let titleFocused = false;
 
 	let cwdDropdownOpenEdit = false;
 	let cwdHighlightIndexEdit = -1;
@@ -1394,29 +1395,33 @@ function showGoalEditDialog(existingGoal: Goal): void {
 			Dialog({
 				isOpen: true,
 				onClose: cleanup,
-				width: "min(540px, 92vw)",
-				height: "auto",
-				className: "max-h-[90vh]",
+				width: "min(1100px, 96vw)",
+				height: "min(900px, 92vh)",
+				className: "max-h-[92vh]",
 				backdropClassName: "bg-black/50 backdrop-blur-sm",
 				children: html`
-					${DialogContent({
-						className: "overflow-y-auto",
-						children: html`
+					<div class="flex flex-col h-full min-h-0" data-testid="goal-edit-dialog">
+						<div class="shrink-0 px-6 pt-6 pb-2">
 							${DialogHeader({ title: "Edit Goal" })}
-							<div class="mt-4 flex flex-col gap-4">
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Title</label>
-									${Input({
-										type: "text",
-										value: titleValue,
-										onInput: (e: Event) => { titleValue = (e.target as HTMLInputElement).value; renderDialog(); },
-										onKeyDown: (e: KeyboardEvent) => {
+						</div>
+						<div class="flex-1 min-h-0 px-6 pb-4 overflow-y-auto">
+							<div class="flex min-h-full flex-col gap-4">
+								<div class="shrink-0">
+									<label class="text-xs text-muted-foreground mb-1 block" for="goal-edit-title-input">Title</label>
+									<input
+										id="goal-edit-title-input"
+										data-testid="goal-edit-title-input"
+										type="text"
+										class="w-full h-10 px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+										.value=${titleValue}
+										@input=${(e: Event) => { titleValue = (e.target as HTMLInputElement).value; renderDialog(); }}
+										@keydown=${(e: KeyboardEvent) => {
 											if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSave(); }
 											if (e.key === "Escape") cleanup();
-										},
-									})}
+										}}
+									/>
 								</div>
-								<div>
+								<div class="shrink-0">
 									<label class="text-xs text-muted-foreground mb-1 block">Working Directory</label>
 									${cwdCombobox({
 										value: cwdValue,
@@ -1429,9 +1434,9 @@ function showGoalEditDialog(existingGoal: Goal): void {
 										onHighlight: (i) => { cwdHighlightIndexEdit = i; },
 									})}
 								</div>
-								<div>
+								<div class="shrink-0">
 									<label class="text-xs text-muted-foreground mb-1 block">State</label>
-									<div class="flex gap-1.5">
+									<div class="flex flex-wrap gap-1.5">
 										${stateOptions.map((opt) => html`
 											<button
 												class="px-3 py-1.5 text-xs rounded-md border transition-colors
@@ -1444,43 +1449,48 @@ function showGoalEditDialog(existingGoal: Goal): void {
 										`)}
 									</div>
 								</div>
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Goal Spec (Markdown)</label>
+								<div class="flex flex-1 min-h-[320px] flex-col">
+									<label class="text-xs text-muted-foreground mb-1 block" for="goal-edit-spec-textarea">Goal Spec (Markdown)</label>
 									<textarea
-										class="w-full min-h-[120px] max-h-[300px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+										id="goal-edit-spec-textarea"
+										data-testid="goal-edit-spec-textarea"
+										class="w-full flex-1 min-h-[320px] p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
 										placeholder="Describe the goal, acceptance criteria, constraints..."
 										.value=${specValue}
 										@input=${(e: Event) => { specValue = (e.target as HTMLTextAreaElement).value; }}
 									></textarea>
-									<p class="text-[10px] text-muted-foreground mt-1">Injected into the context window of all sessions under this goal.</p>
+									<p class="shrink-0 text-[10px] text-muted-foreground mt-1">Injected into the context window of all sessions under this goal.</p>
 								</div>
-	
 							</div>
-						`,
-					})}
-					${DialogFooter({
-						className: "px-6 pb-4",
-						children: html`
+						</div>
+						<div class="shrink-0 px-6 py-4 border-t border-border">
 							<div class="flex gap-2 justify-end">
-								${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+								${Button({
+									variant: "ghost",
+									onClick: cleanup,
+									children: html`<span data-testid="goal-edit-cancel-button">Cancel</span>`,
+								})}
 								${Button({
 									variant: "default",
 									onClick: doSave,
 									disabled: !titleValue.trim() || saving,
-									children: saving ? "Saving…" : "Save",
+									children: html`<span data-testid="goal-edit-save-button">${saving ? "Saving…" : "Save"}</span>`,
 								})}
 							</div>
-						`,
-					})}
+						</div>
+					</div>
 				`,
 			}),
 			container,
 		);
 
-		requestAnimationFrame(() => {
-			const input = container.querySelector("input");
-			if (input) { input.focus(); input.select(); }
-		});
+		if (!titleFocused) {
+			titleFocused = true;
+			requestAnimationFrame(() => {
+				const input = container.querySelector<HTMLInputElement>("[data-testid='goal-edit-title-input']");
+				if (input) { input.focus(); input.select(); }
+			});
+		}
 	};
 
 	renderDialog();

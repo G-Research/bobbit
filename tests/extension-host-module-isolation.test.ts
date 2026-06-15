@@ -30,11 +30,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ModuleHost, type InvokeRequest } from "../src/server/extension-host/module-host-worker.ts";
 import { ActionError, type ActionHandlerCtx } from "../src/server/extension-host/action-dispatcher.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 let tmp: string;
 let seq = 0;
@@ -80,7 +80,7 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 before(() => {
-	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-iso-")));
+	tmp = makeTmpDir("ext-host-iso-");
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }

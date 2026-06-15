@@ -36,10 +36,10 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cold-restart-reprompt-test-"));
+const tmpRoot = makeTmpDir("cold-restart-reprompt-test-");
 const stateDir = path.join(tmpRoot, "state");
 fs.mkdirSync(stateDir, { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;

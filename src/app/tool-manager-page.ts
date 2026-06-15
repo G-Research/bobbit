@@ -240,17 +240,67 @@ const POLICY_LABELS: Record<string, string> = {
 	"never": "Never",
 };
 
+interface McpPolicyKeys {
+	group: string;
+	tool: string;
+}
+
+function mcpPolicyKeysLocal(toolName: string): McpPolicyKeys | undefined {
+	if (!toolName) return undefined;
+	if (toolName.startsWith("mcp__")) {
+		const remainder = toolName.slice(5);
+		const serverSep = remainder.indexOf("__");
+		if (serverSep <= 0) return undefined;
+		const server = remainder.slice(0, serverSep);
+		const afterServer = remainder.slice(serverSep + 2);
+		if (!server || !afterServer) return undefined;
+		const subSep = afterServer.indexOf("__");
+		const group = `mcp__${server}`;
+		const sub = subSep === -1 ? "" : afterServer.slice(0, subSep);
+		return sub ? { group, tool: `mcp__${server}__${sub}` } : { group, tool: group };
+	}
+	if (toolName.startsWith("mcp_") && !toolName.startsWith("mcp__")) {
+		const rest = toolName.slice(4);
+		if (!rest) return undefined;
+		const subSep = rest.indexOf("__");
+		if (subSep === -1) {
+			const group = `mcp__${rest}`;
+			return { group, tool: group };
+		}
+		const server = rest.slice(0, subSep);
+		const sub = rest.slice(subSep + 2);
+		if (!server || !sub) {
+			const group = `mcp__${rest}`;
+			return { group, tool: group };
+		}
+		return { group: `mcp__${server}`, tool: `mcp__${server}__${sub}` };
+	}
+	return undefined;
+}
+
+function mcpGroupPolicyDefault(toolName: string, toolGroup: string): { policy: string; source: string } {
+	const mcpKeys = mcpPolicyKeysLocal(toolName);
+	if (mcpKeys) {
+		if (mcpKeys.tool !== mcpKeys.group && groupPolicies[mcpKeys.tool]) {
+			return { policy: groupPolicies[mcpKeys.tool], source: mcpKeys.tool };
+		}
+		if (groupPolicies[mcpKeys.group]) return { policy: groupPolicies[mcpKeys.group], source: mcpKeys.group };
+	}
+	if (groupPolicies[toolGroup]) return { policy: groupPolicies[toolGroup], source: toolGroup };
+	return { policy: "allow", source: "system default" };
+}
+
 /** Resolve effective policy for a tool using the layered resolution order */
 function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
 	// 1. Role + tool override
 	if (roleToolPolicies?.[toolName]) return roleToolPolicies[toolName];
-	// 2. Role + group override (check MCP server prefix and display group name)
+	// 2. Role + group override (MCP tool > MCP server > MCP wildcard > display group)
+	const mcpKeys = mcpPolicyKeysLocal(toolName);
 	if (roleToolPolicies) {
-		// Check MCP-style prefix (e.g. "mcp__playwright" for "mcp__playwright__click")
-		const parts = toolName.split("__");
-		if (parts.length >= 3) {
-			const serverPrefix = parts.slice(0, 2).join("__");
-			if (roleToolPolicies[serverPrefix]) return roleToolPolicies[serverPrefix];
+		if (mcpKeys) {
+			if (mcpKeys.tool !== mcpKeys.group && roleToolPolicies[mcpKeys.tool]) return roleToolPolicies[mcpKeys.tool];
+			if (roleToolPolicies[mcpKeys.group]) return roleToolPolicies[mcpKeys.group];
+			if (roleToolPolicies["mcp__"]) return roleToolPolicies["mcp__"];
 		}
 		// Check display group name (e.g. "Browser")
 		if (roleToolPolicies[toolGroup]) return roleToolPolicies[toolGroup];
@@ -259,7 +309,8 @@ function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPol
 	const tool = tools.find(t => t.name === toolName);
 	if (tool?.grantPolicy) return tool.grantPolicy;
 	// 4. Group default
-	if (groupPolicies[toolGroup]) return groupPolicies[toolGroup];
+	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+	if (groupDefault.source !== "system default") return groupDefault.policy;
 	// 5. System fallback
 	return "allow";
 }
@@ -267,17 +318,19 @@ function resolveEffectivePolicy(toolName: string, toolGroup: string, roleToolPol
 /** Describe where a resolved policy came from */
 function policySource(toolName: string, toolGroup: string, roleToolPolicies?: Record<string, string>): string {
 	if (roleToolPolicies?.[toolName]) return "tool override";
+	const mcpKeys = mcpPolicyKeysLocal(toolName);
 	if (roleToolPolicies) {
-		const parts = toolName.split("__");
-		if (parts.length >= 3) {
-			const serverPrefix = parts.slice(0, 2).join("__");
-			if (roleToolPolicies[serverPrefix]) return `from ${serverPrefix}`;
+		if (mcpKeys) {
+			if (mcpKeys.tool !== mcpKeys.group && roleToolPolicies[mcpKeys.tool]) return `from ${mcpKeys.tool} role override`;
+			if (roleToolPolicies[mcpKeys.group]) return `from ${mcpKeys.group} role override`;
+			if (roleToolPolicies["mcp__"]) return "from mcp__ role override";
 		}
 		if (roleToolPolicies[toolGroup]) return `from ${toolGroup} role override`;
 	}
 	const tool = tools.find(t => t.name === toolName);
 	if (tool?.grantPolicy) return "tool default";
-	if (groupPolicies[toolGroup]) return "group default";
+	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+	if (groupDefault.source !== "system default") return `from ${groupDefault.source} group default`;
 	return "system default";
 }
 
@@ -541,7 +594,7 @@ async function handleMcpPolicyChange(key: string, value: string): Promise<void> 
 	renderApp();
 }
 
-function renderMcpPolicySelect(key: string, current: string, testid: string): TemplateResult {
+function renderMcpPolicySelect(key: string, current: string, testid: string, emptyLabel = "Allow (default)"): TemplateResult {
 	return html`
 		<select class="tool-group-select"
 			data-testid=${testid}
@@ -553,7 +606,7 @@ function renderMcpPolicySelect(key: string, current: string, testid: string): Te
 				const val = (e.target as HTMLSelectElement).value;
 				await handleMcpPolicyChange(key, val);
 			}}>
-			<option value="" ?selected=${!current}>Allow (default)</option>
+			<option value="" ?selected=${!current}>${emptyLabel}</option>
 			<option value="allow" ?selected=${current === "allow"}>Allow</option>
 			<option value="ask" ?selected=${current === "ask"}>Ask</option>
 			<option value="never" ?selected=${current === "never"}>Never</option>
@@ -624,6 +677,10 @@ function renderMcpSection(): TemplateResult {
 													const hasSub = sub.length > 0;
 													const toolPolicyKey = hasSub ? `mcp__${server.name}__${sub}` : `mcp__${server.name}`;
 													const toolPolicy = groupPolicies[toolPolicyKey] || "";
+													const inheritedPolicy = hasSub && !toolPolicy ? groupPolicies[serverPolicyKey] : "";
+													const emptyPolicyLabel = inheritedPolicy
+														? `${POLICY_LABELS[inheritedPolicy] || inheritedPolicy} (inherited from ${serverPolicyKey})`
+														: "Allow (default)";
 													const toolKey = `${server.name}::${sub}`;
 													const toolExpanded = expandedMcpTools.has(toolKey);
 													const toolLabel = hasSub ? sub : server.name;
@@ -639,7 +696,7 @@ function renderMcpSection(): TemplateResult {
 																<span class="tool-group-name">${toolLabel}</span>
 																<span class="tool-group-count">${ops.length} operation${ops.length !== 1 ? "s" : ""}</span>
 																<span class="tool-group-policy-label">Tool Policy:</span>
-																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy")}
+																${renderMcpPolicySelect(toolPolicyKey, toolPolicy, "mcp-tool-policy", emptyPolicyLabel)}
 															</div>
 															${toolExpanded
 																? html`<div class="mcp-server-ops" data-testid="mcp-server-ops" style="padding-left: 1.5rem;">
@@ -868,8 +925,11 @@ function renderAccessTab(): TemplateResult {
 
 	const toolName = selectedTool.name;
 	const toolGroup = selectedTool.group || "Other";
-	const groupDefault = groupPolicies[toolGroup] || "allow";
-	const groupDefaultLabel = POLICY_LABELS[groupDefault] || groupDefault;
+	const groupDefault = mcpGroupPolicyDefault(toolName, toolGroup);
+	const groupDefaultLabel = POLICY_LABELS[groupDefault.policy] || groupDefault.policy;
+	const groupDefaultHint = groupDefault.source === "system default"
+		? `${groupDefaultLabel} [system default]`
+		: `${groupDefaultLabel} [from ${groupDefault.source}]`;
 
 	return html`
 		<!-- Default Grant Policy -->
@@ -882,7 +942,7 @@ function renderAccessTab(): TemplateResult {
 					editGrantPolicy,
 					(val) => { editGrantPolicy = val; renderApp(); },
 					POLICY_OPTIONS,
-					!editGrantPolicy ? `${groupDefaultLabel} [from group]` : undefined,
+					!editGrantPolicy ? groupDefaultHint : undefined,
 				)}
 			</div>
 		</div>

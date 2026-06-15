@@ -18,7 +18,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
 	ActionDispatcher,
@@ -27,6 +26,7 @@ import {
 	type ActionHandlerCtx,
 	type ActionToolLocationResolver,
 } from "../src/server/extension-host/action-dispatcher.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 let tmp: string;
 
@@ -66,7 +66,7 @@ const ctx = (): ActionHandlerCtx => ({
 });
 
 before(() => {
-	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-dispatch-")));
+	tmp = makeTmpDir("ext-host-dispatch-");
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }

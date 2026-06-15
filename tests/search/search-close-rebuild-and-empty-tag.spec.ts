@@ -6,8 +6,9 @@
  *      a deferred startup rebuild via `setTimeout`. If `close()` runs before
  *      the timer fires, the rebuild used to call `store.clear()` on a closed
  *      store and throw. The fix keeps the timer handle on the instance,
- *      `clearTimeout`s it in `close()`, and guards the scheduled callback to
- *      no-op once the service is closed.
+ *      `clearTimeout`s it in `close()`, guards the scheduled callback to
+ *      no-op once the service is closed, and waits for a rebuild that already
+ *      passed the timer guard before closing the store.
  *
  *   2. SECONDARY — `[search] Skipping corrupt index file 1.tag.json:
  *      TypeError: Cannot read properties of null (reading 'length')`. An
@@ -191,6 +192,85 @@ test("scheduled rebuild callback no-ops when the service is already closed", asy
 	}
 
 	expect(errors.filter((e) => e.includes("already closed"))).toEqual([]);
+});
+
+test("close() waits for an in-flight startup rebuild before closing the store", async () => {
+	const stateDir = tmp("svc-rebuild-in-flight-");
+	const prevDelay = process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS;
+	process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS = "1";
+
+	const errors: string[] = [];
+	const unhandled: string[] = [];
+	const origError = console.error;
+	const originalClear = FlexSearchStore.prototype.clear;
+	let releaseClear!: () => void;
+	let enteredClear!: () => void;
+	const clearEntered = new Promise<void>((resolve) => { enteredClear = resolve; });
+	const clearReleased = new Promise<void>((resolve) => { releaseClear = resolve; });
+	let blockNextClear = true;
+	console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+	const onUnhandled = (reason: unknown) => {
+		unhandled.push(reason instanceof Error ? reason.message : String(reason));
+	};
+	process.on("unhandledRejection", onUnhandled);
+	FlexSearchStore.prototype.clear = async function clearWithTestGate() {
+		await originalClear.call(this);
+		if (blockNextClear) {
+			blockNextClear = false;
+			enteredClear();
+			await clearReleased;
+		}
+	};
+
+	try {
+		const svc = new SearchService({
+			stateDir,
+			projectId: "p1",
+			progressBus: new ProgressBus(),
+		});
+		const context = {
+			goalStore: {
+				getAll: () => [{
+					id: "g1",
+					title: "Search race goal",
+					spec: "Close while the startup rebuild is in flight.",
+					state: "open",
+					projectId: "p1",
+					createdAt: 1,
+					updatedAt: 2,
+				}],
+			},
+			sessionStore: { getAll: () => [] },
+			staffStore: { getAll: () => [] },
+		} as unknown as Parameters<SearchService["open"]>[0];
+		svc.open(context);
+		await svc.whenReady();
+
+		await Promise.race([
+			clearEntered,
+			new Promise((_, reject) => setTimeout(() => reject(new Error("startup rebuild did not start")), 1_000)),
+		]);
+
+		let closeSettled = false;
+		const closePromise = svc.close().then(() => { closeSettled = true; });
+		await new Promise((r) => setTimeout(r, 30));
+		expect(closeSettled).toBe(false);
+
+		releaseClear();
+		await closePromise;
+		await new Promise((r) => setTimeout(r, 30));
+	} finally {
+		FlexSearchStore.prototype.clear = originalClear;
+		process.off("unhandledRejection", onUnhandled);
+		console.error = origError;
+		if (prevDelay === undefined) delete process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS;
+		else process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS = prevDelay;
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+
+	expect(errors.filter((e) => e.includes("already closed"))).toEqual([]);
+	expect(errors.filter((e) => e.includes("Background rebuild failed"))).toEqual([]);
+	expect(unhandled.filter((e) => e.includes("already closed"))).toEqual([]);
 });
 
 // ── Fix 2: empty/null tag export round-trips cleanly ────────────────
