@@ -329,8 +329,17 @@ export function getSidePanelWorkspace(sessionId?: string | null): SidePanelWorks
 
 export function applySidePanelWorkspaceFromServer(rawWorkspace: unknown, options: { source?: "hydrate" | "rest" | "ws"; skipRender?: boolean; force?: boolean } = {}): SidePanelWorkspace {
 	const rawSessionId = stringValue(asRecord(rawWorkspace)?.sessionId) || activeSessionId() || state.selectedSessionId || "";
-	const workspace = normalizeWorkspace(rawWorkspace, rawSessionId);
+	let workspace = normalizeWorkspace(rawWorkspace, rawSessionId);
 	const sid = panelWorkspaceSessionKey(workspace.sessionId);
+	const localSelection = (state as any).__lastSidePanelUserActiveSelection as { sessionId?: string; tabId?: string; at?: number } | undefined;
+	if (localSelection?.sessionId === sid
+		&& typeof localSelection.tabId === "string"
+		&& localSelection.tabId !== workspace.activeTabId
+		&& typeof localSelection.at === "number"
+		&& Date.now() - localSelection.at < 10_000
+		&& workspace.tabs.some((tab) => tab.id === localSelection.tabId)) {
+		workspace = { ...workspace, activeTabId: localSelection.tabId };
+	}
 	const currentRevision = state.lastWorkspaceRevisionBySession[sid];
 	const force = options.force === true;
 	if (!force && typeof currentRevision === "number" && workspace.revision <= currentRevision) {
@@ -552,7 +561,8 @@ async function settleMutation(sessionId: string, mutationId: string, request: Pr
 	const sid = panelWorkspaceSessionKey(sessionId);
 	try {
 		const workspace = await request;
-		if (mutationState.get(sid)?.id === mutationId) mutationState.delete(sid);
+		if (mutationState.get(sid)?.id !== mutationId) return state.sidePanelWorkspaceBySession[sid] || workspace;
+		mutationState.delete(sid);
 		return applySidePanelWorkspaceFromServer(workspace, { source: "rest" });
 	} catch (err) {
 		const pending = mutationState.get(sid);
@@ -579,6 +589,7 @@ function mutationBody(extra: Record<string, unknown>, workspace: SidePanelWorksp
 	return JSON.stringify({
 		...extra,
 		baseRevision: options?.baseRevision ?? workspace.revision,
+		baseActiveTabId: workspace.activeTabId,
 		...(options?.strictRevision === true ? { strictRevision: true } : {}),
 	});
 }

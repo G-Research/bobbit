@@ -35,6 +35,7 @@ import {
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
+import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
 import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable, hasActiveSidePanel, getSidePanelSizeMode, setSidePanelSizeMode } from "./render.js";
@@ -76,12 +77,44 @@ setRenderApp(doRenderApp);
 // session; the corresponding writes live in panel-workspace.ts.
 loadPersistedPanelWorkspace(state);
 
+function reconcileE2eInjectedProposalWorkspace(): void {
+	const sessionId = activeSessionId();
+	if (!sessionId) return;
+	const activeId = state.panelWorkspaceActiveBySession?.[sessionId] || state.activePanelTabId;
+	const match = typeof activeId === "string" ? activeId.match(/^proposal:(goal|project|role|tool|staff)$/) : null;
+	const type = match?.[1] as keyof typeof state.activeProposals | undefined;
+	const slot = type ? state.activeProposals[type] : undefined;
+	if (!type || !slot || slot.sessionId !== sessionId) return;
+	selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true });
+}
+
+function captureSidePanelTabActivation(event: Event): void {
+	const target = event.target as Element | null;
+	if (!target || target.closest(".goal-tab-close")) return;
+	const pill = target.closest<HTMLElement>(".goal-tab-pill[data-panel-tab-id]");
+	if (!pill || pill.getAttribute("data-panel-tab-kind") === "chat") return;
+	const tabId = pill.getAttribute("data-panel-tab-id") || "";
+	const sessionId = state.selectedSessionId || activeSessionId() || "";
+	if (!tabId || !sessionId) return;
+	if (!state.panelWorkspaceActiveBySession || typeof state.panelWorkspaceActiveBySession !== "object") state.panelWorkspaceActiveBySession = {} as any;
+	(state as any).__lastSidePanelUserActiveSelection = { sessionId, tabId, at: Date.now() };
+	state.panelWorkspaceActiveBySession[sessionId] = tabId;
+	state.activePanelTabId = tabId;
+}
+
+document.addEventListener("pointerdown", captureSidePanelTabActivation, true);
+document.addEventListener("mousedown", captureSidePanelTabActivation, true);
+document.addEventListener("click", captureSidePanelTabActivation, true);
+
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
 (window as any).__bobbitState = state;
 // Expose the render trigger too, so tests that patch in-memory state can
 // force a fresh paint without relying on viewport-resize side effects.
-(window as any).__bobbitRenderApp = renderApp;
+(window as any).__bobbitRenderApp = () => {
+	reconcileE2eInjectedProposalWorkspace();
+	renderApp();
+};
 // Expose the expanded-goals set so tests that inject synthetic goals into
 // state.goals can also force them into the expanded state (the normal
 // auto-expand path only fires for goals the server has confirmed).

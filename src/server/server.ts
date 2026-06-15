@@ -11525,6 +11525,10 @@ async function handleApiRoute(
 			return;
 		}
 		const body = await readBody(req).catch(() => ({}));
+		const shouldOpenWorkspaceTab = body?.workspaceTab !== false
+			&& body?.openWorkspaceTab !== false
+			&& body?.internalRestore !== true
+			&& url.searchParams.get("workspaceTab") !== "false";
 		const hasArtifact = typeof body?.artifactId === "string" && body.artifactId.length > 0;
 		const hasHtml = typeof body?.html === "string";
 		const hasFile = typeof body?.file === "string" && body.file.length > 0;
@@ -11546,7 +11550,7 @@ async function handleApiRoute(
 			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
 			if (hasArtifact) {
 				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
-				await openPreviewMountWorkspaceTab(sessionId, restored);
+				if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, restored);
 				broadcastPreviewChanged(sessionId, {
 					entry: restored.entry,
 					mtime: restored.mtime,
@@ -11649,7 +11653,7 @@ async function handleApiRoute(
 			}
 			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
 			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
-			await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
+			if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,
 				mtime: result.mtime,

@@ -170,11 +170,15 @@ export async function handleSidePanelWorkspaceRoute(
 				}
 				if (op === "open") {
 					if (!body || typeof body !== "object") throw new SidePanelWorkspaceError("Invalid request body", 400, "INVALID_BODY");
+					const payload = body as Record<string, unknown>;
+					const baseActiveTabId = typeof payload.baseActiveTabId === "string" ? payload.baseActiveTabId : "";
+					const focus = payload.focus !== false
+						&& !(baseRevision !== undefined && baseRevision !== workspace.revision && baseActiveTabId && workspace.activeTabId !== baseActiveTabId);
 					return applyWorkspaceMutation(workspace, {
 						type: "open",
-						tab: (body as Record<string, unknown>).tab,
-						focus: (body as Record<string, unknown>).focus !== false,
-						placeAfterActive: (body as Record<string, unknown>).placeAfterActive === true,
+						tab: payload.tab,
+						focus,
+						placeAfterActive: payload.placeAfterActive === true,
 					}, validatorsFor(deps, sessionId));
 				}
 				if (op === "active") {

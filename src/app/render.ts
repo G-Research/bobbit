@@ -1063,10 +1063,10 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 		restoreUrl = `/api/preview/artifacts/${encodeURIComponent(artifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`;
 		body = { artifactId };
 	} else if (snapshotKind === "inline" && snapshotHtml) {
-		body = { html: snapshotHtml };
+		body = { html: snapshotHtml, workspaceTab: false, internalRestore: true };
 		if (entry && !entry.includes("/") && !entry.includes("\\")) body.entry = entry;
 	} else if (snapshotKind === "file" && snapshotFile) {
-		body = { file: snapshotFile };
+		body = { file: snapshotFile, workspaceTab: false, internalRestore: true };
 	}
 
 	if (!body) {
@@ -1131,6 +1131,7 @@ function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null
 export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
+	(state as any).__lastSidePanelUserActiveSelection = { sessionId: sid, tabId: tab.id, at: Date.now() };
 	setActivePanelTabIdForSession(state, sid, tab.id);
 	const workspace = getSidePanelWorkspace(sid);
 	if (sid !== "__no-session__" && workspace.tabs.some((candidate) => candidate.id === tab.id) && workspace.activeTabId !== tab.id) {
@@ -1461,6 +1462,11 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 		forceFallback: true,
 		fallbackTolerance: 4,
 		delay: 0,
+		onChoose: (evt) => {
+			const id = (evt.item as HTMLElement).getAttribute("data-panel-tab-id") || "";
+			const tab = findPanelTab(panelTabsForSession(state, workspaceSessionId()), id);
+			if (tab && !isPinnedPanelTab(tab)) setUnifiedActiveTab(tab);
+		},
 		onMove: (evt) => {
 			// Forbid dropping in front of (or onto) a pinned tab. Returning false
 			// cancels this candidate move; SortableJS keeps trying as the cursor
@@ -2016,6 +2022,8 @@ export function doRenderApp(): void {
 			data-panel-tab-title=${dataTitle}
 			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
 			data-testid="side-panel-tab"
+			@mousedown=${(e: MouseEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
+			@pointerup=${(e: PointerEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
 		>${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span

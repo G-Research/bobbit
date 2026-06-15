@@ -212,6 +212,21 @@ function revealActiveProposalPanel(type: ProposalType, sessionId: string): void 
 	}
 }
 
+function openAssistantProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
+	const title = type === "project" ? "Project Proposal"
+		: type === "staff" ? "Staff Proposal"
+		: `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
+	selectPanelWorkspaceTab({
+		id: proposalPanelTabId(type),
+		kind: "proposal",
+		title,
+		label: title.replace(/ Proposal$/, ""),
+		legacyTab: type as any,
+		source: { type: "proposal", proposalType: type, sessionId },
+		state: {},
+	}, { sessionId, select: true, setAssistantTab: true });
+}
+
 function liveProposalSlotForSession(type: ProposalType, sessionId: string): ProposalSlot | undefined {
 	const slot = state.activeProposals[type];
 	if (!slot) return undefined;
@@ -2197,6 +2212,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
 				resetStaffProposalPreview(sessionId);
+				if (options?.isStaffAssistant && !isExisting) openAssistantProposalWorkspaceTab("staff", sessionId);
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;
@@ -2689,7 +2705,8 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
 	const keepAssistantPanelOpen = (state.assistantType === "project" || state.assistantType === "project-scaffolding") && propSessionId === activeSessionId();
-	if (!keepAssistantPanelOpen) removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
+	if (keepAssistantPanelOpen) openAssistantProposalWorkspaceTab("project", propSessionId);
+	else removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.

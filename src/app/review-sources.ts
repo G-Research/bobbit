@@ -1,5 +1,5 @@
 import { gatewayFetch } from "./gateway-fetch.js";
-import { legacyReviewDocumentIdFromTitle, rememberReviewDocumentIdentity, reviewPanelTabId } from "./panel-workspace.js";
+import { legacyReviewDocumentIdFromTitle, rememberReviewDocumentIdentity, reviewDocumentIdFromPanelTab, reviewPanelTabId, reviewTitleFromPanelTab } from "./panel-workspace.js";
 import { selectReviewWorkspaceTab } from "./preview-panel.js";
 import { closeSidePanelTab, getSidePanelWorkspace } from "./side-panel-workspace.js";
 import {
@@ -119,6 +119,18 @@ function findReviewDocumentEntryByTitle(title: string): [string, ReviewDocumentM
 	return undefined;
 }
 
+function findOpenReviewWorkspaceDocumentId(sessionId: string, title: string): string | undefined {
+	if (!sessionId || !title) return undefined;
+	for (const tab of getSidePanelWorkspace(sessionId).tabs) {
+		if (tab.kind !== "review") continue;
+		const tabTitle = reviewTitleFromPanelTab(tab as any) || tab.title.replace(/^Review:\s*/, "");
+		if (tabTitle !== title) continue;
+		const documentId = normalizeDocumentId(reviewDocumentIdFromPanelTab(tab as any));
+		if (documentId) return documentId;
+	}
+	return undefined;
+}
+
 function reviewDocumentIdForOpen(options: OpenReviewDocumentOptions, title: string, sessionId: string): string {
 	const explicit = normalizeDocumentId(options.documentId);
 	if (explicit) return explicit;
@@ -126,6 +138,8 @@ function reviewDocumentIdForOpen(options: OpenReviewDocumentOptions, title: stri
 	const existing = findReviewDocumentEntryByTitle(title)?.[1];
 	const existingId = normalizeDocumentId(existing?.documentId);
 	if (existing) return existingId || legacyReviewDocumentIdFromTitle(title);
+	const openWorkspaceId = findOpenReviewWorkspaceDocumentId(sessionId, title);
+	if (openWorkspaceId) return openWorkspaceId;
 	if (sessionId) {
 		const persisted = Object.values(safeReadPersisted(sessionId)).find((doc) => doc?.title === title);
 		const persistedId = normalizeDocumentId(persisted?.documentId);
