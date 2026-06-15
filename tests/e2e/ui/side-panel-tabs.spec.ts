@@ -51,6 +51,18 @@ async function createRegularSessionViaApi(page: Page): Promise<string> {
 	return sid;
 }
 
+async function createGoalAssistantSessionViaApi(page: Page): Promise<string> {
+	const resp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd: nonGitCwd(), assistantType: "goal" }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `create goal assistant session: ${text}`).toBe(201);
+	const sid = JSON.parse(text).id as string;
+	await navigateToSession(page, sid);
+	return sid;
+}
+
 async function navigateToSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
@@ -99,6 +111,25 @@ async function expectPanelTabs(page: Page, expectedIds: string[], message: strin
 	await expectNoChatTab(page);
 }
 
+async function settleClosedTabRehydratePath(page: Page): Promise<void> {
+	await page.evaluate(() => new Promise<void>((resolve) => {
+		requestAnimationFrame(() => requestAnimationFrame(() => window.setTimeout(resolve, 150)));
+	}));
+}
+
+async function expectClosedSidePanelTabAbsent(page: Page, sessionId: string, tabId: string, message: string): Promise<void> {
+	await expect.poll(async () => {
+		await settleClosedTabRehydratePath(page);
+		return {
+			visible: (await visiblePanelTabIds(page)).filter((id) => id === tabId),
+			server: (await workspace(sessionId)).tabs.map((tab: any) => tab.id).filter((id: string) => id === tabId),
+		};
+	}, {
+		timeout: 5_000,
+		message: `closed side-panel tab should remain absent (${message})`,
+	}).toEqual({ visible: [], server: [] });
+}
+
 async function tabById(page: Page, id: string) {
 	return page.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="${id}"]`).first();
 }
@@ -117,6 +148,16 @@ async function closeTabById(page: Page, id: string, message: string): Promise<vo
 	await expect(tab.locator(".goal-tab-close"), `${message}: tab should be closable`).toBeVisible({ timeout: 5_000 });
 	await tab.locator(".goal-tab-close").click();
 	await expect.poll(async () => (await visiblePanelTabIds(page)).includes(id), {
+		timeout: 10_000,
+		message: `${message}: closed tab should disappear`,
+	}).toBe(false);
+}
+
+async function closeWorkspaceTabViaApi(page: Page, sessionId: string, tabId: string, message: string): Promise<void> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent(tabId)}`, { method: "DELETE" });
+	const text = await resp.text();
+	expect(resp.status, `${message}: workspace DELETE should succeed: ${text}`).toBe(200);
+	await expect.poll(async () => (await visiblePanelTabIds(page)).includes(tabId), {
 		timeout: 10_000,
 		message: `${message}: closed tab should disappear`,
 	}).toBe(false);
@@ -894,6 +935,39 @@ test.describe("Side-panel tab contract", () => {
 		expect(reopenedId).toBe(reviewId);
 		await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 10_000 });
 	});
+
+	test("Persist Closed Panels: proposal closed side-panel tab should remain absent after draft rehydrate", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		const sessionId = await createGoalAssistantSessionViaApi(page);
+		const proposalId = await openGoalProposal(page);
+		let draft: { fields: Record<string, unknown>; rev: number } | undefined;
+		await expect.poll(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}/proposals`);
+			if (!resp.ok) return [];
+			const body = await resp.json() as { proposals?: Array<{ proposalType?: string; fields?: Record<string, unknown>; rev?: number }> };
+			const goalDraft = (body.proposals || []).find((proposal) => proposal.proposalType === "goal" && typeof proposal.rev === "number" && proposal.fields);
+			if (goalDraft?.fields && typeof goalDraft.rev === "number") draft = { fields: goalDraft.fields, rev: goalDraft.rev };
+			return (body.proposals || []).map((proposal) => `${proposal.proposalType}:${proposal.rev}`);
+		}, {
+			timeout: 10_000,
+			message: "goal proposal draft should be persisted before closing its workspace tab",
+		}).toContain("goal:1");
+		expect(draft, "goal proposal draft should be available for rehydrate replay").toBeTruthy();
+
+		await closeWorkspaceTabViaApi(page, sessionId, proposalId, "closing proposal workspace tab before draft rehydrate");
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "proposal tab immediately after workspace close");
+
+		await page.evaluate(({ fields, rev }) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			if (state?.activeProposals) delete state.activeProposals.goal;
+			const remote = state?.remoteAgent;
+			remote?.onProposal?.("goal", fields, false, rev, "rehydrate");
+		}, draft!);
+
+		await expectClosedSidePanelTabAbsent(page, sessionId, proposalId, "proposal tab after non-explicit draft rehydrate replay");
+	});
+
 
 	test("10. Size mode persists across reload for collapsed, split, and fullscreen preview states", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
