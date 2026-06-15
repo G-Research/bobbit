@@ -1259,8 +1259,8 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
 			try {
-				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status`);
-				if (res.status === 404) return { goalId: g.id, pr: null, noPr: true };
+				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1`);
+				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
 				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
 				const data = await res.json();
 				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string }, noPr: false };
@@ -2547,8 +2547,8 @@ export async function saveDraftToServer(sessionId: string, type: string, data: u
 /** Load a draft from the server. Returns null if not found or on error. */
 export async function loadDraftFromServer(sessionId: string, type: string): Promise<unknown | null> {
 	try {
-		const res = await gatewayFetch(`/api/sessions/${sessionId}/draft?type=${encodeURIComponent(type)}`);
-		if (!res.ok) return null;
+		const res = await gatewayFetch(`/api/sessions/${sessionId}/draft?type=${encodeURIComponent(type)}&optional=1`);
+		if (res.status === 204 || !res.ok) return null;
 		const body = await res.json();
 		return body.data ?? null;
 	} catch (err) {

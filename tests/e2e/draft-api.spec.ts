@@ -61,9 +61,28 @@ test.describe("GET /api/sessions/:id/draft", () => {
 		expect(resp.status).toBe(404);
 	});
 
+	test("keeps bare missing prompt draft as 404 but returns empty 204 in optional mode", async () => {
+		const freshSessionId = await createSession();
+		try {
+			const bareResp = await apiFetch(`/api/sessions/${freshSessionId}/draft?type=prompt`);
+			expect(bareResp.status, "bare missing prompt draft should remain 404").toBe(404);
+
+			const optionalResp = await apiFetch(`/api/sessions/${freshSessionId}/draft?type=prompt&optional=1`);
+			expect(optionalResp.status, "quiet optional draft absence should return 204 No Content").toBe(204);
+			expect(await optionalResp.text(), "204 draft response must have no body").toBe("");
+		} finally {
+			await deleteSession(freshSessionId);
+		}
+	});
+
 	test("returns 404 for a non-existent session", async () => {
 		const resp = await apiFetch("/api/sessions/no-such-session/draft?type=prompt");
 		expect(resp.status).toBe(404);
+	});
+
+	test("returns 404 for a non-existent session even in optional draft mode", async () => {
+		const resp = await apiFetch("/api/sessions/no-such-session/draft?type=prompt&optional=1");
+		expect(resp.status, "missing session should remain 404 even for quiet draft probes").toBe(404);
 	});
 });
 
