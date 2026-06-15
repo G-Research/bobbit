@@ -84,6 +84,14 @@ export class SearchService {
 	 */
 	private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
 
+	/**
+	 * Startup/background rebuild currently running (or queued behind the module
+	 * rebuild queue). `close()` waits for this before closing the store so a
+	 * rebuild that already passed the timer guard cannot race into a closed
+	 * FlexSearchStore.
+	 */
+	private _backgroundRebuildPromise: Promise<void> | null = null;
+
 	private readonly _goalSource = new GoalIndexSource();
 	private readonly _sessionSource = new SessionIndexSource();
 	private readonly _messageSource = new MessageIndexSource();
@@ -180,6 +188,13 @@ export class SearchService {
 		if (this._rebuildTimer) {
 			clearTimeout(this._rebuildTimer);
 			this._rebuildTimer = null;
+		}
+		// If the startup/background rebuild already fired, let it settle before
+		// closing the store it is using. This fixes the close-during-rebuild race
+		// that otherwise surfaces as `FlexSearchStore: already closed` from
+		// Indexer.rebuildFromSources().
+		if (this._backgroundRebuildPromise) {
+			try { await this._backgroundRebuildPromise; } catch { /* handled by owner */ }
 		}
 		// Re-read _store after the await — _doOpen() may have just assigned it.
 		if (this._store) {
@@ -479,7 +494,7 @@ export class SearchService {
 		staffStore: StaffStore,
 		sources?: IndexSource[],
 	): Promise<void> {
-		if (!this._indexer) return;
+		if (this._state === "closed" || !this._indexer) return;
 		const ctx: IndexSourceContext = {
 			projectId: this.projectId,
 			goalStore,
@@ -493,7 +508,10 @@ export class SearchService {
 			this._staffSource,
 		];
 		const indexer = this._indexer;
-		await enqueueRebuild(() => indexer.rebuildFromSources(srcs, ctx));
+		await enqueueRebuild(() => {
+			if (this._state === "closed" || this._indexer !== indexer) return Promise.resolve();
+			return indexer.rebuildFromSources(srcs, ctx);
+		});
 	}
 
 	// ── Internals ────────────────────────────────────────────────────
@@ -588,11 +606,23 @@ export class SearchService {
 						// store is then closed and clear()/upsert() would throw
 						// "FlexSearchStore: already closed". No-op in that case.
 						if (this._state === "closed" || !this._indexer) return;
-						this.rebuildFromSources(
+						const rebuildPromise = this.rebuildFromSources(
 							context.goalStore!,
 							context.sessionStore!,
 							staff,
-						).catch((err) => console.error("[search] Background rebuild failed:", err));
+						);
+						const trackedPromise = rebuildPromise
+							.catch((err) => {
+								if (this._state !== "closed" || !isStoreAlreadyClosedError(err)) {
+									console.error("[search] Background rebuild failed:", err);
+								}
+							})
+							.finally(() => {
+								if (this._backgroundRebuildPromise === trackedPromise) {
+									this._backgroundRebuildPromise = null;
+								}
+							});
+						this._backgroundRebuildPromise = trackedPromise;
 					}, delayMs);
 					if (typeof timer.unref === "function") timer.unref();
 					this._rebuildTimer = timer;
@@ -637,4 +667,8 @@ function emptyStaffStore(): StaffStore {
 	return {
 		getAll: () => [],
 	} as unknown as StaffStore;
+}
+
+function isStoreAlreadyClosedError(err: unknown): boolean {
+	return err instanceof Error && err.message.includes("FlexSearchStore: already closed");
 }
