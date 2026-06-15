@@ -1301,7 +1301,7 @@ Resolution order is unchanged (first non-null wins):
 
 MCP server groups behave identically to built-in tool groups: with no override anywhere, they fall through to the system `allow` fallback. `defaults/tool-group-policies.yaml` deliberately ships **no** `mcp__*` entries.
 
-Why no MCP-specific builtin denials: the Tools page renders the cascaded effective policy but cannot show its origin, so a builtin `mcp__<server>: never` would display as "Allow (default)" while silently blocking every agent call — the UI must be honest. A user who wants to block a server does so explicitly via the Tools page (or `.bobbit/config/tool-group-policies.yaml`), and the dropdown then reflects reality.
+Why no MCP-specific builtin denials: MCP servers should have the same baseline as other tool groups, and any restriction should come from an explicit user/project or role decision. The Tools page now mirrors the MCP cascade for display: a sub-namespace row with no stored `mcp__<server>__<sub>` key shows an explicit parent `mcp__<server>` policy as inherited while keeping the sub-key unset.
 
 Disruptive servers (e.g. headed Chromium from `@playwright/mcp`) are opted out at the **role** layer instead — see `defaults/roles/qa-tester.yaml`, which sets `toolPolicies: { mcp__playwright: never }`. Roles that need the tool inherit the `allow` default; roles that shouldn't have it block it locally.
 
