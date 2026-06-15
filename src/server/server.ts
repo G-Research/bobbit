@@ -2542,6 +2542,10 @@ async function handleApiRoute(
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
 	};
+	const noContent = () => {
+		res.writeHead(204);
+		res.end();
+	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
 		// Log stack trace server-side only; do not send it to clients to avoid
@@ -8757,8 +8761,9 @@ async function handleApiRoute(
 		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
 		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
+		const optional = url.searchParams.get("optional") === "1";
 		const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
-		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else { json({ error: "No PR found" }, 404); }
+		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
 		return;
 	}
 
@@ -10882,12 +10887,13 @@ async function handleApiRoute(
 		}
 		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
 		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
+		const optional = url.searchParams.get("optional") === "1";
 		const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
 		if (pr) {
 			const goalId = session.goalId;
 			if (goalId) prStatusStore.set(goalId, pr);
 			json(pr);
-		} else { json({ error: "No PR found" }, 404); }
+		} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
 		return;
 	}
 
@@ -12038,6 +12044,7 @@ async function handleApiRoute(
 			// Check if session exists at all
 			const session = sessionManager.getSession(id);
 			if (!session) { json({ error: "Session not found" }, 404); return; }
+			if (url.searchParams.get("optional") === "1") { noContent(); return; }
 			json({ error: "Draft not found" }, 404);
 			return;
 		}

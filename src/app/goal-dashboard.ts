@@ -631,7 +631,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 			fetchGoalGates(goalId),
 			gatewayFetch(`/api/goals/${goalId}/git-status`).catch(() => null),
 			gatewayFetch(`/api/goals/${goalId}/cost`).catch(() => null),
-			gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null),
+			gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1`).catch(() => null),
 		]);
 
 		if (!goalRes.ok) throw new Error(`Goal not found (${goalRes.status})`);
@@ -681,7 +681,9 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 			goalCost = await costRes.json();
 		}
 
-		if (prStatusRes && prStatusRes.ok) {
+		if (prStatusRes && prStatusRes.status === 204) {
+			prStatus = null;
+		} else if (prStatusRes && prStatusRes.ok) {
 			prStatus = await prStatusRes.json();
 			// Sync to sidebar cache so badge persists even if polling skips this goal
 			if (prStatus && currentGoalId) state.prStatusCache.set(currentGoalId, prStatus);
@@ -1183,8 +1185,13 @@ function startGitStatusPolling(goalId: string): void {
 		}
 		let needRender = false;
 		try {
-			const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null);
-			if (prRes && prRes.ok) {
+			const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1`).catch(() => null);
+			if (prRes && prRes.status === 204) {
+				if (prStatus !== null) {
+					prStatus = null;
+					needRender = true;
+				}
+			} else if (prRes && prRes.ok) {
 				const newPr: PrStatus = await prRes.json();
 				if (JSON.stringify(newPr) !== JSON.stringify(prStatus)) {
 					prStatus = newPr;
@@ -1589,10 +1596,12 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; b
 	try {
 		const [gitRes, prRes] = await Promise.all([
 			gatewayFetch(`/api/goals/${goalId}/git-status`).catch(() => null),
-			gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null),
+			gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1`).catch(() => null),
 		]);
 		if (gitRes && gitRes.ok) gitStatus = await gitRes.json();
-		if (prRes && prRes.ok) {
+		if (prRes && prRes.status === 204) {
+			prStatus = null;
+		} else if (prRes && prRes.ok) {
 			prStatus = await prRes.json();
 			// Immediately update the goal grouping cache so it reflects the merge
 			if (prStatus) state.prStatusCache.set(goalId, prStatus);

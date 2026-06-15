@@ -1493,8 +1493,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Targeted PR status refresh — bypasses the 60s poll throttle
 			(async () => {
 				try {
-					const res = await gatewayFetch(`/api/goals/${goalId}/pr-status`);
-					if (res.ok) {
+					const res = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1`);
+					if (res.status === 204) {
+						state.prStatusCache.delete(goalId);
+					} else if (res.ok) {
 						const data = await res.json();
 						state.prStatusCache.set(goalId, data);
 					} else if (res.status === 404) {
@@ -3015,15 +3017,15 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 
 	// Build the URL: goal-scoped if available, otherwise session-scoped
 	const prStatusUrl = goalId
-		? `/api/goals/${goalId}/pr-status`
-		: `/api/sessions/${sessionId}/pr-status`;
+		? `/api/goals/${goalId}/pr-status?optional=1`
+		: `/api/sessions/${sessionId}/pr-status?optional=1`;
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
 
 	try {
 		const res = await gatewayFetch(prStatusUrl).catch(() => null);
-		if (!res || !res.ok) {
+		if (!res || res.status === 204 || !res.ok) {
 			if (activeSessionId() === sessionId) {
 				ai.prState = undefined;
 				ai.prUrl = undefined;
