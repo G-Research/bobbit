@@ -633,6 +633,12 @@ export async function openSidePanelTab(tab: SidePanelWorkspaceTab, options: Open
 	const sessionId = tab.source.sessionId;
 	const base = mutationBaseWorkspace(sessionId);
 	const focus = options.focus !== false;
+	if (focus) {
+		// Explicit open/update events are authoritative focus changes. A recently
+		// captured tab click may still be guarding against stale WS/REST payloads;
+		// clear it so it cannot pull focus back to the old tab.
+		delete (state as any).__lastSidePanelUserActiveSelection;
+	}
 	const optimistic = upsertTab(base, tab, focus, options.placeAfterActive !== false);
 	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);

@@ -1131,7 +1131,6 @@ function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null
 export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
-	(state as any).__lastSidePanelUserActiveSelection = { sessionId: sid, tabId: tab.id, at: Date.now() };
 	setActivePanelTabIdForSession(state, sid, tab.id);
 	const workspace = getSidePanelWorkspace(sid);
 	if (sid !== "__no-session__" && workspace.tabs.some((candidate) => candidate.id === tab.id) && workspace.activeTabId !== tab.id) {
