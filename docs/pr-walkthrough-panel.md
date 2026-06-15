@@ -139,9 +139,7 @@ The regression coverage lives in
 `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (`T-5`). It seeds a ready walkthrough,
 asserts orientation de-duplication in labelled and collapsed rails, checks the
 `(done/total)` counter format/style, and verifies row geometry at default and
-constrained rail widths. The implementation gate for the polish passed at
-`b92418df` with build, type-check, targeted PR walkthrough E2E, unit, and full
-E2E verification green.
+constrained rail widths.
 
 ## Launch model: the isolated reviewer child
 

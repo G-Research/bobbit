@@ -723,9 +723,10 @@ suite-layout layers:
   file-local serial mode so broad runs do not stack their hottest filesystem and
   child-process work.
 
-Validation for the PR walkthrough polish branch passed at `b92418df`: build,
-type-check, targeted PR walkthrough sidebar E2E (`T-5`), unit suite, and full
-E2E suite were green; optional QA was not enabled for that goal.
+For pack-specific UI changes, keep durable validation tied to the persistent
+coverage contract: a focused browser E2E should pin the changed interaction, and
+the implementation gate should still run build, type-check, unit, and the full
+E2E command before merge.
 
 ### Playwright transform-cache isolation
 
