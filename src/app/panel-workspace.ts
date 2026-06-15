@@ -105,18 +105,28 @@ export function isPreviewContentDismissed(sessionId: string | null | undefined, 
 
 export function loadPersistedPanelWorkspace(stateLike: any): void {
 	if (!stateLike || typeof stateLike !== "object") return;
-	const tabs = safeReadObject(PANEL_TABS_STORAGE_KEY);
-	if (tabs) stateLike.panelTabsBySession = tabs as Record<string, PanelWorkspaceTab[]>;
-	const active = safeReadObject(PANEL_ACTIVE_STORAGE_KEY);
-	if (active) stateLike.panelWorkspaceActiveBySession = active as Record<string, string>;
+	// Real app side-panel tabs/active state are server-authoritative. Legacy
+	// tab/active localStorage is read only by the one-shot migration path in
+	// side-panel-workspace.ts; keep file:// fixtures working without making the
+	// gateway UI resurrect closed tabs from old keys.
+	const isFileFixture = typeof window !== "undefined" && window.location?.protocol === "file:";
+	if (isFileFixture) {
+		const tabs = safeReadObject(PANEL_TABS_STORAGE_KEY);
+		if (tabs) stateLike.panelTabsBySession = tabs as Record<string, PanelWorkspaceTab[]>;
+		const active = safeReadObject(PANEL_ACTIVE_STORAGE_KEY);
+		if (active) stateLike.panelWorkspaceActiveBySession = active as Record<string, string>;
+	}
 	const versions = safeReadObject(PANEL_VERSIONS_STORAGE_KEY);
 	if (versions) stateLike.previewVersionsBySession = versions as Record<string, Record<string, PreviewVersionRecord>>;
 }
 
 function persistPanelWorkspace(stateLike: any): void {
 	if (!stateLike || typeof stateLike !== "object") return;
-	safeWriteObject(PANEL_TABS_STORAGE_KEY, stateLike.panelTabsBySession);
-	safeWriteObject(PANEL_ACTIVE_STORAGE_KEY, stateLike.panelWorkspaceActiveBySession);
+	const isFileFixture = typeof window !== "undefined" && window.location?.protocol === "file:";
+	if (isFileFixture) {
+		safeWriteObject(PANEL_TABS_STORAGE_KEY, stateLike.panelTabsBySession);
+		safeWriteObject(PANEL_ACTIVE_STORAGE_KEY, stateLike.panelWorkspaceActiveBySession);
+	}
 	safeWriteObject(PANEL_VERSIONS_STORAGE_KEY, stateLike.previewVersionsBySession);
 }
 
@@ -265,8 +275,8 @@ function panelTabKindFromId(id: string): PanelWorkspaceKind | undefined {
 	return undefined;
 }
 
-export function isPinnedPanelTab(tab: PanelWorkspaceTab | undefined | null): boolean {
-	return tab?.id === INBOX_PANEL_TAB_ID && tab.kind === "inbox";
+export function isPinnedPanelTab(_tab: PanelWorkspaceTab | undefined | null): boolean {
+	return false;
 }
 
 export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
@@ -842,10 +852,7 @@ function mergeDerivedMetadata(stored: PanelWorkspaceTab, derived: PanelWorkspace
 }
 
 function pinnedFirst(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
-	const pinned: PanelWorkspaceTab[] = [];
-	const unpinned: PanelWorkspaceTab[] = [];
-	for (const tab of tabs) (isPinnedPanelTab(tab) ? pinned : unpinned).push(tab);
-	return [...pinned, ...unpinned];
+	return tabs;
 }
 
 function shouldDropStoredTabAbsentFromDerived(tab: PanelWorkspaceTab, derivedById: Map<string, PanelWorkspaceTab>): boolean {
@@ -918,15 +925,12 @@ export function nextActivePanelTabId(tabs: PanelWorkspaceTab[], closedId: string
 }
 
 export function reorderSidePanelTab(tabs: PanelWorkspaceTab[], fromId: string, beforeIdOrIndex?: string | number | null): PanelWorkspaceTab[] {
-	const ordered = pinnedFirst(panelContentTabs(tabs));
+	const ordered = panelContentTabs(tabs);
 	const fromIndex = ordered.findIndex((tab) => tab.id === fromId);
 	if (fromIndex < 0) return ordered;
 	const moving = ordered[fromIndex];
-	if (isPinnedPanelTab(moving)) return ordered;
 
 	const without = ordered.filter((_, index) => index !== fromIndex);
-	const pinnedCount = without.findIndex((tab) => !isPinnedPanelTab(tab));
-	const minIndex = pinnedCount < 0 ? without.length : pinnedCount;
 	let insertIndex = without.length;
 	if (typeof beforeIdOrIndex === "number" && Number.isFinite(beforeIdOrIndex)) {
 		insertIndex = Math.trunc(beforeIdOrIndex);
@@ -934,9 +938,9 @@ export function reorderSidePanelTab(tabs: PanelWorkspaceTab[], fromId: string, b
 		const targetIndex = without.findIndex((tab) => tab.id === beforeIdOrIndex);
 		if (targetIndex >= 0) insertIndex = targetIndex;
 	}
-	insertIndex = Math.max(minIndex, Math.min(without.length, insertIndex));
+	insertIndex = Math.max(0, Math.min(without.length, insertIndex));
 	without.splice(insertIndex, 0, moving);
-	return pinnedFirst(without);
+	return without;
 }
 
 export function panelTabIdFromLegacy(tab: LegacyPanelTab | string | null | undefined, reviewActiveTitle: string): string | null {

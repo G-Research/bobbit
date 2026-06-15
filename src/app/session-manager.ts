@@ -966,8 +966,12 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	state.chatPanel = null;
 	state.cwdDropdownOpen = false;
 
-	// Update hash route synchronously
-	setHashRoute("session", sessionId, replaceHistory);
+	// Update hash route synchronously. Preserve an existing standalone
+	// side-panel route for this same session while the connection hydrates it.
+	const currentRoute = getRouteFromHash();
+	if (!(currentRoute.view === "session" && currentRoute.sessionId === sessionId && currentRoute.panelTabId)) {
+		setHashRoute("session", sessionId, replaceHistory);
+	}
 
 	// Update hue rotation synchronously
 	document.documentElement.style.setProperty("--bobbit-hue-rotate", `${sessionHueRotation(sessionId)}deg`);

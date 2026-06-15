@@ -38,6 +38,7 @@ import { authenticateGateway, connectToSession, createAndConnectSession, termina
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
 import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable, hasActiveSidePanel, getSidePanelSizeMode, setSidePanelSizeMode } from "./render.js";
+import { getSidePanelWorkspace, hydrateSidePanelWorkspace, setActiveSidePanelTab } from "./side-panel-workspace.js";
 import { renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
@@ -205,6 +206,23 @@ function clearActiveExtRoute(): void {
 	dismissExtRouteUnavailable();
 }
 
+async function restoreSessionPanelRoute(sessionId: string, panelTabId: string | undefined): Promise<void> {
+	if (!panelTabId) return;
+	try {
+		const workspace = getSidePanelWorkspace(sessionId).sessionId === sessionId
+			? getSidePanelWorkspace(sessionId)
+			: await hydrateSidePanelWorkspace(sessionId);
+		const latest = workspace.tabs.length > 0 ? workspace : await hydrateSidePanelWorkspace(sessionId);
+		if (latest.tabs.some((tab) => tab.id === panelTabId)) {
+			await setActiveSidePanelTab(panelTabId, { sessionId });
+		}
+	} catch {
+		/* render.ts shows the closed/missing-panel state */
+	} finally {
+		renderApp();
+	}
+}
+
 async function restoreExtRoute(routeId: string | undefined, params: Record<string, string> | undefined): Promise<void> {
 	if (!routeId) { clearActiveExtRoute(); return; }
 	try {
@@ -293,10 +311,8 @@ async function handleHashChange(): Promise<void> {
 			await loadDashboardData(route.goalId);
 		} else if (route.view === "session" && route.sessionId) {
 			clearDashboardState();
-			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId) {
-				return;
-			}
-			if (state.remoteAgent?.gatewaySessionId === route.sessionId) {
+			if (state.selectedSessionId === route.sessionId || state.connectingSessionId === route.sessionId || state.remoteAgent?.gatewaySessionId === route.sessionId) {
+				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				return;
 			}
 			if (state.remoteAgent) {
@@ -308,6 +324,7 @@ async function handleHashChange(): Promise<void> {
 			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 			if (checkRes.ok) {
 				await connectToSession(route.sessionId, true);
+				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 			} else {
 				setHashRoute("landing");
 				state.appView = "authenticated";
@@ -683,6 +700,7 @@ async function initApp() {
 				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 				if (checkRes.ok) {
 					await connectToSession(route.sessionId, true);
+					await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				}
 			} else if (route.view === "goal-dashboard" && route.goalId) {
 				state.goalDashboardId = route.goalId;

@@ -2,17 +2,17 @@
  * Staff inbox panel — browser E2E.
  *
  * Pins the UI surface for the inbox queue feature (design: docs/design/staff-inbox.md §3.5 / §8):
- *   - Inbox panel mounts as a tab in the unified preview panel when the active
- *     session belongs to a staff agent.
+ *   - Inbox panel mounts as a tab in the unified preview panel after the user
+ *     explicitly opens it for a staff agent session.
  *   - "+ Add to inbox" opens the composer dialog; submitting POSTs to
  *     /api/staff/:id/inbox with source.type="manual_ui" and the new entry
  *     arrives via WS into the Pending section.
- *   - Reload persists the panel (state is rehydrated from REST on session
- *     select; localStorage drives collapse).
+ *   - Reload persists the panel (state is rehydrated from the server workspace
+ *     on session select; server workspace drives collapse).
  *   - Cancel on a pending entry moves it to History (state=cancelled).
  *   - Delete on a terminal entry removes it.
- *   - Ctrl+] collapses the panel; the collapsed flag persists in
- *     localStorage under `bobbit-preview-collapsed-${sid}`.
+ *   - Ctrl+] collapses the panel; the collapsed size mode persists in the
+ *     server side-panel workspace.
  *
  * This test is authored against the REST/WS contract documented in
  * docs/design/staff-inbox.md §7. Stream B (server integration) is responsible
@@ -63,7 +63,21 @@ test.describe("Staff inbox panel", () => {
 			return sid;
 		}, { timeout: 15_000, intervals: [200, 400, 800] }).not.toBe("");
 		await page.evaluate((sessionId) => { window.location.hash = `#/session/${sessionId}`; }, sid);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		return sid;
+	}
+
+	async function openInboxPanel(page: import("@playwright/test").Page): Promise<void> {
+		await expect(page.locator('[data-testid="staff-inbox-open"]')).toBeVisible({ timeout: 20_000 });
+		await page.locator('[data-testid="staff-inbox-open"]').click();
+		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 10_000 });
+	}
+
+	async function workspaceSizeMode(sessionId: string): Promise<string> {
+		const r = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`);
+		const text = await r.text();
+		expect(r.status, text).toBe(200);
+		return (JSON.parse(text) as { sizeMode?: string }).sizeMode || "";
 	}
 
 	type Box = { x: number; y: number; width: number; height: number };
@@ -85,6 +99,7 @@ test.describe("Staff inbox panel", () => {
 		await openApp(page);
 		await page.setViewportSize({ width: 375, height: 667 });
 		await navigateToStaffSession(page, staff.id);
+		await openInboxPanel(page);
 
 		const inboxTab = page.locator("[data-testid='inbox-tab-pill']").first();
 		await expect(inboxTab, "mobile inbox tab should appear for staff sessions").toBeVisible({ timeout: 20_000 });
@@ -138,8 +153,9 @@ test.describe("Staff inbox panel", () => {
 
 		await openApp(page);
 		const sid = await navigateToStaffSession(page, staff.id);
+		await openInboxPanel(page);
 
-		// 1. Inbox tab appears in the unified panel for staff sessions.
+		// 1. Inbox tab appears in the unified panel after explicit open.
 		const inboxTab = page.locator("[data-testid='inbox-tab-unified'], [data-testid='inbox-tab-pill']").first();
 		await expect(inboxTab, "inbox tab should appear for staff sessions").toBeVisible({ timeout: 20_000 });
 		await inboxTab.click();
@@ -180,6 +196,7 @@ test.describe("Staff inbox panel", () => {
 		const staff = await createStaff(`InboxBot-${Date.now()}`);
 		await openApp(page);
 		const sid = await navigateToStaffSession(page, staff.id);
+		await openInboxPanel(page);
 
 		// Seed an entry directly via REST so we don't depend on the dialog path here.
 		const title = `Cancel target ${Date.now()}`;
@@ -224,29 +241,22 @@ test.describe("Staff inbox panel", () => {
 		const staff = await createStaff(`InboxBot-${Date.now()}`);
 		await openApp(page);
 		const sid = await navigateToStaffSession(page, staff.id);
+		await openInboxPanel(page);
 
 		const tab = page.locator("[data-testid='inbox-tab-unified'], [data-testid='inbox-tab-pill']").first();
 		await expect(tab).toBeVisible({ timeout: 20_000 });
 		await tab.click();
 		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 5_000 });
 
-		// Press Ctrl+] to collapse — the keyboard handler treats staff sessions as
-		// panel-bearing once `state.inboxPanelOpen` is true. After collapse, the
-		// localStorage key matches the shared per-session pattern.
-		// Wait for the shortcut listener to attach (document.body.dataset.shortcutsReady).
+		// Press Ctrl+] to collapse. The keyboard handler persists the shared
+		// side-panel size mode to the server workspace.
 		await page.waitForFunction(() => document.body.dataset.shortcutsReady === "1");
 		await page.keyboard.press("Control+]");
+		await expect.poll(() => workspaceSizeMode(sid), { timeout: 10_000 }).toBe("collapsed");
 
-		const collapsedKey = `bobbit-preview-collapsed-${sid}`;
-		const collapsed = await page.evaluate((k) => localStorage.getItem(k), collapsedKey);
-		expect(collapsed, `localStorage[${collapsedKey}] should be "true" after Ctrl+]`).toBe("true");
-
-		// Reload — the panel respects the persisted collapse state on rehydrate.
+		// Reload — the panel respects the server-persisted collapse state on rehydrate.
 		await page.reload();
 		await page.evaluate((s) => { window.location.hash = `#/session/${s}`; }, sid);
-		// The unified panel is collapsed (inbox-panel not rendered into the slot).
-		// We assert via the localStorage value because the DOM hidden-state can vary by viewport.
-		const stillCollapsed = await page.evaluate((k) => localStorage.getItem(k), collapsedKey);
-		expect(stillCollapsed).toBe("true");
+		await expect.poll(() => workspaceSizeMode(sid), { timeout: 10_000 }).toBe("collapsed");
 	});
 });

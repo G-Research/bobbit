@@ -71,7 +71,9 @@ function safeWritePersisted(sessionId: string, docs: Record<string, ReviewDocume
 }
 
 function shouldPersistReviewDocument(doc: ReviewDocumentModel): boolean {
-	return doc.source?.kind === "verification-signoff-markdown" || doc.source?.kind === "verification-signoff-pr";
+	return doc.source?.kind === "markdown-review"
+		|| doc.source?.kind === "verification-signoff-markdown"
+		|| doc.source?.kind === "verification-signoff-pr";
 }
 
 let generatedReviewDocumentCounter = 0;
@@ -246,8 +248,23 @@ export function openReviewDocumentFromEvent(detail: unknown, sessionId = activeS
 }
 
 export function restorePersistedReviewDocuments(sessionId: string, _options: { select?: boolean } = {}): void {
+	const workspaceReviewTabs = getSidePanelWorkspace(sessionId).tabs.filter((tab) => tab.kind === "review");
+	if (workspaceReviewTabs.length === 0) return;
+	const openDocumentIds = new Set<string>();
+	const openTitles = new Set<string>();
+	for (const tab of workspaceReviewTabs) {
+		const source = tab.source as Record<string, unknown> | undefined;
+		const documentId = typeof source?.documentId === "string" ? source.documentId : documentIdFromReviewTabId(tab.id);
+		const title = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
+		if (documentId) openDocumentIds.add(documentId);
+		if (title) openTitles.add(title);
+	}
 	const docs = safeReadPersisted(sessionId);
-	const entries = Object.values(docs).filter((doc) => doc?.title && typeof doc.markdown === "string" && shouldPersistReviewDocument(doc));
+	const entries = Object.values(docs).filter((doc) => {
+		if (!doc?.title || typeof doc.markdown !== "string" || !shouldPersistReviewDocument(doc)) return false;
+		const documentId = doc.documentId || legacyReviewDocumentIdFromTitle(doc.title);
+		return openDocumentIds.has(documentId) || openTitles.has(doc.title);
+	});
 	if (entries.length === 0) return;
 	state.reviewDocuments = new Map(state.reviewDocuments);
 	let firstTitle = "";

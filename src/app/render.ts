@@ -99,6 +99,7 @@ import {
 	packPanelRefFromTabId,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import { openInboxPanel } from "./inbox-panel.js";
 import { renderPackPanelContent } from "./pack-panels.js";
 import {
 	closeSidePanelTab as closeServerSidePanelTab,
@@ -763,11 +764,6 @@ export async function setSidePanelSizeMode(mode: SidePanelSizeMode, sessionId: s
 	// Compatibility mirror until the server-backed controller owns all callers.
 	state.previewPanelFullscreen = mode === "fullscreen";
 	if (!sid || sid === "__no-session__") return;
-	try {
-		const legacyKey = `bobbit-preview-collapsed-${sid}`;
-		if (mode === "collapsed") localStorage.setItem(legacyKey, "true");
-		else localStorage.removeItem(legacyKey);
-	} catch { /* localStorage is only a compatibility mirror, never authoritative */ }
 	try {
 		await setServerSidePanelSizeMode(mode, { sessionId: sid });
 	} catch (err) {
@@ -1873,7 +1869,7 @@ export function doRenderApp(): void {
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
 		event?.preventDefault();
 		event?.stopPropagation();
-		if ((tab as any).kind === "chat" || isPinnedPanelTab(tab)) return;
+		if ((tab as any).kind === "chat") return;
 		const sid = workspaceSessionId();
 		const activeId = activeSidePanelTabIdForSession(state, sid);
 		const wasActive = activeId === tab.id;
@@ -1923,6 +1919,10 @@ export function doRenderApp(): void {
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 			}
+		}
+		if (tab.kind === "inbox") {
+			state.inboxPanelOpen = false;
+			state.inboxAddDialogOpen = false;
 		}
 		if (tab.kind === "preview") {
 			if (!isHistoricalPreviewTab(tab)) markPreviewContentDismissed(sid, previewEntryFromTab(tab), previewContentHashFromTab(tab));
@@ -2506,11 +2506,47 @@ export function doRenderApp(): void {
 			lazyPageCall("search", () => import("./search-page.js"), "resetSearchPage", false);
 		}
 
+		if (route.view === "session" && route.panelTabId) {
+			if (!connected) return html`${reconnectBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+			const sid = workspaceSessionId();
+			const workspace = state.sidePanelWorkspaceBySession?.[sid];
+			if (!workspace) return html`${reconnectBanner()}<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+			const tab = workspace.tabs.find((candidate) => candidate.id === route.panelTabId);
+			if (!tab) {
+				return html`
+					${reconnectBanner()}
+					<div class="flex-1 min-h-0 flex items-center justify-center p-8 text-center" data-testid="side-panel-route-missing">
+						<div class="max-w-sm rounded-lg border border-border bg-card p-5 shadow-sm">
+							<div class="text-sm font-semibold text-foreground mb-2">Panel is closed</div>
+							<div class="text-sm text-muted-foreground mb-4">This side-panel tab is not open for this session anymore.</div>
+							<a class="text-sm text-primary hover:underline" href=${`#/session/${encodeURIComponent(sid)}`}>Back to session</a>
+						</div>
+					</div>
+				`;
+			}
+			if (workspace.activeTabId !== tab.id) setActivePanelTabIdForSession(state, sid, tab.id);
+			return html`${reconnectBanner()}<div class="flex-1 flex flex-col min-h-0 overflow-hidden" data-testid="side-panel-route-content">${renderSidePanelWorkspace("fullscreen")}</div>`;
+		}
+
+		const staffInboxOpenAffordance = () => {
+			const sid = activeSessionId() || "";
+			const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
+			const hasInboxTab = !!sid && getSidePanelWorkspace(sid).tabs.some((tab) => tab.id === "inbox" && tab.kind === "inbox");
+			if (!sess?.staffId || hasInboxTab) return "";
+			return html`
+				<div class="shrink-0 border-b border-border bg-muted/30 px-3 py-2 flex items-center justify-between gap-3" style=${isDesktop() ? "" : "margin-top:var(--mobile-header-height,60px);"} data-testid="staff-inbox-reopen-bar">
+					<span class="text-xs text-muted-foreground">Staff inbox is closed for this session.</span>
+					<button class="text-xs rounded border border-border px-2 py-1 hover:bg-accent" data-testid="staff-inbox-open" @click=${() => openInboxPanel(sid, sess.staffId!)}>Open inbox</button>
+				</div>
+			`;
+		};
+
 		if (connected && hasUnifiedPanel()) {
 			const mode = sidePanelSizeMode();
 			if (desktop && mode === "fullscreen") {
 				return html`
 					${reconnectBanner()}
+					${staffInboxOpenAffordance()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 						${renderSidePanelWorkspace("fullscreen")}
 						<!-- Compact prompt bar at bottom -->
@@ -2524,6 +2560,7 @@ export function doRenderApp(): void {
 				const collapsed = isSidePanelCollapsed();
 				return html`
 					${reconnectBanner()}
+					${staffInboxOpenAffordance()}
 					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
 						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${state.chatPanel}</div>
 						${collapsed ? sidePanelRestoreButton() : renderSidePanelWorkspace("split")}
@@ -2538,6 +2575,7 @@ export function doRenderApp(): void {
 			const paneW = 100 / count;
 			return html`
 				${reconnectBanner()}
+				${staffInboxOpenAffordance()}
 				<div class="side-panel-slider preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
 					<div class="side-panel-slider__track preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
 						${panes.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
@@ -2545,7 +2583,7 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
-		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${state.chatPanel}`;
+		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${staffInboxOpenAffordance()}${state.chatPanel}`;
 
 		if (desktop) {
 			return html`

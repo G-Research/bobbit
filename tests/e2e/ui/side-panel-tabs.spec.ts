@@ -459,6 +459,13 @@ async function expectPanelHidden(page: Page): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
 }
 
+async function openStaffInboxPanel(page: Page): Promise<void> {
+	await expect(page.locator('[data-testid="staff-inbox-open"]')).toBeVisible({ timeout: 15_000 });
+	await page.locator('[data-testid="staff-inbox-open"]').click();
+	await expectPanelTabs(page, ["inbox"], "explicit Staff Inbox action should open a side-panel tab");
+	await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 10_000 });
+}
+
 async function expectContentForTab(page: Page, tab: PanelTab, previewText: string): Promise<string> {
 	await clickTabById(page, tab.id, `click ${tab.id}`);
 	if (tab.kind === "preview") {
@@ -520,6 +527,7 @@ async function openPrWalkthroughPanel(page: Page, sessionId: string): Promise<vo
 }
 
 async function expectPopoutOpens(page: Page, tabId: string, message: string): Promise<void> {
+	const kind = await page.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="${tabId}"]`).first().getAttribute("data-panel-tab-kind");
 	const popout = page.locator(SIDE_PANEL_POPOUT).first();
 	await expect(popout, `${message}: popout control`).toBeVisible({ timeout: 10_000 });
 	const href = await popout.getAttribute("href");
@@ -535,6 +543,12 @@ async function expectPopoutOpens(page: Page, tabId: string, message: string): Pr
 			const encoded = encodeURIComponent(tabId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			await expect.poll(() => popup.url(), { timeout: 15_000, message: `${message}: app popout route` })
 				.toMatch(new RegExp(`/panel/${encoded}`));
+			await expect(popup.locator('[data-testid="side-panel-route-content"]'), `${message}: standalone panel content shell`).toBeVisible({ timeout: 20_000 });
+			await expect(popup.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="${tabId}"]`).first(), `${message}: standalone active tab`).toBeVisible({ timeout: 20_000 });
+			if (kind === "inbox") await expect(popup.locator("inbox-panel"), `${message}: inbox popout content`).toBeVisible({ timeout: 20_000 });
+			else if (kind === "review") await expect(popup.locator("review-pane"), `${message}: review popout content`).toBeVisible({ timeout: 20_000 });
+			else if (kind === "proposal") await expect(popup.locator('input[placeholder="Goal title"]').first(), `${message}: proposal popout content`).toBeVisible({ timeout: 20_000 });
+			else if (kind === "pack") await expect(popup.locator('[data-testid="pack-panel-root"], [data-testid="prw-panel-root"]').first(), `${message}: pack popout content`).toBeVisible({ timeout: 20_000 });
 		}
 	} finally {
 		await popup.close().catch(() => {});
@@ -719,41 +733,30 @@ test.describe("Side-panel tab contract", () => {
 		await expectPanelHidden(page);
 	});
 
-	test("5. Staff Inbox is pinned first, non-closable, non-draggable, and survives closing other tabs", async ({ page }) => {
+	test("5. Staff Inbox opens explicitly, is closable, and stays closed across reload", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		const staff = await createStaff(`SidePanelInbox-${Date.now()}`);
 		staffCleanup.push(staff.id);
 		await openApp(page);
 		await navigateToSession(page, staff.currentSessionId);
 
-		await expect.poll(async () => (await visiblePanelTabs(page))[0] ?? null, { timeout: 20_000, message: "staff sessions should always expose Inbox" })
-			.toMatchObject({ id: "inbox", kind: "inbox" });
+		await expect.poll(() => visiblePanelTabs(page), { timeout: 10_000, message: "staff session should not auto-open Inbox" }).toEqual([]);
+		await openStaffInboxPanel(page);
 		let tabs = await visiblePanelTabs(page);
 		expect(tabs[0]).toMatchObject({ id: "inbox", kind: "inbox" });
-		expect(tabs[0].closable, "Inbox must not render a close control").toBe(false);
-		await expect(page.locator('[data-panel-tab-id="inbox"] .goal-tab-close')).toHaveCount(0);
+		expect(tabs[0].closable, "Inbox must render a close control").toBe(true);
 
 		await mountPreviewHtml(page, staff.currentSessionId, "staff.html", "Staff Preview");
-		await expectPanelTabs(page, ["inbox", previewId("staff.html")], "preview should open beside pinned Inbox");
-		const beforeDrag = await visiblePanelTabIds(page);
-		await dragTab(page, "inbox", previewId("staff.html"));
-		await expectPanelTabs(page, beforeDrag, "dragging pinned Inbox should not change order");
-
-		await closeTabById(page, previewId("staff.html"), "closing staff preview tab");
-		await expectPanelTabs(page, ["inbox"], "Inbox should remain after every other tab closes");
-		await expectActivePanelTabId(page, "inbox", "Inbox should be active after other tabs close");
-		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 10_000 });
+		await expectPanelTabs(page, ["inbox", previewId("staff.html")], "preview should open beside explicit Inbox tab");
+		await closeTabById(page, "inbox", "closing staff inbox tab");
+		await expectPanelTabs(page, [previewId("staff.html")], "closing Inbox should delete only the Inbox tab");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, staff.currentSessionId);
+		await expectPanelTabs(page, [previewId("staff.html")], "closed Inbox should not auto-reopen after reload");
+		await expect(page.locator('[data-testid="staff-inbox-open"]')).toBeVisible({ timeout: 10_000 });
 	});
 
-	// The product pinned-tab guard (render.ts::ensurePanelSortable onMove/onEnd) is
-	// correct; this test was a *contention* flake, not a product bug. Under heavy
-	// Chromium load the synthesised drag could resolve mouse-up before SortableJS's
-	// fallback loop evaluated the onMove over the pinned Inbox, so an earlier
-	// non-pinned swap committed and the order assertion failed (~1/5). The fix is in
-	// `dragTab`: it now settles on stable tab boxes, nudges past fallbackTolerance to
-	// start the drag, glides in fine steps so every crossed tab gets an onMove, and
-	// dwells on the destination so the final drop is evaluated deterministically.
-	test("6. Desktop drag reorder persists and cannot move tabs before pinned Inbox", async ({ page }) => {
+	test("6. Desktop drag reorder persists for all side-panel tabs", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);
 		const sessionId = await createRegularSessionViaApi(page);
@@ -780,13 +783,12 @@ test.describe("Side-panel tab contract", () => {
 		const staff = await createStaff(`SidePanelDrag-${Date.now()}`);
 		staffCleanup.push(staff.id);
 		await navigateToSession(page, staff.currentSessionId);
-		await mountPreviewHtml(page, staff.currentSessionId, "pinned-a.html", "Pinned A");
-		await mountPreviewHtml(page, staff.currentSessionId, "pinned-b.html", "Pinned B");
-		const pinnedA = previewId("pinned-a.html");
-		const pinnedB = previewId("pinned-b.html");
-		await expectPanelTabs(page, ["inbox", pinnedA, pinnedB], "staff drag test should start with pinned Inbox first");
-		await dragTab(page, pinnedB, "inbox", { toLeftEdge: true });
-		await expectPanelTabs(page, ["inbox", pinnedA, pinnedB], "non-pinned tabs cannot be dropped before pinned Inbox");
+		await openStaffInboxPanel(page);
+		await mountPreviewHtml(page, staff.currentSessionId, "inbox-a.html", "Inbox A");
+		const inboxA = previewId("inbox-a.html");
+		await expectPanelTabs(page, ["inbox", inboxA], "staff drag test should start with explicit Inbox and preview");
+		await dragTab(page, inboxA, "inbox", { toLeftEdge: true });
+		await expectPanelTabs(page, [inboxA, "inbox"], "preview tabs can be dropped before Inbox because Inbox is a normal tab");
 		await expectNoChatTab(page);
 	});
 
@@ -796,6 +798,7 @@ test.describe("Side-panel tab contract", () => {
 		staffCleanup.push(staff.id);
 		await openApp(page);
 		await navigateToSession(page, staff.currentSessionId);
+		await openStaffInboxPanel(page);
 
 		const previewText = "Identity Preview";
 		await mountPreviewHtml(page, staff.currentSessionId, "identity.html", previewText);
@@ -948,7 +951,7 @@ test.describe("Side-panel tab contract", () => {
 		staffCleanup.push(staff.id);
 		await openApp(page);
 		await navigateToSession(page, staff.currentSessionId);
-		await expectPanelTabs(page, ["inbox"], "staff session should open Inbox as a side-panel tab");
+		await openStaffInboxPanel(page);
 
 		await exerciseSharedWindowControls(page, staff.currentSessionId, "inbox", "staff inbox shared controls");
 		const proposalId = await openGoalProposal(page);

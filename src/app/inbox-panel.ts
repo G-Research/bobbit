@@ -7,8 +7,9 @@
  * Lifecycle:
  *   - On session select with `session.staffId` set, `startInboxSubscription`
  *     is called: bootstrap fetches GET /api/staff/:id/inbox?state=pending
- *     and ?state=completed&limit=100, merges into `state.inboxEntries`,
- *     and sets `state.inboxPanelOpen = true`.
+ *     and ?state=completed&limit=100, merges into `state.inboxEntries`.
+ *     It does not create a side-panel tab; closed inbox tabs stay closed until
+ *     the user explicitly reopens them.
  *   - WS events `inbox.entry.added` / `updated` / `removed` are routed
  *     into this module's callbacks by `remote-agent.ts` and mutate the
  *     local entry list.
@@ -21,7 +22,7 @@
  */
 
 import { state, renderApp } from "./state.js";
-import { openSidePanelTab } from "./side-panel-workspace.js";
+import { getSidePanelWorkspace, openSidePanelTab } from "./side-panel-workspace.js";
 import { INBOX_PANEL_TAB_ID } from "./panel-workspace.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 
@@ -38,16 +39,8 @@ export function startInboxSubscription(sessionId: string, staffId: string): void
 	stopInboxSubscription();
 	currentSid = sessionId;
 	currentStaffId = staffId;
-	state.inboxPanelOpen = true;
+	state.inboxPanelOpen = getSidePanelWorkspace(sessionId).tabs.some((tab) => tab.id === INBOX_PANEL_TAB_ID && tab.kind === "inbox");
 	state.inboxEntries = [];
-	void openSidePanelTab({
-		id: INBOX_PANEL_TAB_ID,
-		kind: "inbox",
-		title: "Inbox",
-		label: "Inbox",
-		source: { type: "inbox", sessionId, staffId },
-		updatedAt: Date.now(),
-	}, { focus: false });
 	const token = ++bootstrapToken;
 
 	void (async () => {
@@ -97,6 +90,20 @@ export function startInboxSubscription(sessionId: string, staffId: string): void
 			/* bootstrap failures are non-fatal; live WS will catch up */
 		}
 	})();
+}
+
+export function openInboxPanel(sessionId: string = currentSid || "", staffId: string = currentStaffId || ""): void {
+	if (!sessionId || !staffId) return;
+	state.inboxPanelOpen = true;
+	void openSidePanelTab({
+		id: INBOX_PANEL_TAB_ID,
+		kind: "inbox",
+		title: "Inbox",
+		label: "Inbox",
+		source: { type: "inbox", sessionId, staffId },
+		updatedAt: Date.now(),
+	}, { focus: true });
+	renderApp();
 }
 
 /** Tear down the current subscription. Clears local state. */

@@ -110,7 +110,7 @@ const hashB = "b".repeat(64);
 const hashC = "c".repeat(64);
 
 describe("panel workspace side-pane tab contract", () => {
-	it("buildPanelWorkspaceTabs emits side-pane tabs only and pins Inbox first", () => {
+	it("buildPanelWorkspaceTabs emits side-pane tabs only with closable Inbox", () => {
 		const tabs = buildPanelWorkspaceTabs({
 			sessionId: "s1",
 			isPreviewSession: true,
@@ -132,7 +132,7 @@ describe("panel workspace side-pane tab contract", () => {
 		]);
 		assert.equal(tabs.some((tab) => tab.id === CHAT_PANEL_TAB_ID || tab.kind === "chat"), false);
 		assert.equal(tabs[0].kind, "inbox");
-		assert.equal(isPinnedPanelTab(tabs[0]), true);
+		assert.equal(isPinnedPanelTab(tabs[0]), false);
 		assert.equal(firstContentPanelTab(tabs)?.id, INBOX_PANEL_TAB_ID);
 	});
 
@@ -220,7 +220,7 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(state.panelWorkspaceActiveBySession.s1, previewEntryTabId("legacy.html"));
 	});
 
-	it("normalizeSidePanelTabs drops legacy chat/invalid rows, normalizes live preview, merges metadata, dedupes, and pins Inbox", () => {
+	it("normalizeSidePanelTabs drops legacy chat/invalid rows, normalizes live preview, merges metadata, and dedupes", () => {
 		const state = {
 			selectedSessionId: "s1",
 			panelTabsBySession: {
@@ -244,12 +244,12 @@ describe("panel workspace side-pane tab contract", () => {
 		const normalized = normalizeSidePanelTabs(state, "s1", derived);
 
 		assert.deepEqual(normalized.map((tab) => tab.id), [
-			INBOX_PANEL_TAB_ID,
 			previewEntryTabId("a.html"),
 			"proposal:goal",
+			INBOX_PANEL_TAB_ID,
 			reviewPanelTabId("Review A"),
 		]);
-		assert.equal(previewContentHashFromTab(normalized[1]), hashB);
+		assert.equal(previewContentHashFromTab(normalized[0]), hashB);
 		assert.equal(normalized.some((tab) => tab.id === CHAT_PANEL_TAB_ID || tab.id.startsWith("preview:tool")), false);
 
 		const staleInbox = normalizeSidePanelTabs(
@@ -341,7 +341,7 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(nextActivePanelTabId([tabs[0]], tabs[0].id), "");
 	});
 
-	it("reorders only non-pinned side-pane tabs and never before pinned Inbox", () => {
+	it("reorders all side-pane tabs including Inbox", () => {
 		const tabs = [chatTab(), inboxTab(), previewTab(previewEntryTabId("a.html"), { entry: "a.html" }), proposalTab(), reviewTab("Notes")];
 
 		assert.deepEqual(
@@ -350,11 +350,11 @@ describe("panel workspace side-pane tab contract", () => {
 		);
 		assert.deepEqual(
 			reorderSidePanelTab(tabs, reviewPanelTabId("Notes"), INBOX_PANEL_TAB_ID).map((tab) => tab.id),
-			[INBOX_PANEL_TAB_ID, reviewPanelTabId("Notes"), previewEntryTabId("a.html"), "proposal:goal"],
+			[reviewPanelTabId("Notes"), INBOX_PANEL_TAB_ID, previewEntryTabId("a.html"), "proposal:goal"],
 		);
 		assert.deepEqual(
 			reorderSidePanelTab(tabs, INBOX_PANEL_TAB_ID, 3).map((tab) => tab.id),
-			[INBOX_PANEL_TAB_ID, previewEntryTabId("a.html"), "proposal:goal", reviewPanelTabId("Notes")],
+			[previewEntryTabId("a.html"), "proposal:goal", reviewPanelTabId("Notes"), INBOX_PANEL_TAB_ID],
 		);
 	});
 });

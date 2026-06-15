@@ -317,6 +317,7 @@ function syncCompatibilityMirrors(workspace: SidePanelWorkspace): void {
 		state.panelTabs = legacyTabs;
 		state.activePanelTabId = workspace.activeTabId;
 		state.previewPanelFullscreen = workspace.sizeMode === "fullscreen";
+		state.inboxPanelOpen = workspace.tabs.some((tab) => tab.id === INBOX_PANEL_TAB_ID && tab.kind === "inbox");
 	}
 	(state as unknown as { panelWorkspace?: SidePanelWorkspace }).panelWorkspace = workspace;
 }
@@ -381,15 +382,8 @@ function nextActiveAfterClose(tabsBeforeClose: SidePanelWorkspaceTab[], closedId
 	return remaining[Math.min(closedIndex, remaining.length - 1)]?.id || remaining[remaining.length - 1]?.id || "";
 }
 
-function isPinnedSidePanelWorkspaceTab(tab: SidePanelWorkspaceTab): boolean {
-	return tab.kind === "inbox" || tab.id === INBOX_PANEL_TAB_ID;
-}
-
 function pinnedFirstWorkspaceTabs(tabs: SidePanelWorkspaceTab[]): SidePanelWorkspaceTab[] {
-	const pinned: SidePanelWorkspaceTab[] = [];
-	const unpinned: SidePanelWorkspaceTab[] = [];
-	for (const tab of tabs) (isPinnedSidePanelWorkspaceTab(tab) ? pinned : unpinned).push(tab);
-	return [...pinned, ...unpinned];
+	return tabs;
 }
 
 async function readJsonSafe(res: Response): Promise<unknown> {
