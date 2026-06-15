@@ -314,7 +314,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="title-group">
 					<span class="pr-pill">${prLabel}</span>
 					<div class="title-stack">
-						<h1 data-testid="pr-walkthrough-pr-title">${title}</h1>
+						<h1 data-testid="pr-walkthrough-pr-title"><span data-testid="prw-title">${title}</span></h1>
 						<div class="header-meta" data-testid="pr-walkthrough-pr-stats">
 							<span>${stats.files} ${stats.files === 1 ? "file" : "files"}</span>
 							<span class="add">+${stats.additions}</span>
@@ -360,7 +360,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			@click=${() => setActiveCard(entry, host, paramKey, card.id)}
 		>
 			<span class="card-dot prw-nav-dot" aria-hidden="true">${complete ? status === "disliked" ? "!" : "✓" : ""}</span>
-			${compact ? nothing : html`<span class="card-label"><span data-testid="prw-nav-card">${deriveNavLabel(card)}</span></span>`}
+			${compact ? nothing : html`<span class="card-label"><span data-testid="prw-nav-card" data-prw-nav=${card.id} data-card-id=${card.id}>${deriveNavLabel(card)}</span></span>`}
 		</button>`;
 	};
 
