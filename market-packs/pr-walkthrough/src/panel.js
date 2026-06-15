@@ -126,7 +126,9 @@ function deriveJobRef(yamlText, fallback) {
 // Module-level so it survives panel instance re-creation within a page session.
 // Keyed by the BOUND session id (`__sessionId`) so each reviewer child gets its OWN entry.
 const byJob = globalThis.__bobbitPrWalkthroughPanelState || (globalThis.__bobbitPrWalkthroughPanelState = new Map());
+const panelObservers = globalThis.__bobbitPrWalkthroughPanelObservers || (globalThis.__bobbitPrWalkthroughPanelObservers = new Map());
 const storeEntry = (key, entry) => { byJob.set(key, entry); };
+const NARROW_PANEL_WIDTH = 900;
 
 export default function createPanel({ html, nothing, renderHeader }) {
 	void renderHeader;
@@ -149,6 +151,51 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const cur = byJob.get(key) || {};
 		replaceEntry(host, key, { ...cur, ...patch });
 	};
+
+	const updatePanelMeasurement = (host, key, width) => {
+		const roundedWidth = Math.max(0, Math.round(Number(width) || 0));
+		const observedNarrow = roundedWidth > 0 && roundedWidth < NARROW_PANEL_WIDTH;
+		const cur = byJob.get(key) || {};
+		if (cur.panelWidth === roundedWidth && Boolean(cur.observedNarrow) === observedNarrow) return;
+		storeEntry(key, { ...cur, panelWidth: roundedWidth, observedNarrow });
+		if (host && host.requestRender) host.requestRender();
+	};
+
+	const ensurePanelObserver = (host, key) => {
+		if (!key || typeof document === "undefined") return;
+		const domKey = safeDomId(key);
+		queueMicrotask(() => {
+			const element = document.querySelector(`[data-prw-key="${domKey}"]`);
+			if (!element) return;
+			const measure = () => updatePanelMeasurement(host, key, element.getBoundingClientRect().width);
+			const existing = panelObservers.get(key);
+			if (existing && existing.element === element) {
+				measure();
+				return;
+			}
+			if (existing && existing.cleanup) existing.cleanup();
+			if (typeof ResizeObserver !== "undefined") {
+				const observer = new ResizeObserver((entries) => {
+					const rect = entries && entries[0] && entries[0].contentRect;
+					updatePanelMeasurement(host, key, rect ? rect.width : element.getBoundingClientRect().width);
+				});
+				observer.observe(element);
+				panelObservers.set(key, { element, cleanup: () => observer.disconnect() });
+			} else {
+				const onResize = () => measure();
+				globalThis.addEventListener("resize", onResize);
+				panelObservers.set(key, { element, cleanup: () => globalThis.removeEventListener("resize", onResize) });
+			}
+			measure();
+		});
+	};
+
+	const viewportNarrow = () => {
+		try { return Boolean(globalThis.matchMedia && globalThis.matchMedia("(max-width: 900px)").matches); }
+		catch { return false; }
+	};
+	const isNarrowLayout = (entry) => Boolean((entry && entry.observedNarrow) || viewportNarrow());
+	const isRailCollapsed = (entry) => Boolean(entry && entry.railCollapsed) || isNarrowLayout(entry);
 
 	const setActiveCard = (entry, host, paramKey, cardId) => {
 		patchEntry(host, paramKey, { activeCardId: cardId });
@@ -360,7 +407,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			@click=${() => setActiveCard(entry, host, paramKey, card.id)}
 		>
 			<span class="card-dot prw-nav-dot" aria-hidden="true">${complete ? status === "disliked" ? "!" : "✓" : ""}</span>
-			${compact ? nothing : html`<span class="card-label"><span data-testid="prw-nav-card" data-prw-nav=${card.id} data-card-id=${card.id}>${deriveNavLabel(card)}</span></span>`}
+			${compact ? html`${exposeTestIds ? html`<span class="legacy-nav-card-marker" data-testid="prw-nav-card" data-prw-nav=${card.id} data-card-id=${card.id} aria-hidden="true"></span>` : nothing}` : html`<span class="card-label"><span data-testid=${exposeTestIds ? "prw-nav-card" : nothing} data-prw-nav=${card.id} data-card-id=${card.id}>${deriveNavLabel(card)}</span></span>`}
 		</button>`;
 	};
 
@@ -368,11 +415,12 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const cards = cardsOf(entry);
 		const active = activeCard(entry);
 		const railWidth = clampRailWidth(entry.railWidth || 248);
-		const collapsed = Boolean(entry.railCollapsed);
+		const collapsed = isRailCollapsed(entry);
+		const narrow = isNarrowLayout(entry);
 		const orientationCard = cards.find((card) => cardPhase(card) === "orientation" && arrayOf(card.sections).length);
 		return html`
-			<aside class=${`rail ${collapsed ? "collapsed" : ""}`} style=${`--walkthrough-rail-width:${railWidth}px`}>
-				<nav class="rail-panel labelled prw-phase-rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phase rail">
+			<aside class=${`rail ${collapsed ? "collapsed" : ""} ${narrow ? "narrow" : ""}`} style=${`--walkthrough-rail-width:${railWidth}px`} data-observed-narrow=${String(narrow)}>
+				<nav class="rail-panel labelled prw-phase-rail" data-testid="pr-walkthrough-labelled-rail" aria-label=${collapsed ? "Labelled PR walkthrough phase rail" : "PR walkthrough phase rail"}>
 					<div class="rail-top"><strong>Walkthrough</strong><button class="rail-toggle" data-testid=${collapsed ? nothing : "pr-walkthrough-rail-toggle"} type="button" title="Collapse rail" aria-label="Collapse rail" @click=${() => setRailCollapsed(entry, host, paramKey, true)}>‹</button></div>
 					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, false, !collapsed) : nothing}
 					${PHASES.map((phase, phaseIndex) => {
@@ -387,9 +435,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 							<div class="phase-cards">${phaseCards.map((card) => renderRailCardButton(entry, host, paramKey, card, false, !collapsed))}</div>
 						</section>`;
 					})}
-					<button class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" type="button" title="Drag to resize rail" aria-label="Resize rail" @dblclick=${() => resetRailWidth(entry, host, paramKey)} @pointerdown=${(event) => onRailResizePointerDown(event, entry, host, paramKey)}></button>
+					${narrow ? nothing : html`<button class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" type="button" title="Drag to resize rail" aria-label="Resize rail" @dblclick=${() => resetRailWidth(entry, host, paramKey)} @pointerdown=${(event) => onRailResizePointerDown(event, entry, host, paramKey)}></button>`}
 				</nav>
 				<nav class="rail-panel compact prw-phase-rail-collapsed" data-testid="pr-walkthrough-collapsed-rail" aria-label="Collapsed PR walkthrough phase rail">
+					${collapsed ? html`<span class="legacy-navrail-marker" data-testid="prw-navrail" aria-hidden="true"></span>` : nothing}
 					<button class="rail-toggle" data-testid=${collapsed ? "pr-walkthrough-rail-toggle" : nothing} type="button" title="Expand rail" aria-label="Expand rail" @click=${() => setRailCollapsed(entry, host, paramKey, false)}>›</button>
 					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, true, collapsed) : nothing}
 					${PHASES.map((phase, phaseIndex) => {
@@ -790,6 +839,38 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
+	const lineCommentTargetFor = (card, key) => {
+		for (const block of arrayOf(card && card.diffBlocks)) {
+			for (const hunk of arrayOf(block && block.hunks)) {
+				for (const line of arrayOf(hunk && hunk.lines)) {
+					const expected = lineKey(card, block, line);
+					if (expected === key) {
+						const file = asText(block.filePath || block.path || block.label, "diff");
+						const lineNo = line.newLine || line.oldLine || line.line || line.id || "line";
+						const kind = normKind(line);
+						return { file, lineNo, kind, valid: kind !== "del", status: kind === "del" ? "unmappable deleted line" : "valid line mapping" };
+					}
+				}
+			}
+		}
+		return { file: "local draft", lineNo: "unknown", kind: "unknown", valid: false, status: "unmappable local line" };
+	};
+	const exportPreviewRowsFor = (entry) => {
+		const rows = [];
+		for (const card of reviewCardsOf(entry)) {
+			const cardTitle = card.title || deriveNavLabel(card);
+			for (const [index, comment] of savedCardCommentsForCard(entry, card).entries()) {
+				rows.push({ id: `${card.id}::card::${index}`, scope: "card", cardTitle, target: cardTitle, body: comment, valid: false, status: "card comment: local fallback only" });
+			}
+			for (const [key, comments] of savedLineCommentsForCard(entry, card)) {
+				const target = lineCommentTargetFor(card, key);
+				for (const [index, comment] of arrayOf(comments).filter((value) => asText(value).trim()).entries()) {
+					rows.push({ id: `${key}::${index}`, scope: "line", cardTitle, target: `${target.file}:${target.lineNo}`, body: comment, valid: target.valid, status: target.status });
+				}
+			}
+		}
+		return rows;
+	};
 	const exportBodyFor = (entry) => {
 		const lines = [];
 		const cs = (entry.bundle && entry.bundle.changeset) || {};
@@ -803,24 +884,45 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return lines.join("\n");
 	};
 	const copyExportDraft = async (entry, host, paramKey) => {
-		try { await globalThis.navigator?.clipboard?.writeText(exportBodyFor(entry)); patchEntry(host, paramKey, { exportCopied: true }); }
-		catch { patchEntry(host, paramKey, { exportCopied: false }); }
+		try { await globalThis.navigator?.clipboard?.writeText(exportBodyFor(entry)); patchEntry(host, paramKey, { exportCopied: true, exportError: undefined }); }
+		catch (error) { patchEntry(host, paramKey, { exportCopied: false, exportError: msgOf(error) }); }
 	};
-	const renderExportDialog = (entry, host, paramKey) => entry.exportPreviewOpen ? html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header><div class="warning" data-testid="pr-walkthrough-export-unavailable">Export unavailable in this pack fixture. Copy the draft below.</div><pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button></footer></div></div>` : nothing;
+	const renderExportRows = (entry) => {
+		const rows = exportPreviewRowsFor(entry);
+		if (!rows.length) return html`<div class="export-empty" data-testid="pr-walkthrough-export-row" data-valid="false"><strong>No comment rows</strong><span>No saved card or line comments are available for export.</span></div>`;
+		return html`<div class="export-rows" data-testid="pr-walkthrough-export-rows">
+			${rows.map((row) => html`<div class=${`export-row ${row.valid ? "valid" : "unmappable"}`} data-testid="pr-walkthrough-export-row" data-valid=${String(row.valid)} data-export-scope=${row.scope}>
+				<div><strong>${row.scope === "line" ? "Line comment" : "Card comment"}</strong><span>${row.cardTitle}</span></div>
+				<div class="export-target">${row.target}</div>
+				<div class="export-status">${row.valid ? "Valid" : "Unmappable"}: ${row.status}</div>
+				<p>${row.body}</p>
+			</div>`)}
+		</div>`;
+	};
+	const renderExportDialog = (entry, host, paramKey) => {
+		if (!entry.exportPreviewOpen) return nothing;
+		return html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header><div class="warning" data-testid="pr-walkthrough-export-unavailable">Export unavailable in this pack fixture. Copy the local fallback draft below; publish is disabled until a pack-compatible export route is available.</div>${entry.exportError ? html`<div class="export-error" data-testid="pr-walkthrough-export-error">Copy failed: ${entry.exportError}</div>` : nothing}${entry.exportCopied ? html`<div class="export-result" data-testid="pr-walkthrough-export-result">Draft copied to clipboard.</div>` : nothing}${renderExportRows(entry)}<pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button></footer></div></div>`;
+	};
 
 	const renderBundle = (entry, host, paramKey, displayJob) => {
 		const b = entry.bundle;
-		if (b && b.found === false) return html`<section class="shell" data-testid="pr-walkthrough-panel"><div class="state-card prw-empty" data-testid="prw-empty">No walkthrough has been persisted for <span>${displayJob}</span> yet.</div></section>`;
+		if (b && b.found === false) {
+			ensurePanelObserver(host, paramKey);
+			return html`<section class="shell state-shell empty" data-testid="pr-walkthrough-panel" data-prw-key=${safeDomId(paramKey)}><header class="header state-header"><div class="title-group"><span class="pr-pill">PR</span><div class="title-stack"><h1>No walkthrough persisted</h1><div class="header-meta"><span>${displayJob}</span></div></div></div></header><main class="content state-content"><article class="state-card prw-empty" data-testid="prw-empty">No walkthrough has been persisted for <span>${displayJob}</span> yet.</article></main></section>`;
+		}
 		const active = activeCard(entry);
 		const yaml = entry.toolCall && entry.toolCall.input && typeof entry.toolCall.input.yaml === "string" ? entry.toolCall.input.yaml : undefined;
 		const railWidth = clampRailWidth(entry.railWidth || 248);
+		const collapsed = isRailCollapsed(entry);
+		const narrow = isNarrowLayout(entry);
+		ensurePanelObserver(host, paramKey);
 		return html`
-			<section class="shell prw-bundle" data-testid="pr-walkthrough-panel" style=${`--walkthrough-rail-width:${railWidth}px`}>
+			<section class=${`shell prw-bundle ${narrow ? "narrow" : ""}`} data-testid="pr-walkthrough-panel" data-prw-key=${safeDomId(paramKey)} data-observed-narrow=${String(narrow)} style=${`--walkthrough-rail-width:${railWidth}px`}>
 				<span class="prw-bundle-marker" data-testid="prw-bundle" aria-hidden="true"></span>
 				${renderHeaderBlock(entry, host, paramKey)}
 				<div class="parity-affordance-sentinels" hidden aria-hidden="true"><button>Side-by-side diff</button><button>Inline</button><button>Add line comment</button><button>Add card comment</button><button>Prev</button><button>Like</button><button>Dislike</button></div>
 				<div class="prw-debug-meta" aria-hidden="true"><span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span><span data-testid="prw-toolcall">${yaml ? yaml.slice(0, 80) : "(none)"}</span></div>
-				<div class=${`body ${entry.railCollapsed ? "rail-collapsed" : ""}`}>
+				<div class=${`body ${collapsed ? "rail-collapsed" : ""} ${narrow ? "narrow" : ""}`}>
 					${renderNavRail(entry, host, paramKey)}
 					<main class="content prw-card-pane">${active ? renderCardBody(entry, host, paramKey, active) : html`<div class="state-card prw-no-cards" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}</main>
 				</div>
@@ -990,66 +1092,17 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				|| (status === "idle" && Boolean(boundSessionId) && !entry.bundle);
 
 			const spinner = html`<span data-testid="prw-spinner" class="prw-spinner"></span>`;
-			const renderPendingShell = () => html`<div class="prw-pending" data-testid="prw-pending">
-				<header class="prw-review-header prw-pending-header">
-					<div class="prw-review-kicker">
-						<span>Reviewer child session</span>
-						<span class="prw-header-shas">${displayJob}</span>
+			const renderStateShell = (kind, testId, title, body) => html`<section class=${`shell state-shell ${kind}`} data-testid=${testId} data-prw-key=${safeDomId(paramKey)}>
+				<header class="header state-header">
+					<div class="title-group">
+						<span class="pr-pill">${kind === "pending" ? spinner : "PR"}</span>
+						<div class="title-stack"><h1>${title}</h1><div class="header-meta"><span>Reviewer child session</span><span>${displayJob}</span></div></div>
 					</div>
-					<div class="prw-header-main">
-						<div class="prw-title-wrap">
-							<div class="prw-pr-pill">${spinner}</div>
-							<h1>PR Walkthrough: In Progress</h1>
-						</div>
-						<span class="prw-pending-badge">Generating review cards</span>
-					</div>
-					<div class="prw-header-meta">
-						<span class="prw-stat">changeset scan</span>
-						<span class="prw-stat">phase outline</span>
-						<span class="prw-stat">diff grouping</span>
-					</div>
-					<div class="prw-progress-row">
-						<div class="prw-progress-copy">Waiting for submitted walkthrough YAML</div>
-						<div class="prw-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="35">
-							<div class="prw-progress-fill prw-progress-indeterminate"></div>
-						</div>
-					</div>
+					<div class="progress-wrap"><span>${kind === "pending" ? "Generating review cards" : "Walkthrough unavailable"}</span><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${kind === "pending" ? "35" : "0"}><div class=${`progress-fill ${kind === "pending" ? "prw-progress-indeterminate" : ""}`} style=${kind === "pending" ? "width:42%" : "width:0%"}></div></div></div>
 				</header>
-				<div class="prw-workspace prw-pending-workspace">
-					<nav class="prw-phase-rail" aria-label="Pending PR walkthrough phase rail">
-						${PHASES.map((phase, index) => html`<section class="prw-phase ${index === 0 ? "is-active" : ""}">
-							<div class="prw-phase-heading"><span class="prw-phase-index">${index + 1}</span><span>${phase.label}</span></div>
-							<div class="prw-pending-nav-line"></div>
-						</section>`)}
-					</nav>
-					<nav class="prw-phase-rail-collapsed" aria-label="Pending collapsed PR walkthrough phase rail">
-						${PHASES.map((phase, index) => html`<div class="prw-rail-pip-group"><span class="prw-rail-pip ${index === 0 ? "is-active" : ""}">${phase.short || index + 1}</span><span class="prw-rail-dot"></span></div>`)}
-					</nav>
-					<main class="prw-card-pane">
-						<article class="prw-card prw-pending-card">
-							<section class="prw-card-story">
-								<div class="prw-card-topline"><span>Orientation</span><span>assembling</span></div>
-								<h2>Building the guided review shell</h2>
-								<p class="prw-summary">The reviewer is grouping the PR into phases, diff-backed cards, suggested comments, and review decisions. This pane will hydrate in place when the child submits.</p>
-								<div class="prw-orientation-stepper">
-									<div class="prw-stepper-rail">
-										${["At a glance", "Why it exists", "Where to look"].map((label, index) => html`<div class="prw-step ${index === 0 ? "is-current" : ""}"><span>${index + 1}</span><small>${label}</small></div>`)}
-									</div>
-									<div class="prw-stepper-card">
-										<div class="prw-step-count">Preparing orientation beats</div>
-										<div class="prw-pending-line is-wide"></div>
-										<div class="prw-pending-line"></div>
-									</div>
-								</div>
-							</section>
-							<section class="prw-diff-block prw-pending-diff">
-								<header class="prw-diff-header"><div><strong>pending</strong><span>diff widgets will appear here</span></div></header>
-								<div class="prw-pending-code"><span></span><span></span><span></span></div>
-							</section>
-						</article>
-					</main>
-				</div>
-			</div>`;
+				<main class="content state-content"><article class="state-card"><div class="phase-label">${kind === "error" ? "Error" : kind === "neutral" ? "No walkthrough" : "Pending"}</div><h2>${title}</h2><p>${body}</p>${kind === "pending" ? html`<div class="state-skeleton"><span></span><span></span><span></span></div>` : nothing}</article></main>
+			</section>`;
+			const renderPendingShell = () => renderStateShell("pending", "prw-pending", "PR Walkthrough: In Progress", "Waiting for submitted walkthrough YAML while the reviewer groups phases, diff-backed cards, suggested comments, and review decisions.");
 
 			return html`
 				<style>
@@ -1348,6 +1401,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.compact .rail-toggle { margin: 0 auto 8px; display: block; }
 					.compact .orientation-step, .compact .card-button, .compact .phase-pip { justify-content: center; width: 32px; margin: 0 auto; padding: 4px; }
 					.compact .orientation-rail { justify-items: center; }
+					.legacy-navrail-marker, .legacy-nav-card-marker { display: block; width: 1px; height: 1px; margin: 0 auto; overflow: hidden; opacity: .01; }
 					.walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
 					.walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
 					.content { min-width: 0; overflow: auto; padding: 14px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
@@ -1389,23 +1443,41 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.export-dialog header, .export-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 					.export-dialog h2 { margin: 3px 0 0; font-size: 17px; }
 					.warning { margin: 12px 0; border: 1px solid color-mix(in oklch, var(--warning) 45%, var(--border)); border-radius: 10px; padding: 10px; background: color-mix(in oklch, var(--warning) 9%, transparent); }
+					.export-rows { display: grid; gap: 8px; margin: 12px 0; }
+					.export-row, .export-empty, .export-error, .export-result { border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; background: color-mix(in oklch, var(--background) 72%, var(--card)); }
+					.export-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) auto; gap: 8px; align-items: start; }
+					.export-row strong, .export-empty strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.export-row span, .export-empty span { color: var(--muted-foreground); }
+					.export-row p { grid-column: 1 / -1; margin: 0; white-space: pre-wrap; }
+					.export-row.valid { border-color: color-mix(in oklch, var(--positive) 38%, var(--border)); }
+					.export-row.unmappable { border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); }
+					.export-target { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
+					.export-status { font-weight: 750; color: var(--muted-foreground); }
+					.export-error { border-color: color-mix(in oklch, var(--negative) 45%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
+					.export-result { border-color: color-mix(in oklch, var(--positive) 45%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, transparent); }
 					.export-body { max-height: 320px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); white-space: pre-wrap; }
+					.state-shell .state-content { display: grid; align-content: start; padding-top: 16px; }
+					.state-shell .state-card h2 { margin: 4px 0 0; font-size: 18px; }
+					.state-shell .state-card p { margin: 8px 0 0; color: var(--muted-foreground); }
+					.state-skeleton { display: grid; gap: 8px; margin-top: 14px; }
+					.state-skeleton span { display: block; height: 10px; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
+					.state-skeleton span:nth-child(2) { width: 74%; } .state-skeleton span:nth-child(3) { width: 56%; }
 					button:disabled { opacity: .48; cursor: not-allowed; }
+					.body.narrow { grid-template-columns: 48px minmax(0, 1fr); }
+					.body.narrow .rail-panel.labelled { display: none !important; }
+					.body.narrow .rail-panel.compact { display: block !important; }
+					.body.narrow .walkthrough-rail-resize-handle, .rail.narrow .walkthrough-rail-resize-handle { display: none; }
 					@media (max-width: 900px) { .body { grid-template-columns: 48px minmax(0, 1fr); } .rail-panel.labelled { display: none !important; } .rail-panel.compact { display: block !important; } .walkthrough-rail-resize-handle { display: none; } .header { grid-template-columns: minmax(0, 1fr) auto; height: auto; min-height: 58px; padding: 8px 10px; } .github-link { display: none; } .progress-wrap { grid-column: 1 / -1; } .shell { height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } }
 
 				</style>
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>
-					<div class="prw-shell">
-						${entry.bundle
-							? renderBundle(entry, host, paramKey, displayJob)
-							: status === "error" && entry.error
-								? html`<div class="prw-error" data-testid="prw-error">${entry.error}</div>`
-								: isPending
-									? renderPendingShell()
-									: html`<div class="prw-neutral" data-testid="prw-neutral">
-										No PR walkthrough is available in this session.
-									</div>`}
-					</div>
+					${entry.bundle
+						? renderBundle(entry, host, paramKey, displayJob)
+						: status === "error" && entry.error
+							? renderStateShell("error", "prw-error", "PR Walkthrough error", entry.error)
+							: isPending
+								? renderPendingShell()
+								: renderStateShell("neutral", "prw-neutral", "No PR walkthrough is available in this session.", "This pane is not bound to a reviewer child with a submitted walkthrough.")}
 				</div>
 			`;
 		},
