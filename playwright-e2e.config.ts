@@ -128,7 +128,11 @@ export default {
 				// Owned by the api-realpush project (different env).
 				"**/goal-archive-branch-cleanup*",
 			],
-			workers: 4,
+			// In-process API workers still boot a full gateway and shell out to git in
+			// several specs. On Windows, 4 concurrent gateways under verification load
+			// produced fixture setup retries and 900s broad-suite timeouts; 2 preserves
+			// parallelism while avoiding the hot contention cluster.
+			workers: 2,
 		},
 		{
 			// Real-push variant of the in-process harness — isolated project so it
