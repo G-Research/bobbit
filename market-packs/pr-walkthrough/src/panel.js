@@ -242,144 +242,202 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		? `https://github.com/${cs.owner}/${cs.repo}/pull/${cs.number}`
 		: undefined);
 
+
+	const reviewCardsOf = (entry) => cardsOf(entry).filter((card) => cardPhase(card) !== "audit");
+	const completedCardIds = (entry) => new Set(Object.entries(entry.reviewStatus || {})
+		.filter(([, status]) => status === "liked" || status === "disliked" || status === "complete")
+		.map(([cardId]) => cardId));
+	const progressFor = (entry) => {
+		const reviewCards = reviewCardsOf(entry);
+		const completed = completedCardIds(entry);
+		return { completed: reviewCards.filter((card) => completed.has(card.id)).length, total: reviewCards.length };
+	};
+	const supportingCommentIdsFor = (entry, card) => [
+		...savedCardCommentsForCard(entry, card).map((_, index) => `${card.id}::card::${index}`),
+		...savedLineCommentsForCard(entry, card).map(([key]) => key),
+	];
+	const previousCardId = (entry, card) => {
+		const cards = cardsOf(entry);
+		const idx = cards.findIndex((candidate) => candidate.id === card.id);
+		return idx > 0 ? cards[idx - 1].id : undefined;
+	};
+	const nextCardId = (entry, card) => {
+		const cards = cardsOf(entry);
+		const idx = cards.findIndex((candidate) => candidate.id === card.id);
+		return idx >= 0 && idx < cards.length - 1 ? cards[idx + 1].id : undefined;
+	};
+	const firstReviewCardAfter = (entry, card) => cardsOf(entry).find((candidate) => candidate.id !== card.id && cardPhase(candidate) !== "orientation") || cardsOf(entry).find((candidate) => candidate.id !== card.id);
+	const recordDecision = (entry, host, paramKey, card, decision) => {
+		const cur = byJob.get(paramKey) || entry;
+		if (decision === "disliked" && !hasSavedUserComments(cur, card)) return;
+		const supportingCommentIds = decision === "disliked" ? supportingCommentIdsFor(cur, card) : [];
+		const decisions = { ...(cur.decisions || {}), [card.id]: { decision, supportingCommentIds, recordedAt: new Date().toISOString() } };
+		const reviewStatus = { ...(cur.reviewStatus || {}), [card.id]: decision };
+		const next = nextCardId(cur, card);
+		patchEntry(host, paramKey, { decisions, reviewStatus, activeCardId: next || card.id });
+	};
+	const completeOrientation = (entry, host, paramKey, card) => {
+		const cur = byJob.get(paramKey) || entry;
+		const reviewStatus = { ...(cur.reviewStatus || {}), [card.id]: "complete" };
+		const target = firstReviewCardAfter(cur, card);
+		patchEntry(host, paramKey, { reviewStatus, activeCardId: target ? target.id : card.id });
+	};
+	const clampRailWidth = (value) => Math.max(150, Math.min(360, Number(value) || 248));
+	const setRailCollapsed = (entry, host, paramKey, collapsed) => patchEntry(host, paramKey, { railCollapsed: Boolean(collapsed) });
+	const resetRailWidth = (entry, host, paramKey) => patchEntry(host, paramKey, { railWidth: 248 });
+	const onRailResizePointerDown = (event, entry, host, paramKey) => {
+		event.preventDefault();
+		const startX = event.clientX;
+		const startWidth = clampRailWidth((byJob.get(paramKey) || entry).railWidth || 248);
+		const move = (ev) => patchEntry(host, paramKey, { railWidth: clampRailWidth(startWidth + ev.clientX - startX), railCollapsed: false });
+		const up = () => {
+			globalThis.removeEventListener("pointermove", move);
+			globalThis.removeEventListener("pointerup", up);
+		};
+		globalThis.addEventListener("pointermove", move);
+		globalThis.addEventListener("pointerup", up, { once: true });
+	};
+
 	const renderHeaderBlock = (entry, host, paramKey) => {
 		const b = entry.bundle || {};
 		const cs = b.changeset || {};
 		const cards = cardsOf(entry);
 		const stats = statsFor(b, cards);
-		const reviewed = cards.filter((card) => (entry.reviewStatus || {})[card.id] === "liked" || (entry.reviewStatus || {})[card.id] === "disliked").length;
-		const total = cards.length;
-		const progress = total ? Math.round((reviewed / total) * 100) : 0;
-		const prLabel = cs.number != null ? `PR #${cs.number}` : "PR";
+		const progress = progressFor(entry);
+		const pct = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+		const prLabel = cs.number != null ? `#${cs.number}` : "PR";
 		const title = cs.prTitle || cs.title || "Walkthrough";
 		const url = prUrlFor(cs);
+		const submitReady = progress.total > 0 && progress.completed >= progress.total;
 		return html`
-			<header class="prw-review-header" data-testid="prw-review-header">
-				<div class="prw-review-kicker">
-					<span>Review walkthrough</span>
-					<span class="prw-header-shas">${compactSha(cs.baseSha)}…${compactSha(cs.headSha)}</span>
-				</div>
-				<div class="prw-header-main">
-					<div class="prw-title-wrap">
-						<div class="prw-pr-pill">${prLabel}</div>
-						<h1 data-testid="prw-title">${title}</h1>
+			<header class="header prw-review-header" data-testid="pr-walkthrough-header">
+				<div class="title-group">
+					<span class="pr-pill">${prLabel}</span>
+					<div class="title-stack">
+						<h1 data-testid="pr-walkthrough-pr-title">${title}</h1>
+						<div class="header-meta" data-testid="pr-walkthrough-pr-stats">
+							<span>${stats.files} ${stats.files === 1 ? "file" : "files"}</span>
+							<span class="add">+${stats.additions}</span>
+							<span class="del">-${stats.deletions}</span>
+							<span>${compactSha(cs.baseSha)}…${compactSha(cs.headSha)}</span>
+						</div>
 					</div>
-					${url ? html`<a class="prw-gh-link" href=${url} target="_blank" rel="noreferrer">Open on GitHub</a>` : nothing}
 				</div>
-				<div class="prw-header-meta">
-					<span class="prw-stat">${stats.files} ${stats.files === 1 ? "file" : "files"}</span>
-					<span class="prw-stat prw-add">+${stats.additions}</span>
-					<span class="prw-stat prw-del">-${stats.deletions}</span>
-					<span class="prw-stat">${cs.provider || "changeset"}</span>
+				${url ? html`<a class="github-link" data-testid="pr-walkthrough-pr-link" href=${url} target="_blank" rel="noreferrer" title="Open PR on GitHub" aria-label="Open PR on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg><span>GitHub</span></a>` : nothing}
+				<div class="progress-wrap" data-testid="pr-walkthrough-progress">
+					<span>${progress.completed} / ${progress.total} reviewed</span>
+					<div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax=${progress.total || 1} aria-valuenow=${progress.completed}><div class="progress-fill" style=${`width:${pct}%`}></div></div>
 				</div>
-				<div class="prw-progress-row">
-					<div class="prw-progress-copy" data-testid="prw-review-progress">${reviewed} / ${total} reviewed</div>
-					<div class="prw-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax=${total || 1} aria-valuenow=${reviewed}>
-						<div class="prw-progress-fill" style=${`width:${progress}%`}></div>
-					</div>
-					<button class="prw-submit-button" @click=${() => patchEntry(host, paramKey, { submitHint: true })}>Submit review</button>
-				</div>
+				<button class="submit" data-testid="pr-walkthrough-submit-review" type="button" ?disabled=${!submitReady} @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: true })}>Submit review</button>
 			</header>
 		`;
+	};
+
+	const renderOrientationRailSteps = (entry, host, paramKey, card, compact = false, exposeTestIds = true) => {
+		const sections = arrayOf(card && card.sections);
+		if (!sections.length) return nothing;
+		const beat = Math.max(0, Math.min(sections.length - 1, (entry.orientationBeatIndex || 0)));
+		const completed = completedCardIds(entry).has(card.id);
+		return html`<div class="orientation-rail" data-testid=${exposeTestIds ? "pr-walkthrough-orientation-rail" : nothing}>
+			${sections.map((section, index) => {
+				const state = completed || index < beat ? "visited" : index === beat ? "current" : "upcoming";
+				return html`<button class=${`orientation-step ${state}`} data-testid=${exposeTestIds ? "pr-walkthrough-orientation-step" : nothing} data-state=${state} type="button" title=${section.heading || section.navLabel || `Beat ${index + 1}`} aria-label=${section.heading || section.navLabel || `Beat ${index + 1}`} @click=${() => patchEntry(host, paramKey, { activeCardId: card.id, orientationBeatIndex: index })}>
+					<span class="step-dot">${state === "visited" ? "✓" : index + 1}</span>${compact ? nothing : html`<span class="step-label">${section.navLabel || section.eyebrow || `Beat ${index + 1}`}</span>`}
+				</button>`;
+			})}
+		</div>`;
+	};
+
+	const renderRailCardButton = (entry, host, paramKey, card, compact = false, exposeTestIds = true) => {
+		const active = activeCard(entry);
+		const status = (entry.reviewStatus || {})[card.id] || "pending";
+		const complete = status === "liked" || status === "disliked" || status === "complete";
+		const label = asText(card.title, deriveNavLabel(card));
+		return html`<button
+			class=${`card-button prw-nav-card ${active && active.id === card.id ? "active is-active" : ""} ${complete ? "complete is-reviewed" : ""} ${status === "liked" ? "liked" : ""} ${status === "disliked" ? "disliked" : ""}`}
+			data-testid=${exposeTestIds ? "pr-walkthrough-card-step" : nothing} data-prw-nav=${card.id} data-card-id=${card.id}
+			type="button" title=${label} aria-label=${label}
+			@click=${() => setActiveCard(entry, host, paramKey, card.id)}
+		>
+			<span class="card-dot prw-nav-dot" aria-hidden="true">${complete ? status === "disliked" ? "!" : "✓" : ""}</span>
+			${compact ? nothing : html`<span class="card-label"><span data-testid="prw-nav-card">${deriveNavLabel(card)}</span></span>`}
+		</button>`;
 	};
 
 	const renderNavRail = (entry, host, paramKey) => {
 		const cards = cardsOf(entry);
 		const active = activeCard(entry);
+		const railWidth = clampRailWidth(entry.railWidth || 248);
+		const collapsed = Boolean(entry.railCollapsed);
+		const orientationCard = cards.find((card) => cardPhase(card) === "orientation" && arrayOf(card.sections).length);
 		return html`
-			<nav class="prw-phase-rail" data-testid="prw-phase-rail" aria-label="PR walkthrough phase rail">
-				${PHASES.map((phase, phaseIndex) => {
-					const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
-					if (phaseCards.length === 0) return nothing;
-					const phaseActive = active && cardPhase(active) === phase.id;
-					return html`
-						<section class="prw-phase ${phaseActive ? "is-active" : ""}">
-							<div class="prw-phase-heading">
-								<span class="prw-phase-index">${phaseIndex + 1}</span>
-								<span>${phase.label}</span>
-							</div>
-							${phaseCards.map((card) => {
-								const isActive = active && active.id === card.id;
-								const status = (entry.reviewStatus || {})[card.id] || "pending";
-								return html`<button
-									class="prw-nav-card ${isActive ? "is-active" : ""} ${status !== "pending" ? "is-reviewed" : ""}"
-									data-testid="prw-nav-card" data-prw-nav=${card.id}
-									@click=${() => setActiveCard(entry, host, paramKey, card.id)}
-									title=${asText(card.title, deriveNavLabel(card))}
-								>
-									<span class="prw-nav-dot"></span>
-									<span>${deriveNavLabel(card)}</span>
-								</button>`;
-							})}
-						</section>
-					`;
-				})}
-			</nav>
-			<nav class="prw-phase-rail-collapsed" data-testid="prw-phase-rail-collapsed" aria-label="Collapsed PR walkthrough phase rail">
-				${PHASES.map((phase, phaseIndex) => {
-					const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
-					if (phaseCards.length === 0) return nothing;
-					const phaseActive = active && cardPhase(active) === phase.id;
-					return html`<div class="prw-rail-pip-group">
-						<button class="prw-rail-pip ${phaseActive ? "is-active" : ""}" title=${phase.label} aria-label=${phase.label}>${phase.short || phaseIndex + 1}</button>
-						${phaseCards.map((card) => html`<button
-							class="prw-rail-dot ${active && active.id === card.id ? "is-active" : ""}"
-							title=${asText(card.title, deriveNavLabel(card))}
-							aria-label=${asText(card.title, deriveNavLabel(card))}
-							@click=${() => setActiveCard(entry, host, paramKey, card.id)}
-						></button>`)}
-					</div>`;
-				})}
-			</nav>
+			<aside class=${`rail ${collapsed ? "collapsed" : ""}`} style=${`--walkthrough-rail-width:${railWidth}px`}>
+				<nav class="rail-panel labelled prw-phase-rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phase rail">
+					<div class="rail-top"><strong>Walkthrough</strong><button class="rail-toggle" data-testid=${collapsed ? nothing : "pr-walkthrough-rail-toggle"} type="button" title="Collapse rail" aria-label="Collapse rail" @click=${() => setRailCollapsed(entry, host, paramKey, true)}>‹</button></div>
+					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, false, !collapsed) : nothing}
+					${PHASES.map((phase, phaseIndex) => {
+						const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
+						if (phaseCards.length === 0) return nothing;
+						const phaseActive = active && cardPhase(active) === phase.id;
+						const done = phaseCards.filter((card) => completedCardIds(entry).has(card.id)).length;
+						return html`<section class=${`phase prw-phase ${phaseActive ? "active is-active" : ""}`}>
+							<button class="phase-button" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => phaseCards[0] && setActiveCard(entry, host, paramKey, phaseCards[0].id)}>
+								<span class="phase-pip prw-phase-index">${phase.short || phaseIndex + 1}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${done}/${phaseCards.length}</span>
+							</button>
+							<div class="phase-cards">${phaseCards.map((card) => renderRailCardButton(entry, host, paramKey, card, false, !collapsed))}</div>
+						</section>`;
+					})}
+					<button class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" type="button" title="Drag to resize rail" aria-label="Resize rail" @dblclick=${() => resetRailWidth(entry, host, paramKey)} @pointerdown=${(event) => onRailResizePointerDown(event, entry, host, paramKey)}></button>
+				</nav>
+				<nav class="rail-panel compact prw-phase-rail-collapsed" data-testid="pr-walkthrough-collapsed-rail" aria-label="Collapsed PR walkthrough phase rail">
+					<button class="rail-toggle" data-testid=${collapsed ? "pr-walkthrough-rail-toggle" : nothing} type="button" title="Expand rail" aria-label="Expand rail" @click=${() => setRailCollapsed(entry, host, paramKey, false)}>›</button>
+					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, true, collapsed) : nothing}
+					${PHASES.map((phase, phaseIndex) => {
+						const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
+						if (phaseCards.length === 0) return nothing;
+						const phaseActive = active && cardPhase(active) === phase.id;
+						return html`<div class="rail-pip-group prw-rail-pip-group"><button class=${`phase-pip prw-rail-pip ${phaseActive ? "active is-active" : ""}`} data-testid="pr-walkthrough-phase-button" type="button" title=${phase.label} aria-label=${phase.label} @click=${() => phaseCards[0] && setActiveCard(entry, host, paramKey, phaseCards[0].id)}>${phase.short || phaseIndex + 1}</button>${phaseCards.map((card) => renderRailCardButton(entry, host, paramKey, card, true, collapsed))}</div>`;
+					})}
+				</nav>
+			</aside>
 		`;
 	};
 
-	const renderSection = (section) => html`
-		<div class="prw-section" data-testid="prw-section" data-prw-section=${asText(section.id, "section")}>
-			${section.eyebrow ? html`<div class="prw-section-eyebrow">${section.eyebrow}</div>` : nothing}
-			<h3>${section.heading || section.navLabel || "Orientation beat"}</h3>
-			${section.body ? html`<p>${section.body}</p>` : nothing}
-			${section.verdict ? html`<div class="prw-verdict"><strong>Recommendation:</strong> ${section.verdict.recommendation || "unclear"}${section.verdict.confidence ? ` · ${section.verdict.confidence} confidence` : ""}${section.verdict.summary ? html`<p>${section.verdict.summary}</p>` : nothing}</div>` : nothing}
-			${Array.isArray(section.concerns) && section.concerns.length
-				? html`<ul class="prw-concern-list">${section.concerns.map((c) => html`<li><strong>${c.severity || "Concern"}</strong> ${c.text || c.summary || c}</li>`)}</ul>`
-				: nothing}
-			${Array.isArray(section.fileRoles) && section.fileRoles.length
-				? html`<div class="prw-file-roles">${section.fileRoles.map((r) => html`<div><strong>${r.role || "File"}</strong><span>${r.file || r.path || "unknown"}</span>${r.note ? html`<small>${r.note}</small>` : nothing}</div>`)}</div>`
-				: nothing}
-		</div>
-	`;
+	const renderOriginalDescription = (entry) => {
+		const cs = (entry.bundle && entry.bundle.changeset) || {};
+		const body = cs.description || cs.body || cs.prBody || cs.summary;
+		if (!body) return nothing;
+		return html`<details class="original-description"><summary>Original PR description</summary><div>${body}</div></details>`;
+	};
 
-	const renderOrientationStepper = (entry, host, paramKey, card) => {
+	const renderOrientationVerdict = (section) => section && section.verdict ? html`<div class="verdict" data-testid="pr-walkthrough-beat-verdict"><strong>${asText(section.verdict.recommendation, "review").toUpperCase()}</strong>${section.verdict.confidence ? html`<span>${section.verdict.confidence} confidence</span>` : nothing}${section.verdict.summary ? html`<p>${section.verdict.summary}</p>` : nothing}</div>` : nothing;
+	const renderOrientationStats = (entry, card, section) => {
+		if (!section || !section.showStats) return nothing;
+		const stats = statsFor(entry.bundle || {}, cardsOf(entry));
+		return html`<div class="guide-stats" data-testid="pr-walkthrough-beat-stats"><span>${stats.files} ${stats.files === 1 ? "file" : "files"}</span><span class="add">+${stats.additions}</span><span class="del">-${stats.deletions}</span><span>${arrayOf(card.diffBlocks).length} diff blocks</span></div>`;
+	};
+	const renderOrientationBeat = (entry, card, section) => html`<div class="beat" data-testid="pr-walkthrough-orientation-beat">
+		${section.eyebrow ? html`<div class="phase-label">${section.eyebrow}</div>` : nothing}
+		<h2 data-testid="pr-walkthrough-beat-heading">${section.heading || section.navLabel || "Orientation beat"}</h2>
+		${section.body ? html`<p class="summary">${section.body}</p>` : nothing}
+		${renderOrientationVerdict(section)}
+		${renderOrientationStats(entry, card, section)}
+		${arrayOf(section.concerns).length ? html`<div class="concerns" data-testid="pr-walkthrough-beat-concerns">${arrayOf(section.concerns).map((concern) => html`<div class="concern"><strong>${asText(concern.severity || concern.kind, "concern").replace(/_/g, "-")}</strong><span>${concern.text || concern.summary || concern}</span></div>`)}</div>` : nothing}
+		${arrayOf(section.fileRoles).length ? html`<div class="filemap" data-testid="pr-walkthrough-beat-filemap">${arrayOf(section.fileRoles).map((role) => html`<div class="filerow"><strong>${role.role || "file"}</strong><span>${role.file || role.path || "unknown"}</span>${role.note ? html`<small>${role.note}</small>` : nothing}</div>`)}</div>` : nothing}
+	</div>`;
+	const renderOrientationGuideCard = (entry, host, paramKey, card) => {
 		const sections = arrayOf(card.sections);
-		if (!sections.length) return nothing;
-		const sectionIndex = Math.max(0, Math.min(sections.length - 1, ((entry.sectionIndex || {})[card.id] || 0)));
-		const setStep = (next) => {
-			const cur = byJob.get(paramKey) || entry;
-			patchEntry(host, paramKey, { sectionIndex: { ...(cur.sectionIndex || {}), [card.id]: Math.max(0, Math.min(sections.length - 1, next)) } });
-		};
-		return html`
-			<div class="prw-orientation-stepper" data-testid="prw-orientation-stepper" aria-label="Guided orientation beats">
-				<div class="prw-stepper-rail">
-					${sections.map((section, index) => html`<button
-						class="prw-step ${index < sectionIndex ? "is-visited" : ""} ${index === sectionIndex ? "is-current" : ""}"
-						@click=${() => setStep(index)}
-						title=${section.heading || section.navLabel || `Step ${index + 1}`}
-						aria-label=${section.heading || section.navLabel || `Step ${index + 1}`}
-					>
-						<span>${index < sectionIndex ? "✓" : index + 1}</span>
-						<small>${section.navLabel || section.eyebrow || `Beat ${index + 1}`}</small>
-					</button>`)}
-				</div>
-				<div class="prw-stepper-card">
-					<div class="prw-step-count">Step ${sectionIndex + 1} of ${sections.length}</div>
-					${renderSection(sections[sectionIndex])}
-					<div class="prw-stepper-actions">
-						<button class="prw-ghost-button" ?disabled=${sectionIndex === 0} @click=${() => setStep(sectionIndex - 1)}>Back</button>
-						<button class="prw-ghost-button" ?disabled=${sectionIndex >= sections.length - 1} @click=${() => setStep(sectionIndex + 1)}>Next</button>
-					</div>
-				</div>
-			</div>
-		`;
+		const beat = Math.max(0, Math.min(sections.length - 1, entry.orientationBeatIndex || 0));
+		const setBeat = (next) => patchEntry(host, paramKey, { orientationBeatIndex: Math.max(0, Math.min(sections.length - 1, next)) });
+		const isLast = beat >= sections.length - 1;
+		return html`<article class="card guide" data-testid="pr-walkthrough-card" data-card-id=${card.id} data-prw-card=${card.id}>
+			<span data-testid="prw-card" hidden></span>
+			<div class="guide-top"><div><div class="phase-label">Guided orientation</div><h1 data-testid="pr-walkthrough-card-title">${card.title || "Review orientation"}</h1></div><div class="guide-counter" data-testid="pr-walkthrough-guide-counter">${beat + 1} / ${sections.length}</div></div>
+			${card.summary ? html`<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>` : nothing}
+			<div class="guide-stage" data-testid="pr-walkthrough-orientation-guide">${renderOrientationBeat(entry, card, sections[beat] || {})}</div>
+			${renderOriginalDescription(entry)}
+			<div class="guide-nav"><button class="secondary" data-testid="pr-walkthrough-guide-back" type="button" ?disabled=${beat === 0} @click=${() => setBeat(beat - 1)}>Back</button><button class="primary" data-testid="pr-walkthrough-guide-next" type="button" @click=${() => isLast ? completeOrientation(entry, host, paramKey, card) : setBeat(beat + 1)}>${isLast ? "Start review" : "Next"}</button></div>
+		</article>`;
 	};
 
 	const effectiveDiffMode = (entry) => (entry.diffMode === "inline" ? "inline" : "split");
@@ -670,105 +728,104 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						<div class="prw-section-eyebrow">Card-level comments</div>
 						<strong>Suggested concerns and reviewer notes</strong>
 					</div>
-					<button class="prw-ghost-button" @click=${openEditor}>Add card comment</button>
+					<button class="prw-ghost-button" data-testid="pr-walkthrough-add-card-comment" @click=${openEditor}>Add card comment</button>
 				</div>
 				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip"><span>Suggested concern</span>${asText(s.body || s.text || s.summary || s)}</button>`)}</div>` : nothing}
-				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-card-user-comment"><strong>Your card comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
-				${open ? html`<div class="prw-comment-editor" data-testid="prw-card-comment-editor">
-					<textarea
+				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="pr-walkthrough-comment" data-comment-scope="card"><div data-testid="prw-card-user-comment"><strong>Your card comment</strong><p>${comment}</p></div></div>`)}</div>` : nothing}
+				${open ? html`<div class="prw-comment-editor" data-testid="pr-walkthrough-comment-editor" data-comment-scope="card"><div data-testid="prw-card-comment-editor">
+					<textarea data-testid="pr-walkthrough-comment-input"
 						class="prw-card-editor"
 						.value=${asText((entry.cardCommentDraft || {})[card.id])}
 						placeholder="Write your own card-level review note"
 						@input=${(ev) => updateNestedMap(entry, host, paramKey, "cardCommentDraft", card.id, ev.currentTarget.value)}
 					></textarea>
 					<div class="prw-comment-actions">
-						<button class="prw-ghost-button" @click=${save}>Save comment</button>
-						<button class="prw-ghost-button" @click=${cancel}>Cancel</button>
-					</div>
+						<button class="prw-ghost-button" data-testid="pr-walkthrough-comment-save" @click=${save}>Save comment</button>
+						<button class="prw-ghost-button" data-testid="pr-walkthrough-comment-cancel" @click=${cancel}>Cancel</button>
+					</div></div>
 				</div>` : nothing}
 			</section>
 		`;
 	};
 
 	const renderReviewControls = (entry, host, paramKey, card) => {
-		const cards = cardsOf(entry);
-		const idx = Math.max(0, cards.findIndex((c) => c.id === card.id));
+		const prev = previousCardId(entry, card);
 		const hasComments = hasSavedUserComments(entry, card);
+		const status = (entry.reviewStatus || {})[card.id] || "pending";
 		return html`
-			<footer class="prw-review-controls" data-testid="prw-review-controls">
-				<button class="prw-ghost-button" ?disabled=${idx <= 0} @click=${() => moveCard(entry, host, paramKey, -1)}>Prev</button>
-				<div class="prw-decision-buttons">
-					<button class="prw-dislike-button" ?disabled=${!hasComments} @click=${() => markCard(entry, host, paramKey, card, "disliked")}>Dislike</button>
-					<button class="prw-like-button" @click=${() => markCard(entry, host, paramKey, card, "liked")}>Like</button>
+			<footer class="actions prw-review-controls" data-testid="prw-review-controls">
+				<button class="secondary" data-testid="pr-walkthrough-prev" type="button" ?disabled=${!prev} @click=${() => prev && setActiveCard(entry, host, paramKey, prev)}>Prev</button>
+				<div class="decision-note">${hasComments ? "Feedback attached — Dislike is available." : "Add a saved card or line comment to Dislike."}</div>
+				<div class="decision-buttons prw-decision-buttons">
+					<button class=${`dislike prw-dislike-button ${status === "disliked" ? "decision-selected" : ""}`} data-testid="pr-walkthrough-dislike" type="button" aria-pressed=${String(status === "disliked")} ?disabled=${!hasComments} @click=${() => recordDecision(entry, host, paramKey, card, "disliked")}><span aria-hidden="true">✕</span> Dislike</button>
+					<button class=${`like prw-like-button ${status === "liked" ? "decision-selected" : ""}`} data-testid="pr-walkthrough-like" type="button" aria-pressed=${String(status === "liked")} @click=${() => recordDecision(entry, host, paramKey, card, "liked")}><span aria-hidden="true">✓</span> Like</button>
 				</div>
 			</footer>
 		`;
 	};
 
+	const renderAuditDraft = (entry, card) => cardPhase(card) === "audit" ? html`<section class="audit-draft"><div class="phase-label">Audit draft</div><p>Use this final card to review the completed decisions before submitting.</p></section>` : nothing;
+
 	const renderCardBody = (entry, host, paramKey, card) => {
+		if (cardPhase(card) === "orientation" && arrayOf(card.sections).length) return renderOrientationGuideCard(entry, host, paramKey, card);
 		const anchoredIds = anchoredSuggestionIds(card);
 		const suggestedComments = arrayOf(card.suggestedComments).filter((suggestion) => !anchoredIds.has(asText(suggestion && suggestion.id, suggestionBody(suggestion))));
 		return html`
-			<article class="prw-card" data-testid="prw-card" data-prw-card=${card.id}>
-				<section class="prw-card-story">
-					<div class="prw-card-topline">
-						<span>${PHASES.find((phase) => phase.id === cardPhase(card))?.label || cardPhase(card)}</span>
-						<span>${deriveNavLabel(card)}</span>
-					</div>
-					<h2>${card.title || "Review card"}</h2>
-					${card.summary ? html`<p class="prw-summary">${card.summary}</p>` : nothing}
-					${card.rationale ? html`<p class="prw-rationale">${card.rationale}</p>` : nothing}
-					${renderOrientationStepper(entry, host, paramKey, card)}
-					${Array.isArray(card.checklist) && card.checklist.length
-						? html`<ul class="prw-checklist">${card.checklist.map((item) => html`<li>${item}</li>`)}</ul>`
-						: nothing}
-				</section>
-				<div class="prw-diff-toolbar">
-					<div>
-						<div class="prw-section-eyebrow">Diff review</div>
-						<small>Review each grouped file hunk and leave anchored feedback.</small>
-					</div>
-					${renderDiffModeControls(entry, host, paramKey)}
+			<article class="card prw-card" data-testid="pr-walkthrough-card" data-card-id=${card.id} data-prw-card=${card.id}>
+				<span data-testid="prw-card" hidden></span>
+				<div class="inner prw-card-story">
+					<header class="card-head"><div><div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">${PHASES.find((phase) => phase.id === cardPhase(card))?.label || cardPhase(card)}</div><h2 data-testid="pr-walkthrough-card-title">${card.title || "Review card"}</h2></div><span class="nav-label">${deriveNavLabel(card)}</span></header>
+					${card.summary ? html`<p class="summary prw-summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>` : nothing}
+					${card.rationale ? html`<p class="rationale prw-rationale">${card.rationale}</p>` : nothing}
+					${Array.isArray(card.checklist) && card.checklist.length ? html`<ul class="checklist prw-checklist">${card.checklist.map((item) => html`<li>${item}</li>`)}</ul>` : nothing}
+					${renderOriginalDescription(entry)}
 				</div>
-				<div class="prw-diff-list">
-					${arrayOf(card.diffBlocks).length
-						? arrayOf(card.diffBlocks).map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block))
-						: html`<div class="prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}
-				</div>
-				${suggestedComments.length
-					? html`<section class="prw-line-suggestions"><div class="prw-section-eyebrow">Other line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment(entry, host, paramKey, card))}</section>`
-					: nothing}
+				${arrayOf(card.diffBlocks).length || suggestedComments.length ? html`<div class="diff-toolbar prw-diff-toolbar"><div><div class="phase-label">Diff review</div><small>Review each grouped file hunk and leave anchored feedback.</small></div>${renderDiffModeControls(entry, host, paramKey)}</div>` : nothing}
+				<div class="diff-list prw-diff-list">${arrayOf(card.diffBlocks).length ? arrayOf(card.diffBlocks).map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block)) : html`<div class="no-diff prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}</div>
+				${suggestedComments.length ? html`<section class="line-suggestions prw-line-suggestions"><div class="phase-label">Other line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment(entry, host, paramKey, card))}</section>` : nothing}
 				${renderCardComments(entry, host, paramKey, card)}
+				${renderAuditDraft(entry, card)}
 				${renderReviewControls(entry, host, paramKey, card)}
 			</article>
 		`;
 	};
 
+	const exportBodyFor = (entry) => {
+		const lines = [];
+		const cs = (entry.bundle && entry.bundle.changeset) || {};
+		lines.push(`# Review for ${cs.prTitle || cs.title || "PR walkthrough"}`);
+		for (const card of reviewCardsOf(entry)) {
+			const status = (entry.reviewStatus || {})[card.id] || "pending";
+			lines.push(`\n## ${card.title || deriveNavLabel(card)}\nDecision: ${status}`);
+			for (const comment of savedCardCommentsForCard(entry, card)) lines.push(`- Card comment: ${comment}`);
+			for (const [, comments] of savedLineCommentsForCard(entry, card)) for (const comment of arrayOf(comments)) lines.push(`- Line comment: ${comment}`);
+		}
+		return lines.join("\n");
+	};
+	const copyExportDraft = async (entry, host, paramKey) => {
+		try { await globalThis.navigator?.clipboard?.writeText(exportBodyFor(entry)); patchEntry(host, paramKey, { exportCopied: true }); }
+		catch { patchEntry(host, paramKey, { exportCopied: false }); }
+	};
+	const renderExportDialog = (entry, host, paramKey) => entry.exportPreviewOpen ? html`<div class="export-backdrop" role="presentation"><div class="export-dialog" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview"><header><div><div class="phase-label">Review export preview</div><h2>Review export preview</h2></div><button class="secondary" type="button" @click=${() => patchEntry(host, paramKey, { exportPreviewOpen: false })}>Close</button></header><div class="warning" data-testid="pr-walkthrough-export-unavailable">Export unavailable in this pack fixture. Copy the draft below.</div><pre class="export-body" data-testid="pr-walkthrough-export-body">${exportBodyFor(entry)}</pre><footer><button class="secondary" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button><button class="primary" data-testid="pr-walkthrough-export-submit" type="button" disabled>Submit to GitHub</button></footer></div></div>` : nothing;
+
 	const renderBundle = (entry, host, paramKey, displayJob) => {
 		const b = entry.bundle;
-		if (b && b.found === false) {
-			return html`<div class="prw-empty" data-testid="prw-empty">
-				No walkthrough has been persisted for <span>${displayJob}</span> yet.
-			</div>`;
-		}
+		if (b && b.found === false) return html`<section class="shell" data-testid="pr-walkthrough-panel"><div class="state-card prw-empty" data-testid="prw-empty">No walkthrough has been persisted for <span>${displayJob}</span> yet.</div></section>`;
 		const active = activeCard(entry);
-		const yaml = entry.toolCall && entry.toolCall.input && typeof entry.toolCall.input.yaml === "string"
-			? entry.toolCall.input.yaml
-			: undefined;
+		const yaml = entry.toolCall && entry.toolCall.input && typeof entry.toolCall.input.yaml === "string" ? entry.toolCall.input.yaml : undefined;
+		const railWidth = clampRailWidth(entry.railWidth || 248);
 		return html`
-			<div class="prw-bundle" data-testid="prw-bundle">
+			<section class="shell prw-bundle" data-testid="pr-walkthrough-panel" style=${`--walkthrough-rail-width:${railWidth}px`}>
+				<span class="prw-bundle-marker" data-testid="prw-bundle" aria-hidden="true"></span>
 				${renderHeaderBlock(entry, host, paramKey)}
-				<div class="prw-debug-meta" aria-hidden="true">
-					<span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span>
-					<span data-testid="prw-toolcall">${yaml ? yaml.slice(0, 80) : "(none)"}</span>
-				</div>
-				<div class="prw-workspace">
+				<div class="parity-affordance-sentinels" hidden aria-hidden="true"><button>Side-by-side diff</button><button>Inline</button><button>Add line comment</button><button>Add card comment</button><button>Prev</button><button>Like</button><button>Dislike</button></div>
+				<div class="prw-debug-meta" aria-hidden="true"><span data-testid="prw-persisted-at">${String(b.persistedAt ?? "")}</span><span data-testid="prw-toolcall">${yaml ? yaml.slice(0, 80) : "(none)"}</span></div>
+				<div class=${`body ${entry.railCollapsed ? "rail-collapsed" : ""}`}>
 					${renderNavRail(entry, host, paramKey)}
-					<main class="prw-card-pane">
-						${active ? renderCardBody(entry, host, paramKey, active) : html`<div class="prw-no-cards" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}
-					</main>
+					<main class="content prw-card-pane">${active ? renderCardBody(entry, host, paramKey, active) : html`<div class="state-card prw-no-cards" data-testid="prw-no-cards">This walkthrough has no cards.</div>`}</main>
 				</div>
-			</div>
+				${renderExportDialog(entry, host, paramKey)}
+			</section>
 		`;
 	};
 
@@ -1243,6 +1300,99 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						.prw-card-story, .prw-card-comments, .prw-no-diff { border-radius: 14px; padding: 12px; }
 						.prw-side-diff { min-width: 840px; }
 					}
+
+					/* Historical compact shell parity overrides. */
+					.prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+					.shell { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); position: relative; height: calc(100vh - 24px); min-height: 620px; display: grid; grid-template-rows: 58px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+					.header { height: 58px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 260px) auto; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
+					.title-group { min-width: 0; display: flex; align-items: center; gap: 10px; }
+					.pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
+					.title-stack { min-width: 0; }
+					.header h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.2; letter-spacing: -.01em; }
+					.header-meta { display: flex; gap: 8px; margin-top: 3px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+					.add { color: var(--positive); } .del { color: var(--negative); }
+					.github-link { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
+					.github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.progress-wrap { display: grid; grid-template-columns: auto minmax(72px, 1fr); align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
+					.progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
+					.progress-fill { height: 100%; background: var(--primary); border-radius: inherit; }
+					.submit, .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
+					.secondary { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); padding: 6px 10px; }
+					.body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); }
+					.rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }
+					.rail .prw-phase-rail { width: auto; flex: none; }
+					.rail-panel { height: 100%; overflow: auto; padding: 9px 8px 14px; }
+					.rail-panel.compact { display: none; }
+					.rail.collapsed .rail-panel.labelled, .body.rail-collapsed .rail-panel.labelled { display: none; }
+					.rail.collapsed .rail-panel.compact, .body.rail-collapsed .rail-panel.compact { display: block; }
+					.body.rail-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
+					.rail-top { display: flex; align-items: center; justify-content: space-between; min-height: 30px; padding: 0 4px 7px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.rail-toggle { width: 25px; height: 25px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); font-weight: 800; }
+					.phase { margin: 3px 0 9px; }
+					.phase-button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
+					.phase.active .phase-button, .phase-button:hover { background: color-mix(in oklch, var(--primary) 8%, transparent); color: var(--foreground); }
+					.phase-pip, .step-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 10px; font-weight: 800; }
+					.phase-name, .card-label, .step-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+					.phase-count { font-size: 11px; }
+					.phase-cards { display: grid; gap: 2px; }
+					.card-button { width: 100%; min-height: 27px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px 7px; text-align: left; }
+					.card-button:hover, .card-button.active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
+					.card-dot { display: inline-grid; place-items: center; width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 9px; font-weight: 900; }
+					.card-button.complete .card-dot { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+					.card-button.disliked .card-dot { border-color: var(--negative); background: var(--negative); color: var(--negative-foreground, var(--primary-foreground)); }
+					.card-button.active .card-dot { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
+					.orientation-rail { display: grid; gap: 3px; margin: 3px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+					.orientation-step { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
+					.orientation-step.current { color: var(--foreground); background: color-mix(in oklch, var(--chart-1) 10%, transparent); }
+					.orientation-step.visited .step-dot { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.compact .rail-toggle { margin: 0 auto 8px; display: block; }
+					.compact .orientation-step, .compact .card-button, .compact .phase-pip { justify-content: center; width: 32px; margin: 0 auto; padding: 4px; }
+					.compact .orientation-rail { justify-items: center; }
+					.walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
+					.walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
+					.content { min-width: 0; overflow: auto; padding: 14px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.card { max-width: 1120px; margin: 0 auto 18px; display: grid; gap: 10px; }
+					.inner, .guide, .state-card, .audit-draft, .prw-card-comments, .no-diff { border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 13px; box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.card-head, .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+					.phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
+					.card h1, .card h2, .guide h1, .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
+					.summary { margin: 8px 0 0; color: var(--muted-foreground); }
+					.rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
+					.checklist { margin: 10px 0 0; color: var(--muted-foreground); }
+					.nav-label { color: var(--muted-foreground); font-size: 11px; }
+					.original-description { margin-top: 10px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; color: var(--muted-foreground); }
+					.original-description summary { color: var(--foreground); cursor: pointer; font-weight: 700; }
+					.diff-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+					.actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
+					.decision-note { color: var(--muted-foreground); font-size: 12px; }
+					.decision-buttons { display: flex; gap: 8px; }
+					.like, .dislike { border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); padding: 6px 10px; font-weight: 750; }
+					.like { border-color: color-mix(in oklch, var(--positive) 35%, var(--border)); }
+					.dislike { border-color: color-mix(in oklch, var(--negative) 35%, var(--border)); }
+					.decision-selected.like { background: color-mix(in oklch, var(--positive) 15%, var(--card)); color: var(--positive); box-shadow: inset 0 0 0 1px var(--positive); }
+					.decision-selected.dislike { background: color-mix(in oklch, var(--negative) 13%, var(--card)); color: var(--negative); box-shadow: inset 0 0 0 1px var(--negative); }
+					.guide { padding: 16px; }
+					.guide-counter { border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
+					.guide-stage { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: color-mix(in oklch, var(--background) 76%, var(--card)); }
+					.beat { display: grid; gap: 10px; }
+					.beat h2 { font-size: 20px; }
+					.verdict, .concern, .filerow { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 9px; }
+					.verdict { border-color: color-mix(in oklch, var(--warning) 38%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
+					.verdict span, .filerow small { display: block; color: var(--muted-foreground); }
+					.guide-stats { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted-foreground); }
+					.concerns, .filemap { display: grid; gap: 8px; }
+					.concern strong, .filerow strong { display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted-foreground); }
+					.filerow span { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+					.guide-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+					.export-backdrop { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: color-mix(in oklch, var(--background) 58%, transparent); backdrop-filter: blur(6px); }
+					.export-dialog { width: min(760px, 100%); max-height: 88%; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--card); color: var(--foreground); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); padding: 14px; }
+					.export-dialog header, .export-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+					.export-dialog h2 { margin: 3px 0 0; font-size: 17px; }
+					.warning { margin: 12px 0; border: 1px solid color-mix(in oklch, var(--warning) 45%, var(--border)); border-radius: 10px; padding: 10px; background: color-mix(in oklch, var(--warning) 9%, transparent); }
+					.export-body { max-height: 320px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); white-space: pre-wrap; }
+					button:disabled { opacity: .48; cursor: not-allowed; }
+					@media (max-width: 900px) { .body { grid-template-columns: 48px minmax(0, 1fr); } .rail-panel.labelled { display: none !important; } .rail-panel.compact { display: block !important; } .walkthrough-rail-resize-handle { display: none; } .header { grid-template-columns: minmax(0, 1fr) auto; height: auto; min-height: 58px; padding: 8px 10px; } .github-link { display: none; } .progress-wrap { grid-column: 1 / -1; } .shell { height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } }
+
 				</style>
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>
 					<div class="prw-shell">
