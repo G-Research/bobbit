@@ -133,7 +133,7 @@ ${t.comment}`:t.comment}this.doc.range[2]=t.offset;break}default:this.errors.pus
 				<div class="title-group">
 					<span class="pr-pill">${C}</span>
 					<div class="title-stack">
-						<h1 data-testid="pr-walkthrough-pr-title">${N}</h1>
+						<h1 data-testid="pr-walkthrough-pr-title"><span data-testid="prw-title">${N}</span></h1>
 						<div class="header-meta" data-testid="pr-walkthrough-pr-stats">
 							<span>${y.files} ${y.files===1?"file":"files"}</span>
 							<span class="add">+${y.additions}</span>
@@ -160,7 +160,7 @@ ${t.comment}`:t.comment}this.doc.range[2]=t.offset;break}default:this.errors.pus
 			@click=${()=>p(a,c,d,l.id)}
 		>
 			<span class="card-dot prw-nav-dot" aria-hidden="true">${$?v==="disliked"?"!":"\u2713":""}</span>
-			${f?e:r`<span class="card-label"><span data-testid="prw-nav-card">${yr(l)}</span></span>`}
+			${f?e:r`<span class="card-label"><span data-testid="prw-nav-card" data-prw-nav=${l.id} data-card-id=${l.id}>${yr(l)}</span></span>`}
 		</button>`},mn=(a,c,d)=>{let l=i(a),f=n(a),m=It(a.railWidth||248),y=!!a.railCollapsed,v=l.find($=>Se($)==="orientation"&&R($.sections).length);return r`
 			<aside class=${`rail ${y?"collapsed":""}`} style=${`--walkthrough-rail-width:${m}px`}>
 				<nav class="rail-panel labelled prw-phase-rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phase rail">
