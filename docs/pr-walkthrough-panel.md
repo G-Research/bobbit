@@ -280,27 +280,65 @@ same cards re-render with the same `persistedAt`. The reviewer is **not** dismis
 on submit — it stays a live, selectable session (see
 [Lifecycle: no auto-dismiss](#lifecycle-no-auto-dismiss-restart-survival-and-termination)).
 
-### Pack panel parity and recovery contract
+### Ready-state shell parity contract
 
-The production viewer is now `market-packs/pr-walkthrough/src/panel.js` (built to
-`lib/panel.js`), but the UX target did not change. The first-party pack must
-preserve the prototype's review workflow and visual hierarchy:
+The production viewer is `market-packs/pr-walkthrough/src/panel.js` (built to
+`lib/panel.js`). It remains a first-party pack panel; the deleted bespoke
+`PrWalkthroughPanel.ts`, old `/walkthrough` routes, owner-session surfaces, and
+manual Run/Load flows must not return. The shell parity work restored the
+pre-migration review experience inside the pack instead of reintroducing those
+surfaces.
 
-- prominent PR/title header, GitHub link affordance, file/addition/deletion stats,
-  and review progress;
-- full and collapsed/narrow phase rails, including guided orientation beats;
-- multi-card hierarchy with summaries, rationale, checklists, suggested concerns,
-  and card-level comments;
-- inline and side-by-side diff modes with one horizontal scrollbar per diff widget;
-- line-level suggested comments, user comment editors, and saved-comment markers;
-- `Prev` / `Like` / `Dislike` controls with the same interaction semantics as the
-  prototype.
+The ready state is intentionally dense:
+
+- Root layout uses the historical `.shell > .body > .content` structure with
+  `13px/1.45 system-ui` typography scoped under the pack panel root.
+- The header is a compact toolbar, not a hero card. It keeps the PR title,
+  file/addition/deletion stats, GitHub link, reviewed-count progress, and disabled
+  / enabled Submit button in one row.
+- The sidebar is one review rail with labelled and collapsed presentations. It is
+  user-collapsible, resizable on desktop, auto-collapses from the panel's observed
+  container width, and preserves active/completed/liked/disliked state in both
+  presentations.
+- Orientation cards with `sections` render as a dedicated guided card with Back /
+  Next / Start review navigation, rail beat entries, verdict, stats, concerns, and
+  file-role map. Cards without `sections` still fall back to the generic card
+  renderer.
+- Review cards use the compact card shell: phase tag, title, summary, rationale,
+  checklist, original PR-description disclosure, diff widgets, suggested comments,
+  card comments, and sticky action footer.
+- `Like` and `Dislike` are decisions, not simple navigation buttons. A decision
+  marks the card reviewed, persists state, emits the draft/completion event, and
+  advances to the next card. `Dislike` stays disabled until the card has at least
+  one saved line or card comment.
+- The audit card renders the generated draft and copy affordance. The Submit button
+  unlocks only when all non-audit review cards are complete, then opens the
+  export-preview dialog; when direct provider submission is unavailable, the dialog
+  explains that clearly and keeps the GitHub submit button disabled while leaving
+  copy/preview available.
 
 Recovery is part of parity, not a separate fallback UI. Malformed or incomplete
 hunk/header data must degrade to warnings or unmapped suggestions rather than
 blanking the panel. Pending reviews remain in the in-progress state while the
 reviewer is alive, completed reviews re-render through `recover` after reload, and
 long-running reviews show non-error progress hints instead of timing out early.
+
+### Ready-state DOM affordances
+
+Keep these selectors stable unless the corresponding tests and docs are updated in
+the same change. They are the maintenance contract for the compact shell:
+
+| Area | Stable affordances |
+|---|---|
+| Root/header | `data-testid="pr-walkthrough-panel"`, `.shell`, `.body`, `.content`, `pr-walkthrough-header`, `pr-walkthrough-pr-title`, `pr-walkthrough-pr-stats`, `pr-walkthrough-pr-link`, `pr-walkthrough-progress`, `pr-walkthrough-submit-review` |
+| Rail | `pr-walkthrough-labelled-rail`, `pr-walkthrough-collapsed-rail`, `pr-walkthrough-rail-toggle`, `pr-walkthrough-rail-resize`, `pr-walkthrough-phase-button`, `pr-walkthrough-card-step`, `data-card-id`, `complete`, `liked`, `disliked` |
+| Orientation | `pr-walkthrough-orientation-rail`, `pr-walkthrough-orientation-step`, `data-state="current|visited|upcoming"`, `pr-walkthrough-orientation-guide`, `pr-walkthrough-guide-counter`, `pr-walkthrough-guide-back`, `pr-walkthrough-guide-next`, `pr-walkthrough-beat-heading`, `pr-walkthrough-beat-verdict`, `pr-walkthrough-beat-stats`, `pr-walkthrough-beat-concerns`, `pr-walkthrough-beat-filemap` |
+| Cards/comments/actions | `pr-walkthrough-card`, `pr-walkthrough-card-phase-tag`, `pr-walkthrough-card-title`, `pr-walkthrough-card-summary`, `pr-walkthrough-add-card-comment`, `pr-walkthrough-comment-editor`, `pr-walkthrough-comment-input`, `pr-walkthrough-comment-save`, `pr-walkthrough-comment-delete`, `pr-walkthrough-prev`, `pr-walkthrough-dislike`, `pr-walkthrough-like`, `decision-selected` |
+| Audit/export | `pr-walkthrough-audit`, `pr-walkthrough-draft`, `pr-walkthrough-copy-draft`, `pr-walkthrough-export-preview`, `pr-walkthrough-export-unavailable`, `pr-walkthrough-export-body`, `pr-walkthrough-export-row`, `pr-walkthrough-export-submit` |
+
+The pack also retains legacy `prw-*` sentinels used by older parity fixtures. Do
+not remove them as cleanup unless the compatibility tests are intentionally
+retired.
 
 ### Target resolution — GitHub PRs only
 
@@ -438,8 +476,11 @@ for the full root-cause analysis and the special-casing that was removed.
 The walkthrough panel's **own internal rail sidebar toggle**
 (`data-testid="pr-walkthrough-rail-toggle"`, rendered inside the pack panel
 `market-packs/pr-walkthrough/lib/panel.js`) is a different control — it
-collapses/expands the review rail *within* the walkthrough, not the window-level
-panel.
+collapses/expands the single review rail *within* the walkthrough, not the
+window-level panel. Desktop labelled rail width is user-resizable with
+`pr-walkthrough-rail-resize` and clamped to the historical compact range; narrow
+mode is based on the panel container observed by `ResizeObserver`, so an embedded
+narrow side panel collapses even when the browser viewport is wide.
 
 ### Pinning tests
 
@@ -617,13 +658,18 @@ submitted as GitHub line comments.
 
 ### Like, Dislike, and Prev
 
-- **Like** records an approval decision and advances.
-- **Dislike** is disabled until the card has at least one non-empty supporting line or card comment.
-- **Prev** moves back so reviewers can revise comments or decisions.
+- **Like** records an approval decision, marks the card complete, persists reviewer
+  state, emits the draft/completion event, updates header/rail progress, and
+  advances to the next card.
+- **Dislike** is disabled until the card has at least one non-empty supporting line
+  or card comment. Once enabled, it records the supporting comment ids, marks the
+  card complete, persists state, and advances like Like.
+- **Prev** moves back so reviewers can revise comments or decisions; selected
+  decisions remain visible in the footer and in labelled/collapsed rail state.
 
 If the last supporting comment for a disliked card is deleted, the invalid disliked
-decision is cleared. This prevents unsupported change requests from appearing in the
-audit draft.
+decision is cleared and the card is no longer complete. This prevents unsupported
+change requests from appearing in the audit draft.
 
 ### Audit draft
 
@@ -639,12 +685,11 @@ The draft can always be copied, even when provider export is unavailable.
 
 ## Persistence and reload
 
-The pack panel's reviewable state has two durable layers plus browser-local
-interaction state:
+The pack panel's reviewable state has three durable layers:
 
 - **Persisted cards (pack store)** — on a successful `submit_pr_walkthrough_yaml`, the pack's `publish` route validates the YAML, synthesizes cards via `yaml-to-cards.ts`, and persists them in the pack-namespaced `host.store` keyed by changeset id, with a stamped-once `persistedAt`. The persisted job pointer also records the base/head SHAs so a deep-link carrying only the `jobId` can recompute the same changeset.
 - **Live changeset (recomputed)** — the changeset itself is **not** stored as a frozen payload; the `bundle` route recomputes it live via `git` from the session worktree on every open, then overlays the persisted cards.
-- **Reviewer interaction state (browser-local)** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`. This is local to the browser/tab and is not synchronized across browsers or devices.
+- **Reviewer interaction state (pack store + local fallback)** — the panel persists active card, orientation beat, rail collapsed/width, diff mode, comments, decisions, completed review status, dismissed suggestions, collapsed diff blocks, and context expansion under `review-state/<panel>/<job>` in the pack-scoped `host.store`. It also mirrors the same payload to `localStorage` under `bobbit:pr-walkthrough:<review-state-key>` so a tab can recover when host-store persistence is unavailable. This state is per reviewer child/job; it is not an owner-session surface.
 
 The walkthrough lives **only** in the reviewer child session, so reload recovery
 happens there. The reviewer's `submit_pr_walkthrough_yaml` call lives in the child
@@ -687,6 +732,12 @@ Submit behavior:
 Unavailable cases still show a safe preview/copy path. Local changesets,
 unauthenticated GitHub walkthroughs, missing adapters, invalid tokens, insufficient
 permissions, and unmappable-only drafts do not silently submit.
+
+In the first-party pack shell, the compact header Submit button opens the same
+visible preview/unavailable workflow after all non-audit cards are reviewed. Until
+a pack-compatible direct submit route is available, that dialog renders the local
+fallback draft, maps line/card rows as valid or unmappable, keeps `Submit to
+GitHub` disabled, and leaves `Copy draft` available.
 
 ## Edge states and warnings
 
@@ -891,7 +942,7 @@ differently from github.com:
 - The launch (spawn-on-click) gesture is **GitHub-PR-only**: it resolves the current branch's open PR (or an explicit GitHub target) and rejects local-only targets (`LOCAL_UNSUPPORTED`). Local SHA-pair walkthroughs are available only through the compatibility resolver, which cannot submit to GitHub.
 - Running the walkthrough requires an open GitHub PR for the session's branch (else `NO_PR`).
 - Number-only / current-branch launch depends on the launching session worktree having a GitHub `origin` remote.
-- Browser interaction state is local to the browser storage for the tab id; it is not synchronized between browsers or devices.
+- Reviewer interaction state is scoped to a reviewer child/job. It persists through reload via the pack store plus local fallback, but it is not an owner-session artifact and should not be treated as a shared project review record.
 - GitHub line-comment export can only submit comments with valid GitHub review anchors. Card-level and unmappable comments remain in the review body/preview.
 - Binary files and files without text patches cannot receive line comments on GitHub.
 - Large diffs may show representative hunks and truncation warnings rather than every changed line.
@@ -925,11 +976,26 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 - the agent-side resolve/export routes;
 - the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the three walkthrough tools and its system prompt carries the YAML schema, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + schema across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after submit the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
 - browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR inline `git-widget-launcher-error` (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards on submit, and surviving reload via the child-self `recover`; plus validation retry state and explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`);
-- pack-panel parity with the prototype/reference UX: pending state, prominent header/stats/link/progress, full and collapsed rails, inline + side-by-side diffs, one-scrollbar diff behavior, line/card comment workflows, and `Prev` / `Like` / `Dislike` gating (`tests/pr-walkthrough-panel-parity.spec.ts`);
+- pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/pr-walkthrough-panel-parity.spec.ts`);
 - panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
 When the visual PR walkthrough shell changes, QA should include side-by-side screenshots comparing the prototype/reference (`docs/design/pr-walkthrough-panel-prototype.html`) with the delivered pack panel. Cover desktop side-panel, wide/full panel, narrow/mobile, pending state, ready state with multiple cards/diffs/comments, and light/dark themes. Use these tests and screenshots as the pinning contract when changing the pack viewer, agent-side launch/resolver behavior, YAML mapping, persistence, readonly policy, or panel UX.
+
+### Validation commands for this area
+
+Use the narrowest command that covers the change, then broaden when launch/routes or
+shared host behavior changed:
+
+```bash
+npm run build:packs
+npx playwright test --config tests/playwright.config.ts tests/pr-walkthrough-panel-parity.spec.ts
+npm run test:unit
+npm run test:e2e
+```
+
+Run `npm run check` when TypeScript, shared synthesis, Host API, or server/client
+code changes. Pure markdown-only updates do not require it.
 
 ## Historical (pre-pack-migration) — retained for rationale
 

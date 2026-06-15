@@ -9,12 +9,12 @@
  * Pinned by docs/design/staff-inbox.md §3.3, §5, §13.
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { describe, it, after, mock } from "node:test";
 import assert from "node:assert/strict";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-nudger-"));
+const tmpRoot = makeTmpDir("inbox-nudger-");
 
 const { InboxStore } = await import("../src/server/agent/inbox-store.ts");
 const { InboxNudger } = await import("../src/server/agent/inbox-nudger.ts");
@@ -55,6 +55,7 @@ function makeHarness(opts: {
 	const staffManager = {
 		listStaff: () => [staff],
 		getStaff: (id: string) => (id === staffId ? staff : undefined),
+		updateStaff: mock.fn((id: string, patch: Record<string, unknown>) => { if (id === staffId) Object.assign(staff, patch); return staff; }),
 	};
 
 	const session: FakeSession = {

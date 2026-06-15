@@ -189,7 +189,7 @@ QA agents drive browsers **only** through the native `browser_*` tools (`browser
 
 ### What's blocked
 
-The `mcp__playwright__*` tool group (from `@playwright/mcp`) is **denied by default for every role** via `defaults/tool-group-policies.yaml` (`mcp__playwright: never`). The `qa-tester` role additionally sets the same policy in its own `toolPolicies` as a belt-and-braces block. Attempting to call `mcp__playwright__browser_navigate` (or any sibling) returns a policy-denied error without launching the MCP server.
+QA agents should use the native `browser_*` tools, not the `mcp__playwright__*` tool group from `@playwright/mcp`. Defaults ship no `mcp__*` denials in `defaults/tool-group-policies.yaml`; instead, the `qa-tester` role blocks MCP Playwright at the role layer with `toolPolicies: { mcp__playwright: never }`. In a `qa-tester` session, attempting to call `mcp__playwright__browser_navigate` (or any sibling) returns a policy-denied error without launching the MCP server.
 
 ### Why
 
@@ -200,15 +200,19 @@ The `mcp__playwright__*` tool group (from `@playwright/mcp`) is **denied by defa
 
 ### Overriding (if you actually want MCP Playwright)
 
-If a project legitimately needs `mcp__playwright__*` (e.g. driving a real headed browser for manual inspection), allow it at the project layer:
+If a project legitimately needs `mcp__playwright__*` (e.g. driving a real headed browser for manual inspection), allow it for the role that will use it:
 
-1. Create `.bobbit/config/tool-group-policies.yaml` with:
+1. Override that role's `toolPolicies` with:
    ```yaml
    mcp__playwright: allow
    ```
-2. Optionally override `.mcp.json` in the project to drop `--headless` (e.g. `.bobbit/config/mcp.json` or `.claude/.mcp.json` — see [internals.md — MCP servers](internals.md#mcp-servers) for precedence).
+2. Optionally add a project-layer default in `.bobbit/config/tool-group-policies.yaml` for roles that do not already set their own MCP Playwright policy:
+   ```yaml
+   mcp__playwright: allow
+   ```
+3. Optionally override `.mcp.json` in the project to drop `--headless` (e.g. `.bobbit/config/mcp.json` or `.claude/.mcp.json` — see [internals.md — MCP servers](internals.md#mcp-servers) for precedence).
 
-Per-role overrides in a role YAML's `toolPolicies` also work for scoping the allowance to a single role.
+Role-level `toolPolicies` win over project group defaults, so a project-layer `allow` alone does not override the `qa-tester` role's `never` policy.
 
 ## Budget enforcement
 

@@ -419,6 +419,24 @@ export class MockAgentCore {
 			};
 		}
 
+		// Goal proposal carrying a parentGoalId (a child-goal proposal) — used by
+		// subgoals-experimental-toggle.spec.ts to assert the Sub-goals tab is a
+		// pure function of the system flag and does NOT appear merely because the
+		// proposal has a parent. Must precede the generic goal_proposal matcher
+		// (it contains the "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_WITH_PARENT")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Child Goal",
+					workflow: "general",
+					spec: "A child-goal proposal seeded with a parentGoalId.",
+					parentGoalId: "some-parent-id",
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
 		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
 			return {
 				tool: "propose_goal",

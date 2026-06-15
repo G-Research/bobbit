@@ -80,6 +80,22 @@ test.describe("Staff inbox panel", () => {
 		return (JSON.parse(text) as { sizeMode?: string }).sizeMode || "";
 	}
 
+	async function dispatchCollapseShortcut(page: import("@playwright/test").Page): Promise<void> {
+		// The product shortcut is registered as ctrlOrMeta: Ctrl on Windows/Linux,
+		// Cmd on macOS. Dispatch both modifiers so this E2E exercises the same
+		// shortcut binding deterministically on every runner OS.
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "]",
+				code: "BracketRight",
+				ctrlKey: true,
+				metaKey: true,
+				bubbles: true,
+				cancelable: true,
+			}));
+		});
+	}
+
 	type Box = { x: number; y: number; width: number; height: number };
 
 	function formatBox(box: Box): string {
@@ -248,18 +264,10 @@ test.describe("Staff inbox panel", () => {
 		await tab.click();
 		await expect(page.locator("inbox-panel")).toBeVisible({ timeout: 5_000 });
 
-		// Press Ctrl/Cmd+] to collapse. The keyboard handler persists the shared
-		// side-panel size mode to the server workspace.
+		// Press the registered collapse shortcut. The keyboard handler persists the
+		// shared side-panel size mode to the server workspace.
 		await page.waitForFunction(() => document.body.dataset.shortcutsReady === "1");
-		// Dispatch the keydown with BOTH ctrlKey and metaKey so the platform-aware
-		// `ctrlOrMeta` match in shortcut-registry fires on macOS (metaKey) and
-		// Linux/Windows (ctrlKey). `page.keyboard.press("Control+]")` only sets
-		// ctrlKey, so it never matches on macOS where ctrlOrMeta resolves to Cmd.
-		await page.evaluate(() => {
-			window.dispatchEvent(new KeyboardEvent("keydown", {
-				key: "]", code: "BracketRight", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
-			}));
-		});
+		await dispatchCollapseShortcut(page);
 		await expect.poll(() => workspaceSizeMode(sid), { timeout: 10_000 }).toBe("collapsed");
 
 		// Reload — the panel respects the server-persisted collapse state on rehydrate.

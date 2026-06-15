@@ -8,12 +8,12 @@
  * the real store against tmp directories rooted under os.tmpdir().
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "inbox-store-"));
+const tmpRoot = makeTmpDir("inbox-store-");
 
 const { InboxStore } = await import("../src/server/agent/inbox-store.ts");
 type InboxEntry = import("../src/server/agent/inbox-store.ts").InboxEntry;
