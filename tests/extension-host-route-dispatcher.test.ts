@@ -45,7 +45,7 @@ function writeRoutesModule(root: string, packName: string, rel: string, src: str
 	return { modulePath: abs, packRoot };
 }
 
-before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-route-")); });
+before(() => { tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-route-"))); });
 after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 describe("RouteDispatcher — resolution + happy path (pack-level module)", () => {

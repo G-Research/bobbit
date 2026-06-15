@@ -84,7 +84,7 @@ const BYPASS_ENV_KEYS = [
 ];
 
 before(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-iso-cfg-"));
+	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-iso-cfg-")));
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }

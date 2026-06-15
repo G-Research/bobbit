@@ -13,7 +13,7 @@ import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 // Set BOBBIT_DIR before any dynamic imports
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "multi-proj-test-"));
+const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "multi-proj-test-")));
 process.env.BOBBIT_DIR = tmpRoot;
 fs.mkdirSync(path.join(tmpRoot, "state"), { recursive: true });
 fs.mkdirSync(path.join(tmpRoot, "config"), { recursive: true });

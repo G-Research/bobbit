@@ -7,7 +7,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -21,7 +21,7 @@ let workspaceRoot: string;
 const SID = "11111111-2222-3333-4444-555555555555";
 
 before(() => {
-	workspaceRoot = mkdtempSync(path.join(tmpdir(), "bobbit-cr-"));
+	workspaceRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "bobbit-cr-")));
 	// mountDir(sid) resolves to <bobbitStateDir()>/preview/<sid>; redirect
 	// the resolver to a temp dir via BOBBIT_DIR.
 	process.env.BOBBIT_DIR = workspaceRoot;

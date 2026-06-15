@@ -12,7 +12,7 @@ import {
 } from "../src/server/agent/project-registry.js";
 
 function makeStateDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-project-order-state-"));
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-project-order-state-")));
 }
 
 function cleanup(dir: string): void {
@@ -112,7 +112,7 @@ test("ProjectRegistry register and registerProvisional append after a custom ord
   const stateDir = makeStateDir();
   const roots: string[] = [];
   const makeRoot = (name: string) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-project-order-${name}-`));
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-project-order-${name}-`)));
     roots.push(root);
     return root;
   };

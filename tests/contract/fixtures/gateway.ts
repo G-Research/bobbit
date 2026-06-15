@@ -14,7 +14,7 @@
  *
  * For tests that need HTTP/WS (most do), pass { startHttp: true }.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
@@ -94,8 +94,9 @@ export async function createTestGateway(opts?: {
 	agentCliPath?: string;
 }): Promise<TestGateway> {
 	const startHttp = opts?.startHttp ?? true;
-	const dir = join(tmpdir(), `tier2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	mkdirSync(join(dir, "state"), { recursive: true });
+	const rawDir = join(tmpdir(), `tier2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	mkdirSync(join(rawDir, "state"), { recursive: true });
+	const dir = realpathSync(rawDir);
 	writeFileSync(join(dir, "state", "projects.json"), "[]");
 	writeFileSync(join(dir, "state", "setup-complete"), "tier2\n");
 

@@ -80,7 +80,7 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 before(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-iso-"));
+	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-iso-")));
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }

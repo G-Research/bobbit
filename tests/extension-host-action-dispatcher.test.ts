@@ -66,7 +66,7 @@ const ctx = (): ActionHandlerCtx => ({
 });
 
 before(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-dispatch-"));
+	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-dispatch-")));
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
