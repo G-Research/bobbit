@@ -30,6 +30,15 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 };
 
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
+
+export type ProposalSource = "tool" | "legacy" | "edit" | "seed" | "rehydrate" | "restore";
+const SERVER_PROPOSAL_SOURCES = new Set<ProposalSource>(["edit", "seed", "rehydrate", "restore"]);
+
+function normalizeServerProposalSource(source: unknown): ProposalSource {
+	return typeof source === "string" && SERVER_PROPOSAL_SOURCES.has(source as ProposalSource)
+		? source as ProposalSource
+		: "edit";
+}
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
@@ -507,12 +516,14 @@ export class RemoteAgent {
 		fields: Record<string, unknown> | null,
 		streaming: boolean,
 		rev?: number,
+		source?: ProposalSource,
 	) => void;
 	private _bufferedProposalEvents: Array<{
 		type: ProposalType;
 		fields: Record<string, unknown> | null;
 		streaming: boolean;
 		rev?: number;
+		source?: ProposalSource;
 	}> = [];
 	get onProposal(): typeof this._onProposal {
 		return this._onProposal;
@@ -523,7 +534,7 @@ export class RemoteAgent {
 			const pending = this._bufferedProposalEvents;
 			this._bufferedProposalEvents = [];
 			for (const ev of pending) {
-				try { fn(ev.type, ev.fields, ev.streaming, ev.rev); }
+				try { fn(ev.type, ev.fields, ev.streaming, ev.rev, ev.source); }
 				catch (err) { console.warn("[remote-agent] buffered onProposal replay threw:", err); }
 			}
 		}
@@ -1931,11 +1942,12 @@ export class RemoteAgent {
 				const pType = (msg as any).proposalType;
 				const fields = (msg as any).fields;
 				const rev = typeof (msg as any).rev === "number" ? (msg as any).rev as number : undefined;
+				const source = normalizeServerProposalSource((msg as any).source);
 				if (isProposalType(pType) && fields && typeof fields === "object") {
 					if (this._onProposal) {
-						this._onProposal(pType, fields as Record<string, unknown>, false, rev);
+						this._onProposal(pType, fields as Record<string, unknown>, false, rev, source);
 					} else {
-						this._bufferedProposalEvents.push({ type: pType, fields: fields as Record<string, unknown>, streaming: false, rev });
+						this._bufferedProposalEvents.push({ type: pType, fields: fields as Record<string, unknown>, streaming: false, rev, source });
 					}
 				}
 				break;
@@ -2104,7 +2116,7 @@ export class RemoteAgent {
 			// which would leave nothing for mergeFields to preserve if onProposal
 			// ran second.
 			if (this.onProposal && isProposalType(proposalType)) {
-				this.onProposal(proposalType, input, streaming);
+				this.onProposal(proposalType, input, streaming, undefined, "tool");
 			}
 			if (callback) callback(input, streaming);
 
@@ -2211,7 +2223,7 @@ export class RemoteAgent {
 
 				console.warn(`[proposal] Detected legacy XML <${parser.tag}> block — this format is deprecated, use propose_* tools instead`);
 				if (this.onProposal && proposalType) {
-					this.onProposal(proposalType, normalized, false);
+					this.onProposal(proposalType, normalized, false, undefined, "legacy");
 				}
 				if (callback) callback(normalized);
 			}
