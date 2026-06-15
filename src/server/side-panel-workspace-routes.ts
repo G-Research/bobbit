@@ -120,6 +120,21 @@ async function mutate(
 	});
 }
 
+export async function openSidePanelWorkspaceTab(
+	deps: SidePanelWorkspaceRouteDeps,
+	sessionId: string,
+	tab: unknown,
+	options: { focus?: boolean; placeAfterActive?: boolean } = {},
+): Promise<SidePanelWorkspace | undefined> {
+	const result = await mutate(deps, sessionId, (workspace) => applyWorkspaceMutation(workspace, {
+		type: "open",
+		tab,
+		focus: options.focus !== false,
+		placeAfterActive: options.placeAfterActive === true,
+	}, validatorsFor(deps, sessionId)));
+	return result.status === 200 ? result.workspace : undefined;
+}
+
 export async function handleSidePanelWorkspaceRoute(
 	url: URL,
 	req: http.IncomingMessage,

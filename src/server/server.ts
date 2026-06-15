@@ -56,7 +56,7 @@ import { loadPackContributions } from "./agent/pack-contributions.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
-import { handleSidePanelWorkspaceRoute } from "./side-panel-workspace-routes.js";
+import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -11460,6 +11460,57 @@ async function handleApiRoute(
 	// ── Preview mount endpoints ──────────────────────────────────────
 	const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
+	const previewEntryLabelForWorkspace = (entry: string | undefined | null): string => {
+		const clean = (entry || "inline.html").split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "inline.html";
+		return clean.split("/").filter(Boolean).pop() || clean || "inline.html";
+	};
+
+	const openPreviewMountWorkspaceTab = async (sessionId: string, result: {
+		entry?: string;
+		mtime?: number;
+		url?: string;
+		path?: string;
+		contentHash?: string;
+		artifactId?: string;
+	}): Promise<void> => {
+		const entry = previewEntryLabelForWorkspace(result.entry);
+		try {
+			await openSidePanelWorkspaceTab({
+				sessionManager,
+				readBody,
+				broadcastToSession: _broadcastToSession,
+				packContributionRegistry,
+			}, sessionId, {
+				id: `preview:entry:${encodeURIComponent(entry)}`,
+				kind: "preview",
+				title: entry,
+				label: entry,
+				source: {
+					type: "preview",
+					sessionId,
+					entry,
+					live: true,
+					...(typeof result.contentHash === "string" && result.contentHash ? { contentHash: result.contentHash } : {}),
+					...(typeof result.path === "string" && result.path ? { path: result.path } : {}),
+					...(typeof result.url === "string" && result.url ? { url: result.url } : {}),
+					...(typeof result.artifactId === "string" && result.artifactId ? { artifactId: result.artifactId } : {}),
+				},
+				state: {
+					entry,
+					origin: "preview-mount",
+					...(typeof result.mtime === "number" ? { mtime: result.mtime } : {}),
+					...(typeof result.url === "string" && result.url ? { url: result.url } : {}),
+					...(typeof result.path === "string" && result.path ? { path: result.path } : {}),
+					...(typeof result.contentHash === "string" && result.contentHash ? { contentHash: result.contentHash } : {}),
+					...(typeof result.artifactId === "string" && result.artifactId ? { artifactId: result.artifactId } : {}),
+				},
+				updatedAt: Date.now(),
+			}, { focus: true, placeAfterActive: true });
+		} catch (err) {
+			console.warn(`[preview/mount] failed to open side-panel workspace tab for ${sessionId}:`, err);
+		}
+	};
+
 	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
 	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
 	// {url, path, entry, mtime, contentHash}. See docs/design/embedded-html-preview-rewrite.md §6.
@@ -11495,6 +11546,7 @@ async function handleApiRoute(
 			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
 			if (hasArtifact) {
 				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
+				await openPreviewMountWorkspaceTab(sessionId, restored);
 				broadcastPreviewChanged(sessionId, {
 					entry: restored.entry,
 					mtime: restored.mtime,
@@ -11597,6 +11649,7 @@ async function handleApiRoute(
 			}
 			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
 			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
+			await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,
 				mtime: result.mtime,
