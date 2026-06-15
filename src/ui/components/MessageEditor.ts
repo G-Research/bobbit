@@ -270,20 +270,6 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
-	private _clearSlashToken(): void {
-		const textarea = this.textareaRef.value;
-		if (!textarea) return;
-		const cursorPos = textarea.selectionStart;
-		const before = this.value.substring(0, this._slashTokenStart);
-		const after = this.value.substring(cursorPos);
-		this.value = before + after;
-		this.onInput?.(this.value);
-		textarea.value = this.value;
-		const newPos = before.length;
-		textarea.focus();
-		textarea.setSelectionRange(newPos, newPos);
-	}
-
 	private _showLauncherError(message: string): void {
 		void import("../../app/render.js")
 			.then((m) => m.showHeaderToast(message))
@@ -291,18 +277,6 @@ export class MessageEditor extends LitElement {
 	}
 
 	private _selectSlashSkill(skill: SlashSkillInfo) {
-		// Slice C1 — a pack composer-slash ENTRYPOINT runs its launcher (open panel /
-		// navigate) on selection (the user gesture) instead of inserting text.
-		if (skill.entrypointId) {
-			this._slashMenuOpen = false;
-			this._clearSlashToken();
-			try {
-				runLauncherEntrypoint(skill.entrypointId, (r) => {
-					if (!r.ok) this._showLauncherError(r.error || "Could not start the PR walkthrough.");
-				});
-			} catch { /* non-fatal */ }
-			return;
-		}
 		const textarea = this.textareaRef.value;
 		if (!textarea) return;
 		const before = this.value.substring(0, this._slashTokenStart);
@@ -310,13 +284,13 @@ export class MessageEditor extends LitElement {
 		this.value = before + `/${skill.name} ` + after;
 		this._slashMenuOpen = false;
 		this.onInput?.(this.value);
-		// Update textarea and move cursor after the inserted skill name
-		if (textarea) {
-			textarea.value = this.value;
-			const newPos = before.length + skill.name.length + 2; // "/" + name + " "
-			textarea.focus();
-			textarea.setSelectionRange(newPos, newPos);
-		}
+		// Update textarea and move cursor after the inserted skill name. Pack
+		// composer-slash launchers are dispatched only when the completed command is
+		// sent, so selecting autocomplete still lets the user type required args.
+		textarea.value = this.value;
+		const newPos = before.length + skill.name.length + 2; // "/" + name + " "
+		textarea.focus();
+		textarea.setSelectionRange(newPos, newPos);
 	}
 
 	private _packSlashLaunchFromText(text: string): { entrypointId: string; body: Record<string, unknown> } | undefined {

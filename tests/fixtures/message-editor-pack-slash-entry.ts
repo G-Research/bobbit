@@ -99,6 +99,7 @@ function mount(container: HTMLElement): any {
 (window as any).__getInputCalls = () => inputCalls.slice();
 (window as any).__getCallRouteCalls = () => callRouteCalls.slice();
 (window as any).__getMessageSendEvents = () => messageSendEvents.slice();
+(window as any).__getValue = (el: any): string => textarea(el).value;
 (window as any).__resetCalls = () => {
 	sendCalls.length = 0;
 	inputCalls.length = 0;

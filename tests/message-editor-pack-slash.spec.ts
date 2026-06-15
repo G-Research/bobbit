@@ -3,6 +3,8 @@
  *
  * Typed full-line `/pr-walkthrough <arg>` sends must dispatch the registered
  * composer-slash spawn launcher instead of falling through to normal chat.
+ * Autocomplete selection must only complete the slash token so required args can
+ * be entered before launch.
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
@@ -73,14 +75,39 @@ test.describe("MessageEditor pack composer slash dispatch", () => {
 		expect(out.messageSendEvents).toHaveLength(1);
 	});
 
-	test("selecting /pr-walkthrough from autocomplete still launches with an empty body", async ({ page }) => {
+	test("selecting /pr-walkthrough from autocomplete completes the command without launching", async ({ page }) => {
 		await ready(page);
 		const out = await page.evaluate(async () => {
 			const w = window as any;
 			const el = w.__mountEditor(document.getElementById("container"));
 			await el.updateComplete;
-			await w.__typeText(el, "/pr-walkthrough");
-			if (!w.__isSlashMenuOpen(el)) throw new Error("slash menu did not open for /pr-walkthrough");
+			await w.__typeText(el, "/pr-walkthro");
+			if (!w.__isSlashMenuOpen(el)) throw new Error("slash menu did not open for /pr-walkthro");
+			await w.__pressEnter(el);
+			return {
+				value: w.__getValue(el),
+				sendCalls: w.__getSendCalls(),
+				callRoute: w.__getCallRouteCalls(),
+				messageSendEvents: w.__getMessageSendEvents(),
+			};
+		});
+
+		expect(out.value).toBe("/pr-walkthrough ");
+		expect(out.sendCalls).toHaveLength(0);
+		expect(out.callRoute).toHaveLength(0);
+		expect(out.messageSendEvents).toHaveLength(0);
+	});
+
+	test("selected /pr-walkthrough command launches after the user adds an argument and sends", async ({ page }) => {
+		await ready(page);
+		const out = await page.evaluate(async () => {
+			const w = window as any;
+			const el = w.__mountEditor(document.getElementById("container"));
+			await el.updateComplete;
+			await w.__typeText(el, "/pr-walkthro");
+			if (!w.__isSlashMenuOpen(el)) throw new Error("slash menu did not open for /pr-walkthro");
+			await w.__pressEnter(el);
+			await w.__typeText(el, "764");
 			await w.__pressEnter(el);
 			return {
 				sendCalls: w.__getSendCalls(),
@@ -91,7 +118,7 @@ test.describe("MessageEditor pack composer slash dispatch", () => {
 
 		expect(out.sendCalls).toHaveLength(0);
 		expect(out.callRoute).toHaveLength(1);
-		expect(out.callRoute[0]).toMatchObject({ route: "run", body: {} });
-		expect(out.messageSendEvents).toHaveLength(0);
+		expect(out.callRoute[0]).toMatchObject({ route: "run", body: { prNumber: 764 } });
+		expect(out.messageSendEvents).toHaveLength(1);
 	});
 });
