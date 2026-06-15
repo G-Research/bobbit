@@ -782,7 +782,26 @@ export class SessionManager {
 		return this._coalesceRestore(ps.id, async (generation) => {
 			await this.restoreSession(ps);
 			const restored = this.sessions.get(ps.id);
-			if (restored) restored.lifecycleGeneration = generation;
+			if (restored) {
+				restored.lifecycleGeneration = generation;
+				// CS-R2 follow-up (narrow CS-R7): restoreSession() re-seeds the prompt
+				// queue from `ps.messageQueue` and broadcasts idle WITHOUT draining, so
+				// a prompt persisted in the queue — or enqueued during the revive window
+				// — would sit undispatched (doc-04 F7 shape). Drain once here against the
+				// canonical revived object. `drainQueue` itself no-ops unless this is the
+				// current writer (`_sessionWriterIsCurrent`); we additionally gate on idle
+				// + not-compacting + no pending boot-reprompt so we never race the
+				// mid-turn boot-resume nudge. This is intentionally a single drain, not a
+				// broad drain-on-every-idle-transition hook.
+				if (
+					restored.status === "idle" &&
+					!restored.isCompacting &&
+					!this._bootRepromptedSessions.has(ps.id) &&
+					!restored.promptQueue.isEmpty
+				) {
+					this.drainQueue(restored);
+				}
+			}
 			return restored;
 		});
 	}
@@ -1973,8 +1992,44 @@ export class SessionManager {
 		 *  instead of timing out on the default 30s. */
 		coldStart?: boolean;
 	}): Promise<{ status: "dispatched" | "queued" }> {
-		const session = this.sessions.get(sessionId);
+		let session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
+
+		// REVIVE-WINDOW JOIN (CS-R2 follow-up). A prompt that arrives while the
+		// session is dormant/terminated/fenced — or while an `addClient` dormant
+		// revive (or any other restore) is already in flight — must NOT be queued on
+		// the stale `SessionInfo`. The coalesced restore replaces that object with a
+		// fresh one (new PromptQueue(ps.messageQueue), new EventBuffer), so a row
+		// queued here would be dropped and never dispatched (doc-04 F2e split-brain /
+		// F7 stranded-prompt shape). Instead, JOIN the coalesced restore (it starts
+		// one or joins the in-flight one), then re-read the canonical revived session
+		// and dispatch against it via the normal path below.
+		const restoreInFlight = this._restoreCoordinators.has(sessionId);
+		const inReviveWindow = restoreInFlight
+			|| session.status === "terminated"
+			|| session.dormant === true
+			|| session.lifecycleFenced === true;
+		if (inReviveWindow) {
+			const ps = this.resolveStoreForId(sessionId)?.get(sessionId);
+			if (ps && ps.agentSessionFile) {
+				// Coalesces: joins an in-flight restore or starts the single restore.
+				await this._restoreSessionCoalesced(ps);
+				const revived = this.sessions.get(sessionId);
+				if (!revived) return { status: "queued" };
+				session = revived;
+			} else if (restoreInFlight) {
+				// No restorable record of our own, but a restore is already running for
+				// this session — join it rather than acting on the stale object.
+				await this._restoreCoordinators.get(sessionId)?.promise;
+				const revived = this.sessions.get(sessionId);
+				if (!revived) return { status: "queued" };
+				session = revived;
+			}
+			// Otherwise (terminated/dormant with no restorable transcript): fall
+			// through to the existing non-idle path, which queues on the current
+			// object — unchanged behavior for genuinely unrevivable sessions.
+		}
+
 		session.lastPromptSource = opts?.source ?? "user";
 
 		// modelText is what the model sees; text is the user's verbatim input.
