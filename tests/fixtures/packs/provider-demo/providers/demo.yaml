@@ -1,0 +1,6 @@
+id: demo
+kind: generic
+module: ../lib/provider.mjs
+hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
+budget: { maxTokens: 512, timeoutMs: 1000 }
+defaultEnabled: true
