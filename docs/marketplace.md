@@ -435,10 +435,12 @@ Field rules and defaults:
   may run — defined now, enforced when dispatch lands.
 - **`runtime?`** / **`config?`** — optional pass-through fields for the future dispatch tier.
 
-**Providers are inert in this PR.** The loader validates them and the registry indexes them,
-but nothing reads `module`, runs a `hook`, or applies the `budget` yet — provider dispatch is a
-later goal (the lifecycle hub). Authoring a provider today gets you validation, catalogue
-listing, and activation toggles, and nothing else.
+**Authoring a provider has no runtime effect in production yet.** The loader validates them and
+the registry indexes them. The dispatch core — the `LifecycleHub` that runs a provider's `hook`
+on the worker tier and applies its `budget` — now exists ([docs/lifecycle-hub.md](lifecycle-hub.md)),
+but **no session path calls it yet** (session-setup wiring is G1.3, per-turn `beforePrompt` is
+G1.4). So today authoring a provider gets you validation, catalogue listing, and activation
+toggles, and nothing observable beyond that.
 
 #### Why providers are pack-scoped, *not* name-merged
 
