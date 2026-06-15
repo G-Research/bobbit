@@ -129,6 +129,65 @@ const byJob = globalThis.__bobbitPrWalkthroughPanelState || (globalThis.__bobbit
 const panelObservers = globalThis.__bobbitPrWalkthroughPanelObservers || (globalThis.__bobbitPrWalkthroughPanelObservers = new Map());
 const storeEntry = (key, entry) => { byJob.set(key, entry); };
 const NARROW_PANEL_WIDTH = 900;
+const PERSISTED_STATE_VERSION = 1;
+const PERSISTED_FIELDS = [
+	"activeCardId",
+	"orientationBeatIndex",
+	"railCollapsed",
+	"railWidth",
+	"diffMode",
+	"userSetMode",
+	"decisions",
+	"reviewStatus",
+	"cardComments",
+	"cardCommentDraft",
+	"cardCommentOpen",
+	"lineComments",
+	"lineCommentDraft",
+	"lineCommentOpen",
+	"dismissedSuggestionIds",
+	"collapsedDiffBlocks",
+	"contextExpansions",
+];
+const persistenceKeyFor = (panelKey, jobId) => `review-state/${safeDomId(panelKey || "session")}/${safeDomId(jobId || "job")}`;
+const localPersistenceKeyFor = (panelKey, jobId) => `bobbit:pr-walkthrough:${persistenceKeyFor(panelKey, jobId)}`;
+const pickPersistedState = (entry) => {
+	const state = { version: PERSISTED_STATE_VERSION, savedAt: new Date().toISOString() };
+	for (const field of PERSISTED_FIELDS) {
+		if (entry && entry[field] !== undefined) state[field] = entry[field];
+	}
+	return state;
+};
+const readLocalPersistedState = (panelKey, jobId) => {
+	try {
+		const raw = globalThis.localStorage?.getItem(localPersistenceKeyFor(panelKey, jobId));
+		return raw ? JSON.parse(raw) : undefined;
+	} catch { return undefined; }
+};
+const writeLocalPersistedState = (panelKey, jobId, state) => {
+	try { globalThis.localStorage?.setItem(localPersistenceKeyFor(panelKey, jobId), JSON.stringify(state)); }
+	catch { /* localStorage may be unavailable or full */ }
+};
+const readHostPersistedState = async (host, panelKey, jobId) => {
+	try { return host && host.store && host.store.get ? await host.store.get(persistenceKeyFor(panelKey, jobId)) : undefined; }
+	catch { return undefined; }
+};
+const writeHostPersistedState = async (host, panelKey, jobId, state) => {
+	try { if (host && host.store && host.store.put) await host.store.put(persistenceKeyFor(panelKey, jobId), state); }
+	catch { /* host persistence is best-effort */ }
+};
+const emitReviewEvent = (host, panelKey, type, detail = {}) => {
+	try {
+		if (typeof CustomEvent === "undefined") return;
+		const payload = { detail: { panelKey, ...detail }, bubbles: true, composed: true };
+		const eventName = `pr-walkthrough:${type}`;
+		const root = typeof document !== "undefined" ? document.querySelector(`[data-prw-key="${safeDomId(panelKey)}"]`) : undefined;
+		if (root) root.dispatchEvent(new CustomEvent(eventName, payload));
+		if (typeof document !== "undefined") document.dispatchEvent(new CustomEvent(eventName, payload));
+		if (globalThis && globalThis.dispatchEvent) globalThis.dispatchEvent(new CustomEvent(eventName, payload));
+		if (host && typeof host.dispatchEvent === "function") host.dispatchEvent(new CustomEvent(eventName, payload));
+	} catch { /* event emission must never break rendering */ }
+};
 
 export default function createPanel({ html, nothing, renderHeader }) {
 	void renderHeader;
@@ -147,9 +206,19 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		if (host && host.requestRender) host.requestRender();
 	};
 
-	const patchEntry = (host, key, patch) => {
+	const persistEntryState = (host, key, entry, eventType = "draft-change") => {
+		const jobId = entry.jobId || (entry.bundle && entry.bundle.changeset && entry.bundle.changeset.jobId) || key;
+		const state = pickPersistedState(entry);
+		writeLocalPersistedState(key, jobId, state);
+		void writeHostPersistedState(host, key, jobId, state);
+		emitReviewEvent(host, key, eventType, { jobId, state });
+	};
+
+	const patchEntry = (host, key, patch, options = {}) => {
 		const cur = byJob.get(key) || {};
-		replaceEntry(host, key, { ...cur, ...patch });
+		const next = { ...cur, ...patch };
+		replaceEntry(host, key, next);
+		if (next.status === "rendered" || next.bundle) persistEntryState(host, key, next, options.eventType || "draft-change");
 	};
 
 	const updatePanelMeasurement = (host, key, width) => {
@@ -258,6 +327,21 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		.filter(([key, comments]) => key.startsWith(`${asText(card && card.id, "card")}::`) && arrayOf(comments).some((comment) => asText(comment).trim()));
 	const savedCardCommentsForCard = (entry, card) => arrayOf((entry.cardComments || {})[card.id]).filter((comment) => asText(comment).trim());
 	const hasSavedUserComments = (entry, card) => savedCardCommentsForCard(entry, card).length > 0 || savedLineCommentsForCard(entry, card).length > 0;
+	const reconcileUnsupportedDislikes = (entry) => {
+		const cards = cardsOf(entry);
+		let changed = false;
+		const decisions = { ...(entry.decisions || {}) };
+		const reviewStatus = { ...(entry.reviewStatus || {}) };
+		for (const card of cards) {
+			const status = reviewStatus[card.id] || (decisions[card.id] && decisions[card.id].decision);
+			if (status === "disliked" && !hasSavedUserComments(entry, card)) {
+				delete decisions[card.id];
+				delete reviewStatus[card.id];
+				changed = true;
+			}
+		}
+		return changed ? { ...entry, decisions, reviewStatus, reviewComplete: false } : entry;
+	};
 
 	const statsFor = (bundle, cards) => {
 		const cs = (bundle && bundle.changeset) || {};
@@ -290,6 +374,23 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		: undefined);
 
 
+	const mergePersistedReviewerState = (entry, persisted) => {
+		if (!persisted || typeof persisted !== "object") return entry;
+		const cards = cardsOf(entry);
+		const ids = new Set(cards.map((card) => card.id));
+		const state = {};
+		for (const field of PERSISTED_FIELDS) {
+			if (persisted[field] !== undefined) state[field] = persisted[field];
+		}
+		if (state.activeCardId && !ids.has(state.activeCardId)) delete state.activeCardId;
+		if (state.reviewStatus && typeof state.reviewStatus === "object") state.reviewStatus = Object.fromEntries(Object.entries(state.reviewStatus).filter(([cardId]) => ids.has(cardId)));
+		if (state.decisions && typeof state.decisions === "object") state.decisions = Object.fromEntries(Object.entries(state.decisions).filter(([cardId]) => ids.has(cardId)));
+		if (state.cardComments && typeof state.cardComments === "object") state.cardComments = Object.fromEntries(Object.entries(state.cardComments).filter(([cardId]) => ids.has(cardId)));
+		if (state.cardCommentDraft && typeof state.cardCommentDraft === "object") state.cardCommentDraft = Object.fromEntries(Object.entries(state.cardCommentDraft).filter(([cardId]) => ids.has(cardId)));
+		if (state.cardCommentOpen && typeof state.cardCommentOpen === "object") state.cardCommentOpen = Object.fromEntries(Object.entries(state.cardCommentOpen).filter(([cardId]) => ids.has(cardId)));
+		return { ...entry, ...state, activeCardId: state.activeCardId || entry.activeCardId };
+	};
+
 	const reviewCardsOf = (entry) => cardsOf(entry).filter((card) => cardPhase(card) !== "audit");
 	const completedCardIds = (entry) => new Set(Object.entries(entry.reviewStatus || {})
 		.filter(([, status]) => status === "liked" || status === "disliked" || status === "complete")
@@ -321,7 +422,13 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const decisions = { ...(cur.decisions || {}), [card.id]: { decision, supportingCommentIds, recordedAt: new Date().toISOString() } };
 		const reviewStatus = { ...(cur.reviewStatus || {}), [card.id]: decision };
 		const next = nextCardId(cur, card);
-		patchEntry(host, paramKey, { decisions, reviewStatus, activeCardId: next || card.id });
+		const nextCard = next ? cardsOf(cur).find((candidate) => candidate.id === next) : undefined;
+		const complete = !nextCard || cardPhase(nextCard) === "audit";
+		patchEntry(host, paramKey, { decisions, reviewStatus, activeCardId: next || card.id, reviewComplete: complete || cur.reviewComplete }, { eventType: "draft-change" });
+		if (complete) {
+			const finalEntry = byJob.get(paramKey) || { ...cur, decisions, reviewStatus };
+			emitReviewEvent(host, paramKey, "complete", { jobId: finalEntry.jobId || paramKey, state: pickPersistedState(finalEntry), cardId: card.id });
+		}
 	};
 	const completeOrientation = (entry, host, paramKey, card) => {
 		const cur = byJob.get(paramKey) || entry;
@@ -547,11 +654,40 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		return parts;
 	};
 
+	const deleteLineComment = (entry, host, paramKey, key, index) => {
+		const cur = byJob.get(paramKey) || entry;
+		const nextComments = { ...(cur.lineComments || {}) };
+		const values = arrayOf(nextComments[key]).filter((comment) => asText(comment).trim());
+		const filtered = values.filter((_, commentIndex) => commentIndex !== index);
+		if (filtered.length) nextComments[key] = filtered;
+		else delete nextComments[key];
+		const next = reconcileUnsupportedDislikes({ ...cur, lineComments: nextComments });
+		patchEntry(host, paramKey, { lineComments: next.lineComments, decisions: next.decisions, reviewStatus: next.reviewStatus, reviewComplete: next.reviewComplete });
+	};
+	const editLineComment = (entry, host, paramKey, key, index, comment) => {
+		const cur = byJob.get(paramKey) || entry;
+		const nextComments = { ...(cur.lineComments || {}) };
+		const values = arrayOf(nextComments[key]).filter((value) => asText(value).trim());
+		const filtered = values.filter((_, commentIndex) => commentIndex !== index);
+		if (filtered.length) nextComments[key] = filtered;
+		else delete nextComments[key];
+		const next = reconcileUnsupportedDislikes({ ...cur, lineComments: nextComments });
+		patchEntry(host, paramKey, {
+			lineComments: next.lineComments,
+			decisions: next.decisions,
+			reviewStatus: next.reviewStatus,
+			reviewComplete: next.reviewComplete,
+			lineCommentOpen: { ...(cur.lineCommentOpen || {}), [key]: true },
+			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: asText(comment) },
+		});
+	};
+	const clearLineDraft = (entry, host, paramKey, key) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, "");
+
 	const renderLineCommentContent = (entry, host, paramKey, key) => {
 		const saved = commentsForLineKey(entry, key);
 		const open = Boolean((entry.lineCommentOpen || {})[key]);
 		if (!saved.length && !open) return nothing;
-		return html`${saved.length ? html`<div class="line-comments">${saved.map((comment) => html`<div class="comment prw-user-comment"><div class="comment-meta">Your line comment</div><div class="comment-body">${comment}</div></div>`)}</div>` : nothing}${open ? html`<div class="line-editor" data-testid="pr-walkthrough-comment-editor" id=${lineDomId(key)}><textarea data-testid="pr-walkthrough-comment-input" .value=${asText((entry.lineCommentDraft || {})[key])} placeholder="Or write your own comment…" @input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}></textarea><div class="comment-actions"><button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button><button data-testid="pr-walkthrough-comment-cancel" type="button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button></div></div>` : nothing}`;
+		return html`${saved.length ? html`<div class="line-comments">${saved.map((comment, index) => html`<div class="comment prw-user-comment" data-testid="prw-line-user-comment"><div class="comment-meta">Your line comment</div><div class="comment-body">${comment}</div><div class="comment-actions"><button data-testid="pr-walkthrough-comment-edit" type="button" @click=${() => editLineComment(entry, host, paramKey, key, index, comment)}>Edit</button><button data-testid="pr-walkthrough-comment-delete" class="delete" type="button" @click=${() => deleteLineComment(entry, host, paramKey, key, index)}>Delete</button></div></div>`)}</div>` : nothing}${open ? html`<div class="line-editor" data-testid="pr-walkthrough-comment-editor" id=${lineDomId(key)}><textarea data-testid="pr-walkthrough-comment-input" .value=${asText((entry.lineCommentDraft || {})[key])} placeholder="Or write your own comment…" @input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}></textarea><div class="comment-actions"><button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button><button data-testid="pr-walkthrough-comment-clear" type="button" @click=${() => clearLineDraft(entry, host, paramKey, key)}>Clear</button><button data-testid="pr-walkthrough-comment-cancel" type="button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button></div></div>` : nothing}`;
 	};
 
 	const acceptSuggestion = (entry, host, paramKey, key, suggestion, edit) => {
@@ -746,11 +882,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const open = Boolean((entry.cardCommentOpen || {})[card.id]);
 		const suggestions = arrayOf(card.cardSuggestions || card.suggestedConcerns || card.concerns);
 		const saved = savedCardCommentsForCard(entry, card);
-		const openEditor = () => {
+		const openEditor = (draft) => {
 			const cur = byJob.get(paramKey) || entry;
 			patchEntry(host, paramKey, {
 				cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: true },
-				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: asText((cur.cardCommentDraft || {})[card.id]) },
+				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: draft == null ? asText((cur.cardCommentDraft || {})[card.id]) : asText(draft) },
 			});
 		};
 		const cancel = () => {
@@ -760,6 +896,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: "" },
 			});
 		};
+		const clear = () => updateNestedMap(entry, host, paramKey, "cardCommentDraft", card.id, "");
 		const save = () => {
 			const cur = byJob.get(paramKey) || entry;
 			const draft = asText((cur.cardCommentDraft || {})[card.id]).trim();
@@ -770,6 +907,31 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: "" },
 			});
 		};
+		const deleteComment = (index) => {
+			const cur = byJob.get(paramKey) || entry;
+			const cardComments = { ...(cur.cardComments || {}) };
+			const nextForCard = arrayOf(cardComments[card.id]).filter((comment) => asText(comment).trim()).filter((_, commentIndex) => commentIndex !== index);
+			if (nextForCard.length) cardComments[card.id] = nextForCard;
+			else delete cardComments[card.id];
+			const next = reconcileUnsupportedDislikes({ ...cur, cardComments });
+			patchEntry(host, paramKey, { cardComments: next.cardComments, decisions: next.decisions, reviewStatus: next.reviewStatus, reviewComplete: next.reviewComplete });
+		};
+		const editComment = (index, comment) => {
+			const cur = byJob.get(paramKey) || entry;
+			const cardComments = { ...(cur.cardComments || {}) };
+			const nextForCard = arrayOf(cardComments[card.id]).filter((value) => asText(value).trim()).filter((_, commentIndex) => commentIndex !== index);
+			if (nextForCard.length) cardComments[card.id] = nextForCard;
+			else delete cardComments[card.id];
+			const next = reconcileUnsupportedDislikes({ ...cur, cardComments });
+			patchEntry(host, paramKey, {
+				cardComments: next.cardComments,
+				decisions: next.decisions,
+				reviewStatus: next.reviewStatus,
+				reviewComplete: next.reviewComplete,
+				cardCommentOpen: { ...(cur.cardCommentOpen || {}), [card.id]: true },
+				cardCommentDraft: { ...(cur.cardCommentDraft || {}), [card.id]: asText(comment) },
+			});
+		};
 		return html`
 			<section class="prw-card-comments" data-testid="prw-card-comments">
 				<div class="prw-card-comments-head">
@@ -777,10 +939,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 						<div class="prw-section-eyebrow">Card-level comments</div>
 						<strong>Suggested concerns and reviewer notes</strong>
 					</div>
-					<button class="prw-ghost-button" data-testid="pr-walkthrough-add-card-comment" @click=${openEditor}>Add card comment</button>
+					<button class="prw-ghost-button" data-testid="pr-walkthrough-add-card-comment" @click=${() => openEditor()}>Add card comment</button>
 				</div>
-				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip"><span>Suggested concern</span>${asText(s.body || s.text || s.summary || s)}</button>`)}</div>` : nothing}
-				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="pr-walkthrough-comment" data-comment-scope="card"><div data-testid="prw-card-user-comment"><strong>Your card comment</strong><p>${comment}</p></div></div>`)}</div>` : nothing}
+				${suggestions.length ? html`<div class="prw-card-suggestions">${suggestions.map((s) => html`<button class="prw-suggestion-chip" type="button" data-testid="pr-walkthrough-card-suggestion" @click=${() => openEditor(suggestionBody(s))}><span>Suggested concern</span>${suggestionBody(s)}</button>`)}</div>` : nothing}
+				${saved.length ? html`<div class="prw-user-comments">${saved.map((comment, index) => html`<div class="prw-user-comment" data-testid="pr-walkthrough-comment" data-comment-scope="card"><div data-testid="prw-card-user-comment"><strong>Your card comment</strong><p>${comment}</p></div><div class="comment-actions"><button data-testid="pr-walkthrough-comment-edit" type="button" @click=${() => editComment(index, comment)}>Edit</button><button data-testid="pr-walkthrough-comment-delete" class="delete" type="button" @click=${() => deleteComment(index)}>Delete</button></div></div>`)}</div>` : nothing}
 				${open ? html`<div class="prw-comment-editor" data-testid="pr-walkthrough-comment-editor" data-comment-scope="card"><div data-testid="prw-card-comment-editor">
 					<textarea data-testid="pr-walkthrough-comment-input"
 						class="prw-card-editor"
@@ -790,6 +952,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					></textarea>
 					<div class="prw-comment-actions">
 						<button class="prw-ghost-button" data-testid="pr-walkthrough-comment-save" @click=${save}>Save comment</button>
+						<button class="prw-ghost-button" data-testid="pr-walkthrough-comment-clear" @click=${clear}>Clear</button>
 						<button class="prw-ghost-button" data-testid="pr-walkthrough-comment-cancel" @click=${cancel}>Cancel</button>
 					</div></div>
 				</div>` : nothing}
@@ -813,7 +976,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
-	const renderAuditDraft = (entry, card) => cardPhase(card) === "audit" ? html`<section class="audit-draft"><div class="phase-label">Audit draft</div><p>Use this final card to review the completed decisions before submitting.</p></section>` : nothing;
+	const renderAuditDraft = (entry, host, paramKey, card) => {
+		if (cardPhase(card) !== "audit") return nothing;
+		return html`<section class="audit-draft" data-testid="pr-walkthrough-audit"><div class="phase-label">Audit draft</div><p>Review the generated draft before copying or submitting the final review.</p><pre class="audit-body" data-testid="pr-walkthrough-draft">${exportBodyFor(entry)}</pre><button class="secondary" data-testid="pr-walkthrough-copy-draft" type="button" @click=${() => copyExportDraft(entry, host, paramKey)}>Copy draft</button>${entry.exportCopied ? html`<span class="copy-result">Draft copied.</span>` : nothing}</section>`;
+	};
 
 	const renderCardBody = (entry, host, paramKey, card) => {
 		if (cardPhase(card) === "orientation" && arrayOf(card.sections).length) return renderOrientationGuideCard(entry, host, paramKey, card);
@@ -833,7 +999,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<div class="diff-list prw-diff-list">${arrayOf(card.diffBlocks).length ? arrayOf(card.diffBlocks).map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block)) : html`<div class="no-diff prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}</div>
 				${suggestedComments.length ? html`<section class="line-suggestions prw-line-suggestions"><div class="phase-label">Other line-level suggested comments</div>${suggestedComments.map(renderSuggestedComment(entry, host, paramKey, card))}</section>` : nothing}
 				${renderCardComments(entry, host, paramKey, card)}
-				${renderAuditDraft(entry, card)}
+				${renderAuditDraft(entry, host, paramKey, card)}
 				${renderReviewControls(entry, host, paramKey, card)}
 			</article>
 		`;
@@ -982,8 +1148,10 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				const bundle = await host.callRoute("bundle", { query });
 				const firstCard = Array.isArray(bundle && bundle.cards) && bundle.cards.length ? bundle.cards[0].id : undefined;
 				const cur = byJob.get(targetKey) || {};
-				const diffMode = cur.userSetMode && cur.diffMode ? cur.diffMode : defaultDiffMode();
-				storeEntry(targetKey, { ...cur, status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode, mountKicked: true });
+				const persisted = (await readHostPersistedState(host, targetKey, jobId)) || readLocalPersistedState(targetKey, jobId);
+				const diffMode = cur.userSetMode && cur.diffMode ? cur.diffMode : (persisted && persisted.userSetMode && persisted.diffMode ? persisted.diffMode : defaultDiffMode());
+				const rendered = mergePersistedReviewerState({ ...cur, status: "rendered", bundle, toolCall, activeCardId: firstCard, jobId, diffMode, mountKicked: true }, persisted);
+				storeEntry(targetKey, rendered);
 			};
 
 			// ── CHILD-PANE self-poll loop (read-only carve-out) ─────────────────────
@@ -1108,366 +1276,366 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				<style>
 					@keyframes prw-spin { to { transform: rotate(360deg); } }
 					.prw-root { color: var(--foreground); background: var(--background); padding: 12px; min-height: 100%; box-sizing: border-box; }
-					.prw-shell { border: 1px solid var(--border); border-radius: 18px; background: var(--card); overflow: hidden; box-shadow: 0 20px 60px color-mix(in oklch, var(--foreground) 8%, transparent); }
-					.prw-review-header { padding: 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, color-mix(in oklch, var(--chart-1) 12%, transparent), color-mix(in oklch, var(--chart-2) 8%, transparent)); }
-					.prw-review-kicker, .prw-header-main, .prw-header-meta, .prw-progress-row, .prw-title-wrap, .prw-workspace, .prw-card-topline, .prw-diff-header, .prw-card-comments-head, .prw-review-controls, .prw-decision-buttons { display: flex; align-items: center; gap: 10px; }
-					.prw-review-kicker { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; }
-					.prw-header-shas, .prw-debug-meta { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-					.prw-header-main { justify-content: space-between; align-items: flex-start; margin-top: 10px; gap: 16px; }
-					.prw-title-wrap { align-items: flex-start; gap: 12px; }
-					.prw-pr-pill, .prw-stat { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 76%, transparent); padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }
-					.prw-review-header h1 { margin: 0; font-size: clamp(20px, 3vw, 30px); line-height: 1.08; letter-spacing: -.03em; }
-					.prw-gh-link, .prw-submit-button, .prw-like-button { border-radius: 999px; border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); padding: 7px 11px; font-weight: 650; text-decoration: none; white-space: nowrap; }
-					.prw-header-meta { flex-wrap: wrap; margin-top: 14px; }
-					.prw-add { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 32%, var(--border)); }
-					.prw-del { color: var(--negative); border-color: color-mix(in oklch, var(--negative) 32%, var(--border)); }
-					.prw-progress-row { margin-top: 14px; }
-					.prw-progress-copy { min-width: max-content; color: var(--muted-foreground); font-size: 12px; }
-					.prw-progress-track { height: 8px; min-width: 90px; flex: 1; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); overflow: hidden; }
-					.prw-progress-fill { height: 100%; border-radius: inherit; background: var(--primary); }
-					.prw-debug-meta { display: none; }
-					.prw-workspace { align-items: stretch; min-height: 520px; }
-					.prw-phase-rail { width: 230px; flex: 0 0 230px; padding: 14px 10px; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--background) 72%, var(--card)); overflow: auto; }
-					.prw-phase-rail-collapsed { display: none; width: 42px; flex: 0 0 42px; padding: 12px 5px; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--background) 72%, var(--card)); }
-					.prw-phase { margin-bottom: 14px; }
-					.prw-phase-heading { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
-					.prw-phase-index, .prw-rail-pip { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; border: 1px solid var(--border); color: var(--foreground); background: var(--card); font-size: 11px; }
-					.prw-nav-card { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 10px; padding: 7px 8px; background: transparent; color: var(--muted-foreground); text-align: left; cursor: pointer; }
-					.prw-nav-card:hover, .prw-nav-card.is-active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 12%, transparent); }
-					.prw-nav-dot, .prw-rail-dot { width: 8px; height: 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); flex: 0 0 auto; }
-					.prw-nav-card.is-reviewed .prw-nav-dot, .prw-rail-dot.is-active, .prw-rail-pip.is-active { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
-					.prw-rail-pip-group { display: grid; justify-items: center; gap: 6px; margin-bottom: 14px; }
-					.prw-rail-dot { padding: 0; }
-					.prw-card-pane { flex: 1; min-width: 0; overflow: auto; padding: 18px; }
-					.prw-card { max-width: 1120px; margin: 0 auto; }
-					.prw-card-topline { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
-					.prw-card h2 { margin: 8px 0 0; font-size: clamp(20px, 2.5vw, 28px); line-height: 1.12; }
-					.prw-summary, .prw-rationale { color: var(--muted-foreground); line-height: 1.55; }
-					.prw-rationale { border-left: 3px solid var(--chart-3); padding-left: 10px; }
-					.prw-orientation-stepper, .prw-card-comments, .prw-no-diff { border: 1px solid var(--border); border-radius: 16px; background: color-mix(in oklch, var(--card) 84%, transparent); padding: 12px; margin-top: 14px; }
-					.prw-stepper-rail { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
-					.prw-step { min-width: 86px; border: 1px solid var(--border); border-radius: 14px; background: var(--background); color: var(--muted-foreground); padding: 8px; text-align: left; }
-					.prw-step span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; border: 1px solid var(--border); margin-bottom: 6px; }
-					.prw-step.is-current { color: var(--foreground); border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
-					.prw-step.is-visited span { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
-					.prw-step small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-					.prw-stepper-card { margin-top: 8px; }
-					.prw-step-count, .prw-section-eyebrow, .prw-suggestion-anchor { color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
-					.prw-section h3 { margin: 6px 0; font-size: 18px; }
-					.prw-section p { color: var(--muted-foreground); line-height: 1.55; }
-					.prw-verdict, .prw-suggested-comment { border: 1px solid color-mix(in oklch, var(--warning) 34%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); border-radius: 12px; padding: 10px; margin-top: 10px; }
-					.prw-concern-list, .prw-checklist { color: var(--muted-foreground); line-height: 1.5; }
-					.prw-file-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 10px; }
-					.prw-file-roles > div { border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
-					.prw-file-roles span, .prw-file-roles small { display: block; color: var(--muted-foreground); }
-					.prw-stepper-actions, .prw-diff-mode, .prw-comment-actions, .prw-diff-header-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-					.prw-diff-mode { justify-content: flex-end; }
-					.prw-comment-actions { justify-content: flex-end; }
-					.prw-segment, .prw-ghost-button, .prw-dislike-button, .prw-line-comment-button, .prw-suggestion-chip { border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--foreground); padding: 6px 9px; }
-					.prw-segment.is-active { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); }
-					.prw-diff-block { margin-top: 12px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--background); }
-					.prw-diff-header { justify-content: space-between; padding: 9px 10px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
-					.prw-diff-header div { display: flex; gap: 8px; align-items: center; min-width: 0; }
-					.prw-diff-header-actions { margin-top: 0; flex: 0 0 auto; }
-					.prw-diff-toggle { font-family: inherit; font-size: 11px; padding: 3px 7px; }
-					.prw-diff-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-					.prw-diff-scroll { overflow-x: auto; max-width: 100%; }
-					.prw-diff-table { width: 100%; min-width: 760px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
-					.prw-diff-table td { border-bottom: 1px solid color-mix(in oklch, var(--border) 56%, transparent); padding: 2px 6px; vertical-align: top; }
-					.prw-hunk-row td { color: var(--info); background: color-mix(in oklch, var(--info) 9%, transparent); }
-					.prw-line-number { width: 42px; color: var(--muted-foreground); text-align: right; user-select: none; }
-					.prw-prefix { width: 20px; text-align: center; color: var(--muted-foreground); }
-					.prw-code { white-space: pre; min-width: 260px; }
-					.prw-code code { white-space: pre; }
-					.prw-line.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
-					.prw-line.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
-					.prw-side-row.is-change .prw-old.is-del, .prw-side-row.is-del .prw-old.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
-					.prw-side-row.is-change .prw-new.is-add, .prw-side-row.is-add .prw-new.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
-					.prw-side-row .prw-code.is-empty { background: color-mix(in oklch, var(--muted-foreground) 5%, transparent); }
-					.prw-comment-cell { width: 118px; text-align: right; }
-					.prw-line-comment-button { opacity: .72; font-size: 11px; padding: 3px 7px; }
-					.prw-line-comment-button:hover, .prw-line:focus-within .prw-line-comment-button { opacity: 1; border-color: var(--primary); }
-					.prw-line-suggestions, .prw-card-comments { margin-top: 14px; }
-					.prw-line-suggestion-row td { background: color-mix(in oklch, var(--warning) 5%, transparent); padding: 8px 10px; }
-					.prw-inline-suggestions { display: grid; gap: 8px; }
-					.prw-inline-suggested-comment { margin-top: 0; }
-					.prw-suggested-comment { display: grid; gap: 6px; }
-					.prw-card-comments-head { justify-content: space-between; }
-					.prw-card-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-					.prw-suggestion-chip { background: color-mix(in oklch, var(--chart-2) 10%, transparent); }
-					.prw-card-editor, .prw-comment-editor textarea { width: 100%; min-height: 72px; margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--background); color: var(--foreground); padding: 8px; box-sizing: border-box; }
-					.prw-line-comment-row td { background: color-mix(in oklch, var(--chart-1) 6%, transparent); padding: 8px 10px; }
-					.prw-user-comments { display: grid; gap: 8px; margin-top: 10px; }
-					.prw-user-comment { border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border)); border-radius: 12px; background: color-mix(in oklch, var(--primary) 7%, transparent); padding: 8px 10px; }
-					.prw-user-comment strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-foreground); }
-					.prw-user-comment p { margin: 4px 0 0; white-space: pre-wrap; color: var(--foreground); }
-					.prw-review-controls { justify-content: space-between; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
-					.prw-dislike-button { color: var(--foreground); }
-					.prw-dislike-button:hover:not(:disabled), .prw-dislike-button:focus-visible:not(:disabled) { border-color: var(--negative); color: var(--negative); background: color-mix(in oklch, var(--negative) 10%, transparent); }
-					button:disabled { opacity: .48; cursor: not-allowed; }
-					.prw-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted-foreground); border-top-color: transparent; border-radius: 50%; animation: prw-spin .8s linear infinite; }
-					.prw-pending, .prw-empty, .prw-neutral, .prw-error { display: flex; align-items: center; gap: 8px; padding: 18px; color: var(--muted-foreground); }
-					.prw-error { color: var(--negative); }
+					.prw-root .prw-shell { border: 1px solid var(--border); border-radius: 18px; background: var(--card); overflow: hidden; box-shadow: 0 20px 60px color-mix(in oklch, var(--foreground) 8%, transparent); }
+					.prw-root .prw-review-header { padding: 18px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, color-mix(in oklch, var(--chart-1) 12%, transparent), color-mix(in oklch, var(--chart-2) 8%, transparent)); }
+					.prw-root .prw-review-kicker, .prw-root .prw-header-main, .prw-root .prw-header-meta, .prw-root .prw-progress-row, .prw-root .prw-title-wrap, .prw-root .prw-workspace, .prw-root .prw-card-topline, .prw-root .prw-diff-header, .prw-root .prw-card-comments-head, .prw-root .prw-review-controls, .prw-root .prw-decision-buttons { display: flex; align-items: center; gap: 10px; }
+					.prw-root .prw-review-kicker { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; }
+					.prw-root .prw-header-shas, .prw-root .prw-debug-meta { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+					.prw-root .prw-header-main { justify-content: space-between; align-items: flex-start; margin-top: 10px; gap: 16px; }
+					.prw-root .prw-title-wrap { align-items: flex-start; gap: 12px; }
+					.prw-root .prw-pr-pill, .prw-root .prw-stat { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 76%, transparent); padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+					.prw-root .prw-review-header h1 { margin: 0; font-size: clamp(20px, 3vw, 30px); line-height: 1.08; letter-spacing: -.03em; }
+					.prw-root .prw-gh-link, .prw-root .prw-submit-button, .prw-root .prw-like-button { border-radius: 999px; border: 1px solid var(--primary); background: var(--primary); color: var(--primary-foreground); padding: 7px 11px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+					.prw-root .prw-header-meta { flex-wrap: wrap; margin-top: 14px; }
+					.prw-root .prw-add { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 32%, var(--border)); }
+					.prw-root .prw-del { color: var(--negative); border-color: color-mix(in oklch, var(--negative) 32%, var(--border)); }
+					.prw-root .prw-progress-row { margin-top: 14px; }
+					.prw-root .prw-progress-copy { min-width: max-content; color: var(--muted-foreground); font-size: 12px; }
+					.prw-root .prw-progress-track { height: 8px; min-width: 90px; flex: 1; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); overflow: hidden; }
+					.prw-root .prw-progress-fill { height: 100%; border-radius: inherit; background: var(--primary); }
+					.prw-root .prw-debug-meta { display: none; }
+					.prw-root .prw-workspace { align-items: stretch; min-height: 520px; }
+					.prw-root .prw-phase-rail { width: 230px; flex: 0 0 230px; padding: 14px 10px; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--background) 72%, var(--card)); overflow: auto; }
+					.prw-root .prw-phase-rail-collapsed { display: none; width: 42px; flex: 0 0 42px; padding: 12px 5px; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--background) 72%, var(--card)); }
+					.prw-root .prw-phase { margin-bottom: 14px; }
+					.prw-root .prw-phase-heading { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+					.prw-root .prw-phase-index, .prw-root .prw-rail-pip { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; border: 1px solid var(--border); color: var(--foreground); background: var(--card); font-size: 11px; }
+					.prw-root .prw-nav-card { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 10px; padding: 7px 8px; background: transparent; color: var(--muted-foreground); text-align: left; cursor: pointer; }
+					.prw-root .prw-nav-card:hover, .prw-root .prw-nav-card.is-active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 12%, transparent); }
+					.prw-root .prw-nav-dot, .prw-root .prw-rail-dot { width: 8px; height: 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); flex: 0 0 auto; }
+					.prw-root .prw-nav-card.is-reviewed .prw-nav-dot, .prw-root .prw-rail-dot.is-active, .prw-root .prw-rail-pip.is-active { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.prw-root .prw-rail-pip-group { display: grid; justify-items: center; gap: 6px; margin-bottom: 14px; }
+					.prw-root .prw-rail-dot { padding: 0; }
+					.prw-root .prw-card-pane { flex: 1; min-width: 0; overflow: auto; padding: 18px; }
+					.prw-root .prw-card { max-width: 1120px; margin: 0 auto; }
+					.prw-root .prw-card-topline { justify-content: space-between; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+					.prw-root .prw-card h2 { margin: 8px 0 0; font-size: clamp(20px, 2.5vw, 28px); line-height: 1.12; }
+					.prw-root .prw-summary, .prw-root .prw-rationale { color: var(--muted-foreground); line-height: 1.55; }
+					.prw-root .prw-rationale { border-left: 3px solid var(--chart-3); padding-left: 10px; }
+					.prw-root .prw-orientation-stepper, .prw-root .prw-card-comments, .prw-root .prw-no-diff { border: 1px solid var(--border); border-radius: 16px; background: color-mix(in oklch, var(--card) 84%, transparent); padding: 12px; margin-top: 14px; }
+					.prw-root .prw-stepper-rail { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+					.prw-root .prw-step { min-width: 86px; border: 1px solid var(--border); border-radius: 14px; background: var(--background); color: var(--muted-foreground); padding: 8px; text-align: left; }
+					.prw-root .prw-step span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; border: 1px solid var(--border); margin-bottom: 6px; }
+					.prw-root .prw-step.is-current { color: var(--foreground); border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+					.prw-root .prw-step.is-visited span { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.prw-root .prw-step small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+					.prw-root .prw-stepper-card { margin-top: 8px; }
+					.prw-root .prw-step-count, .prw-root .prw-section-eyebrow, .prw-root .prw-suggestion-anchor { color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+					.prw-root .prw-section h3 { margin: 6px 0; font-size: 18px; }
+					.prw-root .prw-section p { color: var(--muted-foreground); line-height: 1.55; }
+					.prw-root .prw-verdict, .prw-root .prw-suggested-comment { border: 1px solid color-mix(in oklch, var(--warning) 34%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); border-radius: 12px; padding: 10px; margin-top: 10px; }
+					.prw-root .prw-concern-list, .prw-root .prw-checklist { color: var(--muted-foreground); line-height: 1.5; }
+					.prw-root .prw-file-roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 10px; }
+					.prw-root .prw-file-roles > div { border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+					.prw-root .prw-file-roles span, .prw-root .prw-file-roles small { display: block; color: var(--muted-foreground); }
+					.prw-root .prw-stepper-actions, .prw-root .prw-diff-mode, .prw-root .prw-comment-actions, .prw-root .prw-diff-header-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+					.prw-root .prw-diff-mode { justify-content: flex-end; }
+					.prw-root .prw-comment-actions { justify-content: flex-end; }
+					.prw-root .prw-segment, .prw-root .prw-ghost-button, .prw-root .prw-dislike-button, .prw-root .prw-line-comment-button, .prw-root .prw-suggestion-chip { border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--foreground); padding: 6px 9px; }
+					.prw-root .prw-segment.is-active { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 14%, transparent); }
+					.prw-root .prw-diff-block { margin-top: 12px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--background); }
+					.prw-root .prw-diff-header { justify-content: space-between; padding: 9px 10px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+					.prw-root .prw-diff-header div { display: flex; gap: 8px; align-items: center; min-width: 0; }
+					.prw-root .prw-diff-header-actions { margin-top: 0; flex: 0 0 auto; }
+					.prw-root .prw-diff-toggle { font-family: inherit; font-size: 11px; padding: 3px 7px; }
+					.prw-root .prw-diff-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+					.prw-root .prw-diff-scroll { overflow-x: auto; max-width: 100%; }
+					.prw-root .prw-diff-table { width: 100%; min-width: 760px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+					.prw-root .prw-diff-table td { border-bottom: 1px solid color-mix(in oklch, var(--border) 56%, transparent); padding: 2px 6px; vertical-align: top; }
+					.prw-root .prw-hunk-row td { color: var(--info); background: color-mix(in oklch, var(--info) 9%, transparent); }
+					.prw-root .prw-line-number { width: 42px; color: var(--muted-foreground); text-align: right; user-select: none; }
+					.prw-root .prw-prefix { width: 20px; text-align: center; color: var(--muted-foreground); }
+					.prw-root .prw-code { white-space: pre; min-width: 260px; }
+					.prw-root .prw-code code { white-space: pre; }
+					.prw-root .prw-line.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
+					.prw-root .prw-line.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.prw-root .prw-side-row.is-change .prw-old.is-del, .prw-root .prw-side-row.is-del .prw-old.is-del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.prw-root .prw-side-row.is-change .prw-new.is-add, .prw-root .prw-side-row.is-add .prw-new.is-add { background: color-mix(in oklch, var(--positive) 13%, transparent); }
+					.prw-root .prw-side-row .prw-code.is-empty { background: color-mix(in oklch, var(--muted-foreground) 5%, transparent); }
+					.prw-root .prw-comment-cell { width: 118px; text-align: right; }
+					.prw-root .prw-line-comment-button { opacity: .72; font-size: 11px; padding: 3px 7px; }
+					.prw-root .prw-line-comment-button:hover, .prw-root .prw-line:focus-within .prw-line-comment-button { opacity: 1; border-color: var(--primary); }
+					.prw-root .prw-line-suggestions, .prw-root .prw-card-comments { margin-top: 14px; }
+					.prw-root .prw-line-suggestion-row td { background: color-mix(in oklch, var(--warning) 5%, transparent); padding: 8px 10px; }
+					.prw-root .prw-inline-suggestions { display: grid; gap: 8px; }
+					.prw-root .prw-inline-suggested-comment { margin-top: 0; }
+					.prw-root .prw-suggested-comment { display: grid; gap: 6px; }
+					.prw-root .prw-card-comments-head { justify-content: space-between; }
+					.prw-root .prw-card-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+					.prw-root .prw-suggestion-chip { background: color-mix(in oklch, var(--chart-2) 10%, transparent); }
+					.prw-root .prw-card-editor, .prw-root .prw-comment-editor textarea { width: 100%; min-height: 72px; margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--background); color: var(--foreground); padding: 8px; box-sizing: border-box; }
+					.prw-root .prw-line-comment-row td { background: color-mix(in oklch, var(--chart-1) 6%, transparent); padding: 8px 10px; }
+					.prw-root .prw-user-comments { display: grid; gap: 8px; margin-top: 10px; }
+					.prw-root .prw-user-comment { border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border)); border-radius: 12px; background: color-mix(in oklch, var(--primary) 7%, transparent); padding: 8px 10px; }
+					.prw-root .prw-user-comment strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-foreground); }
+					.prw-root .prw-user-comment p { margin: 4px 0 0; white-space: pre-wrap; color: var(--foreground); }
+					.prw-root .prw-review-controls { justify-content: space-between; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+					.prw-root .prw-dislike-button { color: var(--foreground); }
+					.prw-root .prw-dislike-button:hover:not(:disabled), .prw-root .prw-dislike-button:focus-visible:not(:disabled) { border-color: var(--negative); color: var(--negative); background: color-mix(in oklch, var(--negative) 10%, transparent); }
+					.prw-root button:disabled { opacity: .48; cursor: not-allowed; }
+					.prw-root .prw-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted-foreground); border-top-color: transparent; border-radius: 50%; animation: prw-spin .8s linear infinite; }
+					.prw-root .prw-pending, .prw-root .prw-empty, .prw-root .prw-neutral, .prw-root .prw-error { display: flex; align-items: center; gap: 8px; padding: 18px; color: var(--muted-foreground); }
+					.prw-root .prw-error { color: var(--negative); }
 					@media (max-width: 760px) {
 						.prw-root { padding: 0; }
-						.prw-shell { border-radius: 0; border-left: 0; border-right: 0; }
-						.prw-header-main, .prw-progress-row, .prw-review-controls { flex-wrap: wrap; }
-						.prw-phase-rail { display: none; }
-						.prw-phase-rail-collapsed { display: block; }
-						.prw-card-pane { padding: 12px; }
-						.prw-diff-mode { justify-content: flex-start; }
-						.prw-side-diff { min-width: 860px; }
+						.prw-root .prw-shell { border-radius: 0; border-left: 0; border-right: 0; }
+						.prw-root .prw-header-main, .prw-root .prw-progress-row, .prw-root .prw-review-controls { flex-wrap: wrap; }
+						.prw-root .prw-phase-rail { display: none; }
+						.prw-root .prw-phase-rail-collapsed { display: block; }
+						.prw-root .prw-card-pane { padding: 12px; }
+						.prw-root .prw-diff-mode { justify-content: flex-start; }
+						.prw-root .prw-side-diff { min-width: 860px; }
 					}
 					@keyframes prw-pulse { 0%, 100% { opacity: .38; } 50% { opacity: .9; } }
-					* { box-sizing: border-box; }
-					.prw-shell { min-height: calc(100vh - 24px); background: color-mix(in oklch, var(--card) 92%, var(--background)); box-shadow: 0 22px 70px color-mix(in oklch, var(--foreground) 10%, transparent); }
-					.prw-review-header { padding: 16px 18px 14px; background: linear-gradient(135deg, color-mix(in oklch, var(--card) 88%, var(--background)), color-mix(in oklch, var(--chart-1) 10%, transparent)); }
-					.prw-review-header h1 { overflow-wrap: anywhere; }
-					.prw-pr-pill { color: var(--chart-1); border-color: color-mix(in oklch, var(--chart-1) 28%, var(--border)); }
-					.prw-gh-link, .prw-submit-button, .prw-like-button { box-shadow: 0 8px 20px color-mix(in oklch, var(--primary) 18%, transparent); }
-					.prw-progress-fill { background: linear-gradient(90deg, var(--primary), color-mix(in oklch, var(--chart-2) 65%, var(--primary))); }
-					.prw-progress-indeterminate { width: 42%; animation: prw-pulse 1.45s ease-in-out infinite; }
-					.prw-workspace { min-height: 540px; overflow: hidden; }
-					.prw-phase-rail { width: 248px; flex-basis: 248px; padding: 12px; background: color-mix(in oklch, var(--card) 62%, var(--background)); }
-					.prw-phase-rail-collapsed { background: color-mix(in oklch, var(--card) 62%, var(--background)); overflow-y: auto; overflow-x: hidden; }
-					.prw-phase { margin: 3px 0 10px; border-radius: 10px; padding: 2px; }
-					.prw-phase.is-active { background: color-mix(in oklch, var(--primary) 8%, transparent); }
-					.prw-phase-heading { margin: 0 0 5px; padding: 5px 6px; }
-					.prw-phase-index, .prw-rail-pip { font-weight: 750; }
-					.prw-nav-card { border-radius: 7px; padding: 6px 7px 6px 28px; font-size: 12px; position: relative; }
-					.prw-nav-card .prw-nav-dot { position: absolute; left: 11px; }
-					.prw-nav-card.is-reviewed .prw-nav-dot, .prw-rail-dot.is-active, .prw-rail-pip.is-active { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 18%, transparent); }
-					.prw-card-pane { padding: 24px clamp(14px, 3vw, 46px) 34px; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
-					.prw-card { display: grid; gap: 14px; }
-					.prw-card-story, .prw-card-comments, .prw-no-diff { border: 1px solid var(--border); border-radius: 18px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 16px; box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground) 5%, transparent); }
-					.prw-card h2 { letter-spacing: -.02em; }
-					.prw-summary, .prw-rationale { max-width: 860px; line-height: 1.62; }
-					.prw-rationale { background: color-mix(in oklch, var(--chart-3) 7%, transparent); border-radius: 0 10px 10px 0; padding-top: 8px; padding-bottom: 8px; }
-					.prw-orientation-stepper { background: color-mix(in oklch, var(--background) 76%, var(--card)); }
-					.prw-stepper-card { border: 1px solid color-mix(in oklch, var(--border) 70%, transparent); border-radius: 14px; background: color-mix(in oklch, var(--card) 98%, var(--background)); padding: 12px; }
-					.prw-file-roles > div { background: color-mix(in oklch, var(--card) 88%, var(--background)); }
-					.prw-diff-toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; margin: 3px 0 -2px; }
-					.prw-diff-toolbar small { color: var(--muted-foreground); }
-					.prw-diff-mode { margin-top: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card); }
-					.prw-segment { border: 0; border-radius: 0; color: var(--muted-foreground); }
-					.prw-segment.is-active { background: var(--primary); color: var(--primary-foreground); }
-					.prw-diff-list { display: grid; gap: 12px; }
-					.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
-					.modebar .mode-toggle { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in oklch, var(--background) 62%, transparent); }
-					.modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground); }
-					.modebar .mode-toggle button.active { background: color-mix(in oklch, var(--primary) 22%, transparent); color: var(--primary); outline: 1px solid color-mix(in oklch, var(--primary) 42%, var(--border)); }
-					.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-					.diff-block { margin: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
-					.diff-block.closed .diff-overflow { display: none; }
-					.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
-					.diff-block.closed .diff-file-header-row { border-bottom: 0; }
-					.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font: inherit; color: inherit; text-align: left; cursor: pointer; }
-					.diff-external-link { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; padding: 0; border-left: 1px solid var(--border); color: var(--muted-foreground); text-decoration: none; }
-					.diff-external-link:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 7%, transparent); }
-					.diff-external-link svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.caret { width: 12px; color: var(--muted-foreground); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
-					.diff-block.open .caret { transform: rotate(90deg); }
-					.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
-					.diff-path b { color: var(--foreground); }
-					.diff-counts { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; }
-					.diff-add-count { color: var(--positive); }
-					.diff-del-count { color: var(--negative); }
-					.diff-comment-count { font-size: 11px; color: var(--negative); background: color-mix(in oklch, var(--negative) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
-					.diff-overflow { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
-					.split-grid { min-width: 980px; }
-					.inline-lines { min-width: 640px; }
-					.split-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; min-width: 100%; }
-					.split-row .diff-line:first-child { border-right: 1px solid var(--border); }
-					.hunk-header { display: grid; grid-template-columns: 60px minmax(0, 1fr); min-width: max-content; color: var(--muted-foreground); background: color-mix(in oklch, var(--info) 10%, transparent); font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-					.hunk-context-cell { min-height: 24px; padding: 3px; display: inline-flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; }
-					.hunk-signature { min-width: 0; padding: 3px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.6; }
-					.context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info) 10%, transparent); color: var(--muted-foreground); }
-					.context-toggle:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 18%, transparent); }
-					.context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.diff-line { position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: transparent; }
-					.diff-line.empty { pointer-events: none; color: transparent; }
-					.diff-line.add { background: color-mix(in oklch, var(--positive) 15%, transparent); }
-					.diff-line.del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
-					.diff-line:hover, .diff-line:focus-visible { outline: none; background: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
-					.diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary); font-size: 8px; }
-					.line-no, .prefix, .comment-cue { padding: 3px 6px; color: var(--muted-foreground); user-select: none; }
-					.line-no { position: relative; text-align: right; }
-					.line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
-					.comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary); color: var(--primary-foreground); line-height: 18px; font-weight: 800; opacity: 0; font-family: inherit; }
-					.diff-line:hover .comment-cue, .diff-line:focus-visible .comment-cue, .diff-line.editing .comment-cue, .diff-line.commented .comment-cue { opacity: 1; }
-					.line-comments, .line-editor, .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); background: color-mix(in oklch, var(--card) 88%, var(--background)); }
-					.comment, .suggestion { padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
-					.comment-meta { margin-bottom: 4px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-					.comment-body { white-space: pre-wrap; }
-					.comment-actions, .suggestion-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; justify-content: flex-end; }
-					.comment-actions button, .suggestion button { padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted-foreground); }
-					.comment-actions button:hover, .suggestion button:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
-					.comment-actions button.delete:hover, .suggestion button.delete:hover { color: var(--negative); background: color-mix(in oklch, var(--negative) 12%, transparent); }
-					.tok-keyword { color: var(--chart-4); }
-					.tok-string { color: var(--chart-2); }
-					.tok-number { color: var(--chart-3); }
-					.tok-comment { color: var(--muted-foreground); font-style: italic; }
-					.tok-property { color: var(--chart-1); }
-					.tok-function { color: var(--chart-6); }
-					.diff-block-error { padding: 12px; color: var(--negative); }
-					.prw-diff-block { margin-top: 0; border-radius: 12px; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
-					.prw-diff-header { padding: 9px 12px; }
-					.prw-diff-header strong { color: var(--chart-1); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; border: 1px solid color-mix(in oklch, var(--chart-1) 24%, var(--border)); border-radius: 5px; padding: 2px 6px; }
-					.prw-diff-scroll { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
-					.prw-diff-table { min-width: 680px; table-layout: fixed; }
-					.prw-side-diff { min-width: 860px; }
-					.prw-inline-diff { min-width: 640px; }
-					.prw-diff-table td { padding: 3px 6px; }
-					.prw-code { min-width: 0; overflow: visible; }
-					.prw-code code { display: block; width: max-content; min-width: 100%; background: transparent; padding: 0; }
-					.prw-line-comment-button { background: color-mix(in oklch, var(--card) 82%, transparent); }
-					.prw-line-comment-button:hover, .prw-line:focus-within .prw-line-comment-button { background: var(--primary); color: var(--primary-foreground); }
-					.prw-suggested-comment { position: relative; border-left: 4px solid color-mix(in oklch, var(--warning) 70%, var(--border)); }
-					.prw-inline-suggested-comment { margin-top: 0; background: color-mix(in oklch, var(--warning) 10%, var(--card)); }
-					.prw-card-suggestions { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 12px; }
-					.prw-suggestion-chip { display: grid; gap: 4px; text-align: left; white-space: normal; border-radius: 10px; background: color-mix(in oklch, var(--warning) 8%, var(--card)); border-color: color-mix(in oklch, var(--warning) 30%, var(--border)); line-height: 1.35; }
-					.prw-suggestion-chip span { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
-					.prw-card-editor, .prw-comment-editor textarea { font: inherit; resize: vertical; }
-					.prw-review-controls { margin-top: 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 16px; background: color-mix(in oklch, var(--card) 96%, var(--background)); box-shadow: 0 10px 28px color-mix(in oklch, var(--foreground) 4%, transparent); }
-					button { cursor: pointer; font: inherit; }
-					.prw-pending { display: block; padding: 0; color: var(--foreground); }
-					.prw-pending-header .prw-pr-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; }
-					.prw-pending-badge { border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border)); border-radius: 999px; background: color-mix(in oklch, var(--card) 78%, transparent); color: var(--primary); padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }
-					.prw-pending-nav-line, .prw-pending-line, .prw-pending-code span { display: block; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
-					.prw-pending-nav-line { height: 9px; margin: 8px 9px 12px 36px; }
-					.prw-pending-card .prw-card-story { border-style: dashed; }
-					.prw-pending-line { height: 10px; width: 70%; margin-top: 10px; }
-					.prw-pending-line.is-wide { width: 92%; }
-					.prw-pending-code { display: grid; gap: 8px; padding: 14px; }
-					.prw-pending-code span { height: 12px; }
-					.prw-pending-code span:nth-child(2) { width: 74%; background: color-mix(in oklch, var(--positive) 18%, transparent); }
-					.prw-pending-code span:nth-child(3) { width: 58%; background: color-mix(in oklch, var(--negative) 16%, transparent); }
+					.prw-root * { box-sizing: border-box; }
+					.prw-root .prw-shell { min-height: calc(100vh - 24px); background: color-mix(in oklch, var(--card) 92%, var(--background)); box-shadow: 0 22px 70px color-mix(in oklch, var(--foreground) 10%, transparent); }
+					.prw-root .prw-review-header { padding: 16px 18px 14px; background: linear-gradient(135deg, color-mix(in oklch, var(--card) 88%, var(--background)), color-mix(in oklch, var(--chart-1) 10%, transparent)); }
+					.prw-root .prw-review-header h1 { overflow-wrap: anywhere; }
+					.prw-root .prw-pr-pill { color: var(--chart-1); border-color: color-mix(in oklch, var(--chart-1) 28%, var(--border)); }
+					.prw-root .prw-gh-link, .prw-root .prw-submit-button, .prw-root .prw-like-button { box-shadow: 0 8px 20px color-mix(in oklch, var(--primary) 18%, transparent); }
+					.prw-root .prw-progress-fill { background: linear-gradient(90deg, var(--primary), color-mix(in oklch, var(--chart-2) 65%, var(--primary))); }
+					.prw-root .prw-progress-indeterminate { width: 42%; animation: prw-pulse 1.45s ease-in-out infinite; }
+					.prw-root .prw-workspace { min-height: 540px; overflow: hidden; }
+					.prw-root .prw-phase-rail { width: 248px; flex-basis: 248px; padding: 12px; background: color-mix(in oklch, var(--card) 62%, var(--background)); }
+					.prw-root .prw-phase-rail-collapsed { background: color-mix(in oklch, var(--card) 62%, var(--background)); overflow-y: auto; overflow-x: hidden; }
+					.prw-root .prw-phase { margin: 3px 0 10px; border-radius: 10px; padding: 2px; }
+					.prw-root .prw-phase.is-active { background: color-mix(in oklch, var(--primary) 8%, transparent); }
+					.prw-root .prw-phase-heading { margin: 0 0 5px; padding: 5px 6px; }
+					.prw-root .prw-phase-index, .prw-root .prw-rail-pip { font-weight: 750; }
+					.prw-root .prw-nav-card { border-radius: 7px; padding: 6px 7px 6px 28px; font-size: 12px; position: relative; }
+					.prw-root .prw-nav-card .prw-nav-dot { position: absolute; left: 11px; }
+					.prw-root .prw-nav-card.is-reviewed .prw-nav-dot, .prw-root .prw-rail-dot.is-active, .prw-root .prw-rail-pip.is-active { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 18%, transparent); }
+					.prw-root .prw-card-pane { padding: 24px clamp(14px, 3vw, 46px) 34px; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.prw-root .prw-card { display: grid; gap: 14px; }
+					.prw-root .prw-card-story, .prw-root .prw-card-comments, .prw-root .prw-no-diff { border: 1px solid var(--border); border-radius: 18px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 16px; box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground) 5%, transparent); }
+					.prw-root .prw-card h2 { letter-spacing: -.02em; }
+					.prw-root .prw-summary, .prw-root .prw-rationale { max-width: 860px; line-height: 1.62; }
+					.prw-root .prw-rationale { background: color-mix(in oklch, var(--chart-3) 7%, transparent); border-radius: 0 10px 10px 0; padding-top: 8px; padding-bottom: 8px; }
+					.prw-root .prw-orientation-stepper { background: color-mix(in oklch, var(--background) 76%, var(--card)); }
+					.prw-root .prw-stepper-card { border: 1px solid color-mix(in oklch, var(--border) 70%, transparent); border-radius: 14px; background: color-mix(in oklch, var(--card) 98%, var(--background)); padding: 12px; }
+					.prw-root .prw-file-roles > div { background: color-mix(in oklch, var(--card) 88%, var(--background)); }
+					.prw-root .prw-diff-toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; margin: 3px 0 -2px; }
+					.prw-root .prw-diff-toolbar small { color: var(--muted-foreground); }
+					.prw-root .prw-diff-mode { margin-top: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card); }
+					.prw-root .prw-segment { border: 0; border-radius: 0; color: var(--muted-foreground); }
+					.prw-root .prw-segment.is-active { background: var(--primary); color: var(--primary-foreground); }
+					.prw-root .prw-diff-list { display: grid; gap: 12px; }
+					.prw-root .modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
+					.prw-root .modebar .mode-toggle { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in oklch, var(--background) 62%, transparent); }
+					.prw-root .modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground); }
+					.prw-root .modebar .mode-toggle button.active { background: color-mix(in oklch, var(--primary) 22%, transparent); color: var(--primary); outline: 1px solid color-mix(in oklch, var(--primary) 42%, var(--border)); }
+					.prw-root .modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+					.prw-root .diff-block { margin: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root .diff-block.closed .diff-overflow { display: none; }
+					.prw-root .diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
+					.prw-root .diff-block.closed .diff-file-header-row { border-bottom: 0; }
+					.prw-root .diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font: inherit; color: inherit; text-align: left; cursor: pointer; }
+					.prw-root .diff-external-link { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; padding: 0; border-left: 1px solid var(--border); color: var(--muted-foreground); text-decoration: none; }
+					.prw-root .diff-external-link:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 7%, transparent); }
+					.prw-root .diff-external-link svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.prw-root .caret { width: 12px; color: var(--muted-foreground); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
+					.prw-root .diff-block.open .caret { transform: rotate(90deg); }
+					.prw-root .diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
+					.prw-root .diff-path b { color: var(--foreground); }
+					.prw-root .diff-counts { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; }
+					.prw-root .diff-add-count { color: var(--positive); }
+					.prw-root .diff-del-count { color: var(--negative); }
+					.prw-root .diff-comment-count { font-size: 11px; color: var(--negative); background: color-mix(in oklch, var(--negative) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
+					.prw-root .diff-overflow { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
+					.prw-root .split-grid { min-width: 980px; }
+					.prw-root .inline-lines { min-width: 640px; }
+					.prw-root .split-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; min-width: 100%; }
+					.prw-root .split-row .diff-line:first-child { border-right: 1px solid var(--border); }
+					.prw-root .hunk-header { display: grid; grid-template-columns: 60px minmax(0, 1fr); min-width: max-content; color: var(--muted-foreground); background: color-mix(in oklch, var(--info) 10%, transparent); font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+					.prw-root .hunk-context-cell { min-height: 24px; padding: 3px; display: inline-flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; }
+					.prw-root .hunk-signature { min-width: 0; padding: 3px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.6; }
+					.prw-root .context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info) 10%, transparent); color: var(--muted-foreground); }
+					.prw-root .context-toggle:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 18%, transparent); }
+					.prw-root .context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.prw-root .diff-line { position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: transparent; }
+					.prw-root .diff-line.empty { pointer-events: none; color: transparent; }
+					.prw-root .diff-line.add { background: color-mix(in oklch, var(--positive) 15%, transparent); }
+					.prw-root .diff-line.del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.prw-root .diff-line:hover, .prw-root .diff-line:focus-visible { outline: none; background: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
+					.prw-root .diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary); font-size: 8px; }
+					.prw-root .line-no, .prw-root .prefix, .prw-root .comment-cue { padding: 3px 6px; color: var(--muted-foreground); user-select: none; }
+					.prw-root .line-no { position: relative; text-align: right; }
+					.prw-root .line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+					.prw-root .comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary); color: var(--primary-foreground); line-height: 18px; font-weight: 800; opacity: 0; font-family: inherit; }
+					.prw-root .diff-line:hover .comment-cue, .prw-root .diff-line:focus-visible .comment-cue, .prw-root .diff-line.editing .comment-cue, .prw-root .diff-line.commented .comment-cue { opacity: 1; }
+					.prw-root .line-comments, .prw-root .line-editor, .prw-root .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); background: color-mix(in oklch, var(--card) 88%, var(--background)); }
+					.prw-root .comment, .prw-root .suggestion { padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
+					.prw-root .comment-meta { margin-bottom: 4px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.prw-root .comment-body { white-space: pre-wrap; }
+					.prw-root .comment-actions, .prw-root .suggestion-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; justify-content: flex-end; }
+					.prw-root .comment-actions button, .prw-root .suggestion button { padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted-foreground); }
+					.prw-root .comment-actions button:hover, .prw-root .suggestion button:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
+					.prw-root .comment-actions button.delete:hover, .prw-root .suggestion button.delete:hover { color: var(--negative); background: color-mix(in oklch, var(--negative) 12%, transparent); }
+					.prw-root .tok-keyword { color: var(--chart-4); }
+					.prw-root .tok-string { color: var(--chart-2); }
+					.prw-root .tok-number { color: var(--chart-3); }
+					.prw-root .tok-comment { color: var(--muted-foreground); font-style: italic; }
+					.prw-root .tok-property { color: var(--chart-1); }
+					.prw-root .tok-function { color: var(--chart-6); }
+					.prw-root .diff-block-error { padding: 12px; color: var(--negative); }
+					.prw-root .prw-diff-block { margin-top: 0; border-radius: 12px; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root .prw-diff-header { padding: 9px 12px; }
+					.prw-root .prw-diff-header strong { color: var(--chart-1); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; border: 1px solid color-mix(in oklch, var(--chart-1) 24%, var(--border)); border-radius: 5px; padding: 2px 6px; }
+					.prw-root .prw-diff-scroll { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
+					.prw-root .prw-diff-table { min-width: 680px; table-layout: fixed; }
+					.prw-root .prw-side-diff { min-width: 860px; }
+					.prw-root .prw-inline-diff { min-width: 640px; }
+					.prw-root .prw-diff-table td { padding: 3px 6px; }
+					.prw-root .prw-code { min-width: 0; overflow: visible; }
+					.prw-root .prw-code code { display: block; width: max-content; min-width: 100%; background: transparent; padding: 0; }
+					.prw-root .prw-line-comment-button { background: color-mix(in oklch, var(--card) 82%, transparent); }
+					.prw-root .prw-line-comment-button:hover, .prw-root .prw-line:focus-within .prw-line-comment-button { background: var(--primary); color: var(--primary-foreground); }
+					.prw-root .prw-suggested-comment { position: relative; border-left: 4px solid color-mix(in oklch, var(--warning) 70%, var(--border)); }
+					.prw-root .prw-inline-suggested-comment { margin-top: 0; background: color-mix(in oklch, var(--warning) 10%, var(--card)); }
+					.prw-root .prw-card-suggestions { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 12px; }
+					.prw-root .prw-suggestion-chip { display: grid; gap: 4px; text-align: left; white-space: normal; border-radius: 10px; background: color-mix(in oklch, var(--warning) 8%, var(--card)); border-color: color-mix(in oklch, var(--warning) 30%, var(--border)); line-height: 1.35; }
+					.prw-root .prw-suggestion-chip span { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+					.prw-root .prw-card-editor, .prw-root .prw-comment-editor textarea { font: inherit; resize: vertical; }
+					.prw-root .prw-review-controls { margin-top: 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 16px; background: color-mix(in oklch, var(--card) 96%, var(--background)); box-shadow: 0 10px 28px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root button { cursor: pointer; font: inherit; }
+					.prw-root .prw-pending { display: block; padding: 0; color: var(--foreground); }
+					.prw-root .prw-pending-header .prw-pr-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; }
+					.prw-root .prw-pending-badge { border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--border)); border-radius: 999px; background: color-mix(in oklch, var(--card) 78%, transparent); color: var(--primary); padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+					.prw-root .prw-pending-nav-line, .prw-root .prw-pending-line, .prw-root .prw-pending-code span { display: block; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
+					.prw-root .prw-pending-nav-line { height: 9px; margin: 8px 9px 12px 36px; }
+					.prw-root .prw-pending-card .prw-card-story { border-style: dashed; }
+					.prw-root .prw-pending-line { height: 10px; width: 70%; margin-top: 10px; }
+					.prw-root .prw-pending-line.is-wide { width: 92%; }
+					.prw-root .prw-pending-code { display: grid; gap: 8px; padding: 14px; }
+					.prw-root .prw-pending-code span { height: 12px; }
+					.prw-root .prw-pending-code span:nth-child(2) { width: 74%; background: color-mix(in oklch, var(--positive) 18%, transparent); }
+					.prw-root .prw-pending-code span:nth-child(3) { width: 58%; background: color-mix(in oklch, var(--negative) 16%, transparent); }
 					@media (max-width: 900px) {
-						.prw-workspace { min-height: 500px; }
-						.prw-phase-rail { display: none; }
-						.prw-phase-rail-collapsed { display: block; }
+						.prw-root .prw-workspace { min-height: 500px; }
+						.prw-root .prw-phase-rail { display: none; }
+						.prw-root .prw-phase-rail-collapsed { display: block; }
 					}
 					@media (max-width: 760px) {
-						.prw-shell { min-height: 100vh; }
-						.prw-review-header { padding: 14px; }
-						.prw-card-story, .prw-card-comments, .prw-no-diff { border-radius: 14px; padding: 12px; }
-						.prw-side-diff { min-width: 840px; }
+						.prw-root .prw-shell { min-height: 100vh; }
+						.prw-root .prw-review-header { padding: 14px; }
+						.prw-root .prw-card-story, .prw-root .prw-card-comments, .prw-root .prw-no-diff { border-radius: 14px; padding: 12px; }
+						.prw-root .prw-side-diff { min-width: 840px; }
 					}
 
 					/* Historical compact shell parity overrides. */
-					.prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-					.shell { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); position: relative; height: calc(100vh - 24px); min-height: 620px; display: grid; grid-template-rows: 58px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-					.header { height: 58px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 260px) auto; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
-					.title-group { min-width: 0; display: flex; align-items: center; gap: 10px; }
-					.pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
-					.title-stack { min-width: 0; }
-					.header h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.2; letter-spacing: -.01em; }
-					.header-meta { display: flex; gap: 8px; margin-top: 3px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
-					.add { color: var(--positive); } .del { color: var(--negative); }
-					.github-link { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
-					.github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-					.progress-wrap { display: grid; grid-template-columns: auto minmax(72px, 1fr); align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
-					.progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
-					.progress-fill { height: 100%; background: var(--primary); border-radius: inherit; }
-					.submit, .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
-					.secondary { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); padding: 6px 10px; }
-					.body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); }
-					.rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }
-					.rail .prw-phase-rail { width: auto; flex: none; }
-					.rail-panel { height: 100%; overflow: auto; padding: 9px 8px 14px; }
-					.rail-panel.compact { display: none; }
-					.rail.collapsed .rail-panel.labelled, .body.rail-collapsed .rail-panel.labelled { display: none; }
-					.rail.collapsed .rail-panel.compact, .body.rail-collapsed .rail-panel.compact { display: block; }
-					.body.rail-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
-					.rail-top { display: flex; align-items: center; justify-content: space-between; min-height: 30px; padding: 0 4px 7px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-					.rail-toggle { width: 25px; height: 25px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); font-weight: 800; }
-					.phase { margin: 3px 0 9px; }
-					.phase-button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
-					.phase.active .phase-button, .phase-button:hover { background: color-mix(in oklch, var(--primary) 8%, transparent); color: var(--foreground); }
-					.phase-pip, .step-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 10px; font-weight: 800; }
-					.phase-name, .card-label, .step-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-					.phase-count { font-size: 11px; }
-					.phase-cards { display: grid; gap: 2px; }
-					.card-button { width: 100%; min-height: 27px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px 7px; text-align: left; }
-					.card-button:hover, .card-button.active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
-					.card-dot { display: inline-grid; place-items: center; width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 9px; font-weight: 900; }
-					.card-button.complete .card-dot { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
-					.card-button.disliked .card-dot { border-color: var(--negative); background: var(--negative); color: var(--negative-foreground, var(--primary-foreground)); }
-					.card-button.active .card-dot { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
-					.orientation-rail { display: grid; gap: 3px; margin: 3px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
-					.orientation-step { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
-					.orientation-step.current { color: var(--foreground); background: color-mix(in oklch, var(--chart-1) 10%, transparent); }
-					.orientation-step.visited .step-dot { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
-					.compact .rail-toggle { margin: 0 auto 8px; display: block; }
-					.compact .orientation-step, .compact .card-button, .compact .phase-pip { justify-content: center; width: 32px; margin: 0 auto; padding: 4px; }
-					.compact .orientation-rail { justify-items: center; }
-					.legacy-navrail-marker, .legacy-nav-card-marker { display: block; width: 1px; height: 1px; margin: 0 auto; overflow: hidden; opacity: .01; }
-					.walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
-					.walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
-					.content { min-width: 0; overflow: auto; padding: 14px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
-					.card { max-width: 1120px; margin: 0 auto 18px; display: grid; gap: 10px; }
-					.inner, .guide, .state-card, .audit-draft, .prw-card-comments, .no-diff { border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 13px; box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
-					.card-head, .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-					.phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
-					.card h1, .card h2, .guide h1, .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
-					.summary { margin: 8px 0 0; color: var(--muted-foreground); }
-					.rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
-					.checklist { margin: 10px 0 0; color: var(--muted-foreground); }
-					.nav-label { color: var(--muted-foreground); font-size: 11px; }
-					.original-description { margin-top: 10px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; color: var(--muted-foreground); }
-					.original-description summary { color: var(--foreground); cursor: pointer; font-weight: 700; }
-					.diff-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
-					.actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
-					.decision-note { color: var(--muted-foreground); font-size: 12px; }
-					.decision-buttons { display: flex; gap: 8px; }
-					.like, .dislike { border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); padding: 6px 10px; font-weight: 750; }
-					.like { border-color: color-mix(in oklch, var(--positive) 35%, var(--border)); }
-					.dislike { border-color: color-mix(in oklch, var(--negative) 35%, var(--border)); }
-					.decision-selected.like { background: color-mix(in oklch, var(--positive) 15%, var(--card)); color: var(--positive); box-shadow: inset 0 0 0 1px var(--positive); }
-					.decision-selected.dislike { background: color-mix(in oklch, var(--negative) 13%, var(--card)); color: var(--negative); box-shadow: inset 0 0 0 1px var(--negative); }
-					.guide { padding: 16px; }
-					.guide-counter { border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
-					.guide-stage { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: color-mix(in oklch, var(--background) 76%, var(--card)); }
-					.beat { display: grid; gap: 10px; }
-					.beat h2 { font-size: 20px; }
-					.verdict, .concern, .filerow { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 9px; }
-					.verdict { border-color: color-mix(in oklch, var(--warning) 38%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
-					.verdict span, .filerow small { display: block; color: var(--muted-foreground); }
-					.guide-stats { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted-foreground); }
-					.concerns, .filemap { display: grid; gap: 8px; }
-					.concern strong, .filerow strong { display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted-foreground); }
-					.filerow span { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-					.guide-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-					.export-backdrop { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: color-mix(in oklch, var(--background) 58%, transparent); backdrop-filter: blur(6px); }
-					.export-dialog { width: min(760px, 100%); max-height: 88%; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--card); color: var(--foreground); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); padding: 14px; }
-					.export-dialog header, .export-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-					.export-dialog h2 { margin: 3px 0 0; font-size: 17px; }
-					.warning { margin: 12px 0; border: 1px solid color-mix(in oklch, var(--warning) 45%, var(--border)); border-radius: 10px; padding: 10px; background: color-mix(in oklch, var(--warning) 9%, transparent); }
-					.export-rows { display: grid; gap: 8px; margin: 12px 0; }
-					.export-row, .export-empty, .export-error, .export-result { border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; background: color-mix(in oklch, var(--background) 72%, var(--card)); }
-					.export-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) auto; gap: 8px; align-items: start; }
-					.export-row strong, .export-empty strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-					.export-row span, .export-empty span { color: var(--muted-foreground); }
-					.export-row p { grid-column: 1 / -1; margin: 0; white-space: pre-wrap; }
-					.export-row.valid { border-color: color-mix(in oklch, var(--positive) 38%, var(--border)); }
-					.export-row.unmappable { border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); }
-					.export-target { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
-					.export-status { font-weight: 750; color: var(--muted-foreground); }
-					.export-error { border-color: color-mix(in oklch, var(--negative) 45%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
-					.export-result { border-color: color-mix(in oklch, var(--positive) 45%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, transparent); }
-					.export-body { max-height: 320px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); white-space: pre-wrap; }
-					.state-shell .state-content { display: grid; align-content: start; padding-top: 16px; }
-					.state-shell .state-card h2 { margin: 4px 0 0; font-size: 18px; }
-					.state-shell .state-card p { margin: 8px 0 0; color: var(--muted-foreground); }
-					.state-skeleton { display: grid; gap: 8px; margin-top: 14px; }
-					.state-skeleton span { display: block; height: 10px; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
-					.state-skeleton span:nth-child(2) { width: 74%; } .state-skeleton span:nth-child(3) { width: 56%; }
-					button:disabled { opacity: .48; cursor: not-allowed; }
-					.body.narrow { grid-template-columns: 48px minmax(0, 1fr); }
-					.body.narrow .rail-panel.labelled { display: none !important; }
-					.body.narrow .rail-panel.compact { display: block !important; }
-					.body.narrow .walkthrough-rail-resize-handle, .rail.narrow .walkthrough-rail-resize-handle { display: none; }
-					@media (max-width: 900px) { .body { grid-template-columns: 48px minmax(0, 1fr); } .rail-panel.labelled { display: none !important; } .rail-panel.compact { display: block !important; } .walkthrough-rail-resize-handle { display: none; } .header { grid-template-columns: minmax(0, 1fr) auto; height: auto; min-height: 58px; padding: 8px 10px; } .github-link { display: none; } .progress-wrap { grid-column: 1 / -1; } .shell { height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } }
+					.prw-root .prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+					.prw-root .shell { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); position: relative; height: calc(100vh - 24px); min-height: 620px; display: grid; grid-template-rows: 58px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+					.prw-root .header { height: 58px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 260px) auto; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
+					.prw-root .title-group { min-width: 0; display: flex; align-items: center; gap: 10px; }
+					.prw-root .pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
+					.prw-root .title-stack { min-width: 0; }
+					.prw-root .header h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.2; letter-spacing: -.01em; }
+					.prw-root .header-meta { display: flex; gap: 8px; margin-top: 3px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+					.prw-root .add { color: var(--positive); } .del { color: var(--negative); }
+					.prw-root .github-link { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-foreground); text-decoration: none; font-size: 12px; white-space: nowrap; }
+					.prw-root .github-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.prw-root .progress-wrap { display: grid; grid-template-columns: auto minmax(72px, 1fr); align-items: center; gap: 8px; color: var(--muted-foreground); font-size: 12px; }
+					.prw-root .progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 14%, transparent); }
+					.prw-root .progress-fill { height: 100%; background: var(--primary); border-radius: inherit; }
+					.prw-root .submit, .prw-root .primary { border: 1px solid var(--primary); border-radius: 999px; background: var(--primary); color: var(--primary-foreground); padding: 6px 10px; font-weight: 700; }
+					.prw-root .secondary { border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--card) 92%, var(--background)); color: var(--foreground); padding: 6px 10px; }
+					.prw-root .body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); }
+					.prw-root .rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }
+					.prw-root .rail .prw-phase-rail { width: auto; flex: none; }
+					.prw-root .rail-panel { height: 100%; overflow: auto; padding: 9px 8px 14px; }
+					.prw-root .rail-panel.compact { display: none; }
+					.prw-root .rail.collapsed .rail-panel.labelled, .prw-root .body.rail-collapsed .rail-panel.labelled { display: none; }
+					.prw-root .rail.collapsed .rail-panel.compact, .prw-root .body.rail-collapsed .rail-panel.compact { display: block; }
+					.prw-root .body.rail-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
+					.prw-root .rail-top { display: flex; align-items: center; justify-content: space-between; min-height: 30px; padding: 0 4px 7px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.prw-root .rail-toggle { width: 25px; height: 25px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); font-weight: 800; }
+					.prw-root .phase { margin: 3px 0 9px; }
+					.prw-root .phase-button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
+					.prw-root .phase.active .phase-button, .prw-root .phase-button:hover { background: color-mix(in oklch, var(--primary) 8%, transparent); color: var(--foreground); }
+					.prw-root .phase-pip, .prw-root .step-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 10px; font-weight: 800; }
+					.prw-root .phase-name, .prw-root .card-label, .prw-root .step-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+					.prw-root .phase-count { font-size: 11px; }
+					.prw-root .phase-cards { display: grid; gap: 2px; }
+					.prw-root .card-button { width: 100%; min-height: 27px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px 7px; text-align: left; }
+					.prw-root .card-button:hover, .prw-root .card-button.active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
+					.prw-root .card-dot { display: inline-grid; place-items: center; width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 9px; font-weight: 900; }
+					.prw-root .card-button.complete .card-dot { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+					.prw-root .card-button.disliked .card-dot { border-color: var(--negative); background: var(--negative); color: var(--negative-foreground, var(--primary-foreground)); }
+					.prw-root .card-button.active .card-dot { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
+					.prw-root .orientation-rail { display: grid; gap: 3px; margin: 3px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+					.prw-root .orientation-step { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
+					.prw-root .orientation-step.current { color: var(--foreground); background: color-mix(in oklch, var(--chart-1) 10%, transparent); }
+					.prw-root .orientation-step.visited .step-dot { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+					.prw-root .compact .rail-toggle { margin: 0 auto 8px; display: block; }
+					.prw-root .compact .orientation-step, .prw-root .compact .card-button, .prw-root .compact .phase-pip { justify-content: center; width: 32px; margin: 0 auto; padding: 4px; }
+					.prw-root .compact .orientation-rail { justify-items: center; }
+					.prw-root .legacy-navrail-marker, .prw-root .legacy-nav-card-marker { display: block; width: 1px; height: 1px; margin: 0 auto; overflow: hidden; opacity: .01; }
+					.prw-root .walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
+					.prw-root .walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
+					.prw-root .content { min-width: 0; overflow: auto; padding: 14px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.prw-root .card { max-width: 1120px; margin: 0 auto 18px; display: grid; gap: 10px; }
+					.prw-root .inner, .prw-root .guide, .prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 13px; box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root .card-head, .prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+					.prw-root .phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
+					.prw-root .card h1, .prw-root .card h2, .prw-root .guide h1, .prw-root .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
+					.prw-root .summary { margin: 8px 0 0; color: var(--muted-foreground); }
+					.prw-root .rationale { margin: 10px 0 0; padding: 8px 10px; border-left: 3px solid var(--chart-3); border-radius: 0 8px 8px 0; background: color-mix(in oklch, var(--chart-3) 7%, transparent); color: var(--muted-foreground); }
+					.prw-root .checklist { margin: 10px 0 0; color: var(--muted-foreground); }
+					.prw-root .nav-label { color: var(--muted-foreground); font-size: 11px; }
+					.prw-root .original-description { margin-top: 10px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; color: var(--muted-foreground); }
+					.prw-root .original-description summary { color: var(--foreground); cursor: pointer; font-weight: 700; }
+					.prw-root .diff-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+					.prw-root .actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
+					.prw-root .decision-note { color: var(--muted-foreground); font-size: 12px; }
+					.prw-root .decision-buttons { display: flex; gap: 8px; }
+					.prw-root .like, .prw-root .dislike { border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); padding: 6px 10px; font-weight: 750; }
+					.prw-root .like { border-color: color-mix(in oklch, var(--positive) 35%, var(--border)); }
+					.prw-root .dislike { border-color: color-mix(in oklch, var(--negative) 35%, var(--border)); }
+					.prw-root .decision-selected.like { background: color-mix(in oklch, var(--positive) 15%, var(--card)); color: var(--positive); box-shadow: inset 0 0 0 1px var(--positive); }
+					.prw-root .decision-selected.dislike { background: color-mix(in oklch, var(--negative) 13%, var(--card)); color: var(--negative); box-shadow: inset 0 0 0 1px var(--negative); }
+					.prw-root .guide { padding: 16px; }
+					.prw-root .guide-counter { border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; color: var(--muted-foreground); font-weight: 750; }
+					.prw-root .guide-stage { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: color-mix(in oklch, var(--background) 76%, var(--card)); }
+					.prw-root .beat { display: grid; gap: 10px; }
+					.prw-root .beat h2 { font-size: 20px; }
+					.prw-root .verdict, .prw-root .concern, .prw-root .filerow { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 9px; }
+					.prw-root .verdict { border-color: color-mix(in oklch, var(--warning) 38%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
+					.prw-root .verdict span, .prw-root .filerow small { display: block; color: var(--muted-foreground); }
+					.prw-root .guide-stats { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted-foreground); }
+					.prw-root .concerns, .prw-root .filemap { display: grid; gap: 8px; }
+					.prw-root .concern strong, .prw-root .filerow strong { display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--muted-foreground); }
+					.prw-root .filerow span { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+					.prw-root .guide-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+					.prw-root .export-backdrop { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: color-mix(in oklch, var(--background) 58%, transparent); backdrop-filter: blur(6px); }
+					.prw-root .export-dialog { width: min(760px, 100%); max-height: 88%; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--card); color: var(--foreground); box-shadow: 0 24px 80px color-mix(in oklch, var(--foreground) 18%, transparent); padding: 14px; }
+					.prw-root .export-dialog header, .prw-root .export-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+					.prw-root .export-dialog h2 { margin: 3px 0 0; font-size: 17px; }
+					.prw-root .warning { margin: 12px 0; border: 1px solid color-mix(in oklch, var(--warning) 45%, var(--border)); border-radius: 10px; padding: 10px; background: color-mix(in oklch, var(--warning) 9%, transparent); }
+					.prw-root .export-rows { display: grid; gap: 8px; margin: 12px 0; }
+					.prw-root .export-row, .prw-root .export-empty, .prw-root .export-error, .prw-root .export-result { border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; background: color-mix(in oklch, var(--background) 72%, var(--card)); }
+					.prw-root .export-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) auto; gap: 8px; align-items: start; }
+					.prw-root .export-row strong, .prw-root .export-empty strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.prw-root .export-row span, .prw-root .export-empty span { color: var(--muted-foreground); }
+					.prw-root .export-row p { grid-column: 1 / -1; margin: 0; white-space: pre-wrap; }
+					.prw-root .export-row.valid { border-color: color-mix(in oklch, var(--positive) 38%, var(--border)); }
+					.prw-root .export-row.unmappable { border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); }
+					.prw-root .export-target { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
+					.prw-root .export-status { font-weight: 750; color: var(--muted-foreground); }
+					.prw-root .export-error { border-color: color-mix(in oklch, var(--negative) 45%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
+					.prw-root .export-result { border-color: color-mix(in oklch, var(--positive) 45%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, transparent); }
+					.prw-root .export-body { max-height: 320px; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); color: var(--foreground); white-space: pre-wrap; }
+					.prw-root .state-shell .state-content { display: grid; align-content: start; padding-top: 16px; }
+					.prw-root .state-shell .state-card h2 { margin: 4px 0 0; font-size: 18px; }
+					.prw-root .state-shell .state-card p { margin: 8px 0 0; color: var(--muted-foreground); }
+					.prw-root .state-skeleton { display: grid; gap: 8px; margin-top: 14px; }
+					.prw-root .state-skeleton span { display: block; height: 10px; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground) 16%, transparent); animation: prw-pulse 1.6s ease-in-out infinite; }
+					.prw-root .state-skeleton span:nth-child(2) { width: 74%; } .prw-root .state-skeleton span:nth-child(3) { width: 56%; }
+					.prw-root button:disabled { opacity: .48; cursor: not-allowed; }
+					.prw-root .body.narrow { grid-template-columns: 48px minmax(0, 1fr); }
+					.prw-root .body.narrow .rail-panel.labelled { display: none !important; }
+					.prw-root .body.narrow .rail-panel.compact { display: block !important; }
+					.prw-root .body.narrow .walkthrough-rail-resize-handle, .prw-root .rail.narrow .walkthrough-rail-resize-handle { display: none; }
+					@media (max-width: 900px) { .prw-root .body { grid-template-columns: 48px minmax(0, 1fr); } .prw-root .rail-panel.labelled { display: none !important; } .prw-root .rail-panel.compact { display: block !important; } .prw-root .walkthrough-rail-resize-handle { display: none; } .prw-root .header { grid-template-columns: minmax(0, 1fr) auto; height: auto; min-height: 58px; padding: 8px 10px; } .prw-root .github-link { display: none; } .prw-root .progress-wrap { grid-column: 1 / -1; } .prw-root .shell { height: 100vh; min-height: 560px; grid-template-rows: auto minmax(0, 1fr); } }
 
 				</style>
 				<div class="prw-root" data-testid="prw-panel-root" data-prw-job=${displayJob}>

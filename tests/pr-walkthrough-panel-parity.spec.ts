@@ -28,6 +28,7 @@ const root = () => document.getElementById("root");
 let currentParams = {};
 let currentHost = undefined;
 let renderQueued = false;
+const hostStoreData = new Map();
 
 const READY_YAML = ` + JSON.stringify(`pr:
   provider: github
@@ -193,8 +194,12 @@ function makeHost(mode) {
   return {
     store: {
       async get(key) {
+        if (hostStoreData.has(key)) return hostStoreData.get(key);
         if (!key.startsWith("binding/")) return undefined;
         return { jobId: mode === "ready" ? "job-ready" : "job-pending", baseSha: "abcdef1234567890", headSha: "fedcba0987654321" };
+      },
+      async put(key, value) {
+        hostStoreData.set(key, value);
       },
     },
     async callRoute(route) {
@@ -220,6 +225,10 @@ function renderPanel(params, host) {
 
 window.__renderPrwPending = () => renderPanel({ __sessionId: "child-pending", jobId: "job-pending" }, makeHost("pending"));
 window.__renderPrwReady = () => renderPanel({ __sessionId: "child-ready", jobId: "job-ready" }, makeHost("ready"));
+window.__clearPrwMemory = () => {
+  window.__bobbitPrWalkthroughPanelState?.clear?.();
+};
+window.__prwHostStoreEntries = () => Array.from(hostStoreData.entries());
 window.__prwMissingReadyParityAffordances = () => {
   const hasText = (pattern) => pattern.test(document.body.textContent || "");
   const buttonText = (pattern) => Array.from(document.querySelectorAll("button")).some((button) => pattern.test([button.textContent, button.getAttribute("aria-label"), button.getAttribute("title")].filter(Boolean).join(" ")));
@@ -390,6 +399,26 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-labelled-rail"]);
 	});
 
+	test("pr-walkthrough shell parity: compact CSS selectors do not leak outside the panel root", async ({ page }) => {
+		await loadFixture(page);
+		await page.evaluate(() => {
+			const outside = document.createElement("div");
+			outside.id = "outside-card";
+			outside.className = "card actions like dislike primary secondary shell header body content warning";
+			outside.textContent = "outside control";
+			document.body.appendChild(outside);
+			(window as any).__renderPrwReady();
+		});
+		await expectRenderedReadyPanel(page);
+		const outside = await page.locator("#outside-card").evaluate((element: HTMLElement) => {
+			const style = getComputedStyle(element);
+			return { display: style.display, position: style.position, fontSize: style.fontSize };
+		});
+		expect(outside.display, "broad .card/.actions/.shell rules must be scoped under .prw-root").not.toBe("grid");
+		expect(outside.position, "broad .shell/.actions rules must not make unrelated nodes relative/sticky").toBe("static");
+		expect(outside.fontSize, "compact shell font must not leak to unrelated light-DOM nodes").not.toBe("13px");
+	});
+
 	test("pr-walkthrough shell parity: guided orientation rail and card navigation match the historical flow", async ({ page }) => {
 		await renderReady(page);
 		await expectRenderedReadyPanel(page);
@@ -469,6 +498,68 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
 		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]'), "pr-walkthrough shell parity: collapsed rail must preserve disliked/completed state").toHaveClass(/disliked/);
+	});
+
+	test("pr-walkthrough shell parity: reviewer state persists through recover/bundle reloads", async ({ page }) => {
+		await renderReady(page);
+		await expectRenderedReadyPanel(page);
+		await startReviewFromGuide(page);
+		await page.evaluate(() => {
+			(window as any).__prwCompleteEvents = 0;
+			document.addEventListener("pr-walkthrough:complete", () => { (window as any).__prwCompleteEvents += 1; }, { once: true });
+		});
+		await page.locator('[data-testid="pr-walkthrough-like"]').click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__prwCompleteEvents || 0)).toBeGreaterThan(0);
+		await page.locator('[data-testid="pr-walkthrough-rail-toggle"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/2\s*\/\s*2\s+reviewed/);
+		await expect.poll(async () => (await page.evaluate(() => (window as any).__prwHostStoreEntries())).length).toBeGreaterThan(0);
+
+		await page.evaluate(() => {
+			(window as any).__clearPrwMemory();
+			(window as any).__renderPrwReady();
+		});
+		await expectRenderedReadyPanel(page);
+		await expect(page.locator('[data-testid="pr-walkthrough-card-title"]')).toContainText("Final review controls");
+		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/2\s*\/\s*2\s+reviewed/);
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]')).toBeVisible();
+		await page.locator('[data-testid="pr-walkthrough-prev"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-like"]')).toHaveAttribute("aria-pressed", "true");
+	});
+
+	test("pr-walkthrough shell parity: audit card renders generated review draft and copy affordance", async ({ page }) => {
+		await renderReady(page);
+		await expectRenderedReadyPanel(page);
+		await startReviewFromGuide(page);
+		await page.locator('[data-testid="pr-walkthrough-add-card-comment"]').click();
+		const editor = page.locator('[data-testid="pr-walkthrough-comment-editor"][data-comment-scope="card"]');
+		await editor.locator('[data-testid="pr-walkthrough-comment-input"]').fill("Draft should mention this card note.");
+		await editor.locator('[data-testid="pr-walkthrough-comment-save"]').click();
+		await page.locator('[data-testid="pr-walkthrough-dislike"]').click();
+
+		await expect(page.locator('[data-testid="pr-walkthrough-audit"]')).toBeVisible();
+		await expect(page.locator('[data-testid="pr-walkthrough-draft"]')).toContainText("Diff review controls and comments");
+		await expect(page.locator('[data-testid="pr-walkthrough-draft"]')).toContainText("Decision: disliked");
+		await expect(page.locator('[data-testid="pr-walkthrough-draft"]')).toContainText("Draft should mention this card note.");
+		await expect(page.locator('[data-testid="pr-walkthrough-copy-draft"]')).toBeVisible();
+	});
+
+	test("pr-walkthrough shell parity: deleting the last supporting comment clears stale Dislike completion", async ({ page }) => {
+		await renderReady(page);
+		await expectRenderedReadyPanel(page);
+		await startReviewFromGuide(page);
+		await page.locator('[data-testid="pr-walkthrough-add-card-comment"]').click();
+		const editor = page.locator('[data-testid="pr-walkthrough-comment-editor"][data-comment-scope="card"]');
+		await editor.locator('[data-testid="pr-walkthrough-comment-input"]').fill("Only support for dislike.");
+		await editor.locator('[data-testid="pr-walkthrough-comment-save"]').click();
+		await page.locator('[data-testid="pr-walkthrough-dislike"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/2\s*\/\s*2\s+reviewed/);
+		await page.locator('[data-testid="pr-walkthrough-prev"]').click();
+		await page.locator('[data-testid="pr-walkthrough-comment-delete"]').click();
+		await expect(page.locator('[data-testid="pr-walkthrough-dislike"]')).toBeDisabled();
+		await expect(page.locator('[data-testid="pr-walkthrough-dislike"]')).toHaveAttribute("aria-pressed", "false");
+		await expect(page.locator('[data-testid="pr-walkthrough-progress"]')).toContainText(/1\s*\/\s*2\s+reviewed/);
+		await expect(page.locator('[data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]')).not.toHaveClass(/disliked/);
+		await expect(page.locator('[data-testid="pr-walkthrough-card-step"][data-card-id="diff-review"]')).not.toHaveClass(/complete/);
 	});
 
 	test("pr-walkthrough shell parity: Submit unlocks only after review completion and opens export preview", async ({ page }) => {
@@ -626,7 +717,7 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await editor.getByRole("button", { name: /Save comment|Save/ }).click();
 		await expect(firstBlock.locator('.diff-line.commented[data-line-id="L36"]')).toBeVisible();
 		await expect(header.locator('.diff-comment-count')).toContainText(/1 comment/);
-		await expect(firstBlock.locator('.line-comments, [data-testid="prw-line-user-comment"]')).toContainText("compact cue");
+		await expect(firstBlock.locator('.line-comments').first()).toContainText("compact cue");
 		await expect(dislike).toBeEnabled();
 
 		const blocks = page.locator('.diff-block, [data-testid="pr-walkthrough-diff-block"]');
