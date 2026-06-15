@@ -108,9 +108,10 @@ export function validateManifest(
 		}
 		return parsed;
 	};
-	const provides = parseCapabilities("provides");
+	const schemaSupportsExtensionKeys = schema >= 2;
+	const provides = schemaSupportsExtensionKeys ? parseCapabilities("provides") : undefined;
 	if (provides === null) return null;
-	const requires = parseCapabilities("requires");
+	const requires = schemaSupportsExtensionKeys ? parseCapabilities("requires") : undefined;
 	if (requires === null) return null;
 
 	const contents = d.contents;
@@ -148,18 +149,32 @@ export function validateManifest(
 	// contents.entrypoints — basenames of entrypoints/<name>.yaml files.
 	const entrypoints = parseContentsBasenames("entrypoints", c.entrypoints);
 	if (entrypoints === null) return null;
-	const providers = parseContentsBasenames("providers", c.providers);
-	if (providers === null) return null;
-	const hooks = parseContentsBasenames("hooks", c.hooks);
-	if (hooks === null) return null;
-	const mcp = parseContentsBasenames("mcp", c.mcp);
-	if (mcp === null) return null;
-	const piExtensions = parseContentsBasenames("pi-extensions", c["pi-extensions"]);
-	if (piExtensions === null) return null;
-	const runtimes = parseContentsBasenames("runtimes", c.runtimes);
-	if (runtimes === null) return null;
-	const workflows = parseContentsBasenames("workflows", c.workflows);
-	if (workflows === null) return null;
+	let providers: string[] = [];
+	let hooks: string[] = [];
+	let mcp: string[] = [];
+	let piExtensions: string[] = [];
+	let runtimes: string[] = [];
+	let workflows: string[] = [];
+	if (schemaSupportsExtensionKeys) {
+		const parsedProviders = parseContentsBasenames("providers", c.providers);
+		if (parsedProviders === null) return null;
+		providers = parsedProviders;
+		const parsedHooks = parseContentsBasenames("hooks", c.hooks);
+		if (parsedHooks === null) return null;
+		hooks = parsedHooks;
+		const parsedMcp = parseContentsBasenames("mcp", c.mcp);
+		if (parsedMcp === null) return null;
+		mcp = parsedMcp;
+		const parsedPiExtensions = parseContentsBasenames("pi-extensions", c["pi-extensions"]);
+		if (parsedPiExtensions === null) return null;
+		piExtensions = parsedPiExtensions;
+		const parsedRuntimes = parseContentsBasenames("runtimes", c.runtimes);
+		if (parsedRuntimes === null) return null;
+		runtimes = parsedRuntimes;
+		const parsedWorkflows = parseContentsBasenames("workflows", c.workflows);
+		if (parsedWorkflows === null) return null;
+		workflows = parsedWorkflows;
+	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,

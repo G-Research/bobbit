@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { validateManifest } from "../src/server/agent/pack-manifest.ts";
 import { loadPackContributions, loadProviders, PackContributionError } from "../src/server/agent/pack-contributions.ts";
 import type { PackManifest } from "../src/server/agent/pack-types.ts";
 
@@ -71,7 +72,6 @@ describe("loadProviders (schema v2)", () => {
 			module: "../lib/provider.js",
 			hooks: ["beforePrompt"],
 			budget: { maxTokens: 8192, timeoutMs: 100 },
-			defaultEnabled: true,
 			listName: "memory",
 			sourceFile: path.join(root, "providers", "memory.yaml"),
 			packRoot: root,
@@ -108,6 +108,30 @@ describe("loadProviders (schema v2)", () => {
 			() => loadPackContributions(root, manifest(["a", "b"])),
 			(e) => e instanceof PackContributionError && /provider id "dup"/.test(e.message),
 		);
+	});
+
+	it("does not load listed providers from a schema-1 manifest", () => {
+		const root = packRoot("schema-1-gate");
+		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const schema1 = validateManifest({
+			name: "provider-pack",
+			description: "d",
+			version: "1",
+			contents: { roles: [], tools: [], skills: [], providers: ["memory"] },
+		});
+		assert.ok(schema1);
+		assert.deepEqual(loadPackContributions(root, schema1).providers, []);
+
+		const schema2 = validateManifest({
+			name: "provider-pack",
+			description: "d",
+			version: "1",
+			schema: 2,
+			contents: { roles: [], tools: [], skills: [], providers: ["memory"] },
+		});
+		assert.ok(schema2);
+		assert.deepEqual(loadPackContributions(root, schema2).providers.map((p) => p.id), ["memory"]);
 	});
 
 	it("ignores provider files that are not listed in contents.providers", () => {
