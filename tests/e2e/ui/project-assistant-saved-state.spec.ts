@@ -2,18 +2,16 @@
  * Project Assistant Saved State — browser E2E.
  *
  * After clicking "Apply Changes" on a registered-mode project proposal in a
- * project-assistant session, the proposal panel must render a "Changes Saved"
- * confirmation view with a "Terminate Project Assistant" button instead of
- * the "Waiting for project analysis…" empty state. The saved state must
- * survive a page reload, must be replaced by a new proposal when one arrives,
- * and the Terminate button must tear down the assistant session.
+ * project-assistant session, the proposal tab must durably close. The accepted
+ * saved-state flag still persists, but its "Changes Saved" UI may only appear
+ * after an explicit proposal-tab reopen or a fresh proposal output.
  *
  * Coverage:
- *   1. Apply Changes → "Changes Saved" + Terminate button visible.
- *   2. Reload → saved state persists (restored from project draft).
- *   3. Click Terminate → confirm → session deleted, navigated to landing.
- *   4. New project_proposal arrives mid-saved-state → form replaces "Changes
- *      Saved".
+ *   1. Apply Changes → proposal:project is absent in UI and server workspace.
+ *   2. Navigate/reload → accepted flag persists, but the closed tab stays absent.
+ *   3. Explicit reopen → "Changes Saved" + Terminate button visible.
+ *   4. New project_proposal replaces "Changes Saved" with the form.
+ *   5. Click Terminate → confirm → session deleted, navigated to landing.
  */
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
@@ -21,6 +19,7 @@ import { apiFetch, defaultProjectId } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
+const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const REGISTERED_PROJECT_PROPOSAL_SELECTOR = '[data-panel="project-proposal"][data-mode="registered"]';
 
 /** Create a project-assistant session bound to an already-registered project
@@ -39,6 +38,74 @@ async function createRegisteredProjectAssistant(projectId: string, cwd: string):
 async function openSession(page: Page, sessionId: string): Promise<void> {
 	await page.evaluate((id: string) => { window.location.hash = `#/session/${id}`; }, sessionId);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+}
+
+async function visiblePanelTabIds(page: Page): Promise<string[]> {
+	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons
+		.map((button) => {
+			const el = button as HTMLElement;
+			const rect = el.getBoundingClientRect();
+			const style = window.getComputedStyle(el);
+			if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") return "";
+			if (button.getAttribute("data-panel-tab-kind") === "chat") return "";
+			return button.getAttribute("data-panel-tab-id") || "";
+		})
+		.filter(Boolean));
+}
+
+async function workspace(sessionId: string): Promise<any> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`);
+	const text = await resp.text();
+	expect(resp.status, `workspace GET failed: ${text}`).toBe(200);
+	return JSON.parse(text);
+}
+
+async function openProjectProposalWorkspaceTab(sessionId: string): Promise<void> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/open`, {
+		method: "POST",
+		body: JSON.stringify({
+			tab: {
+				id: PROJECT_PROPOSAL_TAB_ID,
+				kind: "proposal",
+				title: "Project Proposal",
+				label: "Project",
+				source: { type: "proposal", proposalType: "project", sessionId },
+				updatedAt: Date.now(),
+			},
+		}),
+	});
+	const text = await resp.text();
+	expect(resp.status, `open project proposal workspace tab failed: ${text}`).toBe(200);
+}
+
+async function settleClosedTabRehydratePath(page: Page): Promise<void> {
+	await page.evaluate(() => new Promise<void>((resolve) => {
+		requestAnimationFrame(() => requestAnimationFrame(() => window.setTimeout(resolve, 150)));
+	}));
+}
+
+async function expectProjectProposalTabAbsent(page: Page, sessionId: string, message: string): Promise<void> {
+	await expect.poll(async () => {
+		await settleClosedTabRehydratePath(page);
+		return {
+			visible: (await visiblePanelTabIds(page)).filter((id) => id === PROJECT_PROPOSAL_TAB_ID),
+			server: (await workspace(sessionId)).tabs.map((tab: any) => tab.id).filter((id: string) => id === PROJECT_PROPOSAL_TAB_ID),
+		};
+	}, { timeout: 10_000, message }).toEqual({ visible: [], server: [] });
+	await expect(page.locator('[data-panel="project-proposal"]'), `${message}: proposal panel content should not render`).toHaveCount(0);
+}
+
+async function expectProjectProposalTabVisible(page: Page, message: string): Promise<void> {
+	await expect.poll(async () => {
+		await forceRender(page);
+		return (await visiblePanelTabIds(page)).includes(PROJECT_PROPOSAL_TAB_ID);
+	}, { timeout: 10_000, message }).toBe(true);
+}
+
+async function navigateAwayAndBackToSession(page: Page, sessionId: string): Promise<void> {
+	await page.evaluate(() => { window.location.hash = "#/settings"; });
+	await expect(page.getByText("Settings").first()).toBeVisible({ timeout: 10_000 });
+	await openSession(page, sessionId);
 }
 
 /** Write a synthetic project proposal directly into client state. Used to
@@ -87,6 +154,8 @@ async function injectProjectProposal(
 	projectId: string,
 	rootPath: string,
 ): Promise<void> {
+	await openProjectProposalWorkspaceTab(sessionId);
+
 	// connectToSession's async phase-2 hydrate calls restoreProjectDraft (a GET
 	// that can land late under load); with no saved draft it deletes the project
 	// slot. So our synthetic write can be wiped right after we set it. We re-write
@@ -166,7 +235,7 @@ async function markAccepted(
 }
 
 test.describe("Project Assistant Saved State", () => {
-	test("Apply Changes shows Changes Saved + Terminate button; survives reload; new proposal replaces it", async ({ page }) => {
+	test("Apply Changes closes proposal tab durably while accepted state survives explicit reopen", async ({ page }) => {
 		const projectId = await defaultProjectId();
 		expect(projectId).toBeTruthy();
 
@@ -188,31 +257,39 @@ test.describe("Project Assistant Saved State", () => {
 
 		// Click the real "Apply Changes" accept button — this exercises the
 		// production acceptRegisteredProjectProposal() flow including the
-		// PUT /api/projects/:id/config request and the saveProjectDraft call.
+		// PUT /api/projects/:id/config request, workspace close, and saveProjectDraft call.
 		await applyButton.click();
 
-		// 1a. "Changes Saved" view appears with the Terminate button.
-		const heading = page.locator('[data-testid="project-changes-saved-heading"]');
-		await expect(heading).toBeVisible({ timeout: 10_000 });
-		await expect(heading).toHaveText("Changes Saved");
-		const termBtn = page.getByRole("button", { name: "Terminate Project Assistant" });
-		await expect(termBtn).toBeVisible();
-		await expect(page.locator('[data-panel="project-proposal"][data-state="accepted"]')).toBeVisible();
+		await expectProjectProposalTabAbsent(page, sessionId, "proposal tab after Apply Changes");
 
-		// 2. Reload → state restored from on-disk project draft. Poll the
-		// server for the persisted draft so we observe the 300 ms debounced
-		// saveProjectDraft flush as a real outcome rather than sleeping. The
-		// `accepted: true` flag in the serialized draft is what powers the
-		// post-reload "Changes Saved" view.
+		// The accepted flag is still persisted, but it must not derive/reopen the
+		// closed proposal tab by itself.
 		await expect.poll(async () => {
 			const resp = await apiFetch(`/api/sessions/${sessionId}/draft?type=project`);
 			if (!resp.ok) return false;
 			const data = await resp.json().catch(() => ({}));
 			return data?.data?.accepted === true;
 		}, { timeout: 5_000 }).toBe(true);
+		await expect.poll(() => page.evaluate((sid) => {
+			const state = (window as any).bobbitState;
+			return state?.projectProposalAcceptedBySessionId?.[sid] === true;
+		}, sessionId), { timeout: 5_000 }).toBe(true);
+
+		await navigateAwayAndBackToSession(page, sessionId);
+		await expectProjectProposalTabAbsent(page, sessionId, "accepted proposal tab after navigation away/back");
+
 		await page.reload();
 		await openSession(page, sessionId);
-		await expect(page.locator('[data-testid="project-changes-saved-heading"]')).toBeVisible({ timeout: 15_000 });
+		await expect.poll(() => page.evaluate((sid) => {
+			const state = (window as any).bobbitState;
+			return state?.projectProposalAcceptedBySessionId?.[sid] === true;
+		}, sessionId), { timeout: 15_000 }).toBe(true);
+		await expectProjectProposalTabAbsent(page, sessionId, "accepted proposal tab after reload/rehydrate");
+
+		// Explicitly reopening the proposal tab may render the saved-state UI.
+		await openProjectProposalWorkspaceTab(sessionId);
+		await expectProjectProposalTabVisible(page, "explicit proposal reopen should restore the tab");
+		await expect(page.locator('[data-testid="project-changes-saved-heading"]')).toHaveText("Changes Saved", { timeout: 10_000 });
 		await expect(page.getByRole("button", { name: "Terminate Project Assistant" })).toBeVisible();
 
 		// 4. (Done before destructive Terminate — order matters.) Deliver a new
@@ -229,11 +306,12 @@ test.describe("Project Assistant Saved State", () => {
 		await expect(page.locator('[data-panel="project-proposal"][data-state="accepted"]')).toHaveCount(0, { timeout: 5_000 });
 		await expectRegisteredProposalReady(page);
 
-		// 3. Re-accept (so the saved state returns), then click Terminate
-		//    Project Assistant and confirm. Session should be deleted and the
-		//    user navigated to landing.
+		// Re-arm the saved state, explicitly reopen the proposal tab, then click
+		// Terminate Project Assistant and confirm. Session should be deleted and
+		// the user navigated to landing.
 		await markAccepted(page, sessionId);
-		await forceRender(page);
+		await openProjectProposalWorkspaceTab(sessionId);
+		await expectProjectProposalTabVisible(page, "explicit proposal reopen before terminate should restore saved state");
 		await expect(page.locator('[data-testid="project-changes-saved-heading"]')).toBeVisible({ timeout: 10_000 });
 
 		const termBtn2 = page.getByRole("button", { name: "Terminate Project Assistant" });

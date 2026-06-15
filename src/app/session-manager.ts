@@ -2712,9 +2712,9 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	state.projectProposalAcceptedBySessionId[propSessionId] = true;
 	delete state.activeProposals.project;
 	state.assistantHasProposal = false;
-	const keepAssistantPanelOpen = (state.assistantType === "project" || state.assistantType === "project-scaffolding") && propSessionId === activeSessionId();
-	if (keepAssistantPanelOpen) openAssistantProposalWorkspaceTab("project", propSessionId);
-	else removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
+	// Apply/Accept is a proposal-specific close path: the server workspace's
+	// absence is authoritative, so accepted saved-state must not reopen the tab.
+	removePanelWorkspaceTabs([proposalPanelTabId("project")], { sessionId: propSessionId, select: false, clearCollapse: false });
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.
