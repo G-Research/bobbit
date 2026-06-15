@@ -41,7 +41,10 @@ export interface PackStoreQuota {
 }
 
 export const DEFAULT_PACK_STORE_QUOTA: PackStoreQuota = {
-	maxValueBytes: 256 * 1024, // 256 KiB per value
+	// First-party viewer state (for example synthesized PR walkthrough cards with
+	// mapped diff context) can legitimately be multiple MiB. Keep per-pack total
+	// bytes as the disk-exhaustion bound while allowing one large persisted view.
+	maxValueBytes: 4 * 1024 * 1024, // 4 MiB per value
 	maxKeys: 1000,
 	maxTotalBytes: 5 * 1024 * 1024, // 5 MiB per pack
 };
@@ -169,6 +172,43 @@ function makePackMutex() {
 		});
 		return run;
 	};
+}
+
+function isTransientWindowsReplaceError(err: unknown): boolean {
+	const code = (err as NodeJS.ErrnoException | undefined)?.code;
+	return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
+const replaceDelay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Best-effort atomic replace with a Windows-safe fallback. POSIX `rename(tmp, file)`
+ * atomically replaces an existing file; on Windows it can transiently fail with
+ * EPERM/EACCES/EBUSY when the destination exists or a scanner briefly touches it.
+ * Keep the atomic path first, then fall back to remove+rename with bounded retries
+ * so idempotent re-publishes (notably PR walkthrough cards) do not surface as 500s.
+ */
+async function replaceFileWithTemp(tmpFile: string, file: string): Promise<void> {
+	try {
+		await fs.promises.rename(tmpFile, file);
+		return;
+	} catch (err) {
+		if (!isTransientWindowsReplaceError(err)) throw err;
+	}
+
+	let lastErr: unknown;
+	for (let attempt = 0; attempt < 5; attempt++) {
+		if (attempt > 0) await replaceDelay(10 * attempt);
+		try {
+			await fs.promises.rm(file, { force: true });
+			await fs.promises.rename(tmpFile, file);
+			return;
+		} catch (err) {
+			lastErr = err;
+			if (!isTransientWindowsReplaceError(err)) throw err;
+		}
+	}
+	throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 /**
@@ -307,9 +347,9 @@ export function createPackStore(opts?: { rootDir?: string; quota?: Partial<PackS
 					await handle.close();
 				}
 				try {
-					await fs.promises.rename(tmpFile, file);
+					await replaceFileWithTemp(tmpFile, file);
 				} catch (err) {
-					// Rename failed — do not leave the temp behind.
+					// Replace failed — do not leave the temp behind.
 					await fs.promises.rm(tmpFile, { force: true }).catch(() => {});
 					throw err;
 				}
