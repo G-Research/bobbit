@@ -2313,9 +2313,7 @@ export function doRenderApp(): void {
 		const fullscreenTitle = tab.kind === "preview"
 			? `Fullscreen preview${shortcutHint("toggle-sidebar")}`
 			: `Fullscreen side panel${shortcutHint("toggle-sidebar")}`;
-		const restoreTitle = tab.kind === "preview"
-			? `Collapse preview${shortcutHint("toggle-sidebar")}`
-			: `Restore side panel${shortcutHint("toggle-sidebar")}`;
+		const restoreTitle = `Restore side panel${shortcutHint("toggle-sidebar")}`;
 		return html`
 		${mode === "fullscreen" ? html`
 			<button @click=${() => setSidePanelModeAndRender("split")} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title=${restoreTitle} data-testid="side-panel-restore">

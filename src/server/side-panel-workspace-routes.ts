@@ -45,8 +45,22 @@ function revisionFromRequest(req: http.IncomingMessage, body: unknown): number |
 	return typeof bodyRev === "number" && Number.isInteger(bodyRev) && bodyRev >= 0 ? bodyRev : undefined;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 function strictRevision(body: unknown): boolean {
-	return !!(body && typeof body === "object" && (body as Record<string, unknown>).strictRevision === true);
+	return !!(isObject(body) && body.strictRevision === true);
+}
+
+function tabPatchFromRequestBody(body: unknown): unknown {
+	if (!isObject(body)) return body;
+	if ("patch" in body) return body.patch;
+	const patch: Record<string, unknown> = {};
+	for (const key of ["title", "label", "source", "state"] as const) {
+		if (key in body) patch[key] = body[key];
+	}
+	return patch;
 }
 
 function resolveSessionStore(deps: SidePanelWorkspaceRouteDeps, sessionId: string) {
@@ -202,7 +216,7 @@ export async function handleSidePanelWorkspaceRoute(
 					throw new SidePanelWorkspaceError("Stale side-panel workspace revision", 409, "STALE_REVISION");
 				}
 				return req.method === "PATCH"
-					? applyWorkspaceMutation(workspace, { type: "update", tabId, patch: body }, validatorsFor(deps, sessionId))
+					? applyWorkspaceMutation(workspace, { type: "update", tabId, patch: tabPatchFromRequestBody(body) }, validatorsFor(deps, sessionId))
 					: applyWorkspaceMutation(workspace, { type: "close", tabId }, validatorsFor(deps, sessionId));
 			});
 			if (result.status === 404) { error(res, 404, result.error, "SESSION_NOT_FOUND"); return true; }

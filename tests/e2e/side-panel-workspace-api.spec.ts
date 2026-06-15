@@ -59,12 +59,37 @@ test.describe("side-panel workspace API", () => {
 
 			const patchResp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent("proposal:goal")}`, {
 				method: "PATCH",
-				body: JSON.stringify({ title: "Updated Proposal", label: "Updated" }),
+				body: JSON.stringify({
+					patch: {
+						title: "Updated Proposal",
+						label: "Updated",
+						source: { type: "proposal", sessionId, proposalType: "goal", rev: 2 },
+						state: { selectedSection: "details" },
+					},
+					baseRevision: opened.revision,
+				}),
 			});
 			expect(patchResp.status).toBe(200);
 			const patched = await patchResp.json();
 			expect(patched.revision).toBe(2);
-			expect(patched.tabs[0].title).toBe("Updated Proposal");
+			expect(patched.tabs[0]).toMatchObject({
+				title: "Updated Proposal",
+				label: "Updated",
+				source: { type: "proposal", sessionId, proposalType: "goal", rev: 2 },
+				state: { selectedSection: "details" },
+			});
+			expect(patched.tabs[0].patch).toBeUndefined();
+			expect(patched.tabs[0].baseRevision).toBeUndefined();
+
+			const legacyPatchResp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent("proposal:goal")}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "Legacy Direct Patch" }),
+			});
+			expect(legacyPatchResp.status).toBe(200);
+			const legacyPatched = await legacyPatchResp.json();
+			expect(legacyPatched.revision).toBe(3);
+			expect(legacyPatched.tabs[0].title).toBe("Legacy Direct Patch");
+			expect(legacyPatched.tabs[0].source.rev).toBe(2);
 
 			const resizeResp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/resize`, {
 				method: "POST",
@@ -72,13 +97,13 @@ test.describe("side-panel workspace API", () => {
 			});
 			expect(resizeResp.status).toBe(200);
 			const resized = await resizeResp.json();
-			expect(resized.revision).toBe(3);
+			expect(resized.revision).toBe(4);
 			expect(resized.sizeMode).toBe("fullscreen");
 
 			const closeResp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent("proposal:goal")}`, { method: "DELETE" });
 			expect(closeResp.status).toBe(200);
 			const closed = await closeResp.json();
-			expect(closed.revision).toBe(4);
+			expect(closed.revision).toBe(5);
 			expect(closed.tabs).toEqual([]);
 			expect(closed.sizeMode).toBe("fullscreen");
 
@@ -186,7 +211,7 @@ test.describe("side-panel workspace API", () => {
 		cleanup.push(sessionId);
 		const missingPatch = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent("proposal:goal")}`, {
 			method: "PATCH",
-			body: JSON.stringify({ title: "No create" }),
+			body: JSON.stringify({ patch: { title: "No create" }, baseRevision: 0 }),
 		});
 		expect(missingPatch.status).toBe(404);
 
