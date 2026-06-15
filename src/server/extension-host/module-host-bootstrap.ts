@@ -101,7 +101,7 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes";
+	exportKind: "actions" | "routes" | "providers";
 	member: string;
 	/** Serializable handler context (identity + capability flags; NO live host). */
 	ctx: SerializableCtx;
@@ -458,7 +458,9 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
 		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
-		const group = mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind];
+		const group = msg.exportKind === "providers"
+			? ((mod.default as Record<string, unknown> | undefined) ?? mod)
+			: (mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind]);
 		// Export-map validation now lives HERE (moved off the parent so the parent never
 		// imports pack code): a module with no `actions`/`routes` export object is a 500,
 		// matching the status the dispatcher used to throw parent-side.
