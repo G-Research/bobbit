@@ -4,6 +4,7 @@ import { property, state } from "lit/decorators.js";
 import { html, type TemplateResult } from "lit/html.js";
 import { Check, Copy, Columns2, Rows2 } from "lucide";
 import { i18n } from "../utils/i18n.js";
+export { isGitDiff } from "../utils/diff-utils.js";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -135,11 +136,8 @@ function buildSidePairs(lines: DiffLine[]): SidePair[] {
 }
 
 // ── Detect ─────────────────────────────────────────────────────────────
-
-/** Returns true if the text looks like a unified git diff. */
-export function isGitDiff(text: string): boolean {
-	return /^diff --git /m.test(text) && /^@@ /m.test(text);
-}
+// `isGitDiff` is re-exported above from the side-effect-free helper so callers
+// can detect diffs without registering the heavy custom element.
 
 // ── Component ──────────────────────────────────────────────────────────
 

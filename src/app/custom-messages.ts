@@ -1,6 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai";
-import type { AgentMessage, MessageRenderer } from "../ui/index.js";
-import { defaultConvertToLlm, registerMessageRenderer } from "../ui/index.js";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { defaultConvertToLlm } from "../ui/components/Messages.js";
+import { registerMessageRenderer, type MessageRenderer } from "../ui/components/message-renderer-registry.js";
 import { html } from "lit";
 import { gatewayFetch } from "./api.js";
 import { isSubgoalsEnabled } from "./subgoals-flag.js";

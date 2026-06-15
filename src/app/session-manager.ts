@@ -1,4 +1,4 @@
-import { ChatPanel } from "../ui/index.js";
+import { ChatPanel } from "../ui/ChatPanel.js";
 import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorkspaceTab, startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus } from "./remote-agent.js";
