@@ -15,9 +15,9 @@
  * For tests that need HTTP/WS (most do), pass { startHttp: true }.
  */
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 let serverModules: any = null;
 async function getServerModules() {
@@ -94,7 +94,7 @@ export async function createTestGateway(opts?: {
 	agentCliPath?: string;
 }): Promise<TestGateway> {
 	const startHttp = opts?.startHttp ?? true;
-	const dir = join(tmpdir(), `tier2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	const dir = makeTmpDir(`tier2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-`);
 	mkdirSync(join(dir, "state"), { recursive: true });
 	writeFileSync(join(dir, "state", "projects.json"), "[]");
 	writeFileSync(join(dir, "state", "setup-complete"), "tier2\n");

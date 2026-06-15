@@ -7,13 +7,13 @@
  * ESM hoists static imports, so we use dynamic import() instead.
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { describe, it, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 // Set BOBBIT_DIR before dynamically importing CostTracker
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cost-tracker-test-"));
+const tmpDir = makeTmpDir("cost-tracker-test-");
 process.env.BOBBIT_DIR = tmpDir;
 fs.mkdirSync(path.join(tmpDir, "state"), { recursive: true });
 

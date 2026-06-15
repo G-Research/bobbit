@@ -5,11 +5,11 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 // Point BOBBIT_DIR to a temp directory before importing SessionStore
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-store-test-"));
+const tmpRoot = makeTmpDir("session-store-test-");
 const stateDir = path.join(tmpRoot, "state");
 fs.mkdirSync(stateDir, { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;

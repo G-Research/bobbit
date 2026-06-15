@@ -7,13 +7,13 @@
  * (the new LanceDB-backed stack).
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 // Set BOBBIT_DIR before any dynamic imports
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "multi-proj-test-"));
+const tmpRoot = makeTmpDir("multi-proj-test-");
 process.env.BOBBIT_DIR = tmpRoot;
 fs.mkdirSync(path.join(tmpRoot, "state"), { recursive: true });
 fs.mkdirSync(path.join(tmpRoot, "config"), { recursive: true });

@@ -8,11 +8,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { handlePreviewRequest, pickEntry } from "../src/server/preview/content-route.ts";
 import { CookieStore, COOKIE_NAME } from "../src/server/auth/cookie.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 // We need `mountDir(sid)` from preview/mount.ts to point inside our temp dir.
 // The stub uses `bobbitStateDir()` which reads BOBBIT_STATE_DIR env. Set it
@@ -21,7 +21,7 @@ let workspaceRoot: string;
 const SID = "11111111-2222-3333-4444-555555555555";
 
 before(() => {
-	workspaceRoot = mkdtempSync(path.join(tmpdir(), "bobbit-cr-"));
+	workspaceRoot = makeTmpDir("bobbit-cr-");
 	// mountDir(sid) resolves to <bobbitStateDir()>/preview/<sid>; redirect
 	// the resolver to a temp dir via BOBBIT_DIR.
 	process.env.BOBBIT_DIR = workspaceRoot;

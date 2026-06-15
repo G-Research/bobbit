@@ -14,12 +14,12 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
 import type { Component } from "../src/server/agent/project-config-store.ts";
+import { makeTmpDir } from "./helpers/tmp.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,7 +27,7 @@ const __dirname = path.dirname(__filename);
 const execFile = promisify(execFileCb);
 
 async function makeRepo(): Promise<string> {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-test-"));
+	const dir = makeTmpDir("bobbit-pool-test-");
 	const repo = path.join(dir, "repo");
 	fs.mkdirSync(repo, { recursive: true });
 	await execFile("git", ["init", "--initial-branch=master"], { cwd: repo });
