@@ -368,6 +368,28 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"] [data-testid="pr-walkthrough-rail-resize"]')).toHaveCount(0);
 	});
 
+	test("pr-walkthrough shell parity: container-narrow panels auto-collapse the rail in a wide viewport", async ({ page }) => {
+		await page.setViewportSize({ width: 1200, height: 800 });
+		await loadFixture(page);
+		await page.evaluate(() => {
+			const root = document.getElementById("root");
+			if (root) root.style.width = "520px";
+			(window as any).__renderPrwReady();
+		});
+		await expectRenderedReadyPanel(page);
+
+		await expect(page.locator('[data-testid="pr-walkthrough-collapsed-rail"]'), "pr-walkthrough shell parity: ResizeObserver must collapse a narrow embedded panel even when the viewport is wide").toBeVisible();
+		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-collapsed-rail"]);
+		await expect(page.locator('[data-testid="pr-walkthrough-rail-resize"]')).toHaveCount(0);
+
+		await page.evaluate(() => {
+			const root = document.getElementById("root");
+			if (root) root.style.width = "1120px";
+		});
+		await expect(page.locator('[data-testid="pr-walkthrough-labelled-rail"]'), "pr-walkthrough shell parity: labelled rail should recover when the observed panel width grows").toBeVisible();
+		expect(await visibleRailTestIds(page)).toEqual(["pr-walkthrough-labelled-rail"]);
+	});
+
 	test("pr-walkthrough shell parity: guided orientation rail and card navigation match the historical flow", async ({ page }) => {
 		await renderReady(page);
 		await expectRenderedReadyPanel(page);
@@ -457,6 +479,15 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 
 		await startReviewFromGuide(page);
 		await expect(submit).toBeDisabled();
+		const firstBlock = page.locator('.diff-block[data-file-path="market-packs/pr-walkthrough/src/panel.js"], [data-testid="pr-walkthrough-diff-block"][data-file-path="market-packs/pr-walkthrough/src/panel.js"]').first();
+		await firstBlock.locator('.diff-line[data-line-id="L36"] .comment-cue').click();
+		let editor = page.locator('[data-testid="pr-walkthrough-comment-editor"], [data-testid="prw-line-comment-editor"]').last();
+		await editor.locator('textarea').fill("Export this valid line comment.");
+		await editor.getByRole("button", { name: /Save comment|Save/ }).click();
+		await page.locator('[data-testid="pr-walkthrough-add-card-comment"]').click();
+		editor = page.locator('[data-testid="pr-walkthrough-comment-editor"][data-comment-scope="card"]');
+		await editor.locator('[data-testid="pr-walkthrough-comment-input"]').fill("Export this card-level fallback comment.");
+		await editor.locator('[data-testid="pr-walkthrough-comment-save"]').click();
 		await page.locator('[data-testid="pr-walkthrough-like"]').click();
 		await expect(submit).toBeEnabled();
 		await submit.click();
@@ -465,6 +496,9 @@ test.describe("PR walkthrough pack panel UI parity", () => {
 		await expect(page.locator('[data-testid="pr-walkthrough-export-preview"]')).toContainText(/Review export preview/i);
 		await expect(page.locator('[data-testid="pr-walkthrough-export-unavailable"]')).toContainText(/Export unavailable|not available/i);
 		await expect(page.locator('[data-testid="pr-walkthrough-export-body"]')).toContainText(/Diff review controls and comments|Final review controls|Restore PR walkthrough/i);
+		await expect(page.locator('[data-testid="pr-walkthrough-export-row"]')).toHaveCount(2);
+		await expect(page.locator('[data-testid="pr-walkthrough-export-row"][data-export-scope="line"]')).toContainText(/Valid: valid line mapping/);
+		await expect(page.locator('[data-testid="pr-walkthrough-export-row"][data-export-scope="card"]')).toContainText(/Unmappable: card comment/);
 		await expect(page.locator('[data-testid="pr-walkthrough-export-submit"]')).toBeDisabled();
 		await expect(page.locator('[data-testid="pr-walkthrough-export-preview"]').getByRole("button", { name: /Copy draft/i })).toBeVisible();
 		await page.locator('[data-testid="pr-walkthrough-export-preview"]').getByRole("button", { name: /^Close$/i }).click();
