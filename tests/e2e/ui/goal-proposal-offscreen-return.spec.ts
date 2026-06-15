@@ -99,7 +99,20 @@ async function setupOffscreen(page: Page): Promise<{ sidA: string; sidB: string 
 	const sidA = await openGoalAssistantSession(page);
 
 	// S2 — a plain session. This focuses S2 and caches S1.
+	// createSessionViaUI only waits for the textarea, NOT for the client to
+	// finish switching window.bobbitState.selectedSessionId to the new session.
+	// Under full-suite parallel load, reading activeSessionId() immediately can
+	// still observe sidA, making sidB === sidA → false negative. Wait until the
+	// active session id actually changes away from sidA before reading it.
 	await createSessionViaUI(page);
+	await page.waitForFunction(
+		(prev: string) => {
+			const sid = (window as any).bobbitState?.selectedSessionId ?? null;
+			return !!sid && sid !== prev;
+		},
+		sidA,
+		{ timeout: 20_000, polling: 100 },
+	);
 	const sidB = await activeSessionId(page);
 	expect(sidB, "S2 must be a different session").not.toBe(sidA);
 

@@ -135,9 +135,8 @@ function isBrowserReserved(binding) {
 
 // Keydown listener
 function matchesBinding(e, b) {
-	const modMatch = b.ctrlOrMeta
-		? (_isMac ? e.metaKey : e.ctrlKey)
-		: !(_isMac ? e.metaKey : e.ctrlKey);
+	const primaryOrCtrlPressed = _isMac ? (e.metaKey || e.ctrlKey) : e.ctrlKey;
+	const modMatch = b.ctrlOrMeta ? primaryOrCtrlPressed : !primaryOrCtrlPressed;
 	return (
 		modMatch &&
 		e.shiftKey === b.shift &&
