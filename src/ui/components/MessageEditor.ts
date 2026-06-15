@@ -6,7 +6,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { live } from "lit/directives/live.js";
 import { GripVertical, Loader2, Mic, MicOff, Paperclip, Pencil, Send, Square, Zap, X } from "lucide";
-import { type Attachment, loadAttachment } from "../utils/attachment-utils.js";
+import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { gatewayFetch } from "../../app/api.js";
@@ -15,6 +15,11 @@ import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 /** Slash skill metadata from the server */
+async function loadAttachmentLazy(source: string | File | Blob | ArrayBuffer, fileName?: string): Promise<Attachment> {
+	const mod = await import("../utils/attachment-utils.js");
+	return mod.loadAttachment(source, fileName);
+}
+
 interface SlashSkillInfo {
 	name: string;
 	description: string;
@@ -666,7 +671,7 @@ export class MessageEditor extends LitElement {
 						continue;
 					}
 
-					const attachment = await loadAttachment(file);
+					const attachment = await loadAttachmentLazy(file);
 					newAttachments.push(attachment);
 				} catch (error) {
 					console.error("Error processing pasted image:", error);
@@ -732,7 +737,7 @@ export class MessageEditor extends LitElement {
 					continue;
 				}
 
-				const attachment = await loadAttachment(file);
+				const attachment = await loadAttachmentLazy(file);
 				newAttachments.push(attachment);
 			} catch (error) {
 				console.error(`Error processing ${file.name}:`, error);
@@ -796,7 +801,7 @@ export class MessageEditor extends LitElement {
 					continue;
 				}
 
-				const attachment = await loadAttachment(file);
+				const attachment = await loadAttachmentLazy(file);
 				newAttachments.push(attachment);
 			} catch (error) {
 				console.error(`Error processing ${file.name}:`, error);

@@ -31,7 +31,6 @@ import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
-import "../ui/components/SidebarActionsPopover.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 
@@ -485,19 +484,20 @@ function refreshOpenSidebarActionsPopover(): void {
 	current.element.items = sidebarActionPopoverItems(current.actions);
 }
 
-function openSidebarActionsPopover(input: {
+async function openSidebarActionsPopover(input: {
 	kind: SidebarActionEntityKind;
 	entityId: string;
 	trigger: HTMLElement;
 	actions: SidebarActionItem[];
 	refresh: () => SidebarActionItem[];
 	sourceRects: SidebarActionsFlipRect[];
-}): void {
+}): Promise<void> {
 	if (isSidebarActionsPopoverOpen(input.kind, input.entityId)) {
 		closeSidebarActionsPopover();
 		return;
 	}
 	closeSidebarActionsPopover(false);
+	await import("../ui/components/SidebarActionsPopover.js");
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
 	element.anchorEl = input.trigger;
 	element.items = sidebarActionPopoverItems(input.actions);
@@ -561,7 +561,7 @@ function renderSidebarActionsTrigger(input: {
 		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
 		input.onBeforeOpen?.();
 		const actions = input.refresh();
-		openSidebarActionsPopover({
+		void openSidebarActionsPopover({
 			kind: input.kind,
 			entityId: input.entityId,
 			trigger,
