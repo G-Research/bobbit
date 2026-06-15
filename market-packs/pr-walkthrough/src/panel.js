@@ -51,6 +51,8 @@ import { changesetIdForGithub } from "../../../src/shared/pr-walkthrough/ids.ts"
 const HARD_CAP_MS = 30 * 60_000; // absolute backstop (30 min)
 const SLOW_HINT_MS = 120_000; // after this, still pending — no copy change, no error
 const POLL_INTERVAL_MS = 1_500;
+const DEFAULT_DIFF_CONTEXT_LINES = 3;
+const DIFF_CONTEXT_EXPAND_LINES = 20;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -76,9 +78,9 @@ const cardPhase = (card) => card.phaseId || card.phase || "orientation";
 const safeDomId = (value) => asText(value, "item").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
 const defaultDiffMode = () => {
 	try {
-		return globalThis.matchMedia && globalThis.matchMedia("(max-width: 760px)").matches ? "inline" : "side";
+		return globalThis.matchMedia && globalThis.matchMedia("(max-width: 760px)").matches ? "inline" : "split";
 	} catch {
-		return "side";
+		return "split";
 	}
 };
 
@@ -380,15 +382,11 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		`;
 	};
 
-	const renderDiffModeControls = (entry, host, paramKey) => {
-		const mode = entry.diffMode || defaultDiffMode();
-		return html`
-			<div class="prw-diff-mode" aria-label="Diff display mode">
-				<button class=${`prw-segment ${mode === "side" ? "is-active" : ""}`} @click=${() => patchEntry(host, paramKey, { diffMode: "side", userSetMode: true })}>Side-by-side</button>
-				<button class=${`prw-segment ${mode === "inline" ? "is-active" : ""}`} @click=${() => patchEntry(host, paramKey, { diffMode: "inline", userSetMode: true })}>Inline</button>
-			</div>
-		`;
-	};
+	const effectiveDiffMode = (entry) => (entry.diffMode === "inline" ? "inline" : "split");
+	const normKind = (line) => (line && (line.kind === "add" || line.kind === "del") ? line.kind : "context");
+	const hunkId = (hunk, index) => asText(hunk && (hunk.id || hunk.header), `hunk-${index}`);
+	const lineId = (line) => asText(line && (line.id || line.lineId || line.line || line.newLine || line.oldLine || line.text), "line");
+	const commentsForLineKey = (entry, key) => arrayOf((entry.lineComments || {})[key]).filter((comment) => asText(comment).trim());
 
 	const openLineComment = (entry, host, paramKey, key, draft) => {
 		const cur = byJob.get(paramKey) || entry;
@@ -397,7 +395,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: draft == null ? asText((cur.lineCommentDraft || {})[key]) : asText(draft) },
 		});
 	};
-
 	const cancelLineComment = (entry, host, paramKey, key) => {
 		const cur = byJob.get(paramKey) || entry;
 		patchEntry(host, paramKey, {
@@ -405,7 +402,6 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: "" },
 		});
 	};
-
 	const saveLineComment = (entry, host, paramKey, key) => {
 		const cur = byJob.get(paramKey) || entry;
 		const draft = asText((cur.lineCommentDraft || {})[key]).trim();
@@ -416,196 +412,216 @@ export default function createPanel({ html, nothing, renderHeader }) {
 			lineCommentDraft: { ...(cur.lineCommentDraft || {}), [key]: "" },
 		});
 	};
-
-	const lineCommentButton = (entry, host, paramKey, key) => html`<button
-		class="prw-line-comment-button"
-		title="Add line comment"
-		aria-label="Add line comment"
-		aria-controls=${lineDomId(key)}
-		@click=${() => openLineComment(entry, host, paramKey, key)}
-	>Add line comment</button>`;
-
 	const useSuggestedLineComment = (entry, host, paramKey, key, suggestion) => openLineComment(entry, host, paramKey, key, suggestionBody(suggestion));
 
-	const renderSuggestedLineCommentContent = (entry, host, paramKey, key, suggestions) => {
-		const usable = arrayOf(suggestions).filter((suggestion) => suggestionBody(suggestion).trim());
-		if (!usable.length) return nothing;
-		return html`<div class="prw-inline-suggestions">
-			${usable.map((suggestion) => html`<div
-				class="prw-suggested-comment prw-inline-suggested-comment"
-				data-testid="prw-inline-suggested-comment"
-				data-prw-comment=${asText(suggestion && suggestion.id, "comment")}
-				data-prw-line=${asText(suggestion && (suggestion.lineId || suggestion.line_id || suggestion.line), "line")}
-			>
-				<div class="prw-suggestion-anchor">Suggested line comment</div>
-				<div>${suggestionBody(suggestion)}</div>
-				<button class="prw-ghost-button" @click=${() => useSuggestedLineComment(entry, host, paramKey, key, suggestion)}>Use suggestion</button>
-			</div>`)}
-		</div>`;
+	const renderDiffModeControls = (entry, host, paramKey) => {
+		const mode = effectiveDiffMode(entry);
+		return html`<div class="modebar" data-testid="pr-walkthrough-diff-mode-chooser"><span class="mode-toggle" role="radiogroup" aria-label="Diff display mode"><button id="diff-mode-split" data-testid="diff-mode-split" class=${mode === "split" ? "active" : ""} type="button" role="radio" aria-label="Split diff" title="Side-by-side split diff" aria-checked=${String(mode === "split")} @click=${() => patchEntry(host, paramKey, { diffMode: "split", userSetMode: true })}><svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="5" height="10" rx="1"></rect><rect x="9" y="3" width="5" height="10" rx="1"></rect></svg></button><button id="diff-mode-inline" data-testid="diff-mode-inline" class=${mode === "inline" ? "active" : ""} type="button" role="radio" aria-label="Inline diff" title="Inline diff" aria-checked=${String(mode === "inline")} @click=${() => patchEntry(host, paramKey, { diffMode: "inline", userSetMode: true })}><svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h4"></path><path d="M13 6h8"></path><path d="M5 12h4"></path><path d="M13 12h8"></path><path d="M5 18h4M7 16v4"></path><path d="M13 18h8"></path></svg></button></span></div>`;
+	};
+
+	const lineNo = (line, side) => side === "old" ? asText(line && (line.oldLine ?? line.line ?? "")) : side === "new" ? asText(line && (line.newLine ?? line.line ?? "")) : asText(line && (line.newLine ?? line.oldLine ?? line.line ?? ""));
+	const openLine = (event, entry, host, paramKey, key, draft) => { if (event) event.stopPropagation(); openLineComment(entry, host, paramKey, key, draft); };
+	const onLineKey = (event, entry, host, paramKey, key) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openLineComment(entry, host, paramKey, key); } };
+
+	const renderHighlightedLine = (text) => {
+		const source = asText(text);
+		const tokenPattern = /(\/\/.*$|`(?:\\.|[^`])*`|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\b(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)\b|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\s*\()|\b[A-Za-z_$][\w$]*(?=\??\s*:))/g;
+		const parts = [];
+		let last = 0;
+		for (const match of source.matchAll(tokenPattern)) {
+			const index = match.index || 0;
+			if (index > last) parts.push(html`${source.slice(last, index)}`);
+			const token = match[0];
+			const cls = token.startsWith("//") ? "tok-comment" : token.startsWith('"') || token.startsWith("'") || token.startsWith("`") ? "tok-string" : /^\d/.test(token) ? "tok-number" : /^(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)$/.test(token) ? "tok-keyword" : source.slice(index + token.length).match(/^\s*\(/) ? "tok-function" : "tok-property";
+			parts.push(html`<span class=${cls}>${token}</span>`);
+			last = index + token.length;
+		}
+		if (last < source.length) parts.push(html`${source.slice(last)}`);
+		return parts;
 	};
 
 	const renderLineCommentContent = (entry, host, paramKey, key) => {
-		const saved = arrayOf((entry.lineComments || {})[key]).filter((comment) => asText(comment).trim());
+		const saved = commentsForLineKey(entry, key);
 		const open = Boolean((entry.lineCommentOpen || {})[key]);
 		if (!saved.length && !open) return nothing;
-		return html`
-			${saved.length ? html`<div class="prw-user-comments">${saved.map((comment) => html`<div class="prw-user-comment" data-testid="prw-line-user-comment"><strong>Your line comment</strong><p>${comment}</p></div>`)}</div>` : nothing}
-			${open ? html`<div class="prw-comment-editor" data-testid="prw-line-comment-editor">
-				<textarea
-					.value=${asText((entry.lineCommentDraft || {})[key])}
-					placeholder="Write a line-level review comment"
-					@input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}
-				></textarea>
-				<div class="prw-comment-actions">
-					<button class="prw-ghost-button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button>
-					<button class="prw-ghost-button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button>
-				</div>
-			</div>` : nothing}
-		`;
+		return html`${saved.length ? html`<div class="line-comments">${saved.map((comment) => html`<div class="comment prw-user-comment"><div class="comment-meta">Your line comment</div><div class="comment-body">${comment}</div></div>`)}</div>` : nothing}${open ? html`<div class="line-editor" data-testid="pr-walkthrough-comment-editor" id=${lineDomId(key)}><textarea data-testid="pr-walkthrough-comment-input" .value=${asText((entry.lineCommentDraft || {})[key])} placeholder="Or write your own comment…" @input=${(ev) => updateNestedMap(entry, host, paramKey, "lineCommentDraft", key, ev.currentTarget.value)}></textarea><div class="comment-actions"><button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => saveLineComment(entry, host, paramKey, key)}>Save comment</button><button data-testid="pr-walkthrough-comment-cancel" type="button" @click=${() => cancelLineComment(entry, host, paramKey, key)}>Cancel</button></div></div>` : nothing}`;
 	};
 
-	const renderLineCommentState = (entry, host, paramKey, key, colspan) => {
-		const content = renderLineCommentContent(entry, host, paramKey, key);
-		if (content === nothing) return nothing;
-		return html`<tr class="prw-line-comment-row" id=${lineDomId(key)}><td colspan=${colspan}>${content}</td></tr>`;
+	const acceptSuggestion = (entry, host, paramKey, key, suggestion, edit) => {
+		if (edit) return openLineComment(entry, host, paramKey, key, suggestionBody(suggestion));
+		const cur = byJob.get(paramKey) || entry;
+		const body = suggestionBody(suggestion).trim();
+		if (!body) return;
+		const id = asText(suggestion && suggestion.id, body);
+		patchEntry(host, paramKey, { lineComments: { ...(cur.lineComments || {}), [key]: [...arrayOf((cur.lineComments || {})[key]), body] }, dismissedSuggestionIds: { ...(cur.dismissedSuggestionIds || {}), [id]: true } });
+	};
+	const dismissSuggestion = (entry, host, paramKey, suggestion) => {
+		const cur = byJob.get(paramKey) || entry;
+		const id = asText(suggestion && suggestion.id, suggestionBody(suggestion));
+		patchEntry(host, paramKey, { dismissedSuggestionIds: { ...(cur.dismissedSuggestionIds || {}), [id]: true } });
+	};
+	const renderSuggestion = (entry, host, paramKey, key, line, suggestion) => html`<div class="suggestion" data-testid="pr-walkthrough-suggested-comment" data-suggestion-id=${asText(suggestion && suggestion.id, suggestionBody(suggestion))} data-line-id=${lineId(line)}><div class="comment-meta">LLM suggested line comment</div><div class="comment-body">${suggestionBody(suggestion)}</div><div class="suggestion-actions"><button data-testid="pr-walkthrough-suggested-comment-accept" type="button" @click=${() => acceptSuggestion(entry, host, paramKey, key, suggestion, false)}>Accept</button><button data-testid="pr-walkthrough-suggested-comment-edit" type="button" @click=${() => acceptSuggestion(entry, host, paramKey, key, suggestion, true)}>Edit</button><button data-testid="pr-walkthrough-suggested-comment-delete" class="delete" type="button" @click=${() => dismissSuggestion(entry, host, paramKey, suggestion)}>Delete</button></div></div>`;
+	const renderLineDetails = (entry, host, paramKey, card, block, line) => {
+		if (!line) return nothing;
+		const key = lineKey(card, block, line);
+		const suggestions = lineSuggestions(card, block, line).filter((suggestion) => !(entry.dismissedSuggestionIds || {})[asText(suggestion && suggestion.id, suggestionBody(suggestion))]);
+		const comments = renderLineCommentContent(entry, host, paramKey, key);
+		return suggestions.length || comments !== nothing ? html`${suggestions.length ? html`<div class="suggestions">${suggestions.map((suggestion) => renderSuggestion(entry, host, paramKey, key, line, suggestion))}</div>` : nothing}${comments}` : nothing;
 	};
 
-	const renderInlineDiff = (entry, host, paramKey, card, block) => html`
-		<div class="prw-diff-scroll">
-			<table class="prw-diff-table prw-inline-diff">
-				<tbody>
-					${arrayOf(block.hunks).map((hunk) => html`
-						<tr class="prw-hunk-row"><td colspan="4">${asText(hunk && hunk.header, "@@")}</td></tr>
-						${arrayOf(hunk && hunk.lines).map((ln) => {
-							const key = lineKey(card, block, ln);
-							const suggestions = lineSuggestions(card, block, ln);
-							return html`
-								<tr class=${`prw-line is-${lineTone(ln && ln.kind)}`} data-prw-line-id=${lineIdentifier(ln)}>
-									<td class="prw-line-number">${asText(ln && (ln.oldLine || ln.line || ln.id), "")}</td>
-									<td class="prw-prefix">${linePrefix(ln && ln.kind)}</td>
-									<td class="prw-code"><code>${asText(ln && ln.text)}</code></td>
-									<td class="prw-comment-cell">${lineCommentButton(entry, host, paramKey, key)}</td>
-								</tr>
-								${suggestions.length ? html`<tr class="prw-line-suggestion-row"><td colspan="4">${renderSuggestedLineCommentContent(entry, host, paramKey, key, suggestions)}</td></tr>` : nothing}
-								${renderLineCommentState(entry, host, paramKey, key, 4)}
-							`;
-						})}
-					`)}
-				</tbody>
-			</table>
-		</div>
-	`;
+	const renderDiffLine = (entry, host, paramKey, card, block, line, side) => {
+		if (!line) return html`<div class="diff-line empty" aria-hidden="true"><span></span><span></span><span></span><span></span></div>`;
+		const key = lineKey(card, block, line);
+		const kind = normKind(line);
+		const commented = commentsForLineKey(entry, key).length > 0;
+		const number = lineNo(line, side);
+		return html`<div class=${`diff-line ${kind} ${commented ? "commented" : ""} ${(entry.lineCommentOpen || {})[key] ? "editing" : ""}`} data-testid="pr-walkthrough-diff-line" data-line-id=${lineId(line)} data-line-kind=${kind} data-line-side=${asText(line && line.side, side)} data-old-line=${asText(line && line.oldLine, "")} data-new-line=${asText(line && line.newLine, "")} role="button" tabindex="0" aria-label=${`Comment on ${asText(block && (block.filePath || block.path), "diff")} line ${number || "context"}`} @click=${() => openLineComment(entry, host, paramKey, key)} @keydown=${(event) => onLineKey(event, entry, host, paramKey, key)}><span class="line-no">${number}</span><span class="prefix">${kind === "add" ? "+" : kind === "del" ? "−" : " "}</span><span class="line-text">${renderHighlightedLine(line && line.text)}</span><button class="comment-cue" data-testid="pr-walkthrough-line-comment-button" type="button" aria-label="Add line comment" @click=${(event) => openLine(event, entry, host, paramKey, key)}>+</button></div>`;
+	};
 
-	const pairedSideRows = (lines) => {
+	const hunkSignature = (header) => {
+		const text = typeof header === "string" ? header : asText(header);
+		return (text.match(/^@@[^@]*@@\s*(.*)$/)?.[1] || text).trim();
+	};
+	const signatureLikeLine = (text) => {
+		const trimmed = asText(text).trim();
+		return /^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\b/.test(trimmed) ? trimmed : undefined;
+	};
+	const scopeSignatureBeforeIndex = (hunk, anchor) => {
+		const lines = arrayOf(hunk && hunk.lines);
+		for (let i = anchor - 1; i >= 0; i -= 1) {
+			const sig = signatureLikeLine(lines[i] && lines[i].text);
+			if (sig) return sig;
+		}
+		return undefined;
+	};
+	const renderHunkHeader = (signature, controls = nothing) => {
+		const label = hunkSignature(signature);
+		return label || controls !== nothing ? html`<div class="hunk-header" data-testid="pr-walkthrough-hunk-header" aria-label=${label || "Expand hidden diff context"} title=${label}><div class="hunk-context-cell">${controls}</div><div class="hunk-signature">${label}</div></div>` : nothing;
+	};
+
+	const hiddenRanges = (visible, total) => {
+		const ranges = [];
+		for (let i = 0; i < total;) {
+			if (visible.has(i)) { i += 1; continue; }
+			const start = i;
+			while (i < total && !visible.has(i)) i += 1;
+			ranges.push({ start, end: i - 1 });
+		}
+		return ranges;
+	};
+	const hasLineDetail = (entry, card, block, line) => {
+		const key = lineKey(card, block, line);
+		return commentsForLineKey(entry, key).length > 0 || Boolean((entry.lineCommentOpen || {})[key]) || lineSuggestions(card, block, line).some((suggestion) => !(entry.dismissedSuggestionIds || {})[asText(suggestion && suggestion.id, suggestionBody(suggestion))]);
+	};
+	const contextKey = (card, block, hunk, index, start, end) => `${blockKey(card, block)}::${hunkId(hunk, index)}::${start}-${end}`;
+	const diffEntries = (entry, card, block, hunk, hunkIndex) => {
+		const lines = arrayOf(hunk && hunk.lines);
+		const important = lines.map((line, index) => (normKind(line) !== "context" || hasLineDetail(entry, card, block, line)) ? index : -1).filter((index) => index >= 0);
+		if (!important.length) return [{ kind: "lines", start: 0, end: lines.length - 1, lines }];
+		const baseVisible = new Set();
+		for (const index of important) for (let i = Math.max(0, index - DEFAULT_DIFF_CONTEXT_LINES); i <= Math.min(lines.length - 1, index + DEFAULT_DIFF_CONTEXT_LINES); i += 1) baseVisible.add(i);
+		const visible = new Set(baseVisible);
+		const gaps = hiddenRanges(baseVisible, lines.length);
+		for (const gap of gaps) {
+			const exp = (entry.contextExpansions || {})[contextKey(card, block, hunk, hunkIndex, gap.start, gap.end)] || {};
+			const hidden = gap.end - gap.start + 1;
+			const below = Math.min(exp.below || 0, hidden);
+			const above = Math.min(exp.above || 0, Math.max(0, hidden - below));
+			for (let i = gap.start; i < gap.start + below; i += 1) visible.add(i);
+			for (let i = gap.end - above + 1; i <= gap.end; i += 1) visible.add(i);
+		}
+		const entries = [];
+		for (let i = 0; i < lines.length;) {
+			if (visible.has(i)) {
+				const start = i;
+				const chunk = [];
+				while (i < lines.length && visible.has(i)) chunk.push(lines[i++]);
+				entries.push({ kind: "lines", start, end: i - 1, lines: chunk });
+			} else {
+				const start = i;
+				while (i < lines.length && !visible.has(i)) i += 1;
+				const end = i - 1;
+				const gap = gaps.find((g) => start >= g.start && end <= g.end) || { start, end };
+				entries.push({ kind: "context", start, end, gapStart: gap.start, gapEnd: gap.end, hiddenCount: end - start + 1, canExpandAbove: gap.end < lines.length - 1, canExpandBelow: gap.start > 0 });
+			}
+		}
+		return entries;
+	};
+	const expandContext = (entry, host, paramKey, card, block, hunk, hunkIndex, ctx, direction) => {
+		const cur = byJob.get(paramKey) || entry;
+		const key = contextKey(card, block, hunk, hunkIndex, ctx.gapStart, ctx.gapEnd);
+		const current = (cur.contextExpansions || {})[key] || {};
+		patchEntry(host, paramKey, { contextExpansions: { ...(cur.contextExpansions || {}), [key]: { ...current, [direction]: (current[direction] || 0) + DIFF_CONTEXT_EXPAND_LINES } } });
+	};
+	const contextButton = (entry, host, paramKey, card, block, hunk, hunkIndex, ctx, direction) => {
+		const count = Math.min(DIFF_CONTEXT_EXPAND_LINES, ctx.hiddenCount);
+		const label = `Show ${count} more line${count === 1 ? "" : "s"} ${direction}`;
+		return html`<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction=${direction} type="button" title=${label} aria-label=${`${label} in ${asText(block && (block.filePath || block.path), "diff")}`} @click=${() => expandContext(entry, host, paramKey, card, block, hunk, hunkIndex, ctx, direction)}>${direction === "above" ? html`<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>` : html`<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>`}</button>`;
+	};
+
+	const sidePairs = (lines) => {
 		const rows = [];
 		const source = arrayOf(lines);
 		for (let i = 0; i < source.length;) {
-			const line = source[i];
-			const kind = line && line.kind;
-			if (kind === "del") {
-				const dels = [];
-				const adds = [];
-				while (source[i] && source[i].kind === "del") dels.push(source[i++]);
-				while (source[i] && source[i].kind === "add") adds.push(source[i++]);
-				const count = Math.max(dels.length, adds.length);
-				for (let index = 0; index < count; index += 1) rows.push({ oldLine: dels[index], newLine: adds[index] });
-				continue;
-			}
-			if (kind === "add") {
-				rows.push({ oldLine: undefined, newLine: line });
-				i += 1;
-				continue;
-			}
-			rows.push({ oldLine: line, newLine: line, shared: true });
-			i += 1;
+			if (normKind(source[i]) === "del") {
+				const dels = [], adds = [];
+				while (source[i] && normKind(source[i]) === "del") dels.push(source[i++]);
+				while (source[i] && normKind(source[i]) === "add") adds.push(source[i++]);
+				for (let j = 0; j < Math.max(dels.length, adds.length); j += 1) rows.push({ left: dels[j], right: adds[j] });
+			} else if (normKind(source[i]) === "add") rows.push({ left: undefined, right: source[i++] });
+			else rows.push({ left: source[i], right: source[i++] });
 		}
 		return rows;
 	};
+	const renderSplitHunk = (entry, host, paramKey, card, block, hunk, hunkIndex) => html`${diffEntries(entry, card, block, hunk, hunkIndex).map((part, index, entries) => {
+		if (part.kind === "context") return nothing;
+		const prev = entries[index - 1] && entries[index - 1].kind === "context" ? entries[index - 1] : undefined;
+		const next = entries[index + 1] && entries[index + 1].kind === "context" ? entries[index + 1] : undefined;
+		const above = prev && prev.canExpandAbove ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, prev, "above") : nothing;
+		const below = next && next.canExpandBelow ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, next, "below") : nothing;
+		return html`${renderHunkHeader((prev && scopeSignatureBeforeIndex(hunk, part.start)) || hunkSignature(hunk && hunk.header), above)}${sidePairs(part.lines).map((pair) => html`<div class="split-row">${renderDiffLine(entry, host, paramKey, card, block, pair.left, "old")}${renderDiffLine(entry, host, paramKey, card, block, pair.right, "new")}</div>${pair.left && pair.right && lineId(pair.left) === lineId(pair.right) ? renderLineDetails(entry, host, paramKey, card, block, pair.left) : html`${renderLineDetails(entry, host, paramKey, card, block, pair.left)}${renderLineDetails(entry, host, paramKey, card, block, pair.right)}`}`)}${below === nothing ? nothing : renderHunkHeader("", below)}`;
+	})}`;
+	const renderInlineHunk = (entry, host, paramKey, card, block, hunk, hunkIndex) => html`${diffEntries(entry, card, block, hunk, hunkIndex).map((part, index, entries) => {
+		if (part.kind === "context") return nothing;
+		const prev = entries[index - 1] && entries[index - 1].kind === "context" ? entries[index - 1] : undefined;
+		const next = entries[index + 1] && entries[index + 1].kind === "context" ? entries[index + 1] : undefined;
+		const above = prev && prev.canExpandAbove ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, prev, "above") : nothing;
+		const below = next && next.canExpandBelow ? contextButton(entry, host, paramKey, card, block, hunk, hunkIndex, next, "below") : nothing;
+		return html`${renderHunkHeader((prev && scopeSignatureBeforeIndex(hunk, part.start)) || hunkSignature(hunk && hunk.header), above)}${part.lines.map((line) => html`${renderDiffLine(entry, host, paramKey, card, block, line, "inline")}${renderLineDetails(entry, host, paramKey, card, block, line)}`)}${below === nothing ? nothing : renderHunkHeader("", below)}`;
+	})}`;
+	const renderSplitDiff = (entry, host, paramKey, card, block) => html`<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll"><div class="split-grid">${arrayOf(block && block.hunks).map((hunk, index) => renderSplitHunk(entry, host, paramKey, card, block, hunk, index))}</div></div>`;
+	const renderInlineDiff = (entry, host, paramKey, card, block) => html`<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll"><div class="inline-lines">${arrayOf(block && block.hunks).map((hunk, index) => renderInlineHunk(entry, host, paramKey, card, block, hunk, index))}</div></div>`;
 
-	const sideLineNumber = (line, side) => side === "old"
-		? asText(line && (line.oldLine || line.line || line.id), "")
-		: asText(line && (line.newLine || line.line || line.id), "");
-
-	const renderSideAuxRows = (entry, host, paramKey, oldKey, oldSuggestions, newKey, newSuggestions) => {
-		const sharedKey = oldKey && oldKey === newKey;
-		const oldSuggestionContent = oldKey ? renderSuggestedLineCommentContent(entry, host, paramKey, oldKey, oldSuggestions) : nothing;
-		const newSuggestionContent = newKey && !sharedKey ? renderSuggestedLineCommentContent(entry, host, paramKey, newKey, newSuggestions) : nothing;
-		const oldCommentContent = oldKey ? renderLineCommentContent(entry, host, paramKey, oldKey) : nothing;
-		const newCommentContent = newKey && !sharedKey ? renderLineCommentContent(entry, host, paramKey, newKey) : nothing;
-		return html`
-			${oldSuggestionContent !== nothing && sharedKey ? html`<tr class="prw-line-suggestion-row"><td colspan="6">${oldSuggestionContent}</td></tr>` : nothing}
-			${oldSuggestionContent !== nothing && !sharedKey ? html`<tr class="prw-line-suggestion-row prw-side-suggestion-row"><td colspan="3">${oldSuggestionContent}</td><td colspan="3"></td></tr>` : nothing}
-			${newSuggestionContent !== nothing ? html`<tr class="prw-line-suggestion-row prw-side-suggestion-row"><td colspan="3"></td><td colspan="3">${newSuggestionContent}</td></tr>` : nothing}
-			${oldCommentContent !== nothing && sharedKey ? html`<tr class="prw-line-comment-row" id=${lineDomId(oldKey)}><td colspan="6">${oldCommentContent}</td></tr>` : nothing}
-			${oldCommentContent !== nothing && !sharedKey ? html`<tr class="prw-line-comment-row prw-side-comment-row" id=${lineDomId(oldKey)}><td colspan="3">${oldCommentContent}</td><td colspan="3"></td></tr>` : nothing}
-			${newCommentContent !== nothing ? html`<tr class="prw-line-comment-row prw-side-comment-row" id=${lineDomId(newKey)}><td colspan="3"></td><td colspan="3">${newCommentContent}</td></tr>` : nothing}
-		`;
+	const diffStats = (block) => {
+		let additions = 0, deletions = 0;
+		for (const hunk of arrayOf(block && block.hunks)) for (const line of arrayOf(hunk && hunk.lines)) { if (normKind(line) === "add") additions += 1; else if (normKind(line) === "del") deletions += 1; }
+		return { additions, deletions };
 	};
-
-	const renderSideDiff = (entry, host, paramKey, card, block) => html`
-		<div class="prw-diff-scroll">
-			<table class="prw-diff-table prw-side-diff">
-				<tbody>
-					${arrayOf(block.hunks).map((hunk) => html`
-						<tr class="prw-hunk-row"><td colspan="6">${asText(hunk && hunk.header, "@@")}</td></tr>
-						${pairedSideRows(hunk && hunk.lines).map((row) => {
-							const oldLine = row.oldLine;
-							const newLine = row.newLine;
-							const oldKey = oldLine ? lineKey(card, block, oldLine) : undefined;
-							const newKey = newLine ? lineKey(card, block, newLine) : undefined;
-							const oldSuggestions = oldLine ? lineSuggestions(card, block, oldLine) : [];
-							const newSuggestions = newLine && newLine !== oldLine ? lineSuggestions(card, block, newLine) : oldSuggestions;
-							const tone = row.shared ? lineTone(oldLine && oldLine.kind) : oldLine && newLine ? "change" : oldLine ? "del" : "add";
-							return html`
-								<tr
-									class=${`prw-line prw-side-row is-${tone}`}
-									data-testid="prw-side-diff-row"
-									data-prw-old-line-id=${oldLine ? lineIdentifier(oldLine) : ""}
-									data-prw-new-line-id=${newLine ? lineIdentifier(newLine) : ""}
-								>
-									<td class="prw-line-number prw-old-number">${oldLine ? sideLineNumber(oldLine, "old") : ""}</td>
-									<td class="prw-code prw-old ${oldLine ? `is-${lineTone(oldLine.kind)}` : "is-empty"}"><code>${oldLine ? asText(oldLine.text) : ""}</code></td>
-									<td class="prw-comment-cell prw-old-comment">${oldKey ? lineCommentButton(entry, host, paramKey, oldKey) : nothing}</td>
-									<td class="prw-line-number prw-new-number">${newLine ? sideLineNumber(newLine, "new") : ""}</td>
-									<td class="prw-code prw-new ${newLine ? `is-${lineTone(newLine.kind)}` : "is-empty"}"><code>${newLine ? asText(newLine.text) : ""}</code></td>
-									<td class="prw-comment-cell prw-new-comment">${newKey ? lineCommentButton(entry, host, paramKey, newKey) : nothing}</td>
-								</tr>
-								${renderSideAuxRows(entry, host, paramKey, oldKey, oldSuggestions, newKey, newSuggestions)}
-							`;
-						})}
-					`)}
-				</tbody>
-			</table>
-		</div>
-	`;
-
+	const blockCommentCount = (entry, card, block) => {
+		const prefix = `${blockKey(card, block)}::`;
+		return Object.entries(entry.lineComments || {}).filter(([key, comments]) => key.startsWith(prefix) && arrayOf(comments).some((comment) => asText(comment).trim())).length;
+	};
+	const safeExternalUrl = (value) => {
+		try { const url = new URL(asText(value), globalThis.location && globalThis.location.href ? globalThis.location.href : "https://example.invalid/"); return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined; } catch { return undefined; }
+	};
+	const externalFileUrl = (block) => safeExternalUrl(block && (block.externalUrl || block.blobUrl || block.rawUrl || block.contentsUrl));
 	const renderDiffBlock = (entry, host, paramKey, card, block) => {
-		const mode = entry.diffMode || defaultDiffMode();
-		const label = block && (block.label || block.filePath || block.path) || "Diff block";
+		const filePath = asText(block && (block.filePath || block.path), "unknown");
+		const label = asText(block && (block.label || block.filePath || block.path), "Diff block");
 		const key = blockKey(card, block);
 		const collapsed = Boolean((entry.collapsedDiffBlocks || {})[key]);
-		return html`
-			<section class="prw-diff-block ${collapsed ? "is-collapsed" : ""}" data-testid="prw-diffblock" data-prw-file=${asText(block && (block.filePath || block.path), "unknown")}>
-				<header class="prw-diff-header">
-					<div>
-						<strong>${asText(block && block.status, "modified")}</strong>
-						<span>${label}</span>
-					</div>
-					<div class="prw-diff-header-actions">
-						${block && block.oldPath && block.oldPath !== block.filePath ? html`<small>was ${block.oldPath}</small>` : nothing}
-						<button
-							class="prw-ghost-button prw-diff-toggle"
-							type="button"
-							data-testid="prw-diff-toggle"
-							aria-expanded=${String(!collapsed)}
-							@click=${() => updateNestedMap(entry, host, paramKey, "collapsedDiffBlocks", key, !collapsed)}
-						>${collapsed ? "Expand" : "Collapse"}</button>
-					</div>
-				</header>
-				${collapsed ? nothing : mode === "inline" ? renderInlineDiff(entry, host, paramKey, card, block || {}) : renderSideDiff(entry, host, paramKey, card, block || {})}
-			</section>
-		`;
+		const stats = diffStats(block);
+		const comments = blockCommentCount(entry, card, block);
+		const href = externalFileUrl(block);
+		const oldPath = asText(block && block.oldPath);
+		const mode = effectiveDiffMode(entry);
+		return html`<section class=${`diff-block ${collapsed ? "closed" : "open"}`} data-testid="pr-walkthrough-diff-block" data-file-path=${filePath} data-diff-mode=${mode} data-expanded=${String(!collapsed)}><div class="diff-file-header-row"><button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${String(!collapsed)} @click=${() => updateNestedMap(entry, host, paramKey, "collapsedDiffBlocks", key, !collapsed)}><span class="caret">▸</span><span class="diff-path"><b>${oldPath && oldPath !== filePath ? `${oldPath} → ${filePath}` : label}</b></span>${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}<span class="diff-counts" data-testid="pr-walkthrough-diff-counts" aria-label=${`${stats.additions} additions, ${stats.deletions} deletions`}><span class="diff-add-count" data-testid="pr-walkthrough-diff-additions">+${stats.additions}</span><span class="diff-del-count" data-testid="pr-walkthrough-diff-deletions">-${stats.deletions}</span></span></button>${href ? html`<a class="diff-external-link" href=${href} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link" title="Open file" aria-label=${`Open ${filePath}`}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></a>` : nothing}</div>${collapsed ? nothing : mode === "inline" ? renderInlineDiff(entry, host, paramKey, card, block || {}) : renderSplitDiff(entry, host, paramKey, card, block || {})}</section>`;
 	};
+	const renderDiffBlockSafe = (entry, host, paramKey, card, block) => {
+		try { return renderDiffBlock(entry, host, paramKey, card, block || {}); }
+		catch (error) { console.warn(`[pr-walkthrough] failed to render diff block for ${asText(block && (block.filePath || block.path), "<unknown file>")}`, error); return html`<section class="diff-block diff-block-error" data-testid="pr-walkthrough-diff-block-error" data-file-path=${asText(block && (block.filePath || block.path), "")}><p class="diff-error-note">Could not render the diff for <b>${asText(block && (block.filePath || block.path), "this file")}</b>.</p></section>`; }
+	};
+
 
 	const renderSuggestedComment = (entry, host, paramKey, card) => (sc) => html`
 		<div class="prw-suggested-comment" data-testid="prw-suggested-comment" data-prw-comment=${asText(sc && sc.id, "comment")}>
@@ -716,7 +732,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 				</div>
 				<div class="prw-diff-list">
 					${arrayOf(card.diffBlocks).length
-						? arrayOf(card.diffBlocks).map((block) => renderDiffBlock(entry, host, paramKey, card, block))
+						? arrayOf(card.diffBlocks).map((block) => renderDiffBlockSafe(entry, host, paramKey, card, block))
 						: html`<div class="prw-no-diff"><span>No diff block on this card.</span><button class="prw-line-comment-button" disabled>Line comments appear on diff lines</button></div>`}
 				</div>
 				${suggestedComments.length
@@ -1126,6 +1142,64 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-segment { border: 0; border-radius: 0; color: var(--muted-foreground); }
 					.prw-segment.is-active { background: var(--primary); color: var(--primary-foreground); }
 					.prw-diff-list { display: grid; gap: 12px; }
+					.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
+					.modebar .mode-toggle { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in oklch, var(--background) 62%, transparent); }
+					.modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground); }
+					.modebar .mode-toggle button.active { background: color-mix(in oklch, var(--primary) 22%, transparent); color: var(--primary); outline: 1px solid color-mix(in oklch, var(--primary) 42%, var(--border)); }
+					.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+					.diff-block { margin: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.diff-block.closed .diff-overflow { display: none; }
+					.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
+					.diff-block.closed .diff-file-header-row { border-bottom: 0; }
+					.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; background: color-mix(in oklch, var(--muted-foreground) 8%, transparent); font: inherit; color: inherit; text-align: left; cursor: pointer; }
+					.diff-external-link { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; padding: 0; border-left: 1px solid var(--border); color: var(--muted-foreground); text-decoration: none; }
+					.diff-external-link:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 7%, transparent); }
+					.diff-external-link svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.caret { width: 12px; color: var(--muted-foreground); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
+					.diff-block.open .caret { transform: rotate(90deg); }
+					.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground); }
+					.diff-path b { color: var(--foreground); }
+					.diff-counts { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; }
+					.diff-add-count { color: var(--positive); }
+					.diff-del-count { color: var(--negative); }
+					.diff-comment-count { font-size: 11px; color: var(--negative); background: color-mix(in oklch, var(--negative) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
+					.diff-overflow { overflow-x: auto; overflow-y: hidden; max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
+					.split-grid { min-width: 980px; }
+					.inline-lines { min-width: 640px; }
+					.split-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; min-width: 100%; }
+					.split-row .diff-line:first-child { border-right: 1px solid var(--border); }
+					.hunk-header { display: grid; grid-template-columns: 60px minmax(0, 1fr); min-width: max-content; color: var(--muted-foreground); background: color-mix(in oklch, var(--info) 10%, transparent); font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+					.hunk-context-cell { min-height: 24px; padding: 3px; display: inline-flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; }
+					.hunk-signature { min-width: 0; padding: 3px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.6; }
+					.context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info) 10%, transparent); color: var(--muted-foreground); }
+					.context-toggle:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 18%, transparent); }
+					.context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+					.diff-line { position: relative; width: 100%; min-width: 0; min-height: 24px; padding: 0; border: 0; border-radius: 0; display: grid; overflow: hidden; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; align-items: stretch; text-align: left; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground); background: transparent; }
+					.diff-line.empty { pointer-events: none; color: transparent; }
+					.diff-line.add { background: color-mix(in oklch, var(--positive) 15%, transparent); }
+					.diff-line.del { background: color-mix(in oklch, var(--negative) 13%, transparent); }
+					.diff-line:hover, .diff-line:focus-visible { outline: none; background: color-mix(in oklch, var(--primary) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 38%, transparent); }
+					.diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary); font-size: 8px; }
+					.line-no, .prefix, .comment-cue { padding: 3px 6px; color: var(--muted-foreground); user-select: none; }
+					.line-no { position: relative; text-align: right; }
+					.line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+					.comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary); color: var(--primary-foreground); line-height: 18px; font-weight: 800; opacity: 0; font-family: inherit; }
+					.diff-line:hover .comment-cue, .diff-line:focus-visible .comment-cue, .diff-line.editing .comment-cue, .diff-line.commented .comment-cue { opacity: 1; }
+					.line-comments, .line-editor, .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); background: color-mix(in oklch, var(--card) 88%, var(--background)); }
+					.comment, .suggestion { padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--background); }
+					.comment-meta { margin-bottom: 4px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.comment-body { white-space: pre-wrap; }
+					.comment-actions, .suggestion-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; justify-content: flex-end; }
+					.comment-actions button, .suggestion button { padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted-foreground); }
+					.comment-actions button:hover, .suggestion button:hover { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
+					.comment-actions button.delete:hover, .suggestion button.delete:hover { color: var(--negative); background: color-mix(in oklch, var(--negative) 12%, transparent); }
+					.tok-keyword { color: var(--chart-4); }
+					.tok-string { color: var(--chart-2); }
+					.tok-number { color: var(--chart-3); }
+					.tok-comment { color: var(--muted-foreground); font-style: italic; }
+					.tok-property { color: var(--chart-1); }
+					.tok-function { color: var(--chart-6); }
+					.diff-block-error { padding: 12px; color: var(--negative); }
 					.prw-diff-block { margin-top: 0; border-radius: 12px; background: color-mix(in oklch, var(--card) 98%, var(--background)); box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
 					.prw-diff-header { padding: 9px 12px; }
 					.prw-diff-header strong { color: var(--chart-1); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; border: 1px solid color-mix(in oklch, var(--chart-1) 24%, var(--border)); border-radius: 5px; padding: 2px 6px; }
