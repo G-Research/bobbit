@@ -23,12 +23,11 @@
  *   C. The "X more" pill label never wraps to a second line.
  *
  * Implementation notes:
- *   - Pills are dismissed via `page.evaluate(...)` manipulating the host
- *     `<agent-interface>`'s `bgProcesses` property (same path the UI's
- *     own dismiss handler uses — see `dismissBgProcess` in
- *     `src/app/session-manager.ts`). DELETE-via-REST only KILLS running
- *     pills; they stay in the strip as "exited" status, which doesn't
- *     exercise the promotion code path.
+ *   - Pills are synthetic `bgProcesses` entries injected into the mounted
+ *     `<agent-interface>`, because these assertions cover client-side layout
+ *     and do not need real long-running subprocesses.
+ *   - Pills are dismissed via the same property update path the UI's own
+ *     dismiss handler uses (see `dismissBgProcess` in `src/app/session-manager.ts`).
  *   - Pill name padding (`qa-pill-xxxxxx-NN`) makes pill widths stable
  *     across host font fallbacks so the overflow precondition holds on
  *     varied CI hardware.
@@ -45,10 +44,6 @@ import {
 import type { Page } from "@playwright/test";
 import { openApp } from "./ui-helpers.js";
 
-const SLEEP_CMD = process.platform === "win32"
-	? "ping -n 600 127.0.0.1 >NUL"
-	: "sleep 600";
-
 const padName = (i: number): string => `qa-pill-xxxxxx-${i.toString().padStart(2, "0")}`;
 
 /** Two rAFs let Lit complete a render AND the rAF-coalesced measure. */
@@ -59,18 +54,63 @@ async function settleTwoRafs(page: Page): Promise<void> {
 }
 
 /**
+ * Seed synthetic bg-process pills directly into the mounted chat UI.
+ *
+ * These tests assert client-side layout/overflow behaviour. Spawning real
+ * long-running subprocesses made the broad browser E2E suite spend minutes in
+ * process setup/teardown and left expensive retries when a layout assertion
+ * timed out, without increasing coverage of the pill layout code.
+ */
+async function seedPillsInUI(page: Page, count: number): Promise<string[]> {
+	const startTime = Date.now();
+	const processes = Array.from({ length: count }, (_, i) => ({
+		id: `mock-bg-${i + 1}`,
+		name: padName(i + 1),
+		command: "mock long-running command",
+		pid: 10_000 + i,
+		status: "running" as const,
+		exitCode: null,
+		terminalReason: null,
+		startTime: startTime + i,
+		endTime: null,
+	}));
+	await page.evaluate(async (mockProcesses) => {
+		await customElements.whenDefined("bg-process-pill");
+		const ai = document.querySelector("agent-interface") as
+			| (HTMLElement & { bgProcesses?: unknown[]; updateComplete?: Promise<unknown>; _measurePillOverflow?: () => void })
+			| null;
+		if (!ai) throw new Error("agent-interface not mounted");
+		ai.bgProcesses = mockProcesses;
+		await ai.updateComplete;
+	}, processes);
+	await page.waitForFunction(
+		() => Array.from(document.querySelectorAll("bg-process-pill"))
+			.every((el) => (el as HTMLElement).offsetWidth > 0),
+		{ timeout: 10_000 },
+	);
+	await page.evaluate(() => {
+		(document.querySelector("agent-interface") as
+			| (HTMLElement & { _measurePillOverflow?: () => void })
+			| null)?._measurePillOverflow?.();
+	});
+	await settleTwoRafs(page);
+	return processes.map((p) => p.id);
+}
+
+/**
  * Optimistically remove pills from the UI by filtering them out of
  * `agent-interface.bgProcesses`. Mirrors what the UI's dismiss handler
  * does (`dismissBgProcess` in `src/app/session-manager.ts`). Triggers
  * Lit's reactivity → re-render → `_measurePillOverflow` → promotion.
  */
 async function dismissPillsFromUI(page: Page, idsToRemove: string[]): Promise<void> {
-	await page.evaluate((ids) => {
+	await page.evaluate(async (ids) => {
 		const ai = document.querySelector("agent-interface") as
-			| (HTMLElement & { bgProcesses?: Array<{ id: string }> })
+			| (HTMLElement & { bgProcesses?: Array<{ id: string }>; updateComplete?: Promise<unknown> })
 			| null;
 		if (!ai || !Array.isArray(ai.bgProcesses)) return;
 		ai.bgProcesses = ai.bgProcesses.filter((p) => !ids.includes(p.id));
+		await ai.updateComplete;
 	}, idsToRemove);
 }
 
@@ -105,18 +145,9 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		await page.setViewportSize({ width: 540, height: 800 });
 		await expectMode(page, "narrow");
 
-		const ids: string[] = [];
-		for (let i = 1; i <= 10; i++) {
-			const r = await apiFetch(`/api/sessions/${sessionId}/bg-processes`, {
-				method: "POST",
-				body: JSON.stringify({ command: SLEEP_CMD, name: padName(i) }),
-			});
-			expect(r.status).toBe(201);
-			ids.push((await r.json()).id);
-		}
+		const ids = await seedPillsInUI(page, 15);
 
 		await expect(page.locator("[data-more-btn]")).toBeVisible({ timeout: 15_000 });
-		await settleTwoRafs(page);
 		await rec.capture("Narrow: strip rendered with overflow");
 
 		const visibleBefore = await page.locator("bg-process-pill").count();
@@ -124,7 +155,7 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 			visibleBefore,
 			"need at least 2 visible pills + a 'more' pill so the bug surface is exercised",
 		).toBeGreaterThanOrEqual(2);
-		expect(visibleBefore).toBeLessThan(10);
+		expect(visibleBefore).toBeLessThan(15);
 
 		const visiblePillIds = await page
 			.locator("bg-process-pill[data-id]")
@@ -164,7 +195,7 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 				`pre-fix this collapses to 1 because _pillWidths cached the popover container width for every hidden pill`,
 		).toBeGreaterThanOrEqual(visibleBefore);
 
-		await teardown(sessionId, ids);
+		await teardown(sessionId);
 	});
 
 	test("narrow mode: strip never wraps to more than 2 rows even with many pills", async ({ page }) => {
@@ -177,18 +208,9 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		await page.setViewportSize({ width: 540, height: 800 });
 		await expectMode(page, "narrow");
 
-		const ids: string[] = [];
-		for (let i = 1; i <= 15; i++) {
-			const r = await apiFetch(`/api/sessions/${sessionId}/bg-processes`, {
-				method: "POST",
-				body: JSON.stringify({ command: SLEEP_CMD, name: padName(i) }),
-			});
-			expect(r.status).toBe(201);
-			ids.push((await r.json()).id);
-		}
+		await seedPillsInUI(page, 15);
 
 		await expect(page.locator("[data-more-btn]")).toBeVisible({ timeout: 15_000 });
-		await settleTwoRafs(page);
 
 		// Strip height must be ≤ (2 × pill-h + gap + small slack).
 		// --pill-h is 22 px; gap-1.5 ≈ 6 px; allow a few extra px for
@@ -202,7 +224,7 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 				`The 0.75 \u00d7 1.85 budget should cap at 2 rows worth of capacity.`,
 		).toBeLessThanOrEqual(2 * 22 + 6 + 8);
 
-		await teardown(sessionId, ids);
+		await teardown(sessionId);
 	});
 
 	// ─────────────────────────────────────────────────────────────────────
@@ -221,18 +243,9 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		await page.setViewportSize({ width: 1400, height: 800 });
 		await expectMode(page, "wide");
 
-		const ids: string[] = [];
-		for (let i = 1; i <= 12; i++) {
-			const r = await apiFetch(`/api/sessions/${sessionId}/bg-processes`, {
-				method: "POST",
-				body: JSON.stringify({ command: SLEEP_CMD, name: padName(i) }),
-			});
-			expect(r.status).toBe(201);
-			ids.push((await r.json()).id);
-		}
+		await seedPillsInUI(page, 12);
 
 		await expect(page.locator("[data-more-btn]")).toBeVisible({ timeout: 15_000 });
-		await settleTwoRafs(page);
 
 		// The strip MUST stay on a single pill-row in wide mode. Pre-fix
 		// (flex-wrap) it would wrap onto a second row during the brief
@@ -251,7 +264,7 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		expect(visible).toBeLessThan(12);
 		expect(visible).toBeGreaterThanOrEqual(1);
 
-		await teardown(sessionId, ids);
+		await teardown(sessionId);
 	});
 
 	test("wide mode: hidden pills promote back into the strip after visible pills are dismissed", async ({ page }) => {
@@ -267,18 +280,9 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		await page.setViewportSize({ width: 1400, height: 800 });
 		await expectMode(page, "wide");
 
-		const ids: string[] = [];
-		for (let i = 1; i <= 14; i++) {
-			const r = await apiFetch(`/api/sessions/${sessionId}/bg-processes`, {
-				method: "POST",
-				body: JSON.stringify({ command: SLEEP_CMD, name: padName(i) }),
-			});
-			expect(r.status).toBe(201);
-			ids.push((await r.json()).id);
-		}
+		const ids = await seedPillsInUI(page, 14);
 
 		await expect(page.locator("[data-more-btn]")).toBeVisible({ timeout: 15_000 });
-		await settleTwoRafs(page);
 
 		const visibleBefore = await page.locator("bg-process-pill").count();
 		expect(visibleBefore).toBeGreaterThanOrEqual(2);
@@ -309,7 +313,7 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 			`wide-mode promote-back failed (visibleBefore=${visibleBefore}, visibleAfter=${visibleAfter})`,
 		).toBeGreaterThanOrEqual(visibleBefore);
 
-		await teardown(sessionId, ids);
+		await teardown(sessionId);
 	});
 
 	// ─────────────────────────────────────────────────────────────────────
@@ -324,19 +328,10 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		await page.setViewportSize({ width: 540, height: 800 });
 
-		const ids: string[] = [];
-		for (let i = 1; i <= 10; i++) {
-			const r = await apiFetch(`/api/sessions/${sessionId}/bg-processes`, {
-				method: "POST",
-				body: JSON.stringify({ command: SLEEP_CMD, name: padName(i) }),
-			});
-			expect(r.status).toBe(201);
-			ids.push((await r.json()).id);
-		}
+		await seedPillsInUI(page, 10);
 
 		const moreBtn = page.locator("[data-more-btn]");
 		await expect(moreBtn).toBeVisible({ timeout: 15_000 });
-		await settleTwoRafs(page);
 
 		// Visual outcome assertion: the more pill button stays at a
 		// single line of content height. If `whitespace-nowrap`
@@ -350,16 +345,10 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 				`whitespace-nowrap should keep it on one line.`,
 		).toBeLessThanOrEqual(24); // 22 px pill-h + 2 px epsilon
 
-		await teardown(sessionId, ids);
+		await teardown(sessionId);
 	});
 });
 
-async function teardown(sessionId: string, allIds: string[]): Promise<void> {
-	for (const id of allIds) {
-		await apiFetch(
-			`/api/sessions/${sessionId}/bg-processes/${id}`,
-			{ method: "DELETE" },
-		).catch(() => {});
-	}
+async function teardown(sessionId: string): Promise<void> {
 	await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
 }
