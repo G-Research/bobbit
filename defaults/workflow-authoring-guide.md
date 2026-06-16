@@ -248,7 +248,7 @@ Common optional fields (apply to all three shapes):
 
 ### 4.2 `type: llm-review`
 
-Reviewer agent. Runs against the diff between the goal's branch and master, with access to repo files and gate content.
+Reviewer agent. Runs against the diff between the goal's branch and the configured integration branch, with access to repo files and gate content.
 
 ```yaml
 - name: "Code quality review"
@@ -311,13 +311,15 @@ Free-form `run:` strings and `prompt:` bodies may reference:
 | Token | Meaning |
 |---|---|
 | `{{branch}}` | the goal/session branch name |
-| `{{baseBranch}}` | the bare integration branch from the project's `base_ref`, falling back to the detected primary branch (e.g. `master`/`main`) |
-| `{{master}}` | **deprecated/backwards-compat alias** — always resolves to the detected primary branch regardless of `base_ref`. Prefer `{{baseBranch}}`. |
+| `{{baseBranch}}` | built-in bare integration branch resolved from the project's configured `base_ref`, falling back to the detected primary branch (for example, `origin/master` → `master`, `origin/develop` → `develop`) |
+| `{{master}}` | **legacy alias** — resolves to the detected primary branch regardless of `base_ref`. Prefer `{{baseBranch}}` for new workflows. |
 | `{{goal_spec}}` | full markdown of the goal spec |
 | `{{agent.<key>}}` | metadata supplied by the signaling agent |
 | `{{<gate_id>.meta.<key>}}` | metadata from a passed upstream gate |
 
-These are substituted by the gate runner before the step executes. **Do not** use `{{project.<key>}}` in command shapes — it is removed in favor of structural `{ component, command }` references. The validator will catch unresolved `{ component, command }` references at load time; unrecognized free-form tokens just pass through to the shell and fail at runtime as ordinary typos.
+These are substituted by the gate runner before the step executes. **Do not** use `{{project.<key>}}` in verification `run:` strings or `prompt:` bodies — project-variable templates are unsupported there. Use structural `{ component, command }` references for project commands and component `config:` for QA settings.
+
+Unrecognized free-form tokens are generally treated as runtime typos. Optional command steps may be skipped when their optional metadata token is absent, but required Ready-to-Merge checks must not skip/pass because a built-in such as `{{branch}}`, `{{baseBranch}}`, or `{{master}}` failed to resolve.
 
 ## 6. Pattern library
 
@@ -501,6 +503,6 @@ The `shared` data-only component generates no workflow steps. It's only present 
 - **Literal shell strings instead of structural references.** `{ run: "npm run build" }` works but loses validator coverage and breaks when the command rotates. Prefer `{ component, command }`.
 - **Copy-paste step bodies across phases.** Use `phase:` to parallelize and structural references to share command definitions.
 - **Over-broad `expect: failure`.** It's for TDD reproducing-tests where the gate must demonstrate the bug. Don't use it to paper over a flaky build.
-- **`{{project.X}}` tokens in command shapes.** Removed; replaced by `{ component, command }`. The migration rewrites known usages on first server boot.
+- **`{{project.X}}` tokens in verification templates.** Unsupported in `run:` strings and `prompt:` bodies; replace command lookups with `{ component, command }`. The migration rewrites known command usages on first server boot.
 - **Pure `{ run }` steps that pretend to be component-scoped.** If a step belongs to a component, link it: `{ component, run }` so the working directory is correct.
 - **Data-only components with workflow steps.** A component with no `commands` cannot be referenced by a structural step. The validator rejects this at load time.
