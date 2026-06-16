@@ -8185,7 +8185,12 @@ async function handleApiRoute(
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
-		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
+		const signalResponse = { id: signal.id, gateId, goalId, status: "running", steps: verifySteps };
+		const response: { signal: typeof signalResponse; agentReminder?: string } = { signal: signalResponse };
+		if (verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running") {
+			response.agentReminder = "Gate signal accepted. Verification is running asynchronously. Do not poll with `gate_status` or `gate_inspect`. Go idle now and wait for the server to deliver verification results or further instructions.";
+		}
+		json(response, 201);
 		return;
 	}
 

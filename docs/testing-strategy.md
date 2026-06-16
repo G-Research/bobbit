@@ -13,7 +13,7 @@ To make that a no-brainer, exactly one rule is enforced: **every test file under
 | **e2e** | all remaining non-LLM integration | `playwright-e2e.config.ts` (union across its `api` / `api-realpush` / `browser` projects) | `e2e:` → `npx playwright test --config playwright-e2e.config.ts` |
 | **manual-integration** *(gate-exempt)* | real LLM / Docker | `playwright-manual.config.ts` | `npm run test:manual` only |
 
-`npm run test:unit` runs the two unit runners **concurrently** via [`scripts/run-unit.mjs`](../scripts/run-unit.mjs), splitting the cores between them (node `--test-concurrency=N/2`, browser `--workers=N/2`) so they run genuinely in parallel without oversubscribing the box — full concurrency starves slow browser fixtures past their 15s timeout.
+`npm run test:unit` runs the two unit runners **concurrently** via [`scripts/run-unit.mjs`](../scripts/run-unit.mjs), splitting the cores between them and capping each runner at 6 workers by default (node `--test-concurrency=min(6,N/2)`, browser `--workers=min(6,N/2)`) so they run genuinely in parallel without oversubscribing or starving file:// browser fixtures. Env overrides are available for intentional local stress runs.
 
 **Convention purity**: `*.test.ts` ⇒ node:test runner; `*.spec.ts` ⇒ Playwright. A `*.test.ts` must never import `@playwright/test`; a `*.spec.ts` must never import `node:test`. This is what keeps the two unit runners cleanly separable.
 

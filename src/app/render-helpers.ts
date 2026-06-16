@@ -31,7 +31,6 @@ import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
-import "../ui/components/SidebarActionsPopover.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 
@@ -447,6 +446,7 @@ interface OpenSidebarActionsPopover {
 }
 
 let _openSidebarActionsPopover: OpenSidebarActionsPopover | null = null;
+let _sidebarActionsPopoverRequestId = 0;
 
 function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: string): boolean {
 	return _openSidebarActionsPopover?.kind === kind
@@ -465,6 +465,7 @@ function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActions
 }
 
 function closeSidebarActionsPopover(render = true): void {
+	_sidebarActionsPopoverRequestId++;
 	const current = _openSidebarActionsPopover;
 	if (!current) return;
 	_openSidebarActionsPopover = null;
@@ -485,19 +486,22 @@ function refreshOpenSidebarActionsPopover(): void {
 	current.element.items = sidebarActionPopoverItems(current.actions);
 }
 
-function openSidebarActionsPopover(input: {
+async function openSidebarActionsPopover(input: {
 	kind: SidebarActionEntityKind;
 	entityId: string;
 	trigger: HTMLElement;
 	actions: SidebarActionItem[];
 	refresh: () => SidebarActionItem[];
 	sourceRects: SidebarActionsFlipRect[];
-}): void {
+}): Promise<void> {
 	if (isSidebarActionsPopoverOpen(input.kind, input.entityId)) {
 		closeSidebarActionsPopover();
 		return;
 	}
 	closeSidebarActionsPopover(false);
+	const requestId = ++_sidebarActionsPopoverRequestId;
+	await import("../ui/components/SidebarActionsPopover.js");
+	if (requestId !== _sidebarActionsPopoverRequestId || !input.trigger.isConnected) return;
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
 	element.anchorEl = input.trigger;
 	element.items = sidebarActionPopoverItems(input.actions);
@@ -561,7 +565,7 @@ function renderSidebarActionsTrigger(input: {
 		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
 		input.onBeforeOpen?.();
 		const actions = input.refresh();
-		openSidebarActionsPopover({
+		void openSidebarActionsPopover({
 			kind: input.kind,
 			entityId: input.entityId,
 			trigger,
