@@ -166,13 +166,13 @@ async function setupOffscreen(page: Page): Promise<{ sidA: string; sidB: string 
 async function expectGoalPanelPopulated(page: Page): Promise<void> {
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
 	await expect(titleInput).toBeVisible({ timeout: 20_000 });
-	await expect(titleInput).toHaveValue(GOAL_TITLE, { timeout: 30_000 });
+	await expect(titleInput).toHaveValue(GOAL_TITLE, { timeout: 15_000 });
 	await expect(async () => {
 		const spec = await page.evaluate(
 			() => ((window as any).bobbitState?.previewSpec as string) ?? "",
 		);
 		expect(spec, "off-screen proposal spec must be restored on return").toContain(GOAL_SPEC_TAIL);
-	}).toPass({ timeout: 30_000, intervals: [500, 1000, 2000] });
+	}).toPass({ timeout: 15_000, intervals: [500, 1000, 2000] });
 }
 
 test.describe("Goal proposal off-screen return @repro", () => {
