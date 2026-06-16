@@ -32,6 +32,7 @@
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
+import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,15 +119,24 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// with scaffolding and produces spurious ENOENT.
 		mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
-		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-		const { createGateway } = await import("../../dist/server/server.js");
+		const {
+			setProjectRoot,
+			scaffoldBobbitDir,
+			loadOrCreateToken,
+			createGateway,
+			registerRpcBridgeFactory,
+		} = await withDistServerImportLock(async () => {
+			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
+			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
+			const { createGateway } = await import("../../dist/server/server.js");
+			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
+			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
+		});
 		// Register the in-process mock bridge factory before any sessions are
 		// created. The factory intercepts RpcBridge constructions whose cliPath
 		// points at our mock-agent.mjs and returns a drop-in class that skips
 		// the Node subprocess + JSONL serialization entirely.
-		const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
 		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
 		registerRpcBridgeFactory((opts: any) => {
 			if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
