@@ -2074,8 +2074,7 @@ export class VerificationHarness {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
 		} else {
 			const steps = failureContext?.steps ?? [];
-			const goalBranch = failureContext?.goalBranch;
-			const message = buildVerificationFailureMessage(gateId, steps, goalBranch);
+			const message = buildVerificationFailureMessage(gateId, steps);
 			this.notifyTeamLeadFn(goalId, message);
 		}
 		// Cross-team propagation: when a CHILD goal's ready-to-merge gate
