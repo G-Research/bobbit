@@ -28,7 +28,7 @@ fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
 const { VerificationHarness } = await import("../src/server/agent/verification-harness.ts");
-const { spawnTracked, killAllTracked, _trackedCount } = await import("../src/server/agent/spawn-tree.ts");
+const { spawnTracked, killAllTracked, killTreeByPid, _trackedCount } = await import("../src/server/agent/spawn-tree.ts");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
 async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: number, stepMs = 50): Promise<boolean> {
@@ -51,6 +51,27 @@ function isAlive(pid: number): boolean {
 	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
 	try { process.kill(pid, 0); return true; }
 	catch (err: any) { return err?.code === "EPERM"; }
+}
+
+async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: string): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${label} within ${budgetMs}ms`)), budgetMs);
+				timer.unref();
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+function killPidBestEffort(pid: number): void {
+	if (!pid || !isAlive(pid)) return;
+	try { killTreeByPid(pid, "SIGKILL"); } catch { /* best-effort */ }
+	try { process.kill(pid, "SIGKILL"); } catch { /* best-effort */ }
 }
 
 /** Minimal stubs for a bare-bones VerificationHarness. */
@@ -210,31 +231,41 @@ describe("runCommandStep tree-kill", () => {
 			nodeTreeShellCmd(), tmp, 60, false, streamCtx, undefined, undefined,
 		);
 
-		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
-		assert.ok(registered, "tracked child should be registered shortly after spawn");
+		let parentPid = 0;
+		let childPid = 0;
+		try {
+			const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+			assert.ok(registered, "tracked child should be registered shortly after spawn");
 
-		const pidsReady = await poll(() => {
+			const pidsReady = await poll(() => {
+				const av = (harness as any).activeVerifications.get(signalId);
+				const out = av?.steps?.[0]?.output ?? "";
+				return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+			}, 6000);
+			assert.ok(pidsReady, "script should have printed both pids before cancel");
 			const av = (harness as any).activeVerifications.get(signalId);
-			const out = av?.steps?.[0]?.output ?? "";
-			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-		}, 6000);
-		assert.ok(pidsReady, "script should have printed both pids before cancel");
-		const av = (harness as any).activeVerifications.get(signalId);
-		const out = av.steps[0].output as string;
-		const parentPid = Number(/PARENT_PID=(\d+)/.exec(out)![1]);
-		const childPid = Number(/CHILD_PID=(\d+)/.exec(out)![1]);
+			const out = av.steps[0].output as string;
+			parentPid = Number(/PARENT_PID=(\d+)/.exec(out)![1]);
+			childPid = Number(/CHILD_PID=(\d+)/.exec(out)![1]);
 
-		await harness.cancelStaleVerifications(goalId, gateId);
+			await harness.cancelStaleVerifications(goalId, gateId);
 
-		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 3000);
-		assert.ok(dead, `tree should be reaped within budget; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
+			const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve");
+			assert.strictEqual(result.passed, false);
+			assert.ok(
+				/cancelled\s+\u2014\s+killed subprocess tree/.test(result.output),
+				`expected cancellation marker, got: ${result.output}`,
+			);
 
-		const result = await stepPromise;
-		assert.strictEqual(result.passed, false);
-		assert.ok(
-			/cancelled\s+\u2014\s+killed subprocess tree/.test(result.output),
-			`expected cancellation marker, got: ${result.output}`,
-		);
+			// Windows taskkill is a separate process and can be slow to schedule under
+			// full-suite CPU contention; assert eventual reaping without making this a
+			// tight performance test.
+			const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 10000, 100);
+			assert.ok(dead, `tree should be reaped after cancellation; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
+		} finally {
+			killPidBestEffort(childPid);
+			killPidBestEffort(parentPid);
+		}
 	});
 });
 
