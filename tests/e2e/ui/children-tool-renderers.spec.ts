@@ -30,7 +30,7 @@ async function mountTool(
 	ctx: any = {},
 ): Promise<void> {
 	await page.waitForFunction(() => (window as any).__bobbitRenderTool && (window as any).__bobbitLitRender, null, { timeout: 10_000 });
-	await page.evaluate(({ toolName, params, result, ctx }: any) => {
+	await page.evaluate(async ({ toolName, params, result, ctx }: any) => {
 		let host = document.getElementById("e2e-render-host");
 		if (!host) {
 			host = document.createElement("div");
@@ -41,8 +41,23 @@ async function mountTool(
 		host.innerHTML = "";
 		const renderTool = (window as any).__bobbitRenderTool;
 		const litRender = (window as any).__bobbitLitRender;
-		const out = renderTool(toolName, params, result, false, ctx);
-		litRender(out.content, host);
+		const renderOnce = () => {
+			const out = renderTool(toolName, params, result, false, ctx);
+			litRender(out.content, host);
+		};
+		renderOnce();
+		if (!host.querySelector("[data-lazy-renderer-placeholder-btn]")) return;
+		await new Promise<void>((resolve, reject) => {
+			const timeout = window.setTimeout(() => reject(new Error(`lazy renderer ${toolName} did not load`)), 10_000);
+			const onLoaded = (event: Event) => {
+				if ((event as CustomEvent).detail?.toolName !== toolName) return;
+				window.clearTimeout(timeout);
+				document.removeEventListener("bobbit-tool-renderer-loaded", onLoaded);
+				resolve();
+			};
+			document.addEventListener("bobbit-tool-renderer-loaded", onLoaded);
+		});
+		renderOnce();
 	}, { toolName, params, result, ctx });
 }
 

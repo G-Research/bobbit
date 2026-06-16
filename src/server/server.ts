@@ -8187,7 +8187,12 @@ async function handleApiRoute(
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
-		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
+		const signalResponse = { id: signal.id, gateId, goalId, status: "running", steps: verifySteps };
+		const response: { signal: typeof signalResponse; agentReminder?: string } = { signal: signalResponse };
+		if (verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running") {
+			response.agentReminder = "Gate signal accepted. Verification is running asynchronously. Do not poll with `gate_status` or `gate_inspect`. Go idle now and wait for the server to deliver verification results or further instructions.";
+		}
+		json(response, 201);
 		return;
 	}
 
@@ -10167,14 +10172,27 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
-			// Auto-inject parentGoalId for team-lead sessions proposing a goal
+			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
+			// but only when the current goal is actually allowed to spawn a child.
+			// If subgoals are disabled globally or for this parent, an omitted
+			// parentGoalId must remain omitted so accepting the proposal creates a
+			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
 			if (proposalType === "goal") {
 				const sess = sessionManager.getSession(sessionId);
 				if (sess?.role === "team-lead" && sess.teamGoalId) {
 					const existingParent = enrichedArgs.parentGoalId;
 					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
-						enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+						const parent = getGoalAcrossProjects(sess.teamGoalId);
+						const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
+						const canSpawnImplicitChild = !!parent && checkCanSpawnChild(
+							parent,
+							prefs,
+							(id) => getGoalAcrossProjects(id),
+						).ok;
+						if (canSpawnImplicitChild) {
+							enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+						}
 					}
 				}
 			}

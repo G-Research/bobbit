@@ -139,6 +139,11 @@ export class GitStatusWidget extends LitElement {
      *  (design pr-walkthrough-launch-ux.md §3.3). `id` is the compound launcher key. */
     @state() private _launcherError: { id: string; message: string } | null = null;
 
+    /** Inline pending state for launchers whose async route/spawn dispatch has
+     *  started but has not resolved yet. This gives immediate feedback after the
+     *  PR walkthrough button is pressed, before the child session appears. */
+    @state() private _launcherPending: { id: string; message: string } | null = null;
+
     private _onDocumentClick = (e: MouseEvent) => {
         const target = e.target as Node;
         if (this.expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target)) {
@@ -224,8 +229,9 @@ export class GitStatusWidget extends LitElement {
         if (this._dropdownEl && (!hasConnectedDropdown || !this.expanded)) {
             this._removeDropdown();
         }
-        // Opening fresh: clear any stale launcher error from a prior session.
+        // Opening fresh: clear any stale launcher status from a prior session.
         this._launcherError = null;
+        this._launcherPending = null;
         this._closeToken++;
         this._closing = false;
         this._dropdownEl?.classList.remove('git-dropdown-closing');
@@ -935,15 +941,22 @@ export class GitStatusWidget extends LitElement {
             <div class="border-t border-border pt-2 mt-2" data-testid="git-widget-launchers">
                 <div class="text-muted-foreground mb-1 font-medium">Extensions</div>
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                    ${gitButtons.map((b) => html`<div style="display:flex;flex-direction:column;gap:2px"><button
-                        type="button"
-                        style=${btnStyle}
-                        data-testid="git-widget-launcher"
-                        data-entrypoint-id=${b.id}
-                        @click=${(e: MouseEvent) => { e.stopPropagation(); this._runPackLauncher(b.id); }}
-                    >${b.label}</button>${this._launcherError?.id === b.id
-                        ? html`<div data-testid="git-widget-launcher-error" style="color:var(--negative);font-size:11px;margin-top:4px">${this._launcherError.message}</div>`
-                        : nothing}</div>`)}
+                    ${gitButtons.map((b) => {
+                        const pending = this._launcherPending?.id === b.id;
+                        return html`<div style="display:flex;flex-direction:column;gap:2px"><button
+                            type="button"
+                            style=${`${btnStyle};${pending ? 'opacity:.75;cursor:progress' : ''}`}
+                            data-testid="git-widget-launcher"
+                            data-entrypoint-id=${b.id}
+                            ?disabled=${pending}
+                            aria-busy=${pending ? 'true' : 'false'}
+                            @click=${(e: MouseEvent) => { e.stopPropagation(); this._runPackLauncher(b.id); }}
+                        >${pending ? 'Starting…' : b.label}</button>${pending
+                            ? html`<div data-testid="git-widget-launcher-pending" style="color:var(--primary);font-size:11px;margin-top:4px">${this._launcherPending!.message}</div>`
+                            : this._launcherError?.id === b.id
+                                ? html`<div data-testid="git-widget-launcher-error" style="color:var(--negative);font-size:11px;margin-top:4px">${this._launcherError.message}</div>`
+                                : nothing}</div>`;
+                    })}
                     ${hasPaletteCommands ? html`<button
                         type="button"
                         style=${btnStyle}
@@ -963,15 +976,23 @@ export class GitStatusWidget extends LitElement {
      *  no view switch occurs (design §3.3). */
     private _runPackLauncher(id: string): void {
         this._launcherError = null;
+        this._launcherPending = { id, message: "Starting PR walkthrough…" };
+        // Re-render the portaled dropdown content immediately so the click gives
+        // visible feedback while the async spawn/route request is in flight.
+        if (this._dropdownEl) render(this._renderDropdownContent(), this._dropdownEl);
         try {
             runLauncherEntrypoint(id, (r) => {
-                if (r.ok) { this._closeDropdown(); return; }
+                if (r.ok) { this._launcherPending = null; this._closeDropdown(); return; }
+                this._launcherPending = null;
                 this._launcherError = { id, message: r.error || "Could not start the PR walkthrough." };
                 // Re-render the portaled dropdown content inline (the portal lives under
                 // document.body, outside this component's reactive subtree).
                 if (this._dropdownEl) render(this._renderDropdownContent(), this._dropdownEl);
             });
-        } catch { /* non-fatal */ }
+        } catch {
+            this._launcherPending = null;
+            if (this._dropdownEl) render(this._renderDropdownContent(), this._dropdownEl);
+        }
     }
 
     private _renderDropdownContent() {

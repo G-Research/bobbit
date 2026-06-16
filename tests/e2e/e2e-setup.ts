@@ -1004,6 +1004,8 @@ export async function createGoal(opts: {
 	workflowId?: string;
 	autoStartTeam?: boolean;
 	projectId?: string;
+	subgoalsAllowed?: boolean;
+	maxNestingDepth?: number;
 }): Promise<{ id: string; [k: string]: unknown }> {
 	// Default spec for tests that don't care about spec content. The server now
 	// requires a non-placeholder spec (>=20 chars) before starting a team, so the

@@ -2933,10 +2933,15 @@ function goalProposalPanel() {
 				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
 					? _proposalMaxNestingDepth
 					: undefined;
+				// Parent goal is meaningful only while the system Subgoals feature is
+				// enabled. A stale/auto-filled parentGoalId from a team-lead proposal
+				// must not be submitted while the Sub-goals tab is hidden/off; accepting
+				// that proposal should create a top-level goal.
+				const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
 				// Root-only orchestration. Only forwarded for a top-level goal
 				// (no parent) that allows subgoals, and only when the user
 				// actually picked a value (null = inherit server default).
-				const isRootProposal = !_proposalParentGoalId;
+				const isRootProposal = !parentGoalIdField;
 				const allowsChildren = subgoalsEnabled && (_proposalSubgoalsAllowed ?? false);
 				const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
 					? _proposalDivergencePolicy
@@ -2964,7 +2969,7 @@ function goalProposalPanel() {
 					projectId,
 					enabledOptionalSteps,
 					autoStartTeam,
-					parentGoalId: _proposalParentGoalId || undefined,
+					parentGoalId: parentGoalIdField,
 					subgoalsAllowed: subgoalsAllowedField,
 					maxNestingDepth: maxNestingDepthField,
 					divergencePolicy: divergencePolicyField,
@@ -3090,7 +3095,7 @@ function goalProposalPanel() {
 		createDisabled: (() => {
 			if (!_proposalTitle.trim() || _proposalSaving) return true;
 			// Disable Create when a parent is selected but the child would exceed cap.
-			if (_proposalParentGoalId && maxNestingDepth !== undefined) {
+			if (subgoalsEnabled && _proposalParentGoalId && maxNestingDepth !== undefined) {
 				const pDepth = computeGoalDepth(_proposalParentGoalId, state.goals);
 				if (pDepth + 1 > maxNestingDepth) return true;
 			}
