@@ -30,7 +30,7 @@ import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePushForTests, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, type WorktreeResult } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
@@ -570,7 +570,8 @@ export class WorktreePool {
 	 * Background freshen: fetch origin + reset --hard <base> + explicit branch push.
 	 * Resolves the base via `resolveBaseRef(repoPath, baseRefResolver())` so
 	 * pool entries adopt the project's currently-configured `base_ref` at the
-	 * moment they're freshened — no drain / no recorded-base needed.
+	 * moment they're freshened — no drain / no recorded-base needed. In offline
+	 * test modes, skips non-local remote work while still allowing local bare origins.
 	 * Errors are non-fatal and logged — the worktree is still usable.
 	 */
 	private freshenInBackground(worktreePath: string, branch: string): void {
@@ -587,18 +588,19 @@ export class WorktreePool {
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? { calls: 1, fetchResetErrors: 0, pushSkipped: 0, pushErrors: 0, success: 0 } : undefined;
 		try {
-			try {
-				if (!(await shouldSkipRemoteGitForTests(worktreePath))) {
+			const skipRemoteGitForTests = await shouldSkipRemoteGitForTests(worktreePath, "origin");
+			if (!skipRemoteGitForTests) {
+				try {
 					await execGit(["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
 					const configured = this.baseRefResolver?.();
 					const { ref: remotePrimary } = await resolveBaseRef(this.repoPath, configured);
 					await execGit(["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
+				} catch (err) {
+					if (counters) counters.fetchResetErrors = 1;
+					console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
 				}
-			} catch (err) {
-				if (counters) counters.fetchResetErrors = 1;
-				console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
 			}
-			if (!(await shouldSkipRemotePushForTests(worktreePath))) {
+			if (!skipRemoteGitForTests && !shouldSkipRemotePush()) {
 				try {
 					await execGit(["push", "origin", `${branch}:refs/heads/${branch}`], { cwd: worktreePath, timeout: 30_000 });
 					try {

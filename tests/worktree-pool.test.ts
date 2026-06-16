@@ -178,27 +178,31 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 		}
 	});
 
-	it("test-mode freshen skips remote reset when origin is absent", async () => {
+	it("freshen skips missing origin in no-remote test mode without logging a reset failure", async () => {
 		const repo = await makeRepo();
-		const warns: string[] = [];
+		const originalNoRemote = process.env.BOBBIT_TEST_NO_REMOTE;
+		const originalNoExternal = process.env.BOBBIT_TEST_NO_EXTERNAL;
 		const originalWarn = console.warn;
+		const warnings: string[] = [];
+		process.env.BOBBIT_TEST_NO_REMOTE = "1";
+		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
+		console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
 		try {
 			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
-			console.warn = (...args: unknown[]) => {
-				warns.push(args.map(String).join(" "));
-			};
-
-			await (pool as any).freshen(repo, "session/no-origin");
-
-			assert.equal(
-				warns.some(line => line.includes("Background reset failed") || line.includes("git fetch origin")),
-				false,
-				"test-mode worktree freshen must not try to fetch a missing/real origin",
-			);
+			await (pool as any).freshen(repo, "session/no-remote");
 		} finally {
 			console.warn = originalWarn;
+			if (originalNoRemote === undefined) delete process.env.BOBBIT_TEST_NO_REMOTE;
+			else process.env.BOBBIT_TEST_NO_REMOTE = originalNoRemote;
+			if (originalNoExternal === undefined) delete process.env.BOBBIT_TEST_NO_EXTERNAL;
+			else process.env.BOBBIT_TEST_NO_EXTERNAL = originalNoExternal;
 			await rmRepo(repo);
 		}
+		assert.equal(
+			warnings.some(w => w.includes("[worktree-pool] Background reset failed") || w.includes("git fetch origin")),
+			false,
+			`freshen should not attempt origin in no-remote test mode; warnings: ${warnings.join("\n")}`,
+		);
 	});
 });
 

@@ -59,29 +59,33 @@ export function shouldSkipRemotePush(): boolean {
 	return process.env.BOBBIT_TEST_NO_PUSH === "1";
 }
 
-function isLocalGitRemoteUrl(url: string): boolean {
-	const trimmed = url.trim();
-	if (!trimmed) return false;
-	if (trimmed.startsWith("file://")) return true;
-	if (/^[A-Za-z]:[\\/]/.test(trimmed)) return true;
-	if (path.isAbsolute(trimmed)) return true;
-	if (trimmed.startsWith("./") || trimmed.startsWith("../") || trimmed.startsWith("~/")) return true;
-	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return false;
-	if (/^[^@\s]+@[^:\s]+:.+/.test(trimmed)) return false;
-	return !trimmed.includes(":");
+function isLocalGitRemoteUrl(rawUrl: string): boolean {
+	const url = rawUrl.trim();
+	if (!url) return false;
+	try {
+		const parsed = new URL(url);
+		return parsed.protocol === "file:";
+	} catch {
+		// Not a URL; fall through to path / SCP-style checks.
+	}
+	if (path.isAbsolute(url) || path.win32.isAbsolute(url)) return true;
+	if (url === "." || url === ".." || url.startsWith("./") || url.startsWith("../") || url.startsWith("~/")) return true;
+	if (/^[A-Za-z]:[\\/]/.test(url)) return true;
+	if (/^[^\s/:]+@[^\s:]+:.+/.test(url)) return false;
+	if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) return false;
+	return !/^[^\\/]+:.+/.test(url);
 }
 
 /**
- * In test mode, skip git remote probes unless `origin` is an isolated local
- * path/bare fixture. This keeps E2E/unit suites off real remotes while still
- * allowing specs that explicitly create local bare remotes to exercise remote
- * semantics.
+ * In offline E2E/unit modes, skip git operations that would touch a missing or
+ * non-local remote. Local bare/file remotes are allowed so tests can exercise
+ * fetch/reset semantics without network access.
  */
 export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin"): Promise<boolean> {
-	if (process.env.BOBBIT_TEST_NO_PUSH !== "1" && process.env.BOBBIT_TEST_NO_REMOTE !== "1") return false;
+	if (process.env.BOBBIT_TEST_NO_PUSH !== "1" && process.env.BOBBIT_TEST_NO_REMOTE !== "1" && process.env.BOBBIT_TEST_NO_EXTERNAL !== "1") return false;
 	try {
 		const { stdout } = await execGit(["remote", "get-url", remote], { cwd, timeout: 5_000 });
-		return !isLocalGitRemoteUrl(stdout.trim());
+		return !isLocalGitRemoteUrl(stdout.toString());
 	} catch {
 		return true;
 	}
