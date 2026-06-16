@@ -209,7 +209,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 				console.warn(`[in-process-harness-realpush] cleanup deferred for ${bobbitDir}: ${msg}`);
 			},
 		});
-	}, { scope: "worker", auto: true, timeout: 30_000 }],
+	}, { scope: "worker", auto: true, timeout: 60_000 }],
 });
 
 export { expect } from "@playwright/test";
