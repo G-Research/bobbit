@@ -34,6 +34,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
+import { waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
 async function activeSessionId(page: Page): Promise<string> {
@@ -69,12 +70,24 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 
 		const sid = await activeSessionId(page);
 
-		// 4. Plant the goal-proposal draft on the server explicitly. The
-		//    debounced `saveGoalDraft` triggered by `onGoalProposal` is racy in
-		//    the test (the slot may not yet be live when the debounce fires),
-		//    so we PUT the draft body directly. This is the exact shape that
-		//    `goalDraft.serialize()` produces when a propose_goal has just
-		//    arrived (src/app/session-manager.ts:271-282).
+		// Let the assistant turn and its debounced draft save settle before we
+		// simulate dismissal. Otherwise a late `saveGoalDraft` can overwrite the
+		// planted draft after the simulated dismiss with a slot-less draft that
+		// still carries the stale previewTitle, making this test fail for the
+		// race instead of the reload contract.
+		await waitForSessionStatus(sid, "idle", 30_000);
+		await page.waitForFunction(async (sidArg: string) => {
+			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
+			const token = localStorage.getItem("gateway.token") ?? "";
+			const res = await fetch(`${url}/api/sessions/${sidArg}/draft?type=goal`, { headers: { Authorization: `Bearer ${token}` } });
+			if (!res.ok) return false;
+			const body = await res.json();
+			return !!body?.data?.activeGoalProposal;
+		}, sid, { timeout: 10_000 });
+
+		// 4. Plant the goal-proposal draft on the server explicitly. This keeps
+		//    the test focused on restore/dismiss behavior even if the client-side
+		//    draft shape changes while the proposal pipeline settles.
 		const plantResult = await page.evaluate(async (sidArg: string) => {
 			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
 			const token = localStorage.getItem("gateway.token") ?? "";
@@ -184,9 +197,7 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 
 
 		// 7. The assistant goal title input must NOT have been re-populated
-		//    from the dismissed proposal. CURRENTLY FAILS — the restore
-		//    path re-fills `state.previewTitle` from the draft so the
-		//    input shows "E2E Test Goal" again.
+		//    from the dismissed proposal.
 		const titleAfterReload = page
 			.locator("input[placeholder='Goal title']")
 			.first();
