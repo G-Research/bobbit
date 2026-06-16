@@ -62,15 +62,15 @@ export function shouldSkipRemotePush(): boolean {
 function isLocalGitRemoteUrl(rawUrl: string): boolean {
 	const url = rawUrl.trim();
 	if (!url) return false;
+	if (path.isAbsolute(url) || path.win32.isAbsolute(url)) return true;
+	if (url === "." || url === ".." || url.startsWith("./") || url.startsWith("../") || url.startsWith("~/")) return true;
+	if (/^[A-Za-z]:[\\/]/.test(url)) return true;
 	try {
 		const parsed = new URL(url);
 		return parsed.protocol === "file:";
 	} catch {
-		// Not a URL; fall through to path / SCP-style checks.
+		// Not a URL; fall through to SCP-style checks.
 	}
-	if (path.isAbsolute(url) || path.win32.isAbsolute(url)) return true;
-	if (url === "." || url === ".." || url.startsWith("./") || url.startsWith("../") || url.startsWith("~/")) return true;
-	if (/^[A-Za-z]:[\\/]/.test(url)) return true;
 	if (/^[^\s/:]+@[^\s:]+:.+/.test(url)) return false;
 	if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) return false;
 	return !/^[^\\/]+:.+/.test(url);
@@ -82,7 +82,7 @@ function isLocalGitRemoteUrl(rawUrl: string): boolean {
  * fetch/reset semantics without network access.
  */
 export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin"): Promise<boolean> {
-	if (process.env.BOBBIT_TEST_NO_PUSH !== "1" && process.env.BOBBIT_TEST_NO_REMOTE !== "1" && process.env.BOBBIT_TEST_NO_EXTERNAL !== "1") return false;
+	if (process.env.BOBBIT_TEST_NO_REMOTE !== "1" && process.env.BOBBIT_TEST_NO_EXTERNAL !== "1") return false;
 	try {
 		const { stdout } = await execGit(["remote", "get-url", remote], { cwd, timeout: 5_000 });
 		return !isLocalGitRemoteUrl(stdout.toString());

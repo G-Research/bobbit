@@ -159,6 +159,10 @@ describe("subsystem CPU attribution", () => {
 
 	it("records worktree pool and setup timers plus git child attribution", async () => {
 		const repo = initRepo("pool");
+		const origin = fs.mkdtempSync(path.join(tmpRoot, "pool-origin-"));
+		git(tmpRoot, "init", "--bare", "-q", origin);
+		git(repo, "remote", "add", "origin", origin);
+		git(repo, "push", "-u", "origin", "master");
 		const { WorktreePool } = await import("../src/server/agent/worktree-pool.js");
 		const { runComponentSetups } = await import("../src/server/skills/worktree-setup.js");
 		const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
@@ -174,7 +178,7 @@ describe("subsystem CPU attribution", () => {
 
 		const snapshot = await flushSnapshot("worktree");
 		assert.equal(snapshot.timers["worktree-pool:claim"].empty, 1);
-		assert.equal(snapshot.timers["worktree-pool:freshen"].fetchResetErrors, 1);
+		assert.equal(snapshot.timers["worktree-pool:freshen"].fetchResetErrors, 0);
 		assert.equal(snapshot.timers["worktree-setup:run"].commands, 1);
 		assert.equal(snapshot.timers["worktree-setup:component"].successes, 1);
 		assert.ok(snapshot.child["git fetch"].count >= 1);
