@@ -22,7 +22,7 @@ import { GoalPausedError } from "./goal-paused-guard.js";
 import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import { detectPrimaryBranch } from "../skills/git.js";
+import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
@@ -49,6 +49,7 @@ import {
 	groupStepsByPhase,
 	getSortedPhases,
 	isCommandStepSkippable,
+	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
 	buildStepCache,
 	computeAllPassed,
@@ -1287,10 +1288,11 @@ export class VerificationHarness {
 		if (!signal) return null;
 
 		const cwd = goal.worktreePath || goal.cwd;
-		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
+		const baseBranch = await this.resolveVerificationBaseBranch(goalId, cwd);
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
-			master: primary,
+			baseBranch,
+			master: baseBranch,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
@@ -1842,6 +1844,18 @@ export class VerificationHarness {
 		return this.projectConfigStore;
 	}
 
+	private resolveConfiguredBaseBranch(goalId: string): string | undefined {
+		const configured = this.resolveProjectConfigStore(goalId)?.get("base_ref") ?? "";
+		const parsed = parseBaseRef(configured);
+		return parsed.branch || undefined;
+	}
+
+	private async resolveVerificationBaseBranch(goalId: string, cwd: string, fallback?: string): Promise<string> {
+		return this.resolveConfiguredBaseBranch(goalId)
+			|| fallback
+			|| (await detectPrimaryBranch(cwd).catch(() => "master"));
+	}
+
 	private resolveToolActivationDeps(cwd: string): VerificationToolActivationDeps {
 		let toolManager: ToolManager | undefined;
 		let groupPolicyStore: GroupPolicyProvider | undefined;
@@ -2183,9 +2197,11 @@ export class VerificationHarness {
 		}
 
 		try {
+			const baseBranch = await this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master");
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
-				master: primaryBranch || "master",
+				baseBranch,
+				master: baseBranch,
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
@@ -2459,8 +2475,11 @@ export class VerificationHarness {
 							// project has no build_command configured). Skipped-as-passed so
 							// optional infrastructure steps (build, custom commands) don't fail
 							// the gate for projects that don't define them.
-							const skipReason = isCommandStepSkippable(cmd);
-							if (skipReason) {
+							const requiredBuiltinFailure = readyToMergeUnresolvedBuiltinFailure(signal.gateId, cmd);
+							const skipReason = requiredBuiltinFailure ? null : isCommandStepSkippable(cmd);
+							if (requiredBuiltinFailure) {
+								result = { passed: false, output: requiredBuiltinFailure };
+							} else if (skipReason) {
 								result = { passed: true, output: skipReason };
 							} else {
 								const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
