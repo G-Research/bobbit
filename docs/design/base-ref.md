@@ -282,14 +282,21 @@ Check that the ref is still a valid branch.
 A single new built-in variable is added to the verification harness's
 `builtinVars` map (alongside `branch`, `master`, `cwd`, `goal_spec`, `commit`):
 
-- **`{{baseBranch}}`** → bare branch name derived from the project's `base_ref`.
+- **`{{baseBranch}}`** → bare branch name derived from the project's configured `base_ref`.
+  - `base_ref = "origin/master"` → `{{baseBranch}}` = `"master"`
   - `base_ref = "origin/develop"` → `{{baseBranch}}` = `"develop"`
   - `base_ref = "develop"` (local) → `{{baseBranch}}` = `"develop"`
   - `base_ref = ""` (unset) → `detectPrimaryBranch()` → typically `"master"`
 
 Workflow authors write `origin/{{baseBranch}}` explicitly whenever a remote ref
 is needed (mirrors the existing `origin/{{master}}` pattern — same shape, just
-configurable).
+configurable). `{{project.*}}` is not part of the verification template contract;
+use structural `{ component, command }` references for project commands.
+
+Required Ready-to-Merge commands that use built-ins (`{{branch}}`,
+`{{baseBranch}}`, `{{master}}`) must run or fail loudly. Optional unresolved-token
+skips are for optional metadata/infra only and must not make a required
+Ready-to-Merge safety check pass.
 
 **`{{master}}` is intentionally not touched.** It continues to resolve via
 `detectPrimaryBranch(cwd)` regardless of `base_ref`. This keeps existing
@@ -303,9 +310,8 @@ authoring guide documents the distinction:
 
 ### 4. New-project workflow templates
 
-`src/server/state-migration/seed-default-workflows.ts` and
-`src/server/agent/project-assistant.ts:133` are updated to emit
-`{{baseBranch}}` instead of `{{master}}`:
+`src/server/state-migration/seed-default-workflows.ts` and the project-assistant
+workflow generator are updated to emit `{{baseBranch}}` instead of `{{master}}`:
 
 - Ready-to-Merge gate:
   - `git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q .`
