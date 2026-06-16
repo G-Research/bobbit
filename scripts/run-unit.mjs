@@ -45,15 +45,15 @@ const npx = isWin ? "npx.cmd" : "npx";
 // instead of their sum, with no contention-induced timeouts.
 const cpus = availableParallelism();
 // True half-core split: node + browser worker pools must sum to <= cpus so they
-// never oversubscribe. `Math.floor(cpus / 2)` keeps the sum within budget on
-// every box (e.g. 24 -> 12+12, 4 -> 2+2, 3 -> 1+1, 2 -> 1+1, 1 -> 1+1). The
-// floor of 1 keeps each runner alive on tiny machines without exceeding cpus
-// (a 2-core box runs 1+1, not the previous 2+2). The 24-core behaviour (12+12)
-// is unchanged.
+// never oversubscribe. On large Windows hosts, 12+ node/browser workers can
+// still starve file:// browser fixtures badly enough to flake or hit the 300s gate
+// timeout, so cap each runner at 6 by default. Env overrides remain available for
+// intentional local stress runs.
 const half = Math.max(1, Math.floor(cpus / 2));
-const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || String(half);
+const defaultConcurrency = Math.min(6, half);
+const nodeConcurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || String(defaultConcurrency);
 // Passed to Playwright via --workers (CLI overrides the config's default).
-const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(half);
+const browserWorkers = process.env.BOBBIT_UNIT_BROWSER_WORKERS || String(defaultConcurrency);
 
 const failureTailLines = Math.max(20, Number.parseInt(process.env.BOBBIT_UNIT_FAILURE_TAIL_LINES || "240", 10) || 240);
 
