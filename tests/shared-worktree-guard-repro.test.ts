@@ -20,6 +20,8 @@ process.env.BOBBIT_SKIP_NPM_CI = "1";
 const execFile = promisify(execFileCb);
 const { SessionManager } = await import("../src/server/agent/session-manager.ts");
 const { SessionStore } = await import("../src/server/agent/session-store.ts");
+const { GoalManager } = await import("../src/server/agent/goal-manager.ts");
+const { GoalStore } = await import("../src/server/agent/goal-store.ts");
 const { handleSetupFailure } = await import("../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../src/server/agent/system-prompt.ts");
 
@@ -208,6 +210,60 @@ describe("shared worktree guard reproductions", () => {
 				orphans.some((entry: { path: string }) => path.resolve(entry.path) === path.resolve(sharedWorktree)),
 				false,
 				`SHARED_WORKTREE_GUARD_ORPHAN_LIST_REGRESSION: manual orphan listing reported a path referenced by live repoWorktrees: ${JSON.stringify(orphans)}`,
+			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("goal archive must not remove a multi-repo worktree referenced by a live session resolver", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-goal-archive-"));
+		try {
+			const root = path.join(tmp, "project");
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			fs.mkdirSync(root, { recursive: true });
+			await makeRepoIn(api);
+			await makeRepoIn(web);
+
+			const branch = "goal/archive-shared";
+			const apiWorktree = path.join(tmp, "project-wt", "goal-archive", "api");
+			const webWorktree = path.join(tmp, "project-wt", "goal-archive", "web");
+			await makeWorktree(api, apiWorktree, branch);
+			await makeWorktree(web, webWorktree, branch);
+
+			const goalState = path.join(tmp, "goal-state");
+			const goalStore = new GoalStore(goalState);
+			const goalManager = new GoalManager(goalStore);
+			goalManager.setLiveSessionResolver(() => [makeSession("live-api-owner", {
+				cwd: apiWorktree.replace(/\\/g, "/").toUpperCase(),
+				branch: "session/live-api-owner",
+			})]);
+			goalStore.put({
+				id: "goal-archive",
+				title: "goal archive",
+				cwd: path.join(tmp, "project-wt", "goal-archive"),
+				state: "complete",
+				spec: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				repoPath: root,
+				branch,
+				worktreePath: path.join(tmp, "project-wt", "goal-archive"),
+				repoWorktrees: { api: apiWorktree, web: webWorktree },
+			});
+
+			const archived = await goalManager.archiveGoal("goal-archive");
+			assert.equal(archived, true, "goal should be archived by the test setup");
+			await waitForWorktreeRemoval(webWorktree);
+			assert.ok(
+				fs.existsSync(apiWorktree),
+				"SHARED_WORKTREE_GUARD_GOAL_ARCHIVE_REGRESSION: goal archive removed a repoWorktrees path still referenced by a live session resolver",
+			);
+			assert.equal(
+				fs.existsSync(webWorktree),
+				false,
+				"unshared goal repoWorktree should remain cleanable so archive cleanup still removes true orphans",
 			);
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
