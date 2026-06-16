@@ -1,21 +1,33 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, deleteSession } from "./e2e-setup.js";
+import { awaitableRm } from "./test-utils/cleanup.js";
 
 type GitFixture = {
 	cwd: string;
 	baseSha: string;
 	headSha: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 };
 
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+async function cleanupGitFixture(cwd: string): Promise<void> {
+	await awaitableRm(cwd, {
+		maxAttempts: 8,
+		backoffMs: 100,
+		onFinalFailure: (err) => {
+			const msg = (err as Error)?.message ?? String(err);
+			console.warn(`[pr-walkthrough-api] cleanup deferred for ${cwd}: ${msg}`);
+		},
+	});
 }
 
 function makeGitFixture(): GitFixture {
@@ -33,7 +45,7 @@ function makeGitFixture(): GitFixture {
 	git(cwd, ["add", "."]);
 	git(cwd, ["commit", "-m", "head"]);
 	const headSha = git(cwd, ["rev-parse", "HEAD"]);
-	return { cwd, baseSha, headSha, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
+	return { cwd, baseSha, headSha, cleanup: () => cleanupGitFixture(cwd) };
 }
 
 async function resolveLocal(fixture: GitFixture): Promise<any> {
@@ -126,7 +138,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.cards.length).toBeGreaterThanOrEqual(2);
 			expect(result.cards.flatMap((card: any) => card.diffBlocks).some((block: any) => block.filePath === "src/feature.ts")).toBe(true);
 		} finally {
-			fixture.cleanup();
+			await fixture.cleanup();
 		}
 	});
 
@@ -163,7 +175,7 @@ test.describe("PR walkthrough REST API", () => {
 			const submitBody = await submitResp.json();
 			expect(submitBody.code).toBe("CONFIRMATION_REQUIRED");
 		} finally {
-			fixture.cleanup();
+			await fixture.cleanup();
 		}
 	});
 
@@ -177,7 +189,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(invalidResp.status).toBe(400);
 			expect((await invalidResp.json()).error).toContain("Invalid baseSha");
 		} finally {
-			fixture.cleanup();
+			await fixture.cleanup();
 		}
 	});
 
@@ -204,7 +216,7 @@ test.describe("PR walkthrough REST API", () => {
 			const result = await resp.json();
 			expect(result.warnings.some((warning: any) => warning.code === "diff-truncated")).toBe(true);
 		} finally {
-			rmSync(cwd, { recursive: true, force: true });
+			await cleanupGitFixture(cwd);
 		}
 	});
 
@@ -221,7 +233,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.cards).toHaveLength(1);
 			expect(result.cards[0].phaseId).toBe("orientation");
 		} finally {
-			fixture.cleanup();
+			await fixture.cleanup();
 		}
 	});
 
@@ -291,7 +303,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(submitResp.status).toBe(400);
 			expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
 		} finally {
-			fixture.cleanup();
+			await fixture.cleanup();
 		}
 	});
 
@@ -308,7 +320,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.changeset.prUrl).toBeUndefined();
 			expect(result.changeset.externalUrl).toBeUndefined();
 		} finally {
-			fixture.cleanup();
+			await fixture.cleanup();
 		}
 	});
 });
