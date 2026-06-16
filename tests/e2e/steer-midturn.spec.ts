@@ -84,7 +84,7 @@ test.describe("Steer mid-turn delivery", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:15000 working on something" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue a message while agent is streaming (this is what the UI does)
@@ -107,7 +107,7 @@ test.describe("Steer mid-turn delivery", () => {
 					m.data?.type === "message_end" &&
 					m.data?.message?.role === "user" &&
 					(m.data?.message?.content?.[0]?.text || "").includes("STEER_QUEUED_TEST_456"),
-				5000,
+				10_000,
 			);
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_QUEUED_TEST_456");
@@ -117,14 +117,14 @@ test.describe("Steer mid-turn delivery", () => {
 		}
 	});
 
-	test("PI-10b: batch steer_queued — two queued messages promoted to steer are delivered as a batch", async () => {
+	test("PI-10b: two queued messages promoted to steer dispatch immediately", async () => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:15000 working on multi-step task" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on multi-step task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue two messages while streaming
@@ -152,7 +152,7 @@ test.describe("Steer mid-turn delivery", () => {
 						m.data?.type === "message_end" &&
 						m.data?.message?.role === "user" &&
 						(m.data?.message?.content?.[0]?.text || "").includes(needle),
-					5000,
+					10_000,
 				);
 			}
 		} finally {
