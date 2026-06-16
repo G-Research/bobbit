@@ -68,11 +68,14 @@ tab (`data-testid="goal-proposal-tab-subgoals"`). The tab's visibility — and t
 equivalent non-tabbed parent-picker row — is a **pure function of the system
 Subgoals preference**: present when the flag is ON (for both top-level proposals
 and child proposals that already carry a `parentGoalId`) and absent when it is
-OFF, regardless of `parentGoalId`. Earlier the visibility also keyed off
-`parentGoalId`; but a child proposal can only exist when the flag is on (child
-creation is server-gated), so `parentGoalId` always implied `subgoalsEnabled` —
-the extra clause was dead and was removed so tab visibility tracks the setting,
-not the proposal's parent/child relationship.
+OFF, regardless of `parentGoalId`. Team-lead `propose_goal` calls only auto-fill
+`parentGoalId` when the current goal can spawn children under the current system
+and per-goal subgoal policy; otherwise an omitted `parentGoalId` stays omitted
+and accepting the proposal creates a top-level goal. Earlier the visibility also
+keyed off `parentGoalId`; but a child proposal can only exist when the flag is
+on (child creation is server-gated), so `parentGoalId` always implied
+`subgoalsEnabled` — the extra clause was dead and was removed so tab visibility
+tracks the setting, not the proposal's parent/child relationship.
 
 The proposal modal also exposes **Workflow** and **Roles** tabs
 (`goal-proposal-tab-workflow` / `goal-proposal-tab-roles`) for authoring a
