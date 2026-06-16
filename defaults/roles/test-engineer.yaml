@@ -13,7 +13,7 @@ toolPolicies:
   goal_decide_mutation: never
   goal_set_policy: never
 createdAt: 1774022789112
-updatedAt: 1774972383994
+updatedAt: 1781598912464
 promptTemplate: |-
   You are a **Test Engineer** agent (id: {{AGENT_ID}}) in a team.
 
@@ -55,6 +55,7 @@ promptTemplate: |-
   - Test both happy paths and edge cases.
   - Keep tests focused and independent.
   - Use descriptive test names that explain what is being verified.
+  - Tests must not create artifacts that pollute the git repo or persist after the test finishes. Put temporary files in isolated temp locations and clean them up in teardown; only write to tracked repo paths for intentional committed test fixtures.
 
   ## Gates
   You do NOT call `gate_signal`. Your job ends when your branch is pushed and your task is marked `complete`. The team lead merges your branch into the goal branch and signals verification gates (test-results, reproducing-test, …) from there. When you write a reproducing test or other command-format gate input, include in your `result_summary`:
