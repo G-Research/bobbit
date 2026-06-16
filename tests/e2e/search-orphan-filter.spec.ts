@@ -62,6 +62,29 @@ function pcm(gw: any): any {
 /** Tracks every FlexDoc id this test inserted so afterEach can purge them. */
 type Inserted = { gw: any; projectId: string; ids: string[] };
 
+async function settleStartupRebuild(gw: any, projectId: string): Promise<void> {
+	const ctx = pcm(gw).getOrCreate(projectId);
+	expect(ctx).toBeTruthy();
+	await ctx.searchIndex.whenReady();
+
+	// The in-process gateway schedules a one-shot startup rebuild several
+	// seconds after the default project is registered. These tests intentionally
+	// inject synthetic FlexSearch rows directly; if that rebuild fires between a
+	// direct upsert and the query, it clears the synthetic row and makes the weak
+	// metadata-match assertions intermittently see zero hits. Drain that startup
+	// rebuild once, before each direct-indexing test, so the store stays stable
+	// for the test body without weakening the orphan/weak-match contract.
+	const service = ctx.searchIndex as any;
+	if (service._rebuildTimer) {
+		clearTimeout(service._rebuildTimer);
+		service._rebuildTimer = null;
+		await ctx.searchIndex.rebuildFromStores(ctx.goalStore, ctx.sessionStore, undefined, ctx.staffStore);
+	}
+	if (service._backgroundRebuildPromise) {
+		await service._backgroundRebuildPromise;
+	}
+}
+
 async function indexOrphan(
 	tracker: Inserted,
 	doc: Record<string, unknown>,
@@ -106,6 +129,7 @@ test.describe("search orphan filter & weak-match drop", () => {
 	});
 
 	test.beforeEach(async ({ gateway }) => {
+		await settleStartupRebuild(gateway, projectId);
 		tracker = { gw: gateway, projectId, ids: [] };
 	});
 
@@ -323,8 +347,14 @@ test.describe("search orphan filter & weak-match drop", () => {
 		// highlight() centres on the first match in `text` and finds none,
 		// returning a head-of-text preview with no <b>.
 		const filler = "lorem ipsum dolor sit amet ".repeat(40); // ~1080 chars
+		const syntheticDocId = `goal:${goal.id}:weak-${weakToken}`;
+		const syntheticResultId = `${goal.id}:weak-${weakToken}`;
 		await indexOrphan(tracker, {
-			id: `goal:${goal.id}`,
+			// Use a synthetic row id while keeping goal_id pointed at the real goal.
+			// POST /api/goals also schedules an async canonical `goal:${goal.id}`
+			// upsert; sharing that id lets the canonical index update race with and
+			// overwrite this weak metadata-only fixture under full-suite load.
+			id: syntheticDocId,
 			source_id: "goals",
 			title: "Weak Match Goal",
 			// Body text does NOT contain the token — the index hit comes
@@ -343,8 +373,10 @@ test.describe("search orphan filter & weak-match drop", () => {
 
 		const out = await searchAll(gw, weakToken, projectId);
 		// SearchResult.id is emitted bare (the "goal:" source prefix on the
-		// underlying FlexDoc row id is stripped in toSearchResult).
-		const goalHits = out.results.filter((r: any) => r.type === "goal" && r.id === goal.id);
+		// underlying FlexDoc row id is stripped in toSearchResult). Scope to the
+		// synthetic weak-match row specifically so unrelated fuzzy goal hits, or
+		// the async canonical goal index row, cannot affect the assertion.
+		const goalHits = out.results.filter((r: any) => r.type === "goal" && r.id === syntheticResultId && r.goalId === goal.id);
 		expect(goalHits.length).toBe(1);
 		expect(goalHits[0].matchedOn).toBe("metadata");
 		// Snippet should have no <b> tag — it's a head-of-text preview.
