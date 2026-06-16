@@ -328,10 +328,10 @@ async function checkGitStatusWidget(page: Page): Promise<string | null> {
 }
 
 /**
- * Create a goal via the browser UI:
- *   1. Click "New Goal" button — opens goal assistant with form panel
- *   2. Fill in title and spec directly in the form
- *   3. Select workflow from dropdown
+ * Create a goal through the current browser flow:
+ *   1. Click "New Goal" for the target project — opens a goal-assistant session
+ *   2. Ask the assistant to emit a concrete goal proposal
+ *   3. Fill/normalise the proposal form fields
  *   4. Click "Create Goal"
  *   5. Wait for navigation to goal dashboard
  *   6. Return the goalId from the URL
@@ -372,11 +372,31 @@ async function createGoalViaBrowser(
 		}
 	}
 
-	// Wait for the goal assistant form to render (title input + Create Goal button)
-	const titleInput = page.locator("input[placeholder='Goal title']").first();
-	await expect(titleInput).toBeVisible({ timeout: 15_000 });
+	// The New Goal entry point opens a goal-assistant chat first. Drive it
+	// to emit the proposal, then use the proposal form as before.
+	await expect(page).toHaveURL(/#\/session\//, { timeout: 30_000 });
+	await page.waitForSelector("textarea", { timeout: 30_000 });
+	const sessionMatch = page.url().match(/#\/session\/([^/?]+)/);
+	if (!sessionMatch) throw new Error(`Could not extract goal assistant session id from ${page.url()}`);
+	const assistantSessionId = sessionMatch[1];
+	await pollIdle(gw, assistantSessionId, 120_000);
 
-	// Fill in the title
+	const proposalPrompt = [
+		"Create a goal proposal now. Do not ask follow-up questions.",
+		`Use exactly this title: ${title}`,
+		`Use exactly this specification: ${spec}`,
+		opts?.workflowId ? `Use workflow id: ${opts.workflowId}` : "Use the default workflow.",
+		"Call the propose_goal tool with those values.",
+	].join("\n");
+	await page.fill("textarea", proposalPrompt);
+	await page.press("textarea", "Enter");
+	await pollIdle(gw, assistantSessionId, 180_000);
+
+	// Wait for the goal proposal form to render (title input + Create Goal button)
+	const titleInput = page.locator("input[placeholder='Goal title']").first();
+	await expect(titleInput).toBeVisible({ timeout: 45_000 });
+
+	// Normalise the title in case the model paraphrased it.
 	await titleInput.fill(title);
 
 	// Check "Sandbox (Docker)" if requested
