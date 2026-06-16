@@ -646,6 +646,18 @@ Multi-repo pool entries are sets: each pool slot pre-builds N worktrees (one per
 
 **Session flow.** Pool entries pre-build on `pool/_pool-<id>`. On claim, `pool.claim(targetBranch)` runs the single branch-rename + worktree-move to the final `session/<id8>` name and the session is persisted with that name immediately. There is no first-prompt rename. The display title is independent of the git ref - `PUT /api/sessions/:id/title` updates metadata only. Archive cleanup operates on the final branch. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) for the full rationale and the test plan.
 
+**Shared worktree deletion guard.** Cleanup must never remove a worktree just because the session or goal currently being archived, purged, or repaired owns a stale record for it. Delegates, continued sessions, read-only children, shared session flows, and multi-repo goal/session sets can leave more than one persisted session pointing at the same host path. Deleting that path while any non-archived session still references it loses the other session's working tree and branch context.
+
+Before deleting a host worktree, cleanup checks persisted sessions across visible project contexts and skips deletion if any other non-archived session references the same normalized path. The guard considers:
+
+- `worktreePath` - the single-repo worktree root.
+- `cwd` - protects the candidate when the live session cwd is the same path or a child of it, which covers subdirectory projects.
+- `repoWorktrees` - every per-repo worktree path in a multi-repo session.
+
+Normalization is intentionally host-path focused: paths are trimmed, backslashes are treated as forward slashes, trailing separators are ignored, and comparison is case-insensitive. This lets Windows and Linux-style separators, casing differences, and stored `cwd` offsets compare consistently. It is not a broad ownership lock: if no live session references the normalized path, true orphan cleanup is still allowed.
+
+Protected cleanup paths include archived-session purge, manual maintenance orphan listing and cleanup, boot worktree sweeper classification/cleanup, multi-repo goal archive cleanup, and setup-failure cleanup. The existing delegate skip remains, but shared-path detection is the authoritative protection.
+
 **Boot sweeper.** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
 
 - `pool/_pool-<id>` worktrees not in the in-memory pool - reclaimed.
@@ -661,8 +673,8 @@ This means crash recovery doesn't require the user to manually clean up pool det
 
 1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal branch as appropriate). Staff worktrees are provisioned by `StaffManager` directly and use the same project worktree-root/base-ref/component setup helpers when auto mode chooses a worktree. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, staff provisioning, and team member spawning.
 2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
-3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
-4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
+3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox) only after the shared worktree deletion guard confirms no other non-archived session still references the same host path.
+4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are exposed in Settings → Maintenance and through the REST API (`GET /api/maintenance/orphaned-worktrees`, `POST /api/maintenance/cleanup-worktrees`). The same shared-path guard keeps live referenced paths out of the orphan list; unreferenced worktrees remain eligible for cleanup.
 5. **Restore**: After a restart, existing session worktrees are reused - the server reconnects to the worktree on disk without recreating it.
 
 **Session creation modes:** The session-setup pipeline (`src/server/agent/session-setup.ts`) handles four modes, all routed through the same plan/execute structure:

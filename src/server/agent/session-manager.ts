@@ -31,6 +31,7 @@ import {
 	mergeCompactionSidecarIntoMessages,
 } from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
+import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
@@ -1185,6 +1186,12 @@ export class SessionManager {
 		return null;
 	}
 
+	private getAllPersistedSessionsForWorktreeGuard(): PersistedSession[] {
+		return this.projectContextManager
+			? this.projectContextManager.getAllSessions()
+			: (this._testStore?.getAll() ?? []);
+	}
+
 	/** Resolve the correct CostTracker for a session based on its project. */
 	private resolveCostTracker(session: { projectId?: string }): CostTracker {
 		if (session.projectId && this.projectContextManager) {
@@ -1269,6 +1276,7 @@ export class SessionManager {
 		} else {
 			throw new Error("Cannot build pipeline context: no project context manager or test stores");
 		}
+		resolvedGoalManager.setLiveSessionResolver(() => this.getAllPersistedSessionsForWorktreeGuard());
 		return {
 			agentCliPath: this.agentCliPath,
 			systemPromptPath: this.systemPromptPath,
@@ -1287,6 +1295,7 @@ export class SessionManager {
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
 			sessions: this.sessions,
+			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
@@ -6211,15 +6220,22 @@ export class SessionManager {
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf) {
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
+				const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
 				// Multi-repo: clean each repo's worktree in parallel + delete the
 				// shared branch from each repo's remote (Phase 4a).
 				if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
 					await Promise.allSettled(Object.entries(ps.repoWorktrees).map(([repo, wt]) => {
+						if (isWorktreePathReferencedByLiveSession(wt, allPersisted, { ignoreSessionId: ps.id })) {
+							console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${wt}`);
+							return Promise.resolve();
+						}
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
 						return cleanupWorktree(repoPath, wt, ps.branch, true);
 					}));
-				} else {
+				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true);
+				} else {
+					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
 			} catch (err) {
 				console.error(`[session-manager] Failed to cleanup worktree for ${ps.id}:`, err);
@@ -6344,18 +6360,25 @@ export class SessionManager {
 			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
 			const blocks = stdout.split("\n\n");
 
-			// Build a set of branches owned by live (non-archived) persisted sessions.
+			// Build a set of branches/paths owned by live (non-archived) persisted sessions.
 			// Prior to the fix, pool worktree directories were renamed on claim but
 			// `git worktree repair` could fail — git tracked the OLD path while
 			// the session stored the NEW path. Matching by branch prevents the
 			// cleanup from deleting worktrees that are actually in use.
 			const persistedBranches = new Set<string>();
-			const allPersisted = this.projectContextManager
-				? [...this.projectContextManager.getAllLiveSessions()]
-				: (this._testStore?.getLive() ?? []);
+			const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
 			for (const ps of allPersisted) {
-				if (ps.branch) persistedBranches.add(ps.branch);
+				if (!ps.archived && ps.branch) persistedBranches.add(ps.branch);
 			}
+			const runtimeRecords: WorktreeReferenceRecord[] = [...this.sessions.values()].map(s => ({
+				id: s.id,
+				worktreePath: s.worktreePath,
+				cwd: s.cwd,
+				repoWorktrees: s.repoWorktrees
+					? Object.fromEntries(s.repoWorktrees.map(w => [w.repo, w.worktreePath]))
+					: undefined,
+			}));
+			const allPathRecords: WorktreeReferenceRecord[] = [...allPersisted, ...runtimeRecords];
 
 			for (const block of blocks) {
 				const branchMatch = block.match(/^branch refs\/heads\/(session\/.+)$/m);
@@ -6367,15 +6390,8 @@ export class SessionManager {
 				const pathMatch = block.match(/^worktree (.+)$/m);
 				if (!pathMatch) continue;
 				const wtPath = pathMatch[1];
-				// Normalize paths for comparison — git uses forward slashes on Windows,
-				// but session store uses OS-native backslashes. Without normalization,
-				// every session worktree is considered "orphaned" and deleted on restart.
-				const normalize = (p: string | undefined) => p?.replace(/\\/g, "/").toLowerCase();
-				const normalizedWtPath = normalize(wtPath);
 				// Check if any active session uses this worktree (by path or branch)
-				const isActive = [...this.sessions.values()].some(
-					s => normalize(s.worktreePath) === normalizedWtPath || normalize(s.cwd) === normalizedWtPath
-				) || persistedBranches.has(branch);
+				const isActive = isWorktreePathReferencedByLiveSession(wtPath, allPathRecords) || persistedBranches.has(branch);
 				if (!isActive) {
 					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
 					const { cleanupWorktree } = await import("../skills/git.js");
@@ -6397,12 +6413,19 @@ export class SessionManager {
 			const blocks = stdout.split("\n\n");
 
 			const persistedBranches = new Set<string>();
-			const allPersisted = this.projectContextManager
-				? [...this.projectContextManager.getAllLiveSessions()]
-				: (this._testStore?.getLive() ?? []);
+			const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
 			for (const ps of allPersisted) {
-				if (ps.branch) persistedBranches.add(ps.branch);
+				if (!ps.archived && ps.branch) persistedBranches.add(ps.branch);
 			}
+			const runtimeRecords: WorktreeReferenceRecord[] = [...this.sessions.values()].map(s => ({
+				id: s.id,
+				worktreePath: s.worktreePath,
+				cwd: s.cwd,
+				repoWorktrees: s.repoWorktrees
+					? Object.fromEntries(s.repoWorktrees.map(w => [w.repo, w.worktreePath]))
+					: undefined,
+			}));
+			const allPathRecords: WorktreeReferenceRecord[] = [...allPersisted, ...runtimeRecords];
 
 			const orphans: Array<{ path: string; branch: string }> = [];
 			for (const block of blocks) {
@@ -6413,11 +6436,7 @@ export class SessionManager {
 				const pathMatch = block.match(/^worktree (.+)$/m);
 				if (!pathMatch) continue;
 				const wtPath = pathMatch[1];
-				const normalize = (p: string | undefined) => p?.replace(/\\/g, "/").toLowerCase();
-				const normalizedWtPath = normalize(wtPath);
-				const isActive = [...this.sessions.values()].some(
-					s => normalize(s.worktreePath) === normalizedWtPath || normalize(s.cwd) === normalizedWtPath
-				) || persistedBranches.has(branch);
+				const isActive = isWorktreePathReferencedByLiveSession(wtPath, allPathRecords) || persistedBranches.has(branch);
 				if (!isActive) {
 					orphans.push({ path: wtPath, branch });
 				}
