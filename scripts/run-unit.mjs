@@ -18,7 +18,7 @@
  * expands them — never the shell (Windows command-line-length limit).
  */
 import { spawn, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,33 @@ import { NODE_UNIT_GLOBS } from "./test-phase-config.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
+
+const GENERATED_ARTIFACTS = [
+	"market-packs/artifacts/lib/ArtifactViewerPanel.js",
+	"market-packs/pr-walkthrough/lib/yaml-to-cards.mjs",
+	"tests/fixtures/message-editor-pack-slash-bundle.css",
+];
+
+function snapshotGeneratedArtifacts() {
+	const snapshots = GENERATED_ARTIFACTS.map((rel) => {
+		const file = join(projectRoot, rel);
+		return { file, rel, existed: existsSync(file), bytes: existsSync(file) ? readFileSync(file) : undefined };
+	});
+	return () => {
+		for (const snap of snapshots) {
+			try {
+				if (snap.existed) {
+					mkdirSync(dirname(snap.file), { recursive: true });
+					writeFileSync(snap.file, snap.bytes);
+				} else {
+					rmSync(snap.file, { force: true });
+				}
+			} catch (err) {
+				console.warn(`[run-unit] warning: could not restore generated artifact ${snap.rel}: ${err?.message || err}`);
+			}
+		}
+	};
+}
 
 // Some node-logic tests import compiled server modules from dist/server.
 if (!existsSync(join(projectRoot, "dist", "server"))) {
@@ -115,10 +142,16 @@ const browserArgs = ["playwright", "test", "--config", "tests/playwright.config.
 console.log(`[run-unit] ${cpus} cores → node --test-concurrency=${nodeConcurrency}, browser --workers=${browserWorkers}`);
 
 const overallStart = Date.now();
-const results = await Promise.all([
-	run("node-logic", nodeArgs),
-	run("browser-fixtures", browserArgs),
-]);
+const restoreGeneratedArtifacts = snapshotGeneratedArtifacts();
+let results;
+try {
+	results = await Promise.all([
+		run("node-logic", nodeArgs),
+		run("browser-fixtures", browserArgs),
+	]);
+} finally {
+	restoreGeneratedArtifacts();
+}
 const totalSecs = ((Date.now() - overallStart) / 1000).toFixed(1);
 const failed = results.filter((r) => r.code !== 0);
 console.log(`\n[run-unit] total wall time ${totalSecs}s`);
