@@ -43,7 +43,11 @@ async function getProjectId(): Promise<string> {
 	expect(resp.status).toBe(200);
 	const body = await resp.json();
 	const list = Array.isArray(body) ? body : body.projects;
-	return list[0].id;
+	const project =
+		list.find((p: any) => p?.name === "default" && !p?.hidden && p?.id) ??
+		list.find((p: any) => !p?.hidden && p?.id);
+	expect(project?.id).toBeTruthy();
+	return project.id;
 }
 
 /** Generate a globally-unique alphanumeric token that won't collide with
@@ -85,9 +89,10 @@ async function settleStartupRebuild(gw: any, projectId: string): Promise<void> {
 	}
 }
 
-async function indexOrphan(
+async function upsertSyntheticDoc(
 	tracker: Inserted,
 	doc: Record<string, unknown>,
+	{ track = true }: { track?: boolean } = {},
 ): Promise<void> {
 	const ctx = pcm(tracker.gw).getOrCreate(tracker.projectId);
 	expect(ctx).toBeTruthy();
@@ -95,7 +100,14 @@ async function indexOrphan(
 	const store = ctx.searchIndex.getStore();
 	expect(store).toBeTruthy();
 	await store.upsert([doc]);
-	tracker.ids.push(String(doc.id));
+	if (track) tracker.ids.push(String(doc.id));
+}
+
+async function indexOrphan(
+	tracker: Inserted,
+	doc: Record<string, unknown>,
+): Promise<void> {
+	await upsertSyntheticDoc(tracker, doc);
 }
 
 async function purgeInserted(tracker: Inserted): Promise<void> {
@@ -118,6 +130,43 @@ function searchAll(gw: any, query: string, projectId: string) {
 		offset: 0,
 		projectId,
 	});
+}
+
+async function waitForSyntheticHit(
+	tracker: Inserted,
+	query: string,
+	doc: Record<string, unknown>,
+	predicate: (row: any) => boolean,
+): Promise<any> {
+	let lastOut: any;
+	let lastStoreDoc: unknown;
+	let matchedHit: any;
+	try {
+		await expect
+			.poll(
+				async () => {
+					// Keep the direct-index fixture stable against unrelated full-suite search
+					// rebuilds. A rebuild repopulates the index from real stores and therefore
+					// legitimately removes synthetic rows that exist only for this orphan-filter
+					// harness. Re-upserting here does not weaken the assertion below: if the
+					// production orphan/weak-match filter drops real goal metadata matches, the
+					// searched hit still never appears and this helper times out.
+					await upsertSyntheticDoc(tracker, doc, { track: false });
+					const ctx = pcm(tracker.gw).getOrCreate(tracker.projectId);
+					lastStoreDoc = ctx?.searchIndex?.getStore()?.getById?.(String(doc.id));
+					lastOut = await searchAll(tracker.gw, query, tracker.projectId);
+					const hits = lastOut.results.filter(predicate);
+					matchedHit = hits[0];
+					return hits.length;
+				},
+				{ timeout: 5_000, intervals: [50, 100, 250] },
+			)
+			.toBe(1);
+	} catch (err) {
+		console.error("[search-synthetic-hit-timeout]", JSON.stringify({ query, docId: doc.id, lastStoreDoc, lastOut }, null, 2));
+		throw err;
+	}
+	return matchedHit;
 }
 
 test.describe("search orphan filter & weak-match drop", () => {
@@ -349,7 +398,7 @@ test.describe("search orphan filter & weak-match drop", () => {
 		const filler = "lorem ipsum dolor sit amet ".repeat(40); // ~1080 chars
 		const syntheticDocId = `goal:${goal.id}:weak-${weakToken}`;
 		const syntheticResultId = `${goal.id}:weak-${weakToken}`;
-		await indexOrphan(tracker, {
+		const syntheticDoc = {
 			// Use a synthetic row id while keeping goal_id pointed at the real goal.
 			// POST /api/goals also schedules an async canonical `goal:${goal.id}`
 			// upsert; sharing that id lets the canonical index update race with and
@@ -369,18 +418,22 @@ test.describe("search orphan filter & weak-match drop", () => {
 			weight: 1.5,
 			role: "title",
 			goal_id: goal.id,
-		});
+		};
+		await indexOrphan(tracker, syntheticDoc);
 
-		const out = await searchAll(gw, weakToken, projectId);
 		// SearchResult.id is emitted bare (the "goal:" source prefix on the
 		// underlying FlexDoc row id is stripped in toSearchResult). Scope to the
 		// synthetic weak-match row specifically so unrelated fuzzy goal hits, or
 		// the async canonical goal index row, cannot affect the assertion.
-		const goalHits = out.results.filter((r: any) => r.type === "goal" && r.id === syntheticResultId && r.goalId === goal.id);
-		expect(goalHits.length).toBe(1);
-		expect(goalHits[0].matchedOn).toBe("metadata");
+		const goalHit = await waitForSyntheticHit(
+			tracker,
+			weakToken,
+			syntheticDoc,
+			(r: any) => r.type === "goal" && r.id === syntheticResultId && r.goalId === goal.id,
+		);
+		expect(goalHit.matchedOn).toBe("metadata");
 		// Snippet should have no <b> tag — it's a head-of-text preview.
-		expect(/<b>/i.test(goalHits[0].snippet)).toBe(false);
+		expect(/<b>/i.test(goalHit.snippet)).toBe(false);
 
 		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
 	});
