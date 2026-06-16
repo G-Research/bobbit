@@ -18,6 +18,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,35 +59,38 @@ const DOC_FRAMING = [
 ];
 
 const TEXT_EXT = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".md", ".yaml", ".yml", ".txt", ".html", ".css"]);
-const SKIP_DIRS = new Set(["node_modules", "dist", ".git"]);
 
 // Never scanned — they describe the removal and would self-match (no exception hole).
-const EXCLUDE = new Set([
-	path.join(REPO_ROOT, "tests", "extension-host-no-capability-sandbox-residual.test.ts"),
-	path.join(REPO_ROOT, "docs", "design", "extension-host-isolation-simplification.md"),
+const EXCLUDE_RELS = new Set([
+	path.normalize("tests/extension-host-no-capability-sandbox-residual.test.ts"),
+	path.normalize("docs/design/extension-host-isolation-simplification.md"),
 ]);
 
-/** Recursively collect text files under `dir`, skipping excluded dirs/files. */
-function collectFiles(dir: string): string[] {
-	const out: string[] = [];
-	let entries: fs.Dirent[];
+/**
+ * Collect only git-tracked text files. This keeps the guard bounded under the
+ * full unit suite: concurrent tests and browser fixtures may create temporary
+ * directories, traces, or generated files, but only committed source/docs/packs
+ * can reintroduce the deleted sandbox surface this test guards.
+ */
+function trackedTextFiles(...roots: string[]): string[] {
+	let raw: string;
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return out;
+		raw = execFileSync("git", ["ls-files", "-z", "--", ...roots], {
+			cwd: REPO_ROOT,
+			encoding: "utf8",
+			maxBuffer: 8 * 1024 * 1024,
+		});
+	} catch (err: any) {
+		assert.fail(`could not enumerate tracked files for residual sandbox scan: ${err?.message || err}`);
 	}
-	for (const e of entries) {
-		const abs = path.join(dir, e.name);
-		if (e.isDirectory()) {
-			if (SKIP_DIRS.has(e.name)) continue;
-			out.push(...collectFiles(abs));
-		} else if (e.isFile()) {
-			if (EXCLUDE.has(abs)) continue;
-			if (!TEXT_EXT.has(path.extname(e.name))) continue;
-			out.push(abs);
-		}
-	}
-	return out;
+	const files = raw
+		.split("\0")
+		.filter(Boolean)
+		.filter((rel) => TEXT_EXT.has(path.extname(rel)))
+		.filter((rel) => !EXCLUDE_RELS.has(path.normalize(rel)))
+		.map((rel) => path.join(REPO_ROOT, rel));
+	assert.ok(files.length > 0, `residual sandbox scan found no tracked files under: ${roots.join(", ")}`);
+	return files;
 }
 
 function readText(abs: string): string {
@@ -97,29 +101,27 @@ function readText(abs: string): string {
 	}
 }
 
-const ROOTS = ["src", "tests", "docs", "market-packs"].map((r) => path.join(REPO_ROOT, r));
+const ROOT_FILES = trackedTextFiles("src", "tests", "docs", "market-packs");
 
 describe("extension-host — no residual capability-sandbox references (acceptance #2)", () => {
 	it("the unique sandbox identifiers appear NOWHERE under src/ tests/ docs/ market-packs/", () => {
 		const offenders: string[] = [];
-		for (const root of ROOTS) {
-			for (const abs of collectFiles(root)) {
-				const text = readText(abs);
-				for (const ident of SANDBOX_IDENTS) {
-					if (text.includes(ident)) offenders.push(`${path.relative(REPO_ROOT, abs)} :: ${ident}`);
-				}
+		for (const abs of ROOT_FILES) {
+			const text = readText(abs);
+			for (const ident of SANDBOX_IDENTS) {
+				if (text.includes(ident)) offenders.push(`${path.relative(REPO_ROOT, abs)} :: ${ident}`);
 			}
 		}
-		assert.deepEqual(offenders, [], `unique sandbox identifiers must have zero residual references:\n${offenders.join("\n")}`);
+		assert.deepEqual(offenders, [], `unique sandbox identifiers must have zero residual references across ${ROOT_FILES.length} tracked files:\n${offenders.join("\n")}`);
 	});
 
 	it("the extension-host source/test/pack surface contains neither forbidden word (case-insensitive)", () => {
 		const surface: string[] = [];
-		surface.push(...collectFiles(path.join(REPO_ROOT, "src", "server", "extension-host")));
+		surface.push(...trackedTextFiles("src/server/extension-host"));
 		surface.push(path.join(REPO_ROOT, "src", "server", "agent", "tool-contributions.ts"));
 		surface.push(path.join(REPO_ROOT, "tests", "extension-host-module-isolation.test.ts"));
 		surface.push(path.join(REPO_ROOT, "tests", "extension-host-isolation-config-invariant.test.ts"));
-		surface.push(...collectFiles(path.join(REPO_ROOT, "market-packs", "pr-walkthrough")));
+		surface.push(...trackedTextFiles("market-packs/pr-walkthrough"));
 
 		const offenders: string[] = [];
 		for (const abs of surface) {
