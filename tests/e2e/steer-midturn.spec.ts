@@ -84,7 +84,7 @@ test.describe("Steer mid-turn delivery", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on something" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:15000 working on something" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue a message while agent is streaming (this is what the UI does)
@@ -95,24 +95,19 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages to track only steer-related events
 			conn.messages.length = 0;
 
-			// Promote to steered via steer_queued (this is what the Steer button does)
+			// Promote to steered via steer_queued (this is what the Steer button does).
+			// Promotion dispatches immediately through the live-steer path, matching a
+			// fresh steer instead of waiting for a later tool boundary.
 			conn.send({ type: "steer_queued", messageId: msgId });
 
-			// Wait for the queue_update confirming the message is steered
-			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.isSteered),
-			);
-
-			// The steered message is dispatched at tool_execution_end (after
-			// the 2s tool call finishes). The mock agent emits a user-role
-			// message_end via handlePrompt(steeredText).
+			// The mock agent emits a user-role message_end via handlePrompt(steeredText).
 			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
 					m.data?.message?.role === "user" &&
 					(m.data?.message?.content?.[0]?.text || "").includes("STEER_QUEUED_TEST_456"),
-				10_000,
+				5000,
 			);
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_QUEUED_TEST_456");
@@ -129,7 +124,7 @@ test.describe("Steer mid-turn delivery", () => {
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
 
-			conn.send({ type: "prompt", text: "STAY_BUSY:2000 working on multi-step task" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:15000 working on multi-step task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
 			// Queue two messages while streaming
@@ -144,20 +139,12 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages to track only steer-related events
 			conn.messages.length = 0;
 
-			// Promote both to steered
+			// Promote both to steered. Each promotion dispatches immediately through the
+			// live-steer path; each substring must show up in at least one user-role
+			// message_end event.
 			conn.send({ type: "steer_queued", messageId: msg1Id });
-			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg1Id && q.isSteered),
-			);
 			conn.send({ type: "steer_queued", messageId: msg2Id });
-			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg2Id && q.isSteered),
-			);
 
-			// At tool_execution_end, both steers are batched into a single
-			// rpcClient.steer() call (joined by \n) OR delivered as two
-			// separate user prompts. Accept either: each substring must show
-			// up in at least one user-role message_end event.
 			for (const needle of ["STEER_BATCH_MSG_1", "STEER_BATCH_MSG_2"]) {
 				await conn.waitFor(
 					(m) =>
@@ -165,7 +152,7 @@ test.describe("Steer mid-turn delivery", () => {
 						m.data?.type === "message_end" &&
 						m.data?.message?.role === "user" &&
 						(m.data?.message?.content?.[0]?.text || "").includes(needle),
-					10_000,
+					5000,
 				);
 			}
 		} finally {
