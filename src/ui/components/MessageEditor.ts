@@ -355,6 +355,12 @@ export class MessageEditor extends LitElement {
 				this._atFiles = Array.isArray(data.files)
 					? (data.files as Array<{ path: string }>).map((f) => f.path).filter((p) => typeof p === "string")
 					: [];
+				// The user may have selected a mention while this fetch was in flight.
+				// Only a currently active @ token may reopen the menu.
+				if (!this._currentAtMatch()) {
+					this._atMenuOpen = false;
+					return;
+				}
 				// Re-apply the current (possibly newer) token filter so the menu
 				// reflects what the user has typed since this fetch was scheduled.
 				this._applyAtFilter();
@@ -370,6 +376,16 @@ export class MessageEditor extends LitElement {
 			this._atLoadTimer = null;
 			this._loadFileMentions(query);
 		}, 120);
+	}
+
+	private _currentAtMatch(): RegExpMatchArray | null {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return null;
+		const cursorPos = textarea.selectionStart;
+		const textBeforeCursor = this.value.substring(0, cursorPos);
+		// Trigger on an `@` at a word boundary (start, whitespace, or newline)
+		// followed by a path fragment with no whitespace or further `@`.
+		return textBeforeCursor.match(/(^|[\s])@([^\s@]*)$/);
 	}
 
 	/** Filter the cached file list by the current `@` query for an instant menu. */
@@ -388,10 +404,7 @@ export class MessageEditor extends LitElement {
 		const textarea = this.textareaRef.value;
 		if (!textarea) { this._atMenuOpen = false; return; }
 		const cursorPos = textarea.selectionStart;
-		const textBeforeCursor = this.value.substring(0, cursorPos);
-		// Trigger on an `@` at a word boundary (start, whitespace, or newline)
-		// followed by a path fragment with no whitespace or further `@`.
-		const match = textBeforeCursor.match(/(^|[\s])@([^\s@]*)$/);
+		const match = this._currentAtMatch();
 		if (match) {
 			this._atTokenStart = cursorPos - match[2].length - 1; // position of "@"
 			this._atQuery = match[2];
@@ -406,10 +419,15 @@ export class MessageEditor extends LitElement {
 	private _selectFileMention(filePath: string) {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return;
+		if (this._atLoadTimer) {
+			clearTimeout(this._atLoadTimer);
+			this._atLoadTimer = null;
+		}
 		const before = this.value.substring(0, this._atTokenStart);
 		const after = this.value.substring(textarea.selectionStart);
 		this.value = before + `@${filePath} ` + after;
 		this._atMenuOpen = false;
+		this._atQuery = "";
 		this.onInput?.(this.value);
 		// Update textarea and move cursor after the inserted path + trailing space.
 		if (textarea) {
