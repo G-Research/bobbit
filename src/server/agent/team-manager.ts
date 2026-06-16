@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
@@ -1734,9 +1734,12 @@ export class TeamManager {
 			const goalId8 = goalId.slice(0, 8);
 			branchName = `goal/${goalId8}/${role}-${shortId}`;
 
-			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point
+			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point.
+			// Test harnesses may use repos with no origin; never contact real remotes there.
 			try {
-				await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
+				if (!(await shouldSkipRemoteGitForTests(goal.repoPath!))) {
+					await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
+				}
 			} catch { /* fetch failure is non-fatal — worktree falls back to local HEAD */ }
 
 			// Compute subdirectory offset from the goal's worktree root to its cwd.

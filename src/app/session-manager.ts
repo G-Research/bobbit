@@ -44,6 +44,7 @@ async function invalidateProjectScopeConfig(projectId: string): Promise<void> {
 import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
+	hasProposalDismissalRecord,
 	clearProposalDismissed as clearProposalDismissedTyped,
 	deleteProposalFile,
 } from "./proposal-helpers.js";
@@ -442,6 +443,13 @@ const goalDraft = createDraftManager({
 					rev,
 				};
 			}
+		} else if (hasProposalDismissalRecord(_sessionId, "goal")) {
+			// Broad-suite race: a late debounced save after dismissal can overwrite the
+			// server draft with no activeGoalProposal but stale previewTitle/previewSpec.
+			// The dismissal fingerprint is still authoritative for this session, so keep
+			// the slot empty and clear the form mirror instead of restoring stale fields.
+			delete state.activeProposals.goal;
+			dismissed = true;
 		} else if (state.activeProposals.goal?.sessionId !== _sessionId) {
 			// Finding 2 — an OFF-SCREEN proposal's client draft was never saved
 			// (the unified/legacy callbacks early-return while the panel is inactive),

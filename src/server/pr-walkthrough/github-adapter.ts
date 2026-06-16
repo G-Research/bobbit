@@ -176,6 +176,19 @@ type FetchLike = (url: string, init?: {
 const DEFAULT_MAX_PATCH_BYTES = 1_000_000;
 const DEFAULT_MAX_LINES_PER_FILE = 2_000;
 
+function externalNetworkBlockedForTests(): boolean {
+	return process.env.BOBBIT_TEST_NO_EXTERNAL === "1" || process.env.BOBBIT_E2E === "1";
+}
+
+function isLocalHttpUrl(raw: string): boolean {
+	try {
+		const host = new URL(raw).hostname.toLowerCase();
+		return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
+	} catch {
+		return false;
+	}
+}
+
 export class GithubPrAdapterError extends Error {
 	readonly status: number;
 	readonly code: string;
@@ -262,9 +275,17 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 		throw new GithubPrAdapterError("GitHub PR number is required", { status: 400, code: "github_pr_number_required" });
 	}
 
-	const token = await resolveGithubToken(options, host);
-
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? apiBaseUrlForHost(host);
+	if (externalNetworkBlockedForTests() && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
+		throw new GithubPrAdapterError(`External GitHub API access is disabled in tests: ${apiBaseUrl}`, {
+			status: 403,
+			code: "github_external_network_disabled",
+			warnings,
+			host,
+		});
+	}
+
+	const token = await resolveGithubToken(options, host);
 	const fetchImpl = options.fetch ?? fetch;
 	const headers = githubHeaders(token);
 	const prApiUrl = `${apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`;

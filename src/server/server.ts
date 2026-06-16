@@ -8172,11 +8172,13 @@ async function handleApiRoute(
 			});
 		}
 
-		// Fire-and-forget verification — resolve primary branch dynamically so
-		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
-		// hardcoded "master". See docs/goals-workflows-tasks.md — Gate baselines.
+		// Fire-and-forget verification — project `base_ref` is the configured
+		// integration target; when unset, fall back to the repo's detected primary.
+		// `parseBaseRef` normalizes remote refs like `origin/master` to `master`
+		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
 		const branchContainer = goalBranchContainer(goal);
-		const primary = await detectPrimaryBranch(branchContainer).catch(() => "master");
+		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
+		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));

@@ -88,9 +88,12 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	// Isolate the agent dir so each test has its own ~/.bobbit/agent equivalent.
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+	process.env.NODE_ENV = "test";
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
+	process.env.BOBBIT_TEST_NO_REMOTE = "1";
+	process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 	process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 	process.env.BOBBIT_NO_OPEN = "1";
 	process.env.BOBBIT_SKIP_TITLE_GEN = "1";

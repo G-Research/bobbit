@@ -407,7 +407,7 @@ export function substituteVars(
 			return match;
 		}
 
-		// Bare variables — builtins only (branch, master, cwd, goal_spec)
+		// Bare variables — builtins only (branch, baseBranch, master, cwd, goal_spec, commit)
 		if (trimmed in builtinVars) return builtinVars[trimmed];
 
 		return match; // Leave unresolved
@@ -442,6 +442,23 @@ export function isCommandStepSkippable(resolvedCmd: string): string | null {
 		return `Skipped — unresolved template variable {{${unresolved[1].trim()}}} (not configured for this project)`;
 	}
 	return null;
+}
+
+const READY_TO_MERGE_REQUIRED_BUILTINS = new Set(["branch", "baseBranch", "master", "cwd", "goal_spec", "commit"]);
+
+/**
+ * Ready-to-merge command checks are safety checks. If one still contains an
+ * unresolved required built-in after substitution, fail the step instead of
+ * treating it like an optional project-specific command.
+ */
+export function readyToMergeUnresolvedBuiltinFailure(gateId: string, resolvedCmd: string): string | null {
+	if (gateId !== "ready-to-merge") return null;
+	const unresolved = [...resolvedCmd.matchAll(/\{\{([^}]+)\}\}/g)]
+		.map(match => match[1].trim())
+		.filter(name => READY_TO_MERGE_REQUIRED_BUILTINS.has(name));
+	if (unresolved.length === 0) return null;
+	const name = unresolved[0];
+	return `Failed — unresolved required built-in template variable {{${name}}} in ready-to-merge command`;
 }
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { test, expect } from "../gateway-harness.js";
+import type { Page, Response } from "@playwright/test";
 import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
 
@@ -236,6 +237,42 @@ async function listContributions(): Promise<PackContributionsMeta[]> {
 	const res = await apiFetch("/api/ext/contributions");
 	expect(res.ok).toBe(true);
 	return (await res.json()).packs as PackContributionsMeta[];
+}
+
+interface RecoverRouteResult {
+	status: number;
+	body: any;
+	text: string;
+}
+
+function isRecoverRouteResponse(response: Response): boolean {
+	return /\/api\/ext\/route\/recover\b/.test(response.url()) && response.request().method() === "POST";
+}
+
+async function readRecoverRouteResult(response: Response): Promise<RecoverRouteResult> {
+	const text = await response.text().catch(() => "");
+	let body: any = {};
+	try {
+		body = text ? JSON.parse(text) : {};
+	} catch {
+		body = {};
+	}
+	return { status: response.status(), body, text };
+}
+
+function createRecoverRouteProbe(page: Page) {
+	const responses: Array<Promise<RecoverRouteResult>> = [];
+	page.on("response", (response) => {
+		if (isRecoverRouteResponse(response)) responses.push(readRecoverRouteResult(response));
+	});
+	return {
+		mark: () => responses.length,
+		async waitAfter(mark: number, timeout = 20_000): Promise<RecoverRouteResult> {
+			if (responses.length > mark) return responses[mark];
+			const response = await page.waitForResponse(isRecoverRouteResponse, { timeout });
+			return readRecoverRouteResult(response);
+		},
+	};
 }
 
 async function listInstalled(): Promise<Array<{ packName: string; scope: string; builtin?: boolean }>> {
@@ -672,19 +709,19 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		return sid;
 	}
 
-	async function openRecoveredReadyWalkthrough(page: import("@playwright/test").Page, jobId: string): Promise<string | undefined> {
-		const recoverResp = page.waitForResponse(
-			(r) => /\/api\/ext\/route\/recover\b/.test(r.url()) && r.request().method() === "POST",
-			{ timeout: 20_000 },
-		);
+	async function openRecoveredReadyWalkthrough(
+		page: Page,
+		jobId: string,
+		recoverProbe = createRecoverRouteProbe(page),
+		recoverMark = recoverProbe.mark(),
+	): Promise<string | undefined> {
 		await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
 		await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
-		const resp = await recoverResp;
-		expect(resp.status(), `recover callRoute failed: ${await resp.text().catch(() => "")}`).toBe(200);
-		const recovered = await resp.json().catch(() => ({}));
-		expect(recovered.found, "the child pane must self-resolve binding/<child> → submitted YAML").toBe(true);
-		expect(recovered.jobId).toBe(jobId);
+		const recovered = await recoverProbe.waitAfter(recoverMark);
+		expect(recovered.status, `recover callRoute failed: ${recovered.text}`).toBe(200);
+		expect(recovered.body.found, "the child pane must self-resolve binding/<child> → submitted YAML").toBe(true);
+		expect(recovered.body.jobId).toBe(jobId);
 		await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
 		await expect(page.locator('[data-testid="prw-navrail"], [aria-label="PR walkthrough phase rail"]').first()).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
@@ -738,6 +775,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 	//    via the child-self `recover` branch — NO click, NO Run/Load button — and a
 	//    reload re-renders the SAME persisted cards (child self-recover again). ──
 	test("T-4 — bound child pane self-recovers READY cards on mount and re-renders after reload", async ({ page, gateway }) => {
+		const recoverProbe = createRecoverRouteProbe(page);
 		const sid = await freshSessionWithPanel(page);
 		// The bound session's worktree must be a real git repo so publish/bundle
 		// recompute the LIVE diff. This sets the module-level baseSha/headSha that
@@ -768,28 +806,8 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 
 		// The child pane AUTO-mounts: on mount it self-resolves binding/<self> →
 		// `recover` → re-publishes → renders cards. NO click, NO prw-load button.
-		const recoverAndAssertCards = async (): Promise<string | undefined> => {
-			const recoverResp = page.waitForResponse(
-				(r) => /\/api\/ext\/route\/recover\b/.test(r.url()) && r.request().method() === "POST",
-				{ timeout: 20_000 },
-			);
-			await page.evaluate((h) => { window.location.hash = h; }, `#/ext/${PACK}`);
-			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toBe(`#/ext/${PACK}`);
-			await expect(page.locator('[data-testid="prw-panel-root"]').first()).toBeVisible({ timeout: 20_000 });
-			// The recover POST fires automatically — NO button click.
-			const resp = await recoverResp;
-			expect(resp.status(), `recover callRoute failed: ${await resp.text().catch(() => "")}`).toBe(200);
-			const recovered = await resp.json().catch(() => ({}));
-			expect(recovered.found, "the child pane must self-resolve binding/<child> → submitted YAML").toBe(true);
-			expect(recovered.jobId).toBe(childJobId);
-			// There is NO manual Load button — the pane auto-renders.
-			await expect(page.locator('[data-testid="prw-load"]')).toHaveCount(0);
-			// The READY cards render in THIS (child) session's pane.
-			await expect(page.locator('[data-testid="prw-navrail"], [aria-label="PR walkthrough phase rail"]').first()).toBeVisible({ timeout: 10_000 });
-			await expect(page.locator('[data-testid="prw-title"]').first()).toContainText(PR_TITLE, { timeout: 10_000 });
-			await expect(page.locator('[data-testid="prw-nav-card"][data-prw-nav="orientation-summary"], [data-testid="pr-walkthrough-orientation-rail"]').first()).toBeVisible();
-			return (await page.locator('[data-testid="prw-persisted-at"]').first().textContent())?.trim();
-		};
+		const recoverAndAssertCards = (recoverMark = recoverProbe.mark()): Promise<string | undefined> =>
+			openRecoveredReadyWalkthrough(page, childJobId, recoverProbe, recoverMark);
 
 		const persistedAt1 = await recoverAndAssertCards();
 		expect(persistedAt1, "stored cards must carry a persistedAt").toBeTruthy();
@@ -797,10 +815,11 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		// RELOAD persistence: a full reload clears the in-memory byJob; the child pane
 		// re-renders the SAME cards via the recover route (child self-resolve again).
 		const token = await readE2ETokenAsync();
+		const reloadRecoverMark = recoverProbe.mark();
 		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/session/${sid}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers()).catch(() => {});
-		const persistedAt2 = await recoverAndAssertCards();
+		const persistedAt2 = await recoverAndAssertCards(reloadRecoverMark);
 		expect(persistedAt2, "reload must rehydrate the SAME persisted store record via recover").toBe(persistedAt1);
 	});
 

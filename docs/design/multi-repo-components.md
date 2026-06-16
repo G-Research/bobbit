@@ -228,7 +228,7 @@ Surface the warning in the project assistant chat and in Settings → project ta
    - `type: llm-review` — `role`, `prompt`, `phase`, `expect`, `optional`, `optionalLabel`, `description`, `timeout`.
    - `type: agent-qa` — same plus implicit dependency on project-level `qa_*` fields.
    - `type: human-signoff` — `label` (sign-off card title), `prompt`, `phase`, `role`, `optional`, `optionalLabel`, `description`; no timeout.
-5. **Runtime context tokens:** `{{branch}}`, `{{baseBranch}}` (`{{master}}` remains valid as a legacy alias), `{{goal_spec}}`, `{{agent.<key>}}`, `{{<gate_id>.meta.<key>}}`. **No `{{project.<key>}}`** (replaced by structural references).
+5. **Runtime context tokens:** `{{branch}}`, `{{baseBranch}}` (built-in bare branch from configured `base_ref`; `origin/master` → `master`), `{{goal_spec}}`, `{{agent.<key>}}`, `{{<gate_id>.meta.<key>}}`. `{{master}}` remains a legacy detected-primary alias. **No `{{project.<key>}}`** in verification templates (replaced by structural references).
 6. **Pattern library** — typical gates per workflow style: general / feature / bug-fix / quick-fix / pr-review. The bobbit appendix in the goal spec is reproduced as a worked single-repo example; multi-repo and monorepo worked examples follow the same shape.
 7. **Anti-patterns:** literal shell strings instead of structural refs; copy-paste of step bodies; over-broad `expect: failure`.
 
@@ -353,7 +353,7 @@ Rules:
   - `command` step with `command` and no `component` → reject.
   - `command` step with neither `command` nor `run` → reject.
   - `command`/`component` pair where component or command name is unknown → reject (with "did you mean" suggestion via Levenshtein on the available set).
-- Free-form `run:` strings and `prompt:` strings → **not** validated for tokens. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{agent.x}}`, `{{<gate>.meta.x}}`; `{{master}}` is still accepted as a legacy alias) pass through to `verification-logic.ts::substituteVars`. Anything else fails at shell-time as a typo. (Acceptance criterion 6.)
+- Free-form `run:` strings and `prompt:` strings → **not** validated for tokens. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{agent.x}}`, `{{<gate>.meta.x}}`; `{{master}}` is still accepted as a legacy alias) pass through to `verification-logic.ts::substituteVars`. `{{baseBranch}}` is the bare branch derived from configured `base_ref`, falling back to detected primary; `{{master}}` remains a legacy detected-primary alias. `{{project.*}}` is unsupported in verification templates; structural `{ component, command }` references replace project command lookups. Anything else fails at shell-time as a typo. (Acceptance criterion 6.)
 - `optional` step requires `optionalLabel` (legacy non-human `label` is migrated on load and saved canonically).
 - `agent-qa` step requires the project to have `qa_start_command` configured (warn, don't reject — runtime already returns "QA not configured").
 
@@ -399,12 +399,12 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 | 18 | `{{goal_spec}}` injection | many | Unchanged | existing |
 | 19 | `{{agent.X}}` from signal metadata | bug-fix `{{agent.test_command}}` | Unchanged | existing |
 | 20 | `{{gate_id.meta.key}}` from upstream gates | bug-fix `{{reproducing-test.meta.test_command}}` | Unchanged | existing |
-| 21 | `{{project.X}}` token | implementation steps | **Removed.** Validator rejects in command shapes (`{ component, command }` is the replacement). Free-form `run:` keeps it functional but the migration rewrites all known usages. | `template-vars-no-project.spec.ts` |
-| 22 | `isCommandStepSkippable` (auto-skip on unresolved tokens / empty) | optional infra steps | **Replaced** by: data-only components produce zero steps, missing commands are validator errors. Kept only for free-form `run:` with unresolved `{{agent.X}}` to preserve existing optional-metadata semantics. | `step-skippable.spec.ts` |
+| 21 | `{{project.X}}` token | implementation steps | **Removed.** Unsupported in verification `run:`/`prompt:` templates; `{ component, command }` is the replacement and the migration rewrites known command usages. | `template-vars-no-project.spec.ts` |
+| 22 | `isCommandStepSkippable` (auto-skip on unresolved tokens / empty) | optional infra steps | **Replaced** by: data-only components produce zero steps, missing commands are validator errors. Kept only for optional free-form metadata misses (for example unresolved `{{agent.X}}`), not required Ready-to-Merge built-ins such as `{{branch}}`, `{{baseBranch}}`, or `{{master}}`. | `step-skippable.spec.ts` |
 | 23 | `error_pattern` agent metadata + `expect: failure` regex match | bug-fix `reproducing-test` | Unchanged | `expect-failure-pattern.spec.ts` (existing) |
 | 24 | Re-run / resume of llm-review and agent-qa transient failures | harness | Unchanged | existing harness tests |
 | 25 | Step result caching by commit SHA | harness | Unchanged | existing |
-| 26 | Skipped steps count as passed | harness | Unchanged | existing |
+| 26 | Optional skipped steps count as passed | harness | Unchanged for intentional optional skips; required Ready-to-Merge built-ins must fail rather than skip when unresolved. | existing |
 | 27 | Phase failure cascades skip downstream phases | harness | Unchanged | existing |
 | 28 | Pre-implementation gates skip diff-baseline injection | harness | Unchanged | existing |
 | 29 | `metadata: { test_command: string }` schema declaration on gate | bug-fix `reproducing-test` | Unchanged | existing |

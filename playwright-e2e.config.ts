@@ -69,9 +69,8 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Retries policy: 3 everywhere for now. Real bugs fail all 4 attempts;
-// flakes (Windows-FS races, goal-assistant cold-start timeouts) absorb
-// the retry. Will tighten back to 0 once the flake floor is fully fixed.
+// Keep three retries as the project-level flake absorber for broad E2E runs.
+// Deterministic failures still fail after the retry budget is exhausted.
 export default {
 	timeout: 30_000,
 	retries: 3,

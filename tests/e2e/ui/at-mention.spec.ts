@@ -147,6 +147,19 @@ test.describe("@-mention file references UI", () => {
 		await page.keyboard.press("Enter");
 		await expect(textarea).toHaveValue(`@${TEXT_FILE} `, { timeout: 10_000 });
 		await expect(page.locator(".at-menu")).toHaveCount(0);
+		// Guard against stale debounced file-mention fetches reopening the menu
+		// after selection.
+		await page.waitForFunction(() => {
+			const key = "__atMentionMenuAbsentSince";
+			const w = window as typeof window & Record<string, number | undefined>;
+			if (document.querySelector(".at-menu")) {
+				w[key] = undefined;
+				return false;
+			}
+			w[key] ??= performance.now();
+			return performance.now() - w[key] >= 250;
+		}, undefined, { timeout: 2_000 });
+		await expect(page.locator(".at-menu")).toHaveCount(0);
 	});
 
 	// Exercises the text-mention round trip: the chip renders live and survives

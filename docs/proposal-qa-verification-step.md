@@ -22,17 +22,20 @@ Replace the standalone `qa-testing` gate with a phased verification step on the 
 verify:
   - name: "Type check"
     type: command
-    run: "{{project.typecheck_command}}"
+    component: app
+    command: check
     # phase: 0 (implicit default)
 
   - name: "Unit tests"
     type: command
-    run: "{{project.test_unit_command}}"
+    component: app
+    command: unit
     # phase: 0
 
   - name: "E2E tests"
     type: command
-    run: "{{project.test_e2e_command}}"
+    component: app
+    command: e2e
     # phase: 0
 
   - name: "Code quality review"
@@ -244,13 +247,16 @@ The `qa-testing` gate is removed. QA testing becomes a phase-2 verification step
     # Phase 0 — automated command checks (serialized)
     - name: "Type check passes"
       type: command
-      run: "{{project.typecheck_command}}"
+      component: app
+      command: check
     - name: "Unit tests"
       type: command
-      run: "{{project.test_unit_command}}"
+      component: app
+      command: unit
     - name: "E2E tests"
       type: command
-      run: "{{project.test_e2e_command}}"
+      component: app
+      command: e2e
 
     # Phase 1 — code review (parallel non-command steps, after phase 0 passes)
     - name: "Gap analysis"

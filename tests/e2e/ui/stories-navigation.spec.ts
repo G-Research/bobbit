@@ -10,6 +10,7 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
+import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { waitForHealth, createGoal, deleteGoal } from "../e2e-setup.js";
 import {
@@ -27,6 +28,24 @@ import {
 	STORY_N10,
 } from "./story-registry.js";
 import { navigateToHash } from "./ui-helpers.js";
+
+async function waitForGoalDashboardRoute(page: Page, goalId: string): Promise<void> {
+	await expect.poll(
+		() => page.evaluate((id) => {
+			const state = (window as any).bobbitState;
+			const dashboardVisible = Array.from(document.querySelectorAll(".dashboard-container, .goal-dashboard, goal-dashboard"))
+				.some((el) => {
+					const rect = el.getBoundingClientRect();
+					const style = window.getComputedStyle(el);
+					return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+				});
+			return window.location.hash.includes(`/goal/${id}`)
+				&& state?.goalDashboardId === id
+				&& dashboardVisible;
+		}, goalId),
+		{ timeout: 20_000, intervals: [100, 200, 500, 1000] },
+	).toBe(true);
+}
 
 test.describe("CT-13: URL routing and navigation", () => {
 	let s: SpecContext;
@@ -453,6 +472,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
+		await waitForGoalDashboardRoute(s.page, goal.id);
 		s.assert();
 		await s.url_contains(`/goal/${goal.id}`);
 		await expect(s.page.locator(".dashboard-container").first())
@@ -478,7 +498,9 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// act — session → goal dashboard
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
+		await waitForGoalDashboardRoute(s.page, goal.id);
 		s.assert();
+		await s.url_contains(`/goal/${goal.id}`);
 		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 10_000 });
 
@@ -492,6 +514,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// act — back through the stack
 		s.act();
 		await s.navigate_back(); // back to goal
+		await waitForGoalDashboardRoute(s.page, goal.id);
 		s.assert();
 		await s.url_contains(`/goal/${goal.id}`);
 

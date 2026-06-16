@@ -42,6 +42,12 @@ export default function globalSetup() {
 	const serverEntry = join(projectRoot, "dist", "server", "cli.js");
 	const uiDir = join(projectRoot, "dist", "ui");
 
+	// Keep the standard E2E suite off external services; individual specs may
+	// still exercise local mock servers and local bare git remotes.
+	process.env.NODE_ENV = "test";
+	process.env.BOBBIT_TEST_NO_EXTERNAL = process.env.BOBBIT_TEST_NO_EXTERNAL || "1";
+	process.env.BOBBIT_TEST_NO_REMOTE = process.env.BOBBIT_TEST_NO_REMOTE || "1";
+
 	// Do not let a host-level Node compile cache leak into E2E workers. Stale or
 	// partial cache entries produced false ESM startup errors such as "module X
 	// does not provide an export Y" under concurrent Windows runs.

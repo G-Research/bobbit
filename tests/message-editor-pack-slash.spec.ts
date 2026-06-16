@@ -7,18 +7,30 @@
  * be entered before launch.
  */
 import { test, expect } from "@playwright/test";
+import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle.js";
 
-const FIXTURE = path.resolve("tests/fixtures/message-editor-pack-slash.html");
-const BUNDLE = path.resolve("tests/fixtures/message-editor-pack-slash-bundle.js");
+const OUT_DIR = path.resolve(".bobbit/tmp/tests/message-editor-pack-slash");
+const FIXTURE = path.join(OUT_DIR, "message-editor-pack-slash.html");
+const BUNDLE = path.join(OUT_DIR, "message-editor-pack-slash-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/message-editor-pack-slash-entry.ts");
 const EDITOR_SRC = path.resolve("src/ui/components/MessageEditor.ts");
 const PACK_ENTRYPOINTS_SRC = path.resolve("src/app/pack-entrypoints.ts");
 const PACK_PANELS_SRC = path.resolve("src/app/pack-panels.ts");
 
 test.beforeAll(() => {
+	fs.mkdirSync(OUT_DIR, { recursive: true });
 	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, EDITOR_SRC, PACK_ENTRYPOINTS_SRC, PACK_PANELS_SRC] });
+	fs.writeFileSync(FIXTURE, `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /><title>MessageEditor pack slash fixture</title></head>
+<body>
+<div id="container"></div>
+<script src="./${path.basename(BUNDLE)}"></script>
+</body>
+</html>
+`, "utf-8");
 });
 
 const PAGE = `file://${FIXTURE}`;

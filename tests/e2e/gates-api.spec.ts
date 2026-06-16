@@ -43,6 +43,40 @@ async function deleteGoal(goalId: string): Promise<void> {
 	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
 }
 
+async function signalGate(goalId: string, gateId: string, body: Record<string, unknown> = {}): Promise<any> {
+	const resp = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	const errorText = resp.status === 201 ? "" : await resp.text().catch(() => "");
+	expect(resp.status, errorText).toBe(201);
+	return resp.json();
+}
+
+async function waitForSignalVerificationStatus(
+	goalId: string,
+	gateId: string,
+	signalId: string,
+	targetStatus: string,
+	timeoutMs = 15000,
+): Promise<any> {
+	try {
+		return await pollUntil(async () => {
+			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
+			const data = await res.json();
+			const signal = data.signals?.find((s: any) => s.id === signalId);
+			return signal?.verification?.status === targetStatus ? signal : null;
+		}, { timeoutMs, intervalMs: 50, label: `signal ${signalId} verification=${targetStatus}` });
+	} catch (err) {
+		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
+		const data = await res.json();
+		const signal = data.signals?.find((s: any) => s.id === signalId);
+		throw new Error(
+			`Signal ${signalId} did not reach verification status "${targetStatus}" within ${timeoutMs}ms. Current status: "${signal?.verification?.status ?? "missing"}"`,
+		);
+	}
+}
+
 /**
  * Poll until a gate reaches the target status or timeout expires.
  * Returns the gate object on success; throws on timeout.
@@ -177,17 +211,15 @@ test.describe("Gates API", () => {
 		const goalId = await createGoalWithWorkflow("general");
 		try {
 			// Signal design-doc twice with different content
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design v1\n\nApproach: A\nFiles: x.ts\nCriteria: P" }),
+			const firstSignal = await signalGate(goalId, "design-doc", {
+				content: "# Design v1\n\nApproach: A\nFiles: x.ts\nCriteria: P",
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForSignalVerificationStatus(goalId, "design-doc", firstSignal.signal.id, "passed");
 
-			await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "# Design v2\n\nApproach: B\nFiles: y.ts\nCriteria: Q" }),
+			const secondSignal = await signalGate(goalId, "design-doc", {
+				content: "# Design v2\n\nApproach: B\nFiles: y.ts\nCriteria: Q",
 			});
-			await waitForGateStatus(goalId, "design-doc", "passed");
+			await waitForSignalVerificationStatus(goalId, "design-doc", secondSignal.signal.id, "passed");
 
 			// Check signal history
 			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signals`);

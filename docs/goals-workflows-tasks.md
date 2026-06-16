@@ -180,7 +180,7 @@ workflows:
 - `component:` referencing an unknown component name
 - a `(component, command)` pair where the component has no such command name
 
-The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{goal_title}}`, etc. — `{{master}}` is still accepted as a legacy alias) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
+The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{goal_title}}`, etc. — `{{master}}` is still accepted as a legacy alias) are necessary for workflows to function and are substituted by the gate runner before each step executes. `{{baseBranch}}` is a built-in bare branch name derived from configured `base_ref` (`origin/master` → `master`), falling back to the detected primary branch when unset. `{{project.*}}` is unsupported in verification templates; use structural `{ component, command }` references instead of project-variable command lookups.
 
 #### Workflow editor authoring
 
@@ -395,6 +395,16 @@ Typical triage flow: `gate_status` reports a failure and names the culprit in `f
 
 The UI uses the same explicit-status model. Gate status cards, the `gate_inspect` renderer, and signaled gate live cards reconcile WebSocket events, active-verification fetches, and persisted signal rows without flickering back to placeholder failed or `0ms` states while verification is still running.
 
+#### Verification template semantics
+
+Verification `run:` strings and `prompt:` bodies use a small runtime template scope:
+
+- `{{baseBranch}}` is a built-in and resolves to the bare integration branch from the project's configured `base_ref` (`origin/master` → `master`). If `base_ref` is unset, it falls back to the detected primary branch.
+- `{{master}}` is a legacy alias for the detected primary branch. It does not honor `base_ref`; prefer `{{baseBranch}}` in new workflows.
+- `{{project.*}}` is unsupported in verification templates. Component commands should use `{ component, command }`; QA settings should live under the selected component's `config:` map.
+
+Unresolved optional metadata can still make an optional command step skip. That skip behavior must not apply to required Ready-to-Merge built-ins: a required Ready-to-Merge check that references `{{branch}}`, `{{baseBranch}}`, or `{{master}}` should execute when the project has a resolvable branch, or fail loudly if the built-in cannot be resolved. It must not pass solely because the template remained unresolved.
+
 #### Gate verification baselines
 
 A gate's **baseline** is the git reference the reviewer diffs `HEAD` against when deciding what to comment on. Choosing the right baseline matters: too broad and the reviewer critiques upstream work that another agent already merged; too narrow and real goal-branch changes slip through unreviewed. It is also the single biggest source of false-positive "branch doesn't match design doc" findings when it drifts.
@@ -413,7 +423,7 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 
 **Primary branch detection:** the harness calls `detectPrimaryBranch(cwd)` from `src/server/skills/git.ts`, which uses `git symbolic-ref refs/remotes/origin/HEAD` with a `master` → `main` fallback. Never hardcode `"master"` in new gate logic — always resolve via this helper. The resolved baseline (e.g. `origin/main@abc1234`) is printed into every review prompt's "Signal Context" so failures are trivial to diagnose.
 
-**Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — the bare branch name derived from `base_ref` (or `detectPrimaryBranch()` when unset). `{{master}}` is intentionally unchanged and continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+**Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — a built-in bare branch name derived from `base_ref` (for example, `origin/master` → `master`, `origin/develop` → `develop`) or from `detectPrimaryBranch()` when unset. `{{master}}` is a legacy alias that continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
 
 **Branch publication safety:** Ready-to-Merge templates publish the goal branch with an explicit destination refspec:
 
