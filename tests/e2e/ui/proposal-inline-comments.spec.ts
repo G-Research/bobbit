@@ -308,6 +308,36 @@ test.describe("Inline comments on goal proposal panel", () => {
 		);
 	}
 
+	async function clickFirstRenderedHighlight(page: Page): Promise<void> {
+		const pointHandle = await page.waitForFunction(() => {
+			const annotations = Array.from(
+				document.querySelectorAll<HTMLElement>(".r6o-annotation"),
+			);
+			for (const el of annotations) {
+				if (!el.isConnected) continue;
+				el.scrollIntoView({ block: "center", inline: "nearest" });
+				const style = window.getComputedStyle(el);
+				if (style.display === "none" || style.visibility === "hidden") continue;
+				const rect = Array.from(el.getClientRects()).find(
+					(r) => r.width > 0 && r.height > 0,
+				);
+				if (!rect) continue;
+				const x = Math.min(
+					window.innerWidth - 1,
+					Math.max(1, rect.left + rect.width / 2),
+				);
+				const y = Math.min(
+					window.innerHeight - 1,
+					Math.max(1, rect.top + rect.height / 2),
+				);
+				return { x, y };
+			}
+			return null;
+		}, { timeout: 5_000 });
+		const point = await pointHandle.jsonValue() as { x: number; y: number };
+		await page.mouse.click(point.x, point.y);
+	}
+
 	test("BUG: clicking an existing highlight reopens popover prefilled", async ({
 		page,
 	}) => {
@@ -319,25 +349,18 @@ test.describe("Inline comments on goal proposal panel", () => {
 			comment: "Make this clearer",
 		});
 
-		const highlight = page.locator(".r6o-annotation").first();
-		await expect(highlight).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator(".r6o-annotation").first()).toBeVisible({
+			timeout: 5_000,
+		});
 
 		// User clicks the visible position of the highlighted text. This
 		// dispatches a real mouse click at those screen coords — which is
 		// what a user actually does, vs. dispatchEvent which bypasses any
-		// pointer-event layering the bug would otherwise mask.
-		// Wait for the annotator-rendered span to have a real layout box.
-		// `toBeVisible` can resolve before the highlight overlay has been
-		// positioned, leaving boundingBox() returning null.
-		await page.waitForFunction(() => {
-			const el = document.querySelector(".r6o-annotation") as HTMLElement | null;
-			if (!el) return false;
-			const r = el.getBoundingClientRect();
-			return r.width > 0 && r.height > 0;
-		}, { timeout: 5_000 });
-		const box = await highlight.boundingBox();
-		if (!box) throw new Error(".r6o-annotation has no bounding box");
-		await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+		// pointer-event layering the bug would otherwise mask. Compute the
+		// point in-page from the rendered client rect because, under load,
+		// Playwright can observe a stale locator box while the annotator has
+		// already produced a measurable span.
+		await clickFirstRenderedHighlight(page);
 
 		// Popover must open with the existing comment prefilled in the textarea.
 		const popover = page.locator("annotation-popover[open]");
@@ -345,13 +368,10 @@ test.describe("Inline comments on goal proposal panel", () => {
 			popover,
 			"clicking a highlight must open the annotation popover",
 		).toBeVisible({ timeout: 5_000 });
-		const textareaValue = await popover
-			.locator("textarea")
-			.inputValue();
-		expect(
-			textareaValue,
+		await expect(
+			popover.locator("textarea"),
 			"clicking highlight must prefill textarea with existing comment",
-		).toBe("Make this clearer");
+		).toHaveValue("Make this clearer", { timeout: 5_000 });
 	});
 
 	test("BUG: re-selecting overlapping text edits the existing annotation, does not stack", async ({
