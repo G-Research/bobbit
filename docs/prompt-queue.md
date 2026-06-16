@@ -54,7 +54,7 @@ Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcCli
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. The steered message is reordered to the front and shows a "Sent" badge in the UI. Steered messages are **not** dispatched immediately by `steer_queued` — promotion just sets `isSteered=true` and broadcasts. The next `tool_execution_end` event (or `agent_end` as a safety net for non-tool turns) drains all consecutive steered rows from the front of the queue via `dequeueAllSteered()` and hands them to the single `_dispatchSteer()` site, which removes the rows, joins them with `\n`, and forwards to `rpcClient.steer()`. While the agent is parked inside `bash_bg wait`, `steerQueued` still calls `bgProcessManager.abortAllWaits()` so the wait resolves and a tool boundary actually arrives. If the agent is force-killed before any boundary, the row is still in `promptQueue` and `drainQueue()` picks it up after respawn.
+Promotes an already-queued message to steered priority. The steered message is reordered to the front and shows a "Sent" badge in the UI. If the agent is **streaming**, promotion dequeues all consecutive steered rows from the front of the queue via `dequeueAllSteered()` and immediately hands them to the single `_dispatchSteer()` site, matching a fresh live steer instead of waiting for a later tool boundary. `_dispatchSteer()` removes the rows, joins them with `\n`, aborts any parked `bash_bg wait`, forwards to `rpcClient.steer()`, and owns RPC-failure recovery. If the agent is **idle**, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
 
 ### `remove_queued` (client → server)
 
@@ -158,7 +158,7 @@ When the user clicks Stop (or presses Escape), the server attempts a graceful ab
 
 **Force-kill recovery flow** (exactly-once at the transcript level):
 
-1. User clicks Stop. `SessionManager.forceAbort()` calls `_reconcileAfterAbort(session)` *before* tearing down the bridge — the shadow ledger (`session.inFlightSteerTexts`) holds every steer text whose `rpcClient.steer()` resolved but whose `message_end(role:user)` echo has not yet arrived.
+1. User clicks Stop. `SessionManager.forceAbort()` calls `_reconcileAfterAbort(session)` during abort handling — the shadow ledger (`session.inFlightSteerTexts`) holds every steer text whose `rpcClient.steer()` resolved but whose `message_end(role:user)` echo has not yet arrived.
 2. `_reconcileAfterAbort()` re-enqueues each ledger entry at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger.
 3. The agent process is killed, synthetic `agent_end` emitted, fresh subprocess spawned.
 4. `drainQueue()` runs. The re-enqueued steered rows are popped via `dequeueAllSteered()`, joined into a single prompt, and dispatched once.
@@ -177,7 +177,7 @@ The ledger exists because pi-coding-agent's RPC bridge surface does not expose `
 
 Residual at-least-once risk: a hard process kill in the small window between `rpcClient.steer()` resolving and the SDK pushing the text onto its mirror. The window is orders of magnitude smaller than the previous always-on at-least-once contract — see [docs/design/steer-subsystem-rewrite.md §6](design/steer-subsystem-rewrite.md) for the analysis.
 
-**Why steered messages aren't dispatched eagerly from `steer_queued`**: `steerQueued` only flips `isSteered=true` and broadcasts the queue. The next `tool_execution_end` (or, as a safety net, `agent_end` non-aborting) hands the row to the single `_dispatchSteer` site. This collapses three previous `bg.abortAllWaits` call sites into one call site inside `_dispatchSteer` (plus one inside `steerQueued` so a parked `bash_bg wait` unblocks before the tool boundary can fire). If the agent is force-killed before the boundary arrives, the row is still in `promptQueue` — never dispatched, never lost.
+**Why `steer_queued` dispatches through `_dispatchSteer()`**: while streaming, `steerQueued()` only does the queue promotion/dequeue work and then immediately calls the same `_dispatchSteer()` path used by fresh live steers. That keeps wait abort, row removal, batching, shadow-ledger handoff, and RPC-failure recovery in one place. When idle, promotion falls back to normal `drainQueue()` semantics with steered rows first.
 
 ## WS protocol summary
 

@@ -180,17 +180,16 @@ Three thin wrappers / call sites use it:
 | Site | When | What it dispatches |
 |---|---|---|
 | `deliverLiveSteer(sid, text)` | WS `{type:"steer"}` while streaming | enqueue row `isSteered=true` then `_dispatchSteer([row])` |
-| Tool-boundary in `handleAgentLifecycle` | `tool_execution_end` and (safety) `agent_end` non-aborting | `_dispatchSteer(promptQueue.dequeueAllSteered())` |
-| (optional eager path) `steerQueued` | WS `{type:"steer_queued"}` while streaming | mark `isSteered=true` only; tool-boundary handler picks it up |
+| Tool-boundary in `handleAgentLifecycle` | `tool_execution_end` and (safety) `agent_end` non-aborting | Defensive flush of any steered rows that remain queued (for example recovered/pre-existing rows) via `_dispatchSteer(promptQueue.dequeueAllSteered())` |
+| `steerQueued` | WS `{type:"steer_queued"}` while streaming | mark `isSteered=true`, dequeue the steered front group, and immediately call `_dispatchSteer(...)` |
 
-`steerQueued` no longer dispatches eagerly — promotion + reorder + `bg.abortAllWaits` is enough; the next `tool_execution_end` does the work via the single dispatch site. This collapses three `abortAllWaits` call sites into one (inside `_dispatchSteer`). `steerQueued` keeps its bg-wait abort because it must unblock the parked `wait` long-poll *before* a tool boundary can occur.
+`steerQueued` now dispatches immediately while streaming, matching a fresh live steer instead of waiting for a later tool boundary. Idle promotions still drain normally through `drainQueue()` with steered rows first. Wait interruption, row removal, shadow-ledger handoff, and RPC-failure recovery stay centralized in `_dispatchSteer()`.
 
-Net call-site map for `bg.abortAllWaits(sessionId)` after the change:
+Net call-site map for steer-related `bg.abortAllWaits(sessionId)` after the change:
 
-1. Inside `_dispatchSteer` (always — every dispatch).
-2. Inside `steerQueued` when `status === "streaming"` (to force a tool boundary so the dispatch can happen). *Not redundant with #1: this fires before any dispatch path runs.*
+1. Inside `_dispatchSteer` (always — every steer dispatch).
 
-Two sites total. Down from three with clearer semantics.
+Queued promotions and fresh live steers therefore share the same wait-abort/recovery behavior; termination cleanup remains separate.
 
 ### 3.5 Reconciliation on abort
 
@@ -272,7 +271,7 @@ If we want to keep the pill for UX (a transient "delivering…" hint between dis
 |---|---|
 | `src/server/agent/prompt-queue.ts` | Delete `markDispatched`/`removeDispatched`/`resetDispatched`. Drop `dispatched`-aware filter from `dequeueAllSteered`. Rename `dequeueUndispatched` → `dequeue` (or merge into existing `dequeue`). Add `enqueueAtFront(text, opts)`. |
 | `src/server/ws/protocol.ts` | Remove `dispatched?: boolean` from `QueuedMessage`. |
-| `src/server/agent/session-manager.ts` | Replace `deliverLiveSteer` body, `steerQueued` body (drop dispatch), `_dispatchSteeredMessages` (delete), `handleAgentLifecycle` `message_end(user)` hook (delete `removeDispatched`), `agent_end` `wasAborting` block (replace `resetDispatched` with `_reconcileAfterAbort`), `forceAbort` (call `_reconcileAfterAbort` before kill, delete `resetDispatched` after). Add `_dispatchSteer` and `_reconcileAfterAbort`. |
+| `src/server/agent/session-manager.ts` | Replace `deliverLiveSteer` body, `steerQueued` body (streaming promotions dequeue the steered front group and immediately call `_dispatchSteer`; idle promotions drain normally), `_dispatchSteeredMessages` (delete), `handleAgentLifecycle` `message_end(user)` hook (delete `removeDispatched`), `agent_end` `wasAborting` block (replace `resetDispatched` with `_reconcileAfterAbort`), `forceAbort` reconciliation, and add `_dispatchSteer` / `_reconcileAfterAbort`. |
 | `src/server/agent/rpc-bridge.ts` | Add `clearQueue()` method that sends `{type:"clear_queue"}`. Add type for `clear_queue` in the bridge command union. |
 | `src/server/agent/rpc-bridge-server.ts` *(or wherever the SDK side dispatches RPC commands; verify at impl time)* | Add `clear_queue` handler returning `agentSession.clearQueue()`. |
 | `src/ui/...` | If sent-indicator was keyed on `dispatched`, remove that DOM. (Audit at impl time — likely `QueuedMessageList.ts` or `Composer.ts`.) |
@@ -356,7 +355,7 @@ Landed as the four-commit stack on `goal/steer-subs-bd19361f`:
 ### What landed
 
 - **`PromptQueue`** (`src/server/agent/prompt-queue.ts`): no `dispatched` field, no `markDispatched` / `removeDispatched` / `resetDispatched`. Adds `enqueueAtFront(text, opts)` for reconciliation paths. Row lifetime is exactly `queued → dispatched (= removed)`.
-- **`SessionManager`** (`src/server/agent/session-manager.ts`): single dispatch site `_dispatchSteer()` removes rows from `promptQueue` *before* awaiting `rpcClient.steer()`. `deliverLiveSteer`, `steerQueued`, and the `tool_execution_end` / `agent_end` boundary handlers all funnel through it. `bgProcessManager.abortAllWaits()` has two call sites: inside `_dispatchSteer` (every dispatch) and inside `steerQueued` for the streaming case (so a parked `bash_bg wait` resolves and a tool boundary actually arrives).
+- **`SessionManager`** (`src/server/agent/session-manager.ts`): single dispatch site `_dispatchSteer()` removes rows from `promptQueue` *before* awaiting `rpcClient.steer()`. `deliverLiveSteer`, streaming `steerQueued` promotions, and defensive `tool_execution_end` / `agent_end` boundary flushes all funnel through it. While streaming, `steerQueued` dequeues the steered front group and immediately calls `_dispatchSteer()`; idle promotions drain normally. `bgProcessManager.abortAllWaits()` for steer delivery is owned by `_dispatchSteer()`, so wait abort/recovery is shared by fresh live steers and queued promotions.
 - **Shadow ledger** (`SessionInfo.inFlightSteerTexts: string[]`): mitigation B from §6.1 — chosen because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` and the agent-side dispatch table lives inside `node_modules/@earendil-works/pi-coding-agent`. Push on `_dispatchSteer` post-RPC; splice on `message_end(role:user)` matching by text in `_consumeSteerEcho`; drain in `_reconcileAfterAbort` (re-enqueue at front of `promptQueue` via `enqueueAtFront`).
 - **Reconciliation on abort**: `_reconcileAfterAbort()` runs in two places — `handleAgentLifecycle`'s `agent_end while wasAborting` branch (graceful) and `forceAbort` *before* `rpcClient.stop()` (force-kill). Either way the SDK's pending steers are pulled back into Bobbit's queue and redispatched exactly once after the agent is ready.
 - **Tests**: five P0 specs in place — `tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts` (§1 exactly-once), `tests/e2e/steer-reconnect.spec.ts` (§2 WS reconnect), `tests/e2e/steer-gateway-restart.spec.ts` (§3 gateway restart), `tests/e2e/steer-multitab.spec.ts` (§4 multi-tab convergence), `tests/e2e/ui/queue-ui.spec.ts` PI-10 (§5 sent-indicator removal). Plus `tests/queue-dispatch.spec.ts` and `tests/prompt-queue.spec.ts` rewritten to assert on row-removal + `enqueueAtFront` rather than on the deleted `dispatched` flag.
@@ -390,5 +389,5 @@ grep -c "_dispatchSteer\|_reconcileAfterAbort\|inFlightSteerTexts" src/server/ag
 ### Where to look next
 
 - Steer architecture, shadow-ledger lifecycle, and force-kill recovery: [docs/prompt-queue.md — Abort and force-kill recovery](../prompt-queue.md#abort-and-force-kill-recovery).
-- Live-steer call-site map and the two `abortAllWaits` invocation points: [docs/internals.md — Steer-interruptible bash_bg wait](../internals.md#steer-interruptible-bash_bg-wait).
+- Live-steer call-site map and the `_dispatchSteer()`-owned wait abort path: [docs/internals.md — Steer-interruptible bash_bg wait](../internals.md#steer-interruptible-bash_bg-wait).
 - Debugging duplicate-on-Stop, lost-after-abort, and reconnect mid-steer scenarios: [docs/debugging.md — Abort, steer & queue](../debugging.md#abort-steer--queue).

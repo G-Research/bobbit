@@ -53,15 +53,16 @@ test.describe("Queue UI E2E", () => {
 		await expect(page.locator(".steer-btn")).toHaveCount(1);
 		await rec.capture("Follow-up queued — pill + Steer button visible");
 
-		// PI-10 step 2: Click Steer → pill shows "Sent", dispatched immediately
+		// PI-10 step 2: Click Steer → pill shows "Sent" and streaming promotion
+		// immediately dispatches through the live-steer path.
 		await page.locator(".steer-btn").first().click();
 		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
 		await expect(page.locator(".sent-indicator")).toContainText("Sent");
 		await rec.capture("Steer clicked — Sent badge visible");
 
-		// PI-10 step 3: Agent receives the steer at the next tool boundary.
-		// The steered text renders as a user-message in chat.
-		// Verify it appears WITHOUT clicking abort.
+		// PI-10 step 3: Agent receives the steer mid-turn through the same
+		// dispatch path as a fresh live steer. The steered text renders as a
+		// user-message in chat. Verify it appears WITHOUT clicking abort.
 		await expect(
 			page.locator("user-message").filter({ hasText: "steer me now" }).first(),
 		).toBeVisible({ timeout: 10_000 });
@@ -107,9 +108,9 @@ test.describe("Queue UI E2E", () => {
 		await expect(page.locator(".sent-indicator")).toHaveCount(2, { timeout: 3_000 });
 		await rec.capture("Both pills steered — Sent x2");
 
-		// PI-10b step 5: Agent receives both steers at the next tool boundary.
-		// Each steered text renders as a user-message in chat.
-		// Verify delivery WITHOUT aborting.
+		// PI-10b step 5: Agent receives both steers mid-turn through the
+		// immediate queued-promotion dispatch path. Each steered text renders
+		// as a user-message in chat. Verify delivery WITHOUT aborting.
 		await expect(
 			page.locator("user-message").filter({ hasText: "batch steer A" }).first(),
 		).toBeVisible({ timeout: 10_000 });
