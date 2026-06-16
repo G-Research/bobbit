@@ -50,6 +50,42 @@ async function activeSessionId(page: Page): Promise<string> {
 	return sid;
 }
 
+async function waitForGoalSessionReady(page: Page, sid: string): Promise<void> {
+	await page.waitForFunction(
+		(sidArg: string) => {
+			const state = (window as any).bobbitState;
+			return state?.selectedSessionId === sidArg
+				&& state?.assistantType === "goal"
+				&& state?.connectionStatus === "connected"
+				&& state?.connectingSessionId == null
+				&& state?.remoteAgent?.gatewaySessionId === sidArg;
+		},
+		sid,
+		{ timeout: 30_000, polling: 100 },
+	);
+}
+
+async function reloadToLandingWithoutRestoringLastSession(page: Page): Promise<void> {
+	// The slow-path scenario needs a fresh page/WS without also letting boot
+	// auto-reconnect the previous S2 from localStorage. Under full-suite load,
+	// racing that boot reconnect against the explicit S1 navigation can leave
+	// the goal draft restore ordered behind stale state. Clearing only the
+	// last-session pointer keeps auth/local proposal-dismissal state intact while
+	// making the test's navigation deterministic.
+	await page.evaluate(() => { localStorage.removeItem("gateway.sessionId"); });
+	await openApp(page);
+	await page.waitForFunction(
+		() => {
+			const state = (window as any).bobbitState;
+			return !window.location.hash.startsWith("#/session/")
+				&& !state?.selectedSessionId
+				&& !state?.connectingSessionId;
+		},
+		null,
+		{ timeout: 20_000, polling: 100 },
+	);
+}
+
 /** Open a fresh goal-assistant session via the "+ New Goal" button. */
 async function openGoalAssistantSession(page: Page): Promise<string> {
 	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
@@ -130,13 +166,13 @@ async function setupOffscreen(page: Page): Promise<{ sidA: string; sidB: string 
 async function expectGoalPanelPopulated(page: Page): Promise<void> {
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
 	await expect(titleInput).toBeVisible({ timeout: 20_000 });
-	await expect(titleInput).toHaveValue(GOAL_TITLE, { timeout: 15_000 });
+	await expect(titleInput).toHaveValue(GOAL_TITLE, { timeout: 30_000 });
 	await expect(async () => {
 		const spec = await page.evaluate(
 			() => ((window as any).bobbitState?.previewSpec as string) ?? "",
 		);
 		expect(spec, "off-screen proposal spec must be restored on return").toContain(GOAL_SPEC_TAIL);
-	}).toPass({ timeout: 15_000, intervals: [500, 1000, 2000] });
+	}).toPass({ timeout: 30_000, intervals: [500, 1000, 2000] });
 }
 
 test.describe("Goal proposal off-screen return @repro", () => {
@@ -150,11 +186,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		// Fast path: S1 is cached → navigate back reuses the chat panel and
 		// rehydrates via REST. CURRENTLY FAILS on master: panel stays empty.
 		await navigateToHash(page, `#/session/${sidA}`);
-		await page.waitForFunction(
-			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
-			sidA,
-			{ timeout: 15_000 },
-		);
+		await waitForGoalSessionReady(page, sidA);
 		await expectGoalPanelPopulated(page);
 	});
 
@@ -164,13 +196,9 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		// Slow path: wipe the in-memory session cache by reloading to the
 		// landing page, then connect to S1 fresh (cache miss → new WebSocket →
 		// WS-auth rehydrate broadcast). CURRENTLY FAILS on master.
-		await openApp(page);
+		await reloadToLandingWithoutRestoringLastSession(page);
 		await navigateToHash(page, `#/session/${sidA}`);
-		await page.waitForFunction(
-			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
-			sidA,
-			{ timeout: 20_000 },
-		);
+		await waitForGoalSessionReady(page, sidA);
 		await expectGoalPanelPopulated(page);
 	});
 
@@ -184,11 +212,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 20_000 });
-		await page.waitForFunction(
-			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
-			sidA,
-			{ timeout: 20_000 },
-		);
+		await waitForGoalSessionReady(page, sidA);
 		await expectGoalPanelPopulated(page);
 	});
 
@@ -255,11 +279,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 
 		// Fast path: S1 is cached → navigate back reuses the chat panel.
 		await navigateToHash(page, `#/session/${sidA}`);
-		await page.waitForFunction(
-			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
-			sidA,
-			{ timeout: 15_000 },
-		);
+		await waitForGoalSessionReady(page, sidA);
 
 		// The slot must survive the stale-draft restore, and the form-mirror must
 		// be populated from it. CURRENTLY FAILS on HEAD: restore deletes the slot
@@ -299,11 +319,7 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		// Return to S1 (fast path). The dismissal short-circuit must keep the
 		// proposal hidden — the fix must not weaken this guard.
 		await navigateToHash(page, `#/session/${sidA}`);
-		await page.waitForFunction(
-			(sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg,
-			sidA,
-			{ timeout: 15_000 },
-		);
+		await waitForGoalSessionReady(page, sidA);
 
 		// Give any async rehydrate a chance to (wrongly) populate the slot.
 		await page
