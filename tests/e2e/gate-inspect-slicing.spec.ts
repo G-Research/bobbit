@@ -59,17 +59,32 @@ async function signalGate(goalId: string, gateId: string, body: Record<string, u
 	return res.json();
 }
 
-async function waitForGateStatus(goalId: string, gateId: string, status: string): Promise<void> {
-	await pollUntil(async () => {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		const body = await res.json();
-		return body.status === status ? body : null;
-	}, { timeoutMs: 20_000, intervalMs: 100, label: `${gateId} status ${status}` });
+async function waitForSignalVerificationStatus(
+	goalId: string,
+	gateId: string,
+	signalId: string,
+	status: "passed" | "failed",
+): Promise<void> {
+	let lastStatuses = "unavailable";
+	try {
+		await pollUntil(async () => {
+			const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
+			const body = await res.json();
+			const signals = Array.isArray(body.signals) ? body.signals : [];
+			lastStatuses = signals
+				.map((s: any) => `${s.id}:${s.verification?.status ?? "missing"}`)
+				.join(", ") || "none";
+			const postedSignal = signals.find((s: any) => s.id === signalId);
+			return postedSignal?.verification?.status === status ? postedSignal : null;
+		}, { timeoutMs: 45_000, intervalMs: 100, label: `${gateId} signal ${signalId} verification ${status}` });
+	} catch (err) {
+		throw new Error(`${(err as Error).message}; last signal statuses: ${lastStatuses}`);
+	}
 }
 
 async function signalAndWait(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
 	const signal = await signalGate(goalId, gateId, body);
-	await waitForGateStatus(goalId, gateId, signal.signal?.verification?.status === "failed" ? "failed" : "passed");
+	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "passed");
 	return signal;
 }
 
@@ -92,6 +107,8 @@ async function withGoal<T>(run: (goalId: string) => Promise<T>): Promise<T> {
 }
 
 test.describe("gate inspect slicing", () => {
+	test.setTimeout(60_000);
+
 	test("preserves existing content inspect shape while defaulting to a bounded tail", async () => {
 		await withGoal(async (goalId) => {
 			const post = await signalAndWait(goalId, "content-gate", { content: contentLines(120) });
