@@ -296,11 +296,13 @@ test("compaction — real LLM @real", async ({ page }) => {
 		await page.goto(`${gw.base}/?token=${gw.token}#/session/${sessionId}`);
 		await expect(card).toBeVisible({ timeout: 30_000 });
 
-		// Persistence across reload. Reload-path materialises a rich synthetic
-		// from the server's plain-text marker; `tokens-before` must be present.
+		// Persistence across reload. The server-side compaction sidecar splices
+		// the rich synthetic card into snapshots; complete cards intentionally no
+		// longer render token badges.
 		await page.reload();
 		await expect(card).toBeVisible({ timeout: 30_000 });
-		await expect(card.locator("[data-test='tokens-before']")).toContainText(/tok/);
+		await expect(card).toHaveAttribute("data-state", /complete|error/);
+		await expect(card.locator("[data-test='tokens-before']")).toHaveCount(0);
 	} finally {
 		await stopGW(gw);
 		cleanDir(dir);
