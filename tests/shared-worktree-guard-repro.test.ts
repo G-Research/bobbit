@@ -81,6 +81,21 @@ async function waitForWorktreeRemoval(worktreePath: string, timeoutMs = 3_000): 
 	}
 }
 
+async function removeTempDirWithRetries(dir: string): Promise<void> {
+	let lastErr: unknown;
+	for (let attempt = 0; attempt < 10; attempt += 1) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+			return;
+		} catch (err: any) {
+			lastErr = err;
+			if (!["ENOTEMPTY", "EPERM", "EBUSY"].includes(err?.code)) throw err;
+			await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+		}
+	}
+	throw lastErr;
+}
+
 function cleanupManager(manager: any): void {
 	if (manager?._statusHeartbeatTimer) {
 		clearInterval(manager._statusHeartbeatTimer);
@@ -97,11 +112,11 @@ describe("shared worktree guard reproductions", () => {
 		initPromptDirs(stateRoot);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (managers.length > 0) cleanupManager(managers.pop());
 		if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 		else process.env.BOBBIT_DIR = prevBobbitDir;
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeTempDirWithRetries(stateRoot);
 	});
 
 	it("purging an archived session must not remove a worktree referenced by a live session cwd", async () => {
@@ -137,7 +152,7 @@ describe("shared worktree guard reproductions", () => {
 				"SHARED_WORKTREE_GUARD_PURGE_SINGLE_REGRESSION: archived session purge removed a worktree path still referenced by a non-archived session cwd",
 			);
 		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
+			await removeTempDirWithRetries(tmp);
 		}
 	});
 
@@ -186,7 +201,7 @@ describe("shared worktree guard reproductions", () => {
 				"unshared multi-repo worktree should remain cleanable so the guard does not mask true cleanup",
 			);
 		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
+			await removeTempDirWithRetries(tmp);
 		}
 	});
 
@@ -212,7 +227,7 @@ describe("shared worktree guard reproductions", () => {
 				`SHARED_WORKTREE_GUARD_ORPHAN_LIST_REGRESSION: manual orphan listing reported a path referenced by live repoWorktrees: ${JSON.stringify(orphans)}`,
 			);
 		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
+			await removeTempDirWithRetries(tmp);
 		}
 	});
 
@@ -266,7 +281,7 @@ describe("shared worktree guard reproductions", () => {
 				"unshared goal repoWorktree should remain cleanable so archive cleanup still removes true orphans",
 			);
 		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
+			await removeTempDirWithRetries(tmp);
 		}
 	});
 
@@ -316,7 +331,7 @@ describe("shared worktree guard reproductions", () => {
 				"SHARED_WORKTREE_GUARD_SETUP_FAILURE_REGRESSION: setup-failure cleanup removed a worktree path already referenced by another non-archived persisted session",
 			);
 		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
+			await removeTempDirWithRetries(tmp);
 		}
 	});
 });
