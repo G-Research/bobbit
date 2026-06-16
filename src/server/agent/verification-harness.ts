@@ -1288,11 +1288,14 @@ export class VerificationHarness {
 		if (!signal) return null;
 
 		const cwd = goal.worktreePath || goal.cwd;
-		const baseBranch = await this.resolveVerificationBaseBranch(goalId, cwd);
+		const [baseBranch, legacyMasterBranch] = await Promise.all([
+			this.resolveVerificationBaseBranch(goalId, cwd),
+			this.resolveLegacyMasterBranch(cwd),
+		]);
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
 			baseBranch,
-			master: baseBranch,
+			master: legacyMasterBranch,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
@@ -1856,6 +1859,10 @@ export class VerificationHarness {
 			|| (await detectPrimaryBranch(cwd).catch(() => "master"));
 	}
 
+	private async resolveLegacyMasterBranch(cwd: string): Promise<string> {
+		return detectPrimaryBranch(cwd).catch(() => "master");
+	}
+
 	private resolveToolActivationDeps(cwd: string): VerificationToolActivationDeps {
 		let toolManager: ToolManager | undefined;
 		let groupPolicyStore: GroupPolicyProvider | undefined;
@@ -2197,11 +2204,14 @@ export class VerificationHarness {
 		}
 
 		try {
-			const baseBranch = await this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master");
+			const [baseBranch, legacyMasterBranch] = await Promise.all([
+				this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master"),
+				this.resolveLegacyMasterBranch(cwd),
+			]);
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
 				baseBranch,
-				master: baseBranch,
+				master: legacyMasterBranch,
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",

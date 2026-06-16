@@ -139,6 +139,38 @@ test("ready-to-merge command templates resolve {{baseBranch}} from configured or
 	assert.equal(verification?.status, "passed");
 });
 
+test("ready-to-merge keeps {{master}} on detected primary when configured base_ref differs", async () => {
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/develop");
+	let executedCommand: string | null = null;
+	(harness as any).runCommandStep = async (command: string) => {
+		executedCommand = command;
+		return { passed: true, output: `executed ${command}` };
+	};
+
+	await harness.verifyGateSignal(
+		signal as any,
+		{
+			id: "ready-to-merge",
+			name: "Ready to Merge",
+			dependsOn: [],
+			verify: [{
+				name: "Base branch and legacy master differ",
+				type: "command",
+				run: "echo base={{baseBranch}} master={{master}}",
+			}],
+		} as any,
+		process.cwd(),
+		undefined,
+		"develop",
+		new Map(),
+		"Preserve legacy master template semantics",
+	);
+
+	const verification = gateStore._gateState.signals[0].verification;
+	assert.equal(executedCommand, "echo base=develop master=master");
+	assert.equal(verification?.status, "passed");
+});
+
 test("rerun verification context includes {{baseBranch}} from configured base_ref", async () => {
 	const { harness, signal, gateStore } = makeHarnessFixture("origin/develop");
 	gateStore._gateState.signals[0] = {
@@ -158,7 +190,7 @@ test("rerun verification context includes {{baseBranch}} from configured base_re
 	);
 	assert.equal(
 		context.builtinVars.master,
-		"develop",
-		`BASE_BRANCH_REPRO: legacy {{master}} alias should follow configured base_ref origin/develop in rerun context, got ${JSON.stringify(context.builtinVars)}`,
+		"master",
+		`BASE_BRANCH_REPRO: legacy {{master}} must preserve detected-primary/fallback semantics instead of following configured base_ref origin/develop, got ${JSON.stringify(context.builtinVars)}`,
 	);
 });
