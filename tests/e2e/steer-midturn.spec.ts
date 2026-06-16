@@ -6,9 +6,9 @@
  *    agent via rpcClient.steer() (used by steer_queued promotion + abort).
  * 2. { type: "prompt" } sent while streaming is correctly queued by the server
  *    (the default path — the UI always queues via prompt during streaming).
- * 3. PI-10: steer_queued (the real UI flow) delivers mid-turn at the next
- *    tool boundary — queue a prompt, promote via steer_queued, verify the
- *    agent receives it BEFORE the current turn ends.
+ * 3. PI-10: steer_queued (the real UI flow) dispatches immediately through
+ *    the live-steer path — queue a prompt, promote via steer_queued, verify
+ *    the agent receives it BEFORE the current turn ends.
  *
  * Optimized: tests run in parallel (each creates its own session).
  */

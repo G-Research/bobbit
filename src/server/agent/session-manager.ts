@@ -2218,10 +2218,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Promote a queued message to steered and reorder.
-	 * If the agent is streaming, all steered+undispatched messages are
-	 * batched and dispatched immediately via rpcClient.steer() so they
-	 * are injected at the next tool boundary (PI-10).
+	 * Promote a queued message to steered priority.
+	 * If the agent is streaming, dispatch the current steered front group through
+	 * the same live-steer path as a fresh steer so user intent is observed on the
+	 * current turn instead of waiting for a later tool boundary or agent_end.
 	 */
 	steerQueued(sessionId: string, messageId: string): boolean {
 		const session = this.sessions.get(sessionId);
@@ -2229,27 +2229,14 @@ export class SessionManager {
 		const ok = session.promptQueue.steer(messageId);
 		if (!ok) return false;
 
-		// Steered messages are NOT dispatched immediately on promotion.
-		// They accumulate in the queue and are dispatched as a batch at the
-		// next tool boundary (PI-10b). This ensures that multiple steers sent
-		// during a long tool call are all delivered together, even if they
-		// arrive seconds apart. The dispatch is triggered by the tool_result
-		// event handler in _handleAgentEvent().
-		// If the agent is idle, they'll drain normally via drainQueue.
-		//
-		// SPECIAL CASE: bash_bg.wait. A wait long-poll has no natural tool
-		// boundary — it sits indefinitely until the bg process exits or the
-		// wait is aborted. Without intervention, a steer-on-queue while the
-		// agent is parked in wait would be deferred for the entire wait
-		// duration. Mirror deliverLiveSteer's behaviour: when the session is
-		// streaming and there is at least one active wait, abort all waits so
-		// the agent unblocks at once. The underlying bg process keeps
-		// running; only the wait long-poll is cancelled, which is exactly
-		// what the user expects from the Steer button.
-		const bg = (this as any).bgProcessManager;
-		if (bg && session.status === "streaming") bg.abortAllWaits(session.id);
+		if (session.status === "streaming") {
+			const steered = session.promptQueue.dequeueAllSteered();
+			void this._dispatchSteer(session, steered).catch(() => {});
+			return true;
+		}
 
 		this.broadcastQueue(session);
+		if (session.status === "idle") this.drainQueue(session);
 		return true;
 	}
 
@@ -2484,6 +2471,7 @@ export class SessionManager {
 
 		// Optimistic status update to prevent double-dispatch race
 		this.markPromptDispatchStreaming(session);
+		const dispatchStatusVersion = session.statusVersion;
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -2493,6 +2481,15 @@ export class SessionManager {
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
 
 		const recoverDispatchedRows = (reason: string) => {
+			// If any lifecycle/status transition happened after this prompt dispatch
+			// started, the agent has observed the turn (or the session moved on). A
+			// late prompt() failure then refers to bridge bookkeeping, not an
+			// undelivered row. Re-enqueueing here duplicates steered prompts such as
+			// task-completion notifications on the next agent_end drain.
+			if (session.statusVersion !== dispatchStatusVersion) {
+				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${reason} after session advanced (statusVersion ${dispatchStatusVersion} → ${session.statusVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+				return;
+			}
 			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
 		};
 
@@ -2563,10 +2560,9 @@ export class SessionManager {
 		// user messages (regular prompts, follow-ups, ask responses).
 		this._consumeSteerEcho(session, event);
 
-		// Tool boundary: dispatch accumulated steered messages as a batch
-		// (PI-10b). Steers sent during a long tool call are collected in the
-		// queue and delivered together when the tool finishes, before the
-		// agent starts its next step.
+		// Tool boundary: defensively flush any steered rows that remain queued
+		// (for example, recovered/pre-existing rows). Fresh live steers and
+		// steer_queued promotions dispatch immediately through _dispatchSteer.
 		if (event.type === "tool_execution_end") {
 			// If we're already aborting, do NOT dispatch steers via rpcClient.steer.
 			// The agent loop is being torn down — the SDK would queue the steer
