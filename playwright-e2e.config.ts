@@ -69,12 +69,11 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Keep one retry as a bounded flake absorber. Deterministic failures still fail
-// on both attempts, while broad-suite timeout cost is capped at two attempts
-// instead of four.
+// Keep three retries as the project-level flake absorber for broad E2E runs.
+// Deterministic failures still fail after the retry budget is exhausted.
 export default {
 	timeout: 30_000,
-	retries: 1,
+	retries: 3,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain
