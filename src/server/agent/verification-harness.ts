@@ -232,6 +232,59 @@ export function resolveStep(
 	return { cwd: branchContainer, runString: step.run };
 }
 
+const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
+const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
+
+/**
+ * Frozen workflows may omit `timeout:` for component command steps. The full
+ * unit suite is resource-sensitive on developer machines/CI and can exceed the
+ * generic 5-minute shell default under contention, so give `command: unit` a
+ * durable default while preserving explicit workflow timeouts.
+ */
+export function resolveCommandStepTimeoutSec(step: Pick<VerifyStep, "type" | "component" | "command" | "timeout">): number {
+	if (typeof step.timeout === "number" && Number.isFinite(step.timeout) && step.timeout > 0) return step.timeout;
+	const isComponentUnitCommand = step.type === "command"
+		&& typeof step.component === "string"
+		&& step.component.length > 0
+		&& typeof step.command === "string"
+		&& step.command.toLowerCase() === "unit";
+	return isComponentUnitCommand ? DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC : DEFAULT_COMMAND_STEP_TIMEOUT_SEC;
+}
+
+/** Command steps are the expensive OS-level work; keep them serialized within
+ * a phase so frozen workflows don't run full unit/E2E suites concurrently.
+ * Non-command steps keep the legacy parallel behavior.
+ */
+export function shouldSerializeVerificationStepWithinPhase(step: Pick<VerifyStep, "type">): boolean {
+	return step.type === "command";
+}
+
+export async function runVerificationPhaseSteps<T, R>(
+	phaseSteps: readonly T[],
+	runStep: (phaseStep: T) => Promise<R>,
+	options: { shouldSerialize?: (phaseStep: T) => boolean } = {},
+): Promise<R[]> {
+	const shouldSerialize = options.shouldSerialize ?? (() => false);
+	const parallelSteps: Array<{ phaseStep: T; order: number }> = [];
+	const serializedSteps: Array<{ phaseStep: T; order: number }> = [];
+	phaseSteps.forEach((phaseStep, order) => {
+		if (shouldSerialize(phaseStep)) serializedSteps.push({ phaseStep, order });
+		else parallelSteps.push({ phaseStep, order });
+	});
+
+	const results = new Array<R>(phaseSteps.length);
+	const parallelPromise = Promise.all(parallelSteps.map(async ({ phaseStep, order }) => {
+		results[order] = await runStep(phaseStep);
+	}));
+	const serializedPromise = (async () => {
+		for (const { phaseStep, order } of serializedSteps) {
+			results[order] = await runStep(phaseStep);
+		}
+	})();
+	await Promise.all([parallelPromise, serializedPromise]);
+	return results;
+}
+
 export interface VerificationPushSafetyVars {
 	branch?: string;
 	baseBranch?: string;
@@ -2231,8 +2284,10 @@ export class VerificationHarness {
 			}
 
 			// --- Phased execution ---
-			// Group active steps by phase (default 0), execute phases sequentially,
-			// steps within each phase run in parallel. Skipped optional steps are excluded.
+			// Group active steps by phase (default 0), execute phases sequentially.
+			// Within a phase, command steps are serialized to avoid test-suite
+			// contention; non-command steps still run in parallel. Skipped optional
+			// steps are excluded.
 			const phaseGroups = groupStepsByPhase(activeSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
@@ -2319,9 +2374,11 @@ export class VerificationHarness {
 					phase, stepIndices,
 				});
 
-				// Run steps in this phase in parallel
-				const phaseResults = await Promise.all(
-					phaseSteps.map(async ({ step, index }) => {
+				// Run safe work in parallel, but serialize command steps in this
+				// phase to avoid harness-induced full-suite contention.
+				const phaseResults = await runVerificationPhaseSteps(
+					phaseSteps,
+					async ({ step, index }) => {
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
 							const cachedResult: GateSignalStep = { ...cached, output: `[cached from prior signal] ${cached.output}` };
@@ -2477,7 +2534,7 @@ export class VerificationHarness {
 									}
 									await this.commandSemaphore.acquire();
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
+										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -2662,7 +2719,8 @@ export class VerificationHarness {
 						};
 						if (artifact) stepResult.artifact = artifact;
 						return { index, stepResult };
-					})
+					},
+					{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
 				);
 
 				// Store phase results
