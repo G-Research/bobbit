@@ -29,6 +29,7 @@ import path from "node:path";
 import { isPoolBranch } from "./worktree-pool.js";
 import { cleanupWorktree } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
+import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 
 const execFile = promisify(execFileCb);
 
@@ -77,6 +78,7 @@ export interface SweepRecord {
 	id: string;
 	branch?: string;
 	worktreePath?: string;
+	cwd?: string;
 	archived?: boolean;
 	/** Per-repo worktree paths (multi-repo). Each is treated as separately owned. */
 	repoWorktrees?: Record<string, string>;
@@ -110,8 +112,7 @@ function parseWorktreeList(stdout: string): ParsedWorktree[] {
 	return out;
 }
 
-const normalize = (p: string | undefined): string | undefined =>
-	p ? p.replace(/\\/g, "/").toLowerCase() : undefined;
+const normalize = normalizeWorktreeHostPath;
 
 /**
  * Sweep orphaned worktrees across all projects.
@@ -145,11 +146,14 @@ export async function sweepOrphanedWorktrees(opts: {
 		const ownedBranches = new Set<string>();
 		const ownedPaths = new Set<string>();
 		const branchToExpectedPath = new Map<string, string>();
-		for (const rec of [...opts.goals, ...opts.sessions, ...opts.staff]) {
+		const allRecords = [...opts.goals, ...opts.sessions, ...opts.staff];
+		for (const rec of allRecords) {
 			if (rec.archived) continue;
 			if (rec.branch) ownedBranches.add(rec.branch);
 			const np = normalize(rec.worktreePath);
 			if (np) ownedPaths.add(np);
+			const cwd = normalize(rec.cwd);
+			if (cwd) ownedPaths.add(cwd);
 			if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
 			// Multi-repo: each per-repo worktree is separately owned. The branch is
 			// shared across repos so we only add to ownedPaths.
@@ -214,7 +218,7 @@ export async function sweepOrphanedWorktrees(opts: {
 
 				// Active record owns this worktree (by branch or path).
 				const ownedByBranch = !!(branch && ownedBranches.has(branch));
-				const ownedByPath = ownedPaths.has(wtPathNorm);
+				const ownedByPath = ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords);
 
 				if (ownedByBranch || ownedByPath) {
 					// Multi-repo: a per-repo path explicitly listed in any record's
@@ -284,11 +288,14 @@ export function classifyWorktrees(opts: {
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
 	const branchToExpectedPath = new Map<string, string>();
-	for (const rec of [...opts.goals, ...opts.sessions, ...opts.staff]) {
+	const allRecords = [...opts.goals, ...opts.sessions, ...opts.staff];
+	for (const rec of allRecords) {
 		if (rec.archived) continue;
 		if (rec.branch) ownedBranches.add(rec.branch);
 		const np = normalize(rec.worktreePath);
 		if (np) ownedPaths.add(np);
+		const cwd = normalize(rec.cwd);
+		if (cwd) ownedPaths.add(cwd);
 		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
 		if (rec.repoWorktrees) {
 			for (const wp of Object.values(rec.repoWorktrees)) {
@@ -309,7 +316,7 @@ export function classifyWorktrees(opts: {
 			continue;
 		}
 		const ownedByBranch = !!(wt.branch && ownedBranches.has(wt.branch));
-		const ownedByPath = !!wtPathNorm && ownedPaths.has(wtPathNorm);
+		const ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
 		if (ownedByBranch || ownedByPath) {
 			// Multi-repo: a per-repo path explicitly listed in any record's
 			// `repoWorktrees` map is active even if it differs from the record's
