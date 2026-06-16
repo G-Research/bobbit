@@ -88,10 +88,12 @@ async function seedPillsInUI(page: Page, count: number): Promise<string[]> {
 			.every((el) => (el as HTMLElement).offsetWidth > 0),
 		{ timeout: 10_000 },
 	);
-	await page.evaluate(() => {
-		(document.querySelector("agent-interface") as
-			| (HTMLElement & { _measurePillOverflow?: () => void })
-			| null)?._measurePillOverflow?.();
+	await page.evaluate(async () => {
+		const ai = document.querySelector("agent-interface") as
+			| (HTMLElement & { _measurePillOverflow?: () => void; updateComplete?: Promise<unknown> })
+			| null;
+		ai?._measurePillOverflow?.();
+		await ai?.updateComplete;
 	});
 	await settleTwoRafs(page);
 	return processes.map((p) => p.id);
@@ -116,6 +118,16 @@ async function dismissPillsFromUI(page: Page, idsToRemove: string[]): Promise<vo
 
 /** Sanity check that the test's viewport produced the expected mode. */
 async function expectMode(page: Page, expected: "narrow" | "wide"): Promise<void> {
+	const expectedNarrow = expected === "narrow";
+	await page.waitForFunction(
+		(narrow) => {
+			const viewportNarrow = !window.matchMedia("(min-width: 640px)").matches;
+			const ai = document.querySelector("agent-interface") as ({ _isNarrow?: boolean } & HTMLElement) | null;
+			return viewportNarrow === narrow && (!ai || ai._isNarrow === narrow);
+		},
+		expectedNarrow,
+		{ timeout: 5_000 },
+	);
 	const isNarrow = await page.evaluate(
 		() => !window.matchMedia("(min-width: 640px)").matches,
 	);
@@ -327,8 +339,12 @@ test.describe("pill strip overflow — promote-back, wrap policy, label nowrap",
 		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		await page.setViewportSize({ width: 540, height: 800 });
+		await expectMode(page, "narrow");
 
-		await seedPillsInUI(page, 10);
+		// Ten short synthetic pills can fit in the narrow two-row budget on some
+		// font/CI combinations; use the same overflow-producing count as the
+		// narrow wrap-policy tests so the label assertion's precondition is stable.
+		await seedPillsInUI(page, 15);
 
 		const moreBtn = page.locator("[data-more-btn]");
 		await expect(moreBtn).toBeVisible({ timeout: 15_000 });
