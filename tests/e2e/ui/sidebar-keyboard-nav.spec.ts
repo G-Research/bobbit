@@ -18,6 +18,22 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const MARK = "SIDEBAR_NAV_CONTRACT";
+const EVAL_TIMEOUT_MS = 2_000;
+
+async function bounded<T>(label: string, promise: Promise<T>, timeoutMs = EVAL_TIMEOUT_MS): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${MARK}: ${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+		promise.catch(() => {});
+	}
+}
 
 async function registerProject(name: string): Promise<{ id: string; rootPath: string; name: string }> {
 	const rootPath = join(
@@ -38,7 +54,7 @@ async function pressCtrlArrow(
 	page: Page,
 	key: "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight",
 ): Promise<void> {
-	await page.evaluate((k) => {
+	await bounded(`dispatch ${key}`, page.evaluate((k) => {
 		window.dispatchEvent(new KeyboardEvent("keydown", {
 			key: k,
 			code: k,
@@ -47,11 +63,14 @@ async function pressCtrlArrow(
 			bubbles: true,
 			cancelable: true,
 		}));
-	}, key);
+	}, key));
 }
 
 async function nextFrame(page: Page): Promise<void> {
-	await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+	// Use Playwright's bounded waitForFunction instead of a raw RAF evaluate:
+	// under broad-suite CPU contention Chromium can leave page.evaluate pending
+	// until the 30s test timeout, hiding the contract failure behind a helper hang.
+	await page.waitForFunction(() => new Promise((resolve) => requestAnimationFrame(() => resolve(true))), undefined, { timeout: EVAL_TIMEOUT_MS });
 }
 
 type ActiveNavSnapshot = {
@@ -65,7 +84,7 @@ type ActiveNavSnapshot = {
 };
 
 async function activeNavSnapshot(page: Page): Promise<ActiveNavSnapshot> {
-	return page.evaluate(() => {
+	return bounded("read active nav snapshot", page.evaluate(() => {
 		const idsFor = (selector: string) => Array.from(document.querySelectorAll(selector))
 			.map((el) => el.getAttribute("data-nav-id"))
 			.filter((id): id is string => !!id);
@@ -84,7 +103,7 @@ async function activeNavSnapshot(page: Page): Promise<ActiveNavSnapshot> {
 			connectingSessionId: state.connectingSessionId ?? null,
 			hash: window.location.hash,
 		};
-	});
+	}));
 }
 
 async function activeNavId(page: Page): Promise<string | null> {
@@ -92,7 +111,7 @@ async function activeNavId(page: Page): Promise<string | null> {
 }
 
 async function navIdsInDomOrder(page: Page): Promise<string[]> {
-	return page.evaluate(() => {
+	return bounded("read nav DOM order", page.evaluate(() => {
 		const sidebar = document.querySelector(".sidebar-edge");
 		if (!sidebar) return [];
 		const out: string[] = [];
@@ -105,7 +124,7 @@ async function navIdsInDomOrder(page: Page): Promise<string[]> {
 			}
 		}
 		return out;
-	});
+	}));
 }
 
 function sameOrder(a: string[], b: string[]): boolean {
@@ -144,15 +163,22 @@ async function waitForShortcutsReady(page: Page): Promise<void> {
 }
 
 async function waitForActiveNavId(page: Page, expected: string | null): Promise<void> {
-	const deadline = Date.now() + 10_000;
+	const deadline = Date.now() + 8_000;
 	let latest: ActiveNavSnapshot | null = null;
+	let latestError: string | null = null;
 	while (Date.now() < deadline) {
 		await nextFrame(page);
-		latest = await activeNavSnapshot(page);
+		try {
+			latest = await activeNavSnapshot(page);
+			latestError = null;
+		} catch (err) {
+			latestError = err instanceof Error ? err.message : String(err);
+			continue;
+		}
 		const contractActiveIsSettled = latest.activeIds.length <= 1;
 		if (contractActiveIsSettled && latest.id === expected) return;
 	}
-	throw new Error(`${MARK}: expected active nav ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)}`);
+	throw new Error(`${MARK}: expected active nav ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)} latestError=${JSON.stringify(latestError)}`);
 }
 
 // Deterministic settle: gate on the concrete presence/absence of the specific
@@ -175,7 +201,7 @@ async function waitForNavRows(
 }
 
 async function resetNavStart(page: Page): Promise<void> {
-	await page.evaluate(() => {
+	await bounded("reset nav start", page.evaluate(() => {
 		window.history.replaceState({}, "", "#/");
 		const state = (window as any).__bobbitState ?? (window as any).bobbitState;
 		if (state) {
@@ -186,8 +212,32 @@ async function resetNavStart(page: Page): Promise<void> {
 			state.remoteAgent = null;
 		}
 		(window as any).__bobbitRenderApp?.();
-	});
+	}));
 	await waitForActiveNavId(page, null);
+}
+
+async function setKeyboardNavActiveId(page: Page, navId: string): Promise<void> {
+	await bounded("set keyboard active nav", page.evaluate((id) => {
+		const state = (window as any).__bobbitState ?? (window as any).bobbitState;
+		if (state) {
+			state.keyboardNavActiveId = id;
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.connectingSessionId = null;
+			state.remoteAgent = null;
+		}
+		(window as any).__bobbitRenderApp?.();
+	}, navId));
+	await waitForActiveNavId(page, navId);
+}
+
+async function expectArrowDownFromPreviousDomRow(page: Page, domOrder: string[], expectedId: string): Promise<void> {
+	const expectedIdx = domOrder.indexOf(expectedId);
+	expect(expectedIdx, `${MARK}: expected ${expectedId} in settled DOM order`).toBeGreaterThanOrEqual(0);
+	const previousId = domOrder[(expectedIdx - 1 + domOrder.length) % domOrder.length];
+	await setKeyboardNavActiveId(page, previousId);
+	await pressCtrlArrow(page, "ArrowDown");
+	await waitForActiveNavId(page, expectedId);
 }
 
 async function walkDown(page: Page, steps: number, expectedOrder?: string[]): Promise<Array<string | null>> {
@@ -430,15 +480,14 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		).toBe(true);
 
 		// ON: archived rows are present and reachable via the keyboard cycle.
-		// One full walk (down the settled order) confirms they were genuinely
-		// added to the cycle — the single keyboard assertion this test needs.
+		// The wrap test proves global cycle membership == DOM order. Here we verify
+		// the archived-specific edges directly: Ctrl+ArrowDown from each archived
+		// row's DOM predecessor lands on that archived row.
 		const onIds = await waitForNavRows(page, [archHeaderNavId, archGoalNavId]);
 		expect(onIds.includes(archHeaderNavId), `${MARK}: archived header in DOM when Show Archived is on`).toBe(true);
 		expect(onIds.includes(archGoalNavId), `${MARK}: archived goal in DOM when Show Archived is on`).toBe(true);
-		await resetNavStart(page);
-		const visitedOn = new Set((await walkDown(page, onIds.length, onIds)).filter((id): id is string => !!id));
-		expect(visitedOn.has(archHeaderNavId), `${MARK}: archived header visited when Show Archived is on`).toBe(true);
-		expect(visitedOn.has(archGoalNavId), `${MARK}: archived goal visited when Show Archived is on`).toBe(true);
+		await expectArrowDownFromPreviousDomRow(page, onIds, archHeaderNavId);
+		await expectArrowDownFromPreviousDomRow(page, onIds, archGoalNavId);
 	});
 
 	test("Show Archived persists across reload and can be turned back off", async ({ page }) => {
@@ -468,15 +517,12 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		).toBe(true);
 
 		// Deterministic hydrated signal: the specific archived rows rendered after
-		// reload. One full keyboard walk confirms the persisted rows remain
-		// reachable in the cycle — the persistence guarantee this test exists for.
+		// reload and remain reachable from their DOM predecessors in the cycle.
 		const reloadedIds = await waitForNavRows(page, [archHeaderNavId, archGoalNavId]);
 		expect(reloadedIds.includes(archHeaderNavId), `${MARK}: archived header remains in DOM after reload`).toBe(true);
 		expect(reloadedIds.includes(archGoalNavId), `${MARK}: archived goal remains in DOM after reload`).toBe(true);
-		await resetNavStart(page);
-		const visitedAfterReload = new Set((await walkDown(page, reloadedIds.length, reloadedIds)).filter((id): id is string => !!id));
-		expect(visitedAfterReload.has(archHeaderNavId), `${MARK}: archived header remains in cycle after reload`).toBe(true);
-		expect(visitedAfterReload.has(archGoalNavId), `${MARK}: archived goal remains in cycle after reload`).toBe(true);
+		await expectArrowDownFromPreviousDomRow(page, reloadedIds, archHeaderNavId);
+		await expectArrowDownFromPreviousDomRow(page, reloadedIds, archGoalNavId);
 
 		// Turn Show Archived back off — archived rows leave the DOM (and the cycle).
 		await clickShowArchivedToggle(page);
