@@ -61,6 +61,12 @@ if (!existsSync(join(projectRoot, "dist", "server"))) {
 
 const isWin = process.platform === "win32";
 const npx = isWin ? "npx.cmd" : "npx";
+const testEnv = {
+	...process.env,
+	NODE_ENV: "test",
+	BOBBIT_TEST_NO_EXTERNAL: process.env.BOBBIT_TEST_NO_EXTERNAL || "1",
+	BOBBIT_TEST_NO_REMOTE: process.env.BOBBIT_TEST_NO_REMOTE || "1",
+};
 
 // The two runners are BOTH CPU-bound and each parallelises internally. Running
 // them concurrently while each grabs all cores oversubscribes the box (node's
@@ -103,7 +109,7 @@ function run(label, args) {
 			// npx is a .cmd shim on Windows → needs a shell. The args are short
 			// (globs are NOT pre-expanded), so the shell command line stays tiny.
 			shell: isWin,
-			env: process.env,
+			env: testEnv,
 		});
 		child.stdout?.on("data", (chunk) => {
 			process.stdout.write(chunk);

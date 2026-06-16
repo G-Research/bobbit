@@ -47,7 +47,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
-import { shouldSkipRemotePush, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -5928,11 +5928,13 @@ export class SessionManager {
 		// the persisted record we just archived.
 		const persistedForBranchDelete = terminateStore.get(id);
 		const sessionBranch = persistedForBranchDelete?.branch;
+		const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
+		const skipRemoteBranchDelete = shouldSkipRemotePush() || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete);
 		eagerDeleteRemoteSessionBranch({
 			branch: sessionBranch,
-			repoPath: persistedForBranchDelete?.repoPath,
+			repoPath: repoPathForBranchDelete,
 			delegateOf: session.delegateOf,
-			skipPush: shouldSkipRemotePush(),
+			skipPush: skipRemoteBranchDelete,
 			detectPrimary: detectPrimaryBranch,
 			runGit: async (args, cwd) => {
 				await execFileAsync("git", args, { cwd, timeout: 15_000 });

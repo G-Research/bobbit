@@ -177,6 +177,29 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 			await rmRepo(repo);
 		}
 	});
+
+	it("test-mode freshen skips remote reset when origin is absent", async () => {
+		const repo = await makeRepo();
+		const warns: string[] = [];
+		const originalWarn = console.warn;
+		try {
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
+			console.warn = (...args: unknown[]) => {
+				warns.push(args.map(String).join(" "));
+			};
+
+			await (pool as any).freshen(repo, "session/no-origin");
+
+			assert.equal(
+				warns.some(line => line.includes("Background reset failed") || line.includes("git fetch origin")),
+				false,
+				"test-mode worktree freshen must not try to fetch a missing/real origin",
+			);
+		} finally {
+			console.warn = originalWarn;
+			await rmRepo(repo);
+		}
+	});
 });
 
 describe("WorktreePool — components[*].worktreeSetupCommand is the source of truth", () => {

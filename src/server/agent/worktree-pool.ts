@@ -30,7 +30,7 @@ import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePush, createWorktreeSet, resolveBaseRef, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePushForTests, shouldSkipRemoteGitForTests, createWorktreeSet, resolveBaseRef, type WorktreeResult } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
@@ -588,15 +588,17 @@ export class WorktreePool {
 		const counters = diagEnabled ? { calls: 1, fetchResetErrors: 0, pushSkipped: 0, pushErrors: 0, success: 0 } : undefined;
 		try {
 			try {
-				await execGit(["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
-				const configured = this.baseRefResolver?.();
-				const { ref: remotePrimary } = await resolveBaseRef(this.repoPath, configured);
-				await execGit(["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
+				if (!(await shouldSkipRemoteGitForTests(worktreePath))) {
+					await execGit(["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
+					const configured = this.baseRefResolver?.();
+					const { ref: remotePrimary } = await resolveBaseRef(this.repoPath, configured);
+					await execGit(["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
+				}
 			} catch (err) {
 				if (counters) counters.fetchResetErrors = 1;
 				console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
 			}
-			if (!shouldSkipRemotePush()) {
+			if (!(await shouldSkipRemotePushForTests(worktreePath))) {
 				try {
 					await execGit(["push", "origin", `${branch}:refs/heads/${branch}`], { cwd: worktreePath, timeout: 30_000 });
 					try {

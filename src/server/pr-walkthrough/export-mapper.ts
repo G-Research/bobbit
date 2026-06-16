@@ -217,6 +217,19 @@ export function buildGithubReviewPreview(
 	};
 }
 
+function externalNetworkBlockedForTests(): boolean {
+	return process.env.BOBBIT_TEST_NO_EXTERNAL === "1" || process.env.BOBBIT_E2E === "1";
+}
+
+function isLocalHttpUrl(raw: string): boolean {
+	try {
+		const host = new URL(raw).hostname.toLowerCase();
+		return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
+	} catch {
+		return false;
+	}
+}
+
 export async function submitGithubReview(
 	preview: GithubReviewPreview,
 	confirmation: SubmitGithubReviewConfirmation,
@@ -236,6 +249,9 @@ export async function submitGithubReview(
 
 	const payload = createGithubReviewPayload(preview, confirmation.event ?? "COMMENT");
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? "https://api.github.com";
+	if (externalNetworkBlockedForTests() && !options.fetch && !isLocalHttpUrl(apiBaseUrl)) {
+		return { ok: false, status: 403, submitted: false, message: `External GitHub API access is disabled in tests: ${apiBaseUrl}`, warnings: preview.warnings };
+	}
 	const url = `${apiBaseUrl}/repos/${encodeURIComponent(preview.target.owner)}/${encodeURIComponent(preview.target.repo)}/pulls/${preview.target.prNumber}/reviews`;
 	const response = await (options.fetch ?? fetch)(url, {
 		method: "POST",

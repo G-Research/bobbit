@@ -59,6 +59,38 @@ export function shouldSkipRemotePush(): boolean {
 	return process.env.BOBBIT_TEST_NO_PUSH === "1";
 }
 
+function isLocalGitRemoteUrl(url: string): boolean {
+	const trimmed = url.trim();
+	if (!trimmed) return false;
+	if (trimmed.startsWith("file://")) return true;
+	if (/^[A-Za-z]:[\\/]/.test(trimmed)) return true;
+	if (path.isAbsolute(trimmed)) return true;
+	if (trimmed.startsWith("./") || trimmed.startsWith("../") || trimmed.startsWith("~/")) return true;
+	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return false;
+	if (/^[^@\s]+@[^:\s]+:.+/.test(trimmed)) return false;
+	return !trimmed.includes(":");
+}
+
+/**
+ * In test mode, skip git remote probes unless `origin` is an isolated local
+ * path/bare fixture. This keeps E2E/unit suites off real remotes while still
+ * allowing specs that explicitly create local bare remotes to exercise remote
+ * semantics.
+ */
+export async function shouldSkipRemoteGitForTests(cwd: string, remote = "origin"): Promise<boolean> {
+	if (process.env.BOBBIT_TEST_NO_PUSH !== "1" && process.env.BOBBIT_TEST_NO_REMOTE !== "1") return false;
+	try {
+		const { stdout } = await execGit(["remote", "get-url", remote], { cwd, timeout: 5_000 });
+		return !isLocalGitRemoteUrl(stdout.trim());
+	} catch {
+		return true;
+	}
+}
+
+export async function shouldSkipRemotePushForTests(cwd: string, remote = "origin"): Promise<boolean> {
+	return shouldSkipRemotePush() || await shouldSkipRemoteGitForTests(cwd, remote);
+}
+
 /**
  * Strip embedded credentials from a git remote URL.
  * e.g. "https://ghp_abc123@github.com/user/repo.git" → "https://github.com/user/repo.git"
@@ -239,6 +271,7 @@ export function parseLsRemoteSymref(output: string): string | null {
  */
 export async function detectBaseRefFromRemote(repoPath: string): Promise<string | null> {
 	try {
+		if (await shouldSkipRemoteGitForTests(repoPath)) return null;
 		const { stdout } = await execGit(["ls-remote", "--symref", "origin", "HEAD"], {
 			cwd: repoPath,
 			timeout: 10_000,
@@ -430,10 +463,13 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 		}
 	}
 
-	// Fetch the start point to ensure it's up to date
+	// Fetch the start point to ensure it's up to date. Test harnesses must never
+	// reach real remotes; local bare origins used by explicit remote specs remain allowed.
 	try {
-		const remote = startPoint.startsWith("origin/") ? startPoint.replace("origin/", "") : startPoint;
-		await execGit(["fetch", "origin", remote], { cwd: repoPath, timeout: 30_000 });
+		if (!(await shouldSkipRemoteGitForTests(repoPath))) {
+			const remote = startPoint.startsWith("origin/") ? startPoint.replace("origin/", "") : startPoint;
+			await execGit(["fetch", "origin", remote], { cwd: repoPath, timeout: 30_000 });
+		}
 	} catch {
 		// Fetch failure is non-fatal — may be offline, or startPoint is a local ref
 	}
@@ -503,7 +539,7 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	// upstream config (for example origin/master) can never redirect the publish.
 	// Set upstream tracking only after that safe publish succeeds so git-status can
 	// report ahead/behind and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
-	if (!opts?.skipPush && !shouldSkipRemotePush()) {
+	if (!opts?.skipPush && !(await shouldSkipRemotePushForTests(worktreePath))) {
 		try {
 			await execGit(["push", "origin", `${branchName}:refs/heads/${branchName}`], {
 				cwd: worktreePath,
@@ -745,7 +781,7 @@ export async function cleanupWorktree(
 		}
 		// Also delete the remote branch (best-effort — remote may be unreachable,
 		// or the repo may have no remote configured, e.g. in E2E tests).
-		if (!shouldSkipRemotePush()) {
+		if (!(await shouldSkipRemotePushForTests(repoPath))) {
 			try {
 				await execGit(["push", "origin", "--delete", branchName], {
 					cwd: repoPath,
@@ -821,9 +857,12 @@ export async function mergeChildBranchLocal(
 		);
 	}
 
-	// Best-effort fetch — child branch may be local-only.
+	// Best-effort fetch — child branch may be local-only. In tests, only local
+	// bare origins are allowed so the suite never contacts a real remote.
 	try {
-		await execFile("git", ["fetch", "origin", childBranch], { cwd: parentCwd, timeout: 30_000 });
+		if (!(await shouldSkipRemoteGitForTests(parentCwd))) {
+			await execFile("git", ["fetch", "origin", childBranch], { cwd: parentCwd, timeout: 30_000 });
+		}
 	} catch {
 		// non-fatal
 	}
@@ -961,12 +1000,15 @@ export async function recoverWorktree(
 			}
 		}
 
-		// Fetch to make sure we have the branch ref
+		// Fetch to make sure we have the branch ref. In tests, only local bare
+		// origins are allowed so recovery never contacts a real remote.
 		try {
-			await execGit(["fetch", "origin", branchName], {
-				cwd: repoPath,
-				timeout: 30_000,
-			});
+			if (!(await shouldSkipRemoteGitForTests(repoPath))) {
+				await execGit(["fetch", "origin", branchName], {
+					cwd: repoPath,
+					timeout: 30_000,
+				});
+			}
 		} catch {
 			// Fetch failure is non-fatal — branch may exist locally
 		}

@@ -97,9 +97,13 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Playwright workers are separate Node processes, so module singletons
 		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
 		process.env.BOBBIT_DIR = bobbitDir;
+		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		// (realpush variant) BOBBIT_TEST_NO_PUSH intentionally NOT set so push-delete actually runs.
+		// BOBBIT_TEST_NO_REMOTE still blocks non-local origins; specs must use local bare remotes.
+		process.env.BOBBIT_TEST_NO_REMOTE = "1";
+		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 		// Skip outbound network probes and per-prompt title-generation calls.
