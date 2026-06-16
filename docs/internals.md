@@ -937,7 +937,7 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ## Editable proposals
 
-Every `propose_*` payload (`goal`, `project`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth; the in-memory `state.activeProposals[type]` slot is a parsed projection rebuilt on every change. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+Every `propose_*` payload (`goal`, `project`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth for draft content; the in-memory `state.activeProposals[type]` slot is a parsed content projection rebuilt on every change. Side-panel tab presence is separate and comes from the server-backed workspace. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
 
 ### Why
 
@@ -990,7 +990,7 @@ Per-type metadata lives in `src/server/proposals/proposal-types.ts`: `filename`,
 
 ### Unified client state
 
-The legacy per-type slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit `tool` slot) are collapsed into one map in `src/app/state.ts`:
+The legacy per-type content slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit `tool` slot) are collapsed into one map in `src/app/state.ts`:
 
 ```ts
 activeProposals: Partial<Record<ProposalType, ProposalSlot>>;
@@ -1007,7 +1007,7 @@ interface ProposalSlot {
 `src/app/proposal-registry.ts` exports `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, and `PROPOSAL_TYPE_REGISTRY`. Each plugin contributes:
 
 - `mergeFields(prev, incoming)` - streaming shallow-merge. Project carries `components` and `workflows` forward when the partial omits them; goal carries the markdown body across frontmatter-only deltas; the others use a plain spread.
-- `onFirstEmit(slot, opts)` - tab auto-select on the first emit (e.g. project flips `previewPanelActiveTab="project"`, mobile flips the assistant tab).
+- `onFirstEmit(slot, opts)` - reveal helper used only by explicit proposal-open sources (e.g. project flips `previewPanelActiveTab="project"`, mobile flips the assistant tab).
 - `validate(fields)` - returns blocking errors that disable the submit button.
 - `accept(slot)` - reserved hook; current accept paths (`createGoal`, `acceptProjectProposal`, role/tool/staff save flows) are unchanged.
 
@@ -1020,13 +1020,13 @@ LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId
 
 ### Panel routing and tabs
 
-`state.activeProposals[type]` is the routing source for every proposal surface. A proposal is openable when the active session has a slot for one of the supported `ProposalType`s (`goal`, `project`, `role`, `tool`, `staff`); `assistantType` does not filter the slot.
+Proposal content and proposal tab presence are separate. `state.activeProposals[type]` is a parsed content/cache slot used by proposal panels once a tab is open; it is not the routing source for side-panel tabs. The server-backed side-panel workspace is authoritative for open proposal tabs, active tab selection, and closed-tab absence. Chat is not a workspace tab, and content caches (`activeProposals`, draft files, legacy mirrors, review/preview caches, localStorage) must not derive tabs that are absent from the workspace.
 
-Normal and assistant sessions render active slots through the same workspace dispatcher. Tab order is deterministic: `Chat`, then `Preview` when present, active proposal tabs in `PROPOSAL_TYPES` order, then `Review` and `Inbox` tabs when those surfaces are present. Proposal labels are `Goal`, `Project`, `Role`, `Tool`, and `Staff`; each live proposal tab shows the existing proposal dot. Desktop tabs and the mobile slider use the same tab list.
+Current proposal tabs are keyed as `proposal:<type>` for `goal`, `project`, `role`, `tool`, and `staff`. Historical proposal snapshots use `proposal:<type>:rev:<N>` and are created only by explicit historical reopen actions. Matching assistant types use their normal preview surface when the workspace tab is open; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
 
-Matching assistant types use their normal preview surface; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
+`session-manager.ts::shouldRevealProposalForSource` gates content updates from tab reveals. Explicit reveal sources are `tool`, `legacy`, `seed`, and `restore`, plus user actions that dispatch `proposal-open` from Open Proposal / Resubmit Proposal / historical reopen renderers. Content-only sources are `edit` and `rehydrate`; they update `state.activeProposals[type]` and refresh already-open tabs, but must not create or focus a workspace tab. This is what makes a closed proposal tab durable across navigation, reload, reconnect, and rehydrate while still allowing an explicit reopen.
 
-The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, selects the live proposal tab for the current rev, or reads an older snapshot into a read-only historical workspace tab. Legacy archived cards without a rev marker still replay `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and archived-session resubmit/continue flows feed the same `remote.onProposal(type, fields, ...)` path, so restored sessions do not need type-specific reopen code.
+The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, explicitly opens/selects the live proposal tab for the current rev, or reads an older snapshot into a read-only historical workspace tab. Legacy archived cards without a rev marker still replay `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and `GET /api/sessions/:id/proposals` populate content slots only; the archived footer's Resubmit button is the explicit tab reopen path.
 
 ### Flow: `propose_*` → file-seed → broadcast → parsed projection
 
@@ -1034,31 +1034,32 @@ The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, 
 agent calls propose_<type>(args)
   └─> defaults/tools/proposals/extension.ts execute()
         └─> POST /api/sessions/:id/proposal/:type/seed { args }
-              └─> writeProposalFile (serialize + write)
-                    └─> parseProposalFile
-                          └─> _broadcastToSession({ type: "proposal_update",
-                                                       proposalType, fields,
-                                                       streaming: false,
-                                                       source: "seed" })
-                                └─> client remote.onProposal(type, fields, false)
-                                      └─> mergeFields, onFirstEmit (if first), renderApp
+              ├─> writeProposalFile (serialize + write)
+              ├─> parseProposalFile
+              ├─> open/focus side-panel workspace tab `proposal:<type>`
+              └─> _broadcastToSession({ type: "proposal_update",
+                                           proposalType, fields,
+                                           streaming: false,
+                                           source: "seed" })
+                    └─> client remote.onProposal(type, fields, false)
+                          └─> mergeFields, reveal only because source is explicit, renderApp
 ```
 
-`edit_proposal` follows the same flow except the entry point is `POST /api/sessions/:id/proposal/:type/edit` and `source: "edit"`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
+`seed` opens the workspace tab on the server before broadcasting the content update, so all clients converge on the same server-backed tab state. `restore` has the same explicit open/focus side effect after copying a historical snapshot back to the live draft. `edit_proposal` follows the content-write/broadcast flow via `POST /api/sessions/:id/proposal/:type/edit` with `source: "edit"`, but it is content-only: it must not open or focus `proposal:<type>`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
 
 ### Dual-fire: legacy streaming path coexists
 
-The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolProposals` continues to fire the legacy per-type `onXProposal` callbacks during streaming, so partial deltas flow into the panel as the model types them. The unified `remote.onProposal` callback is the WS-driven path - it handles `proposal_update` (sources `seed`, `edit`, `rehydrate`) and `proposal_cleared`. Both paths funnel into the same `state.activeProposals[type]` slot via the plugin's `mergeFields`. The streaming-partial path provides UX responsiveness; the file-derived path provides the canonical projection and restart survival.
+The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolProposals` continues to fire the legacy per-type `onXProposal` callbacks during streaming, so partial deltas flow into the panel as the model types them. The unified `remote.onProposal` callback is the WS-driven path - it handles `proposal_update` (sources `seed`, `edit`, `restore`, `rehydrate`) and `proposal_cleared`. Both paths funnel into the same `state.activeProposals[type]` slot via the plugin's `mergeFields`. The streaming-partial path provides UX responsiveness; the file-derived path provides the canonical projection and restart survival.
 
 ### Restart survival via rehydrate-on-attach
 
-On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. Because the file IS the source of truth, no separate persistence layer is needed - a server restart mid-edit, a browser reload, or a session resume all yield the same broadcasted projection.
+On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. The file is the source of truth for draft content, so no separate content persistence layer is needed. Tab presence still comes only from the side-panel workspace: rehydrate updates content slots and already-open tabs, but it must not recreate a closed proposal tab.
 
 Session purge cleans the directory: `session-manager.ts::purgeOneSession` fire-and-forgets `fsp.rm` of the per-session dir at the 7-day mark. Archive itself no longer touches the drafts (see [archived-proposal-reopen.md](archived-proposal-reopen.md) for the rationale — archived assistant sessions must keep their drafts on disk so the user can resubmit or continue them). An in-flight `editProposalFile` racing with cleanup is harmless - `unlink` on a missing dir is a no-op.
 
 ### Accept lifecycle
 
-The per-type submit/completion handlers (`createGoal`, `acceptProjectProposal`, role/staff save flows, the tool completion flow, etc.) are unchanged and render from the same panel implementations outside assistant sessions. When a handler accepts or saves a proposal, the client fires `DELETE /api/sessions/:id/proposal/:type` which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
+The per-type submit/completion handlers (`createGoal`, `acceptProjectProposal`, role/staff save flows, the tool completion flow, etc.) are unchanged and render from the same panel implementations outside assistant sessions. When a handler accepts or saves a proposal, the client closes the current proposal workspace tab and fires `DELETE /api/sessions/:id/proposal/:type`, which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
 
 ### Tool surface
 
@@ -1072,14 +1073,15 @@ Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementatio
 
 ### REST endpoints
 
-Six endpoints, full reference in [docs/rest-api.md - Proposal drafts](rest-api.md#proposal-drafts):
+Seven endpoints, full reference in [docs/rest-api.md - Proposal drafts](rest-api.md#proposal-drafts):
 
 - `GET /api/sessions/:id/proposal/:type` - read raw body
 - `GET /api/sessions/:id/proposal/:type/snapshot?rev=N` - read a historical snapshot without mutating the live draft
-- `POST /api/sessions/:id/proposal/:type/seed` - called by `propose_*` `execute()`
-- `POST /api/sessions/:id/proposal/:type/edit` - surgical edit
-- `POST /api/sessions/:id/proposal/:type/restore` - explicit mutating rollback (writes new snapshot at `currentRev+1`)
+- `POST /api/sessions/:id/proposal/:type/seed` - called by `propose_*` `execute()`; writes content and opens/focuses `proposal:<type>`
+- `POST /api/sessions/:id/proposal/:type/edit` - surgical content edit; does not open tabs
+- `POST /api/sessions/:id/proposal/:type/restore` - explicit mutating rollback (writes new snapshot at `currentRev+1`) and opens/focuses `proposal:<type>`
 - `DELETE /api/sessions/:id/proposal/:type` - clean up after accept
+- `GET /api/sessions/:id/proposals` - list parsed content slots; does not open tabs
 
 ### Revision snapshots
 
