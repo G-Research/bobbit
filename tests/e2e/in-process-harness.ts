@@ -348,7 +348,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 				console.warn(`[in-process-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
 			},
 		});
-	}, { scope: "worker", auto: true, timeout: 60_000 }],
+	}, { scope: "worker", auto: true, timeout: 30_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {
 		await use();
