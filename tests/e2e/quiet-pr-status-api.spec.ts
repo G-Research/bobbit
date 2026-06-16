@@ -6,25 +6,40 @@ async function expectEmptyNoContent(resp: Response, label: string): Promise<void
 	expect(await resp.text(), `${label} 204 response must have no body`).toBe("");
 }
 
-async function createGoalWithBranch(): Promise<{ id: string }> {
+async function createGoalWithNoPrBranch(): Promise<{ id: string; branch: string }> {
+	const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const title = `quiet pr-status no-pr ${suffix}`;
+	const cwd = nonGitCwd();
+	const spec = "E2E reproducer goal for quiet optional PR status probes with no matching GitHub PR.";
+	const branch = `quiet-204-no-pr-${suffix}`;
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
-			title: `quiet pr-status no-pr ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: nonGitCwd(),
+			title,
+			cwd,
 			worktree: false,
 			team: false,
-			branch: `quiet-204-no-pr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			spec: "E2E reproducer goal for quiet optional PR status probes with no matching GitHub PR.",
+			spec,
 		}),
 	});
 	expect(resp.status).toBe(201);
-	return resp.json();
+	const goal = await resp.json() as { id: string; cwd?: string };
+
+	// POST /api/goals derives branches only for real git projects and ignores a
+	// caller-supplied branch. Pin a unique no-PR branch explicitly so this test
+	// probes true absence instead of the current checkout, which may have an open PR.
+	const updateResp = await apiFetch(`/api/goals/${goal.id}`, {
+		method: "PUT",
+		body: JSON.stringify({ title, cwd: goal.cwd ?? cwd, spec, branch }),
+	});
+	expect(updateResp.status).toBe(200);
+	return { id: goal.id, branch };
 }
 
 test.describe("quiet optional PR status probes", () => {
 	test("keeps bare session PR absence as 404 but returns empty 204 in optional mode", async () => {
-		const sessionId = await createSession();
+		const goal = await createGoalWithNoPrBranch();
+		const sessionId = await createSession({ goalId: goal.id });
 		try {
 			const bareResp = await apiFetch(`/api/sessions/${sessionId}/pr-status`);
 			expect(bareResp.status, "bare session PR-status absence should remain 404").toBe(404);
@@ -33,6 +48,7 @@ test.describe("quiet optional PR status probes", () => {
 			await expectEmptyNoContent(optionalResp, "quiet optional session PR-status absence");
 		} finally {
 			await deleteSession(sessionId);
+			await deleteGoal(goal.id);
 		}
 	});
 
@@ -42,7 +58,7 @@ test.describe("quiet optional PR status probes", () => {
 	});
 
 	test("keeps bare goal PR absence as 404 but returns empty 204 in optional mode", async () => {
-		const goal = await createGoalWithBranch();
+		const goal = await createGoalWithNoPrBranch();
 		try {
 			const bareResp = await apiFetch(`/api/goals/${goal.id}/pr-status`);
 			expect(bareResp.status, "bare goal PR-status absence should remain 404").toBe(404);
