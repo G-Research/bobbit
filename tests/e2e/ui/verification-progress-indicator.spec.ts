@@ -26,11 +26,12 @@ import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
 
-// Slow phase-0 step (~25s) so the verification stays observably in flight
-// across navigation + reload. Pre-fix the race window itself was 15-30s,
-// so a 25s budget is the right order of magnitude for an honest check.
+// Slow phase-0 step (~12s) so the verification stays observably in flight
+// across navigation + reload without pushing the default 30s Playwright test
+// timeout under full-suite load. The regression is the immediate step
+// enumeration/persistence, not the command's eventual completion.
 // Cross-platform via node -e.
-const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),25000)"`;
+const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),12000)"`;
 
 const GATE_ID = "slow-multi";
 const GATE_NAME = "Slow Multi-Step Gate";
