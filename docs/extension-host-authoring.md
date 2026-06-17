@@ -801,14 +801,16 @@ created, the Hub dispatches `sessionSetup` and the returned blocks render as a f
 **Dynamic Context** prompt section (visible in the prompt-sections inspector with
 `source: "providers"` provenance) — so a provider that declares `sessionSetup` and is installed +
 active + enabled for the session's scope contributes context today. A provider fault never blocks
-the spawn. The per-turn `beforePrompt` hook and the rest of the hook set are **not wired yet**
-(G1.4 and later), and **no built-in production provider ships yet** (G1.6), so an out-of-the-box
-install produces no Dynamic Context section. See
-[docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13).
+the spawn. **All five hooks are now wired** (G1.3 + G1.4): the per-turn `beforePrompt` /
+`beforeCompact` fire via a generated provider-bridge pi extension, and `afterTurn` /
+`sessionShutdown` fire server-side from the gateway's agent-event stream. **No built-in
+production provider ships yet** (G1.6), so an out-of-the-box install produces no Dynamic Context
+section. See [docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13)
+and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
 Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
 surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
-eventually dispatches it, the provider runs as a module on the worker tier and returns context
+dispatches it, the provider runs as a module on the worker tier and returns context
 blocks (see the [provider module contract](#provider-module-contract) below).
 
 Key author-facing rules (full reference, field table, defaults, and clamps live in

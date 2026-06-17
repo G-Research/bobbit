@@ -435,13 +435,14 @@ Field rules and defaults:
   may run.
 - **`runtime?`** / **`config?`** — optional pass-through fields handed to the hook as `ctx.config`.
 
-**The `sessionSetup` hook is wired; the rest of the dispatch is not.** The loader validates
-providers and the registry indexes them, and the `LifecycleHub` that runs a provider's `hook` on
-the worker tier and applies its `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)) is now called
-during session setup: a provider that declares `sessionSetup` and is installed + active + enabled
-for the session's scope contributes a **Dynamic Context** prompt section. The per-turn
-`beforePrompt` dispatch is still pending (G1.4), and **no built-in production provider ships yet**
-(G1.6) — so an out-of-the-box install contributes nothing until you add a provider pack.
+**All five hooks are wired (G1.3 + G1.4).** The loader validates providers and the registry
+indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier and applies its
+`budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
+is installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
+section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
+extension and `afterTurn` / `sessionShutdown` fire server-side. **No built-in production provider
+ships yet** (G1.6) — so an out-of-the-box install contributes nothing until you add a provider
+pack.
 
 #### Why providers are pack-scoped, *not* name-merged
 
