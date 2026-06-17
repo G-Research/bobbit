@@ -276,11 +276,11 @@ async function setupTeamWithWorker() {
 	function workerIdleNudgeCount(): number {
 		return enqueuePrompt.mock.calls.filter((c: any) => {
 			const msg = String(c.arguments?.[1] ?? "");
-			return msg.includes("### Task Complete") || msg.includes("### Agent Finished");
+			return msg.includes("**Task complete**") || msg.includes("**Agent finished**");
 		}).length
 			+ deliverLiveSteer.mock.calls.filter((c: any) => {
 				const msg = String(c.arguments?.[1] ?? "");
-				return msg.includes("### Task Complete") || msg.includes("### Agent Finished");
+				return msg.includes("**Task complete**") || msg.includes("**Agent finished**");
 			}).length;
 	}
 

@@ -13,7 +13,8 @@ describe("buildVerificationFailureMessage", () => {
 		assert.match(message, /\*\*Gate:\*\* `execution`/);
 		assert.match(message, /\*\*Failed:\*\* `Unit tests`/);
 		assert.match(message, /\*\*First output:\*\* `Unit tests` \(`command`\)\n```text\nAssertionError: expected 1 to equal 2\n```/);
-		assert.match(message, /\*\*Next:\*\* `gate_status` \/ `gate_inspect`; fix issues; re-signal gate\./);
+		assert.match(message, /\*\*Inspect:\*\*\n```text\ngate_inspect\(gate_id="execution", section="verification", step="Unit tests", mode="tail", lines=120\)\n```/);
+		assert.match(message, /\*\*Next:\*\* fix issues; re-signal gate\./);
 		assert.doesNotMatch(message, /Possible merge gap/);
 		assert.doesNotMatch(message, /git for-each-ref/);
 	});
@@ -24,7 +25,7 @@ describe("buildVerificationFailureMessage", () => {
 		]);
 
 		assert.match(message, /\*\*First output:\*\* `LLM review` \(`llm-review`\)\n> Found an issue\n> - src\/app\.ts:1/);
-		assert.doesNotMatch(message, /```/);
+		assert.match(message, /gate_inspect\(gate_id="review", section="verification", step="LLM review", mode="tail", lines=120\)/);
 	});
 
 	it("summarizes multiple failures and only includes the first output", () => {
@@ -41,6 +42,9 @@ describe("buildVerificationFailureMessage", () => {
 		assert.match(message, /unit output/);
 		assert.doesNotMatch(message, /type output/);
 		assert.doesNotMatch(message, /review output/);
+		assert.match(message, /step="Unit tests"/);
+		assert.match(message, /step="Typecheck"/);
+		assert.match(message, /step="Signoff"/);
 	});
 
 	it("truncates long failed-step output from the tail", () => {
@@ -49,9 +53,10 @@ describe("buildVerificationFailureMessage", () => {
 			{ name: "Unit tests", type: "command", passed: false, output },
 		]);
 
+		assert.match(message, /\*\*First output \(truncated\):\*\*/);
 		assert.match(message, /… \(truncated, \d+ earlier chars\)/);
 		assert.doesNotMatch(message, /START/);
-		assert.match(message, /TAIL\n```\n\*\*Next:/);
+		assert.match(message, /TAIL\n```\n\n\*\*Inspect:/);
 	});
 
 	it("uses a longer fence when command output contains backticks", () => {

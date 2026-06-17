@@ -1094,7 +1094,7 @@ describe("TeamManager", () => {
 					assignedSessionId: "worker-1",
 					createdAt: Date.now(),
 					updatedAt: Date.now(),
-					resultSummary: "Updated `docs/testing-metrics/e2e-inventory.md`; checks passed.",
+					resultSummary: "Branch goal/f1b2cd81/test-engineer-5dac pushed at dca79a31d4ab72a3bc10abda358e6a98d19d7798. Updated `docs/testing-metrics/e2e-inventory.md`. Validation passed: `git diff --check`; tests skipped (docs-only). Working copy clean after push.",
 				}],
 			};
 			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, taskManager });
@@ -1117,9 +1117,13 @@ describe("TeamManager", () => {
 			assert.equal(opts?.source, "auto-nudge");
 			assert.equal(
 				message,
-				"### Task Complete\n" +
-					"**Done:** `test-engineer-5dac` (`test-engineer`) — **Milestone 1 E2E inventory by feature and layer** (`complete`) — Updated `docs/testing-metrics/e2e-inventory.md`; checks passed.\n" +
-					"**Next:** `task_list` → review task; decide next step.",
+				"**Task complete**\n\n" +
+					"- **Agent:** `test-engineer-5dac` (`test-engineer`)\n" +
+					"- **Task:** **Milestone 1 E2E inventory by feature and layer** (`complete`)\n" +
+					"- **Result:** Updated `docs/testing-metrics/e2e-inventory.md`\n" +
+					"- **Branch:** `goal/f1b2cd81/test-engineer-5dac` @ `dca79a31`\n" +
+					"- **Checks:** `git diff --check`; tests skipped (docs-only)\n" +
+					"- **Next:** `task_list`, then review task and decide next step.",
 			);
 		});
 	});

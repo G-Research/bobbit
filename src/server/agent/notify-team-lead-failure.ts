@@ -31,6 +31,28 @@ function blockquote(text: string): string {
 	return text.split(/\r?\n/).map(line => `> ${line}`).join("\n");
 }
 
+function toolStringLiteral(value: string): string {
+	return JSON.stringify(value);
+}
+
+function gateInspectCommand(gateId: string, stepName?: string): string {
+	const stepArg = stepName ? `, step=${toolStringLiteral(stepName)}` : "";
+	return `gate_inspect(gate_id=${toolStringLiteral(gateId)}, section="verification"${stepArg}, mode="tail", lines=120)`;
+}
+
+function appendInspectCommands(lines: string[], gateId: string, failed: ReadonlyArray<FailureStepLike>): void {
+	lines.push("");
+	lines.push("**Inspect:**");
+	lines.push("```text");
+	if (failed.length === 0) {
+		lines.push(`gate_status(gate_id=${toolStringLiteral(gateId)})`);
+		lines.push(gateInspectCommand(gateId));
+	} else {
+		for (const step of failed) lines.push(gateInspectCommand(gateId, step.name));
+	}
+	lines.push("```");
+}
+
 /**
  * Build the team-lead failure-notification message body for a failed gate.
  *
@@ -50,7 +72,8 @@ export function buildVerificationFailureMessage(
 	lines.push(`**Gate:** \`${gateId}\``);
 
 	if (failed.length === 0) {
-		lines.push("**Next:** `gate_status` / `gate_inspect`; fix issues; re-signal gate.");
+		appendInspectCommands(lines, gateId, failed);
+		lines.push("**Next:** fix issues; re-signal gate.");
 		return lines.join("\n");
 	}
 
@@ -66,11 +89,12 @@ export function buildVerificationFailureMessage(
 	const first = failed[0];
 	const out = (first.output ?? "").trim();
 	if (out.length > 0) {
-		const truncated = out.length > MAX_OUTPUT_CHARS
+		const wasTruncated = out.length > MAX_OUTPUT_CHARS;
+		const truncated = wasTruncated
 			? `… (truncated, ${out.length - MAX_OUTPUT_CHARS} earlier chars)\n` + out.slice(-MAX_OUTPUT_CHARS)
 			: out;
 		lines.push("");
-		lines.push(`**First output:** \`${first.name}\` (\`${first.type}\`)`);
+		lines.push(`**First output${wasTruncated ? " (truncated)" : ""}:** \`${first.name}\` (\`${first.type}\`)`);
 		if (first.type === "command") {
 			const fence = markdownCodeFenceFor(truncated);
 			lines.push(`${fence}text`);
@@ -81,6 +105,7 @@ export function buildVerificationFailureMessage(
 		}
 	}
 
-	lines.push("**Next:** `gate_status` / `gate_inspect`; fix issues; re-signal gate.");
+	appendInspectCommands(lines, gateId, failed);
+	lines.push("**Next:** fix issues; re-signal gate.");
 	return lines.join("\n");
 }
