@@ -26,9 +26,9 @@ import {
 import { statusBobbit } from "./session-colors.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt, forkSession } from "./session-manager.js";
-import { showRenameDialog } from "./dialogs-lazy.js";
+import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
+import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, refreshAgentSession, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -437,6 +437,9 @@ export interface SidebarActionItem {
 // each time a session actions menu opens.
 let _forkNewWorktree = true;
 
+/** Session ids with an in-flight sidebar Refresh agent request. */
+const _refreshingAgentSessionIds = new Set<string>();
+
 interface OpenSidebarActionsPopover {
 	kind: SidebarActionEntityKind;
 	entityId: string;
@@ -631,6 +634,7 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
 		},
 	];
+	if (canRefreshAgentSession(session)) actions.push(buildRefreshAgentSidebarAction(session));
 	if (canForkSidebarSession(session)) {
 		actions.push({
 			id: "fork",
@@ -651,7 +655,7 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 }
 
 function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: string, goalId?: string): SidebarActionItem[] {
-	return [
+	const actions: SidebarActionItem[] = [
 		{
 			id: "modify",
 			label: "Modify",
@@ -684,6 +688,8 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
 		},
 	];
+	if (canRefreshAgentSession(session)) actions.push(buildRefreshAgentSidebarAction(session));
+	return actions;
 }
 
 function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean; showArchive: boolean }): SidebarActionItem[] {
@@ -742,6 +748,54 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		});
 	}
 	return actions;
+}
+
+function buildRefreshAgentSidebarAction(session: GatewaySession): SidebarActionItem {
+	const refreshing = _refreshingAgentSessionIds.has(session.id);
+	return {
+		id: "refresh-agent",
+		label: refreshing ? "Refreshing agent…" : "Refresh agent",
+		title: refreshing ? "Refreshing agent…" : "Refresh agent",
+		icon: icon(RotateCcw, "xs"),
+		quick: false,
+		run: (e: Event) => { e.stopPropagation(); void runRefreshAgentSession(session); },
+	};
+}
+
+function canRefreshAgentSession(session: GatewaySession): boolean {
+	return !session.archived
+		&& !session.readOnly
+		&& !session.nonInteractive
+		&& session.status !== "terminated"
+		&& session.status !== "archived";
+}
+
+function refreshAgentNeedsConfirmation(session: GatewaySession): boolean {
+	return session.status === "streaming" || session.status === "busy" || session.isCompacting === true;
+}
+
+async function runRefreshAgentSession(session: GatewaySession): Promise<void> {
+	if (_refreshingAgentSessionIds.has(session.id)) return;
+	const force = refreshAgentNeedsConfirmation(session);
+	if (force) {
+		const confirmed = await confirmAction(
+			"Refresh agent",
+			"This will interrupt the current agent process and restart it with the latest prompt, tools, MCP configuration, and auth state. Transcript and history remain intact.",
+			"Refresh agent",
+			false,
+		);
+		if (!confirmed) return;
+	}
+	_refreshingAgentSessionIds.add(session.id);
+	refreshOpenSidebarActionsPopover();
+	renderApp();
+	try {
+		await refreshAgentSession(session.id, { force });
+	} finally {
+		_refreshingAgentSessionIds.delete(session.id);
+		refreshOpenSidebarActionsPopover();
+		renderApp();
+	}
 }
 
 function canForkSidebarSession(session: GatewaySession): boolean {
