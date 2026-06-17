@@ -1583,11 +1583,12 @@ The search flush-on-close path is **fully awaitable** end to end. This matters b
 - **`ProjectContextManager.closeAll()`** (`project-context-manager.ts`) is `async` and `await`s `Promise.allSettled(...)` over every context's `close()` before clearing the map. `remove(projectId)` stays fire-and-forget (`void ctx.close().catch(...)`) on purpose — it runs during normal operation, not teardown, so it must not block but must not throw.
 - **`server.ts` shutdown** `await`s `projectContextManager.closeAll()`.
 
-`SearchService.close()` (`search-service.ts`) coordinates with two async paths: a possibly in-flight `open()` and an already-fired startup/background rebuild. Without the open guard, `_doOpen()` could resume *after* `close()` returned and re-establish the store, indexer, and rebuild timer — leaking live search resources past shutdown. Without rebuild tracking, a timer callback that already passed its closed-state guard could keep using the FlexSearch store while close closes it, surfacing `FlexSearchStore: already closed`. The shutdown guards are:
+`SearchService.close()` (`search-service.ts`) coordinates with three async paths: a possibly in-flight `open()`, an already-fired startup/background rebuild, and fire-and-forget mutation tasks. Without the open guard, `_doOpen()` could resume *after* `close()` returned and re-establish the store, indexer, and rebuild timer — leaking live search resources past shutdown. Without rebuild or mutation tracking, background work could keep using the FlexSearch store while close closes it, surfacing `FlexSearchStore: already closed` or allowing stale title metadata writes to finish after shutdown. The shutdown guards are:
 
 1. `close()` first `await`s any in-flight `_openPromise`, then sets `_state = "closed"` and clears the startup `_rebuildTimer`.
 2. `_doOpen()` re-checks `_state` after the `FlexSearchStore.open()` await *and* after the meta-read awaits. If state went `"closed"` mid-open it `await store.close()` and returns **without** assigning `_store`/`_indexer`, scheduling the rebuild timer, or flipping to `"ready"`.
 3. The startup rebuild timer is `unref()`'d and cancelled on close; its callback also re-checks `_state === "closed" || !_indexer` before rebuilding. Once a rebuild starts, the callback stores `_backgroundRebuildPromise`, and `close()` awaits it before re-reading `_store`, closing it, and nulling `_indexer`.
+4. All mutation helpers go through `_scheduleMutation()`. `close()` waits for the tracked mutation set to settle before closing the store, and compound message reindexes are serialized per parent session so an older delete-and-reinsert cannot overwrite newer `sessionTitle` metadata.
 
 `FlexSearchStore` (`flex-store.ts`) is the belt-and-braces layer for any flush that still loses the race (a debounced timer or concurrent project-delete):
 
@@ -1606,6 +1607,17 @@ The surface in `src/server/search/types.ts` that downstream code sees is unchang
 
 `SearchService` (`search-service.ts`) is the per-project facade that bundles `FlexSearchStore`, `Indexer`, and the source array. `ProjectContext` constructs and owns one per project. No embedder component exists.
 
+### Search result titles
+
+Full search title rendering is driven by resolved search metadata, not client-side guesses. This matters because message hits are indexed as standalone rows; when a message-only result is restored after a rebuild or arrives without a direct session hit beside it, the UI still needs authoritative parent-session context.
+
+- `SessionIndexSource`, `MessageIndexSource`, and live `SearchService.indexMessage()` calls all use the same session-title formatter before writing rows.
+- Message rows carry the resolved parent session title in `metadata.sessionTitle`; `indexableToDoc()` stores it as `session_title`, and `toSearchResult()` returns it as `SearchResult.sessionTitle`.
+- The full search page groups message hits under their parent session and uses that resolved `sessionTitle` for both message-only session cards and nested message rows. It should not fall back to the raw message row title for message context.
+- Goal-owned sessions render as `<Goal title>: <Session title>`. The formatter avoids duplicating the goal when the session title already contains the goal title as a standalone phrase, after trimming, whitespace normalization, and case-folding.
+- Goal title, session title, and session goal-ownership changes must refresh dependent message rows as well as the session row. Project context update hooks reindex the session row and call `reindexMessagesForSession()` for affected sessions; the message content hash includes the resolved display title so metadata-only title changes are not skipped as unchanged content.
+- Full rebuilds get the same behavior because sources rebuild from the goal and session stores, including archived sessions, instead of trying to reconstruct titles in the UI.
+
 ### Content policy (role-aware weighting)
 
 What gets indexed per message matters more than the store choice. `content-policy.ts` (replaces the old `message-extractor.ts`) extracts role-tagged entries with weights applied as post-rank multipliers:
@@ -1620,7 +1632,7 @@ What gets indexed per message matters more than the store choice. `content-polic
 | `tool_call` | 0.8 | `<tool_name> + first line of input` |
 | `tool_result` | 0.5 | first 500 chars; **hard-skipped if raw >32KB** (aligns with `truncate-large-content.ts`) |
 
-Bump `CONTENT_POLICY_VERSION` when the policy changes - the meta-mismatch check auto-rebuilds. Weights are tunable server-side without re-indexing the content itself.
+Bump `CONTENT_POLICY_VERSION` when the policy changes - the meta-mismatch check auto-rebuilds. Treat derived display metadata as part of the content policy: if existing rows would keep stale titles, goal prefixes, snippets, roles, weights, or other rendered metadata after a code change, bump the version so the index is safely rebuilt from authoritative stores. Weights are tunable server-side without changing user data, but any persisted ranking/display semantics that old rows cannot self-correct must force a rebuild.
 
 ### Chunking
 

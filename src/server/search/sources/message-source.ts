@@ -20,12 +20,18 @@ import * as readline from "node:readline";
 import type { IndexSource, IndexSourceContext, Indexable } from "../types.js";
 import { extractForIndexing } from "../content-policy.js";
 import { contentHashOf } from "./hash.js";
+import { formatSessionSearchTitle } from "./session-title.js";
 
 export class MessageIndexSource implements IndexSource {
 	readonly sourceId = "messages" as const;
 
 	async *iterate(ctx: IndexSourceContext): AsyncIterable<Indexable> {
 		const sessions = ctx.sessionStore.getAll();
+		const goalTitleMap = new Map<string, string>();
+		for (const g of ctx.goalStore.getAll()) {
+			goalTitleMap.set(g.id, g.title ?? "");
+		}
+
 		for (const session of sessions) {
 			const filePath = session.agentSessionFile;
 			if (!filePath) continue;
@@ -43,6 +49,12 @@ export class MessageIndexSource implements IndexSource {
 			} catch {
 				continue;
 			}
+
+			const sessionTitle = (session.title ?? "").trim();
+			const goalTitle = session.goalId
+				? goalTitleMap.get(session.goalId) ?? ""
+				: "";
+			const displayTitle = formatSessionSearchTitle(sessionTitle, goalTitle);
 
 			const rl = readline.createInterface({
 				input: stream,
@@ -80,18 +92,21 @@ export class MessageIndexSource implements IndexSource {
 					const hit = extractForIndexing(msg);
 					for (const entry of hit.entries) {
 						const id = `message:${session.id}:${msgIdx}:${entry.blockKey}`;
+						const metadata: Record<string, string | number | boolean> = {
+							sessionId: session.id,
+							msgIdx,
+							blockKey: entry.blockKey,
+							...(session.goalId ? { goalId: session.goalId } : {}),
+						};
+						if (goalTitle) metadata.goalTitle = goalTitle;
+						if (displayTitle) metadata.sessionTitle = displayTitle;
 						const indexable: Indexable = {
 							id,
 							sourceId: "messages",
 							text: entry.text,
-							metadata: {
-								sessionId: session.id,
-								msgIdx,
-								blockKey: entry.blockKey,
-								...(session.goalId ? { goalId: session.goalId } : {}),
-							},
+							metadata,
 							contentHash: contentHashOf(
-								entry.text,
+								`${entry.text}\n${displayTitle}`,
 								entry.weight,
 								entry.role,
 								timestamp,
@@ -102,7 +117,7 @@ export class MessageIndexSource implements IndexSource {
 							weight: entry.weight,
 							role: entry.role,
 							display: {
-								title: session.title ?? "",
+								title: displayTitle,
 							},
 						};
 						yield indexable;
