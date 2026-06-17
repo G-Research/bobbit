@@ -69,9 +69,8 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Retries policy: 3 everywhere for now. Real bugs fail all 4 attempts;
-// flakes (Windows-FS races, goal-assistant cold-start timeouts) absorb
-// the retry. Will tighten back to 0 once the flake floor is fully fixed.
+// Keep three retries as the project-level flake absorber for broad E2E runs.
+// Deterministic failures still fail after the retry budget is exhausted.
 export default {
 	timeout: 30_000,
 	retries: 3,
@@ -128,7 +127,11 @@ export default {
 				// Owned by the api-realpush project (different env).
 				"**/goal-archive-branch-cleanup*",
 			],
-			workers: 4,
+			// In-process API workers still boot a full gateway and shell out to git in
+			// several specs. On Windows, 4 concurrent gateways under verification load
+			// produced fixture setup retries and 900s broad-suite timeouts; 2 preserves
+			// parallelism while avoiding the hot contention cluster.
+			workers: 2,
 		},
 		{
 			// Real-push variant of the in-process harness — isolated project so it

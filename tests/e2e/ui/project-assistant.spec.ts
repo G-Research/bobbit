@@ -226,9 +226,10 @@ test.describe("Project assistant UX (consolidated)", () => {
 		// Click Dismiss
 		await page.locator("button").filter({ hasText: "Dismiss" }).first().click();
 
-		// The "Accept Project" should disappear, replaced by placeholder
+		// The proposal action closes the side-panel workspace tab durably; the
+		// proposal form should disappear without being replaced by a cache-derived tab.
 		await expect(page.getByText("Accept Project").first()).not.toBeVisible({ timeout: 15_000 });
-		await expect(page.getByText("Waiting for project analysis").first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator('[data-panel-workspace="content"]')).toHaveCount(0, { timeout: 15_000 });
 
 		// Get the provisional project and verify it exists
 		const prov = await findProvisionalProject(dir);

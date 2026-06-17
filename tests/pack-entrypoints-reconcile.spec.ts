@@ -284,6 +284,25 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 		expect(out.fetches.some((u: string) => u.includes("/panels/"))).toBe(false);
 	});
 
+	test("T-1 — spawn launcher passes an explicit route body to callRoute", async ({ page }) => {
+		await gotoAndWait(page);
+		const prUrl = "https://github.com/SuuBro/bobbit/pull/764";
+		const out = await page.evaluate(async (body) => {
+			await (window as any).__reconcile("A");
+			(window as any).__installLauncherHost("ok");
+			const result = await (window as any).__runSpawnWithBody("tp.spawn", body);
+			await (window as any).__flush();
+			return {
+				result,
+				callRoute: (window as any).__callRouteCalls(),
+			};
+		}, { prUrl });
+
+		expect(out.result).toEqual({ ok: true });
+		expect(out.callRoute).toHaveLength(1);
+		expect(out.callRoute[0]).toMatchObject({ route: "run", body: { prUrl } });
+	});
+
 	test("T-1 — a NO_PR (ok:false) result flows back through onResult; no panel opens", async ({ page }) => {
 		await gotoAndWait(page);
 		const out = await page.evaluate(async () => {

@@ -6,9 +6,9 @@
  *    agent via rpcClient.steer() (used by steer_queued promotion + abort).
  * 2. { type: "prompt" } sent while streaming is correctly queued by the server
  *    (the default path — the UI always queues via prompt during streaming).
- * 3. PI-10: steer_queued (the real UI flow) delivers mid-turn at the next
- *    tool boundary — queue a prompt, promote via steer_queued, verify the
- *    agent receives it BEFORE the current turn ends.
+ * 3. PI-10: steer_queued (the real UI flow) dispatches immediately through
+ *    the live-steer path — queue a prompt, promote via steer_queued, verify
+ *    the agent receives it BEFORE the current turn ends.
  *
  * Optimized: tests run in parallel (each creates its own session).
  */
@@ -59,10 +59,11 @@ test.describe("Steer mid-turn delivery", () => {
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_REDIRECT_123");
 
-			// PI-25b fix: live steer is now persisted in promptQueue as
-			// {isSteered:true, dispatched:true} so it survives abort. The
-			// queue_update should reflect that, and any queued steer row
-			// should carry isSteered=true (not a plain user prompt).
+			// PI-25b fix: live steer is first persisted as a steered queue row,
+			// then `_dispatchSteer()` records the in-flight ledger and removes
+			// the row as it dispatches. Any queued steer row visible in an
+			// intermediate queue_update should carry isSteered=true (not a plain
+			// user prompt).
 			const queuedMsgs = conn.messages.filter(
 				(m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0,
 			);
@@ -95,17 +96,12 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages to track only steer-related events
 			conn.messages.length = 0;
 
-			// Promote to steered via steer_queued (this is what the Steer button does)
+			// Promote to steered via steer_queued (this is what the Steer button does).
+			// Promotion dispatches immediately through the live-steer path, matching a
+			// fresh steer instead of waiting for a later tool boundary.
 			conn.send({ type: "steer_queued", messageId: msgId });
 
-			// Wait for the queue_update confirming the message is steered
-			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.isSteered),
-			);
-
-			// The steered message is dispatched at tool_execution_end (after
-			// the 2s tool call finishes). The mock agent emits a user-role
-			// message_end via handlePrompt(steeredText).
+			// The mock agent emits a user-role message_end via handlePrompt(steeredText).
 			const steerAck = await conn.waitFor(
 				(m) =>
 					m.type === "event" &&
@@ -122,7 +118,7 @@ test.describe("Steer mid-turn delivery", () => {
 		}
 	});
 
-	test("PI-10b: batch steer_queued — two queued messages promoted to steer are delivered as a batch", async () => {
+	test("PI-10b: two queued messages promoted to steer dispatch immediately", async () => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -144,20 +140,12 @@ test.describe("Steer mid-turn delivery", () => {
 			// Clear messages to track only steer-related events
 			conn.messages.length = 0;
 
-			// Promote both to steered
+			// Promote both to steered. Each promotion dispatches immediately through the
+			// live-steer path; each substring must show up in at least one user-role
+			// message_end event.
 			conn.send({ type: "steer_queued", messageId: msg1Id });
-			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg1Id && q.isSteered),
-			);
 			conn.send({ type: "steer_queued", messageId: msg2Id });
-			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === msg2Id && q.isSteered),
-			);
 
-			// At tool_execution_end, both steers are batched into a single
-			// rpcClient.steer() call (joined by \n) OR delivered as two
-			// separate user prompts. Accept either: each substring must show
-			// up in at least one user-role message_end event.
 			for (const needle of ["STEER_BATCH_MSG_1", "STEER_BATCH_MSG_2"]) {
 				await conn.waitFor(
 					(m) =>

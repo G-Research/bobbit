@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { SessionManager, SessionInfo } from "./session-manager.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemoteGitForTests } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
@@ -46,6 +46,35 @@ const execFile = promisify(execFileCb);
 function scanSlugDirForJsonls(worktreePath: string) {
 	const sessionsRoot = path.join(os.homedir(), ".bobbit", "agent", "sessions");
 	return scanSlugDirForJsonlsAt(sessionsRoot, worktreePath, fs, path.join);
+}
+
+function splitWorkerResultSummary(resultSummary: string): { summary?: string; branch?: string; commit?: string; checks?: string } {
+	let rest = resultSummary.trim();
+	let branch: string | undefined;
+	let commit: string | undefined;
+	let checks: string | undefined;
+
+	const branchMatch = rest.match(/\bBranch\s+(\S+)\s+pushed\s+at\s+([0-9a-f]{7,40})\.?/i);
+	if (branchMatch) {
+		branch = branchMatch[1];
+		commit = branchMatch[2];
+		rest = `${rest.slice(0, branchMatch.index)} ${rest.slice((branchMatch.index ?? 0) + branchMatch[0].length)}`.trim();
+	}
+
+	rest = rest.replace(/\bWorking copy clean after push\.?/i, "").trim();
+
+	const validationMatch = rest.match(/\bValidation(?:\s+passed)?:\s*([\s\S]*)$/i);
+	if (validationMatch) {
+		checks = validationMatch[1].trim().replace(/\.$/, "");
+		rest = rest.slice(0, validationMatch.index).trim();
+	}
+
+	return {
+		summary: rest.replace(/\s+/g, " ").replace(/\.$/, "").trim() || undefined,
+		branch,
+		commit,
+		checks: checks?.replace(/\s+/g, " ").trim() || undefined,
+	};
 }
 
 /**
@@ -1734,9 +1763,12 @@ export class TeamManager {
 			const goalId8 = goalId.slice(0, 8);
 			branchName = `goal/${goalId8}/${role}-${shortId}`;
 
-			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point
+			// Fetch latest so origin/<goal-branch> is up to date for the worktree start-point.
+			// Test harnesses may use repos with no origin; never contact real remotes there.
 			try {
-				await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
+				if (!(await shouldSkipRemoteGitForTests(goal.repoPath!))) {
+					await execFile("git", ["fetch", "origin", goal.branch!], { cwd: goal.repoPath!, timeout: 30_000 });
+				}
 			} catch { /* fetch failure is non-fatal — worktree falls back to local HEAD */ }
 
 			// Compute subdirectory offset from the goal's worktree root to its cwd.
@@ -1959,14 +1991,23 @@ export class TeamManager {
 
 		let message: string;
 		if (tasks.length > 0) {
-			const taskSummaries = tasks.map(t => {
-				let s = `"${t.title}" (state: ${t.state})`;
-				if (t.resultSummary) s += ` — ${t.resultSummary}`;
-				return s;
-			}).join("; ");
-			message = `Agent ${agentId} (${role}) has finished. Tasks: ${taskSummaries}. Check task details and decide next steps.`;
+			const heading = tasks.every(t => t.state === "complete") ? "Task complete" : "Agent finished";
+			const taskSummaries = tasks.map(t => `**${t.title}** (\`${t.state}\`)`).join("; ");
+			const resultSummary = tasks.map(t => t.resultSummary?.trim()).filter(Boolean).join(" ");
+			const result = resultSummary ? splitWorkerResultSummary(resultSummary) : undefined;
+			const lines = [
+				`**${heading}**`,
+				"",
+				`- **Agent:** \`${agentId}\` (\`${role}\`)`,
+				`- **Task:** ${taskSummaries}`,
+			];
+			if (result?.summary) lines.push(`- **Result:** ${result.summary}`);
+			if (result?.branch) lines.push(`- **Branch:** \`${result.branch}\`${result.commit ? ` @ \`${result.commit.slice(0, 8)}\`` : ""}`);
+			if (result?.checks) lines.push(`- **Checks:** ${result.checks}`);
+			lines.push("- **Next:** `task_list`, then review task and decide next step.");
+			message = lines.join("\n");
 		} else {
-			message = `Agent ${agentId} (${role}) has finished with no assigned tasks. Check tasks and decide next steps.`;
+			message = `**Agent finished**\n\n- **Agent:** \`${agentId}\` (\`${role}\`)\n- **Task:** no assigned tasks\n- **Next:** \`task_list\`, then review tasks and decide next step.`;
 		}
 
 		try {

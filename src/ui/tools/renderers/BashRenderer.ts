@@ -3,7 +3,8 @@ import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { SquareTerminal } from "lucide";
 import { i18n } from "../../utils/i18n.js";
-import { isGitDiff } from "../../components/DiffBlock.js";
+import { ensureDiffBlock } from "../../lazy/diff-block.js";
+import { isGitDiff } from "../../utils/diff-utils.js";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
@@ -60,6 +61,7 @@ export class BashRenderer implements ToolRenderer<BashParams, undefined> {
 			const images = Array.isArray(result.content) ? renderInlineImages(result.content) : "";
 			const hasImages = Array.isArray(result.content) && result.content.some((c: any) => c.type === "image");
 			const isDiff = !result.isError && isGitDiff(output);
+			if (isDiff) ensureDiffBlock();
 
 			const contentRef = createRef<HTMLDivElement>();
 			const chevronRef = createRef<HTMLSpanElement>();

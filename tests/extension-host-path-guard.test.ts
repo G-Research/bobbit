@@ -26,7 +26,7 @@ import { isPackPathWithinRoot } from "../src/server/extension-host/path-guard.ts
 let tmp: string;
 
 before(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-pathguard-"));
+	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ext-host-pathguard-")));
 });
 after(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }

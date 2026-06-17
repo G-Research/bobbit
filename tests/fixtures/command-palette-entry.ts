@@ -9,6 +9,7 @@
 import "../../src/ui/components/CommandPalette.js";
 import "../../src/ui/components/GitStatusWidget.js";
 import { registerPackEntrypoints, launcherKey } from "../../src/app/pack-entrypoints.js";
+import { setLauncherHostFactory } from "../../src/app/pack-panels.js";
 import { openCommandPalette } from "../../src/ui/components/CommandPalette.js";
 
 function register(): void {
@@ -23,17 +24,43 @@ function register(): void {
 	);
 }
 
+let resolveSpawnRoute: ((value: { ok: boolean; childSessionId?: string }) => void) | null = null;
+const spawnRouteCalls: Array<{ route: string; body?: unknown; packId: string; contributionId: string }> = [];
+
+function registerSpawn(): void {
+	spawnRouteCalls.length = 0;
+	resolveSpawnRoute = null;
+	registerPackEntrypoints(
+		[
+			{ id: "gw.spawn", packId: "pr-walkthrough", kind: "git-widget-button", label: "PR Walkthrough", target: { action: "spawn", route: "run", panelId: "pr-walkthrough.panel" } },
+		],
+		"proj1",
+	);
+	setLauncherHostFactory((_sessionId, packId, contributionId) => ({
+		capabilities: { callRoute: true } as any,
+		callRoute: async (route: string, init?: { body?: unknown }) => {
+			spawnRouteCalls.push({ route, body: init?.body, packId, contributionId });
+			return await new Promise<{ ok: boolean; childSessionId?: string }>((resolve) => { resolveSpawnRoute = resolve; });
+		},
+		ui: { openPanel: () => { /* not needed for these assertions */ } },
+	}) as any);
+}
+
 function clearRegistry(): void {
 	registerPackEntrypoints([], "proj2");
 }
 
 (window as any).__register = register;
+(window as any).__registerSpawn = registerSpawn;
 (window as any).__clearRegistry = clearRegistry;
 (window as any).__hash = () => window.location.hash;
 (window as any).__clearHash = () => history.replaceState({}, "", window.location.pathname);
-// All fixture launchers belong to pack "tp"; the surfaces key dispatch + the
-// data-entrypoint-id attribute by the COMPOUND launcher key (packId+id).
+// Most fixture launchers belong to pack "tp"; spawn helpers use the real
+// pr-walkthrough pack id to mirror the production launcher.
 (window as any).__key = (id: string) => launcherKey("tp", id);
+(window as any).__packKey = (packId: string, id: string) => launcherKey(packId, id);
+(window as any).__getSpawnRouteCalls = () => spawnRouteCalls.slice();
+(window as any).__resolveSpawnRoute = () => resolveSpawnRoute?.({ ok: true, childSessionId: "child-prw" });
 
 // ── Command palette helpers ──
 (window as any).__openPalette = () => openCommandPalette();
@@ -88,6 +115,13 @@ async function mountGit() {
 };
 (window as any).__gitHasPaletteOpener = () =>
 	!!document.querySelector("#git-status-dropdown [data-testid='git-widget-open-command-palette']");
+(window as any).__gitLauncherPending = () =>
+	(document.querySelector("#git-status-dropdown [data-testid='git-widget-launcher-pending']")?.textContent || "").trim();
+(window as any).__gitLauncherDisabled = (key: string) => {
+	const el = [...document.querySelectorAll<HTMLButtonElement>("#git-status-dropdown [data-testid='git-widget-launcher']")]
+		.find((e) => e.dataset.entrypointId === key);
+	return !!el?.disabled;
+};
 (window as any).__clickGitPaletteOpener = () => {
 	const el = document.querySelector<HTMLElement>("#git-status-dropdown [data-testid='git-widget-open-command-palette']");
 	if (!el) throw new Error("git palette opener not found");

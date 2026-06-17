@@ -499,6 +499,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					<span class="step-dot">${state === "visited" ? "✓" : index + 1}</span>${compact ? nothing : html`<span class="step-label">${section.navLabel || section.eyebrow || `Beat ${index + 1}`}</span>`}
 				</button>`;
 			})}
+			${exposeTestIds ? html`<span hidden data-testid="prw-nav-card" data-prw-nav=${card.id} data-card-id=${card.id} aria-hidden="true"></span>` : nothing}
 		</div>`;
 	};
 
@@ -525,19 +526,21 @@ export default function createPanel({ html, nothing, renderHeader }) {
 		const collapsed = isRailCollapsed(entry);
 		const narrow = isNarrowLayout(entry);
 		const orientationCard = cards.find((card) => cardPhase(card) === "orientation" && arrayOf(card.sections).length);
+		const railPhases = orientationCard ? PHASES.filter((phase) => phase.id !== "orientation") : PHASES;
 		return html`
 			<aside class=${`rail ${collapsed ? "collapsed" : ""} ${narrow ? "narrow" : ""}`} style=${`--walkthrough-rail-width:${railWidth}px`} data-observed-narrow=${String(narrow)}>
 				<nav class="rail-panel labelled prw-phase-rail" data-testid="pr-walkthrough-labelled-rail" aria-label=${collapsed ? "Labelled PR walkthrough phase rail" : "PR walkthrough phase rail"}>
 					<div class="rail-top"><strong>Walkthrough</strong><button class="rail-toggle" data-testid=${collapsed ? nothing : "pr-walkthrough-rail-toggle"} type="button" title="Collapse rail" aria-label="Collapse rail" @click=${() => setRailCollapsed(entry, host, paramKey, true)}>‹</button></div>
 					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, false, !collapsed) : nothing}
-					${PHASES.map((phase, phaseIndex) => {
+					${railPhases.map((phase, phaseIndex) => {
 						const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
 						if (phaseCards.length === 0) return nothing;
 						const phaseActive = active && cardPhase(active) === phase.id;
 						const done = phaseCards.filter((card) => completedCardIds(entry).has(card.id)).length;
+						const phaseDone = done >= phaseCards.length;
 						return html`<section class=${`phase prw-phase ${phaseActive ? "active is-active" : ""}`}>
 							<button class="phase-button" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => phaseCards[0] && setActiveCard(entry, host, paramKey, phaseCards[0].id)}>
-								<span class="phase-pip prw-phase-index">${phase.short || phaseIndex + 1}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${done}/${phaseCards.length}</span>
+								<span class="phase-pip prw-phase-index">${phase.short || phaseIndex + 1}</span><span class="phase-name">${phase.label}</span><span class=${`phase-count ${phaseDone ? "complete" : phaseActive ? "active" : "pending"}`} title=${`${done} of ${phaseCards.length} cards reviewed`}>(${done}/${phaseCards.length})</span>
 							</button>
 							<div class="phase-cards">${phaseCards.map((card) => renderRailCardButton(entry, host, paramKey, card, false, !collapsed))}</div>
 						</section>`;
@@ -548,7 +551,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					${collapsed ? html`<span class="legacy-navrail-marker" data-testid="prw-navrail" aria-hidden="true"></span>` : nothing}
 					<button class="rail-toggle" data-testid=${collapsed ? "pr-walkthrough-rail-toggle" : nothing} type="button" title="Expand rail" aria-label="Expand rail" @click=${() => setRailCollapsed(entry, host, paramKey, false)}>›</button>
 					${orientationCard ? renderOrientationRailSteps(entry, host, paramKey, orientationCard, true, collapsed) : nothing}
-					${PHASES.map((phase, phaseIndex) => {
+					${railPhases.map((phase, phaseIndex) => {
 						const phaseCards = cards.filter((c) => cardPhase(c) === phase.id);
 						if (phaseCards.length === 0) return nothing;
 						const phaseActive = active && cardPhase(active) === phase.id;
@@ -1524,8 +1527,8 @@ export default function createPanel({ html, nothing, renderHeader }) {
 
 					/* Historical compact shell parity overrides. */
 					.prw-root .prw-bundle-marker { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-					.prw-root .shell { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); position: relative; height: calc(100vh - 24px); min-height: 620px; display: grid; grid-template-rows: 58px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-					.prw-root .header { height: 58px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 260px) auto; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
+					.prw-root .shell { --walkthrough-content-x: clamp(10px, 1.4vw, 20px); position: relative; height: calc(100vh - 16px); min-height: 600px; display: grid; grid-template-rows: 52px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--foreground); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+					.prw-root .header { height: 52px; display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 240px) auto; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--card) 94%, var(--background)); }
 					.prw-root .title-group { min-width: 0; display: flex; align-items: center; gap: 10px; }
 					.prw-root .pr-pill { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary); font-weight: 750; }
 					.prw-root .title-stack { min-width: 0; }
@@ -1542,28 +1545,32 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .body { min-height: 0; display: grid; grid-template-columns: var(--walkthrough-rail-width, 248px) minmax(0, 1fr); }
 					.prw-root .rail { min-width: 0; border-right: 1px solid var(--border); background: color-mix(in oklch, var(--card) 70%, var(--background)); position: relative; }
 					.prw-root .rail .prw-phase-rail { width: auto; flex: none; }
-					.prw-root .rail-panel { height: 100%; overflow: auto; padding: 9px 8px 14px; }
+					.prw-root .rail-panel { height: 100%; overflow: auto; padding: 7px 6px 10px; }
 					.prw-root .rail-panel.compact { display: none; }
 					.prw-root .rail.collapsed .rail-panel.labelled, .prw-root .body.rail-collapsed .rail-panel.labelled { display: none; }
 					.prw-root .rail.collapsed .rail-panel.compact, .prw-root .body.rail-collapsed .rail-panel.compact { display: block; }
 					.prw-root .body.rail-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
-					.prw-root .rail-top { display: flex; align-items: center; justify-content: space-between; min-height: 30px; padding: 0 4px 7px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-					.prw-root .rail-toggle { width: 25px; height: 25px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); font-weight: 800; }
-					.prw-root .phase { margin: 3px 0 9px; }
-					.prw-root .phase-button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
+					.prw-root .rail-top { display: flex; align-items: center; justify-content: space-between; min-height: 26px; padding: 0 3px 5px; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+					.prw-root .rail-toggle { width: 24px; height: 24px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); font-weight: 800; }
+					.prw-root .phase { margin: 2px 0 7px; }
+					.prw-root .phase-button { width: 100%; display: grid; grid-template-columns: 20px minmax(0, 1fr) max-content; align-items: center; column-gap: 6px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); padding: 4px 5px; text-align: left; }
 					.prw-root .phase.active .phase-button, .prw-root .phase-button:hover { background: color-mix(in oklch, var(--primary) 8%, transparent); color: var(--foreground); }
-					.prw-root .phase-pip, .prw-root .step-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 10px; font-weight: 800; }
+					.prw-root .phase-pip, .prw-root .step-dot { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 10px; font-weight: 800; }
 					.prw-root .phase-name, .prw-root .card-label, .prw-root .step-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-					.prw-root .phase-count { font-size: 11px; }
-					.prw-root .phase-cards { display: grid; gap: 2px; }
-					.prw-root .card-button { width: 100%; min-height: 27px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px 7px; text-align: left; }
+					.prw-root .phase-name { padding-right: 1px; }
+					.prw-root .phase-count { justify-self: end; min-width: max-content; flex: 0 0 auto; font-size: 0.75em; font-weight: 600; letter-spacing: -0.02em; white-space: nowrap; color: var(--muted-foreground); }
+					.prw-root .phase-count.complete { color: var(--positive); }
+					.prw-root .phase-count.active { color: var(--info); }
+					.prw-root .phase-cards { display: grid; gap: 1px; }
+					.prw-root .card-button { width: 100%; min-width: 0; min-height: 25px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 4px 6px; text-align: left; }
 					.prw-root .card-button:hover, .prw-root .card-button.active { color: var(--foreground); background: color-mix(in oklch, var(--primary) 10%, transparent); }
-					.prw-root .card-dot { display: inline-grid; place-items: center; width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 9px; font-weight: 900; }
+					.prw-root .card-label { flex: 1 1 auto; }
+					.prw-root .card-button .card-dot { position: static; left: auto; display: inline-grid; place-items: center; width: 13px; height: 13px; flex: 0 0 13px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); font-size: 9px; font-weight: 900; }
 					.prw-root .card-button.complete .card-dot { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
 					.prw-root .card-button.disliked .card-dot { border-color: var(--negative); background: var(--negative); color: var(--negative-foreground, var(--primary-foreground)); }
 					.prw-root .card-button.active .card-dot { box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent); }
-					.prw-root .orientation-rail { display: grid; gap: 3px; margin: 3px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
-					.prw-root .orientation-step { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 5px; text-align: left; }
+					.prw-root .orientation-rail { display: grid; gap: 2px; margin: 2px 0 8px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+					.prw-root .orientation-step { display: flex; align-items: center; gap: 6px; min-width: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted-foreground); padding: 4px 5px; text-align: left; }
 					.prw-root .orientation-step.current { color: var(--foreground); background: color-mix(in oklch, var(--chart-1) 10%, transparent); }
 					.prw-root .orientation-step.visited .step-dot { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
 					.prw-root .compact .rail-toggle { margin: 0 auto 8px; display: block; }
@@ -1572,9 +1579,9 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .legacy-navrail-marker, .prw-root .legacy-nav-card-marker { display: block; width: 1px; height: 1px; margin: 0 auto; overflow: hidden; opacity: .01; }
 					.prw-root .walkthrough-rail-resize-handle { position: absolute; right: -4px; top: 0; width: 8px; height: 100%; border: 0; border-radius: 0; background: transparent; cursor: col-resize; }
 					.prw-root .walkthrough-rail-resize-handle:hover { background: color-mix(in oklch, var(--primary) 18%, transparent); }
-					.prw-root .content { min-width: 0; overflow: auto; padding: 14px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
-					.prw-root .card { max-width: 1120px; margin: 0 auto 18px; display: grid; gap: 10px; }
-					.prw-root .inner, .prw-root .guide, .prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 13px; box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 4%, transparent); }
+					.prw-root .content { min-width: 0; overflow: auto; padding: 10px var(--walkthrough-content-x) 0; background: color-mix(in oklch, var(--background) 92%, var(--card)); }
+					.prw-root .card { max-width: 1120px; margin: 0 auto 14px; display: grid; gap: 8px; }
+					.prw-root .inner, .prw-root .guide, .prw-root .state-card, .prw-root .audit-draft, .prw-root .prw-card-comments, .prw-root .no-diff { border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 96%, var(--background)); padding: 11px; box-shadow: 0 6px 18px color-mix(in oklch, var(--foreground) 4%, transparent); }
 					.prw-root .card-head, .prw-root .guide-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 					.prw-root .phase-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; font-weight: 800; }
 					.prw-root .card h1, .prw-root .card h2, .prw-root .guide h1, .prw-root .guide h2 { margin: 4px 0 0; font-size: 18px; line-height: 1.2; letter-spacing: -.015em; }
@@ -1585,7 +1592,7 @@ export default function createPanel({ html, nothing, renderHeader }) {
 					.prw-root .original-description { margin-top: 10px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; color: var(--muted-foreground); }
 					.prw-root .original-description summary { color: var(--foreground); cursor: pointer; font-weight: 700; }
 					.prw-root .diff-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
-					.prw-root .actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
+					.prw-root .actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--card) 88%, transparent); backdrop-filter: blur(12px); }
 					.prw-root .decision-note { color: var(--muted-foreground); font-size: 12px; }
 					.prw-root .decision-buttons { display: flex; gap: 8px; }
 					.prw-root .like, .prw-root .dislike { border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); padding: 6px 10px; font-weight: 750; }

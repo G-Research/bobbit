@@ -227,21 +227,22 @@ analogous helper `spliceInFlightSteers()` in the same module.
 `SessionManager._dispatchSteer()` (`src/server/agent/session-manager.ts`) is
 ordered as:
 
-1. `session.promptQueue.remove(r.id)` — pending row removed.
-2. `broadcastQueue(session)` — clients told the queue is empty (the pill
-   disappears from the UI).
-3. Push the batch text onto `session.inFlightSteerTexts` (the shadow
+1. Push the batch text onto `session.inFlightSteerTexts` (the shadow
    ledger — see [`steer-subsystem-rewrite.md`](./steer-subsystem-rewrite.md)).
+2. `session.promptQueue.remove(r.id)` — pending row removed.
+3. `broadcastQueue(session, { includeInFlightSteers: true })` — clients are
+   told the queue is empty (the pill disappears from the UI), and the store
+   persists the queue removal plus ledger entry together.
 4. `await session.rpcClient.steer(batchText)` — the SDK echoes the text
    back later as `message_end(role:user)`; the agent only flushes that
    echo to `.jsonl` at that point.
 
-Between step 2 and the echo landing in `.jsonl`, a client snapshot
+Between step 3 and the echo landing in `.jsonl`, a client snapshot
 (`get_messages` from visibility resync, WS reconnect resume-fallback, or a
-second tab attaching) reads from `rpcClient.getMessages()` and sees the
-steer text in **neither** channel — no queue pill (step 2 cleared it) and
-no user-message row (echo not yet flushed). The text appears to vanish
-until the echo lands seconds later.
+second tab attaching) reads from `rpcClient.getMessages()` and sees no
+queue pill (step 3 cleared it) and no durable user-message row (echo not
+yet flushed). The ledger has the text, so the splice helper can keep it
+visible until the echo lands.
 
 This is the user-side mirror of §3.1: the `.jsonl` lags real in-process
 state, and the snapshot is authoritative about a row the gateway already

@@ -1,14 +1,11 @@
-import {
-	AppStorage,
-	CustomProvidersStore,
-	IndexedDBStorageBackend,
-	ProviderKeysStore,
-	SessionsStore,
-	SettingsStore,
-	ShortcutBindingsStore,
-	setAppStorage,
-} from "../ui/index.js";
+import { AppStorage, setAppStorage } from "../ui/storage/app-storage.js";
+import { IndexedDBStorageBackend } from "../ui/storage/backends/indexeddb-storage-backend.js";
 import { CommandHistoryStore } from "../ui/storage/stores/command-history-store.js";
+import { CustomProvidersStore } from "../ui/storage/stores/custom-providers-store.js";
+import { ProviderKeysStore } from "../ui/storage/stores/provider-keys-store.js";
+import { SessionsStore } from "../ui/storage/stores/sessions-store.js";
+import { SettingsStore } from "../ui/storage/stores/settings-store.js";
+import { ShortcutBindingsStore } from "../ui/storage/stores/shortcut-bindings-store.js";
 
 const settings = new SettingsStore();
 const providerKeys = new ProviderKeysStore();
