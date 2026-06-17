@@ -176,7 +176,7 @@ The same reconciliation runs on the graceful path: when `handleAgentLifecycle` s
 - **Splice**: in `_consumeSteerEcho()`, called from `handleAgentLifecycle` for every event. Silent no-op for non-matching messages (regular prompts, follow-ups, skill-expansion echoes whose body has been rewritten).
 - **Drain**: in `_reconcileAfterAbort()` and during `restoreSession()` after `switch_session` has replayed durable echoes. Any ledger entry still un-echoed is re-enqueued at the front with `isSteered: true`, then the ledger is cleared.
 
-The ledger exists because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` — the natural primitive for "pull undelivered steers back". Mirroring the SDK's text-match removal logic at our layer (mitigation B in the design doc) gives Bobbit a single, bounded reconciliation point without an upstream PR. Bounded growth is enforced by construction: every push has a paired echo or abort-drain; neither path is silently dropped.
+The ledger exists because the SDK's in-process steering mirror is not a durable restart/abort recovery surface. Mirroring the SDK's text-match removal logic at Bobbit's persisted-session layer gives Bobbit a single, bounded reconciliation point without an upstream PR. Bounded growth is enforced by construction: every push has a paired echo or abort-drain; neither path is silently dropped.
 
 Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer back into the queue if its ledger entry is still present. If abort/restart reconciliation already drained that entry, the catch path persists the cleared ledger and does **not** enqueue a duplicate.
 
