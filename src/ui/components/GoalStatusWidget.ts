@@ -29,7 +29,7 @@ import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { AlertTriangle, CheckCircle2, Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
-import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
+import { completeTeam, scheduleGateStatusRefreshForGoal } from "../../app/api.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -719,7 +719,6 @@ export class GoalStatusWidget extends LitElement {
 		this._confirmCompletionLoading = true;
 		this._confirmCompletionError = "";
 		try {
-			const { completeTeam } = await import("../../app/api.js");
 			const ok = await completeTeam(this.goalId, { confirmBypassedGates: true });
 			if (!ok) {
 				this._confirmCompletionError = "Unable to complete goal";

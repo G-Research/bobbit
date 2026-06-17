@@ -10,6 +10,7 @@ import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { gatewayFetch } from "../../app/api.js";
+import { showHeaderToast } from "../../app/render.js";
 import { listLauncherEntrypoints, runLauncherEntrypoint } from "../../app/pack-entrypoints.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -278,9 +279,9 @@ export class MessageEditor extends LitElement {
 
 	private _showLauncherFeedback(message: string, kind: "pending" | "error"): void {
 		window.dispatchEvent(new CustomEvent("bobbit-launcher-feedback", { detail: { kind, message } }));
-		void import("../../app/render.js")
-			.then((m) => m.showHeaderToast(message))
-			.catch(() => { /* best-effort */ });
+		try {
+			showHeaderToast(message);
+		} catch { /* best-effort */ }
 	}
 
 	private _showLauncherError(message: string): void {
