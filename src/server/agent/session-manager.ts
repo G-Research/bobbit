@@ -3601,7 +3601,7 @@ export class SessionManager {
 		try {
 			sessionStore = this.getSessionStore(ps.projectId);
 		} catch {
-			console.warn(`[session-manager] Skipping session ${ps.id} — project "${ps.projectId}" no longer registered`);
+			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Skipping session ${ps.id} — project "${ps.projectId}" no longer registered`);
 			return;
 		}
 		// Generalized boot-reap for ANY child linked by parentSessionId+childKind
