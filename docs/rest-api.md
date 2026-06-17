@@ -1179,6 +1179,18 @@ Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or 
 
 Running command steps may include bounded live stdout/stderr reads via `liveLogs`. The server reads a capped portion of the live log file first, then applies the requested `tail`, `head`, `slice`, `grep`, or `full` selection and the aggregate output budget. Use those selection modes for deeper targeted logs instead of relying on the default 20-line tail.
 
+Completed command steps can include retained diagnostics. When a verification request uses an explicit `mode`, `steps[].diagnostics` may report:
+
+| Field | Meaning |
+|---|---|
+| `diagnostics.outputSource` | `"retained-logs"`, `"live-logs"`, or `"compact-tail"` |
+| `diagnostics.logs.stdout` / `stderr` | Retained log path, bytes, line count, and cap/truncation metadata |
+| `diagnostics.artifacts` | Count and retained file metadata for copied `test-results` / `playwright-report` artifacts; small `error-context.md` files may include markdown `content` |
+| `diagnostics.inspectHints` | Suggested `gate_inspect` calls for targeted follow-up |
+| `diagnostics.note` | Human-readable summary of which output source was used |
+
+Default `gate_status`, notifications, and omitted-mode inspection do not include retained log paths or artifact file lists. Retained stdout and stderr are capped at 20 MiB per stream, and explicit inspection exposes cap/truncation metadata. See [Retained gate diagnostics](gate-diagnostics.md) for artifact retention, symlink hardening, and cleanup lifecycle.
+
 **`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected JSON-lines `text`.
 ```json
 {
