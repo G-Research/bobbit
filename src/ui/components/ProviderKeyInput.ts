@@ -1,10 +1,11 @@
 import { i18n } from "@mariozechner/mini-lit";
 import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { type Context, complete, getModel } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/pi-ai";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/api.js";
+import { completePiAi, getPiAiModel } from "../../app/pi-ai-lazy.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { applyProxyIfNeeded } from "../utils/proxy-utils.js";
 import { Input } from "./Input.js";
@@ -55,7 +56,7 @@ export class ProviderKeyInput extends LitElement {
 			// Returning true here for Ollama and friends. Can' know which model to use for testing
 			if (!modelId) return true;
 
-			let model = getModel(provider as any, modelId);
+			let model = await getPiAiModel(provider, modelId);
 			if (!model) return false;
 
 			// Get proxy URL from settings (if available)
@@ -69,10 +70,10 @@ export class ProviderKeyInput extends LitElement {
 				messages: [{ role: "user", content: "Reply with: ok", timestamp: Date.now() }],
 			};
 
-			const result = await complete(model, context, {
+			const result = await completePiAi(model, context, {
 				apiKey,
 				maxTokens: 200,
-			} as any);
+			});
 
 			return result.stopReason === "stop";
 		} catch (error) {
