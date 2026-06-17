@@ -27,6 +27,7 @@ import { SessionIndexSource } from "./sources/session-source.js";
 import { MessageIndexSource } from "./sources/message-source.js";
 import { StaffIndexSource } from "./sources/staff-source.js";
 import { contentHashOf } from "./sources/hash.js";
+import { formatSessionSearchTitle } from "./sources/session-title.js";
 import { progressBus as sharedProgressBus, type ProgressBus } from "./progress-bus.js";
 import { needsRebuild as metaNeedsRebuild, buildCurrentMeta } from "./meta.js";
 import { CONTENT_POLICY_VERSION, extractForIndexing } from "./content-policy.js";
@@ -253,6 +254,7 @@ export class SearchService {
 		const weight = 3.0;
 		const role = "title" as const;
 		const timestamp = session.createdAt ?? session.lastActivity ?? 0;
+		const displayTitle = formatSessionSearchTitle(title, goalTitle);
 		const metadata: Record<string, string | number | boolean> = { sessionId: session.id };
 		if (session.goalId) metadata.goalId = session.goalId;
 		if (goalTitle) metadata.goalTitle = goalTitle;
@@ -264,13 +266,13 @@ export class SearchService {
 					sourceId: "sessions",
 					text: title,
 					metadata,
-					contentHash: contentHashOf(title, weight, role, timestamp),
+					contentHash: contentHashOf(`${title}\n${displayTitle}`, weight, role, timestamp),
 					timestamp,
 					projectId: pid,
 					archived: session.archived === true,
 					weight,
 					role,
-					display: { title, snippet: title },
+					display: { title: displayTitle, snippet: displayTitle },
 				},
 			])
 			.catch((err) => console.error("[search] indexSession failed:", err));
@@ -300,6 +302,7 @@ export class SearchService {
 		projectId?: string;
 		msgIdx?: number;
 		goalId?: string;
+		goalTitle?: string;
 	}): void;
 	indexMessage(
 		sessionId: string,
@@ -320,6 +323,7 @@ export class SearchService {
 					projectId?: string;
 					msgIdx?: number;
 					goalId?: string;
+					goalTitle?: string;
 			  },
 		sessionTitle?: string,
 		text?: string,
@@ -332,7 +336,7 @@ export class SearchService {
 
 		if (typeof arg1 === "string") {
 			const sessionId = arg1;
-			const title = sessionTitle ?? "";
+			const title = (sessionTitle ?? "").trim();
 			const ts = timestamp ?? 0;
 			const pid = projectId ?? this.projectId;
 			const body = (text ?? "").trim();
@@ -345,8 +349,12 @@ export class SearchService {
 						id: `message:${sessionId}:legacy:${ts}`,
 						sourceId: "messages",
 						text: body,
-						metadata: { sessionId, blockKey: "legacy:0" },
-						contentHash: contentHashOf(body, weight, role, ts),
+						metadata: {
+							sessionId,
+							blockKey: "legacy:0",
+							...(title ? { sessionTitle: title } : {}),
+						},
+						contentHash: contentHashOf(`${body}\n${title}`, weight, role, ts),
 						timestamp: ts,
 						projectId: pid,
 						archived: false,
@@ -359,7 +367,8 @@ export class SearchService {
 			return;
 		}
 
-		const { sessionId, sessionTitle: st, message, timestamp: ts, projectId: pid, msgIdx, goalId } = arg1;
+		const { sessionId, sessionTitle: st, message, timestamp: ts, projectId: pid, msgIdx, goalId, goalTitle } = arg1;
+		const displayTitle = formatSessionSearchTitle(st, goalTitle);
 		const hit = extractForIndexing(message);
 		if (hit.entries.length === 0) return;
 		const resolvedProjectId = pid ?? this.projectId;
@@ -373,14 +382,16 @@ export class SearchService {
 				msgIdx: idx,
 				blockKey: entry.blockKey,
 				...(goalId ? { goalId } : {}),
+				...(goalTitle ? { goalTitle } : {}),
+				...(displayTitle ? { sessionTitle: displayTitle } : {}),
 			},
-			contentHash: contentHashOf(entry.text, entry.weight, entry.role, ts),
+			contentHash: contentHashOf(`${entry.text}\n${displayTitle}`, entry.weight, entry.role, ts),
 			timestamp: ts,
 			projectId: resolvedProjectId,
 			archived: false,
 			weight: entry.weight,
 			role: entry.role,
-			display: { title: st },
+			display: { title: displayTitle },
 		}));
 		indexer
 			.upsertEntries(indexables)

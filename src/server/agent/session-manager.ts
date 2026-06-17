@@ -2798,6 +2798,7 @@ export class SessionManager {
 		// emits one row per text / tool_use / tool_result block.
 		if (event.type === "message_end" && event.message) {
 			try {
+				const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 				this.resolveSearchIndex(session).indexMessage({
 					sessionId: session.id,
 					sessionTitle: session.title,
@@ -2805,6 +2806,7 @@ export class SessionManager {
 					timestamp: Date.now(),
 					projectId: session.projectId || undefined,
 					goalId: session.goalId,
+					goalTitle,
 				});
 			} catch {
 				// Non-critical — don't break message flow

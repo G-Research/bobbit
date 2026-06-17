@@ -265,14 +265,17 @@ export function buildGroups(filtered: SearchResultItem[]): ResultGroup[] {
 				if (!hit.sessionId) continue;
 				const key = `session:${hit.sessionId}`;
 				const g = ensureGroup(key, "session");
+				const sessionTitle = hit.sessionTitle?.trim();
 				if (!g.parent && !g.parentFallback) {
 					g.parentFallback = {
 						id: hit.sessionId,
-						title: hit.sessionTitle ?? "Untitled session",
+						title: sessionTitle || "Untitled session",
 						archived: hit.archived ?? false,
 						timestamp: hit.timestamp ?? 0,
 						projectId: hit.projectId,
 					};
+				} else if (!g.parent && g.parentFallback && sessionTitle && /^Untitled(?: session)?$/i.test(g.parentFallback.title)) {
+					g.parentFallback.title = sessionTitle;
 				}
 				g.children.push(hit);
 				g.matchCount.messages++;
@@ -385,9 +388,9 @@ export function resetSearchPage(): void {
 // RENDER — child (nested) rows
 // ============================================================================
 
-function _renderChildRow(result: SearchResultItem) {
+function _renderChildRow(result: SearchResultItem, sessionTitleContext?: string) {
 	const title = result.type === "message"
-		? (result.sessionTitle || result.title)
+		? (sessionTitleContext || result.sessionTitle || result.title)
 		: result.title;
 	const isStale = _staleIds.has(result.id) || (result.sessionId ? _staleIds.has(result.sessionId) : false);
 
@@ -498,6 +501,9 @@ function _renderGroupCard(group: ResultGroup) {
 		renderApp();
 	};
 
+	const childSessionTitleContext = group.kind === "session"
+		? (parent?.title || fallback?.title || undefined)
+		: undefined;
 	const fragments = expanded ? [] : _collapsedSnippetFragments(group);
 	// Only render the muted "matched on title/metadata" note in the header
 	// when the card is *collapsed* — the expanded body renders its own copy,
@@ -566,7 +572,7 @@ function _renderGroupCard(group: ResultGroup) {
 					` : ""}
 					${group.children.length > 0 ? html`
 						<div class="flex flex-col gap-0.5 border-l-2 border-border/50 ml-2 pl-1">
-							${group.children.map(c => _renderChildRow(c))}
+							${group.children.map(c => _renderChildRow(c, childSessionTitleContext))}
 						</div>
 					` : ""}
 				</div>
