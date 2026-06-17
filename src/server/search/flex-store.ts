@@ -263,9 +263,16 @@ export class FlexSearchStore {
 
 	async clear(): Promise<void> {
 		if (this._closed) throw new Error("FlexSearchStore: already closed");
-		// FlexSearch's `Document.clear` exists but is inconsistently async.
-		// Remove individually for safety.
-		for (const id of this._docs.keys()) this._idx.remove(id);
+		// Discard the whole index in O(1) by recreating it. Removing documents
+		// one-by-one via FlexSearch's `Document.remove` is O(n) PER call (it
+		// scrubs the id from every posting list), so clearing N docs is O(n²) —
+		// a synchronous tight loop that freezes the event loop on a large index
+		// and wedges boot during the content-policy version-bump rebuild
+		// (rebuildFromSources calls clear() first). `_docs` is the authoritative
+		// mirror; a fresh index + cleared mirror is equivalent to removing every
+		// entry. (`Document.clear` exists but is inconsistently async, hence the
+		// recreate rather than calling it.)
+		this._idx = FlexSearchStore._newIndex();
 		this._docs.clear();
 		this._scheduleSave();
 	}

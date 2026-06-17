@@ -10,7 +10,9 @@
       "WebFetch",
       "WebSearch",
       "PowerShell(Get-CimInstance *)",
-      "PowerShell(Get-NetTCPConnection *)"
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(npm run *)",
+      "PowerShell(npx playwright test tests/search/flex-store.spec.ts 2>&1 | Select-Object -Last 30)"
     ]
   }
 }
