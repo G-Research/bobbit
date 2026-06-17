@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { gateDiagnosticsRootDir, safeGateDiagnosticsSegment } from "./agent/gate-diagnostics-cleanup.js";
 
 export interface GateStepDiagnosticLogMetadata {
 	path: string;
@@ -43,19 +44,6 @@ const PLAYWRIGHT_ARTIFACT_DIRS: Array<{ name: string; kind: GateStepDiagnosticAr
 	{ name: "playwright-report", kind: "playwright-report" },
 ];
 
-function safeSegment(value: string): string {
-	const cleaned = value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
-	return cleaned.slice(0, 80) || "unnamed";
-}
-
-export function gateDiagnosticsRoot(stateDir: string): string {
-	return path.join(stateDir, "gate-diagnostics");
-}
-
-export function cleanupGateDiagnosticsForGoal(stateDir: string, goalId: string): void {
-	fs.rmSync(path.join(gateDiagnosticsRoot(stateDir), safeSegment(goalId)), { recursive: true, force: true });
-}
-
 export function prepareGateStepDiagnosticsPaths(input: {
 	stateDir: string;
 	goalId: string;
@@ -65,11 +53,11 @@ export function prepareGateStepDiagnosticsPaths(input: {
 	stepName: string;
 }): GateStepDiagnosticsPaths {
 	const baseDir = path.join(
-		gateDiagnosticsRoot(input.stateDir),
-		safeSegment(input.goalId),
-		safeSegment(input.gateId),
-		safeSegment(input.signalId),
-		`${String(input.stepIndex).padStart(2, "0")}-${safeSegment(input.stepName)}`,
+		gateDiagnosticsRootDir(input.stateDir),
+		safeGateDiagnosticsSegment(input.goalId),
+		safeGateDiagnosticsSegment(input.gateId),
+		safeGateDiagnosticsSegment(input.signalId),
+		`${String(input.stepIndex).padStart(2, "0")}-${safeGateDiagnosticsSegment(input.stepName)}`,
 	);
 	fs.rmSync(baseDir, { recursive: true, force: true });
 	fs.mkdirSync(baseDir, { recursive: true });
