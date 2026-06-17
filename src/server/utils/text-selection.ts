@@ -9,6 +9,8 @@ export const MAX_SELECTED_BYTES = 50 * 1024;
 export interface TextSelectionOptions {
 	mode?: TextSelectionMode;
 	implicitDefault?: boolean;
+	/** Include retained diagnostic metadata. Set by explicit gate_inspect calls, not compact status snapshots. */
+	includeDiagnostics?: boolean;
 	pattern?: string;
 	context?: number;
 	maxResults?: number;

@@ -73,6 +73,7 @@ import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-level
 import { inferMeta } from "./aigw-manager.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
+	appendRetainedLogChunk,
 	finalizeGateStepDiagnostics,
 	prepareGateStepDiagnosticsPaths,
 	type GateStepDiagnostics,
@@ -3863,7 +3864,7 @@ export class VerificationHarness {
 			const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
 				if (!diagnosticsPaths) return undefined;
 				try {
-					return finalizeGateStepDiagnostics({ paths: diagnosticsPaths, commandCwd: normalizedCwd });
+					return finalizeGateStepDiagnostics({ paths: diagnosticsPaths, commandCwd: normalizedCwd, containerId });
 				} catch (err) {
 					console.warn(`[verification] Failed to finalize retained command diagnostics: ${(err as Error).message}`);
 					return undefined;
@@ -3874,10 +3875,8 @@ export class VerificationHarness {
 				return diagnostics ? { ...result, diagnostics } : result;
 			};
 			const handleSpawnError = (err: Error): { passed: boolean; output: string; diagnostics?: GateStepDiagnostics } => {
-				try {
-					if (outFile) fs.writeFileSync(outFile, "", { flag: "a" });
-					if (errFile) fs.writeFileSync(errFile, err.message, { flag: "a" });
-				} catch { /* ignore diagnostics write failure */ }
+				appendRetainedLogChunk(outFile, "");
+				appendRetainedLogChunk(errFile, err.message);
 				if (expectFailure && errorPattern) {
 					try {
 						const regex = new RegExp(errorPattern, "i");
@@ -4001,10 +4000,8 @@ export class VerificationHarness {
 				stopTail = this._startFileTailers(outFile, errFile, streamCtx);
 			} else if (!useDetached) {
 				const onData = (text: string, stream: "stdout" | "stderr") => {
-					try {
-						const target = stream === "stdout" ? outFile : errFile;
-						if (target) fs.appendFileSync(target, text, "utf8");
-					} catch { /* diagnostics retention is best-effort */ }
+					const target = stream === "stdout" ? outFile : errFile;
+					appendRetainedLogChunk(target, text);
 					if (stream === "stdout") {
 						stdout += text;
 						if (stdout.length > 1024 * 1024) stdout = stdout.slice(-512 * 1024);
@@ -4103,8 +4100,8 @@ export class VerificationHarness {
 				if (stat.size <= pos) return pos;
 				const fd = fs.openSync(filePath, "r");
 				try {
-					const len = stat.size - pos;
-					const buf = Buffer.alloc(len);
+					const len = Math.min(stat.size - pos, 64 * 1024);
+					const buf = Buffer.allocUnsafe(len);
 					fs.readSync(fd, buf, 0, len, pos);
 					const text = buf.toString("utf8");
 					this.broadcastFn(ctx.goalId, {
@@ -4123,7 +4120,7 @@ export class VerificationHarness {
 						s.output = (s.output || "") + text;
 						if (s.output.length > 512 * 1024) s.output = s.output.slice(-512 * 1024);
 					}
-					return stat.size;
+					return pos + len;
 				} finally {
 					try { fs.closeSync(fd); } catch { /* ignore */ }
 				}

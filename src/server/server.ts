@@ -7648,7 +7648,7 @@ async function handleApiRoute(
 
 		let selectionOptions: TextSelectionOptions;
 		try {
-			selectionOptions = parseGateInspectSelectionOptions(url.searchParams);
+			selectionOptions = { ...parseGateInspectSelectionOptions(url.searchParams), includeDiagnostics: true };
 			selectText("", selectionOptions);
 		} catch (err) {
 			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
