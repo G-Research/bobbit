@@ -44,7 +44,7 @@ test.describe("Sidebar session actions", () => {
 		const sessionRow = page.locator(".sidebar-session-active").first();
 		await expect(sessionRow).toBeVisible({ timeout: 10_000 });
 		await sessionRow.hover();
-		const renameBtn = sessionRow.locator("button[title='Modify']");
+		const renameBtn = sessionRow.getByRole("button", { name: "Modify", exact: true });
 		await expect(renameBtn).toBeVisible({ timeout: 5_000 });
 		await renameBtn.click();
 
@@ -88,7 +88,7 @@ test.describe("Sidebar session actions", () => {
 		const sessionRow = page.locator(".sidebar-session-active").first();
 		await expect(sessionRow).toBeVisible({ timeout: 10_000 });
 		await sessionRow.hover();
-		const endTeamBtn = sessionRow.locator("button[title*='End team']");
+		const endTeamBtn = sessionRow.getByRole("button", { name: "End team", exact: true });
 		await expect(endTeamBtn).toBeVisible({ timeout: 5_000 });
 		await endTeamBtn.click();
 

@@ -121,7 +121,13 @@ test.describe("gate verification resume after restart", () => {
 			let nudgeCount = 0;
 			let reviewerNudgeCount = 0;
 			let workerNudgeCount = 0;
-			const matchNudge = (msg: string) => /has finished/i.test(msg);
+			// Match the worker-completion nudge sent by TeamManager.notifyTeamLead
+			// without depending on one exact prose variant. The message currently
+			// uses markdown headings like `Agent finished` or `Task complete`, and
+			// includes the standard `task_list` next step.
+			const matchNudge = (msg: string) =>
+				/(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?(?:Agent finished|Task complete)(?:\*\*)?\s*(?:\n|$)/i.test(msg)
+				&& /\btask_list\b/.test(msg);
 			sm.deliverLiveSteer = async (sid: string, msg: string) => {
 				if (sid === teamLeadId && matchNudge(msg)) {
 					nudgeCount++;

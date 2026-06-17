@@ -140,16 +140,11 @@ test.describe("Sidebar navigation", () => {
 		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
 
 		const goalRow = goalHeader.locator("xpath=ancestor::div[contains(@class, 'group')]").first();
-		await expect.poll(
-			() => goalRow.evaluate((row) => !!row.querySelector("button[title='Goal dashboard']")),
-			{ timeout: 10_000 },
-		).toBe(true);
+		await goalRow.hover();
+		const dashboardButton = goalRow.getByRole("button", { name: "Goal dashboard", exact: true }).first();
+		await expect(dashboardButton).toBeVisible({ timeout: 10_000 });
 		await expect(async () => {
-			await goalRow.evaluate((row) => {
-				const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
-				if (!btn) throw new Error("Dashboard button not found in goal row");
-				btn.click();
-			});
+			await dashboardButton.click();
 			const h = await page.evaluate(() => window.location.hash);
 			expect(h).toContain(goal.id);
 			expect(h).toMatch(/goal/i);
