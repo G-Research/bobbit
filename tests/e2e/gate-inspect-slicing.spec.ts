@@ -3,6 +3,8 @@ import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 
 const VERIFY_LOG_CMD = `node -e "for (let i=1;i<=160;i++) console.log((i===125?'ERROR failed sentinel line '+i:'noise line '+i))"`;
+const RETAINED_DIAGNOSTICS_MARKER = "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER stack frame";
+const FAILED_RETAINED_DIAGNOSTICS_CMD = `node -e "for (let i=1;i<=80;i++) console.log('prelude line '+i+' '+ 'x'.repeat(100)); console.log('${RETAINED_DIAGNOSTICS_MARKER}'); for (let i=81;i<=260;i++) console.log('tail line '+i+' '+ 'y'.repeat(100)); process.exit(1)"`;
 
 function makeWorkflowId(): string {
 	return `gate-inspect-slicing-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -34,6 +36,11 @@ async function createInspectWorkflow(workflowId: string): Promise<void> {
 						{ name: "unit", type: "command", run: VERIFY_LOG_CMD },
 						{ name: "lint", type: "command", run: `node -e "console.log('lint ok line')"` },
 					],
+				},
+				{
+					id: "failed-retained-diagnostics-gate",
+					name: "Failed Retained Diagnostics Gate",
+					verify: [{ name: "failing verbose command", type: "command", run: FAILED_RETAINED_DIAGNOSTICS_CMD }],
 				},
 				{ id: "signals-gate", name: "Signals Gate", content: true },
 			],
@@ -85,6 +92,12 @@ async function waitForSignalVerificationStatus(
 async function signalAndWait(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
 	const signal = await signalGate(goalId, gateId, body);
 	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "passed");
+	return signal;
+}
+
+async function signalAndWaitFailed(goalId: string, gateId: string, body: Record<string, unknown>): Promise<any> {
+	const signal = await signalGate(goalId, gateId, body);
+	await waitForSignalVerificationStatus(goalId, gateId, signal.signal.id, "failed");
 	return signal;
 }
 
@@ -197,6 +210,47 @@ test.describe("gate inspect slicing", () => {
 			expect(sliceStep.output).not.toContain("noise line 127");
 			expect(sliceStep.selection).toMatchObject({ mode: "slice", totalLines: 160, range: { from: 120, to: 126 } });
 			expect(sliceStep.selection.omittedHint).toBeUndefined();
+		});
+	});
+
+	test("retains completed failed command diagnostics for explicit grep and slice inspection", async () => {
+		await withGoal(async (goalId) => {
+			const post = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
+
+			const grepRes = await inspectGate(goalId, "failed-retained-diagnostics-gate", "verification", {
+				mode: "grep",
+				pattern: "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER",
+				context: 1,
+			});
+			expect(grepRes.status).toBe(200);
+			const grepBody = await grepRes.json();
+			expect(grepBody.signalId).toBe(post.signal.id);
+			expect(grepBody.steps).toHaveLength(1);
+			const grepStep = grepBody.steps[0];
+			expect(
+				grepStep.output,
+				"RETAINED_GATE_DIAGNOSTICS_GREP_MISSING: completed failed command inspection must search retained full diagnostics, not only the compact persisted tail",
+			).toContain(RETAINED_DIAGNOSTICS_MARKER);
+			expect(grepStep.output).toContain("prelude line 80");
+			expect(grepStep.output).toContain("tail line 81");
+			expect(grepStep.selection).toMatchObject({ mode: "grep", matchCount: 1, shownMatches: 1 });
+
+			const sliceRes = await inspectGate(goalId, "failed-retained-diagnostics-gate", "verification", {
+				mode: "slice",
+				from: 78,
+				to: 83,
+			});
+			expect(sliceRes.status).toBe(200);
+			const sliceBody = await sliceRes.json();
+			const sliceStep = sliceBody.steps[0];
+			expect(
+				sliceStep.output,
+				"RETAINED_GATE_DIAGNOSTICS_SLICE_MISSING: completed failed command inspection must slice retained full diagnostics, not only the compact persisted tail",
+			).toContain(RETAINED_DIAGNOSTICS_MARKER);
+			expect(sliceStep.output).toMatch(/^80\b.*prelude line 80/m);
+			expect(sliceStep.output).toMatch(/^81\b.*RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER/m);
+			expect(sliceStep.output).toMatch(/^82\b.*tail line 81/m);
+			expect(sliceStep.selection).toMatchObject({ mode: "slice", totalLines: 261, range: { from: 78, to: 83 } });
 		});
 	});
 
