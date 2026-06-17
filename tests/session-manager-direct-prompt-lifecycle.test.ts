@@ -179,6 +179,35 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await steerPromise;
 	});
 
+	it("does not duplicate a pending steer when abort reconciliation wins the rejection race", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const steer = mock.fn(() => pending.promise);
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: mock.fn(async () => ({ success: true })), steer },
+		});
+
+		const steerPromise = manager.deliverLiveSteer(session.id, "recover steer exactly once");
+
+		assert.equal(steer.mock.callCount(), 1);
+		assert.equal(session.promptQueue.length, 0);
+		assert.deepEqual(session.inFlightSteerTexts, ["recover steer exactly once"]);
+
+		manager._reconcileAfterAbort(session);
+		assert.deepEqual(session.inFlightSteerTexts, []);
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.text, "recover steer exactly once");
+		assert.equal(session.promptQueue.peek()?.isSteered, true);
+
+		pending.resolve({ success: false, error: "steer rejected after abort" });
+		await assert.rejects(steerPromise, /steer rejected after abort/);
+
+		const recovered = session.promptQueue.toArray().filter((row: any) => row.text === "recover steer exactly once");
+		assert.equal(recovered.length, 1, "late steer rejection must not duplicate a row already recovered by abort reconciliation");
+		assert.equal(session.promptQueue.length, 1);
+	});
+
 	it("does not replay a queued steered task notification after its prompt has started", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const manager = makeManager();

@@ -2299,14 +2299,21 @@ export class SessionManager {
 				throw new Error((steerResp as any)?.error || "steer rejected");
 			}
 		} catch (err) {
-			// Splice this entry from the ledger — it never reached the SDK so
-			// it shouldn't show up as "in-flight" for reconcile.
+			// Splice this entry from the ledger only if this catch path still owns
+			// it. Abort/restart reconciliation can drain the same ledger while the
+			// steer RPC is pending; in that case the row has already been recovered
+			// exactly once and must not be enqueued again here.
 			const lidx = session.inFlightSteerTexts.lastIndexOf(batchText);
-			if (lidx !== -1) session.inFlightSteerTexts.splice(lidx, 1);
-			for (const r of [...rows].reverse()) {
-				session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
+			if (lidx !== -1) {
+				session.inFlightSteerTexts.splice(lidx, 1);
+				for (const r of [...rows].reverse()) {
+					session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
+				}
+				this.broadcastQueue(session, { includeInFlightSteers: true });
+			} else {
+				this.persistInFlightSteerLedger(session);
+				console.warn(`[session-manager] _dispatchSteer failed for ${session.id} after in-flight ledger was already reconciled; not re-enqueueing duplicate steer`);
 			}
-			this.broadcastQueue(session, { includeInFlightSteers: true });
 			console.error(`[session-manager] _dispatchSteer failed for ${session.id}:`, err);
 			throw err;
 		}
