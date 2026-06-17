@@ -28,13 +28,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { ProviderContribution } from "./pack-contributions.js";
+import type { LifecycleHub, LifecycleHook } from "./lifecycle-hub.js";
 
 /** Delimiters wrapping the per-turn dynamic-context region in the system prompt. */
 export const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
 export const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
 
 /** The per-turn hooks that require the in-process bridge extension. */
-export const TURN_BRIDGE_HOOKS = ["beforePrompt", "beforeCompact"] as const;
+export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = ["beforePrompt", "beforeCompact"];
 
 /** Timeout (ms) for the before-prompt callback — blocking-with-timeout. */
 export const BEFORE_PROMPT_TIMEOUT_MS = 2500;
@@ -72,6 +73,16 @@ export function providersDeclareTurnHooks(
 	providers: ReadonlyArray<Pick<ProviderContribution, "hooks">>,
 ): boolean {
 	return providers.some((p) => p.hooks.some((h) => (TURN_BRIDGE_HOOKS as readonly string[]).includes(h)));
+}
+
+/**
+ * True when the session's project has at least one enabled provider declaring a
+ * per-turn hook (`beforePrompt` / `beforeCompact`). Delegates to the hub so
+ * provider activation filtering stays centralized in the registry. When false,
+ * session setup must NOT generate or push the bridge extension (zero overhead).
+ */
+export function hasProviderBridgeHooks(hub: LifecycleHub, projectId?: string): boolean {
+	return hub.hasProvidersForHooks(projectId, TURN_BRIDGE_HOOKS);
 }
 
 /**
@@ -180,7 +191,7 @@ const bridgeFileCache = new Map<string, string>();
  * dedup, mirroring `writeToolGuardExtension`'s caching and write-if-changed
  * handling.
  */
-export function writeProviderBridgeExtension(sessionId: string): string {
+export function writeProviderBridgeExtension(sessionId: string): string | undefined {
 	const cachedPath = bridgeFileCache.get(sessionId);
 	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
 
@@ -190,21 +201,26 @@ export function writeProviderBridgeExtension(sessionId: string): string {
 		bridgeCodeCache.set(sessionId, code);
 	}
 
-	const baseDir = path.join(bobbitStateDir(), "provider-bridge");
-	const hash = createHash("sha256").update(code).digest("hex").slice(0, 12);
-	const extDir = path.join(baseDir, hash);
-	fs.mkdirSync(extDir, { recursive: true });
-
-	const filePath = path.join(extDir, "bridge.ts");
 	try {
-		const existing = fs.readFileSync(filePath, "utf-8");
-		if (existing === code) {
-			bridgeFileCache.set(sessionId, filePath);
-			return filePath;
-		}
-	} catch { /* file doesn't exist yet */ }
-	fs.writeFileSync(filePath, code, "utf-8");
-	bridgeFileCache.set(sessionId, filePath);
+		const baseDir = path.join(bobbitStateDir(), "provider-bridge");
+		const hash = createHash("sha256").update(code).digest("hex").slice(0, 12);
+		const extDir = path.join(baseDir, hash);
+		fs.mkdirSync(extDir, { recursive: true });
 
-	return filePath;
+		const filePath = path.join(extDir, "bridge.ts");
+		try {
+			const existing = fs.readFileSync(filePath, "utf-8");
+			if (existing === code) {
+				bridgeFileCache.set(sessionId, filePath);
+				return filePath;
+			}
+		} catch { /* file doesn't exist yet */ }
+		fs.writeFileSync(filePath, code, "utf-8");
+		bridgeFileCache.set(sessionId, filePath);
+		return filePath;
+	} catch {
+		// Non-fatal: if the bridge can't be written the turn proceeds without
+		// dynamic context rather than failing session setup.
+		return undefined;
+	}
 }
