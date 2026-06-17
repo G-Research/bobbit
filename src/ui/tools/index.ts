@@ -19,17 +19,6 @@ import { ScreenshotRenderer } from "./renderers/ScreenshotRenderer.js";
 import { WebFetchRenderer } from "./renderers/WebFetchRenderer.js";
 import { WebSearchRenderer } from "./renderers/WebSearchRenderer.js";
 import { WriteRenderer } from "./renderers/WriteRenderer.js";
-// Eagerly-registered nested-goal children renderers. The Team /
-// Task / Gate / Inbox / Review / Proposal / compaction renderers are loaded
-// lazily below (master's bundle-size work) so they need no static import here.
-import { GoalSpawnChildRenderer } from "./renderers/GoalSpawnChildRenderer.js";
-import { GoalPlanProposeRenderer } from "./renderers/GoalPlanProposeRenderer.js";
-import { GoalPlanStatusRenderer } from "./renderers/GoalPlanStatusRenderer.js";
-import { GoalMergeChildRenderer } from "./renderers/GoalMergeChildRenderer.js";
-import { GoalPauseRenderer, GoalResumeRenderer } from "./renderers/GoalPauseResumeRenderer.js";
-import { GoalArchiveChildRenderer } from "./renderers/GoalArchiveChildRenderer.js";
-import { GoalDecideMutationRenderer } from "./renderers/GoalDecideMutationRenderer.js";
-import { GoalSetPolicyRenderer } from "./renderers/GoalSetPolicyRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -172,17 +161,19 @@ for (const name of PROPOSAL_TOOL_NAMES) {
 	});
 }
 
-// Children (nested-goal) tools — each renderer internally checks
-// isSubgoalsEnabled() and falls through to DefaultRenderer when off.
-registerToolRenderer("goal_spawn_child", new GoalSpawnChildRenderer());
-registerToolRenderer("goal_plan_propose", new GoalPlanProposeRenderer());
-registerToolRenderer("goal_plan_status", new GoalPlanStatusRenderer());
-registerToolRenderer("goal_merge_child", new GoalMergeChildRenderer());
-registerToolRenderer("goal_pause", new GoalPauseRenderer());
-registerToolRenderer("goal_resume", new GoalResumeRenderer());
-registerToolRenderer("goal_archive_child", new GoalArchiveChildRenderer());
-registerToolRenderer("goal_decide_mutation", new GoalDecideMutationRenderer());
-registerToolRenderer("goal_set_policy", new GoalSetPolicyRenderer());
+// Children (nested-goal) tools — lazy so rare child-goal cards don't pad the
+// eager app-shell SCC. Each renderer internally checks isSubgoalsEnabled() and
+// falls through to DefaultRenderer when off.
+registerLazyClass("goal_spawn_child", () => import("./renderers/GoalSpawnChildRenderer.js"), "GoalSpawnChildRenderer");
+registerLazyClass("goal_plan_propose", () => import("./renderers/GoalPlanProposeRenderer.js"), "GoalPlanProposeRenderer");
+registerLazyClass("goal_plan_status", () => import("./renderers/GoalPlanStatusRenderer.js"), "GoalPlanStatusRenderer");
+registerLazyClass("goal_merge_child", () => import("./renderers/GoalMergeChildRenderer.js"), "GoalMergeChildRenderer");
+const loadGoalPauseResumeRenderers = () => import("./renderers/GoalPauseResumeRenderer.js");
+registerLazyClass("goal_pause", loadGoalPauseResumeRenderers, "GoalPauseRenderer");
+registerLazyClass("goal_resume", loadGoalPauseResumeRenderers, "GoalResumeRenderer");
+registerLazyClass("goal_archive_child", () => import("./renderers/GoalArchiveChildRenderer.js"), "GoalArchiveChildRenderer");
+registerLazyClass("goal_decide_mutation", () => import("./renderers/GoalDecideMutationRenderer.js"), "GoalDecideMutationRenderer");
+registerLazyClass("goal_set_policy", () => import("./renderers/GoalSetPolicyRenderer.js"), "GoalSetPolicyRenderer");
 
 const defaultRenderer = new DefaultRenderer();
 

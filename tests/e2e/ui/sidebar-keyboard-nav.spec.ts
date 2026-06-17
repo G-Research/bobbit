@@ -54,17 +54,41 @@ async function nextFrame(page: Page): Promise<void> {
 	await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
 }
 
-async function activeNavId(page: Page): Promise<string | null> {
+type ActiveNavSnapshot = {
+	id: string | null;
+	activeIds: string[];
+	fallbackIds: string[];
+	keyboardNavActiveId: string | null;
+	selectedSessionId: string | null;
+	connectingSessionId: string | null;
+	hash: string;
+};
+
+async function activeNavSnapshot(page: Page): Promise<ActiveNavSnapshot> {
 	return page.evaluate(() => {
-		const sel = [
-			"[data-nav-id].sidebar-session-active",
-			"[data-nav-id].sidebar-active",
-			"[data-nav-id][data-nav-active='true']",
-			"[data-nav-id][data-active='true']",
-		].join(", ");
-		const el = document.querySelector(sel);
-		return el ? el.getAttribute("data-nav-id") : null;
+		const idsFor = (selector: string) => Array.from(document.querySelectorAll(selector))
+			.map((el) => el.getAttribute("data-nav-id"))
+			.filter((id): id is string => !!id);
+		const activeIds = idsFor("[data-nav-id][data-nav-active='true']");
+		// Legacy class/attribute fallback is only for diagnostics and pre-contract
+		// renders. The contract-active row is data-nav-active=true; querying class
+		// selectors first can read a stale selected session during route churn.
+		const fallbackIds = idsFor("[data-nav-id].sidebar-session-active, [data-nav-id].sidebar-active, [data-nav-id][data-active='true']");
+		const state = (window as any).__bobbitState ?? (window as any).bobbitState ?? {};
+		return {
+			id: activeIds[0] ?? fallbackIds[0] ?? null,
+			activeIds,
+			fallbackIds,
+			keyboardNavActiveId: state.keyboardNavActiveId ?? null,
+			selectedSessionId: state.selectedSessionId ?? null,
+			connectingSessionId: state.connectingSessionId ?? null,
+			hash: window.location.hash,
+		};
 	});
+}
+
+async function activeNavId(page: Page): Promise<string | null> {
+	return (await activeNavSnapshot(page)).id;
 }
 
 async function navIdsInDomOrder(page: Page): Promise<string[]> {
@@ -120,7 +144,15 @@ async function waitForShortcutsReady(page: Page): Promise<void> {
 }
 
 async function waitForActiveNavId(page: Page, expected: string | null): Promise<void> {
-	await expect.poll(() => activeNavId(page), { timeout: 5_000 }).toBe(expected);
+	const deadline = Date.now() + 10_000;
+	let latest: ActiveNavSnapshot | null = null;
+	while (Date.now() < deadline) {
+		await nextFrame(page);
+		latest = await activeNavSnapshot(page);
+		const contractActiveIsSettled = latest.activeIds.length <= 1;
+		if (contractActiveIsSettled && latest.id === expected) return;
+	}
+	throw new Error(`${MARK}: expected active nav ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)}`);
 }
 
 // Deterministic settle: gate on the concrete presence/absence of the specific
@@ -150,10 +182,11 @@ async function resetNavStart(page: Page): Promise<void> {
 			state.keyboardNavActiveId = null;
 			state.selectedSessionId = null;
 			state.goalDashboardId = null;
+			state.connectingSessionId = null;
+			state.remoteAgent = null;
 		}
 		(window as any).__bobbitRenderApp?.();
 	});
-	await nextFrame(page);
 	await waitForActiveNavId(page, null);
 }
 

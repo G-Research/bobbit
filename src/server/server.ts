@@ -135,6 +135,40 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	return /^[A-Za-z0-9_./-]+$/.test(name);
 }
 
+function collectVisibleSessionWorktreeReferences(projectContextManager: ProjectContextManager): WorktreeReferenceRecord[] {
+	const sessions: WorktreeReferenceRecord[] = [];
+	for (const ctx of projectContextManager.visible()) {
+		sessions.push(...ctx.sessionStore.getAll());
+	}
+	return sessions;
+}
+
+function wireGoalManagerResolvers(
+	ctx: ProjectContext,
+	deps: {
+		sessionManager: SessionManager;
+		projectContextManager: ProjectContextManager;
+		projectRegistry: ProjectRegistry;
+	},
+): void {
+	const projectId = ctx.project.id;
+	ctx.goalManager.setPoolResolver(() => deps.sessionManager.getWorktreePool(projectId));
+	ctx.goalManager.setComponentsResolver((pid: string) => {
+		const c = deps.projectContextManager.getOrCreate(pid);
+		return c ? c.projectConfigStore.getComponents() : [];
+	});
+	ctx.goalManager.setProjectRootResolver((pid: string) => deps.projectRegistry.get(pid)?.rootPath);
+	ctx.goalManager.setWorktreeRootResolver((pid: string) => {
+		const c = deps.projectContextManager.getOrCreate(pid);
+		return c?.projectConfigStore.get("worktree_root") || undefined;
+	});
+	ctx.goalManager.setBaseRefResolver((pid: string) => {
+		const c = deps.projectContextManager.getOrCreate(pid);
+		return c?.projectConfigStore.get("base_ref") || undefined;
+	});
+	ctx.goalManager.setLiveSessionResolver(() => collectVisibleSessionWorktreeReferences(deps.projectContextManager));
+}
+
 // Best-effort guard for add-time `base_ref` pinning: a detected `origin/<branch>`
 // must exist in EVERY configured component repo before it is persisted — mirroring
 // the save-time validator (which rejects a ref missing in any component). Without
@@ -269,8 +303,10 @@ import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
+import type { ProjectContext } from "./agent/project-context.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
+import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
@@ -1050,6 +1086,7 @@ export function createGateway(config: GatewayConfig) {
 			ctx.goalStore.bumpGeneration();
 		};
 	}
+
 	const builtinConfigProvider = new BuiltinConfigProvider();
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
 	// Direct store lookups (roleStore.get()) transparently fall back to
@@ -2123,9 +2160,9 @@ export function createGateway(config: GatewayConfig) {
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
 						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
-						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; repoWorktrees?: Record<string, string> }> = [];
+						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
+						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
@@ -2137,13 +2174,13 @@ export function createGateway(config: GatewayConfig) {
 							});
 							for (const g of ctx.goalStore.getAll()) {
 								sweepGoals.push({
-									id: g.id, branch: g.branch, worktreePath: g.worktreePath, archived: !!g.archived,
+									id: g.id, branch: g.branch, worktreePath: g.worktreePath, cwd: g.cwd, archived: !!g.archived,
 									repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
 								});
 							}
 							for (const s of ctx.sessionStore.getAll()) {
 								sweepSessions.push({
-									id: s.id, branch: s.branch, worktreePath: s.worktreePath, archived: !!s.archived,
+									id: s.id, branch: s.branch, worktreePath: s.worktreePath, cwd: s.cwd, archived: !!s.archived,
 									repoWorktrees: s.repoWorktrees,
 								});
 							}
@@ -2152,6 +2189,7 @@ export function createGateway(config: GatewayConfig) {
 									id: st.id,
 									branch: st.branch,
 									worktreePath: st.worktreePath,
+									cwd: st.cwd,
 									repoWorktrees: st.repoWorktrees,
 								});
 							}
@@ -2222,23 +2260,7 @@ export function createGateway(config: GatewayConfig) {
 			// resolve components / project root for multi-repo goal creation.
 			// Hidden contexts (synthetic system project) have no goals to wire.
 			for (const ctx of projectContextManager.visible()) {
-				const projectId = ctx.project.id;
-				ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(projectId));
-				ctx.goalManager.setComponentsResolver((pid: string) => {
-					const c = projectContextManager.getOrCreate(pid);
-					return c ? c.projectConfigStore.getComponents() : [];
-				});
-				ctx.goalManager.setProjectRootResolver((pid: string) => {
-					return projectRegistry.get(pid)?.rootPath;
-				});
-				ctx.goalManager.setWorktreeRootResolver((pid: string) => {
-					const c = projectContextManager.getOrCreate(pid);
-					return c?.projectConfigStore.get("worktree_root") || undefined;
-				});
-				ctx.goalManager.setBaseRefResolver((pid: string) => {
-					const c = projectContextManager.getOrCreate(pid);
-					return c?.projectConfigStore.get("base_ref") || undefined;
-				});
+				wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -3259,20 +3281,7 @@ async function handleApiRoute(
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
 						};
-						ctx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(existing.id));
-						ctx.goalManager.setComponentsResolver((pid: string) => {
-							const c = projectContextManager.getOrCreate(pid);
-							return c ? c.projectConfigStore.getComponents() : [];
-						});
-						ctx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
-						ctx.goalManager.setWorktreeRootResolver((pid: string) => {
-							const c = projectContextManager.getOrCreate(pid);
-							return c?.projectConfigStore.get("worktree_root") || undefined;
-						});
-						ctx.goalManager.setBaseRefResolver((pid: string) => {
-							const c = projectContextManager.getOrCreate(pid);
-							return c?.projectConfigStore.get("base_ref") || undefined;
-						});
+						wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
 					}
 					json(existing, 200);
 					return;
@@ -3415,20 +3424,7 @@ async function handleApiRoute(
 			}
 			// Wire the goal-manager pool resolver for the new project (Phase 3 — goals via pool).
 			if (newCtx) {
-				newCtx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(project.id));
-				newCtx.goalManager.setComponentsResolver((pid: string) => {
-					const c = projectContextManager.getOrCreate(pid);
-					return c ? c.projectConfigStore.getComponents() : [];
-				});
-				newCtx.goalManager.setProjectRootResolver((pid: string) => projectRegistry.get(pid)?.rootPath);
-				newCtx.goalManager.setWorktreeRootResolver((pid: string) => {
-					const c = projectContextManager.getOrCreate(pid);
-					return c?.projectConfigStore.get("worktree_root") || undefined;
-				});
-				newCtx.goalManager.setBaseRefResolver((pid: string) => {
-					const c = projectContextManager.getOrCreate(pid);
-					return c?.projectConfigStore.get("base_ref") || undefined;
-				});
+				wireGoalManagerResolvers(newCtx, { sessionManager, projectContextManager, projectRegistry });
 			}
 			json(project, 201);
 		} catch (err: any) {
@@ -4236,6 +4232,45 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/restart — restart a live session's agent process by id.
+	const restartMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
+	if (restartMatch && req.method === "POST") {
+		let id: string;
+		try {
+			id = decodeURIComponent(restartMatch[1]);
+		} catch {
+			json({ error: "Session not found", code: "SESSION_NOT_FOUND" }, 404);
+			return;
+		}
+
+		const session = sessionManager.getSession(id);
+		const persisted = session ? sessionManager.getSessionStore(session.projectId).get(session.id) : undefined;
+		if (!session || session.status === "terminated" || persisted?.archived) {
+			json({ error: "Session not found", code: "SESSION_NOT_FOUND" }, 404);
+			return;
+		}
+		if (session.readOnly || session.nonInteractive || persisted?.readOnly || persisted?.nonInteractive) {
+			json({ error: "Session cannot be restarted", code: "SESSION_NOT_RESTARTABLE" }, 403);
+			return;
+		}
+
+		const body = await readBody(req).catch(() => null);
+		const status = String(session.status);
+		if ((status === "busy" || status === "streaming" || session.isCompacting) && body?.force !== true) {
+			json({ error: "Session is busy; retry with force to restart", code: "SESSION_BUSY" }, 409);
+			return;
+		}
+
+		try {
+			await sessionManager.restartAgent(id);
+			json({ ok: true, sessionId: id });
+		} catch (err: any) {
+			const code = typeof err?.code === "string" && err.code ? err.code : "RESTART_ERROR";
+			json({ error: err instanceof Error ? err.message : String(err), code }, 500);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id (exact match — not /api/sessions/:id/output etc.)
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
@@ -4511,6 +4546,7 @@ async function handleApiRoute(
 				provCtx.gateStore.onStatusChange = () => {
 					provCtx.goalStore.bumpGeneration();
 				};
+				wireGoalManagerResolvers(provCtx, { sessionManager, projectContextManager, projectRegistry });
 			}
 		}
 
@@ -8212,17 +8248,24 @@ async function handleApiRoute(
 			});
 		}
 
-		// Fire-and-forget verification — resolve primary branch dynamically so
-		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
-		// hardcoded "master". See docs/goals-workflows-tasks.md — Gate baselines.
+		// Fire-and-forget verification — project `base_ref` is the configured
+		// integration target; when unset, fall back to the repo's detected primary.
+		// `parseBaseRef` normalizes remote refs like `origin/master` to `master`
+		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
 		const branchContainer = goalBranchContainer(goal);
-		const primary = await detectPrimaryBranch(branchContainer).catch(() => "master");
+		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
+		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
 			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
-		json({ signal: { id: signal.id, gateId, goalId, status: "running", steps: verifySteps } }, 201);
+		const signalResponse = { id: signal.id, gateId, goalId, status: "running", steps: verifySteps };
+		const response: { signal: typeof signalResponse; agentReminder?: string } = { signal: signalResponse };
+		if (verificationHarness.getActiveVerification(signal.id)?.overallStatus === "running") {
+			response.agentReminder = "Gate signal accepted. Verification is running asynchronously. Do not poll with `gate_status` or `gate_inspect`. Go idle now and wait for the server to deliver verification results or further instructions.";
+		}
+		json(response, 201);
 		return;
 	}
 
@@ -10202,14 +10245,27 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
-			// Auto-inject parentGoalId for team-lead sessions proposing a goal
+			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
+			// but only when the current goal is actually allowed to spawn a child.
+			// If subgoals are disabled globally or for this parent, an omitted
+			// parentGoalId must remain omitted so accepting the proposal creates a
+			// top-level goal instead of a hidden invalid child proposal.
 			let enrichedArgs = args as Record<string, unknown>;
 			if (proposalType === "goal") {
 				const sess = sessionManager.getSession(sessionId);
 				if (sess?.role === "team-lead" && sess.teamGoalId) {
 					const existingParent = enrichedArgs.parentGoalId;
 					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
-						enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+						const parent = getGoalAcrossProjects(sess.teamGoalId);
+						const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
+						const canSpawnImplicitChild = !!parent && checkCanSpawnChild(
+							parent,
+							prefs,
+							(id) => getGoalAcrossProjects(id),
+						).ok;
+						if (canSpawnImplicitChild) {
+							enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+						}
 					}
 				}
 			}
@@ -10237,6 +10293,22 @@ async function handleApiRoute(
 					json(parsed, 400);
 					return;
 				}
+				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
+				await openSidePanelWorkspaceTab({
+					sessionManager,
+					readBody,
+					broadcastToSession: _broadcastToSession,
+					packContributionRegistry,
+				}, sessionId, {
+					id: `proposal:${proposalType}`,
+					kind: "proposal",
+					title: `${proposalLabel} Proposal`,
+					label: proposalLabel,
+					source: { type: "proposal", sessionId, proposalType },
+					updatedAt: Date.now(),
+				}, { focus: true, placeAfterActive: true }).catch((err) => {
+					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
+				});
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -10274,6 +10346,22 @@ async function handleApiRoute(
 					json(result, status);
 					return;
 				}
+				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
+				await openSidePanelWorkspaceTab({
+					sessionManager,
+					readBody,
+					broadcastToSession: _broadcastToSession,
+					packContributionRegistry,
+				}, sessionId, {
+					id: `proposal:${proposalType}`,
+					kind: "proposal",
+					title: `${proposalLabel} Proposal`,
+					label: proposalLabel,
+					source: { type: "proposal", sessionId, proposalType },
+					updatedAt: Date.now(),
+				}, { focus: true, placeAfterActive: true }).catch((err) => {
+					console.warn(`[proposal/restore] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
+				});
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",

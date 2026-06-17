@@ -142,6 +142,15 @@ export function markProposalDismissed(
 	}
 }
 
+export function hasProposalDismissalRecord(sessionId: string, type: ProposalType): boolean {
+	migrateLegacyDismissalKeyIfGoal(sessionId, type);
+	try {
+		return localStorage.getItem(dismissalKey(sessionId, type)) !== null;
+	} catch {
+		return false;
+	}
+}
+
 export function clearProposalDismissed(sessionId: string, type: ProposalType): void {
 	migrateLegacyDismissalKeyIfGoal(sessionId, type);
 	try {

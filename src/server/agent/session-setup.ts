@@ -42,6 +42,7 @@ import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
@@ -235,6 +236,7 @@ export interface PipelineContext {
 	store: SessionStore;
 	searchIndex: SearchService;
 	sessions: Map<string, SessionInfo>;
+	listPersistedSessionsForWorktreeGuard?: () => WorktreeReferenceRecord[];
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
@@ -1333,7 +1335,12 @@ export function handleSetupFailure(
 
 	// 4. Background worktree cleanup (slow, non-blocking)
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
-		cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
+		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
+		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
+			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
+		} else {
+			console.log(`[session-setup] Skipping setup-failure cleanup for shared worktree ${plan.worktreePath} (session ${session.id})`);
+		}
 	}
 
 	// 5. Clean up sandbox token for this session

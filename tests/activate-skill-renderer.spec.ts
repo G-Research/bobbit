@@ -16,9 +16,26 @@
  * esbuild-on-demand bundle).
  */
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
+import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
+
+async function renameWithRetry(src: string, dest: string): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	let lastErr: unknown;
+	while (Date.now() < deadline) {
+		try {
+			fs.renameSync(src, dest);
+			return;
+		} catch (err) {
+			lastErr = err;
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw err;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+	throw lastErr;
+}
 
 const FIXTURE = path.resolve("tests/fixtures/activate-skill-renderer.html");
 const BUNDLE = path.resolve("tests/fixtures/activate-skill-renderer-bundle.js");
@@ -26,7 +43,7 @@ const ENTRY = path.resolve("tests/fixtures/activate-skill-renderer-entry.ts");
 const RENDERER_SRC = path.resolve("src/ui/tools/renderers/ActivateSkillRenderer.ts");
 const CHIP_SRC = path.resolve("src/ui/components/SkillChip.ts");
 
-test.beforeAll(() => {
+test.beforeAll(async () => {
 	const entryMtime = Math.max(
 		fs.statSync(ENTRY).mtimeMs,
 		fs.statSync(RENDERER_SRC).mtimeMs,
@@ -35,17 +52,29 @@ test.beforeAll(() => {
 	const bundleExists = fs.existsSync(BUNDLE);
 	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
 	if (!bundleExists || bundleStale) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
-				"--define:import.meta.url='\"http://localhost/\"'",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
+		// With fullyParallel enabled, multiple workers can run this file's
+		// beforeAll concurrently. esbuild's outfile write is not atomic
+		// (open→truncate→stream→close), so a sibling worker can load a
+		// partial bundle and wait forever for `window.__ready`. Build to a
+		// per-worker temp path, then atomically replace the shared bundle.
+		const tmpDir = fs.mkdtempSync(path.join(path.dirname(BUNDLE), ".bundle-tmp-"));
+		const tmpOut = path.join(tmpDir, path.basename(BUNDLE));
+		try {
+			await esbuild.build({
+				entryPoints: [ENTRY],
+				bundle: true,
+				format: "iife",
+				target: "es2022",
+				outfile: tmpOut,
+				tsconfig: "tsconfig.web.json",
+				alias: { "pdfjs-dist": "./tests/fixtures/empty-shim" },
+				define: { "import.meta.url": '"http://localhost/"' },
+				loader: { ".ts": "ts" },
+			});
+			await renameWithRetry(tmpOut, BUNDLE);
+		} finally {
+			try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+		}
 	}
 });
 

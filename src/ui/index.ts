@@ -25,11 +25,10 @@ export type { AttachmentTile } from "./components/AttachmentTile.js";
 // `AskUserChoicesRenderer` via `app/lazy-widgets.ts`.
 export type { AskUserChoicesWidget } from "./components/AskUserChoicesWidget.js";
 export type { ConsoleBlock } from "./components/ConsoleBlock.js";
-// `isGitDiff` is a pure function (used by BashRenderer in entry); the
-// class re-export is type-only to keep the customElement registration
-// side effect out of entry. BashRenderer's value import still evaluates
-// the module and registers `<diff-block>` for inline diff rendering.
-export { isGitDiff } from "./components/DiffBlock.js";
+// `isGitDiff` is a pure function (used by BashRenderer in entry); keep it in a
+// side-effect-free helper so importing the UI barrel does not register
+// `<diff-block>` or pull the full diff viewer into the app-shell SCC.
+export { isGitDiff } from "./utils/diff-utils.js";
 export type { DiffBlock } from "./components/DiffBlock.js";
 export type { ErrorMessage } from "./components/ErrorMessage.js";
 export type { ErrorDetails } from "./components/ErrorDetails.js";

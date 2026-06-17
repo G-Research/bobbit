@@ -6,7 +6,7 @@
  *          harness (so local stale `master` no longer produces false positives).
  *   RC2 \u2014 Pre-implementation design gates receive NO git diff/log
  *          instructions in their review prompt; implementation gates use
- *          `origin/<primary>` baselines.
+ *          `origin/<base>` baselines.
  *
  * See docs/goals-workflows-tasks.md \u2014 "Gate verification baselines".
  */
@@ -48,6 +48,25 @@ test("implementation gate: prompt contains origin/<primary> diff instructions", 
 	assert.match(prompt, /git diff origin\/main\.\.\.HEAD/);
 	// Must not have a bare-local `git diff main...HEAD` (without `origin/` prefix).
 	assert.doesNotMatch(prompt, /git diff main\.\.\.HEAD/);
+});
+
+test("implementation gate: review prompt baselines use configured baseBranch over legacy master", async () => {
+	const gate = { id: "implementation", depends_on: ["design-doc"] };
+	const prompt = await buildReviewPrompt(
+		{ promptTemplate: "role\n{{REVIEW_CONTEXT}}", name: "reviewer" },
+		{ name: "Code quality", prompt: "Review code." },
+		"/tmp/cwd",
+		{ branch: "goal/x", baseBranch: "develop", master: "master", cwd: "/tmp/cwd", commit: "abc", goal_spec: "" },
+		undefined, undefined, "spec", new Map(),
+		gate,
+	);
+
+	assert.match(prompt, /git diff --stat origin\/develop\.\.\.HEAD/);
+	assert.match(prompt, /git diff origin\/develop\.\.\.HEAD/);
+	assert.match(prompt, /git log --oneline origin\/develop\.\.HEAD/);
+	assert.match(prompt, /Base branch: develop/);
+	assert.match(prompt, /Baseline: origin\/develop \(sha unresolved\)/);
+	assert.doesNotMatch(prompt, /origin\/master/);
 });
 
 test("isPreImplementationGate: classification rules", () => {

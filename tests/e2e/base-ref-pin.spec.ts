@@ -83,6 +83,11 @@ async function getConfig(id: string): Promise<any> {
 
 test.beforeAll(() => { token = readE2EToken(); });
 
+// Remote/default-branch detection shells out to git and creates several repos.
+// Serializing this file avoids fully-parallel Windows FS/process contention that
+// otherwise causes gateway fixture retries in broad E2E runs.
+test.describe.configure({ mode: "serial" });
+
 test.describe("base_ref add-time pinning", () => {
 	test("single-repo with live origin/HEAD pins concrete origin/<branch>", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-pin-"));

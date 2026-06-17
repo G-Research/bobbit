@@ -101,10 +101,13 @@ export async function createTestGateway(opts?: {
 
 	process.env.BOBBIT_DIR = dir;
 	process.env.BOBBIT_SKIP_MCP = "1";
+	process.env.NODE_ENV = "test";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
 	process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 	process.env.BOBBIT_NO_OPEN = "1";
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
+	process.env.BOBBIT_TEST_NO_REMOTE = "1";
+	process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 
 	const { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway } = await getServerModules();
 

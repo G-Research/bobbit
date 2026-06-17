@@ -180,7 +180,7 @@ workflows:
 - `component:` referencing an unknown component name
 - a `(component, command)` pair where the component has no such command name
 
-The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{goal_title}}`, etc. — `{{master}}` is still accepted as a legacy alias) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
+The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{baseBranch}}`, `{{goal_spec}}`, `{{goal_title}}`, etc. — `{{master}}` is still accepted as a legacy alias) are necessary for workflows to function and are substituted by the gate runner before each step executes. `{{baseBranch}}` is a built-in bare branch name derived from configured `base_ref` (`origin/master` → `master`), falling back to the detected primary branch when unset. `{{project.*}}` is unsupported in verification templates; use structural `{ component, command }` references instead of project-variable command lookups.
 
 #### Workflow editor authoring
 
@@ -346,7 +346,7 @@ Each signal is recorded in the gate's signal history with a unique ID, timestamp
 
 Gates can define automated verification that runs when signaled:
 
-- **Command** — runs shell commands, checks exit codes (e.g. `npm run check`)
+- **Command** — runs shell commands and checks exit codes (e.g. `npm run check`). Command steps default to a 300s timeout unless the workflow sets `timeout`; component-linked `command: unit` steps default to 1200s because the full unit suite can exceed the generic shell default under contention.
 - **LLM review** — spawns a sub-agent for qualitative review against a prompt
 - **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
 - **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
@@ -395,6 +395,16 @@ Typical triage flow: `gate_status` reports a failure and names the culprit in `f
 
 The UI uses the same explicit-status model. Gate status cards, the `gate_inspect` renderer, and signaled gate live cards reconcile WebSocket events, active-verification fetches, and persisted signal rows without flickering back to placeholder failed or `0ms` states while verification is still running.
 
+#### Verification template semantics
+
+Verification `run:` strings and `prompt:` bodies use a small runtime template scope:
+
+- `{{baseBranch}}` is a built-in and resolves to the bare integration branch from the project's configured `base_ref` (`origin/master` → `master`). If `base_ref` is unset, it falls back to the detected primary branch.
+- `{{master}}` is a legacy alias for the detected primary branch. It does not honor `base_ref`; prefer `{{baseBranch}}` in new workflows.
+- `{{project.*}}` is unsupported in verification templates. Component commands should use `{ component, command }`; QA settings should live under the selected component's `config:` map.
+
+Unresolved optional metadata can still make an optional command step skip. That skip behavior must not apply to required Ready-to-Merge built-ins: a required Ready-to-Merge check that references `{{branch}}`, `{{baseBranch}}`, or `{{master}}` should execute when the project has a resolvable branch, or fail loudly if the built-in cannot be resolved. It must not pass solely because the template remained unresolved.
+
 #### Gate verification baselines
 
 A gate's **baseline** is the git reference the reviewer diffs `HEAD` against when deciding what to comment on. Choosing the right baseline matters: too broad and the reviewer critiques upstream work that another agent already merged; too narrow and real goal-branch changes slip through unreviewed. It is also the single biggest source of false-positive "branch doesn't match design doc" findings when it drifts.
@@ -413,7 +423,7 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 
 **Primary branch detection:** the harness calls `detectPrimaryBranch(cwd)` from `src/server/skills/git.ts`, which uses `git symbolic-ref refs/remotes/origin/HEAD` with a `master` → `main` fallback. Never hardcode `"master"` in new gate logic — always resolve via this helper. The resolved baseline (e.g. `origin/main@abc1234`) is printed into every review prompt's "Signal Context" so failures are trivial to diagnose.
 
-**Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — the bare branch name derived from `base_ref` (or `detectPrimaryBranch()` when unset). `{{master}}` is intentionally unchanged and continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+**Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — a built-in bare branch name derived from `base_ref` (for example, `origin/master` → `master`, `origin/develop` → `develop`) or from `detectPrimaryBranch()` when unset. `{{master}}` is a legacy alias that continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
 
 **Branch publication safety:** Ready-to-Merge templates publish the goal branch with an explicit destination refspec:
 
@@ -431,11 +441,11 @@ Do not use bare forms such as `git push origin {{branch}}` in verification. Bare
 
 #### Phased verification
 
-Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within each phase, steps run in **parallel** (preserving pre-phase behavior for phase-0 steps).
+Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within a phase, command steps are **serialized** while non-command steps still run in parallel. This prevents the harness from launching multiple full build/test commands against the same worktree at once, which is especially expensive on Windows under concurrent verification load.
 
 If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with `skipped: true` on `GateSignalStep` and output `"Skipped — earlier phase failed"`. The `skipped` flag persists to disk so the UI can distinguish skipped steps from passed/failed ones after page reload.
 
-This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
+This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed, while also avoiding command-suite contention inside phase 0. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
 
 ```yaml
 verify:
@@ -456,7 +466,7 @@ verify:
       Review for correctness, completeness, and code quality.
 ```
 
-**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work — all steps execute in parallel as before.
+**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work without migration. Non-command steps keep the legacy parallel behavior; command steps in the same phase now serialize as a contention-control measure.
 
 **WebSocket events:** The server broadcasts `gate_verification_phase_started` before each phase begins, including the phase number and which step indices belong to it. Step-level events (`gate_verification_step_started`, `gate_verification_step_complete`) include an optional `phase` field. The goal dashboard uses these to show phase progression in real time.
 

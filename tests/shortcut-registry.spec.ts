@@ -333,7 +333,7 @@ test.describe("Shortcut Registry", () => {
 		expect(results.caseInsensitive).toBe(true);
 	});
 
-	test("matchesBinding uses metaKey on Mac", async ({ page }) => {
+	test("matchesBinding accepts metaKey and physical Ctrl on Mac", async ({ page }) => {
 		const result = await page.evaluate(() => {
 			const r = (window as any).__registry;
 			r.setMac(true);
@@ -343,16 +343,16 @@ test.describe("Shortcut Registry", () => {
 				{ key: "t", ctrlKey: false, metaKey: true, shiftKey: false, altKey: false },
 				binding,
 			);
-			const ctrlNoMatch = r.matchesBinding(
+			const ctrlMatch = r.matchesBinding(
 				{ key: "t", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false },
 				binding,
 			);
 
 			r.setMac(false);
-			return { metaMatch, ctrlNoMatch };
+			return { metaMatch, ctrlMatch };
 		});
 		expect(result.metaMatch).toBe(true);
-		expect(result.ctrlNoMatch).toBe(false);
+		expect(result.ctrlMatch).toBe(true);
 	});
 
 	// ========================================================================

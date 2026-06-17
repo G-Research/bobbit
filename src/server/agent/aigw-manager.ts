@@ -473,7 +473,21 @@ export function applyPiOfflineEnv(hasInternet: boolean): void {
  * well-known LLM API endpoints. Returns true if any responds.
  * Called once — not repeated after startup.
  */
+function externalNetworkBlockedForTests(): boolean {
+	return process.env.BOBBIT_TEST_NO_EXTERNAL === "1" || process.env.BOBBIT_E2E === "1";
+}
+
+function isLocalHttpUrl(raw: string): boolean {
+	try {
+		const host = new URL(raw).hostname.toLowerCase();
+		return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
+	} catch {
+		return false;
+	}
+}
+
 export async function checkInternetAvailable(): Promise<boolean> {
+	if (externalNetworkBlockedForTests()) return false;
 	const targets = [
 		"https://api.anthropic.com",
 		"https://api.openai.com",
@@ -693,6 +707,9 @@ export function proxyRequest(
  */
 export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
 	const url = baseUrl.replace(/\/+$/, "");
+	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(url)) {
+		throw new Error(`External AI Gateway discovery is disabled in tests: ${url}`);
+	}
 	const modelsUrl = url.endsWith("/v1") ? `${url}/models` : `${url}/v1/models`;
 
 	const data = await httpGet(modelsUrl);

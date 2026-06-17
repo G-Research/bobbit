@@ -104,6 +104,8 @@ export interface PersistedSession {
 	preview?: boolean;
 	/** Persisted prompt queue */
 	messageQueue?: QueuedMessage[];
+	/** Steer texts accepted for dispatch but not yet echoed as user messages. */
+	inFlightSteerTexts?: string[];
 	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role") */
 	drafts?: Record<string, unknown>;
 	/** Goal ID this session is re-attempting (for goal assistant sessions) */
@@ -167,6 +169,7 @@ export type UpdatableSessionFields = Pick<
 	| "accessory"
 	| "preview"
 	| "messageQueue"
+	| "inFlightSteerTexts"
 	| "archived"
 	| "archivedAt"
 	| "repoPath"
@@ -535,6 +538,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId",
+		"inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
 

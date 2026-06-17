@@ -1595,6 +1595,34 @@ export function patchSession(sessionId: string, updates: Record<string, unknown>
 	}).catch(() => { /* best-effort */ });
 }
 
+export async function refreshAgentSession(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
+	await flashSidebarToast("Refreshing agent…");
+	let ok = false;
+	try {
+		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/restart`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ force: opts?.force === true }),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed to refresh agent: ${res.status}`);
+		ok = true;
+		await flashSidebarToast("Agent refreshed");
+		return true;
+	} catch (err) {
+		const { message } = errorDetails(err);
+		console.error("[refresh-agent] Failed:", err);
+		await flashSidebarToast(`Refresh agent failed: ${message}`);
+		return false;
+	} finally {
+		try {
+			await refreshSessions();
+		} catch (err) {
+			console.warn("[refresh-agent] Session refresh failed after restart", err);
+		}
+		if (!ok) renderApp();
+	}
+}
+
 // ============================================================================
 // TEAM API
 // ============================================================================

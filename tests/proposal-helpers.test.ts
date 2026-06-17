@@ -70,6 +70,7 @@ const helpers = await import("../src/app/proposal-helpers.ts");
 const {
 	isProposalDismissed,
 	markProposalDismissed,
+	hasProposalDismissalRecord,
 	clearProposalDismissed,
 	saveProposalDraft,
 	loadProposalDraft,
@@ -106,7 +107,9 @@ describe("proposal-helpers — dismissal fingerprint", () => {
 		const fields = { a: 1, b: "two" };
 		for (const t of TYPES) {
 			assert.equal(isProposalDismissed(sid, t, fields), false, `${t}: clean state`);
+			assert.equal(hasProposalDismissalRecord(sid, t), false, `${t}: no marker yet`);
 			markProposalDismissed(sid, t, fields);
+			assert.equal(hasProposalDismissalRecord(sid, t), true, `${t}: marker exists after mark`);
 			assert.equal(isProposalDismissed(sid, t, fields), true, `${t}: marked sticks`);
 			assert.equal(
 				isProposalDismissed(sid, t, { a: 1, b: "different" }),
@@ -114,6 +117,7 @@ describe("proposal-helpers — dismissal fingerprint", () => {
 				`${t}: different fields don't match`,
 			);
 			clearProposalDismissed(sid, t);
+			assert.equal(hasProposalDismissalRecord(sid, t), false, `${t}: marker removed by clear`);
 			assert.equal(isProposalDismissed(sid, t, fields), false, `${t}: cleared`);
 		}
 	});

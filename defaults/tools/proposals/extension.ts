@@ -122,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 			cwd: Type.Optional(Type.String({ description: "Working directory override." })),
 			workflow: Type.Optional(Type.String({ description: "Workflow ID, e.g. general, feature, bug-fix." })),
 			options: Type.Optional(Type.String({ description: "Comma-separated optional step names." })),
-			parentGoalId: Type.Optional(Type.String({ description: "Parent goal ID for a subgoal; omit for top-level (team-lead auto-fills)." })),
+			parentGoalId: Type.Optional(Type.String({ description: "Subgoal parent ID; team leads auto-fill only when child spawn is allowed." })),
 			subgoalsAllowed: Type.Optional(Type.Boolean({ description: "Allow the team-lead to spawn sub-goals. Default off." })),
 			maxNestingDepth: Type.Optional(Type.Integer({ minimum: 1, description: "Per-goal sub-goal nesting cap; clamped to the global ceiling." })),
 			divergencePolicy: Type.Optional(Type.Union([Type.Literal("strict"), Type.Literal("balanced"), Type.Literal("autonomous")], { description: "Root-only plan-change autonomy (default balanced)." })),

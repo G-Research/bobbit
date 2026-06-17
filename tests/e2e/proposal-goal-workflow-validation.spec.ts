@@ -26,13 +26,30 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession, rawApiFetch, readE2EToken } from "./e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, rawApiFetch, readE2EToken, startTeam, teardownTeam } from "./e2e-setup.js";
 
 async function seedGoal(sid: string, args: Record<string, unknown>): Promise<Response> {
 	return apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
 		method: "POST",
 		body: JSON.stringify({ args }),
 	});
+}
+
+async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
+	const resp = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ subgoalsEnabled: enabled }),
+	});
+	expect(resp.status).toBe(200);
+}
+
+async function persistedGoalProposalFields(sid: string): Promise<Record<string, unknown>> {
+	const resp = await apiFetch(`/api/sessions/${sid}/proposals`);
+	expect(resp.status).toBe(200);
+	const body = await resp.json() as { proposals?: Array<{ proposalType?: string; fields?: Record<string, unknown> }> };
+	const proposal = body.proposals?.find(p => p.proposalType === "goal");
+	expect(proposal?.fields).toBeTruthy();
+	return proposal!.fields!;
 }
 
 test.describe("goal proposal — workflow validation @smoke", () => {
@@ -45,6 +62,89 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 
 	test.afterAll(async () => {
 		await deleteSession(sid);
+	});
+
+	test("team-lead goal proposal auto-fills parent only when a child can be spawned", async () => {
+		await setSubgoalsEnabled(true);
+		let parentId: string | undefined;
+		try {
+			const parent = await createGoal({
+				title: `proposal-parent-${Date.now()}`,
+				workflowId: "feature",
+				autoStartTeam: false,
+			});
+			parentId = parent.id;
+			const leadId = await startTeam(parentId);
+
+			const seeded = await seedGoal(leadId, {
+				title: "Implicit Child",
+				workflow: "feature",
+				spec: "Team-lead proposal with a spawn-capable parent should become an implicit child proposal.",
+			});
+			expect(seeded.status).toBe(200);
+			const fields = await persistedGoalProposalFields(leadId);
+			expect(fields.parentGoalId).toBe(parentId);
+		} finally {
+			if (parentId) await teardownTeam(parentId).catch(() => {});
+			if (parentId) await deleteGoal(parentId).catch(() => {});
+			await setSubgoalsEnabled(true);
+		}
+	});
+
+	test("team-lead goal proposal stays top-level when parent disallows subgoals", async () => {
+		await setSubgoalsEnabled(true);
+		let parentId: string | undefined;
+		try {
+			const parent = await createGoal({
+				title: `proposal-parent-no-subgoals-${Date.now()}`,
+				workflowId: "feature",
+				autoStartTeam: false,
+				subgoalsAllowed: false,
+			});
+			parentId = parent.id;
+			const leadId = await startTeam(parentId);
+
+			const seeded = await seedGoal(leadId, {
+				title: "Implicit Root",
+				workflow: "feature",
+				spec: "Team-lead proposal with subgoals disabled on the parent should remain a top-level goal proposal.",
+			});
+			expect(seeded.status).toBe(200);
+			const fields = await persistedGoalProposalFields(leadId);
+			expect(fields.parentGoalId).toBeUndefined();
+		} finally {
+			if (parentId) await teardownTeam(parentId).catch(() => {});
+			if (parentId) await deleteGoal(parentId).catch(() => {});
+			await setSubgoalsEnabled(true);
+		}
+	});
+
+	test("team-lead goal proposal stays top-level when system subgoals are disabled", async () => {
+		await setSubgoalsEnabled(true);
+		let parentId: string | undefined;
+		try {
+			const parent = await createGoal({
+				title: `proposal-parent-system-off-${Date.now()}`,
+				workflowId: "feature",
+				autoStartTeam: false,
+			});
+			parentId = parent.id;
+			const leadId = await startTeam(parentId);
+			await setSubgoalsEnabled(false);
+
+			const seeded = await seedGoal(leadId, {
+				title: "Implicit Root Off",
+				workflow: "feature",
+				spec: "Team-lead proposal with system subgoals disabled should remain a top-level goal proposal.",
+			});
+			expect(seeded.status).toBe(200);
+			const fields = await persistedGoalProposalFields(leadId);
+			expect(fields.parentGoalId).toBeUndefined();
+		} finally {
+			await setSubgoalsEnabled(true);
+			if (parentId) await teardownTeam(parentId).catch(() => {});
+			if (parentId) await deleteGoal(parentId).catch(() => {});
+		}
 	});
 
 	test("unknown workflow id → 400 UNKNOWN_WORKFLOW listing available ids", async () => {
