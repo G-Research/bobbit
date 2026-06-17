@@ -23,6 +23,36 @@
 	color: var(--foreground);
 }
 
+.market-research-preview-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.625rem;
+	width: 100%;
+	padding: 0.75rem 1rem;
+	border-bottom: 1px solid color-mix(in oklch, var(--warning, var(--chart-4)) 35%, var(--border));
+	background: color-mix(in oklch, var(--warning, var(--chart-4)) 10%, var(--card));
+	color: var(--foreground);
+}
+
+.market-research-preview-icon {
+	color: var(--warning, var(--chart-4));
+	flex-shrink: 0;
+	margin-top: 0.0625rem;
+}
+
+.market-research-preview-title {
+	font-size: 0.8125rem;
+	font-weight: 700;
+	line-height: 1.25;
+}
+
+.market-research-preview-copy {
+	margin-top: 0.125rem;
+	font-size: 0.75rem;
+	line-height: 1.45;
+	color: var(--muted-foreground);
+}
+
 .market-input {
 	font-size: 0.75rem;
 	padding: 0.375rem 0.5rem;
