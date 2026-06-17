@@ -10,7 +10,7 @@ docs: |
   Post 1–5 multiple-choice questions to the user as an inline interactive widget.
 
   **This tool is non-blocking.** It returns immediately with `{ status: "posted",
-  tool_use_id: "<id>" }` and your current turn ends. The user's answers arrive
+  tool_use_id: "TOOL_USE_ID" }` and your current turn ends. The user's answers arrive
   later as a separate user message (see the "Non-blocking contract" section in
   detail_docs for the envelope format).
 detail_docs: |
@@ -41,7 +41,7 @@ detail_docs: |
 
   When you post **more than one question**, every question MUST include a
   `tab_label` field. The widget renders the tab strip as
-  `A. <tab_label>`, `B. <tab_label>`, … so the user can jump between
+  `A. {tab_label}`, `B. {tab_label}`, … so the user can jump between
   questions without re-reading the full prompt.
 
   Keep it to **2–4 words, ≤24 characters**, topical and question-scoped
@@ -63,7 +63,7 @@ detail_docs: |
   Calling `ask_user_choices` returns immediately with:
 
   ```json
-  { "status": "posted", "tool_use_id": "<id>" }
+  { "status": "posted", "tool_use_id": "TOOL_USE_ID" }
   ```
 
   This ends your turn. **Do not emit further reasoning or tool calls in the
@@ -73,7 +73,7 @@ detail_docs: |
   exactly:
 
   ```
-  [ask_user_choices_response tool_use_id=<same id as above>]
+  [ask_user_choices_response tool_use_id=SAME_TOOL_USE_ID_AS_ABOVE]
   {"answers":[{"question":"...","selected":"...","other_text":null}, ...]}
   ```
 
