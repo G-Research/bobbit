@@ -8,6 +8,7 @@ import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
 const execFile = promisify(execFileCb);
+const primaryBranchFallbackWarningCwds = new Set<string>();
 
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
@@ -147,8 +148,37 @@ export async function detectPrimaryBranch(cwd: string): Promise<string> {
 		await execGit(["rev-parse", "--verify", "refs/heads/main"], { cwd, timeout: 5_000 });
 		return "main";
 	} catch { /* ignore */ }
-	console.warn(`[git] detectPrimaryBranch(${cwd}): could not detect primary branch; defaulting to "master"`);
+	await warnPrimaryBranchFallbackIfUseful(cwd);
 	return "master";
+}
+
+async function warnPrimaryBranchFallbackIfUseful(cwd: string): Promise<void> {
+	if (!await shouldWarnPrimaryBranchFallback(cwd)) return;
+	const key = path.resolve(cwd);
+	if (primaryBranchFallbackWarningCwds.has(key)) return;
+	primaryBranchFallbackWarningCwds.add(key);
+	console.warn(`[git] detectPrimaryBranch(${cwd}): could not detect primary branch; defaulting to "master"`);
+}
+
+async function shouldWarnPrimaryBranchFallback(cwd: string): Promise<boolean> {
+	try {
+		await execGit(["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
+		return true;
+	} catch { /* no origin remote is fine for minimal temp repos */ }
+
+	try {
+		const { stdout } = await execGit(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], {
+			cwd,
+			timeout: 5_000,
+		});
+		return stdout.split(/\r?\n/).some((line) => {
+			const ref = line.trim();
+			return ref !== "" && ref !== "refs/remotes/origin/HEAD";
+		});
+	} catch {
+		// If even ref enumeration fails, keep the diagnostic for likely bad cwd/repos.
+		return true;
+	}
 }
 
 async function resolveRemotePrimary(repoPath: string): Promise<string> {
