@@ -11,6 +11,11 @@ const RETAINED_DIAGNOSTICS_MARKER = "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER stac
 const FAILED_RETAINED_DIAGNOSTICS_CMD = `node -e "for (let i=1;i<=80;i++) console.log('prelude line '+i+' '+ 'x'.repeat(100)); console.log('${RETAINED_DIAGNOSTICS_MARKER}'); for (let i=81;i<=260;i++) console.log('tail line '+i+' '+ 'y'.repeat(100)); process.exit(1)"`;
 const PLAYWRIGHT_ERROR_CONTEXT_MARKER = "PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER";
 const PLAYWRIGHT_STYLE_ARTIFACT_CMD = `node -e "const fs=require('fs'),path=require('path'); const dir=path.join('test-results','retain-artifact-fixture'); fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(path.join(dir,'error-context.md'),'# Error Context\\n${PLAYWRIGHT_ERROR_CONTEXT_MARKER}\\nlocator(\\\"text=Missing\\\") failed after retry\\n'); fs.writeFileSync(path.join(dir,'trace.zip'),'trace placeholder'); fs.writeFileSync(path.join(dir,'screenshot.png'),'png placeholder'); console.error('PLAYWRIGHT_STYLE_FAILURE_SUMMARY: expect(locator).toBeVisible failed; see test-results/retain-artifact-fixture/error-context.md'); process.exit(1)"`;
+const RETAINED_LOG_CAP_MARKER = "RETAINED_GATE_DIAGNOSTICS_CAP_MARKER";
+const HUGE_RETAINED_LOG_CHUNKS = 3072;
+const HUGE_RETAINED_LOG_CHUNK_BYTES = 2048;
+const HUGE_RETAINED_LOG_EMITTED_BYTES = HUGE_RETAINED_LOG_CHUNKS * ("CAP-FILL ".length + HUGE_RETAINED_LOG_CHUNK_BYTES + 1);
+const HUGE_RETAINED_LOG_CMD = `node -e "const chunk='CAP-FILL '+ 'x'.repeat(${HUGE_RETAINED_LOG_CHUNK_BYTES})+'\\n'; for (let i=0;i<${HUGE_RETAINED_LOG_CHUNKS};i++) process.stdout.write(chunk); console.error('${RETAINED_LOG_CAP_MARKER}'); process.exit(1)"`;
 
 function makeWorkflowId(): string {
 	return `gate-inspect-slicing-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -52,6 +57,11 @@ async function createInspectWorkflow(workflowId: string): Promise<void> {
 					id: "playwright-artifacts-gate",
 					name: "Playwright Artifacts Gate",
 					verify: [{ name: "playwright-style failure", type: "command", run: PLAYWRIGHT_STYLE_ARTIFACT_CMD }],
+				},
+				{
+					id: "huge-retained-log-gate",
+					name: "Huge Retained Log Gate",
+					verify: [{ name: "huge retained log failure", type: "command", run: HUGE_RETAINED_LOG_CMD }],
 				},
 				{ id: "signals-gate", name: "Signals Gate", content: true },
 			],
@@ -116,6 +126,12 @@ async function inspectGate(goalId: string, gateId: string, section: string, para
 	const qs = new URLSearchParams({ section });
 	for (const [key, value] of Object.entries(params)) qs.set(key, String(value));
 	return apiFetch(`/api/goals/${goalId}/gates/${gateId}/inspect?${qs.toString()}`);
+}
+
+async function gateSummary(goalId: string, gateId: string): Promise<any> {
+	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}?view=summary`);
+	if (res.status !== 200) throw new Error(`gate summary ${gateId} failed: ${res.status} ${await res.text().catch(() => "")}`);
+	return res.json();
 }
 
 async function withGoal<T>(run: (goalId: string) => Promise<T>): Promise<T> {
@@ -340,7 +356,7 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("copies and exposes Playwright-style error-context artifacts for failed command inspection", async ({ gateway }) => {
+	test("copies and exposes Playwright-style error-context artifacts from the verification command cwd", async ({ gateway }) => {
 		const workflowId = makeWorkflowId();
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-playwright-artifacts-${Date.now()}-`));
 		await createInspectWorkflow(workflowId);
@@ -366,13 +382,88 @@ test.describe("gate inspect slicing", () => {
 				.filter(file => !file.endsWith("gates.json"));
 			expect(
 				stateMarkerFiles,
-				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: error-context.md content must be copied under Bobbit state outside gates.json so worktree cleanup/restart does not destroy diagnostics",
+				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: error-context.md content must be copied under Bobbit state outside gates.json so worktree cleanup/restart does not destroy diagnostics. This focused E2E covers the host-visible command cwd path; Docker sandbox transfer needs manual/docker coverage.",
 			).not.toEqual([]);
 		} finally {
 			await deleteGoal(goal.id);
 			await deleteInspectWorkflow(workflowId);
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
+	});
+
+	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async ({ gateway }) => {
+		const workflowId = makeWorkflowId();
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-compact-artifacts-${Date.now()}-`));
+		await createInspectWorkflow(workflowId);
+		const goal = await createGoal({ title: `Gate Status Compact Diagnostics ${Date.now()}`, workflowId, cwd });
+		try {
+			await signalAndWaitFailed(goal.id, "playwright-artifacts-gate", {});
+			fs.rmSync(path.join(cwd, "test-results"), { recursive: true, force: true });
+
+			const summary = await gateSummary(goal.id, "playwright-artifacts-gate");
+			const summaryJson = JSON.stringify(summary.latestSignal?.verification ?? summary);
+			expect(summary.latestSignal?.verification?.status).toBe("failed");
+			expect(
+				summaryJson,
+				"GATE_STATUS_RETAINED_DIAGNOSTICS_TOO_VERBOSE: compact gate status/default verification snapshots must not expose retained log paths or bulky Playwright artifact file lists",
+			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
+
+			const defaultInspectRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification");
+			expect(defaultInspectRes.status).toBe(200);
+			const defaultInspect = await defaultInspectRes.json();
+			expect(
+				JSON.stringify(defaultInspect.steps),
+				"GATE_INSPECT_DEFAULT_RETAINED_DIAGNOSTICS_TOO_VERBOSE: implicit/default gate_inspect should stay compact unless a mode is explicit",
+			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
+
+			const explicitRes = await inspectGate(goal.id, "playwright-artifacts-gate", "verification", { mode: "full" });
+			expect(explicitRes.status).toBe(200);
+			const explicit = await explicitRes.json();
+			const explicitJson = JSON.stringify(explicit.steps);
+			expect(
+				explicitJson,
+				"GATE_INSPECT_EXPLICIT_DIAGNOSTICS_MISSING: explicit gate_inspect must expose retained diagnostic log/artifact metadata",
+			).toMatch(/stdout\.log|stderr\.log|gate-diagnostics/i);
+			expect(explicitJson).toContain("error-context.md");
+			expect(explicitJson).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+
+			const stateMarkerFiles = findFilesContaining(path.join(gateway.bobbitDir, "state"), PLAYWRIGHT_ERROR_CONTEXT_MARKER)
+				.filter(file => !file.endsWith("gates.json"));
+			expect(stateMarkerFiles).not.toEqual([]);
+		} finally {
+			await deleteGoal(goal.id);
+			await deleteInspectWorkflow(workflowId);
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("caps retained command logs and exposes cap metadata in explicit inspection", async () => {
+		await withGoal(async (goalId) => {
+			await signalAndWaitFailed(goalId, "huge-retained-log-gate", {});
+
+			const inspectRes = await inspectGate(goalId, "huge-retained-log-gate", "verification", { mode: "full" });
+			expect(inspectRes.status).toBe(200);
+			const body = await inspectRes.json();
+			const step = body.steps[0];
+			const diagnosticsJson = JSON.stringify(step.diagnostics ?? {});
+			expect(
+				step.diagnostics?.logs?.stdout?.bytes,
+				"RETAINED_LOG_CAP_MISSING: retained stdout bytes should be smaller than the emitted output instead of growing without bound",
+			).toBeLessThan(HUGE_RETAINED_LOG_EMITTED_BYTES);
+			expect(
+				diagnosticsJson,
+				"RETAINED_LOG_TRUNCATION_METADATA_MISSING: explicit inspection must expose retained-log cap/truncation metadata, not only selected-output truncation",
+			).toMatch(/truncat|cap|bounded/i);
+			expect(step.selection?.truncated || body.selection?.truncated).toBe(true);
+
+			const grepRes = await inspectGate(goalId, "huge-retained-log-gate", "verification", {
+				mode: "grep",
+				pattern: RETAINED_LOG_CAP_MARKER,
+			});
+			expect(grepRes.status).toBe(200);
+			const grepBody = await grepRes.json();
+			expect(JSON.stringify(grepBody)).toContain(RETAINED_LOG_CAP_MARKER);
+		});
 	});
 
 	test("scopes verification to a single named step and rejects unknown/misplaced step params", async () => {
