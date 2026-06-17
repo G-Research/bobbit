@@ -2,6 +2,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import type { Component } from "../agent/project-config-store.js";
@@ -161,10 +162,20 @@ async function warnPrimaryBranchFallbackIfUseful(cwd: string): Promise<void> {
 }
 
 async function shouldWarnPrimaryBranchFallback(cwd: string): Promise<boolean> {
+	const expectedTempFallbackPath = isExpectedTempPrimaryBranchFallbackPath(cwd);
 	try {
 		await execGit(["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
 		return true;
 	} catch { /* no origin remote is fine for minimal temp repos */ }
+
+	try {
+		const { stdout } = await execGit(["rev-parse", "--is-inside-work-tree"], { cwd, timeout: 5_000 });
+		if (stdout.trim() !== "true") return !expectedTempFallbackPath;
+	} catch {
+		return !expectedTempFallbackPath;
+	}
+
+	if (expectedTempFallbackPath) return false;
 
 	try {
 		const { stdout } = await execGit(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], {
@@ -179,6 +190,49 @@ async function shouldWarnPrimaryBranchFallback(cwd: string): Promise<boolean> {
 		// If even ref enumeration fails, keep the diagnostic for likely bad cwd/repos.
 		return true;
 	}
+}
+
+function isExpectedTempPrimaryBranchFallbackPath(cwd: string): boolean {
+	const resolved = path.resolve(cwd);
+	const tmpRoot = path.resolve(os.tmpdir());
+	if (sameOrInsidePath(resolved, tmpRoot)) {
+		if (samePath(resolved, tmpRoot)) return true;
+		if (hasExpectedTempHarnessComponent(resolved)) return true;
+	}
+
+	const e2eRoot = path.resolve(process.env.BOBBIT_E2E_TMP_ROOT || defaultE2eTempRoot());
+	return sameOrInsidePath(resolved, e2eRoot);
+}
+
+function defaultE2eTempRoot(): string {
+	return process.platform === "win32" ? "C:\\bobbit-e2e" : path.join(os.tmpdir(), "bobbit-e2e");
+}
+
+function hasExpectedTempHarnessComponent(p: string): boolean {
+	return p.split(/[\\/]+/).some((component) => {
+		const c = component.toLowerCase();
+		return c === "bobbit-e2e"
+			|| c.startsWith("bobbit-e2e-")
+			|| c.startsWith("proj-isolation-")
+			|| c.startsWith("verif-restart-repo-");
+	});
+}
+
+function sameOrInsidePath(child: string, parent: string): boolean {
+	const c = comparablePath(child);
+	const p = comparablePath(parent);
+	if (c === p) return true;
+	const rel = path.relative(p, c);
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function samePath(a: string, b: string): boolean {
+	return comparablePath(a) === comparablePath(b);
+}
+
+function comparablePath(p: string): string {
+	const resolved = path.resolve(p);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 async function resolveRemotePrimary(repoPath: string): Promise<string> {
