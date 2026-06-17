@@ -13,6 +13,8 @@ export interface GateStepDiagnosticArtifactMetadata {
 	sourcePath: string;
 	bytes: number;
 	kind: "test-results" | "playwright-report";
+	content?: string;
+	contentType?: string;
 }
 
 export interface GateStepDiagnostics {
@@ -35,6 +37,7 @@ export interface GateStepDiagnosticsPaths {
 
 const MAX_ARTIFACT_FILES = 250;
 const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
+const MAX_INLINE_ARTIFACT_CONTENT_BYTES = 64 * 1024;
 const PLAYWRIGHT_ARTIFACT_DIRS: Array<{ name: string; kind: GateStepDiagnosticArtifactMetadata["kind"] }> = [
 	{ name: "test-results", kind: "test-results" },
 	{ name: "playwright-report", kind: "playwright-report" },
@@ -134,13 +137,18 @@ function copyArtifactTree(rootSourceDir: string, currentSourceDir: string, destR
 			fs.copyFileSync(sourcePath, retainedPath);
 			state.files += 1;
 			state.bytes += stat.size;
-			state.artifacts.push({
+			const artifact: GateStepDiagnosticArtifactMetadata = {
 				path: retainedPath,
 				relativePath: `${kind}/${sourceRelativePath}`.replace(/\\/g, "/"),
 				sourcePath,
 				bytes: stat.size,
 				kind,
-			});
+			};
+			if (sourceRelativePath.toLowerCase().endsWith("error-context.md") && stat.size <= MAX_INLINE_ARTIFACT_CONTENT_BYTES) {
+				artifact.content = fs.readFileSync(retainedPath, "utf8");
+				artifact.contentType = "text/markdown";
+			}
+			state.artifacts.push(artifact);
 		} catch {
 			// Best-effort diagnostics must never fail verification finalization.
 		}

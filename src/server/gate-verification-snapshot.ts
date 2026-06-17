@@ -50,7 +50,7 @@ export interface GateVerificationSnapshotStep {
 			count: number;
 			truncated?: boolean;
 			truncationReason?: string;
-			files: Array<{ path: string; relativePath: string; sourcePath: string; bytes: number; kind: string }>;
+			files: Array<{ path: string; relativePath: string; sourcePath: string; bytes: number; kind: string; content?: string; contentType?: string }>;
 		};
 		inspectHints?: string[];
 		note?: string;
@@ -235,6 +235,7 @@ function diagnosticsMetadata(input: {
 	outputSource: GateVerificationOutputSource;
 	gateId: string;
 	stepName: string;
+	includeArtifactContent: boolean;
 }): GateVerificationSnapshotStep["diagnostics"] {
 	const diagnostics = input.diagnostics;
 	const out: NonNullable<GateVerificationSnapshotStep["diagnostics"]> = {
@@ -251,7 +252,9 @@ function diagnosticsMetadata(input: {
 				count: diagnostics.artifacts.length,
 				truncated: diagnostics.truncated,
 				truncationReason: diagnostics.truncationReason,
-				files: diagnostics.artifacts,
+				files: input.includeArtifactContent
+					? diagnostics.artifacts
+					: diagnostics.artifacts.map(({ content, contentType, ...artifact }) => artifact),
 			};
 		}
 		out.note = input.outputSource === "retained-logs"
@@ -430,6 +433,7 @@ export function buildGateVerificationSnapshot(input: {
 				outputSource,
 				gateId: input.gateId,
 				stepName: persisted.name,
+				includeArtifactContent: !selectionOptions.implicitDefault,
 			});
 		}
 		return out;
