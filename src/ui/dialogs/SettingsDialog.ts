@@ -3,10 +3,10 @@ import { Dialog, DialogContent, DialogHeader } from "@mariozechner/mini-lit/dist
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { Label } from "@mariozechner/mini-lit/dist/Label.js";
 import { Switch } from "@mariozechner/mini-lit/dist/Switch.js";
-import { getProviders } from "@earendil-works/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import "../components/ProviderKeyInput.js";
+import { getPiAiProviders } from "../../app/pi-ai-lazy.js";
 import { getAppStorage } from "../storage/app-storage.js";
 
 // Base class for settings tabs
@@ -21,19 +21,35 @@ export abstract class SettingsTab extends LitElement {
 // API Keys Tab
 @customElement("api-keys-tab")
 export class ApiKeysTab extends SettingsTab {
+	@state() private providers: string[] | null = null;
+
+	override connectedCallback() {
+		super.connectedCallback();
+		void this.loadProviders();
+	}
+
+	private async loadProviders() {
+		try {
+			this.providers = await getPiAiProviders();
+		} catch (error) {
+			console.error("Failed to load providers:", error);
+			this.providers = [];
+		}
+	}
+
 	getTabName(): string {
 		return i18n("API Keys");
 	}
 
 	render(): TemplateResult {
-		const providers = getProviders();
-
 		return html`
 			<div class="flex flex-col gap-6">
 				<p class="text-sm text-muted-foreground">
 					${i18n("Configure API keys for LLM providers. Keys are stored locally in your browser.")}
 				</p>
-				${providers.map((provider) => html`<provider-key-input .provider=${provider}></provider-key-input>`)}
+				${this.providers === null
+					? html`<div class="text-sm text-muted-foreground">Loading providers...</div>`
+					: this.providers.map((provider) => html`<provider-key-input .provider=${provider}></provider-key-input>`)}
 			</div>
 		`;
 	}

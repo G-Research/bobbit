@@ -82,7 +82,7 @@ async function openSidebarArchiveDialog(page: Page, goalId: string, expectedTitl
 	await expect(goalRow).toBeVisible({ timeout: 10_000 });
 	await goalRow.hover();
 
-	const archiveBtn = goalRow.locator('button[title="Archive goal"]').first();
+	const archiveBtn = goalRow.getByRole("button", { name: "Archive", exact: true }).first();
 	await expect(archiveBtn).toBeVisible({ timeout: 5_000 });
 	await archiveBtn.click();
 
@@ -104,7 +104,7 @@ test.describe("Goal archive button (always-on)", () => {
 
 			// The action strip is hover-revealed on desktop. Scope to the goal row
 			// by id so the sidebar quick action and modal confirm button don't race.
-			const archiveBtn = sidebarGoalRow(page, goalId).locator('button[title="Archive goal"]').first();
+			const archiveBtn = sidebarGoalRow(page, goalId).getByRole("button", { name: "Archive", exact: true }).first();
 			await expect(archiveBtn).toBeAttached({ timeout: 5_000 });
 
 			// --- Cancel path ---
@@ -189,7 +189,7 @@ test.describe("Goal archive button (always-on)", () => {
 				{ timeout: 15_000 },
 			).toBe(true);
 
-			const archiveBtn = sidebarGoalRow(page, goalId).locator('button[title="Archive goal"]').first();
+			const archiveBtn = sidebarGoalRow(page, goalId).getByRole("button", { name: "Archive", exact: true }).first();
 			await expect(archiveBtn).toBeAttached({ timeout: 5_000 });
 
 			// Team-active modal copy.
@@ -249,7 +249,7 @@ test.describe("Goal archive button (always-on)", () => {
 			// The dashboard Archive button is a `btn-icon` with the goal's
 			// archive title. After the fix it must be present and enabled
 			// regardless of team/PR state.
-			const archiveBtn = page.locator('button.btn-icon[title="Archive goal"]').first();
+			const archiveBtn = page.locator(".dashboard-container").getByRole("button", { name: "Archive", exact: true }).first();
 			await expect(archiveBtn).toBeVisible({ timeout: 10_000 });
 			await expect(archiveBtn).toBeEnabled();
 

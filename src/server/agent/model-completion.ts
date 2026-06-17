@@ -1,4 +1,4 @@
-import { completeSimple, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { complete, completeSimple, getModel, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -173,6 +173,38 @@ export async function completeModelText(
 		throw new Error((result as any).errorMessage || "Model returned an error");
 	}
 	return assistantText(result);
+}
+
+export async function testProviderApiKey(
+	provider: string,
+	modelId: string,
+	apiKey: string,
+): Promise<{ ok: boolean; modelResolved?: string; latencyMs?: number; error?: string; status?: number }> {
+	if (!provider || !modelId || !apiKey.trim()) {
+		return { ok: false, status: 400, error: "Missing provider, modelId, or key" };
+	}
+	const model = getModel(provider as any, modelId) as Model<Api> | undefined;
+	if (!model) {
+		return { ok: false, status: 404, error: `Model "${provider}/${modelId}" is not in the built-in pi-ai catalog.` };
+	}
+
+	const started = Date.now();
+	try {
+		const result = await complete(model as any, {
+			messages: [{ role: "user", content: "Reply with: OK", timestamp: Date.now() }],
+		}, {
+			apiKey,
+			maxTokens: 5,
+			timeoutMs: 15_000,
+			maxRetries: 0,
+		} as any);
+		if ((result as any).stopReason === "error") {
+			throw new Error((result as any).errorMessage || "Model returned an error");
+		}
+		return { ok: true, modelResolved: model.id, latencyMs: Date.now() - started };
+	} catch (err: any) {
+		return { ok: false, modelResolved: model.id, latencyMs: Date.now() - started, error: err?.message || "Request failed" };
+	}
 }
 
 export async function testModelPreference(

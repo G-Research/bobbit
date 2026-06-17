@@ -1514,7 +1514,7 @@ export function renderSidebar() {
 					<button
 						data-testid="market-nav-button"
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isMarketActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); import("./routing.js").then((m) => m.setHashRoute("market")); })}
+						@click=${() => toggleConfigPage(["market"], () => { import("./marketplace-page.js").then((m) => m.loadMarketplaceData()); setHashRoute("market"); })}
 						title="Marketplace"
 					>
 						${icon(Store, "xs", "!w-3.5 !h-3.5")}

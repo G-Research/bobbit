@@ -62,6 +62,18 @@ these byte counts as eternal truth — the regression guard
 (`npm run test:bundle`) is the spec; re-run it after any UI change to
 get current numbers.
 
+## Later `app-review` guardrail
+
+A clean-build-warning pass later found `app-review` close enough to the
+600 KB raw warning threshold to trip Vite. The fix stayed packaging-only:
+cycle-free leaf modules were peeled into small eager chunks such as
+`app-bobbit-render`, `app-i18n`, and `app-message-ui-leaves` while
+`modulePreload` kept first paint eager. This is the preferred response
+when a named eager seam grows but the leaves have no back-edge into the
+app shell. If Rollup reports a circular chunk, stop: that seam is part
+of the SCC and needs a source-level cycle refactor, not another
+`manualChunks` rule or a larger budget.
+
 ## The floor: ~560 KB raw without a source refactor
 
 `app-session-runtime` is the SCC itself, so it **cannot be split

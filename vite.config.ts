@@ -389,16 +389,25 @@ export default defineConfig(({ mode }) => ({
 						normalizedId.endsWith("/src/ui/inbox/AddToInboxDialog.ts") ||
 						normalizedId.endsWith("/src/ui/inbox/InboxEntry.ts")
 					) return "app-inbox";
-					// Leaf UI modules (pure data / pure helpers with no back-edge into the
-					// session-runtime graph): peeled into one shared eager chunk so they
-					// don't pad `app-session-runtime`. Cycle-free by construction (none of
-					// these import `src/app/*`), so no circular-chunk warning. Combined with
-					// the lazy `dialogs.ts` split, this keeps app-session-runtime comfortably
-					// under the 600 KB raw budget after the sub-goals port (bundle-size.test.ts).
+					// Leaf UI modules (pure data / custom elements with no back-edge into the
+					// app shell): peeled into eager chunks so they don't pad the app-shell SCC
+					// currently emitted as `app-review`. Cycle-free by construction (none of
+					// these import `src/app/*`), so no circular-chunk warning; modulePreload
+					// keeps first paint eager while staying under Vite's 600 kB warning limit.
 					if (
 						normalizedId.endsWith("/src/ui/bobbit-sprite-data.ts") ||
 						normalizedId.endsWith("/src/ui/bobbit-render.ts") ||
-						normalizedId.endsWith("/src/ui/utils/i18n.ts") ||
+						normalizedId.endsWith("/src/ui/components/BobbitLoadingAnimation.ts")
+					) return "app-bobbit-render";
+					if (normalizedId.endsWith("/src/ui/utils/i18n.ts")) return "app-i18n";
+					if (
+						normalizedId.endsWith("/src/ui/components/StreamingMessageContainer.ts") ||
+						normalizedId.endsWith("/src/ui/components/LiveTimer.ts") ||
+						normalizedId.endsWith("/src/ui/components/ToolPermissionCard.ts") ||
+						normalizedId.endsWith("/src/ui/components/FileMentionChip.ts") ||
+						normalizedId.endsWith("/src/ui/components/DeferredBlock.ts")
+					) return "app-message-ui-leaves";
+					if (
 						normalizedId.endsWith("/src/ui/utils/attachment-utils.ts") ||
 						normalizedId.endsWith("/src/ui/prompts/prompts.ts")
 					) return "app-ui-leaves";

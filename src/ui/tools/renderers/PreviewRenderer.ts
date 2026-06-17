@@ -2,6 +2,7 @@ import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing } from "lit";
 import { PanelRight } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
+import * as previewPanel from "../../../app/preview-panel.js";
 import type { ToolRenderContext, ToolRenderer, ToolRenderResult } from "../types.js";
 
 /** Must match `defaults/tools/html/snapshot.ts`. */
@@ -321,10 +322,9 @@ function rememberPreviewSnapshotFromRender(
 	registeredPreviewSnapshotKeys.add(key);
 	queueMicrotask(async () => {
 		try {
-			const [{ state: appState, renderApp }, workspace, previewPanel] = await Promise.all([
+			const [{ state: appState, renderApp }, workspace] = await Promise.all([
 				import("../../../app/state.js"),
 				import("../../../app/panel-workspace.js"),
-				import("../../../app/preview-panel.js"),
 			]);
 			const liveHash = normalizeContentHash((appState as any).previewPanelContentHash);
 			const liveEntry = workspace.previewEntryLabel((appState as any).previewPanelEntry || "inline.html");
@@ -406,13 +406,12 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 			btn.textContent = "Opening…";
 
 			try {
-				// Lazy-load helpers to avoid an import cycle at module init time.
-				const [{ gatewayFetch }, { fetchToolContent }, { state: appState, renderApp }, workspace, previewPanel] = await Promise.all([
-					import("../../../app/api.js"),
+				// Lazy-load helpers that are not already part of the app-shell graph.
+				const [{ gatewayFetch }, { fetchToolContent }, { state: appState, renderApp }, workspace] = await Promise.all([
+					import("../../../app/gateway-fetch.js"),
 					import("../../utils/fetch-tool-content.js"),
 					import("../../../app/state.js"),
 					import("../../../app/panel-workspace.js"),
-					import("../../../app/preview-panel.js"),
 				]);
 
 				// 1. Resolve full snapshot text (inline or lazy-load)

@@ -46,6 +46,7 @@ import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
 import { state as appState, renderApp } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
+import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
@@ -213,10 +214,9 @@ export class AgentInterface extends LitElement {
 		if (this.assistantType) {
 			s.assistantTab = "preview";
 		}
-		void import("../../app/preview-panel.js")
-			.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab: true }))
-			.then(() => renderApp())
-			.catch(() => { /* legacy fields above still select the proposal */ });
+		try {
+			selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true });
+		} catch { /* legacy fields above still select the proposal */ }
 		renderApp();
 		this.requestUpdate();
 	}

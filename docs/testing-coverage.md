@@ -6,6 +6,13 @@ Per-area notes on what user stories and contracts are covered by which test file
 
 Every test file under `tests/` except `tests/manual-integration/**` runs in exactly one phase — `unit` (node logic via `tsx --test` + `file://` browser fixtures via `tests/playwright.config.ts`) or `e2e` (`playwright-e2e.config.ts`). The only gate-exempt path is `tests/manual-integration/**` (real LLM / Docker). [`tests/test-phase-invariant.test.ts`](../tests/test-phase-invariant.test.ts) pins this: a test claimed by zero phases (orphan) or two (double-claim), or one that breaks the `*.test.ts`⇒node / `*.spec.ts`⇒Playwright runner convention, fails the guard. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
 
+## Build warning regression coverage
+
+- **File**: `tests/clean-build-warnings-regression.test.ts`.
+- **Why it exists**: Vite/Rollup warning output is easy to miss when the build still exits 0, so warning classes that previously hid real issues are pinned as fast unit checks.
+- **What it covers**: browser code cannot use runtime static or dynamic bare imports from `@earendil-works/pi-ai`; dynamic imports of known warning targets must either split a real chunk or have an explicit rationale; expected temp git primary-branch fallbacks stay quiet while origin-backed production-shaped repos still warn once.
+- **Related guard**: `tests/bundle-size.test.ts` still owns the concrete chunk budgets, including the 600 kB raw budget that mirrors Vite's `chunkSizeWarningLimit`.
+
 ## Prompt interactions
 
 User stories PI-01 through PI-25 (+ sub-stories) are defined in `userstories/prompt-interactions.md`.

@@ -71,6 +71,10 @@ export function invalidateModelCache(): void {
  * Get all available models, merged from all sources.
  * Results are cached for 5 seconds.
  */
+export function getBuiltInProviderIds(): string[] {
+	return getProviders().map(provider => String(provider));
+}
+
 export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const now = Date.now();
 	const currentVersion = getPrefsVersion(prefs);
