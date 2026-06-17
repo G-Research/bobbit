@@ -72,6 +72,12 @@ import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
 import { inferMeta } from "./aigw-manager.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
+import {
+	finalizeGateStepDiagnostics,
+	prepareGateStepDiagnosticsPaths,
+	type GateStepDiagnostics,
+	type GateStepDiagnosticsPaths,
+} from "../gate-diagnostics.js";
 
 /**
  * Clamp a thinking-level value against the resolved reviewer/QA model. When
@@ -704,6 +710,8 @@ export interface ActiveVerification {
 		expectFailure?: boolean;
 		/** Optional error-pattern regex for expectFailure matching. */
 		errorPattern?: string;
+		/** Host cwd used for targeted artifact retention after a command finishes. */
+		commandCwd?: string;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
@@ -1319,7 +1327,7 @@ export class VerificationHarness {
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
-		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; output: string; duration_ms: number }> = [];
+		const resolvedSteps: Array<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }> = [];
 
 		for (const step of v.steps) {
 			if (step.status !== "running") {
@@ -1438,13 +1446,17 @@ export class VerificationHarness {
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
-			steps: resolvedSteps.map(r => ({
-				name: r.name,
-				type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
-				passed: r.passed,
-				output: r.output,
-				duration_ms: r.duration_ms,
-			})),
+			steps: resolvedSteps.map(r => {
+				const stepResult: GateSignalStep = {
+					name: r.name,
+					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
+					passed: r.passed,
+					output: r.output,
+					duration_ms: r.duration_ms,
+				};
+				if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
+				return stepResult;
+			}),
 		});
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
@@ -2424,7 +2436,7 @@ export class VerificationHarness {
 							return { index, stepResult: cachedResult };
 						}
 
-						let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "No verification result." };
+						let result: { passed: boolean; output: string; sessionId?: string; diagnostics?: GateStepDiagnostics } = { passed: false, output: "No verification result." };
 						let artifact: GateSignalStep["artifact"];
 						const startTime = Date.now();
 
@@ -2747,6 +2759,7 @@ export class VerificationHarness {
 							expect: step.expect,
 						};
 						if (artifact) stepResult.artifact = artifact;
+						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
 						return { index, stepResult };
 					},
 					{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
@@ -3763,7 +3776,7 @@ export class VerificationHarness {
 		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
 		errorPattern?: string,
 		containerId?: string,
-	): Promise<{ passed: boolean; output: string }> {
+	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
 			// Shell selection: default to plain bash (fast), use --login only for
@@ -3789,13 +3802,33 @@ export class VerificationHarness {
 			let exitFile: string | undefined;
 			let outFd: number | undefined;
 			let errFd: number | undefined;
+			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
+
+			if (streamCtx) {
+				try {
+					diagnosticsPaths = prepareGateStepDiagnosticsPaths({
+						stateDir: this._stateDir,
+						goalId: streamCtx.goalId,
+						gateId: streamCtx.gateId,
+						signalId: streamCtx.signalId,
+						stepIndex: streamCtx.stepIndex,
+						stepName: this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex]?.name ?? `step-${streamCtx.stepIndex}`,
+					});
+					outFile = diagnosticsPaths.stdoutPath;
+					errFile = diagnosticsPaths.stderrPath;
+				} catch (err) {
+					console.warn(`[verification] Failed to set up retained command diagnostics: ${(err as Error).message}`);
+				}
+			}
 
 			if (useDetached && streamCtx) {
 				try {
 					const stepDir = path.join(this._stateDir, "verifications", streamCtx.signalId);
 					fs.mkdirSync(stepDir, { recursive: true });
-					outFile = path.join(stepDir, `${streamCtx.stepIndex}.out`);
-					errFile = path.join(stepDir, `${streamCtx.stepIndex}.err`);
+					if (!outFile || !errFile) {
+						outFile = path.join(stepDir, `${streamCtx.stepIndex}.out`);
+						errFile = path.join(stepDir, `${streamCtx.stepIndex}.err`);
+					}
 					exitFile = path.join(stepDir, `${streamCtx.stepIndex}.exit`);
 					try { fs.unlinkSync(exitFile); } catch { /* not present */ }
 					try { fs.unlinkSync(exitFile + ".tmp"); } catch { /* not present */ }
@@ -3806,7 +3839,9 @@ export class VerificationHarness {
 					if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
 					if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 					useDetached = false;
-					outFile = errFile = exitFile = undefined;
+					outFile = diagnosticsPaths?.stdoutPath;
+					errFile = diagnosticsPaths?.stderrPath;
+					exitFile = undefined;
 				}
 			}
 
@@ -3825,16 +3860,33 @@ export class VerificationHarness {
 			// handle child.on("error", ...) — surface the error text and honour
 			// expectFailure semantics. Without this, accessing child.pid below
 			// would throw TypeError and crash the verification pipeline.
-			const handleSpawnError = (err: Error): { passed: boolean; output: string } => {
+			const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
+				if (!diagnosticsPaths) return undefined;
+				try {
+					return finalizeGateStepDiagnostics({ paths: diagnosticsPaths, commandCwd: normalizedCwd });
+				} catch (err) {
+					console.warn(`[verification] Failed to finalize retained command diagnostics: ${(err as Error).message}`);
+					return undefined;
+				}
+			};
+			const withDiagnostics = (result: { passed: boolean; output: string }): { passed: boolean; output: string; diagnostics?: GateStepDiagnostics } => {
+				const diagnostics = finalizeDiagnostics();
+				return diagnostics ? { ...result, diagnostics } : result;
+			};
+			const handleSpawnError = (err: Error): { passed: boolean; output: string; diagnostics?: GateStepDiagnostics } => {
+				try {
+					if (outFile) fs.writeFileSync(outFile, "", { flag: "a" });
+					if (errFile) fs.writeFileSync(errFile, err.message, { flag: "a" });
+				} catch { /* ignore diagnostics write failure */ }
 				if (expectFailure && errorPattern) {
 					try {
 						const regex = new RegExp(errorPattern, "i");
-						return { passed: regex.test(err.message), output: err.message };
+						return withDiagnostics({ passed: regex.test(err.message), output: err.message });
 					} catch {
-						return { passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` };
+						return withDiagnostics({ passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` });
 					}
 				}
-				return { passed: expectFailure, output: err.message };
+				return withDiagnostics({ passed: expectFailure, output: err.message });
 			};
 
 			// IMPORTANT: do NOT re-introduce `spawn(..., { timeout })` here.
@@ -3929,6 +3981,7 @@ export class VerificationHarness {
 					s.timeoutSec = timeoutSec;
 					s.expectFailure = expectFailure;
 					s.errorPattern = errorPattern;
+					s.commandCwd = normalizedCwd;
 					this._persistActive();
 				}
 				// unref so the child does not keep the gateway alive during a
@@ -3948,6 +4001,10 @@ export class VerificationHarness {
 				stopTail = this._startFileTailers(outFile, errFile, streamCtx);
 			} else if (!useDetached) {
 				const onData = (text: string, stream: "stdout" | "stderr") => {
+					try {
+						const target = stream === "stdout" ? outFile : errFile;
+						if (target) fs.appendFileSync(target, text, "utf8");
+					} catch { /* diagnostics retention is best-effort */ }
 					if (stream === "stdout") {
 						stdout += text;
 						if (stdout.length > 1024 * 1024) stdout = stdout.slice(-512 * 1024);
@@ -3999,23 +4056,23 @@ export class VerificationHarness {
 					const combined = tail ? `${tail}\n${marker}` : marker;
 					if (expectFailure) {
 						// Honour expectFailure + errorPattern against the accumulated output.
-						resolve(matchExpectFailure(null, combined, errorPattern));
+						resolve(withDiagnostics(matchExpectFailure(null, combined, errorPattern)));
 						return;
 					}
-					resolve({ passed: false, output: combined });
+					resolve(withDiagnostics({ passed: false, output: combined }));
 					return;
 				}
 				if (didCancel) {
 					const marker = `[step cancelled \u2014 killed subprocess tree]`;
 					const combined = tail ? `${tail}\n${marker}` : marker;
-					resolve({ passed: false, output: combined });
+					resolve(withDiagnostics({ passed: false, output: combined }));
 					return;
 				}
 				if (expectFailure) {
-					resolve(matchExpectFailure(code, tail, errorPattern));
+					resolve(withDiagnostics(matchExpectFailure(code, tail, errorPattern)));
 					return;
 				}
-				resolve({ passed: code === 0, output: tail || `exit code ${code}` });
+				resolve(withDiagnostics({ passed: code === 0, output: tail || `exit code ${code}` }));
 			});
 			child.on("error", (err: Error) => {
 				this._trackedCommandChildren.delete(trackedKey);
@@ -4113,7 +4170,7 @@ export class VerificationHarness {
 	private async _resumeCommandStep(
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
-	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics } | null> {
 		if (!step.exitFile && !step.pid) return null;
 
 		const readFiles = (): { out: string; err: string } => {
@@ -4133,6 +4190,29 @@ export class VerificationHarness {
 				return null;
 			}
 		};
+		const finalizeDiagnostics = (): GateStepDiagnostics | undefined => {
+			if (!step.outFile && !step.errFile) return undefined;
+			const baseDir = path.dirname(step.outFile ?? step.errFile!);
+			try {
+				return finalizeGateStepDiagnostics({
+					paths: {
+						baseDir,
+						stdoutPath: step.outFile ?? path.join(baseDir, "stdout.log"),
+						stderrPath: step.errFile ?? path.join(baseDir, "stderr.log"),
+						artifactsDir: path.join(baseDir, "artifacts"),
+					},
+					commandCwd: step.commandCwd ?? process.cwd(),
+				});
+			} catch (err) {
+				console.warn(`[verification] Failed to finalize retained command diagnostics during resume: ${(err as Error).message}`);
+				return undefined;
+			}
+		};
+		const withDiagnostics = (result: { name: string; type: string; passed: boolean; output: string; duration_ms: number; diagnostics?: GateStepDiagnostics }) => {
+			const diagnostics = finalizeDiagnostics();
+			if (diagnostics) result.diagnostics = diagnostics;
+			return result;
+		};
 		const finalize = (code: number | null) => {
 			const { out, err } = readFiles();
 			const output = (out + "\n" + err).trim().slice(-5000);
@@ -4146,13 +4226,13 @@ export class VerificationHarness {
 				passed = code === 0;
 				displayOutput = output || `exit code ${code}`;
 			}
-			return {
+			return withDiagnostics({
 				name: step.name,
 				type: step.type,
 				passed,
 				output: displayOutput,
 				duration_ms: Date.now() - step.startedAt,
-			};
+			});
 		};
 
 		// Case A: child already finished before we restarted.
@@ -4212,13 +4292,13 @@ export class VerificationHarness {
 				// also the pgid. killTreeByPid handles negative-pid kill (POSIX)
 				// and taskkill /T /F (Windows) so we reap descendants too.
 				if (step.pid) try { killTreeByPid(step.pid, "SIGKILL"); } catch { /* already dead */ }
-				return {
+				return withDiagnostics({
 					name: step.name,
 					type: step.type,
 					passed: false,
 					output: "Verification command did not produce an exit code (timeout or process died after restart).",
 					duration_ms: Date.now() - step.startedAt,
-				};
+				});
 			} finally {
 				if (stopTail) stopTail();
 			}
@@ -4227,13 +4307,13 @@ export class VerificationHarness {
 		// Case C: process gone, no exit file — killed by something between our
 		// last persist and now.
 		console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — marking failed`);
-		return {
+		return withDiagnostics({
 			name: step.name,
 			type: step.type,
 			passed: false,
 			output: "Verification command process died during gateway restart before producing an exit code.",
 			duration_ms: Date.now() - step.startedAt,
-		};
+		});
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,
