@@ -15,6 +15,7 @@ import {
 	type GatewaySession,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision } from "./api.js";
+import { getPiAiModel } from "./pi-ai-lazy.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
@@ -1255,8 +1256,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const savedModel = loadSessionModel(sessionId);
 			if (!savedModel) return null;
 			try {
-				const { getModel } = await import("@earendil-works/pi-ai");
-				return getModel(savedModel.provider as any, savedModel.modelId);
+				return await getPiAiModel(savedModel.provider, savedModel.modelId) ?? null;
 			} catch {
 				return null; // Model no longer available
 			}

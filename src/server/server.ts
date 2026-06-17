@@ -293,8 +293,8 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
-import { testModelPreference } from "./agent/model-completion.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
@@ -7008,6 +7008,25 @@ async function handleApiRoute(
 		const filtered = configs.filter((c: CustomProviderConfig) => c.id !== providerId);
 		preferencesStore.set("customProviders", filtered);
 		json({ ok: true });
+		return;
+	}
+
+	// ── Browser-safe pi-ai boundary ──
+
+	// GET /api/pi-ai/providers — list built-in pi-ai provider ids without exposing the browser to pi-ai's Node-only index
+	if (url.pathname === "/api/pi-ai/providers" && req.method === "GET") {
+		json({ providers: getBuiltInProviderIds() });
+		return;
+	}
+
+	// POST /api/pi-ai/provider-key-test — test a provider key without persisting it
+	if (url.pathname === "/api/pi-ai/provider-key-test" && req.method === "POST") {
+		const body = await readBody(req);
+		const provider = typeof body?.provider === "string" ? body.provider.trim() : "";
+		const modelId = typeof body?.modelId === "string" ? body.modelId.trim() : "";
+		const key = typeof body?.key === "string" ? body.key.trim() : "";
+		const result = await testProviderApiKey(provider, modelId, key);
+		json(result, result.status || (result.ok ? 200 : 502));
 		return;
 	}
 
