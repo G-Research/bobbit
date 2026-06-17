@@ -2594,13 +2594,15 @@ Long waits made the agent feel unresponsive: users would type a correction, see 
 
 ### Call sites
 
-Live-steer delivery is centralised on `SessionManager.deliverLiveSteer(sessionId, message)`, which enqueues the row into `promptQueue` and hands it to the single `SessionManager._dispatchSteer()` site. `_dispatchSteer` calls `bgProcessManager.abortAllWaits(sessionId)` before awaiting `rpcClient.steer(batchText)`, so every dispatch path runs through one abort site. All steer entry points that run while the agent is `streaming` go through this helper:
+Live-steer delivery is centralised on the single `SessionManager._dispatchSteer()` site. Fresh live steers enqueue a steered row and hand it to `_dispatchSteer()`. Promoted queued steers (`steer_queued`) flip `isSteered=true`; while the agent is `streaming`, they immediately dequeue the steered front group via `dequeueAllSteered()` and call `_dispatchSteer()` instead of waiting for a later tool boundary. When the agent is `idle`, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
+
+`_dispatchSteer()` owns wait interruption and recovery: it calls `bgProcessManager.abortAllWaits(sessionId)`, records the batch in `inFlightSteerTexts`, removes rows from `promptQueue`, persists the queue+ledger update together, then awaits `rpcClient.steer(batchText)`. Echoes clear the ledger; abort/restart restore re-enqueues un-echoed ledger entries once; RPC failure rolls rows back only if the ledger entry has not already been reconciled. All streaming steer entry points therefore reach the same abort/recovery path:
 
 - `src/server/ws/handler.ts` - `case "steer"` (user-initiated live steer) calls `deliverLiveSteer` → `_dispatchSteer`.
 - `src/server/agent/team-manager.ts` - `injectSteerMessage()` and the task-completion nudge (mid-turn `team_steer`) call `deliverLiveSteer` → `_dispatchSteer`.
-- `src/server/agent/session-manager.ts` - `SessionManager.steerQueued()` flips `isSteered=true` and (if `status === "streaming"`) calls `bgProcessManager.abortAllWaits()` so a parked `bash_bg wait` resolves and a tool boundary actually arrives. The boundary handler in `handleAgentLifecycle` (`tool_execution_end`, with `agent_end` non-aborting as a safety net for non-tool turns) drains all consecutive steered rows via `dequeueAllSteered()` and hands them to `_dispatchSteer`.
+- `src/server/agent/session-manager.ts` - `SessionManager.steerQueued()` promotes, dequeues the steered front group, and calls `_dispatchSteer()` immediately while streaming; idle promotions drain normally.
 
-Net result: `bgProcessManager.abortAllWaits(sessionId)` has exactly two call sites - once inside `_dispatchSteer` (every dispatch) and once inside `steerQueued` for the streaming case (so the parked wait resolves *before* a tool boundary can occur). Down from three pre-rewrite, with cleaner semantics.
+Net result: steer-related `bgProcessManager.abortAllWaits(sessionId)` calls are owned by `_dispatchSteer()` (plus termination cleanup), so queued promotions and fresh live steers share the same wait-abort/recovery behavior.
 
 ### Termination cleanup
 
@@ -2611,7 +2613,7 @@ Net result: `bgProcessManager.abortAllWaits(sessionId)` has exactly two call sit
 | File | Purpose |
 |---|---|
 | `src/server/agent/bg-process-manager.ts` | `waits` registry, `registerWait`/`unregisterWait`/`abortAllWaits`, `waitForExit` with `AbortSignal` support |
-| `src/server/agent/session-manager.ts` | `deliverLiveSteer()` helper; single `_dispatchSteer()` site (one `abortAllWaits` per dispatch); `steerQueued()` (one `abortAllWaits` to unblock parked waits); `_consumeSteerEcho()` / `_reconcileAfterAbort()` shadow-ledger lifecycle; `terminateSession()` termination-time abort |
+| `src/server/agent/session-manager.ts` | `deliverLiveSteer()` helper; single `_dispatchSteer()` site (one `abortAllWaits` per steer dispatch); `steerQueued()` immediate streaming promotion dispatch plus idle drain fallback; `_consumeSteerEcho()` / `_reconcileAfterAbort()` shadow-ledger lifecycle; `terminateSession()` termination-time abort |
 | `src/server/agent/team-manager.ts` | Team-initiated steers routed through `deliverLiveSteer()` |
 | `src/server/ws/handler.ts` | WebSocket `case "steer"` routed through `deliverLiveSteer()` |
 | `src/server/server.ts` | `/bg-processes/:pid/wait` REST handler - creates the `AbortController`, registers it, passes `signal` to `waitForExit`, unregisters in `finally` |
@@ -2799,7 +2801,7 @@ This is strictly better than the pre-fix state: one-off glitches self-heal on th
 ### Entry points
 
 - `SessionManager.enqueuePrompt` (`src/server/agent/session-manager.ts`) - user / REST prompt arrival.
-- `SessionManager.deliverLiveSteer` - WS `{type:"steer"}` and team-manager steer paths. Enqueues into `promptQueue` as `{ isSteered: true }` and hands to `_dispatchSteer`, which removes the row before awaiting `rpcClient.steer()` and pushes the batch text onto the shadow ledger on success. The PI-25b/c invariant that steers survive a Stop/retry roundtrip is preserved by the shadow ledger → `_reconcileAfterAbort` → `enqueueAtFront` → post-respawn `drainQueue` chain, not by an in-row `dispatched` flag (which has been deleted).
+- `SessionManager.deliverLiveSteer` - WS `{type:"steer"}` and team-manager steer paths. Enqueues into `promptQueue` as `{ isSteered: true }` and hands to `_dispatchSteer`, which records the batch text in the shadow ledger and removes the row in one persisted queue+ledger update before awaiting `rpcClient.steer()`. The PI-25b/c invariant that steers survive a Stop/retry roundtrip is preserved by the shadow ledger → `_reconcileAfterAbort` / restore → `enqueueAtFront` → post-respawn `drainQueue` chain, not by an in-row `dispatched` flag (which has been deleted).
 - Both emit a one-line log on the implicit-unstick path recording `sessionId`, `source` (`enqueuePrompt` vs `deliverLiveSteer`), and current `consecutiveErrorTurns`, so the rescue-vs-park ratio is observable in practice.
 
 ### Team-manager suppression removed
@@ -2810,7 +2812,7 @@ The old `if (teamLeadSession.lastTurnErrored) { suppress }` guard in `team-manag
 
 Direct prompts and queued prompts mark the session `streaming` optimistically before calling Pi. If `rpcClient.prompt()` rejects, or resolves `{ success: false, error }`, Bobbit assumes the agent did not accept the text and re-enqueues the same rows at the front of `PromptQueue` in original order. A zero-delay follow-up drain lets Pi finish any abort/cleanup microtasks before Bobbit tries again.
 
-The recovery path deliberately does **not** re-enqueue when the failure is a child-exit path and the session is already `terminated` or `aborting`. In that state the bridge is gone; sandbox recovery, force-abort recovery, or explicit user retry owns the next live process. This prevents a dead child from causing an immediate redispatch loop while still preserving prompts rejected by transient dispatch races.
+The recovery path suppresses re-enqueue only when an inbound agent event has advanced `agentObservedTurnVersion`, proving the dequeued turn was observed by the agent. Local status-only changes (`statusVersion` bumps such as Stop → `aborting`) do not suppress recovery, because the prompt may still be rejected before acceptance. It also does **not** re-enqueue when the failure is a child-exit path and the session is already `terminated` or `aborting`; in that state the bridge is gone, and sandbox recovery, force-abort recovery, or explicit user retry owns the next live process.
 
 ### Key files
 

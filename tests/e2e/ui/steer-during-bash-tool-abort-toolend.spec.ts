@@ -43,6 +43,21 @@ import {
 } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
+async function clickAllSteerButtons(page: any): Promise<void> {
+	let remaining = await page.locator(".queue-pill .steer-btn").count();
+	while (remaining > 0) {
+		await page.locator(".queue-pill .steer-btn").first().evaluate((el: HTMLElement) => el.click());
+		await expect.poll(async () => page.locator(".queue-pill .steer-btn").count(), { timeout: 5_000 }).toBeLessThan(remaining);
+		remaining = await page.locator(".queue-pill .steer-btn").count();
+	}
+}
+
+async function clickStopIfPresent(page: any): Promise<void> {
+	const stop = page.locator("button[title='Stop streaming']").first();
+	if (await stop.count() === 0) return;
+	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
+}
+
 test.describe("steer subsystem \u2014 queue + steer + abort with tool_execution_end on abort", () => {
 	test.beforeAll(async () => {
 		// Make the mock emit tool_execution_end on abort (real bash extension
@@ -82,14 +97,12 @@ test.describe("steer subsystem \u2014 queue + steer + abort with tool_execution_
 		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 		await rec.capture("Two messages queued");
 
-		await page.locator(".queue-pill .steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toHaveCount(1, { timeout: 5_000 });
-		await page.locator(".queue-pill .steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toHaveCount(2, { timeout: 5_000 });
-		await rec.capture("Both pills steered");
+		await clickAllSteerButtons(page);
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+		await rec.capture("Both pills steered and dispatched");
 
-		await page.locator("button[title='Stop streaming']").click();
-		await rec.capture("Stop clicked");
+		await clickStopIfPresent(page);
+		await rec.capture("Stop clicked if still streaming");
 
 		// Both steered texts must reach the agent without any further user input.
 		await expect(
