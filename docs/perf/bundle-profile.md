@@ -38,7 +38,9 @@ chunk is the next thing to lazy-load.
 Open the treemap, find the `node_modules/<dep>` rectangle. If it's in
 the entry chunk and you didn't expect it, you've found a static-import
 boundary that should be dynamic. Grep `src/` for `from "<dep>"` to find
-the offender.
+the offender. Browser code must not use runtime static or dynamic bare
+imports from `@earendil-works/pi-ai`; use server-backed APIs or narrow
+browser-safe provider subpaths instead.
 
 **3. Why didn't my lazy-loading shrink the entry chunk?**
 Rollup hoists a module into its earliest static importer. If the
@@ -70,7 +72,7 @@ The JSON shape is documented in
 
 ## Regression guards
 
-Three layered checks live in the repo:
+Build-size and build-warning checks live in the repo:
 
 1. **`chunkSizeWarningLimit: 600`** in `vite.config.ts` — Vite prints
    `(!) Some chunks are larger than 600 kB after minification.` if any
@@ -80,7 +82,12 @@ Three layered checks live in the repo:
    build if the entry chunk exceeds 250 KB gzipped, any non-worker
    chunk exceeds 200 KB gzipped, or any non-worker chunk exceeds
    600 KB raw. Pinned thresholds, raise only after a measured win.
-3. **The eye test** — when a chunk size jumps, re-run the profiler and
+3. **`tests/clean-build-warnings-regression.test.ts`** — pins warning
+   classes that are easy to miss in green builds: no browser runtime
+   bare imports from `@earendil-works/pi-ai`, no misleading dynamic
+   import of modules already statically imported, and quiet expected
+   primary-branch fallback logging for temp test repos.
+4. **The eye test** — when a chunk size jumps, re-run the profiler and
    look at the new rectangle. Usually a one-line `import()` fix.
 
 ## When to grow a chunk vs lazy-load
@@ -126,7 +133,9 @@ touching source.
 The floor is the SCC itself: you cannot split a cycle finer than its
 members (Rollup emits a `Circular chunk` warning and folds them back
 together). Going below that requires a source-level refactor to break
-the import cycle. See
+the import cycle. If a named eager seam such as `app-review` grows back
+toward the 600 KB raw limit, first peel cycle-free leaf modules into
+small eager chunks; do not raise the budget just to silence Vite. See
 [`docs/design/shrink-main-ui-manualchunks.md`](../design/shrink-main-ui-manualchunks.md).
 
 ## Adding a per-language chunk emission

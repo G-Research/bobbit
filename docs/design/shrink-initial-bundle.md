@@ -2,12 +2,15 @@
 
 Status: shipped (HEAD `ed850b65`)  •  Goal branch: `goal/shrink-ini-cf48655b`  •  Author: team-lead
 
-> **Follow-up:** a later pass —
+> **Follow-up:** later passes kept this boundary strict. First,
 > [`shrink-main-ui-manualchunks.md`](./shrink-main-ui-manualchunks.md)
-> (HEAD `11278c43`) — peeled the app-shell SCC (`session-manager`,
+> (HEAD `11278c43`) peeled the app-shell SCC (`session-manager`,
 > `remote-agent`, PR-walkthrough, review, inbox) out of the entry chunk
-> with four more app-seam `manualChunks` rules after it crept back over
-> the 600 KB raw budget. Packaging-only; no lazy deferral.
+> with app-seam `manualChunks` rules after it crept back over the 600 KB
+> raw budget. A later clean-build-warning pass made the browser pi-ai
+> boundary stricter: no runtime static or dynamic bare imports from
+> `@earendil-works/pi-ai`; use server-backed APIs or narrow browser-safe
+> provider subpaths.
 
 ## Outcome
 
@@ -23,11 +26,11 @@ chunks dropped well below budget; the bundle-size regression guard
 
 What landed:
 
-- **Task A** — `@earendil-works/pi-ai`'s `models.generated.js` catalog
-  (~553 kB) lazy-loaded via `src/app/pi-ai-lazy.ts`. Eager value imports
-  of `streamSimple` / `getModel` are now dynamic; type-only imports were
-  left untouched. The catalog now loads only when the model picker or
-  first-message stream needs it.
+- **Task A** — `@earendil-works/pi-ai`'s side-effectful bare index no
+  longer sits on browser runtime paths. Browser provider/model/key-test
+  needs go through server APIs, and first-message streaming imports
+  narrow provider subpaths from `src/app/pi-ai-lazy.ts`. Type-only
+  imports stay untouched because `tsc` erases them.
 - **Task B** — `src/ui/tools/highlight-core.ts` replaces every direct
   `import hljs from "highlight.js"` call site. It pulls
   `highlight.js/lib/core` plus 10 eager grammars (`javascript`,
@@ -208,87 +211,42 @@ do not contribute to the entry chunk. The first four files do.
 
 ### Fix
 
-Two surgical changes to the eager entry graph; one cosmetic one:
+Current implementation is stricter than the original lazy-wrapper plan:
 
-1. **`src/ui/tools/artifacts/artifacts.ts`** — replace
-   `import { StringEnum, Type } from "@earendil-works/pi-ai"` with
-   `import { StringEnum, Type } from "typebox"`. Verify with
-   `cat node_modules/@earendil-works/pi-ai/dist/index.js` that pi-ai
-   re-exports `Type` from `"typebox"` (already confirmed). `typebox` is
-   already a transitive dep — no new dependency, and we bypass pi-ai's
-   side-effectful index entirely from this file.
-
-2. **`src/app/remote-agent.ts`** — the single call `getModel("anthropic", "claude-opus-4-6")`
-   at line 459 is used to seed a default config. Two options, pick the
-   cleaner one during implementation:
-   - **Inline a constant**: replace `getModel("anthropic", "claude-opus-4-6")`
-     with a hard-coded `Model` literal (just the fields the call site uses
-     — `provider`, `id`, baseline cost, etc.). Drop the static import.
-   - **Behind a lazy wrapper**: extract a `defaultOpusContext()` helper
-     into a new file `src/app/pi-ai-lazy.ts` that
-     `await import("@earendil-works/pi-ai")` on demand, and convert this
-     call site to async. Lower risk than hard-coding model details.
-
-   Prefer **lazy wrapper** — it keeps a single source of truth and
-   gracefully picks up future pi-ai catalog updates.
-
-3. **`src/ui/utils/proxy-utils.ts`** + **`src/ui/components/AgentInterface.ts`** —
-   replace the `streamSimple` value import with a lazy wrapper:
-
-   ```ts
-   // src/app/pi-ai-lazy.ts
-   let _pi: Promise<typeof import("@earendil-works/pi-ai")> | null = null;
-   export function loadPiAi(): Promise<typeof import("@earendil-works/pi-ai")> {
-     return (_pi ??= import("@earendil-works/pi-ai"));
-   }
-   ```
-
-   In `proxy-utils.ts::createStreamFn`, replace
-   `return streamSimple(model, context, options)` with:
-
-   ```ts
-   const { streamSimple } = await loadPiAi();
-   return streamSimple(model, context, options);
-   ```
-
-   `createStreamFn` already returns an async function — no signature
-   change. The pi-ai chunk loads on **first message stream**, which is
-   already a network round-trip — the dynamic import cost is in the
-   noise.
-
-   In `AgentInterface.ts:841`, the test
-   `if (this.session.streamFn === streamSimple)` exists to detect "is
-   this the default streamFn?". Replace with a sentinel: mark the
-   default streamFn via a `Symbol` or `(fn as any).__isDefault = true`
-   flag at construction time, and check that flag here. No async impact
-   — the comparison runs at component init.
-
+1. **No browser runtime bare imports.** Browser code must not use static
+   or dynamic value imports from `@earendil-works/pi-ai`. The bare index
+   re-exports Node environment probing (`env-api-keys.js`) and makes Vite
+   externalize `node:fs` for browser compatibility.
+2. **Use browser-safe boundaries.** Provider/model catalog and provider
+   key-test flows go through server APIs. First-message streaming goes
+   through `src/app/pi-ai-lazy.ts`, which switches on `model.api` and
+   imports narrow provider subpaths such as
+   `@earendil-works/pi-ai/openai-responses`.
+3. **Keep schema helpers off the bare index.** Browser runtime schema
+   helpers use direct `typebox` imports or local helpers when needed;
+   pi-ai remains type-only on those paths.
 4. **Type imports stay static.** `import type { ... } from "@earendil-works/pi-ai"`
-   is erased by `tsc` and never reaches Vite. The dozens of
-   `import type { ToolResultMessage } from "@earendil-works/pi-ai"` lines
-   across renderers are fine.
+   is erased by `tsc` and never reaches Vite.
 
 ### Files modified
 
-- new: `src/app/pi-ai-lazy.ts` (≤30 LOC)
-- edit: `src/ui/tools/artifacts/artifacts.ts` (one-line import swap)
-- edit: `src/app/remote-agent.ts` (~10 LOC change at line 459)
-- edit: `src/ui/utils/proxy-utils.ts` (~5 LOC inside `createStreamFn`)
-- edit: `src/ui/components/AgentInterface.ts` (drop value import, swap
-  identity check to flag-based)
+- `src/app/pi-ai-lazy.ts` — browser-safe server/subpath boundary for
+  provider/model/key-test and first-message streaming paths.
+- `src/ui/tools/artifacts/artifacts.ts` — direct `typebox` runtime use
+  plus local `StringEnum`, with pi-ai kept type-only.
+- `src/app/remote-agent.ts`, `src/ui/utils/proxy-utils.ts`,
+  `src/ui/components/AgentInterface.ts` — no browser runtime value import
+  from the bare pi-ai package.
 
 ### Validation
 
 - `npm run check` — types must resolve without the static import.
-- `npm run build:ui` — entry chunk no longer contains
-  `models.generated.js`. Confirm via `bundle-stats.html`: search for
-  "models.generated" — it should now appear only inside a `pi-ai-*.js`
-  side chunk (or `chunk-*.js` named after the dynamic import group).
+- `npm run build:ui` — browser chunks no longer warn about `node:fs`
+  being externalized by `@earendil-works/pi-ai`.
+- `npx tsx --test tests/clean-build-warnings-regression.test.ts` — pins
+  the no-bare-runtime-import rule for browser code.
 - `npm run test:e2e` — chat flow still works. Existing E2E coverage of
   message streaming is enough; no new test needed.
-- Manual: send a message in dev, verify the response streams correctly.
-  On first message after cold reload, observe one extra fetch for the
-  pi-ai chunk in DevTools network panel — expected.
 
 ### Expected impact
 
