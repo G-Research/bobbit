@@ -19,7 +19,7 @@ import * as path from "node:path";
 import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
 import type { PersistedSession, SessionStore } from "../agent/session-store.js";
 import type { PersistedStaff, StaffStore } from "../agent/staff-store.js";
-import type { IndexSource, IndexSourceContext, SearchResults } from "./types.js";
+import type { Indexable, IndexSource, IndexSourceContext, SearchResults } from "./types.js";
 import { FlexSearchStore, FLEX_VERSION } from "./flex-store.js";
 import { Indexer } from "./indexer.js";
 import { GoalIndexSource } from "./sources/goal-source.js";
@@ -292,6 +292,29 @@ export class SearchService {
 		this._indexer
 			.removeByFilter({ session_id: sessionId, source_id: "messages" })
 			.catch((err) => console.error("[search] removeMessagesForSession failed:", err));
+	}
+
+	reindexMessagesForSession(session: PersistedSession, goalTitle?: string, projectId?: string): void {
+		if (!this._indexer) return;
+		const indexer = this._indexer;
+		const pid = projectId ?? session.projectId ?? this.projectId;
+		const task = async () => {
+			await indexer.removeByFilter({ session_id: session.id, source_id: "messages" });
+			const goalStore = {
+				getAll: () => session.goalId ? [{ id: session.goalId, title: goalTitle ?? "" }] : [],
+			} as unknown as GoalStore;
+			const sessionStore = { getAll: () => [session] } as unknown as SessionStore;
+			const ctx: IndexSourceContext = {
+				projectId: pid,
+				goalStore,
+				sessionStore,
+				staffStore: emptyStaffStore(),
+			};
+			const entries: Indexable[] = [];
+			for await (const entry of this._messageSource.iterate(ctx)) entries.push(entry);
+			await indexer.upsertEntries(entries);
+		};
+		task().catch((err) => console.error("[search] reindexMessagesForSession failed:", err));
 	}
 
 	indexMessage(arg: {

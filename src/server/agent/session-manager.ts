@@ -3426,7 +3426,14 @@ export class SessionManager {
 				testSearchIndex.open({ goalStore, sessionStore: this._testStore });
 				// Wire index update callbacks
 				goalStore.onIndexUpdate = (goal) => {
-					try { testSearchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
+					try {
+						testSearchIndex.indexGoal(goal, goal.projectId || "");
+						for (const session of this._testStore?.getAll() ?? []) {
+							if (session.goalId !== goal.id) continue;
+							testSearchIndex.indexSession(session, goal.title, session.projectId || "");
+							testSearchIndex.reindexMessagesForSession(session, goal.title, session.projectId || "");
+						}
+					} catch (err) { console.error("[search] Failed to index goal:", err); }
 				};
 				this._testStore.onIndexUpdate = (session) => {
 					try {

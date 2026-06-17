@@ -24,6 +24,7 @@ import { SessionIndexSource } from "../../src/server/search/sources/session-sour
 import { StaffIndexSource } from "../../src/server/search/sources/staff-source.ts";
 import { MessageIndexSource } from "../../src/server/search/sources/message-source.ts";
 import { FilesIndexSourceStub } from "../../src/server/search/sources/files-source.stub.ts";
+import { formatSessionSearchTitle } from "../../src/server/search/sources/session-title.ts";
 import { indexableToDoc } from "../../src/server/search/indexer.ts";
 import { toSearchResult } from "../../src/server/search/flex-store.ts";
 import type { IndexSource, IndexSourceContext, Indexable } from "../../src/server/search/types.ts";
@@ -223,6 +224,14 @@ test.describe("SessionIndexSource", () => {
 			sessions: [{ ...sessions[0], title: "First goal: Working on the thing" }],
 		}));
 		expect(alreadyPrefixed[0].display?.title, "goal prefix should not be duplicated").toBe("First goal: Working on the thing");
+	});
+
+	test("does not treat goal title substrings as existing prefixes", () => {
+		expect(formatSessionSearchTitle("Prefix search", "Fix")).toBe("Fix: Prefix search");
+		expect(formatSessionSearchTitle("guide updates", "UI")).toBe("UI: guide updates");
+		expect(formatSessionSearchTitle("Fix: Prefix search", "Fix")).toBe("Fix: Prefix search");
+		expect(formatSessionSearchTitle("Prefix search for Fix", "Fix")).toBe("Prefix search for Fix");
+		expect(formatSessionSearchTitle("Build the UI guide", "UI")).toBe("Build the UI guide");
 	});
 
 	test("contentHash stable under unchanged input", async () => {
