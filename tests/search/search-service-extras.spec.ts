@@ -242,6 +242,101 @@ test("session goal ownership updates refresh dependent message title prefixes", 
 	}
 });
 
+test("serialized message reindexes keep latest session and goal title metadata", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-order-"));
+	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-order-session-"));
+	const messageFile = path.join(rootPath, "session.jsonl");
+	fs.writeFileSync(
+		messageFile,
+		JSON.stringify({ message: { role: "user", content: "ReindexOrderingToken" } }) + "\n",
+		"utf-8",
+	);
+
+	const svc = new SearchService({
+		stateDir,
+		projectId: "project-reindex-order",
+		progressBus: new ProgressBus(),
+	});
+	let releaseOldUpsert!: () => void;
+	const oldMayFinish = new Promise<void>((resolve) => { releaseOldUpsert = resolve; });
+	let markOldStarted!: () => void;
+	const oldStarted = new Promise<void>((resolve) => { markOldStarted = resolve; });
+	let markOldFinished!: () => void;
+	const oldFinished = new Promise<void>((resolve) => { markOldFinished = resolve; });
+	let markNewFinished!: () => void;
+	const newFinished = new Promise<void>((resolve) => { markNewFinished = resolve; });
+	let oldFinishedFlag = false;
+	let newStartedBeforeOldFinished = false;
+
+	try {
+		svc.open();
+		await svc.whenReady();
+
+		const internals = svc as unknown as {
+			_indexer: { upsertEntries: (entries: Array<{ metadata?: Record<string, unknown> }>) => Promise<void> };
+			_waitForMutationTasks: () => Promise<void>;
+		};
+		const originalUpsert = internals._indexer.upsertEntries.bind(internals._indexer);
+		internals._indexer.upsertEntries = async (entries) => {
+			const sessionTitle = entries
+				.map((entry) => String(entry.metadata?.sessionTitle ?? ""))
+				.find((title) => title.length > 0) ?? "";
+			if (sessionTitle === "Old Goal: Old Session") {
+				markOldStarted();
+				await oldMayFinish;
+				await originalUpsert(entries);
+				oldFinishedFlag = true;
+				markOldFinished();
+				return;
+			}
+			if (sessionTitle === "New Goal: New Session") {
+				if (!oldFinishedFlag) newStartedBeforeOldFinished = true;
+				await originalUpsert(entries);
+				markNewFinished();
+				return;
+			}
+			await originalUpsert(entries);
+		};
+
+		svc.reindexMessagesForSession({
+			id: "session-reindex-order",
+			title: "Old Session",
+			cwd: rootPath,
+			agentSessionFile: messageFile,
+			createdAt: 1,
+			lastActivity: 2,
+			goalId: "goal-reindex-order",
+			projectId: "project-reindex-order",
+		}, "Old Goal", "project-reindex-order");
+		await oldStarted;
+
+		svc.reindexMessagesForSession({
+			id: "session-reindex-order",
+			title: "New Session",
+			cwd: rootPath,
+			agentSessionFile: messageFile,
+			createdAt: 1,
+			lastActivity: 3,
+			goalId: "goal-reindex-order",
+			projectId: "project-reindex-order",
+		}, "New Goal", "project-reindex-order");
+
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		releaseOldUpsert();
+		await Promise.all([oldFinished, newFinished]);
+		await internals._waitForMutationTasks();
+
+		expect(newStartedBeforeOldFinished, "newer message reindex must wait for the older compound write").toBe(false);
+		const results = await svc.search("ReindexOrderingToken", { type: "messages", limit: 5 });
+		expect(results.results[0]?.sessionTitle).toBe("New Goal: New Session");
+	} finally {
+		releaseOldUpsert?.();
+		if (svc.getState() !== "closed") await svc.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
+		fs.rmSync(rootPath, { recursive: true, force: true });
+	}
+});
+
 test("close waits for an in-flight message reindex before closing the store", async () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-close-"));
 	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-session-"));

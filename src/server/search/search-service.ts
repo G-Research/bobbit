@@ -100,6 +100,13 @@ export class SearchService {
 	 */
 	private readonly _mutationTasks = new Set<Promise<void>>();
 
+	/**
+	 * Compound message mutations (`deleteWhere` + reinsert) must be serialized per
+	 * parent session. Otherwise rapid title/goal updates can complete out of order
+	 * and let an older reindex overwrite newer message `sessionTitle` metadata.
+	 */
+	private readonly _sessionMessageMutationChains = new Map<string, Promise<void>>();
+
 	private readonly _goalSource = new GoalIndexSource();
 	private readonly _sessionSource = new SessionIndexSource();
 	private readonly _messageSource = new MessageIndexSource();
@@ -293,21 +300,24 @@ export class SearchService {
 		const indexer = this._indexer;
 		this._scheduleMutation("removeMessagesForSession", indexer, () =>
 			indexer.removeByFilter({ session_id: sessionId, source_id: "messages" }),
+			this._messageMutationKey(sessionId),
 		);
 	}
 
 	reindexMessagesForSession(session: PersistedSession, goalTitle?: string, projectId?: string): void {
 		if (!this._indexer) return;
 		const indexer = this._indexer;
-		const pid = projectId ?? session.projectId ?? this.projectId;
+		const sessionSnapshot = { ...session };
+		const pid = projectId ?? sessionSnapshot.projectId ?? this.projectId;
+		const goalTitleSnapshot = goalTitle;
 		this._scheduleMutation("reindexMessagesForSession", indexer, async () => {
 			if ((this._state as SearchServiceState) === "closed" || this._indexer !== indexer) return;
-			await indexer.removeByFilter({ session_id: session.id, source_id: "messages" });
+			await indexer.removeByFilter({ session_id: sessionSnapshot.id, source_id: "messages" });
 			if ((this._state as SearchServiceState) === "closed" || this._indexer !== indexer) return;
 			const goalStore = {
-				getAll: () => session.goalId ? [{ id: session.goalId, title: goalTitle ?? "" }] : [],
+				getAll: () => sessionSnapshot.goalId ? [{ id: sessionSnapshot.goalId, title: goalTitleSnapshot ?? "" }] : [],
 			} as unknown as GoalStore;
-			const sessionStore = { getAll: () => [session] } as unknown as SessionStore;
+			const sessionStore = { getAll: () => [sessionSnapshot] } as unknown as SessionStore;
 			const ctx: IndexSourceContext = {
 				projectId: pid,
 				goalStore,
@@ -318,7 +328,7 @@ export class SearchService {
 			for await (const entry of this._messageSource.iterate(ctx)) entries.push(entry);
 			if ((this._state as SearchServiceState) === "closed" || this._indexer !== indexer) return;
 			await indexer.upsertEntries(entries);
-		});
+		}, this._messageMutationKey(sessionSnapshot.id));
 	}
 
 	indexMessage(arg: {
@@ -545,21 +555,39 @@ export class SearchService {
 		});
 	}
 
-	private _scheduleMutation(label: string, indexer: Indexer, task: () => Promise<void>): void {
+	private _scheduleMutation(
+		label: string,
+		indexer: Indexer,
+		task: () => Promise<void>,
+		serializeKey?: string,
+	): void {
 		if (this._state === "closed" || this._indexer !== indexer) return;
-		let tracked: Promise<void>;
-		tracked = (async () => {
+		const previous = serializeKey
+			? this._sessionMessageMutationChains.get(serializeKey) ?? Promise.resolve()
+			: Promise.resolve();
+		const run = async () => {
+			await previous.catch(() => undefined);
 			if (this._state === "closed" || this._indexer !== indexer) return;
 			await task();
-		})()
+		};
+		let tracked: Promise<void>;
+		tracked = run()
 			.catch((err) => {
 				if (this._state === "closed" && isStoreAlreadyClosedError(err)) return;
 				console.error(`[search] ${label} failed:`, err);
 			})
 			.finally(() => {
 				this._mutationTasks.delete(tracked);
+				if (serializeKey && this._sessionMessageMutationChains.get(serializeKey) === tracked) {
+					this._sessionMessageMutationChains.delete(serializeKey);
+				}
 			});
+		if (serializeKey) this._sessionMessageMutationChains.set(serializeKey, tracked);
 		this._mutationTasks.add(tracked);
+	}
+
+	private _messageMutationKey(sessionId: string): string {
+		return `messages:${sessionId}`;
 	}
 
 	private async _waitForMutationTasks(): Promise<void> {
