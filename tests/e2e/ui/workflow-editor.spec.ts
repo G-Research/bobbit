@@ -331,7 +331,7 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("free-form command run hint advertises {{baseBranch}} and not {{master}}, persists, and clears on type switch", async ({ page }) => {
+	test("free-form command run hint advertises supported variables only, persists, and clears on type switch", async ({ page }) => {
 		const wfId = "run-hint-" + Date.now();
 		await gotoNewEditor(page, wfId, [{
 			id: "g1", name: "Gate", depends_on: [],
@@ -340,11 +340,14 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expandFirstGate(page);
 		await expandFirstStep(page);
 
-		// Hint advertises {{baseBranch}}, not the legacy {{master}} alias.
+		// Hint advertises supported variables only: {{baseBranch}} is supported, legacy {{master}}
+		// and unsupported {{project.*}} placeholders are not advertised.
 		const hint = page.locator("[data-testid='wf-step-run-hint']").first();
 		await expect(hint).toBeVisible({ timeout: 5_000 });
 		await expect(hint).toContainText("{{baseBranch}}");
-		expect(await hint.textContent()).not.toContain("{{master}}");
+		const hintText = await hint.textContent();
+		expect(hintText).not.toContain("{{master}}");
+		expect(hintText).not.toContain("{{project.");
 
 		// Persistence across reload — re-open the editor and re-expand the step.
 		await openWorkflowEditor(page, wfId);
@@ -355,7 +358,9 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		const hintAfterReload = page.locator("[data-testid='wf-step-run-hint']").first();
 		await expect(hintAfterReload).toBeVisible({ timeout: 5_000 });
 		await expect(hintAfterReload).toContainText("{{baseBranch}}");
-		expect(await hintAfterReload.textContent()).not.toContain("{{master}}");
+		const hintAfterReloadText = await hintAfterReload.textContent();
+		expect(hintAfterReloadText).not.toContain("{{master}}");
+		expect(hintAfterReloadText).not.toContain("{{project.");
 
 		// Cleanup: switching away from `command` removes the run field and its hint.
 		await page.locator("[data-testid='wf-step-type']").first().selectOption("human-signoff");

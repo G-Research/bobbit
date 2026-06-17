@@ -22,7 +22,7 @@ import "./theme-init.js";
 // first paint on cold start, before the chunk had landed. Trading 9 kB raw
 // (still well under the 600 kB entry budget) for deterministic upgrade.
 import "../ui/components/BgProcessPill.js";
-import { ChatPanel } from "../ui/index.js";
+import { ChatPanel } from "../ui/ChatPanel.js";
 import {
 	state,
 	setRenderApp,

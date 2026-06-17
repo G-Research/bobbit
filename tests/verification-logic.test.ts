@@ -14,6 +14,7 @@ import {
 	groupStepsByPhase,
 	getSortedPhases,
 	isCommandStepSkippable,
+	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
 	buildStepCache,
 	canSkipAllSteps,
@@ -60,7 +61,7 @@ function signal(
 // ===================================================================
 
 describe("substituteVars", () => {
-	const builtins = { branch: "feat/x", master: "master", cwd: "/work", commit: "abc123", goal_spec: "Fix the bug" };
+	const builtins = { branch: "feat/x", baseBranch: "master", master: "master", cwd: "/work", commit: "abc123", goal_spec: "Fix the bug" };
 	const project = { test_command: "npm test", typecheck_command: "npm run check", build_command: "npm run build" };
 	const agent = { error_pattern: "Expected.*fail" };
 
@@ -70,6 +71,10 @@ describe("substituteVars", () => {
 
 	it("resolves builtin {{master}}", () => {
 		assert.equal(substituteVars("git merge {{master}}", builtins, {}, {}), "git merge master");
+	});
+
+	it("resolves builtin {{baseBranch}}", () => {
+		assert.equal(substituteVars("git merge origin/{{baseBranch}}", builtins, {}, {}), "git merge origin/master");
 	});
 
 	it("resolves builtin {{cwd}}", () => {
@@ -895,6 +900,17 @@ describe("isCommandStepSkippable", () => {
 		// patterns count as unresolved templates.
 		assert.equal(isCommandStepSkippable("find . -exec echo {} \\;"), null);
 		assert.equal(isCommandStepSkippable("awk '{print $1}'"), null);
+	});
+
+	it("fails unresolved required ready-to-merge builtins instead of skipping", () => {
+		const reason = readyToMergeUnresolvedBuiltinFailure(
+			"ready-to-merge",
+			"git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}",
+		);
+		assert.ok(reason);
+		assert.ok(reason.includes("{{baseBranch}}"));
+		assert.equal(readyToMergeUnresolvedBuiltinFailure("implementation", "echo {{baseBranch}}"), null);
+		assert.equal(readyToMergeUnresolvedBuiltinFailure("ready-to-merge", "echo {{project.build_command}}"), null);
 	});
 });
 

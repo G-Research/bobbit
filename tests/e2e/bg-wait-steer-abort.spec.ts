@@ -133,7 +133,6 @@ test.describe("bash_bg wait — steer abort", () => {
 		expect(bgRes.status).toBe(201);
 		const bg = await bgRes.json();
 
-		const waitStart = Date.now();
 		const waitPromise = adminFetch(
 			gateway.baseURL,
 			`/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=60`,
@@ -145,11 +144,16 @@ test.describe("bash_bg wait — steer abort", () => {
 			{ timeoutMs: 5_000, intervalMs: 25, label: "bg wait registered" },
 		);
 
-		// Terminate — must abort the in-flight wait so the handler resolves.
-		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+		// Terminate — must abort the in-flight wait so the handler resolves. Measure
+		// from the registered wait/DELETE boundary, not from earlier setup work or
+		// DELETE cleanup, so this pins the abort path without accepting hangs.
+		const abortStart = Date.now();
+		const deletePromise = adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
 
 		const response = await waitPromise;
-		const elapsed = Date.now() - waitStart;
+		const elapsed = Date.now() - abortStart;
+		await deletePromise;
+
 		// Either 200 with aborted:true (abort fired first) or 404 (session gone) or
 		// 200 with the process having exited via SIGTERM — any of these is OK as
 		// long as the handler returned well before the 60s timeout.

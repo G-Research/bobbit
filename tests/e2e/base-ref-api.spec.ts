@@ -72,6 +72,12 @@ async function get(id: string): Promise<any> {
 
 test.beforeAll(() => { token = readE2EToken(); });
 
+// These tests create temporary git repositories and mutate project config through
+// one in-process gateway. Running them fully parallel fans out extra gateway
+// workers/retries on Windows and has hit broad-suite timeouts without improving
+// coverage, so keep this file serial while the API project remains parallel.
+test.describe.configure({ mode: "serial" });
+
 test.describe("base_ref API validation", () => {
 	test("PUT round-trip — set origin/<branch>, GET returns it, empty clears it", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-rt-"));

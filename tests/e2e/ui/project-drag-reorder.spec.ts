@@ -223,19 +223,33 @@ async function handleCenter(handle: Locator): Promise<{ x: number; y: number }> 
 	return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 }
 
+async function handleCenterIsHitTarget(handle: Locator): Promise<boolean> {
+	return handle.evaluate((el: HTMLElement) => {
+		const rect = el.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0) return false;
+		const hit = el.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+		return hit === el || (!!hit && el.contains(hit));
+	});
+}
+
+async function expectHandleCenterHitTarget(handle: Locator, message: string): Promise<void> {
+	await expect.poll(() => handleCenterIsHitTarget(handle), { message, timeout: 5_000 }).toBe(true);
+}
+
 async function startProjectDrag(page: Page, project: ProjectFixture): Promise<void> {
+	await page.bringToFront();
 	const header = projectHeader(page, project.id);
 	const handle = projectHandle(page, project.id);
 	await expect(header, `project header for ${project.name} should be visible before dragging`).toBeVisible({ timeout: 20_000 });
 	await header.hover();
 	await expectHandleShown(handle, `project reorder handle for ${project.name} should be shown before dragging`);
 	await expectHandleActionable(handle, `project reorder handle for ${project.name} should receive pointer events before dragging`);
-	// Keep pointerdown immediately after locator hover: Playwright chooses a hittable point inside the animated/clipped handle.
-	await handle.hover();
+	await expectHandleCenterHitTarget(handle, `project reorder handle center for ${project.name} should be hittable before dragging`);
 	const start = await handleCenter(handle);
-	await page.mouse.down();
-	for (const delta of [12, 24, 36]) {
-		await page.mouse.move(start.x, start.y + delta, { steps: 6 });
+	await page.mouse.move(start.x, start.y);
+	await page.mouse.down({ button: "left" });
+	for (const delta of [8, 16, 28, 44, 60]) {
+		await page.mouse.move(start.x, start.y + delta, { steps: 8 });
 		if ((await reorderMode(page).count()) > 0) break;
 	}
 	await expect.poll(async () => reorderMode(page).count(), {

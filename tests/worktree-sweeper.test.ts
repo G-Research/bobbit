@@ -130,6 +130,22 @@ branch refs/heads/session/new-session-deadbeef
 		assert.equal(out.orphan.length, 1);
 		assert.equal(out.active.length, 0);
 	});
+
+	it("keeps a boot-sweeper candidate active when a live session only references it by cwd", () => {
+		const out = classifyWorktrees({
+			porcelainStdout: `worktree /tmp/repo-wt/session-cwd-owned\nbranch refs/heads/session/stale-cwd-branch\n`,
+			repoPath: REPO,
+			goals: [],
+			sessions: [
+				{ id: "archived", branch: "session/stale-cwd-branch", worktreePath: "/tmp/repo-wt/session-cwd-owned", archived: true },
+				{ id: "live", branch: "session/live-different", cwd: "/tmp/repo-wt/session-cwd-owned/subdir" },
+			],
+			staff: [],
+		});
+		assert.equal(out.active.length, 1);
+		assert.equal(out.active[0].path, "/tmp/repo-wt/session-cwd-owned");
+		assert.equal(out.orphan.length, 0);
+	});
 });
 
 describe("worktree-sweeper.sweepOrphanedWorktrees", () => {

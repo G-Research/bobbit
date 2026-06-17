@@ -198,9 +198,12 @@ export function isBrowserReserved(binding: KeyBinding): boolean {
 // ============================================================================
 
 function matchesBinding(e: KeyboardEvent, b: KeyBinding): boolean {
-	const modMatch = b.ctrlOrMeta
-		? (isMac ? e.metaKey : e.ctrlKey)
-		: !(isMac ? e.metaKey : e.ctrlKey);
+	// On macOS, keep Cmd as the platform-primary modifier while also accepting
+	// physical Ctrl. Several UI shortcuts are documented and tested as Ctrl+…
+	// because Playwright and non-Mac hosts use Control; accepting both preserves
+	// those contracts without making callers branch on platform.
+	const primaryOrCtrlPressed = isMac ? (e.metaKey || e.ctrlKey) : e.ctrlKey;
+	const modMatch = b.ctrlOrMeta ? primaryOrCtrlPressed : !primaryOrCtrlPressed;
 	return (
 		modMatch &&
 		e.shiftKey === b.shift &&

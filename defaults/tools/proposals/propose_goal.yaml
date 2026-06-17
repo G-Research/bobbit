@@ -16,9 +16,9 @@ docs: >-
   GET /api/workflows?projectId=... for available workflows; if omitted, the
   user picks one in the proposal panel), options (comma-separated optional
   step names), parentGoalId (parent goal ID for creating a subgoal — must be
-  in the same project; when called from inside a team-lead session the server
-  auto-fills from the current goal so this param is usually omitted; pass the
-  id explicitly to override or omit to create a top-level goal).
+  in the same project; when called from inside a team-lead session with a
+  current goal that can spawn children, the server auto-fills from that goal;
+  omit it to create a top-level goal when subgoals are disabled/unavailable).
 
   SUB-GOAL + ORCHESTRATION SETTINGS (everything a human can set on the
   proposal panel's Sub-goals tab — set these to pre-fill the panel instead of

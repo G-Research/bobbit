@@ -94,10 +94,11 @@ draft on disk, `AgentInterface.ts` does a one-shot
 caches the resulting type list on `_archivedProposalTypes`. The
 archived footer then renders:
 
-- **"Resubmit `<type>` proposal"** — primary button. Selects the live
-  proposal tab in the session's side-panel workspace so the existing
-  proposal panel becomes visible beside the chat. Legacy `previewPanelTab`
-  / `assistantTab` mirrors are updated only for compatibility.
+- **"Resubmit `<type>` proposal"** — primary button. Explicitly opens or
+  focuses the live `proposal:<type>` tab in the session's side-panel
+  workspace so the existing proposal panel becomes visible beside the chat.
+  Legacy `previewPanelTab` / `assistantTab` mirrors are updated only for
+  compatibility.
 - **"Continue in New Session"** — secondary button, kept for Path B.
 
 If no drafts are present, only "Continue in New Session" is rendered
@@ -105,12 +106,12 @@ If no drafts are present, only "Continue in New Session" is rendered
 
 ### What happens on submit
 
-The proposal panel is already hydrated. The unified WS handshake
+The proposal content is already hydrated. The unified WS handshake
 emits `proposal_update {source:"rehydrate"}` for every surviving
 draft on attach (`src/server/ws/handler.ts`), and the same data is
-available via the REST list endpoint as a fallback. By the time the
-user clicks the Resubmit button, `state.activeProposals[type]` is
-already populated.
+available via the REST list endpoint as a fallback. These paths hydrate
+`state.activeProposals[type]` only; they do not open a side-panel tab.
+The Resubmit button is the explicit workspace reopen action.
 
 The submit path is the live REST path verbatim — `POST /api/goals`,
 `POST /api/projects`, `POST /api/roles`, `POST /api/tools`, or
@@ -144,9 +145,10 @@ steer, no agent involvement.
 A previous browser tab on the same archived session may not refire
 `auth_ok` (e.g. a fast back-button navigation that keeps the same WS
 alive). The `GET /api/sessions/:id/proposals` REST endpoint is the
-explicit, one-shot fallback for that case — it returns the same
+explicit, one-shot content fallback for that case — it returns the same
 parsed projections the WS broadcast would have, with the
-authoritative `rev` from `latestRev()` stamped on each entry.
+authoritative `rev` from `latestRev()` stamped on each entry. Like WS
+rehydrate, it never recreates a closed side-panel tab by itself.
 
 ## Path B — Continue assistant session
 
@@ -200,8 +202,9 @@ copied history dir — no metadata file to keep in sync.
 
 Once the new session goes live, the standard WS `auth_ok` handshake
 emits `proposal_update {source:"rehydrate", rev}` per surviving file
-(`src/server/ws/handler.ts`). The proposal panel populates without
-any additional wiring.
+(`src/server/ws/handler.ts`). That hydrates the proposal content slots
+without opening tabs. A later explicit `propose_*`, Open Proposal,
+restore, or Resubmit action is what opens the workspace tab.
 
 ### Cleanup on failure
 

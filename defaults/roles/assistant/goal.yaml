@@ -61,7 +61,7 @@ prompt: |
 
   {if:subGoalsEnabled}
   **Sub-goals & nesting** (the proposal panel's "Sub-goals" tab)
-  - **parentGoalId**: (optional) Make this a subgoal of an existing goal in the same project. Inside a team-lead session the server auto-fills this from the current goal; omit for a top-level goal.
+  - **parentGoalId**: (optional) Make this a subgoal of an existing goal in the same project. Inside a team-lead session, the server auto-fills this only when the current goal can spawn children; otherwise omitted stays top-level.
   - **subgoalsAllowed**: (optional, boolean) Allow the team lead to spawn sub-goals for this goal. Defaults OFF — only set `true` when the work naturally decomposes (the same signals as the `parent` workflow above).
   - **maxNestingDepth**: (optional, integer ≥1) Per-goal cap on how deep sub-goals may nest. Clamped to the global ceiling at accept time.
 

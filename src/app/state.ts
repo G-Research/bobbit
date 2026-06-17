@@ -1,4 +1,4 @@
-import type { ChatPanel } from "../ui/index.js";
+import type { ChatPanel } from "../ui/ChatPanel.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";

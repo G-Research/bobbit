@@ -182,6 +182,37 @@ async function openSession(page: Page, sessionId: string): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 }
 
+async function ensureGoalWidgetGateVisible(page: Page, gateId: string): Promise<void> {
+	const row = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`).first();
+	const dropdown = page.locator("#goal-status-dropdown").first();
+	const closingDropdown = page.locator("#goal-status-dropdown.goal-status-closing").first();
+	if (await closingDropdown.isVisible().catch(() => false)) {
+		await expect(closingDropdown).toBeHidden({ timeout: 5_000 });
+	}
+	if (!(await dropdown.isVisible().catch(() => false))) {
+		const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+		await expect(pill).toBeVisible({ timeout: 10_000 });
+		await pill.click();
+	}
+	await expect(row).toBeVisible({ timeout: 10_000 });
+}
+
+async function visibleGoalWidgetGateAction(page: Page, gateId: string, actionTestId: string): Promise<ReturnType<Page["locator"]>> {
+	const action = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`).first();
+	for (let attempt = 0; attempt < 3; attempt++) {
+		await ensureGoalWidgetGateVisible(page, gateId);
+		if (await action.isVisible().catch(() => false)) return action;
+		await page.locator("#goal-status-dropdown.goal-status-closing").first().waitFor({ state: "hidden", timeout: 2_000 }).catch(() => { /* retry */ });
+	}
+	await expect(action).toBeVisible({ timeout: 10_000 });
+	return action;
+}
+
+async function clickGoalWidgetGateAction(page: Page, gateId: string, actionTestId: string): Promise<void> {
+	const action = await visibleGoalWidgetGateAction(page, gateId, actionTestId);
+	await action.evaluate((el) => (el as HTMLElement).click());
+}
+
 /** Read the red bypassed badge text from a scope (pill or sidebar row). The
  *  bypassed badge is a red span whose text ends with `!`. */
 async function bypassedBadge(scope: ReturnType<Page["locator"]>): Promise<{ text: string; color: string } | null> {
@@ -310,11 +341,10 @@ test.describe("gate bypass (human-only override)", () => {
 			const bypassedRow = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${FAILED_GATE_ID}"]`);
 			await expect(bypassedRow).toHaveAttribute("data-gate-status", "bypassed", { timeout: 10_000 });
 
-			// The goal-status dropdown closes after a confirm-dialog interaction, so
-			// (re)open it on demand before reaching into the gate row.
+			// The goal-status dropdown closes after confirm-dialog interactions; reopen
+			// it through the same row-aware helper used for action clicks.
 			const ensureGatesOpen = async () => {
-				if (await bypassedRow.isVisible().catch(() => false)) return;
-				await pillAfter.click();
+				await ensureGoalWidgetGateVisible(page, FAILED_GATE_ID);
 				await expect(page.locator("[data-testid='goal-widget-gates']")).toBeVisible({ timeout: 5_000 });
 			};
 			const confirmCompletion = page.locator("[data-testid='goal-widget-confirm-completion']");
@@ -327,7 +357,7 @@ test.describe("gate bypass (human-only override)", () => {
 			// passed or bypassed, so the human completion override becomes available.
 			await ensureGatesOpen();
 			const rtmRow = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${RTM_GATE_ID}"]`);
-			await rtmRow.locator('[data-testid="goal-widget-gate-bypass"]').evaluate((el) => (el as HTMLElement).click());
+			await clickGoalWidgetGateAction(page, RTM_GATE_ID, "goal-widget-gate-bypass");
 			await page.locator("[data-testid='goal-widget-bypass-why']").fill(WHY);
 			await page.locator("[data-testid='goal-widget-bypass-who']").fill(WHO);
 			const rtmBypassResp = page.waitForResponse((r) =>
@@ -364,8 +394,7 @@ test.describe("gate bypass (human-only override)", () => {
 			await expect(confirmCompletion).toHaveCount(0);
 
 			// A bypassed gate offers a "Remove bypass" (reset) button to undo the override.
-			const removeBypassBtn = bypassedRow.locator('[data-testid="goal-widget-gate-reset"]');
-			await expect(removeBypassBtn).toBeVisible();
+			let removeBypassBtn = await visibleGoalWidgetGateAction(page, FAILED_GATE_ID, "goal-widget-gate-reset");
 			await expect(removeBypassBtn).toContainText(/Remove bypass/i);
 
 			// Opening the confirm dialog must not call the API; cancel leaves it bypassed.
@@ -382,7 +411,7 @@ test.describe("gate bypass (human-only override)", () => {
 
 			// Confirming removes the bypass and returns the gate to pending.
 			await ensureGatesOpen();
-			await expect(removeBypassBtn).toBeVisible({ timeout: 5_000 });
+			removeBypassBtn = await visibleGoalWidgetGateAction(page, FAILED_GATE_ID, "goal-widget-gate-reset");
 			await removeBypassBtn.evaluate((el) => (el as HTMLElement).click());
 			await expect(removeDialogTitle).toBeVisible({ timeout: 5_000 });
 			const resetResponse = page.waitForResponse((r) =>

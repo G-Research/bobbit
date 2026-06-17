@@ -9,14 +9,13 @@ import type {
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { marked } from "marked";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderTool } from "../tools/index.js";
 import { TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { fetchToolContent } from "../utils/fetch-tool-content.js";
-import { state as appState } from "../../app/state.js";
+import { state as appState, renderApp } from "../../app/state.js";
 import { getHostApi } from "../../app/host-api.js";
 import { packIdForTool } from "../../app/pack-renderers.js";
 import "./ThinkingBlock.js";
@@ -111,6 +110,28 @@ interface ChipItem {
 	render: () => TemplateResult;
 }
 
+let markedParseInline: ((text: string) => string) | null = null;
+let markedInlineLoadStarted = false;
+
+function ensureMarkedInlineLoaded(): void {
+	if (markedParseInline || markedInlineLoadStarted) return;
+	markedInlineLoadStarted = true;
+	void import("marked")
+		.then(({ marked }) => {
+			markedParseInline = (text: string) => marked.parseInline(text, { async: false }) as string;
+			renderApp();
+		})
+		.catch((err) => {
+			markedInlineLoadStarted = false;
+			console.warn("[Messages] failed to load marked inline renderer", err);
+		});
+}
+
+function renderPlainInlineWithBreaks(text: string): TemplateResult {
+	const lines = text.split("\n");
+	return html`${lines.map((line, index) => html`${index > 0 ? html`<br>` : ""}${line}`)}`;
+}
+
 /**
  * Render `text` with chip elements spliced in at each item's recorded UTF-16
  * character range. Plain-text gaps are rendered as inline HTML so user
@@ -163,7 +184,11 @@ function renderTextWithChips(
 	let cursor = 0;
 	const renderGap = (slice: string): TemplateResult => {
 		const withBreaks = slice.replace(/\n/g, "  \n");
-		const inlineHtml = marked.parseInline(withBreaks, { async: false }) as string;
+		if (!markedParseInline) {
+			ensureMarkedInlineLoaded();
+			return html`<span class="skill-chip-gap">${renderPlainInlineWithBreaks(slice)}</span>`;
+		}
+		const inlineHtml = markedParseInline(withBreaks);
 		return html`<span class="skill-chip-gap">${unsafeHTML(inlineHtml)}</span>`;
 	};
 	for (const item of valid) {
