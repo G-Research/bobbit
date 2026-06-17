@@ -26,9 +26,9 @@ import {
 import { statusBobbit } from "./session-colors.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt, forkSession } from "./session-manager.js";
-import { showRenameDialog } from "./dialogs-lazy.js";
+import { confirmAction, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
+import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, refreshAgentSession, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
@@ -437,6 +437,9 @@ export interface SidebarActionItem {
 // each time a session actions menu opens.
 let _forkNewWorktree = true;
 
+/** Session ids with an in-flight sidebar Refresh agent request. */
+const _refreshingAgentSessionIds = new Set<string>();
+
 interface OpenSidebarActionsPopover {
 	kind: SidebarActionEntityKind;
 	entityId: string;
@@ -461,7 +464,7 @@ function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActions
 	// their existing order. FLIP stays keyed by action id, so reordering is safe.
 	const quick = actions.filter((a) => a.quick).reverse();
 	const menuOnly = actions.filter((a) => !a.quick);
-	return [...quick, ...menuOnly].map(({ id, label, icon, tone, quick, trailingToggle }) => ({ id, label, icon, tone, quick, trailingToggle }));
+	return [...quick, ...menuOnly].map(({ id, label, title, icon, tone, quick, trailingToggle }) => ({ id, label, title, icon, tone, quick, trailingToggle }));
 }
 
 function closeSidebarActionsPopover(render = true): void {
@@ -596,11 +599,12 @@ function renderSidebarActionsTrigger(input: {
 function buildSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
 	const staffId = session.staffId;
 	const modifyLabel = staffId ? "Edit staff" : "Modify";
+	const isTeamLead = session.role === "team-lead";
 	const actions: SidebarActionItem[] = [
 		{
 			id: "modify",
 			label: modifyLabel,
-			title: modifyLabel,
+			title: staffId ? "Open this staff agent's settings" : "Rename this session",
 			icon: icon(Pencil, "xs"),
 			quick: true,
 			run: staffId
@@ -609,8 +613,8 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 		},
 		{
 			id: "terminate",
-			label: session.role === "team-lead" ? "End team" : "Terminate",
-			title: `${session.role === "team-lead" ? "End team" : "Terminate"}${shortcutHint("terminate-session")}`,
+			label: isTeamLead ? "End team" : "Terminate",
+			title: `${isTeamLead ? "Stop this team and its agents" : "Terminate this session"}${shortcutHint("terminate-session")}`,
 			icon: icon(Trash2, "xs"),
 			tone: "danger",
 			quick: true,
@@ -619,6 +623,7 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 		{
 			id: "copy-link",
 			label: "Copy link",
+			title: "Copy a link to this session",
 			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
@@ -626,15 +631,18 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 		{
 			id: "open-new-window",
 			label: "Open in new window",
+			title: "Open this session in a new browser window",
 			icon: icon(ExternalLink, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
 		},
 	];
+	if (canRefreshAgentSession(session)) actions.push(buildRefreshAgentSidebarAction(session));
 	if (canForkSidebarSession(session)) {
 		actions.push({
 			id: "fork",
 			label: "Fork",
+			title: "Create a new session from this session's history",
 			icon: icon(GitFork, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void forkSession(session, { newWorktree: _forkNewWorktree }); },
@@ -651,11 +659,11 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 }
 
 function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: string, goalId?: string): SidebarActionItem[] {
-	return [
+	const actions: SidebarActionItem[] = [
 		{
 			id: "modify",
 			label: "Modify",
-			title: "Modify",
+			title: "Rename this team lead session",
 			icon: icon(Pencil, "xs"),
 			quick: true,
 			run: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
@@ -663,7 +671,7 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 		{
 			id: "terminate",
 			label: "End team",
-			title: `End team${shortcutHint("terminate-session")}`,
+			title: `Stop this team and its agents${shortcutHint("terminate-session")}`,
 			icon: icon(Trash2, "xs"),
 			tone: "danger",
 			quick: true,
@@ -672,6 +680,7 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 		{
 			id: "copy-link",
 			label: "Copy link",
+			title: "Copy a link to this team lead session",
 			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
@@ -679,11 +688,14 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 		{
 			id: "open-new-window",
 			label: "Open in new window",
+			title: "Open this team lead session in a new browser window",
 			icon: icon(ExternalLink, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
 		},
 	];
+	if (canRefreshAgentSession(session)) actions.push(buildRefreshAgentSidebarAction(session));
+	return actions;
 }
 
 function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean; showArchive: boolean }): SidebarActionItem[] {
@@ -692,7 +704,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		actions.push({
 			id: "reattempt",
 			label: "Re-attempt",
-			title: "Re-attempt goal",
+			title: "Start a new attempt for this goal",
 			icon: icon(RotateCcw, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); startReattempt(goal.id); },
@@ -702,7 +714,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		actions.push({
 			id: "archive",
 			label: "Archive",
-			title: "Archive goal",
+			title: "Archive this goal",
 			icon: icon(Trash2, "xs"),
 			tone: "danger",
 			quick: true,
@@ -713,7 +725,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		{
 			id: "dashboard",
 			label: "Goal dashboard",
-			title: "Goal dashboard",
+			title: "Open this goal's dashboard",
 			icon: icon(LayoutDashboard, "xs"),
 			quick: true,
 			run: (e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); },
@@ -721,6 +733,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		{
 			id: "copy-link",
 			label: "Copy link",
+			title: "Copy a link to this goal",
 			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(goalDeepLink(goal.id), "Copy goal link"); },
@@ -736,12 +749,61 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		actions.push({
 			id: "open-github",
 			label: "Open on GitHub",
+			title: "Open this goal's pull request on GitHub",
 			icon: goalPrIconSvg(prBadge.color, "1.2em"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); openExternalUrl(url); },
 		});
 	}
 	return actions;
+}
+
+function buildRefreshAgentSidebarAction(session: GatewaySession): SidebarActionItem {
+	const refreshing = _refreshingAgentSessionIds.has(session.id);
+	return {
+		id: "refresh-agent",
+		label: refreshing ? "Refreshing agent…" : "Refresh agent",
+		title: refreshing ? "Agent refresh is already running" : "Restart this agent with the latest prompt, tools, and auth state",
+		icon: icon(RotateCcw, "xs"),
+		quick: false,
+		run: (e: Event) => { e.stopPropagation(); void runRefreshAgentSession(session); },
+	};
+}
+
+function canRefreshAgentSession(session: GatewaySession): boolean {
+	return !session.archived
+		&& !session.readOnly
+		&& !session.nonInteractive
+		&& session.status !== "terminated"
+		&& session.status !== "archived";
+}
+
+function refreshAgentNeedsConfirmation(session: GatewaySession): boolean {
+	return session.status === "streaming" || session.status === "busy" || session.isCompacting === true;
+}
+
+async function runRefreshAgentSession(session: GatewaySession): Promise<void> {
+	if (_refreshingAgentSessionIds.has(session.id)) return;
+	const force = refreshAgentNeedsConfirmation(session);
+	if (force) {
+		const confirmed = await confirmAction(
+			"Refresh agent",
+			"This will interrupt the current agent process and restart it with the latest prompt, tools, MCP configuration, and auth state. Transcript and history remain intact.",
+			"Refresh agent",
+			false,
+		);
+		if (!confirmed) return;
+	}
+	_refreshingAgentSessionIds.add(session.id);
+	refreshOpenSidebarActionsPopover();
+	renderApp();
+	try {
+		await refreshAgentSession(session.id, { force });
+	} finally {
+		_refreshingAgentSessionIds.delete(session.id);
+		refreshOpenSidebarActionsPopover();
+		renderApp();
+	}
 }
 
 function canForkSidebarSession(session: GatewaySession): boolean {

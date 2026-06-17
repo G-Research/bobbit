@@ -4216,6 +4216,45 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/sessions/:id/restart — restart a live session's agent process by id.
+	const restartMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
+	if (restartMatch && req.method === "POST") {
+		let id: string;
+		try {
+			id = decodeURIComponent(restartMatch[1]);
+		} catch {
+			json({ error: "Session not found", code: "SESSION_NOT_FOUND" }, 404);
+			return;
+		}
+
+		const session = sessionManager.getSession(id);
+		const persisted = session ? sessionManager.getSessionStore(session.projectId).get(session.id) : undefined;
+		if (!session || session.status === "terminated" || persisted?.archived) {
+			json({ error: "Session not found", code: "SESSION_NOT_FOUND" }, 404);
+			return;
+		}
+		if (session.readOnly || session.nonInteractive || persisted?.readOnly || persisted?.nonInteractive) {
+			json({ error: "Session cannot be restarted", code: "SESSION_NOT_RESTARTABLE" }, 403);
+			return;
+		}
+
+		const body = await readBody(req).catch(() => null);
+		const status = String(session.status);
+		if ((status === "busy" || status === "streaming" || session.isCompacting) && body?.force !== true) {
+			json({ error: "Session is busy; retry with force to restart", code: "SESSION_BUSY" }, 409);
+			return;
+		}
+
+		try {
+			await sessionManager.restartAgent(id);
+			json({ ok: true, sessionId: id });
+		} catch (err: any) {
+			const code = typeof err?.code === "string" && err.code ? err.code : "RESTART_ERROR";
+			json({ error: err instanceof Error ? err.message : String(err), code }, 500);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id (exact match — not /api/sessions/:id/output etc.)
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {

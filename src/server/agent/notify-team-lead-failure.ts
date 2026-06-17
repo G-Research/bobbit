@@ -68,7 +68,7 @@ export function buildVerificationFailureMessage(
 	const failed = steps.filter((s) => !s.passed);
 
 	const lines: string[] = [];
-	lines.push("### Gate verification FAILED");
+	lines.push("**Gate verification FAILED**");
 	lines.push(`**Gate:** \`${gateId}\``);
 
 	if (failed.length === 0) {

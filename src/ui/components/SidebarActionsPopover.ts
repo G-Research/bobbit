@@ -23,6 +23,7 @@ export interface SidebarActionsTrailingToggle {
 export interface SidebarActionsPopoverItem {
 	id: string;
 	label: string;
+	title?: string;
 	icon: TemplateResult;
 	tone?: "default" | "danger";
 	quick: boolean;
@@ -668,6 +669,7 @@ export class SidebarActionsPopover extends LitElement {
 				data-sidebar-action-id=${item.id}
 				data-sidebar-action-quick=${item.quick ? "true" : "false"}
 				tabindex=${rowActive ? "0" : "-1"}
+				title=${item.title || item.label}
 				class="bobbit-sidebar-actions-row"
 				style=${`display:flex;align-items:center;gap:8px;${hasToggle ? "flex:1;" : "width:100%;"}min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${buttonBackground};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
 				@mouseenter=${() => { this._highlightIndex = this._stopIndexFor(index, "row"); }}
