@@ -121,7 +121,7 @@ test.describe("gate verification resume after restart", () => {
 			let nudgeCount = 0;
 			let reviewerNudgeCount = 0;
 			let workerNudgeCount = 0;
-			const matchNudge = (msg: string) => /has finished/i.test(msg);
+			const matchNudge = (msg: string) => /(?:has finished|agent finished|task complete)/i.test(msg);
 			sm.deliverLiveSteer = async (sid: string, msg: string) => {
 				if (sid === teamLeadId && matchNudge(msg)) {
 					nudgeCount++;
