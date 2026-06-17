@@ -9,6 +9,17 @@ export const projectRoot = resolve(__dirname, "../..");
 export const currentMetricsDir = resolve(projectRoot, ".profiles", "metrics");
 export const baselineMetricsDir = resolve(projectRoot, "docs", "testing-metrics");
 export const schemaVersion = 1;
+export const requiredMetricNames = [
+	"coverage",
+	"unit-node",
+	"unit-browser",
+	"e2e-full",
+	"e2e-api",
+	"e2e-browser",
+	"slice-renderer",
+	"slice-scroll",
+	"slice-sidebar",
+];
 
 export function ensureDir(dir) {
 	mkdirSync(dir, { recursive: true });
@@ -289,9 +300,15 @@ function walkPlaywrightSuites(suites, tests = []) {
 }
 
 export function parsePlaywrightJson(file) {
-	if (!existsSync(file)) return undefined;
+	if (!existsSync(file)) throw new Error(`Missing Playwright JSON report: ${file}`);
+	const stat = statSync(file);
+	if (!stat.isFile() || stat.size === 0) throw new Error(`Empty Playwright JSON report: ${file}`);
 	const report = readJson(file);
+	if (!report || typeof report !== "object" || !Array.isArray(report.suites)) {
+		throw new Error(`Invalid Playwright JSON report (missing suites): ${file}`);
+	}
 	const tests = walkPlaywrightSuites(report.suites || []);
+	if (tests.length === 0) throw new Error(`Playwright JSON report contains no tests: ${file}`);
 	const summary = {
 		total: tests.length,
 		passed: 0,

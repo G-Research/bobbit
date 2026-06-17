@@ -15,7 +15,14 @@ const full = await measureCommand({
 	parseArtifacts: async () => ({ tests: parsePlaywrightJson(reportFile) }),
 });
 
-const projects = full.tests?.projects || {};
+const projects = full.tests?.projects;
+if (!projects || typeof projects !== "object") {
+	throw new Error("metrics:e2e:all could not derive project splits from the Playwright JSON report");
+}
+for (const project of ["api", "browser"]) {
+	if (!projects[project]) throw new Error(`metrics:e2e:all missing required ${project} project split in the Playwright JSON report`);
+}
+
 for (const [project, tests] of Object.entries(projects)) {
 	const split = {
 		schemaVersion,

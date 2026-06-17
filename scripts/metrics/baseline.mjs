@@ -1,20 +1,10 @@
 #!/usr/bin/env node
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { baselineMetricsDir, copyMetricToBaseline, ensureDir, listJsonFiles, metricFile, npmCommand, npmRunArgs, projectRoot, runSyncStep, writeJson } from "./lib.mjs";
+import { baselineMetricsDir, copyMetricToBaseline, ensureDir, listJsonFiles, metricFile, npmCommand, npmRunArgs, projectRoot, requiredMetricNames, runSyncStep, writeJson } from "./lib.mjs";
 
-const metricsToCopy = [
-	"coverage",
-	"unit-node",
-	"unit-browser",
-	"e2e-full",
-	"e2e-api",
-	"e2e-api-realpush",
-	"e2e-browser",
-	"slice-renderer",
-	"slice-scroll",
-	"slice-sidebar",
-];
+const optionalMetricsToCopy = ["e2e-api-realpush"];
+const metricsToCopy = [...requiredMetricNames, ...optionalMetricsToCopy];
 
 const commands = [
 	"metrics:coverage",
@@ -28,6 +18,11 @@ const commands = [
 
 for (const script of commands) {
 	runSyncStep(script, npmCommand(), npmRunArgs(script), { shell: process.platform === "win32" });
+}
+
+const missingRequired = requiredMetricNames.filter((metric) => !existsSync(metricFile(metric)));
+if (missingRequired.length > 0) {
+	throw new Error(`metrics:baseline missing required current metric file(s): ${missingRequired.map((metric) => metricFile(metric).replace(projectRoot, ".")).join(", ")}`);
 }
 
 ensureDir(baselineMetricsDir);

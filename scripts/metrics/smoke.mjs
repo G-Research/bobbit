@@ -37,6 +37,7 @@ function runCheck(dir) {
 			...process.env,
 			BOBBIT_METRICS_BASELINE_DIR: baselineDir,
 			BOBBIT_METRICS_CURRENT_DIR: dir,
+			BOBBIT_METRICS_REQUIRED: "coverage",
 		},
 	});
 }
