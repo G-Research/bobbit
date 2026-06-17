@@ -68,16 +68,10 @@ cause apiece so the audit doesn't fix the same bug five times.
 
 ### 1.3 WS frame → server enqueue
 
-8. Server `ws.on("message")` parses (`src/server/ws/handler.ts:278-285`), enforces auth-first
-   (288-318), routes by type (531). A `prompt` resolves slash-skill expansions on the host
-   (568-573) and calls `sessionManager.enqueuePrompt(sessionId, originalText, {images, attachments, ...})`
-   (581-586). The full base64 `attachments` array rides the WS frame even though only `images` are
-   used as model input downstream.
-9. `enqueuePrompt` (`src/server/agent/session-manager.ts:1707`) gates on error-state
-   (1747-1794, incl. `MAX_CONSECUTIVE_ERROR_TURNS` park at 1757), then:
-   - idle + empty queue → `dispatchDirectPrompt` (2061) → `rpcClient.prompt(text, images)` (2075);
-   - else `promptQueue.enqueue` (`prompt-queue.ts:19`) + `broadcastQueue` (1688, **re-serializes
-     and persists full base64 image data on every queue mutation**).
+8. Server `ws.on("message")` parses in `src/server/ws/handler.ts`, enforces auth-first, and routes by frame type. A `prompt` resolves slash-skill expansions on the host and calls `sessionManager.enqueuePrompt(sessionId, originalText, {images, attachments, ...})`. The full base64 `attachments` array rides the WS frame even though only `images` are used as model input downstream.
+9. `enqueuePrompt` in `src/server/agent/session-manager.ts` gates on error-state, including `MAX_CONSECUTIVE_ERROR_TURNS`, then:
+   - idle + empty queue → `dispatchDirectPrompt` → `rpcClient.prompt(text, images)`;
+   - else `promptQueue.enqueue` + `broadcastQueue`, which **re-serializes and persists full base64 image data on every queue mutation**.
    A `steer` while streaming enqueues a steered row, removes that row from the queue, records and
    persists its text in the `inFlightSteerTexts` shadow ledger, then dispatches through
    `_dispatchSteer()`; rollback requeues the row if the RPC fails.
@@ -100,15 +94,8 @@ cause apiece so the audit doesn't fix the same bug five times.
     `lineBuffer`, splits on `\n`, strips trailing `\r`, `JSON.parse`s each line
     (`catch{continue}` silently drops bad lines), and routes `response` → pending Map vs everything
     else → `eventListeners`.
-13. The live listener (`session-manager.ts:3440`) runs `handleAgentLifecycle` (which calls
-    `broadcastStatus` FIRST — see §1.8) then `truncateLargeToolContent` then `emitSessionEvent`
-    (507). `emitSessionEvent` splices pending skill-expansions, pushes the event into `EventBuffer`
-    assigning a **monotonic per-session `seq` + wall-clock `ts`** (`event-buffer.ts:27-34`, 1000-entry
-    ring), and `broadcast`s `{type:"event", data, seq, ts}` (510-522).
-14. `broadcast()` (`session-manager.ts:399`) JSON-stringifies once and per-client applies the
-    **ws-overflow-guard** (405-430, send-and-defer-check → terminate on a persistent spike).
-    **NOTE the divergence:** a *second*, handler-local `broadcast()` (`handler.ts:178`) used for
-    `task_changed`/`client_joined`/`set_image_model` has **no overflow guard and no seq**.
+13. The live listener in `session-manager.ts` runs `handleAgentLifecycle` (which calls `broadcastStatus` FIRST — see §1.8), then `truncateLargeToolContent`, then `emitSessionEvent`. `emitSessionEvent` splices pending skill-expansions, pushes the event into `EventBuffer` assigning a **monotonic per-session `seq` + wall-clock `ts`**, and `broadcast`s `{type:"event", data, seq, ts}`.
+14. `broadcast()` in `session-manager.ts` JSON-stringifies once and per-client applies the **ws-overflow-guard**: send, defer-check, then terminate on a persistent spike. **NOTE the divergence:** a *second*, handler-local `broadcast()` in `handler.ts` used for `task_changed`/`client_joined`/`set_image_model` has **no overflow guard and no seq**.
 
 ### 1.6 Server → client (WS ingestion + seq gate)
 
@@ -154,7 +141,7 @@ cause apiece so the audit doesn't fix the same bug five times.
 21. Status is a separate, **unbuffered, seq-less** channel. `broadcastStatus`
     (`session-status.ts:46-60`) is the single server writer: it mutates `session.status`,
     **bumps `statusVersion`**, and broadcasts a `session_status` frame. Called at ~15 transition
-    sites. `_emitStatusHeartbeat` (`session-manager.ts:811`) re-broadcasts current status every 15s
+    sites. `_emitStatusHeartbeat` (`session-manager.ts`) re-broadcasts current status every 15s
     **without** bumping `statusVersion`.
 22. Client `case "session_status"` (`remote-agent.ts:1450-1489`) is the SOLE live writer of
     `_state.status`: idempotent drop when `v<=lastStatusVersion` (still fires `_maybeReplayGrant` +
@@ -261,30 +248,30 @@ De-duplication notes:
 | S2 | `send()` silently drops the prompt frame when WS not OPEN — optimistic bubble shown + editor cleared, but server never received it; no outbox/retry | `remote-agent.ts:1253-1259` (+ optimistic at 861-877; clear at `AgentInterface.ts:1490`) | transient-failure | **high** | no | User believes the (possibly image-bearing) prompt sent during reconnect; it was silently lost |
 | S3 | No IME composition guard on Enter-to-send | `MessageEditor.ts:362` | transient-failure | **high** | no | CJK/dead-key commit-Enter fires a partial/garbled prompt and can produce a spurious second message |
 | S4 | onSend not awaited + editor cleared only after blocking awaits ⇒ async window with text still present & textarea enabled, no in-flight lock | `AgentInterface.ts:2111-2113`, `:1461-1491`; `MessageEditor.ts:455` | duplicate-render | **high** | **yes** | A fast second Enter re-fires `onSend` with the same snapshot → duplicate prompt (needs repro to confirm no higher-level guard) |
-| S5 | Three event broadcasts bypass `emitSessionEvent` (no seq, not buffered, not replayed): `auto_retry_pending`, `auto_retry_cancelled`, `forceAbort agent_end` | `session-manager.ts:2489`, `:2526`, `:5731` | reorder | **medium→high** | **yes** | Seq-less frames dispatch immediately (client compat path doesn't advance `_highestSeq`), reordering stop/retry relative to buffered content; banner orphaned on reconnect |
+| S5 | Three event broadcasts bypass `emitSessionEvent` (no seq, not buffered, not replayed): `auto_retry_pending`, `auto_retry_cancelled`, `forceAbort agent_end` | `session-manager.ts` broadcast paths | reorder | **medium→high** | **yes** | Seq-less frames dispatch immediately (client compat path doesn't advance `_highestSeq`), reordering stop/retry relative to buffered content; banner orphaned on reconnect |
 | S6 | Bare image content blocks never render unless role is exactly `user-with-attachments` with non-empty `attachments` | `Messages.ts:183-195` | image-attach | **high** | **yes** | If the server echo arrives role `user` with image blocks and the slot was consumed/null, the image has no render branch (depends on real agent echo shape — Step-2) |
 | S7 | `streamingMessageId` dedup only stamped for tool-call rows; id-less plain-text assistant row relies on object-identity check that snapshot resync breaks | `AgentInterface.ts:1547-1554`; `remote-agent.ts:2178-2192` | duplicate-render | **high** | no | A snapshot resync can append a duplicate plain-text assistant bubble (the new-tab dup class) |
-| S8 | Server-side wedged-streaming has no recovery: `forceAbort` no-ops unless `status==='streaming'`, heartbeat faithfully re-broadcasts the wedged truth | `session-manager.ts:5667` | transient-failure | **high** | **yes** | If the bridge dies without `agent_end`, Stop does nothing and only `restart_agent` recovers (needs a way to provoke a missing `agent_end`) |
+| S8 | Server-side wedged-streaming has no recovery: `forceAbort` no-ops unless `status==='streaming'`, heartbeat faithfully re-broadcasts the wedged truth | `session-manager.ts` | transient-failure | **high** | **yes** | If the bridge dies without `agent_end`, Stop does nothing and only `restart_agent` recovers (needs a way to provoke a missing `agent_end`) |
 | S9 | `_pendingEvents` overflow resets `_highestSeq=0` while `_seqInitialized` stays true ⇒ every later live event re-buffers as a gap; snapshot never re-baselines `_highestSeq` | `remote-agent.ts:1418-1425` | flush-delay | **medium→high** | **yes** | Live streaming can stall (buffer refills to 500, re-fires overflow) until something re-baselines; contrast `resume_gap`'s `=lastSeq` (needs forced-overflow repro) |
 | S10 | Forced-snapshot fallback double-applies live events (no `_inResumeFallback` guard in the event path) | `remote-agent.ts:1378-1382` vs `1391-1435`; reducer survivor `message-reducer.ts:362-401` | duplicate-render | **medium** | **yes** | Id-less + text-empty + non-toolCall rows (pure thinking chunk, toolResult with omitted toolCallId) fall to the H3 survivor branch and render twice (needs a fixture that lands such a row in the window) |
 | S11 | Two independent flush schedulers (global rAF vs container rAF vs Lit microtask) can momentarily show a row in neither surface at the streaming→finalized hand-off | `AgentInterface.ts:1091-1127`; `StreamingMessageContainer.ts:286` | flush-delay | medium | **yes** | Structural cause behind both flush-delay and duplicate hand-off glitches (needs timing repro) |
-| S12 | Status (`session_status`) and `agent_start`/`agent_end` travel on two unordered channels; status applies instantly while the seq'd lifecycle event can buffer | `session-manager.ts:2241` vs `:3456`; cleanup only in `remote-agent.ts:2042` | flush-delay | medium | **yes** | UI shows idle while stale `streamingMessage` still renders until the gap fills or the 15s heartbeat converges |
-| S13 | 30s prompt-ack timeout can fire on a slow-but-accepted prompt and re-dispatch it; pending entry deleted on timeout so the late ack can't guard the double-send | `rpc-bridge.ts:371-388`; recover at `session-manager.ts:2028-2058` | duplicate-render | medium | **yes** | Auto-compaction / Codex preflight mid-dispatch could delay the ack past 30s → duplicate turn (needs a slow-ack trace) |
+| S12 | Status (`session_status`) and `agent_start`/`agent_end` travel on two unordered channels; status applies instantly while the seq'd lifecycle event can buffer | `session-manager.ts` status/lifecycle paths; cleanup in `remote-agent.ts` | flush-delay | medium | **yes** | UI shows idle while stale `streamingMessage` still renders until the gap fills or the 15s heartbeat converges |
+| S13 | 30s prompt-ack timeout can fire on a slow-but-accepted prompt and re-dispatch it; pending entry deleted on timeout so the late ack can't guard the double-send | `rpc-bridge.ts` timeout; recovery in `session-manager.ts` | duplicate-render | medium | **yes** | Auto-compaction / Codex preflight mid-dispatch could delay the ack past 30s → duplicate turn (needs a slow-ack trace) |
 | S14 | Per-chunk `chunk.toString("utf-8")` decode corrupts a multibyte char split across two stdout reads | `rpc-bridge.ts:299-301` | flush-delay | medium | **yes** | A dropped `message_end` line → message never reaches UI; dropped `response` → 30s timeout (severity depends on pi's write granularity — Step-2) |
-| S15 | `switch_session` restore replays full history through the seq-stamping emit, inflating `seq` past the seeded frame-of-reference → guaranteed client gap → snapshot refresh after every in-place respawn | `session-manager.ts:3456` (unconditional) vs `3382` (seed) | flush-delay | medium | **yes** | Extra round-trip + flush stall per respawn; for >1000-event sessions the ring evicts the resume window (needs a long-session restore trace) |
-| S16 | `wasStreaming` continuation re-prompt fires on EVERY `restoreSession`, including routine grant/role-switch respawns | `session-manager.ts:3499-3509` | duplicate-render | medium | **yes** | A respawn-while-streaming injects an unsolicited "continue where you left off" assistant turn (needs confirmation `wasStreaming` is true mid-respawn) |
+| S15 | `switch_session` restore replays full history through the seq-stamping emit, inflating `seq` past the seeded frame-of-reference → guaranteed client gap → snapshot refresh after every in-place respawn | `session-manager.ts` restore and seq-seed paths | flush-delay | medium | **yes** | Extra round-trip + flush stall per respawn; for >1000-event sessions the ring evicts the resume window (needs a long-session restore trace) |
+| S16 | `wasStreaming` continuation re-prompt fires on EVERY `restoreSession`, including routine grant/role-switch respawns | `session-manager.ts` | duplicate-render | medium | **yes** | A respawn-while-streaming injects an unsolicited "continue where you left off" assistant turn (needs confirmation `wasStreaming` is true mid-respawn) |
 | S17 | Text-fallback optimistic dedup collapses/duplicates identical prompts; skill-expanded `originalText` vs server `modelText` divergence defeats it | `message-reducer.ts:221-228` | duplicate-render | medium | **yes** | Same text twice or a model-text echo leaves an optimistic row un-removed until a later snapshot (needs the skill-expand echo shape) |
 | S18 | Optimistic snapshot survivor deduped by id only, never by text ⇒ same-text optimistic + snapshot before live echo = persistent duplicate | `message-reducer.ts:403-408` | duplicate-render | medium | **yes** | A visibilitychange snapshot landing before the live echo renders the prompt twice (needs the snapshot-before-echo window) |
-| S19 | `broadcastQueue` re-serializes & persists full base64 image data on every queue mutation | `session-manager.ts:1688-1694` | perf-resource | medium | no | Multi-MB queued image re-JSON'd + re-sent to all clients + rewritten to `sessions.json` per mutation; can push `bufferedAmount` toward the overflow terminate threshold |
+| S19 | `broadcastQueue` re-serializes & persists full base64 image data on every queue mutation | `session-manager.ts` | perf-resource | medium | no | Multi-MB queued image re-JSON'd + re-sent to all clients + rewritten to `sessions.json` per mutation; can push `bufferedAmount` toward the overflow terminate threshold |
 | S20 | Non-image attachments base64-inflated and sent as full bytes over WS + into server memory but never used as model input | `remote-agent.ts:829-831`, `:884`; `handler.ts:583` | perf-resource | medium | no | Up to 10×20 MB redundant document bytes per send; model consumes only `extractedText` |
-| S21 | `auto_retry_pending`/`cancelled` unbuffered (no seq, no replay) ⇒ reconnect during backoff orphans a stale "Retrying in Xs" banner | `session-manager.ts:2489`, `:2526`; client `remote-agent.ts:2017/2034` | transient-failure | medium | **yes** | Banner cleared only by `agent_start`/`auto_retry_cancelled`; a cancel-without-following-turn leaves it orphaned (needs reconnect-in-window repro) |
+| S21 | `auto_retry_pending`/`cancelled` unbuffered (no seq, no replay) ⇒ reconnect during backoff orphans a stale "Retrying in Xs" banner | `session-manager.ts` retry broadcasts; client `remote-agent.ts` clears | transient-failure | medium | **yes** | Banner cleared only by `agent_start`/`auto_retry_cancelled`; a cancel-without-following-turn leaves it orphaned (needs reconnect-in-window repro) |
 | S22 | Heartbeat & `status_resync` real code paths pinned only by inline-mirror unit tests | `tests/session-manager-status.test.ts:108`, `:151` | transient-failure | medium | no | A regression in the *real* sole self-heal mechanism would pass CI — the missing real-path test IS the bug |
 | S23 | Seq sequencer pinned by hand-copied HTML fixtures, not production `handleServerMessage` | `tests/fixtures/remote-agent-seq-dedup.html`, `remote-agent-sequence-hole.html` | other | medium | no | S9 and S10 (the two riskiest branches) are effectively untested; fixtures can silently diverge |
 | S24 | `_advanceTopLevelSeq` gap path sets `_highestSeq=seq` and only `requestMessages()` — non-message events in the skipped range (tool exec, compaction, agent start/end side effects) are lost | `remote-agent.ts:1107-1118` | transient-failure | medium | **yes** | Snapshot carries only the message list, not event side effects → stuck spinner / never-clearing streaming flag (needs a top-level-frame gap repro) |
 | S25 | Resume across an un-granted tool-permission `pushFrame` seq hole strands the pending buffer until 500-event overflow | `handler.ts:917-934`; `event-buffer.ts:41-43` | flush-delay | medium | **yes** | Disconnect straddling an ungranted permission → resume can't fill the hole (perm only re-sent on full attach) → hard streaming stall (narrow window) |
-| S26 | Batched steered prompts drop all but `steered[0].images`; `steer()` path forwards no images at all | `session-manager.ts:2104-2139`, `:1923` | image-attach | medium | no | Two queued steers each with a pasted image → only the first image attaches |
-| S27 | Steer-batch echo never matches the shadow ledger (joined `batchText` vs per-message SDK echo) ⇒ ledger entry survives to next abort and re-dispatches | `session-manager.ts:1923-1937` vs `1964-1973` | duplicate-render | medium | **yes** | Depends on whether the SDK echoes batched steers as one or N messages (open question — Step-2) |
-| S28 | `MAX_CONSECUTIVE_ERROR_TURNS` parks prompts behind human-only Retry; `consecutiveErrorTurns` not reset on implicit-unstick + a missed `auto_retry_cancelled` ⇒ looks frozen | `session-manager.ts:1757`, `:1777` | transient-failure | medium | **yes** | Session silently parks a queue while UI shows idle (needs an error-accretion repro) |
+| S26 | Batched steered prompts drop all but `steered[0].images`; `steer()` path forwards no images at all | `session-manager.ts` steer dispatch paths | image-attach | medium | no | Two queued steers each with a pasted image → only the first image attaches |
+| S27 | Steer-batch echo never matches the shadow ledger (joined `batchText` vs per-message SDK echo) ⇒ ledger entry survives to next abort and re-dispatches | `session-manager.ts` dispatch vs echo-consume paths | duplicate-render | medium | **yes** | Depends on whether the SDK echoes batched steers as one or N messages (open question — Step-2) |
+| S28 | `MAX_CONSECUTIVE_ERROR_TURNS` parks prompts behind human-only Retry; `consecutiveErrorTurns` not reset on implicit-unstick + a missed `auto_retry_cancelled` ⇒ looks frozen | `session-manager.ts` error-turn queue gates | transient-failure | medium | **yes** | Session silently parks a queue while UI shows idle (needs an error-accretion repro) |
 | S29 | Per-reconnect `onReconnect()` REST hydration fan-out (annotations/git/bg) is un-coalesced | `remote-agent.ts:677-693` | perf-resource | medium | no | Flapping mobile connection ⇒ O(reconnects) full history+annotation refetches |
 | S30 | `compaction_end` synthesized-from-`response` path can double-fire with the real `compaction_end` | `remote-agent.ts:2333`, `:2340` | duplicate-render | low | **yes** | Second pass computes `durationMs` from a now-null `_compactionStartedAt` (mostly absorbed by reducer dedup) |
 | S31 | Large multi-image base64 frame can exceed ws default `maxPayload` (100 MB) and tear down the socket (close 1009) | `server.ts:1071` | transient-failure | medium | **yes** | No guard between the 20 MB/file composer cap and the 100 MB socket cap (needs an actual >100 MB frame to confirm) |
@@ -296,7 +283,7 @@ De-duplication notes:
 | S37 | aigw `x-opencode-session` header runs `child_process` (`!node -e`) on every model request | `aigw-manager.ts:387-390` | perf-resource | low | no | A subprocess fork per LLM call on the hot path; an exec hiccup silently drops the header |
 | S38 | `_maybeReplayGrant` re-sends the original prompt on a fixed 200ms delay with no idle-ready confirmation | `remote-agent.ts:1156-1165`, `1450-1492` | transient-failure | low | **yes** | A momentary heartbeat-idle can dispatch the replay into a not-ready session → dropped server-side (guarded against double-fire, not against not-ready) |
 | S39 | Deferred-block placeholders mask content from non-Ctrl+F DOM scans (screen reader virtual cursor, in-app search, copy-all of unscrolled region) | `DeferredBlock.ts:175-235` | other | low | no | Content present in `state.messages` but absent from DOM for non-find consumers |
-| S40 | Auto-retry timer fire guard checks only `status!=='idle'`, not error/queue state | `session-manager.ts:2499` | duplicate-render | low | **yes** | A queue-drain (steer) that bypasses the cancel path could let a spurious retry inject after the user moved on |
+| S40 | Auto-retry timer fire guard checks only `status!=='idle'`, not error/queue state | `session-manager.ts` | duplicate-render | low | **yes** | A queue-drain (steer) that bypasses the cancel path could let a spurious retry inject after the user moved on |
 | S41 | `attach` `compaction_start` unicast is seq-less and may duplicate the agent's own seq'd `compaction_start` | `handler.ts:373-375` | duplicate-render | low | **yes** | Two compaction cards if the reducer keys by content/time rather than a stable id |
 | S42 | `spliceInFlightSteers` dedup is plain-text multiset ⇒ two identical-text steers collapse | `splice-inflight-message.ts:104-119` | duplicate-render | low | no | Transient under/over-count in a snapshot resync; self-heals on echo flush |
 | S43 | `MAX_SPAWN_RETRIES` retry window can leave stale handlers firing while a replacement child spawns | `rpc-bridge.ts:202-262` | transient-failure | low | **yes** | A fast async ENOTCONN could surface a spurious "Agent process exited" on a healthy spawn (narrow Windows fd-pressure timing) |
@@ -321,12 +308,12 @@ Format: **invariant — where enforced — pinned by** (or **UNPINNED / partial*
   `remote-agent.ts:1096-1121`. Pinned by `tests/remote-agent-sequence-hole.spec.ts`,
   `tests/perm-frame-late-joiner-seq-gap.test.ts`.
 - **Server replays the ORIGINAL perm seq/ts on late-join (single `pushFrame` callsite =
-  `requestToolGrant`).** `session-manager.ts:2702`. Pinned by `tests/perm-frame-late-joiner-seq-gap.test.ts`.
+  `requestToolGrant`).** `session-manager.ts`. Pinned by `tests/perm-frame-late-joiner-seq-gap.test.ts`.
 - **Resume only when `canResumeFrom(fromSeq)`, else `resume_gap` → full snapshot.** `handler.ts:917`;
   `event-buffer.ts`. Pinned by `tests/event-buffer.test.ts` (canResumeFrom cases). **Gap:** no test
   covers resume across an un-granted perm seq hole (S25).
 - **`seedNextSeq` preserves the seq frame-of-reference across in-place respawn.**
-  `event-buffer.ts:88-92` + `session-manager.ts:3382`. Pinned by `tests/restart-preserves-streaming-frame.test.ts`,
+  `event-buffer.ts:88-92` + `session-manager.ts`. Pinned by `tests/restart-preserves-streaming-frame.test.ts`,
   `tests/sandbox-recovery-preserves-streaming-frame.test.ts`.
 - **Every retained live event carries seq+ts assigned once in `EventBuffer.push`; snapshot `_order`
   floor sorts before live.** `event-buffer.ts:15,27`. Pinned by `tests/event-buffer.test.ts`.
@@ -371,7 +358,7 @@ Format: **invariant — where enforced — pinned by** (or **UNPINNED / partial*
   `tests/e2e/abort-status-e2e.spec.ts`. **Gap:** no detection/test for **server-side** wedged-streaming
   with a dead bridge (S8).
 - **Back-pressure: a single transient `bufferedAmount` spike never terminates; only a persistent one
-  does.** `session-manager.ts:399-430`. Pinned by `tests/ws-overflow-guard.test.ts`. **Gap:** the
+  does.** `session-manager.ts`. Pinned by `tests/ws-overflow-guard.test.ts`. **Gap:** the
   handler-local `broadcast()` (S36) is unguarded and untested for this.
 - **Pending RPC requests reject exactly once on child exit; idempotent `stop()`.** Pinned by
   `tests/rpc-bridge-lifecycle.test.ts`.
@@ -382,7 +369,7 @@ Format: **invariant — where enforced — pinned by** (or **UNPINNED / partial*
 - **`spliceInFlightMessage`/`spliceInFlightSteers` reference-stable no-ops; recognise
   `user-with-attachments`.** Pinned by `tests/session-manager-getmessages-splice.test.ts`.
 - **Composer caps ≤10 files / ≤20 MB.** Pinned by `tests/message-editor-attach.spec.ts`.
-- **Title generation single-shot per session.** `session-manager.ts:4790-4800` (convention; no
+- **Title generation single-shot per session.** `session-manager.ts` (convention; no
   dedicated concurrency test cited).
 
 ### Biggest untested surfaces (per AGENTS.md "the missing test IS the bug")

@@ -91,16 +91,8 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   risk: strictly adds previously-dropped tiles.
 
 #### S26 — Steered prompts forward only `steered[0].images`; live `steer()` RPC forwards no images; rollback drops images — **MEDIUM**
-- **Trigger.** Streaming. User submits an image-bearing prompt (queued WITH images,
-  session-manager.ts:1809-1813), then clicks the **Steer** pill on that queue row (`steerQueued`
-  preserves `msg.images`, prompt-queue.ts:43-49). The streaming `steer_queued` promotion removes the
-  row, records and persists its text in `inFlightSteerTexts`, and immediately dispatches through
-  `_dispatchSteer()` → `rpcClient.steer(batchText)`, which drops the image. Idle/recovered steered
-  rows still drain at normal queue boundaries. Two pills → both images lost.
-- **Failure lines.** `session-manager.ts:2108-2109` and `:2139` (batch joins text only, dispatches
-  `next.images = steered[0].images`); `rpc-bridge.ts:399-401` (`steer(text)` has no images field);
-  `session-manager.ts:1948-1949` (rollback `enqueueAtFront(r.text,{isSteered:true})` omits
-  `r.images`).
+- **Trigger.** Streaming. User submits an image-bearing prompt, then clicks the **Steer** pill on that queue row (`steerQueued` preserves `msg.images`). The streaming `steer_queued` promotion removes the row, records and persists its text in `inFlightSteerTexts`, and immediately dispatches through `_dispatchSteer()` → `rpcClient.steer(batchText)`, which drops the image. Idle/recovered steered rows still drain at normal queue boundaries. Two pills → both images lost.
+- **Failure surface.** `SessionManager` batch-building and rollback paths join text-only steer batches and omit row images on rollback; `RpcBridge.steer(text)` has no images field. The older idle drain path forwards only the first steered row's images.
 - **Symptom.** The model never receives the steered image(s); the agent answers as if no image was
   sent. On reload the image still renders in the user bubble (it persisted), so the user sees "the
   model ignored my image" with no trace why.
@@ -119,7 +111,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 #### S1 — Single `_pendingAttachments` slot overwritten across concurrent/queued image prompts — **MEDIUM**
 - **Trigger (single tab).** (1) Idle: attach img1, Enter → `_pendingAttachments=[img1]`, optimistic
   row created, send. (2) Server broadcasts `streaming` *before* awaiting `rpcClient.prompt`
-  (session-manager.ts:2013 via 2070, before 2075), so the client flips to streaming while echo 1 is
+  (the `session-manager.ts` prompt dispatch path), so the client flips to streaming while echo 1 is
   still in flight (window widened by VPN latency). (3) User attaches img2, Enter → `prompt()`
   overwrites `_pendingAttachments=[img2]` (remote-agent.ts:847); line 861 guard skips the optimistic
   row; server queues it. (4) Echo 1 → enriched with `[img2]` (WRONG) and slot nulled; reducer
@@ -169,11 +161,11 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   (`lastTurnErrored && consecutiveErrorTurns < MAX`). User sends a slash-skill prompt `/foo` the
   server will expand. Optimistic row content = `/foo`. Server stores `{modelText:'<expanded>'}` and
   takes the unstick branch, dispatching `prefixedDispatch = buildErrorRecoveryPrefix(…, dispatchText)`
-  (session-manager.ts:1791-1792). Agent echoes the prefixed expanded body.
-  `spliceSkillExpansionsIntoEvent` fails `p.modelText === body` (session-manager.ts:547) → echo
+  (session-manager.ts). Agent echoes the prefixed expanded body.
+  `spliceSkillExpansionsIntoEvent` fails `p.modelText === body` (session-manager.ts) → echo
   arrives un-rewritten.
 - **Failure line.** `src/app/message-reducer.ts:221-228` (exact-text fallback against `/foo` fails
-  on the prefixed/expanded echo) defeated when `src/server/agent/session-manager.ts:547` splice
+  on the prefixed/expanded echo) defeated when `src/server/agent/session-manager.ts` splice
   misses.
 - **Symptom.** Two user bubbles: `/foo` AND a bubble showing
   `[SYSTEM: previous turn failed …]\n\n<expanded skill text>`. Permanent across snapshots (S18:
@@ -194,7 +186,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   the prompt ack is emitted only from that preflight (rpc-mode.js:302-305).
 - **Failure line.** `src/server/agent/rpc-bridge.ts:380-383` (timeout deletes the pending entry and
   rejects) + ack deferred behind compaction (agent-session.js:766-776,825). At 30s the timeout fires;
-  `recoverPromptDispatch` (non-process-exit rejection, regex miss at session-manager.ts:2022)
+  `recoverPromptDispatch` (non-process-exit rejection, regex miss at session-manager.ts)
   re-enqueues at front + `drainQueue` → second `prompt`. The late ack is orphaned
   (rpc-bridge.ts:602/607-611). `isStreaming` is false during compaction (flips true only inside
   `runWithLifecycle`, agent.js:316), so the 2nd prompt is not always rejected; when it is
@@ -243,14 +235,14 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 
 #### S16 — `wasStreaming` continuation re-prompt fires on routine grant/role-switch respawns — **MEDIUM**
 - **Trigger.** Session with an ungranted `ask`-policy tool. Agent streams (agent_start sets
-  store `wasStreaming=true`, session-manager.ts:2240). Agent invokes the gated tool; the guard pauses
+  store `wasStreaming=true`, session-manager.ts). Agent invokes the gated tool; the guard pauses
   the turn inside `beforeToolCall` on a blocking long-poll (tool-guard-extension.ts:70-114) — so
   `agent_end` has NOT fired and persisted `wasStreaming` is still true. User clicks Allow →
   `grantToolPermission` → `_restartSessionWithUpdatedRole` → `_respawnAgentInPlace`:
-  `unsubscribe()` (session-manager.ts:2815) detaches the listener BEFORE `stop()` (2817), so the
+  `unsubscribe()` (session-manager.ts) detaches the listener BEFORE `stop()` (2817), so the
   kill's `process_exit` never resets `wasStreaming`. `restoreSession(ps)` sees `ps.wasStreaming===true`
   and re-prompts.
-- **Failure line.** `src/server/agent/session-manager.ts:3499-3505` (the `[SYSTEM: …continue where
+- **Failure line.** `src/server/agent/session-manager.ts` (the `[SYSTEM: …continue where
   you left off…]` injection) reached via `_respawnAgentInPlace` from the grant path.
 - **Symptom.** After clicking Allow, an unsolicited `[SYSTEM: …continue where you left off…]` user
   bubble appears and the agent runs a fresh continuation turn (re-deciding from replayed history,
@@ -260,7 +252,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   `_respawnAgentInPlace`/`restoreSession`; assert `rpcClient.prompt` is NOT called with the continue
   text. `restart-preserves-streaming-frame.test.ts` only checks seq/statusVersion carry-over.
 - **Lowest-risk fix.** Pass a `respawnReason`/`_suppressContinuationPrompt` flag through
-  `_respawnAgentInPlace`'s `ps` stash (alongside `_restartFrameOfReference`, session-manager.ts:2821)
+  `_respawnAgentInPlace`'s `ps` stash (alongside `_restartFrameOfReference`, session-manager.ts)
   so `restoreSession` skips the continuation prompt for grant/role-switch/restartAgent respawns,
   keeping it only for genuine post-crash restores.
 
@@ -310,7 +302,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 #### S42 — `spliceInFlightSteers` collapses two identical-text steers (Set-based dedup) — **LOW** (transient, self-healing)
 - **Trigger.** Two identical-text live steers while streaming (e.g. user re-sends `reroute` on a
   laggy link, or a team nudge + user steer of the same text). Each `_dispatchSteer` pushes `batchText`
-  onto `inFlightSteerTexts` (session-manager.ts:1937); both coexist before either echo flushes. A
+  onto `inFlightSteerTexts` (session-manager.ts); both coexist before either echo flushes. A
   `get_messages` resync fires in that window.
 - **Failure line.** `src/server/agent/splice-inflight-message.ts:94` (`Set`) + `:105`
   (`presentUserTexts.has(text)` skip collapses the duplicate).
@@ -329,13 +321,12 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 
 #### S40 — Auto-retry timer fire guard checks only `status!=='idle'`; force-abort during backoff doesn't cancel it — **MEDIUM**
 - **Trigger (corrected actor).** A TEAM agent's turn errors transiently → `agent_end` broadcasts idle
-  (session-manager.ts:2298) → `maybeAutoRetryTransient` (2313) schedules the timer. status is now
+  (session-manager.ts) → `maybeAutoRetryTransient` (2313) schedules the timer. status is now
   `idle`. A team operator POSTs `/api/goals/:id/team/abort` (server.ts:6446) → `forceAbort` →
-  early-returns at session-manager.ts:5667 because `status!=='streaming'`, WITHOUT
+  early-returns at session-manager.ts because `status!=='streaming'`, WITHOUT
   `cancelPendingAutoRetry`. Timer fires (guard `status!=='idle'` passes) → `retryLastPrompt({auto:true})`.
-- **Failure line.** `src/server/agent/session-manager.ts:2499` (guard) + `:5667` (forceAbort
-  early-return without cancel). `cancelPendingAutoRetry` is called only at 1755/2557/5003/5878 — never
-  forceAbort.
+- **Failure surface.** `src/server/agent/session-manager.ts` auto-retry fire guard and `forceAbort`
+  early-return path do not cancel pending retry. `cancelPendingAutoRetry` is called from enqueue/error/lifecycle paths — never forceAbort.
 - **Symptom.** A spurious/unwanted assistant turn dispatches on a session someone just tried to stop.
 - **Refutation that narrowed it.** The session-owner's own Stop button / Escape cannot reach this —
   all are `isStreaming`-gated (MessageEditor.ts:770/367, AgentInterface.ts:446) and `isStreaming` is
@@ -362,7 +353,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   re-delivers a never-sent frame.
 - **Symptom.** Editor clears, the message bubble appears, but the gateway never received it; the
   agent never responds; the prompt (possibly image-bearing) is silently lost. Worse over VPN.
-- **Refutation defeated.** `onBeforeSend` is UNSET in production (session-manager.ts:1755-1757), so it
+- **Refutation defeated.** `onBeforeSend` is UNSET in production (session-manager.ts), so it
   cannot gate on connection. `user-message-echo.spec.ts:82-116` deliberately waits for `message_end`
   BEFORE disconnecting (comment lines 88-89) — it pins the *opposite* (drop AFTER delivery).
 - **Minimal repro.** In-process gateway E2E: force ws non-OPEN, call `prompt('hello')`; assert the
@@ -392,17 +383,17 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 
 #### S8 — Server-side wedged-streaming has no automatic recovery; forceAbort no-ops on drift-off-streaming, ~30s when streaming — **HIGH**
 - **Trigger — shape (b), deterministic no-op.** `recoverPromptDispatch`/`agent_end` broadcasts idle
-  (session-manager.ts:2038/2298) while the client still renders a stranded streaming row (S12-class).
-  User clicks Stop → `forceAbort` → early-return at `:5667` (`status!=='streaming'`). Nothing happens.
+  (`session-manager.ts` lifecycle recovery) while the client still renders a stranded streaming row (S12-class).
+  User clicks Stop → `forceAbort` → early-return because `status!=='streaming'`. Nothing happens.
 - **Trigger — shape (a), delayed kill (NEEDS-TRACE on real upstream).** Status still `streaming`, the
   LLM stream wedged by an upstream that trickles keep-alive/SSE comments so undici's 5-min idle
   bodyTimeout never fires and the abort signal can't promptly cancel a not-currently-reading socket.
   `forceAbort` proceeds → `await rpcClient.abort()` blocks on `waitForIdle` up to the 30s
   `sendCommand` timeout (rpc-bridge.ts:380-383) → only then force-kill+restart (5707-5732).
-- **Failure line.** `src/server/agent/session-manager.ts:5667`. No watchdog: `streamingStartedAt` is
+- **Failure line.** `src/server/agent/session-manager.ts`. No watchdog: `streamingStartedAt` is
   only set, never aged-out (team-manager.ts:532-534 merely nudges a team LEAD, never recovers). The
   15s heartbeat re-broadcasts the wedged status without bumping `statusVersion`
-  (session-manager.ts:830) → client drops it idempotently (remote-agent.ts:1460). `status_resync`
+  (session-manager.ts) → client drops it idempotently (remote-agent.ts:1460). `status_resync`
   returns the wedged status verbatim.
 - **Mechanism correction.** The seam's "abort writes to a stdin the loop won't read" is WRONG — rpc
   reads stdin fire-and-forget (rpc-mode.js:605) and `session.abort()` IS invoked; for a normally
@@ -425,14 +416,14 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 
 #### S21 — `auto_retry_pending`/`cancelled` seq-less & unbuffered — reconnect/multi-tab orphans a stale banner — **MEDIUM**
 - **Trigger (permanent orphan).** Two tabs view session S; a turn errors transiently → seq-less
-  `auto_retry_pending` (session-manager.ts:2489) → both show "Retrying in ~Xs…". Session already at
+  `auto_retry_pending` (session-manager.ts) → both show "Retrying in ~Xs…". Session already at
   `>=MAX_CONSECUTIVE_ERROR_TURNS`. Tab A's WS flaps. In Tab B the user sends a new prompt →
   `cancelPendingAutoRetry` broadcasts seq-less `auto_retry_cancelled` (2526), then PARKS the prompt
   (1757-1769) with NO dispatch and NO `agent_start`. Tab A misses the cancel (socket down) and, because
   parked, never gets a subsequent `agent_start`. A reconnects → resume replays only EventBuffer entries
   (the cancel is absent) and `get_state` carries no `autoRetryPending` → banner stuck forever.
-- **Failure line.** `session-manager.ts:2489`/`:2526` (seq-less broadcast); orphan persists because
-  `remote-agent.ts:2039` (auto_retry_cancelled) / `:2012` (agent_start) are the only clears, and the
+- **Failure surface.** `session-manager.ts` emits seq-less retry broadcasts; the orphan persists because
+  `remote-agent.ts` clears only on `auto_retry_cancelled` or `agent_start`, and the
   snapshot/state/session_status handlers never reset `autoRetryPending`. `cancelPendingAutoRetry`
   skips the broadcast entirely when `clients.size===0` (2520).
 - **Symptom.** "Retrying in Xs due to provider overload…" banner that never clears after a reconnect
@@ -454,12 +445,12 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   reconnect within the ring window (`canResumeFrom` true → resume branch, remote-agent.ts:680). Server
   replays only ring entries (handler.ts:924); the seq-less cancel is absent; `get_state` returns no
   snapshot → stale "Retrying…" banner persists indefinitely (nothing reconciles it).
-- **Trigger — force-abort stale partial.** Force-abort (seq-less `agent_end` at session-manager.ts:5731
+- **Trigger — force-abort stale partial.** Force-abort (seq-less `agent_end` at session-manager.ts
   + seq-less `session_status` idle at 5732). Reconnect within the ring before any snapshot →
   `session_status:idle` flips `isStreaming` false but the stale partial is cleared only by the lost
   `agent_end` handler (AgentInterface.ts:1106-1112) until a later visibility-tick snapshot.
-- **Failure line.** `session-manager.ts:2489` (auto_retry_pending), `:2526` (auto_retry_cancelled),
-  `:5731` (forceAbort agent_end) — all skip `emitSessionEvent` (the only `eventBuffer.push()` site,
+- **Failure surface.** `session-manager.ts` emits `auto_retry_pending`, `auto_retry_cancelled`,
+  and `forceAbort agent_end` outside `emitSessionEvent` (the only `eventBuffer.push()` site,
   :507-523).
 - **Reorder sub-claim (narrow).** Requires `_pendingEvents` non-empty (a live seq gap) when a seq-less
   frame arrives. WS-over-TCP keeps the seq'd stream contiguous for an attached client, and the one
@@ -481,7 +472,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 #### S38 — `_maybeReplayGrant` replays on a fixed 200ms with no idle-ready confirmation; fires from the idempotent heartbeat branch; replay `send()` can be dropped — **LOW** (symptom corrected: duplicate-risk, not "grant does nothing")
 - **Trigger.** A grant pauses an `ask` tool. User clicks Allow → `_pendingGrantReplay` stashed →
   `grant_tool_permission`. Server `_respawnAgentInPlace` respawns and, because `ps.wasStreaming` is
-  true (S16), ALSO fires its own continuation prompt (session-manager.ts:3502); then broadcasts idle
+  true (S16), ALSO fires its own continuation prompt (session-manager.ts); then broadcasts idle
   (new statusVersion). Client `_maybeReplayGrant("idle")` (remote-agent.ts:1491) → +200ms
   `send({type:'prompt', text:original})`. Within the 200ms window status is usually still idle →
   `enqueuePrompt` dispatches the client replay too.
@@ -551,7 +542,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   on-attach perm replay (handler.ts:458-461) doesn't re-send (getPendingToolPermission undefined once
   cleared). Stall until 500-event overflow → S9.
 - **Why GRANT does NOT reproduce.** A grant respawns and reseeds the buffer
-  (`seedNextSeq(lastSeq+1)`, session-manager.ts:3382) so `canResumeFrom(J)` is FALSE → `resume_gap` →
+  (`seedNextSeq(lastSeq+1)`, session-manager.ts) so `canResumeFrom(J)` is FALSE → `resume_gap` →
   clean snapshot recovery; the respawn completes before the guard long-poll resolves, so no post-grant
   events land in the old buffer. The prior agent's "user grants → stall" mechanism is refuted.
 - **Failure line.** `src/server/agent/event-buffer.ts:41-43` (pushFrame seq consumed, not retained) +
@@ -621,12 +612,12 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 
 #### S19 — `broadcastQueue` re-serializes & re-persists full base64 image data on every queue mutation; can exceed the 4 MiB overflow-terminate threshold — **MEDIUM**
 - **Trigger.** High-latency client; agent streaming (so the prompt is queued, not direct-dispatched —
-  gate at session-manager.ts:1799). User queues ONE image prompt (even ~2-4 MB; composer cap 20 MB).
-  `broadcastQueue` (session-manager.ts:1688-1694) calls `promptQueue.toArray()` (full `QueuedMessage`s
+  gate at session-manager.ts). User queues ONE image prompt (even ~2-4 MB; composer cap 20 MB).
+  `broadcastQueue` (session-manager.ts) calls `promptQueue.toArray()` (full `QueuedMessage`s
   incl. `images[].data` + `attachments[].content` + `attachments[].preview` — ~3x base64 per image,
   attachment-utils.ts:157-158) and broadcasts a `queue_update` JSON to every client. The next broadcast
   reads `bufferedAmount>4MiB` before its own send → defer → 10ms recheck still over → `client.terminate()`.
-- **Failure line.** `src/server/agent/session-manager.ts:1688-1695`. Threshold is far lower than 20 MB
+- **Failure line.** `src/server/agent/session-manager.ts`. Threshold is far lower than 20 MB
   (~3x duplication; a single ~1.5 MB source image already exceeds 4 MiB). The disk-rewrite sub-claim is
   overstated: `messageQueue` is not in `RECOVERY_CRITICAL_FIELDS` (session-store.ts:513-522) so the
   write is debounced ~1x/sec — the load-bearing path is the synchronous un-debounced WS broadcast.
@@ -645,8 +636,8 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   full `attachments` and transmits the whole array (remote-agent.ts:884) incl. document `content`. Server
   forwards + stores it (handler.ts:583 → prompt-queue rows, dispatchedRowsForRecovery, broadcast/persisted
   queue), but `dispatchDirectPrompt` forwards only `(text, images)` to `rpcClient.prompt`
-  (session-manager.ts:2075) — documents never reach the model.
-- **Failure line.** `src/app/remote-agent.ts:884` (sends full attachments) + `session-manager.ts:2075`
+  (session-manager.ts) — documents never reach the model.
+- **Failure line.** `src/app/remote-agent.ts:884` (sends full attachments) + `session-manager.ts`
   (attachments never reach model).
 - **Refutation defeated.** `convertAttachments` (Messages.ts:667-684) WOULD turn a document's
   `extractedText` into model input via `defaultConvertToLlm`, but `customConvertToLlm` has ZERO callers in
@@ -730,8 +721,8 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 - **Trigger.** Multi-client session with a slow/VPN peer B. Client A repeatedly triggers fanout via the
   unguarded handler path — easiest production trigger: `set_image_model` (remote-agent.ts:1139 →
   handler.ts:632-647 broadcasts a `state` frame to all session.clients).
-- **Failure line.** `src/server/ws/handler.ts:178-214` (plain JSON.stringify + `client.send()`, no
-  bufferedAmount check / warn / terminate), vs the guarded `session-manager.ts:399-436`. Four unguarded
+- **Failure line.** `src/server/ws/handler.ts` (plain JSON.stringify + `client.send()`, no
+  bufferedAmount check / warn / terminate), vs the guarded `session-manager.ts`. Four unguarded
   fanout paths exist (handler.ts:178, the inline client_joined loop at 413-419, server.ts:1331-1339
   broadcastToSession).
 - **Symptom.** On a slow client, bursts of `task_changed`/`set_image_model` grow `bufferedAmount` with no
@@ -786,12 +777,12 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 
 | Seam | Verdict | Why refuted (the specific guard/test) | Residual / settling trace |
 |------|---------|----------------------------------------|---------------------------|
-| **S12** — two-channel status leaves a stale streaming row | REFUTED (symptom) | The state residue (`_state.streamingMessage` lingers non-null after idle) is real, but the rendered streaming bubble is driven by `<streaming-message-container>`'s private `_message`, NOT `_state.streamingMessage`. The container self-heals: `StreamingMessageContainer.updated()` (StreamingMessageContainer.ts:43-68) clears `_message` on `isStreaming`→false, and the instant `session_status:idle` drives `requestUpdate` (session-manager.ts:1242-1248) → `isStreaming=false` binding (AgentInterface.ts:1596) → the self-heal. **Pinned by `streaming-message-container-set-message.spec.ts:107-155`** against the REAL bundled component. | Hygiene-only: have the `session_status:idle` handler also null `_state.streamingMessage` so the field can't lie. Severity low. A Playwright run injecting the gap + asserting a stale DOM bubble post-idle would FAIL (self-heal). |
+| **S12** — two-channel status leaves a stale streaming row | REFUTED (symptom) | The state residue (`_state.streamingMessage` lingers non-null after idle) is real, but the rendered streaming bubble is driven by `<streaming-message-container>`'s private `_message`, NOT `_state.streamingMessage`. The container self-heals: `StreamingMessageContainer.updated()` (StreamingMessageContainer.ts:43-68) clears `_message` on `isStreaming`→false, and the instant `session_status:idle` drives `requestUpdate` (session-manager.ts) → `isStreaming=false` binding (AgentInterface.ts:1596) → the self-heal. **Pinned by `streaming-message-container-set-message.spec.ts:107-155`** against the REAL bundled component. | Hygiene-only: have the `session_status:idle` handler also null `_state.streamingMessage` so the field can't lie. Severity low. A Playwright run injecting the gap + asserting a stale DOM bubble post-idle would FAIL (self-heal). |
 | **S24** — perm-frame seq-gap recovery leaves stuck spinner / compaction placeholder | REFUTED (trigger unreachable) | A perm frame can never arrive with `seq != _highestSeq+1` in production: `push`/`pushFrame` share one monotonic counter (event-buffer.ts:28/42); the agent emits NOTHING between `tool_execution_start` and the perm frame (the guard runs inside `beforeToolCall`, after the start event has resolved), so `perm.seq == start.seq+1` always; reconnect-with-pending-perm replays the ORIGINAL seq (handler.ts:458-460) — contiguous, pinned by `perm-frame-late-joiner-seq-gap.test.ts`. Compaction can't be in-flight mid-tool-batch (`compact()` requires an idle harness). | The real cousin (snapshot not rebuilding `pendingToolCalls`/`_isCompacting`) is reachable only via S9 overflow or resume_gap — investigate THERE, not the perm-frame branch. |
-| **S28** — cap-park parks prompts behind human-only Retry with "no signal / frozen session" | REFUTED (symptom) | The cap-park mechanism is real (consecutiveErrorTurns not reset on implicit unstick; park at session-manager.ts:1757) but TWO persistent signals exist: (1) the errored assistant `message_end` always carries a non-empty `errorMessage` (agent.js:329-338) rendered as a red "Error: …" block WITH a live Retry button (Messages.ts:393-419, wired via AgentInterface.ts:1578) that PERSISTS through every parked prompt (parking emits only a queue_update, not a user message_end); (2) `needsImmediateHumanAttention` (notification-policy.ts:156-167) lights the unseen dot. | Residual UX-polish nit: a parked prompt produces a queue pill with no NEW toast/inline hint adjacent to the composer, so a user focused on the input under high latency might overlook the banner above. Low. |
+| **S28** — cap-park parks prompts behind human-only Retry with "no signal / frozen session" | REFUTED (symptom) | The cap-park mechanism is real (consecutiveErrorTurns not reset on implicit unstick; park at session-manager.ts) but TWO persistent signals exist: (1) the errored assistant `message_end` always carries a non-empty `errorMessage` (agent.js:329-338) rendered as a red "Error: …" block WITH a live Retry button (Messages.ts:393-419, wired via AgentInterface.ts:1578) that PERSISTS through every parked prompt (parking emits only a queue_update, not a user message_end); (2) `needsImmediateHumanAttention` (notification-policy.ts:156-167) lights the unseen dot. | Residual UX-polish nit: a parked prompt produces a queue pill with no NEW toast/inline hint adjacent to the composer, so a user focused on the input under high latency might overlook the banner above. Low. |
 | **S30** — `compaction_end` synthesized-from-`response` double-fire | REFUTED | The synthesized `compaction_end` is produced via `this.emit(...)` (remote-agent.ts:2333-2337), and `emit` (800-804) only notifies UI subscribers — it never re-enters `handleAgentEvent`, so no card transition/reducer apply. The reducer compaction-result case filters by stable id (`compact_active`/`compacting_placeholder`/toolCallId, message-reducer.ts:539-543) → a single card even on a genuine double. **Pinned by message-reducer.test.ts case 12d.** | Optional cosmetic hardening (skip re-scheduling the card transition when `_compactionStartedAt` is null). Not required. |
 | **S41** — attach `compaction_start` unicast duplicates the agent's seq'd one | REFUTED | The attach unicast reaches the client compat path → `_addCompactingPlaceholder` → reducer `compaction-placeholder` which filters by the stable ids `compacting_placeholder`/`compact_active` (message-reducer.ts:520-522) → a SINGLE card. The doc's premise ("reducer keys by content/time") is false; it keys by stable id. | Optional: guard `_compactionStartedAt` assignment in `case compaction_start` with `if (this._compactionStartedAt == null)` so a redundant second start doesn't skew duration. |
-| **S43** — stale spawn handler emits spurious "Agent process exited" | REFUTED (symptom) | Spawn-phase transient errors (ENOTCONN/EMFILE/ENFILE/EAGAIN — the only codes the retry treats as transient) emit `error` but NEVER a later `exit` (verified empirically: spawn-failure 'error' is never followed by 'exit', kill() returns false). The persistent `on('error')` (registered at :205, before the temporary `.once` at :225) runs first and nulls `this.process`, so the catch's `kill()` is a no-op. The immediate-exit path fires the persistent exit handler synchronously during attempt 0 (before P1 exists), leaving `running===true`. Any transient `process_exit` during a successful retry start() is superseded by the "idle" broadcast at session-manager.ts:3479. | Residual: per-retry EventEmitter listener leak on the dead child (cannot null the replacement or emit a spurious exit). Fix: `removeAllListeners()` before kill at rpc-bridge.ts:242. Low. (Listed in §2 as the low residual.) |
+| **S43** — stale spawn handler emits spurious "Agent process exited" | REFUTED (symptom) | Spawn-phase transient errors (ENOTCONN/EMFILE/ENFILE/EAGAIN — the only codes the retry treats as transient) emit `error` but NEVER a later `exit` (verified empirically: spawn-failure 'error' is never followed by 'exit', kill() returns false). The persistent `on('error')` (registered at :205, before the temporary `.once` at :225) runs first and nulls `this.process`, so the catch's `kill()` is a no-op. The immediate-exit path fires the persistent exit handler synchronously during attempt 0 (before P1 exists), leaving `running===true`. Any transient `process_exit` during a successful retry start() is superseded by the "idle" broadcast at session-manager.ts. | Residual: per-retry EventEmitter listener leak on the dead child (cannot null the replacement or emit a spurious exit). Fix: `removeAllListeners()` before kill at rpc-bridge.ts:242. Low. (Listed in §2 as the low residual.) |
 | **S44** — `showLightbox` window listeners + detached `<img>` leak | REFUTED | ALL in-code removal paths funnel through `close()` (image-utils.ts:84-89), which removes all three window listeners and the overlay; backdrop/1x-image click (96-98) and Escape (91-93) both call it. The overlay is parented to `document.body`, so SPA re-renders don't detach it. The "removed without close()" leak requires an external actor that doesn't occur in the app. | Defensive hardening (scope listeners to the overlay; add a disconnectedCallback safety net). Low priority. To confirm: open/close 100× and assert listener + detached-`<img>` counts return to baseline. |
 | **S45** — tool-result image blocks missing `mimeType` silently dropped | REFUTED (trigger unreachable) | The filter (image-utils.ts:113 requires truthy `mimeType`) is real, but NO producer emits a mimeType-less tool-result image block: built-in Read gates on `if (mimeType)` and always emits `{type:'image',data,mimeType}` (read.js:168/189/199); browser screenshot + generate_image always set it; and the MCP path is decisive — the dynamically-generated `mcp_<server>` execute body reduces every MCP result to text (tool-activation.ts:497-506/635-644), DISCARDING image blocks server-side before they reach the UI. | Latent defensive-consistency gap only. NEEDS-TRACE if a future image-capable MCP/tool bridge preserves image blocks — settle by capturing a `tool_result` in the `.jsonl` whose content has an image block with no mimeType (cannot be produced today). |
 | **S46** — snapshot image restore mislabels non-PNG as image/png | REFUTED (MIME half) | pi-ai `ImageContent` has a REQUIRED `mimeType` (types.d.ts:163-167); the client always sends the real mimeType (remote-agent.ts:831; message-editor-attach.spec.ts:54/236 confirm .jpg→image/jpeg); pi persists verbatim (agent-session.js:279, plain JSON.stringify/parse); `get_messages` returns it verbatim. So at message-reducer.ts:172 `img.mimeType` is present and the `|| 'image/png'` fallback NEVER fires — `AttachmentTile.ts:50` emits the correct `data:image/jpeg`. | Residual (HOLDS, low): message-reducer.ts:171 hardcodes the filename `image-${i+1}.png`; the original filename isn't persisted in pi's `ImageContent`, so a restored JPEG shows "image-1.png" in alt/title/download — a cosmetic suffix mislabel only (MIME + data URL are correct). |
@@ -805,7 +796,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
 | **S5** (reorder sub-path only) | resume-loss CONFIRMED; reorder NEEDS-TRACE | Whether `_pendingEvents` can be non-empty (a real live seq gap) coincident with a seq-less frame on an attached client. | Force a real seq gap (packet drop or a regressed perm-frame unicast) and fire `auto_retry_pending` into the gap; assert the seq-less frame's side effects fire before the buffered seq'd content. |
 | **S8** (shape a only) | shape (b) CONFIRMED; shape (a) ~30s delay NEEDS-TRACE | Whether a real wedged upstream keeps `waitForIdle` from resolving within 30s (keep-alive-trickling SSE vs the abort signal). | Timestamp (Stop click)→(rpc abort response/30s timeout)→(force-kill) against a real keep-alive-trickling gateway; ~30s gap confirms shape (a) in production. |
 | **S15** | REFUTED mechanism, NEEDS-TRACE residue | The prior seam ("switch_session replays history through the seq-stamping emit, inflating seq") is refuted from source: pi's `switch_session` rebuilds session state via `createRuntime`/`buildSessionContext` WITHOUT emitting per-message events (agent-session-runtime.js:125-142; only an extension-level `session_start` at agent-session.js:1645). The in-process mock corroborates (switch_session emits nothing, mock-agent-core.mjs:1978). The Bobbit `restoring` guard/comment is stale. | In `test:manual`, restore a >5-event session and capture the EventBuffer seq before vs after `switch_session`; assert it advances by 0 (only by genuinely-new live frames), not by history length. Inferred from source against pi 0.77.0, not observed on the running binary → medium confidence. |
-| **S27** | REFUTED mechanism, NEEDS-TRACE residue | The prior seam ("SDK echoes N separate messages for a batched steer, so the joined `batchText` ledger entry never matches") is refuted: Bobbit dispatches one `steer(batchText)` per batch (one ledger entry, session-manager.ts:1923/1937), the SDK queues it as ONE user message (agent-session.js:923-934), and the echo carries `text===batchText`, which `_consumeSteerEcho`'s `indexOf` (session-manager.ts:1971) matches. | Residual: skill/prompt-template expansion inside the agent (agent-session.js:899-900) could rewrite the echo body so it ≠ `batchText`. Queue two steers containing a `/skill:` invocation, dispatch as a batch, and confirm via a `get_messages` snapshot whether the echoed user text equals the joined raw `batchText` (matches ledger) or the expanded text (would survive → stale re-dispatch). |
+| **S27** | REFUTED mechanism, NEEDS-TRACE residue | The prior seam ("SDK echoes N separate messages for a batched steer, so the joined `batchText` ledger entry never matches") is refuted: Bobbit dispatches one `steer(batchText)` per batch (one ledger entry in `session-manager.ts`), the SDK queues it as ONE user message (agent-session.js:923-934), and the echo carries `text===batchText`, which `_consumeSteerEcho` in `session-manager.ts` matches. | Residual: skill/prompt-template expansion inside the agent (agent-session.js:899-900) could rewrite the echo body so it ≠ `batchText`. Queue two steers containing a `/skill:` invocation, dispatch as a batch, and confirm via a `get_messages` snapshot whether the echoed user text equals the joined raw `batchText` (matches ledger) or the expanded text (would survive → stale re-dispatch). |
 
 ---
 
@@ -888,7 +879,7 @@ baked into the mock agent and the pinning fixtures**. Prioritised by how many re
 - **Reality.** NO test drives the real `SessionManager.maybeAutoRetryTransient`. `auto-retry-policy.test.ts`
   re-implements the decision tree as a local `decideRetryPolicy()` pure function (41-65);
   `queue-dispatch.spec.ts` uses a FAKE timer object `{cancelled:boolean}` (line 28), never a real
-  `setTimeout`, never the real fire guard (`status!=='idle'`, session-manager.ts:2499). `auto-retry-banner.spec.ts`
+  `setTimeout`, never the real fire guard (`status!=='idle'`, session-manager.ts). `auto-retry-banner.spec.ts`
   INJECTS the events client-side via `handleAgentEvent` and never exercises the server seq-less emit
   (S5/S21), reconnect-orphaned banner, or fire/cancel under the guard (S40).
 - **What a faithful test needs.** A real-SessionManager unit test that schedules a real timer (transient
@@ -899,7 +890,7 @@ baked into the mock agent and the pinning fixtures**. Prioritised by how many re
 ### P1 — Server-side wedged-streaming (dead bridge, no agent_end) has no recovery test (S8)
 - **Comfortable assumption.** "Abort/Stop is pinned by `abort-status-e2e.spec.ts`."
 - **Reality.** That spec uses the mock agent which ALWAYS emits `agent_end` on abort, so only the happy
-  grace-period path is tested, never the force-kill+respawn branch (session-manager.ts:5706-5732) or the
+  grace-period path is tested, never the force-kill+respawn branch (session-manager.ts) or the
   heartbeat-faithfully-rebroadcasts-the-wedged-truth failure. The mock's default abort also uses the WRONG
   shape: it emits only `agent_end`+idle (no assistant message), and the opt-in `MOCK_ABORT_AS_ERROR=1`
   uses `stopReason:'error'` with `content:[]` — but the real user-abort emits `stopReason:'aborted'`,
