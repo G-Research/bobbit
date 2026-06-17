@@ -2534,6 +2534,24 @@ export class SessionManager {
 
 			session.streamingStartedAt = undefined;
 			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+			// Extension Platform G1.4: notify lifecycle providers a turn completed.
+			// Fire-and-forget — NEVER await into the agent_end event path, and
+			// swallow/log all errors so a slow or throwing provider can't stall
+			// the lifecycle. Per-provider timeouts are enforced inside the hub.
+			if (this.lifecycleHub) {
+				const turnIndex = session.completedTurnCount;
+				void this.lifecycleHub.dispatch("afterTurn", {
+					sessionId: session.id,
+					projectId: session.projectId,
+					scope: session.projectId ? "project" : "global",
+					cwd: session.cwd,
+					goalId: session.goalId,
+					roleName: session.role,
+					turn: { index: turnIndex },
+				}).catch((err) => {
+					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
+				});
+			}
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
 			broadcastStatus(session, "idle");
 			// Don't drain the queue if the turn ended with a model error —
@@ -5677,6 +5695,30 @@ export class SessionManager {
 	 */
 	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
 		await this.cascadeReapOwner(id);
+		// Extension Platform G1.4: notify lifecycle providers the session is
+		// shutting down. Best-effort and bounded by the hub's per-provider
+		// timeouts; wrapped in try/catch so archival always completes even if a
+		// provider hangs or throws. Resolve context from the live session when
+		// present, else the persisted record (dormant sessions still archive).
+		if (this.lifecycleHub) {
+			const live = this.sessions.get(id);
+			const persisted = live ? undefined : this.getPersistedSession(id);
+			const src = live ?? persisted;
+			if (src) {
+				try {
+					await this.lifecycleHub.dispatch("sessionShutdown", {
+						sessionId: id,
+						projectId: src.projectId,
+						scope: src.projectId ? "project" : "global",
+						cwd: src.cwd,
+						goalId: src.goalId,
+						roleName: src.role,
+					});
+				} catch (err) {
+					console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
+				}
+			}
+		}
 		const target = store ?? this.resolveStoreForId(id);
 		if (!target) return false;
 		try { return target.archive(id); } catch { return false; }
