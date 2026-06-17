@@ -100,6 +100,15 @@ test.describe("Sidebar actions menu", () => {
 		);
 	}
 
+	async function menuTitleMap(page: Page): Promise<Record<string, string | null>> {
+		return page.locator("sidebar-actions-popover [role='menuitem']").evaluateAll((els) =>
+			Object.fromEntries(els.map((el) => [
+				(el as HTMLElement).dataset.sidebarActionId || "",
+				el.getAttribute("title"),
+			])),
+		);
+	}
+
 	async function openSession(page: Page, sessionId: string): Promise<Locator> {
 		await openApp(page);
 		await navigateToHash(page, `#/session/${sessionId}`);
@@ -141,6 +150,14 @@ test.describe("Sidebar actions menu", () => {
 
 		await openMenu(row, "session", sessionId);
 		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Open in new window", "Refresh agent", "Fork"]);
+		await expect.poll(() => menuTitleMap(page)).toMatchObject({
+			modify: "Rename this session",
+			"copy-link": "Copy a link to this session",
+			"open-new-window": "Open this session in a new browser window",
+			"refresh-agent": "Restart this agent with the latest prompt, tools, and auth state",
+			fork: "Create a new session from this session's history",
+		});
+		expect((await menuTitleMap(page)).terminate).toContain("Terminate this session");
 		await expect(triggerFor(row, "session", sessionId), "hamburger trigger stays visible while the menu is open").toBeVisible();
 
 		await page.keyboard.press("Escape");
@@ -194,6 +211,12 @@ test.describe("Sidebar actions menu", () => {
 		await expect(row.locator('[data-sidebar-action-id="reattempt"][data-sidebar-action-quick="true"]'), "re-attempt is not a hover quick action").toHaveCount(0);
 		await openMenuFromKeyboard(row, "goal", goal.id as string, "dashboard");
 		await expect.poll(() => menuLabels(page)).toEqual(["Goal dashboard", "Archive", "Re-attempt", "Copy link"]);
+		await expect.poll(() => menuTitleMap(page)).toEqual({
+			dashboard: "Open this goal's dashboard",
+			archive: "Archive this goal",
+			reattempt: "Start a new attempt for this goal",
+			"copy-link": "Copy a link to this goal",
+		});
 		await expect(menuItem(page, "reattempt"), "re-attempt still appears in the popover menu").toBeVisible();
 		await expect(triggerFor(row, "goal", goal.id as string), "hamburger trigger stays visible while the menu is open").toBeVisible();
 
