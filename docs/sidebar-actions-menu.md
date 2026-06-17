@@ -44,6 +44,7 @@ Menu-only actions are intentionally desktop-only in v1:
 
 - Session `Copy link`
 - Session `Open in new window`
+- Session `Refresh agent`
 - Session `Fork`
 - Goal `Copy link`
 - Goal `Open on GitHub`
@@ -62,9 +63,34 @@ This avoids adding a redundant dense tap target on mobile, where the quick actio
 | `End team` | Quick + menu | Team-lead session | Opens the existing team-end confirmation with goal context. |
 | `Copy link` | Menu only | Live session / team-lead row | Copies an absolute hash route for the session. |
 | `Open in new window` | Menu only | Live session / team-lead row | Opens the session's deep link in a new browser window/tab (see [Open in new window](#open-in-new-window-and-middle-click)). |
+| `Refresh agent` | Menu only | Live, interactive session / team-lead row (see [Refresh agent](#refresh-agent)) | Restarts that session's agent process without clearing its transcript. |
 | `Fork` | Menu only | Forkable live session (see [Forkability policy](#forkability-policy)) | Clones the session's conversation history into a new session and connects to it. Carries an inline **New worktree** checkbox (see below). |
 
-Archived sessions and unsupported live session kinds do not expose `Fork`. The server also enforces this with `422` responses so clients cannot bypass UI availability checks.
+Archived sessions and unsupported live session kinds do not expose `Refresh agent` or `Fork`. The server also enforces this for both actions so clients cannot bypass UI availability checks.
+
+#### Refresh agent
+
+`Refresh agent` is a hamburger-only action. It is intentionally not a quick hover button because it restarts the agent process and can interrupt work in progress.
+
+The label is exactly `Refresh agent` when idle. While the request is in flight, the row is rebuilt with `Refreshing agent…`, and the client shows toast feedback for pending, success, and failure states.
+
+Availability is intentionally conservative:
+
+| State | UI behavior | Server behavior |
+|---|---|---|
+| Live, interactive session | Shows `Refresh agent`. | `POST /api/sessions/:id/restart` may restart it. |
+| Inactive but live session | Shows `Refresh agent` on that row. | The explicit REST `:id` targets that exact session, not the currently open chat. |
+| `busy`, `streaming`, or `isCompacting` | Shows `Refresh agent`, then asks for confirmation before interrupting. | Requires `{ "force": true }`; otherwise returns `409 SESSION_BUSY`. |
+| Archived or terminated | Hidden. | Returns `404 SESSION_NOT_FOUND`. |
+| Read-only or non-interactive | Hidden. | Returns `403 SESSION_NOT_RESTARTABLE`. |
+
+On a busy, streaming, or compacting session, selecting the menu item opens a confirmation dialog. Cancel does not call the server. Confirm posts `{ "force": true }`, which lets the server interrupt and respawn the process. Idle refreshes post without force.
+
+The sidebar action uses the REST endpoint because it can target any visible row, including sessions that are not currently open. The older active-chat path still exists: `RemoteAgent.restartAgent()` sends the WebSocket `restart_agent` command on the active session socket. Both paths call the same `SessionManager.restartAgent(sessionId)` implementation, so respawn semantics stay aligned.
+
+A refresh preserves the session identity, transcript/history, persisted session metadata, and attached clients. The manager stops the old process, restores the persisted session through the normal restore path, reattaches existing WebSocket clients, and switches the new process back to the existing transcript file. During restore it rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
+
+See [REST API — Restart session agent endpoint](rest-api.md#restart-session-agent-endpoint) for the request and error contract.
 
 #### Forkability policy
 
@@ -224,7 +250,7 @@ For changes to this feature, run the focused coverage first:
 
 ```bash
 npx tsx --import ./tests/helpers/css-stub-loader.mjs --test --test-force-exit tests/sidebar-actions-flip.test.ts
-npm run test:e2e -- tests/e2e/sidebar-actions-server.spec.ts tests/e2e/ui/sidebar-actions-menu.spec.ts
+npm run test:e2e -- tests/e2e/sidebar-actions-server.spec.ts tests/e2e/session-restart-api.spec.ts tests/e2e/ui/sidebar-actions-menu.spec.ts tests/e2e/ui/sidebar-refresh-agent.spec.ts
 ```
 
 Then run the broader validation expected for UI + server changes:
@@ -235,4 +261,4 @@ npm run test:unit
 npm run test:e2e
 ```
 
-The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut both opening the session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`.
+The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), `Refresh agent` visibility/targeting/feedback/busy confirmation, fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut both opening the session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`; the restart REST contract is covered by `tests/e2e/session-restart-api.spec.ts`.

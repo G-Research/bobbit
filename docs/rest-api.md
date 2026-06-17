@@ -47,6 +47,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
@@ -86,6 +87,42 @@ The side-panel workspace endpoints persist the right-side panel tab set for a se
 | `POST` | `/api/sessions/:id/side-panel-workspace/migrate` | One-time import from legacy localStorage keys. Ignored once the workspace has tabs or `metadata.migratedFromLocalStorageAt`. |
 
 Each committed mutation increments `revision`, persists on the session record, and emits `side_panel_workspace` on the session WebSocket.
+
+### Restart session agent endpoint
+
+`POST /api/sessions/:id/restart` restarts the live agent process for an existing session. It is the REST contract behind the sidebar hamburger action labeled exactly `Refresh agent`.
+
+This endpoint exists alongside the active-session WebSocket `restart_agent` command. The WebSocket command is scoped to the session socket that sends it; the REST endpoint accepts an explicit `:id`, so sidebar actions can refresh an inactive row without switching the open chat. Both paths call `SessionManager.restartAgent(sessionId)`.
+
+Request body (optional):
+
+```json
+{ "force": false }
+```
+
+- Omit the body, omit `force`, or send `force: false` for an idle session.
+- Send `force: true` only after user confirmation when the session is `busy`, `streaming`, or compacting. Without force, those states return `409 SESSION_BUSY`.
+
+Success returns `200`:
+
+```json
+{ "ok": true, "sessionId": "session-id" }
+```
+
+Restart is in-place. It preserves the session id, transcript/history, persisted session metadata, and any connected WebSocket clients. The manager stops the existing process, restores the persisted session, reattaches clients, and switches the new process back to the existing transcript file. The restore path rebuilds the session prompt, tool definitions, tool activation, MCP proxy/guard extensions, MCP-backed tool surface, MCP server configuration/auth state, and per-session environment from the current server-side managers and config.
+
+Stable error codes:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `404` | `SESSION_NOT_FOUND` | No live restartable session exists for `:id`, including missing, archived, or terminated sessions. |
+| `403` | `SESSION_NOT_RESTARTABLE` | The session is read-only or non-interactive. |
+| `409` | `SESSION_BUSY` | The session is `busy`, `streaming`, or compacting and the request did not include `{ "force": true }`. |
+| `500` | `RESTART_ERROR` or a manager-provided code | Restart was accepted but the session manager could not respawn the process. The response still uses the standard `{ error, code }` shape. |
+
+Clients should surface 5xx restart failures visibly rather than silently retrying. A manager-provided restart code, such as an unrecoverable archived-zombie condition, should be displayed or logged with the human-readable `error`.
+
+See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-agent) for the user-facing behavior.
 
 ### Fork session endpoint
 
