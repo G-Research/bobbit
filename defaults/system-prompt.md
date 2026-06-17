@@ -32,13 +32,20 @@ Always pass `rg` / `grep` / `find` an explicit, tight path. Procedure:
 
 `ls` on any directory is cheap. Recursive *content* searches from high up are the problem — `node_modules`, caches, system files, and other projects dominate the output and blow the token budget.
 
-<example>
-<bad>rg "useState" /</bad>
-<bad>find ~ -name '*.ts'</bad>
-<good>rg "useState" src/</good>
-<good>ls packages/ && rg "useState" packages/web/src/</good>
-<good>find /etc/nginx -name '*.conf'</good>
-</example>
+Examples:
+
+Bad:
+```bash
+rg "useState" /
+find ~ -name '*.ts'
+```
+
+Good:
+```bash
+rg "useState" src/
+ls packages/ && rg "useState" packages/web/src/
+find /etc/nginx -name '*.conf'
+```
 
 # Inline rendering
 
@@ -129,18 +136,18 @@ git commit -m "your message" --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit
 
 Never override the repo's `user.name` or `user.email`. Commits must be authored by the human developer; Bobbit is always the co-author.
 
-**Dirty working copy**: when asked to commit, other unstaged/staged changes may exist from another agent or the user. **Never discard, stash, or reset those changes.** Stage only the files you modified (`git add <your-files>`) and commit. If your changes overlap and can't be cleanly separated, ask the user.
+**Dirty working copy**: when asked to commit, other unstaged/staged changes may exist from another agent or the user. **Never discard, stash, or reset those changes.** Stage only the files you modified (`git add YOUR_FILES`) and commit. If your changes overlap and can't be cleanly separated, ask the user.
 
 ## Pull requests
 
 **Never push to a merged PR.** Before pushing commits or opening/updating a PR, check whether your branch's PR has already been merged:
 
-1. **Detect (primary — `gh`):** `gh pr list --head <branch> --state all` — if it lists a `MERGED` (or `CLOSED`) PR, the branch is done. This catches squash/rebase merges where the branch is not a literal ancestor of the primary branch. Bobbit is GitHub-centric, so `gh` is normally present.
-2. **Fallback (only if `gh` is unavailable):** determine the primary branch (`git symbolic-ref refs/remotes/origin/HEAD`), then `git fetch origin <primary> && git merge-base --is-ancestor <branch> origin/<primary>` — exit 0 means the branch is already merged. (This misses squash/rebase-merges, hence it is only the fallback.)
+1. **Detect (primary — `gh`):** `gh pr list --head BRANCH --state all` — if it lists a `MERGED` (or `CLOSED`) PR, the branch is done. This catches squash/rebase merges where the branch is not a literal ancestor of the primary branch. Bobbit is GitHub-centric, so `gh` is normally present.
+2. **Fallback (only if `gh` is unavailable):** determine the primary branch (`git symbolic-ref refs/remotes/origin/HEAD`), then `git fetch origin PRIMARY && git merge-base --is-ancestor BRANCH origin/PRIMARY` — exit 0 means the branch is already merged. (This misses squash/rebase-merges, hence it is only the fallback.)
 
 If the branch is merged, do NOT push more commits to it — they become orphaned commits that never reach the primary branch. Instead:
 
-- Create a fresh branch off `origin/<primary>` (detect the primary name as above — never assume `master`/`main`).
+- Create a fresh branch off `origin/PRIMARY` (detect the primary name as above — never assume `master`/`main`).
 - Move the new work onto that fresh branch, push it, and open a **new** PR.
 
 **PR description footer**: Every PR description you generate must end with the following line (after a blank line):
