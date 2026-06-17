@@ -54,7 +54,7 @@ Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcCli
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. The steered message is reordered to the front and shows a "Sent" badge in the UI. If the agent is **streaming**, promotion dequeues all consecutive steered rows from the front of the queue via `dequeueAllSteered()` and immediately hands them to the single `_dispatchSteer()` site, matching a fresh live steer instead of waiting for a later tool boundary. `_dispatchSteer()` removes the rows, joins them with `\n`, aborts any parked `bash_bg wait`, forwards to `rpcClient.steer()`, and owns RPC-failure recovery. If the agent is **idle**, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
+Promotes an already-queued message to steered priority. If the agent is **streaming**, promotion dequeues all consecutive steered rows from the front of the queue via `dequeueAllSteered()` and immediately hands them to the single `_dispatchSteer()` site, matching a fresh live steer instead of waiting for a later tool boundary; the dispatched rows leave the visible queue. `_dispatchSteer()` removes the rows, joins them with `\n`, aborts any parked `bash_bg wait`, forwards to `rpcClient.steer()`, and owns RPC-failure recovery. If the agent is **idle**, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
 
 ### `remove_queued` (client → server)
 

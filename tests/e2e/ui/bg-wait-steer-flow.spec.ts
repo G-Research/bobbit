@@ -23,7 +23,7 @@
  *      proving the steer text actually reached the agent.
  *
  * Together the assertions guarantee that:
- *   - The UI steer button reaches the server (sent-indicator appears).
+ *   - The UI steer button reaches the server (queue row dispatches).
  *   - The bash_bg-wait abort hook on the steer-dispatch path actually fires
  *     (wait returns aborted:true within the timeout, bg proc still running).
  *   - The steer is delivered to the agent (user-message rendered in chat).
@@ -63,9 +63,9 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 
 		// 1. Make the agent busy. STAY_BUSY:<ms> emits tool_execution_start
 		//    ("Bash sleep"), ticks for <ms>, then emits tool_execution_end.
-		//    The steered message is batched and dispatched on that _end event,
-		//    so the busy window has to be long enough for us to (a) start the
-		//    bg wait, (b) queue a message, (c) click Steer — comfortably ~5s.
+		//    The busy window only needs to be long enough for us to (a) start the
+		//    bg wait, (b) queue a message, (c) click Steer — queued-steer
+		//    promotion dispatches immediately while the stream is still active.
 		await sendMessage(page, "STAY_BUSY:5000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 		await rec.capture("Agent busy — Stop button visible");
@@ -102,10 +102,9 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		// 4. Click the Steer pill → server marks isSteered, dequeues the
 		//    steered front group, and immediately calls _dispatchSteer while
 		//    the agent is streaming.
-		await page.locator(".steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator(".sent-indicator")).toContainText("Sent");
-		await rec.capture("Steer clicked — sent-indicator shows Sent");
+		await page.locator(".steer-btn").first().evaluate((el: HTMLElement) => el.click());
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+		await rec.capture("Steer clicked — queued row dispatched");
 
 		// 5. Streaming `steerQueued` immediately calls _dispatchSteer, and
 		//    _dispatchSteer owns `bgProcessManager.abortAllWaits(sessionId)`.

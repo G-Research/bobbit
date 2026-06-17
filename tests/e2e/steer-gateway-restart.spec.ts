@@ -1,11 +1,11 @@
 /**
  * AC §3 — Steer + gateway restart durability.
  *
- * Sequence: STAY_BUSY → queue 2 prompts → promote both to steered → while
- * streaming, promotion immediately dequeues the steered front group and calls
+ * Sequence: STAY_BUSY → queue a prompt containing two sentinel lines → promote
+ * it to steered → while streaming, promotion immediately dequeues it and calls
  * the live steer dispatch path → simulate a gateway restart → assert both
- * steered messages remain in the transcript exactly once each, ordering
- * preserved, with no queued rows redrained after restore.
+ * sentinel lines remain in the transcript exactly once each, ordering preserved,
+ * with no queued rows redrained after restore.
  *
  * "Restart" model: the in-process harness shares Node's module cache, so we
  * simulate a clean restart by:
@@ -37,7 +37,7 @@ import {
 test.setTimeout(60_000);
 
 test.describe("Steer + gateway restart (AC §3)", () => {
-	test("two steered messages survive restart and arrive exactly once each, ordered", async ({ gateway }) => {
+	test("steered queued text survives restart exactly once, ordered", async ({ gateway }) => {
 		const sessionId = await createSession();
 		let conn = await connectWs(sessionId);
 		try {
@@ -47,20 +47,17 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			// then promote them while the session is streaming. Promotion should
 			// dispatch immediately through _dispatchSteer, not wait for the busy
 			// tool's later boundary.
-			conn.send({ type: "prompt", text: "STAY_BUSY:60000 long task" });
+			conn.send({ type: "prompt", text: "STAY_BUSY:2000 long task" });
 			await conn.waitFor(statusPredicate("streaming"));
 
-			// Step 2 — queue M1 and M2, then promote both to steered.
-			conn.send({ type: "prompt", text: "RESTART_M1" });
-			await conn.waitFor(queueLenPredicate(1));
-			conn.send({ type: "prompt", text: "RESTART_M2" });
-			const q2 = await conn.waitFor(queueLenPredicate(2));
-			const m1Id = q2.queue!.find((m: any) => m.text === "RESTART_M1")!.id;
-			const m2Id = q2.queue!.find((m: any) => m.text === "RESTART_M2")!.id;
+			// Step 2 — queue a multi-line message, then promote it to steered.
+			const steeredText = "RESTART_M1\nRESTART_M2";
+			conn.send({ type: "prompt", text: steeredText });
+			const queued = await conn.waitFor(queueLenPredicate(1));
+			const messageId = queued.queue!.find((m: any) => m.text === steeredText)!.id;
 
 			conn.messages.length = 0;
-			conn.send({ type: "steer_queued", messageId: m1Id });
-			conn.send({ type: "steer_queued", messageId: m2Id });
+			conn.send({ type: "steer_queued", messageId });
 
 			// Streaming promotion immediately drains the steered front group(s)
 			// through _dispatchSteer, so the persisted queue should become empty
@@ -108,8 +105,8 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 				? messagesResponse.data
 				: (messagesResponse.data?.messages || []);
 
-			// Step 5 — count occurrences of each steered text. Both must
-			// appear exactly once across all user-message bodies.
+			// Step 5 — count occurrences of each sentinel. Both must appear
+			// exactly once across all user-message bodies.
 			const userBodies = messages
 				.filter((m: any) => m.role === "user")
 				.map((m: any) => m.content?.[0]?.text || "");

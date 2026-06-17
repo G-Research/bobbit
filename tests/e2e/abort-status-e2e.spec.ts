@@ -98,14 +98,17 @@ test.describe("Abort status E2E", () => {
 			const m1Id = q3.queue![0].id;
 			const m2Id = q3.queue![1].id;
 
-			// Promote M1 and M2 to steered
+			// Promote M1 and M2 to steered. Streaming promotion dispatches each
+			// immediately through the live-steer path, leaving only M3 queued.
 			conn.send({ type: "steer_queued", messageId: m1Id });
 			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === m1Id && q.isSteered),
+				(m) => m.type === "queue_update" && m.queue?.length === 2 &&
+					m.queue.every((q: any) => q.id !== m1Id),
 			);
 			conn.send({ type: "steer_queued", messageId: m2Id });
 			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.some((q: any) => q.id === m2Id && q.isSteered),
+				(m) => m.type === "queue_update" && m.queue?.length === 1 &&
+					m.queue.every((q: any) => q.id !== m2Id),
 			);
 
 			const abortCursor = conn.messageCount();
@@ -348,33 +351,25 @@ test.describe("Abort status E2E", () => {
 			conn.send({ type: "prompt", text: "S2" });
 			const q3 = await conn.waitFor(queueLenPredicate(3));
 
-			// Promote S1 and S2 to steered
+			// Promote S1 and S2 to steered. Streaming promotion dispatches
+			// immediately, so only non-steered N1 should remain queued.
 			const s1Id = q3.queue![0].id;
 			const s2Id = q3.queue![2].id;
 			conn.send({ type: "steer_queued", messageId: s1Id });
 			await conn.waitFor(
-				(m) => m.type === "queue_update" && m.queue?.[0]?.isSteered === true,
+				(m) => m.type === "queue_update" && m.queue?.length === 2 &&
+					m.queue.every((q: any) => q.id !== s1Id),
 			);
 			conn.send({ type: "steer_queued", messageId: s2Id });
 
-			// After promoting S2, steered messages should be at the front of the queue
-			// with non-steered N1 at the back. This verifies the reordering fix.
-			const reordered = await conn.waitFor(
+			const remaining = await conn.waitFor(
 				(m) =>
 					m.type === "queue_update" &&
-					m.queue?.length === 3 &&
-					m.queue[0].isSteered === true &&
-					m.queue[1].isSteered === true &&
-					m.queue[2].isSteered === false,
+					m.queue?.length === 1 &&
+					m.queue[0].text === "N1" &&
+					m.queue[0].isSteered === false,
 			);
-
-			// Verify the reorder: S1 and S2 (steered) at front, N1 (normal) at back
-			expect(reordered.queue![2].text).toBe("N1");
-			const steeredTexts = reordered.queue!
-				.filter((q: any) => q.isSteered)
-				.map((q: any) => q.text);
-			expect(steeredTexts).toContain("S1");
-			expect(steeredTexts).toContain("S2");
+			expect(remaining.queue![0].text).toBe("N1");
 
 			const abortCursor = conn.messageCount();
 			conn.send({ type: "abort" });

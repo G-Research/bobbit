@@ -81,7 +81,7 @@ test.describe("Queue E2E", () => {
 		}
 	});
 
-	test("steer_queued reorders queue", async () => {
+	test("steer_queued dispatches promoted row and leaves normal queue intact", async () => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -98,16 +98,23 @@ test.describe("Queue E2E", () => {
 			const twoQueued = await conn.waitFor(queueLenPredicate(2));
 
 			const msgBId = twoQueued.queue![1].id;
+			conn.messages.length = 0;
 			conn.send({ type: "steer_queued", messageId: msgBId });
 
-			const reordered = await conn.waitFor(
+			const remaining = await conn.waitFor(
 				(m) => m.type === "queue_update" && m.queue !== undefined &&
-					m.queue.length === 2 && m.queue[0].isSteered === true,
+					m.queue.length === 1 && m.queue[0].text === "msg A",
 			);
-			expect(reordered.queue![0].text).toBe("msg B");
-			expect(reordered.queue![0].isSteered).toBe(true);
-			expect(reordered.queue![1].text).toBe("msg A");
-			expect(reordered.queue![1].isSteered).toBe(false);
+			expect(remaining.queue![0].isSteered).toBe(false);
+
+			await conn.waitFor(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					(m.data?.message?.content?.[0]?.text || "").includes("msg B"),
+				10_000,
+			);
 		} finally {
 			conn.close();
 		}

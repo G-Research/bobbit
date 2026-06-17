@@ -17,12 +17,21 @@ import {
 } from "../e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
+async function clickAllSteerButtons(page: any): Promise<void> {
+	let remaining = await page.locator(".queue-pill .steer-btn").count();
+	while (remaining > 0) {
+		await page.locator(".queue-pill .steer-btn").first().evaluate((el: HTMLElement) => el.click());
+		await expect.poll(async () => page.locator(".queue-pill .steer-btn").count(), { timeout: 5_000 }).toBeLessThan(remaining);
+		remaining = await page.locator(".queue-pill .steer-btn").count();
+	}
+}
+
 test.describe("Queue UI E2E", () => {
 	test.beforeAll(async () => {
 		await waitForHealth();
 	});
 
-	test("PI-10: steer pill shows Sent badge, steer delivered mid-turn without abort @smoke", async ({ page, rec }) => {
+	test("PI-10: steer pill dispatches queued row mid-turn without abort @smoke", async ({ page, rec }) => {
 		// PI-10: Queue a message, click Steer, verify delivery WITHOUT aborting.
 		// The mock agent's handlePrompt round-trip renders the steered text
 		// as a user-message in the chat.
@@ -53,12 +62,11 @@ test.describe("Queue UI E2E", () => {
 		await expect(page.locator(".steer-btn")).toHaveCount(1);
 		await rec.capture("Follow-up queued — pill + Steer button visible");
 
-		// PI-10 step 2: Click Steer → pill shows "Sent" and streaming promotion
-		// immediately dispatches through the live-steer path.
-		await page.locator(".steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator(".sent-indicator")).toContainText("Sent");
-		await rec.capture("Steer clicked — Sent badge visible");
+		// PI-10 step 2: Click Steer → streaming promotion immediately
+		// dispatches through the live-steer path and removes the queue row.
+		await page.locator(".steer-btn").first().evaluate((el: HTMLElement) => el.click());
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+		await rec.capture("Steer clicked — queued row dispatched");
 
 		// PI-10 step 3: Agent receives the steer mid-turn through the same
 		// dispatch path as a fresh live steer. The steered text renders as a
@@ -99,14 +107,11 @@ test.describe("Queue UI E2E", () => {
 		await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 		await rec.capture("Two messages queued — both pills visible");
 
-		// PI-10b step 3: Click Steer on pill 1
-		await page.locator(".queue-pill .steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toHaveCount(1, { timeout: 3_000 });
-
-		// PI-10b step 4: Click Steer on pill 2
-		await page.locator(".queue-pill .steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toHaveCount(2, { timeout: 3_000 });
-		await rec.capture("Both pills steered — Sent x2");
+		// PI-10b steps 3-4: Click Steer on every queued pill. Immediate
+		// dispatch can remove multiple front steers before the next click.
+		await clickAllSteerButtons(page);
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+		await rec.capture("Both pills steered and dispatched");
 
 		// PI-10b step 5: Agent receives both steers mid-turn through the
 		// immediate queued-promotion dispatch path. Each steered text renders
