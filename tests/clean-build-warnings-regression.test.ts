@@ -9,13 +9,15 @@ import { detectPrimaryBranch } from "../src/server/skills/git.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoots = [path.join(repoRoot, "src", "app"), path.join(repoRoot, "src", "ui")];
-const piAiLazyLoader = normalizePath(path.join(repoRoot, "src", "app", "pi-ai-lazy.ts"));
 const ineffectiveDynamicImportTargets = new Set([
 	"side-panel-workspace",
 	"shortcut-registry",
 	"proposal-panels-lazy",
 	"render",
 	"api",
+	"routing",
+	"preview-panel",
+	"gate-status-events",
 ]);
 
 /**
@@ -79,10 +81,14 @@ function collectStaticImports(file: string, source: string): Array<{ file: strin
 	return imports;
 }
 
+function stripTypeOnlyImportExpressions(source: string): string {
+	return source.replace(/\btypeof\s+import\s*\(\s*["'][^"']+["']\s*\)/g, "unknown");
+}
+
 function collectDynamicImports(file: string, source: string): Array<{ file: string; source: string }> {
 	const imports: Array<{ file: string; source: string }> = [];
 	const dynamicImport = /\bimport\s*\(\s*["'](?<source>[^"']+)["']\s*\)/g;
-	for (const match of stripComments(source).matchAll(dynamicImport)) {
+	for (const match of stripTypeOnlyImportExpressions(stripComments(source)).matchAll(dynamicImport)) {
 		imports.push({ file, source: match.groups?.source ?? "" });
 	}
 	return imports;
@@ -112,21 +118,24 @@ describe("clean build warning regression tests", () => {
 	const files = sourceRoots.flatMap(walkTsFiles).sort();
 	const sources = new Map(files.map((file) => [file, fs.readFileSync(file, "utf-8")]));
 
-	it("keeps browser code from statically importing pi-ai runtime values", () => {
+	it("keeps browser code from importing pi-ai runtime values", () => {
 		const offenders: string[] = [];
 		for (const [file, source] of sources) {
 			const rel = normalizePath(file);
-			if (rel === piAiLazyLoader) continue;
 			for (const imp of collectStaticImports(file, source)) {
 				if (imp.source !== "@earendil-works/pi-ai") continue;
 				if (isTypeOnlyImportClause(imp.clause)) continue;
 				offenders.push(`${rel}: static browser value import from @earendil-works/pi-ai`);
 			}
+			for (const imp of collectDynamicImports(file, source)) {
+				if (imp.source !== "@earendil-works/pi-ai") continue;
+				offenders.push(`${rel}: dynamic browser value import from @earendil-works/pi-ai`);
+			}
 		}
 
 		assert.deepEqual(offenders, [], [
-			"Browser code must not use static browser value import statements from @earendil-works/pi-ai.",
-			"Load runtime values through src/app/pi-ai-lazy.ts so node-only package exports stay out of browser chunks.",
+			"Browser code must not use static or dynamic browser value imports from @earendil-works/pi-ai.",
+			"Use a browser-safe route, narrower module boundary, or package export that does not pull node-only exports into browser chunks.",
 			...offenders,
 		].join("\n"));
 	});
