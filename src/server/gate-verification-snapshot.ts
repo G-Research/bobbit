@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import type { GateSignal } from "./agent/gate-store.js";
+import type { GateStepDiagnostics } from "./gate-diagnostics.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
 import {
 	MAX_SELECTED_BYTES,
@@ -39,6 +40,21 @@ export interface GateVerificationSnapshotStep {
 	sessionId?: string;
 	session?: { id: string; href: string };
 	liveLogs?: { stdout: boolean; stderr: boolean };
+	diagnostics?: {
+		outputSource: "compact-tail" | "live-logs" | "retained-logs";
+		logs?: {
+			stdout?: { path: string; bytes: number; lines: number };
+			stderr?: { path: string; bytes: number; lines: number };
+		};
+		artifacts?: {
+			count: number;
+			truncated?: boolean;
+			truncationReason?: string;
+			files: Array<{ path: string; relativePath: string; sourcePath: string; bytes: number; kind: string }>;
+		};
+		inspectHints?: string[];
+		note?: string;
+	};
 }
 
 export interface GateVerificationSnapshot {
@@ -49,6 +65,8 @@ export interface GateVerificationSnapshot {
 	selection: TextSelectionMetadata & { truncationReason?: string };
 	active: boolean;
 }
+
+type GateVerificationOutputSource = NonNullable<GateVerificationSnapshotStep["diagnostics"]>["outputSource"];
 
 interface GateInspectOutputStep {
 	output?: string;
@@ -192,6 +210,69 @@ function composeLiveLogOutput(stdout: string, stderr: string): string {
 	return stdout || stderr;
 }
 
+function safeReadText(filePath: string | undefined): string {
+	if (!filePath) return "";
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size <= 0) return "";
+		return fs.readFileSync(filePath, "utf8");
+	} catch {
+		return "";
+	}
+}
+
+function buildInspectHints(gateId: string, stepName: string): string[] {
+	const encodedStep = stepName.replace(/"/g, '\\"');
+	return [
+		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="grep", pattern="error|failed|Error", context=3)`,
+		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="slice", from=120, to=220)`,
+		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="tail", lines=200)`,
+	];
+}
+
+function diagnosticsMetadata(input: {
+	diagnostics?: GateStepDiagnostics;
+	outputSource: GateVerificationOutputSource;
+	gateId: string;
+	stepName: string;
+}): GateVerificationSnapshotStep["diagnostics"] {
+	const diagnostics = input.diagnostics;
+	const out: NonNullable<GateVerificationSnapshotStep["diagnostics"]> = {
+		outputSource: input.outputSource,
+		inspectHints: buildInspectHints(input.gateId, input.stepName),
+	};
+	if (diagnostics) {
+		out.logs = {};
+		if (diagnostics.stdout) out.logs.stdout = diagnostics.stdout;
+		if (diagnostics.stderr) out.logs.stderr = diagnostics.stderr;
+		if (!out.logs.stdout && !out.logs.stderr) delete out.logs;
+		if (diagnostics.artifacts?.length) {
+			out.artifacts = {
+				count: diagnostics.artifacts.length,
+				truncated: diagnostics.truncated,
+				truncationReason: diagnostics.truncationReason,
+				files: diagnostics.artifacts,
+			};
+		}
+		out.note = input.outputSource === "retained-logs"
+			? "Inspection output is selected from retained stdout/stderr under Bobbit state; compact status output remains bounded."
+			: "Status output is compact; use explicit gate_inspect modes to query retained logs when available.";
+	} else {
+		out.note = input.outputSource === "live-logs"
+			? "Inspection output is selected from live command log files."
+			: "Inspection output is selected from compact persisted output; no retained logs were recorded for this step.";
+	}
+	return out;
+}
+
+function readRetainedCommandOutput(diagnostics: GateStepDiagnostics | undefined): string | undefined {
+	if (!diagnostics) return undefined;
+	const stdout = trimTrailingNewlines(safeReadText(diagnostics.stdout?.path));
+	const stderr = trimTrailingNewlines(safeReadText(diagnostics.stderr?.path));
+	if (!stdout && !stderr) return undefined;
+	return composeLiveLogOutput(stdout, stderr);
+}
+
 function readLiveCommandOutput(
 	activeStep: ActiveVerification["steps"][number],
 	selectionOptions: TextSelectionOptions,
@@ -276,6 +357,7 @@ export function buildGateVerificationSnapshot(input: {
 		let durationMs = persisted.duration_ms;
 		let liveLogs: GateVerificationSnapshotStep["liveLogs"];
 		let liveLogTruncationReason: string | undefined;
+		let outputSource: GateVerificationOutputSource = "compact-tail";
 		const sessionId = activeStep?.sessionId;
 
 		if (activeStep) {
@@ -289,6 +371,7 @@ export function buildGateVerificationSnapshot(input: {
 				const live = activeStep.type === "command" ? readLiveCommandOutput(activeStep, selectionOptions) : { output: activeStep.output || rawPersistedOutput };
 				rawOutput = live.output;
 				liveLogs = live.liveLogs;
+				if (live.liveLogs) outputSource = "live-logs";
 				liveLogTruncationReason = live.truncationReason;
 			} else {
 				durationMs = activeStep.durationMs ?? persisted.duration_ms;
@@ -297,6 +380,18 @@ export function buildGateVerificationSnapshot(input: {
 			}
 		} else {
 			status = finalStatusFromPersisted(persisted, input.verification?.status);
+		}
+
+		const canUseRetainedLogs = persisted.type === "command"
+			&& !selectionOptions.implicitDefault
+			&& status !== "running"
+			&& persisted.diagnostics;
+		if (canUseRetainedLogs) {
+			const retainedOutput = readRetainedCommandOutput(persisted.diagnostics);
+			if (retainedOutput !== undefined) {
+				rawOutput = retainedOutput;
+				outputSource = "retained-logs";
+			}
 		}
 
 		const selected = selectText(rawOutput, selectionOptions);
@@ -329,6 +424,14 @@ export function buildGateVerificationSnapshot(input: {
 			out.session = { id: sessionId, href: `/sessions/${encodeURIComponent(sessionId)}` };
 		}
 		if (liveLogs) out.liveLogs = liveLogs;
+		if (persisted.type === "command") {
+			out.diagnostics = diagnosticsMetadata({
+				diagnostics: persisted.diagnostics,
+				outputSource,
+				gateId: input.gateId,
+				stepName: persisted.name,
+			});
+		}
 		return out;
 	});
 
