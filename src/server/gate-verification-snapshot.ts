@@ -366,9 +366,8 @@ export function buildGateVerificationSnapshot(input: {
 }): GateVerificationSnapshot {
 	const now = input.now ?? Date.now();
 	const selectionOptions = gateVerificationDefaultSelection(input.selectionOptions ?? { implicitDefault: true });
-	const includeDiagnostics = input.selectionOptions?.includeDiagnostics === true
-		|| input.selectionOptions?.implicitDefault === false
-		|| input.selectionOptions?.mode !== undefined;
+	const explicitInspectMode = input.selectionOptions?.mode !== undefined;
+	const includeDiagnostics = explicitInspectMode && input.selectionOptions?.includeDiagnostics !== false;
 	const active = input.activeVerification
 		&& input.activeVerification.goalId === input.goalId
 		&& input.activeVerification.gateId === input.gateId
