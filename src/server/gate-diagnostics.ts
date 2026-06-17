@@ -3,7 +3,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { gateDiagnosticsRootDir, safeGateDiagnosticsSegment } from "./agent/gate-diagnostics-cleanup.js";
 
-export const MAX_RETAINED_LOG_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_RETAINED_LOG_BYTES = 20 * 1024 * 1024;
+const TEST_MAX_RETAINED_LOG_BYTES = 5 * 1024 * 1024;
+
+function resolveMaxRetainedLogBytes(): number {
+	const raw = process.env.BOBBIT_RETAINED_LOG_MAX_BYTES;
+	if (raw !== undefined && raw.trim() !== "") {
+		const parsed = Number(raw);
+		if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+	}
+	return process.env.NODE_ENV === "test" ? TEST_MAX_RETAINED_LOG_BYTES : DEFAULT_MAX_RETAINED_LOG_BYTES;
+}
+
+export const MAX_RETAINED_LOG_BYTES = resolveMaxRetainedLogBytes();
 const LOG_COUNT_CHUNK_BYTES = 64 * 1024;
 
 export interface GateStepDiagnosticLogMetadata {
