@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import type { GateSignal } from "./agent/gate-store.js";
+import { MAX_RETAINED_LOG_BYTES, type GateStepDiagnostics } from "./gate-diagnostics.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
 import {
 	MAX_SELECTED_BYTES,
@@ -39,6 +40,21 @@ export interface GateVerificationSnapshotStep {
 	sessionId?: string;
 	session?: { id: string; href: string };
 	liveLogs?: { stdout: boolean; stderr: boolean };
+	diagnostics?: {
+		outputSource: "compact-tail" | "live-logs" | "retained-logs";
+		logs?: {
+			stdout?: { path: string; bytes: number; lines: number; truncated?: boolean; truncationReason?: string };
+			stderr?: { path: string; bytes: number; lines: number; truncated?: boolean; truncationReason?: string };
+		};
+		artifacts?: {
+			count: number;
+			truncated?: boolean;
+			truncationReason?: string;
+			files: Array<{ path: string; relativePath: string; sourcePath: string; bytes: number; kind: string; content?: string; contentType?: string }>;
+		};
+		inspectHints?: string[];
+		note?: string;
+	};
 }
 
 export interface GateVerificationSnapshot {
@@ -49,6 +65,8 @@ export interface GateVerificationSnapshot {
 	selection: TextSelectionMetadata & { truncationReason?: string };
 	active: boolean;
 }
+
+type GateVerificationOutputSource = NonNullable<GateVerificationSnapshotStep["diagnostics"]>["outputSource"];
 
 interface GateInspectOutputStep {
 	output?: string;
@@ -192,6 +210,97 @@ function composeLiveLogOutput(stdout: string, stderr: string): string {
 	return stdout || stderr;
 }
 
+function safeReadText(filePath: string | undefined, maxBytes: number): BoundedLiveLogRead {
+	if (!filePath) return { text: "", truncated: false };
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size <= 0) return { text: "", truncated: false };
+		const bytesToRead = Math.min(stat.size, maxBytes);
+		const buffer = Buffer.allocUnsafe(bytesToRead);
+		fd = fs.openSync(filePath, "r");
+		const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+		const truncated = stat.size > bytesRead;
+		return {
+			text: buffer.subarray(0, bytesRead).toString("utf8"),
+			truncated,
+			truncationReason: truncated ? `retained log read bounded to first ${bytesRead} bytes before selection` : undefined,
+		};
+	} catch {
+		return { text: "", truncated: false };
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore close failure */ }
+		}
+	}
+}
+
+function buildInspectHints(gateId: string, stepName: string): string[] {
+	const encodedStep = stepName.replace(/"/g, '\\"');
+	return [
+		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="grep", pattern="error|failed|Error", context=3)`,
+		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="slice", from=120, to=220)`,
+		`gate_inspect(gate_id="${gateId}", section="verification", step="${encodedStep}", mode="tail", lines=200)`,
+	];
+}
+
+function diagnosticsMetadata(input: {
+	diagnostics?: GateStepDiagnostics;
+	outputSource: GateVerificationOutputSource;
+	gateId: string;
+	stepName: string;
+	includeArtifactContent: boolean;
+}): GateVerificationSnapshotStep["diagnostics"] {
+	const diagnostics = input.diagnostics;
+	const out: NonNullable<GateVerificationSnapshotStep["diagnostics"]> = {
+		outputSource: input.outputSource,
+		inspectHints: buildInspectHints(input.gateId, input.stepName),
+	};
+	if (diagnostics) {
+		out.logs = {};
+		if (diagnostics.stdout) out.logs.stdout = diagnostics.stdout;
+		if (diagnostics.stderr) out.logs.stderr = diagnostics.stderr;
+		if (!out.logs.stdout && !out.logs.stderr) delete out.logs;
+		if (diagnostics.artifacts?.length) {
+			out.artifacts = {
+				count: diagnostics.artifacts.length,
+				truncated: diagnostics.truncated,
+				truncationReason: diagnostics.truncationReason,
+				files: input.includeArtifactContent
+					? diagnostics.artifacts
+					: diagnostics.artifacts.map(({ content, contentType, ...artifact }) => artifact),
+			};
+		}
+		out.note = input.outputSource === "retained-logs"
+			? "Inspection output is selected from retained stdout/stderr under Bobbit state; compact status output remains bounded."
+			: "Status output is compact; use explicit gate_inspect modes to query retained logs when available.";
+	} else {
+		out.note = input.outputSource === "live-logs"
+			? "Inspection output is selected from live command log files."
+			: "Inspection output is selected from compact persisted output; no retained logs were recorded for this step.";
+	}
+	return out;
+}
+
+function readRetainedCommandOutput(diagnostics: GateStepDiagnostics | undefined): { output?: string; truncationReason?: string } {
+	if (!diagnostics) return {};
+	const stdoutRead = safeReadText(diagnostics.stdout?.path, MAX_RETAINED_LOG_BYTES);
+	const stderrRead = safeReadText(diagnostics.stderr?.path, MAX_RETAINED_LOG_BYTES);
+	const stdout = trimTrailingNewlines(stdoutRead.text);
+	const stderr = trimTrailingNewlines(stderrRead.text);
+	if (!stdout && !stderr) return {};
+	return {
+		output: composeLiveLogOutput(stdout, stderr),
+		truncationReason: combineTruncationReasons([
+			stdoutRead.truncationReason,
+			stderrRead.truncationReason,
+			diagnostics.stdout?.truncationReason,
+			diagnostics.stderr?.truncationReason,
+			diagnostics.truncationReason,
+		]),
+	};
+}
+
 function readLiveCommandOutput(
 	activeStep: ActiveVerification["steps"][number],
 	selectionOptions: TextSelectionOptions,
@@ -257,6 +366,8 @@ export function buildGateVerificationSnapshot(input: {
 }): GateVerificationSnapshot {
 	const now = input.now ?? Date.now();
 	const selectionOptions = gateVerificationDefaultSelection(input.selectionOptions ?? { implicitDefault: true });
+	const explicitInspectMode = input.selectionOptions?.mode !== undefined;
+	const includeDiagnostics = explicitInspectMode && input.selectionOptions?.includeDiagnostics !== false;
 	const active = input.activeVerification
 		&& input.activeVerification.goalId === input.goalId
 		&& input.activeVerification.gateId === input.gateId
@@ -276,6 +387,7 @@ export function buildGateVerificationSnapshot(input: {
 		let durationMs = persisted.duration_ms;
 		let liveLogs: GateVerificationSnapshotStep["liveLogs"];
 		let liveLogTruncationReason: string | undefined;
+		let outputSource: GateVerificationOutputSource = "compact-tail";
 		const sessionId = activeStep?.sessionId;
 
 		if (activeStep) {
@@ -289,6 +401,7 @@ export function buildGateVerificationSnapshot(input: {
 				const live = activeStep.type === "command" ? readLiveCommandOutput(activeStep, selectionOptions) : { output: activeStep.output || rawPersistedOutput };
 				rawOutput = live.output;
 				liveLogs = live.liveLogs;
+				if (live.liveLogs) outputSource = "live-logs";
 				liveLogTruncationReason = live.truncationReason;
 			} else {
 				durationMs = activeStep.durationMs ?? persisted.duration_ms;
@@ -299,14 +412,29 @@ export function buildGateVerificationSnapshot(input: {
 			status = finalStatusFromPersisted(persisted, input.verification?.status);
 		}
 
+		const canUseRetainedLogs = persisted.type === "command"
+			&& includeDiagnostics
+			&& status !== "running"
+			&& persisted.diagnostics;
+		let retainedLogTruncationReason: string | undefined;
+		if (canUseRetainedLogs) {
+			const retainedOutput = readRetainedCommandOutput(persisted.diagnostics);
+			if (retainedOutput.output !== undefined) {
+				rawOutput = retainedOutput.output;
+				outputSource = "retained-logs";
+				retainedLogTruncationReason = retainedOutput.truncationReason;
+			}
+		}
+
 		const selected = selectText(rawOutput, selectionOptions);
-		const selection = liveLogTruncationReason
+		const outputTruncationReason = combineTruncationReasons([liveLogTruncationReason, retainedLogTruncationReason]);
+		const selection = outputTruncationReason
 			? {
 				...selected.selection,
 				truncated: true,
 				truncationReason: selected.selection.truncationReason
-					? `${liveLogTruncationReason}; ${selected.selection.truncationReason}`
-					: liveLogTruncationReason,
+					? `${outputTruncationReason}; ${selected.selection.truncationReason}`
+					: outputTruncationReason,
 			}
 			: selected.selection;
 		aggregateTotalLines += selection.totalLines;
@@ -329,6 +457,15 @@ export function buildGateVerificationSnapshot(input: {
 			out.session = { id: sessionId, href: `/sessions/${encodeURIComponent(sessionId)}` };
 		}
 		if (liveLogs) out.liveLogs = liveLogs;
+		if (persisted.type === "command" && includeDiagnostics) {
+			out.diagnostics = diagnosticsMetadata({
+				diagnostics: persisted.diagnostics,
+				outputSource,
+				gateId: input.gateId,
+				stepName: persisted.name,
+				includeArtifactContent: true,
+			});
+		}
 		return out;
 	});
 

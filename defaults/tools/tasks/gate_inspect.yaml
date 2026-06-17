@@ -7,13 +7,13 @@ provider:
   extension: extension.ts
 group: Gates
 docs: >-
-  Scoped read tool for gate data. Fetches exactly one section per call:
-  content, verification, or signals. Output is bounded by default; use grep,
-  tail, head, slice, or full mode to inspect only the detail you need.
+  Scoped read tool for gate data. Fetches one section per call: content,
+  verification, or signals. Output is bounded by default; use step-scoped grep,
+  slice, or tail before rare full output.
 detail_docs: |-
   ## Purpose
 
-  Read detailed gate data by section. This is the Layer 3 content retrieval tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't have enough detail. Each call fetches exactly one piece of data and applies bounded text selection so large verification logs do not flood context.
+  Read detailed gate data by section. This is the Layer 3 content retrieval tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't have enough detail. Each call fetches exactly one piece of data and applies bounded text selection so large verification logs do not flood context. After verification has run, inspect this persisted gate data before re-running tests just to reproduce logs.
 
   ## Parameters
 
@@ -69,7 +69,7 @@ detail_docs: |-
 
   ### section="verification" — Read verification output
 
-  Returns verification steps with each step's `output` independently selected. When `step="<name>"` is given, only that one step is returned (single-element `steps[]`) and the selection mode applies to that step's output; an unknown name returns a 400 listing the available step names.
+  Returns verification steps with each step's `output` independently selected. When `step="<name>"` is given, only that one step is returned (single-element `steps[]`) and the selection mode applies to that step's output; an unknown name returns a 400 listing the available step names. For failed command steps, explicit inspection may be backed by retained stdout/stderr logs and artifact metadata (for example Playwright `test-results` or reports) that can survive restart and worktree cleanup; default/status views remain compact.
 
   - `gateId` — gate identifier
   - `section` — `"verification"`
@@ -108,10 +108,11 @@ detail_docs: |-
 
   ## When to Use
 
-  - **Start with status** — call `gate_status(gate_id="...")` first; its verdict and output tail are usually enough.
+  - **Start with status** — call `gate_status(gate_id="...")` first; its verdict, `failedSteps`, and output tail are usually enough.
   - **Target failure lines** — use `mode="grep"` with `pattern="error|failed"` and `context=2` for large verification logs.
-  - **Focus one step** — pass `step="<name>"` to scope `section="verification"` to a single step (names come from `gate_status.failedSteps`).
+  - **Focus one step** — pass `step="<name>"` to scope `section="verification"` to a single step (names come from `gate_list.failedSteps` or `gate_status.failedSteps`).
   - **Inspect nearby output** — use `mode="tail"` or `mode="slice"` when grep shows where to look.
+  - **Use retained diagnostics first** — do not re-run tests or spawn agents just to gather logs already available here; re-run only to validate new changes or when diagnostics are insufficient/stale.
   - **Read upstream content** — use `section="content"` when you need the gate's actual content.
   - **Browse attempts** — use `section="signals"` to compare signal history.
 
@@ -119,8 +120,9 @@ detail_docs: |-
 
   - **Quick status check** — use `gate_list` (Layer 1) instead.
   - **Latest verdict and failed-step tail** — use `gate_status` (Layer 2) instead.
-  - **Full output by default** — default `gate_inspect` is a bounded tail. Use `mode="full"` only as a rare escape hatch.
+  - **Full output by default** — default `gate_inspect` is a bounded tail. Use `mode="full"` only as a rare escape hatch; tool-result budgets can still truncate it.
   - **Just in case** — only call when the decision requires reading the actual content or detailed output.
+  - **Duplicating validation** — do not repeat successful agent or gate validation just to collect context.
 
   ## Examples
 
@@ -158,6 +160,8 @@ detail_docs: |-
   - `signal_index` defaults to `-1` (latest). Use `0` for the first signal, `-2` for second-to-last, etc.
   - `section="signals"` ignores `signal_index`; it reads history rather than one signal.
   - Default output is a bounded tail, not the full rendered payload.
+  - Verification inspection may read retained logs/artifacts for failed command steps; status/default responses stay compact.
+  - Retained diagnostics can survive restart and worktree cleanup, but selected output is still bounded and may be capped.
   - `mode="full"` can still be truncated by normal tool-result budgets; check `selection.truncated` and `selection.truncationReason`.
   - Invalid regexes, missing slice bounds, non-integer ranges, ranges below 1, or `from > to` return clear validation errors.
-  - For triage, prefer `gate_status`, then `gate_inspect(..., mode="grep", pattern="error|failed", context=2)`, then `tail` or `slice`.
+  - For triage, prefer `gate_status`, then step-scoped `gate_inspect(..., mode="grep", pattern="error|failed", context=2)`, then `tail` or `slice`.
