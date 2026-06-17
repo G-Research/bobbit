@@ -36,10 +36,13 @@ class TestIO {
 
 (window as any).__mountDeferredBlock = (
 	slotId: string,
-	opts: { eager?: boolean; estHeight?: number; text?: string },
+	opts: { eager?: boolean; estHeight?: number; realHeight?: number; text?: string },
 ): void => {
 	const slot = document.getElementById(slotId)!;
-	const tpl = html`<span data-real-content>${opts.text ?? "REAL"}</span>`;
+	const tpl = html`<span
+		data-real-content
+		style=${opts.realHeight ? `display:block;height:${opts.realHeight}px` : ""}
+	>${opts.text ?? "REAL"}</span>`;
 	render(
 		html`<deferred-block
 			.template=${tpl}

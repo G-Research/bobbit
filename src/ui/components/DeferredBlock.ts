@@ -4,7 +4,7 @@
  * Phase 2 Opt-A — when the `deferOffscreenRender` perf flag is on, the
  * `<message-list>` renderer wraps each off-screen item in this element.
  * The first paint costs only a single empty placeholder div per deferred
- * block. An `IntersectionObserver` (rootMargin: 500px) detects when the
+ * block. An `IntersectionObserver` (rootMargin: 2000px) detects when the
  * placeholder approaches the viewport, then schedules the real template
  * to render on the next `requestIdleCallback` tick (50ms timeout fallback
  * to `setTimeout(0)`).
@@ -24,10 +24,9 @@
  *    keep state alive.
  *
  * The placeholder uses `min-height` so the transcript total height stays
- * roughly stable across the resolve transition. Heights are estimates —
- * a 10–20px mismatch causes a tiny layout shift when the block resolves
- * but no visible flicker because resolution happens 500px outside the
- * viewport.
+ * roughly stable across the resolve transition. Heights are estimates, so
+ * resolve preserves the scroll anchor when an above-viewport placeholder
+ * grows or shrinks after real content mounts.
  */
 import { html, LitElement, type TemplateResult } from "lit";
 import { property, state } from "lit/decorators.js";
@@ -35,11 +34,19 @@ import { property, state } from "lit/decorators.js";
 type IdleHandle = number;
 type IdleDeadline = { didTimeout: boolean; timeRemaining: () => number };
 type IdleRequestCallback = (deadline: IdleDeadline) => void;
+type ScrollAnchor = {
+	scroller: HTMLElement;
+	oldScrollTop: number;
+	oldHeight: number;
+};
 
 interface IdleAPI {
 	requestIdleCallback?: (cb: IdleRequestCallback, opts?: { timeout: number }) => IdleHandle;
 	cancelIdleCallback?: (id: IdleHandle) => void;
 }
+
+const PRELOAD_MARGIN_PX = 2000;
+const SCROLLABLE_OVERFLOW_RE = /(auto|scroll|overlay)/;
 
 export class DeferredBlock extends LitElement {
 	/** Real template to render once resolved. Passed via Lit property; the
@@ -101,6 +108,8 @@ export class DeferredBlock extends LitElement {
 				this.resolved = true;
 				return;
 			}
+			const root = this.findScrollContainer();
+			const rootForObserver = root === document.scrollingElement ? null : root;
 			this.io = new IntersectionObserver(
 				(entries) => {
 					for (const entry of entries) {
@@ -112,7 +121,7 @@ export class DeferredBlock extends LitElement {
 						}
 					}
 				},
-				{ rootMargin: "500px 0px", threshold: 0 },
+				{ root: rootForObserver, rootMargin: `${PRELOAD_MARGIN_PX}px 0px`, threshold: 0 },
 			);
 			this.io.observe(this);
 		});
@@ -140,13 +149,65 @@ export class DeferredBlock extends LitElement {
 		if (changed.has("eager") && this.eager) this.resolved = true;
 	}
 
+	private findScrollContainer(): HTMLElement | null {
+		if (typeof window === "undefined") return null;
+		let el = this.parentElement;
+		while (el) {
+			const style = window.getComputedStyle(el);
+			if (
+				SCROLLABLE_OVERFLOW_RE.test(style.overflowY)
+				&& el.scrollHeight > el.clientHeight
+			) {
+				return el;
+			}
+			el = el.parentElement;
+		}
+		return (document.scrollingElement as HTMLElement | null) ?? document.documentElement;
+	}
+
+	private captureScrollAnchor(): ScrollAnchor | null {
+		const scroller = this.findScrollContainer();
+		if (!scroller) return null;
+		const rect = this.getBoundingClientRect();
+		const scrollerRect = scroller === document.scrollingElement
+			? { top: 0 }
+			: scroller.getBoundingClientRect();
+		// Only compensate blocks fully above the visible viewport. If the block
+		// is visible or below the viewport, changing its own size should not move
+		// the user's current anchor.
+		if (rect.bottom > scrollerRect.top) return null;
+		return {
+			scroller,
+			oldScrollTop: scroller.scrollTop,
+			oldHeight: rect.height,
+		};
+	}
+
+	private restoreScrollAnchor(anchor: ScrollAnchor | null): void {
+		if (!anchor || !anchor.scroller.isConnected) return;
+		const newHeight = this.getBoundingClientRect().height;
+		const delta = newHeight - anchor.oldHeight;
+		if (Math.abs(delta) < 0.5) return;
+		// If the browser's native scroll anchoring (or a real user scroll) already
+		// moved the container, do not double-apply the correction.
+		if (Math.abs(anchor.scroller.scrollTop - anchor.oldScrollTop) > 2) return;
+		anchor.scroller.scrollTop = anchor.oldScrollTop + delta;
+	}
+
+	private resolvePreservingScroll(): void {
+		if (this.resolved) return;
+		const anchor = this.captureScrollAnchor();
+		this.resolved = true;
+		void this.updateComplete.then(() => this.restoreScrollAnchor(anchor));
+	}
+
 	private scheduleResolve(): void {
 		if (this.resolved) return;
 		if (this.idleHandle !== null || this.idleTimeout !== null) return;
 		const cb = (): void => {
 			this.idleHandle = null;
 			this.idleTimeout = null;
-			this.resolved = true;
+			this.resolvePreservingScroll();
 		};
 		const w = window as unknown as IdleAPI;
 		if (typeof w.requestIdleCallback === "function") {
@@ -169,7 +230,7 @@ export class DeferredBlock extends LitElement {
 			clearTimeout(this.idleTimeout);
 			this.idleTimeout = null;
 		}
-		this.resolved = true;
+		this.resolvePreservingScroll();
 	}
 
 	override render(): unknown {
