@@ -9,7 +9,8 @@ describe("buildVerificationFailureMessage", () => {
 			{ name: "Unit tests", type: "command", passed: false, output: "AssertionError: expected 1 to equal 2" },
 		]);
 
-		assert.match(message, /### Gate verification FAILED/);
+		assert.match(message, /^\*\*Gate verification FAILED\*\*/);
+		assert.doesNotMatch(message, /^#{1,6}\s+Gate verification FAILED/m);
 		assert.match(message, /\*\*Gate:\*\* `execution`/);
 		assert.match(message, /\*\*Failed:\*\* `Unit tests`/);
 		assert.match(message, /\*\*First output:\*\* `Unit tests` \(`command`\)\n```text\nAssertionError: expected 1 to equal 2\n```/);
