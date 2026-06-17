@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
-import { baselineMetricsDir, currentMetricsDir, listJsonFiles, projectRoot, readJson, requiredMetricNames } from "./lib.mjs";
+import { baselineMetricFile, baselineMetricsDir, currentMetricsDir, listJsonFiles, metricFile, normalizeMetricName, projectRoot, readJson, requiredMetricNames } from "./lib.mjs";
 
 const baselineDir = resolve(process.env.BOBBIT_METRICS_BASELINE_DIR || baselineMetricsDir);
 const currentDir = resolve(process.env.BOBBIT_METRICS_CURRENT_DIR || currentMetricsDir);
@@ -29,12 +29,12 @@ const thresholds = existsSync(thresholdFile)
 	? { ...defaultThresholds, ...readJson(thresholdFile) }
 	: defaultThresholds;
 
-function requiredFiles() {
+function requiredMetrics() {
 	const raw = process.env.BOBBIT_METRICS_REQUIRED;
 	const names = raw == null
 		? requiredMetricNames
 		: raw.split(",").map((name) => name.trim()).filter(Boolean);
-	return names.map((name) => name.endsWith(".json") ? name : `${name}.json`);
+	return names.map((name) => normalizeMetricName(name));
 }
 
 function fmtMs(ms) {
@@ -71,16 +71,18 @@ function compareCoverage(file, baseline, current) {
 	return failures;
 }
 
-function compareMetric(file) {
-	const baseline = readJson(join(baselineDir, file));
-	const currentPath = join(currentDir, file);
-	if (!existsSync(currentPath)) return [`${file}: missing current metric in ${relative(projectRoot, currentDir)}`];
+function compareMetric(baselineFile) {
+	const metricName = normalizeMetricName(baselineFile);
+	const currentFile = `${metricName}.json`;
+	const baseline = readJson(join(baselineDir, baselineFile));
+	const currentPath = metricFile(metricName, currentDir);
+	if (!existsSync(currentPath)) return [`${baselineFile}: missing current metric ${currentFile} in ${relative(projectRoot, currentDir)}`];
 	const current = readJson(currentPath);
 	const failures = [];
-	if (current.status && current.status !== "passed") failures.push(`${file}: current status is ${current.status}`);
-	failures.push(...compareCoverage(file, baseline, current));
+	if (current.status && current.status !== "passed") failures.push(`${baselineFile}: current status is ${current.status}`);
+	failures.push(...compareCoverage(baselineFile, baseline, current));
 	failures.push(...compareNumeric({
-		label: `${file}: runtime`,
+		label: `${baselineFile}: runtime`,
 		baseline: baseline.durationMs,
 		current: current.durationMs,
 		ratio: thresholds.runtimeMaxIncreaseRatio,
@@ -88,7 +90,7 @@ function compareMetric(file) {
 		format: fmtMs,
 	}));
 	failures.push(...compareNumeric({
-		label: `${file}: estimated CPU`,
+		label: `${baselineFile}: estimated CPU`,
 		baseline: baseline.cpu?.estimatedCpuMs,
 		current: current.cpu?.estimatedCpuMs,
 		ratio: thresholds.cpuMaxIncreaseRatio,
@@ -96,7 +98,7 @@ function compareMetric(file) {
 		format: fmtMs,
 	}));
 	failures.push(...compareNumeric({
-		label: `${file}: peak RSS`,
+		label: `${baselineFile}: peak RSS`,
 		baseline: baseline.memory?.peakRssBytes,
 		current: current.memory?.peakRssBytes,
 		ratio: thresholds.memoryMaxIncreaseRatio,
@@ -106,12 +108,14 @@ function compareMetric(file) {
 	return failures;
 }
 
-const baselineFiles = listJsonFiles(baselineDir).filter((file) => basename(file) !== "thresholds.json");
-const requiredMetricFiles = requiredFiles();
+const baselineFiles = listJsonFiles(baselineDir).filter((file) => basename(file) !== "thresholds.json" && basename(file).startsWith("baseline-"));
+const requiredMetricNamesForCheck = requiredMetrics();
 const failures = [];
-for (const file of requiredMetricFiles) {
-	if (!existsSync(join(baselineDir, file))) failures.push(`${file}: missing required baseline metric in ${relative(projectRoot, baselineDir)}`);
-	if (!existsSync(join(currentDir, file))) failures.push(`${file}: missing required current metric in ${relative(projectRoot, currentDir)}`);
+for (const name of requiredMetricNamesForCheck) {
+	const baselinePath = baselineMetricFile(name, baselineDir);
+	const currentPath = metricFile(name, currentDir);
+	if (!existsSync(baselinePath)) failures.push(`baseline-${name}.json: missing required baseline metric in ${relative(projectRoot, baselineDir)}`);
+	if (!existsSync(currentPath)) failures.push(`${name}.json: missing required current metric in ${relative(projectRoot, currentDir)}`);
 }
 if (baselineFiles.length === 0) {
 	failures.push(`no baseline JSON files found in ${baselineDir}`);
@@ -120,16 +124,17 @@ if (baselineFiles.length === 0) {
 for (const file of baselineFiles) failures.push(...compareMetric(file));
 
 if (thresholds.browserImprovement?.enabled) {
-	for (const file of ["e2e-browser.json", "slice-renderer.json", "slice-scroll.json", "slice-sidebar.json"]) {
-		const b = join(baselineDir, file);
-		const c = join(currentDir, file);
+	for (const name of ["e2e-browser", "slice-renderer", "slice-scroll", "slice-sidebar"]) {
+		const b = baselineMetricFile(name, baselineDir);
+		const c = metricFile(name, currentDir);
 		if (!existsSync(b) || !existsSync(c)) continue;
 		const baseline = readJson(b);
 		const current = readJson(c);
 		const runtimeDrop = -pctChange(baseline.durationMs, current.durationMs);
 		const cpuDrop = -pctChange(baseline.cpu?.estimatedCpuMs, current.cpu?.estimatedCpuMs);
-		if (runtimeDrop < thresholds.browserImprovement.targetRuntimeDropPct) failures.push(`${file}: runtime drop ${runtimeDrop.toFixed(1)}% is below target ${thresholds.browserImprovement.targetRuntimeDropPct}%`);
-		if (cpuDrop < thresholds.browserImprovement.targetCpuDropPct) failures.push(`${file}: CPU drop ${cpuDrop.toFixed(1)}% is below target ${thresholds.browserImprovement.targetCpuDropPct}%`);
+		const baselineFile = `baseline-${name}.json`;
+		if (runtimeDrop < thresholds.browserImprovement.targetRuntimeDropPct) failures.push(`${baselineFile}: runtime drop ${runtimeDrop.toFixed(1)}% is below target ${thresholds.browserImprovement.targetRuntimeDropPct}%`);
+		if (cpuDrop < thresholds.browserImprovement.targetCpuDropPct) failures.push(`${baselineFile}: CPU drop ${cpuDrop.toFixed(1)}% is below target ${thresholds.browserImprovement.targetCpuDropPct}%`);
 	}
 }
 

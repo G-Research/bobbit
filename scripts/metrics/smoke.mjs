@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { metricFile, writeJson } from "./lib.mjs";
+import { baselineMetricFile, metricFile, writeJson } from "./lib.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "bobbit-metrics-smoke-"));
 const baselineDir = join(root, "baseline");
@@ -43,7 +43,7 @@ function runCheck(dir) {
 }
 
 try {
-	writeJson(metricFile("coverage", baselineDir), sampleMetric());
+	writeJson(baselineMetricFile("coverage", baselineDir), sampleMetric());
 	writeJson(metricFile("coverage", currentDir), sampleMetric({ durationMs: 10_500, cpu: { estimatedCpuMs: 8_200, averageCpuPercent: 78, peakCpuPercent: 140 } }));
 	writeJson(metricFile("coverage", badCurrentDir), sampleMetric({
 		coverage: {

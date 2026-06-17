@@ -42,8 +42,16 @@ export function pathFromRoot(...parts) {
 	return resolve(projectRoot, ...parts);
 }
 
+export function normalizeMetricName(name) {
+	return String(name).replace(/\\/g, "/").split("/").pop().replace(/\.json$/u, "").replace(/^baseline-/u, "");
+}
+
 export function metricFile(name, dir = currentMetricsDir) {
-	return join(dir, `${name}.json`);
+	return join(dir, `${normalizeMetricName(name)}.json`);
+}
+
+export function baselineMetricFile(name, dir = baselineMetricsDir) {
+	return join(dir, `baseline-${normalizeMetricName(name)}.json`);
 }
 
 export function npmCommand() {
@@ -346,7 +354,7 @@ export function listJsonFiles(dir) {
 
 export function copyMetricToBaseline(name) {
 	const source = metricFile(name, currentMetricsDir);
-	const target = metricFile(name, baselineMetricsDir);
+	const target = baselineMetricFile(name, baselineMetricsDir);
 	if (!existsSync(source)) throw new Error(`Missing current metric ${source}`);
 	writeJson(target, readJson(source));
 }
