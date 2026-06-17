@@ -85,6 +85,52 @@ function makeMultiStepSnapshot(stepName?: string, selectionOptions?: Parameters<
 	});
 }
 
+function makeDiagnosticsSnapshot(selectionOptions?: Parameters<typeof buildGateVerificationSnapshot>[0]["selectionOptions"]) {
+	const dir = makeTempDir();
+	const stdoutPath = path.join(dir, "stdout.log");
+	const stderrPath = path.join(dir, "stderr.log");
+	const artifactPath = path.join(dir, "artifacts", "test-results", "case", "error-context.md");
+	fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+	fs.writeFileSync(stdoutPath, "retained stdout marker\n", "utf8");
+	fs.writeFileSync(stderrPath, "retained stderr marker\n", "utf8");
+	fs.writeFileSync(artifactPath, "# Error Context\nretained artifact marker\n", "utf8");
+
+	return buildGateVerificationSnapshot({
+		goalId: "goal-1",
+		gateId: "gate-1",
+		signalId: "signal-1",
+		verification: {
+			status: "failed",
+			steps: [{
+				name: "playwright command",
+				type: "command",
+				status: "failed",
+				passed: false,
+				output: "compact failure tail only",
+				duration_ms: 7,
+				diagnostics: {
+					type: "retained-command-diagnostics",
+					baseDir: dir,
+					stdout: { path: stdoutPath, bytes: fs.statSync(stdoutPath).size, lines: 1 },
+					stderr: { path: stderrPath, bytes: fs.statSync(stderrPath).size, lines: 1 },
+					artifacts: [{
+						path: artifactPath,
+						relativePath: "test-results/case/error-context.md",
+						sourcePath: path.join(dir, "source", "test-results", "case", "error-context.md"),
+						bytes: fs.statSync(artifactPath).size,
+						kind: "test-results",
+						content: "# Error Context\nretained artifact marker\n",
+						contentType: "text/markdown",
+					}],
+					createdAt: 1,
+				},
+			}],
+		},
+		selectionOptions,
+		now: 100,
+	});
+}
+
 describe("gate verification per-step (stepName) filter", () => {
 	it("returns the full step array when stepName is omitted", () => {
 		const snapshot = makeMultiStepSnapshot();
@@ -136,6 +182,29 @@ describe("gate verification per-step (stepName) filter", () => {
 		assert.doesNotMatch(step.output ?? "", /build-out-5\b/);
 		assert.equal(step.selection?.mode, "slice");
 		assert.deepEqual(step.selection?.range, { from: 2, to: 4 });
+	});
+});
+
+describe("gate verification retained diagnostics compactness", () => {
+	it("keeps implicit/default snapshots compact while preserving explicit diagnostics access", () => {
+		const compact = makeDiagnosticsSnapshot({ implicitDefault: true });
+		const compactStep = compact.steps[0];
+		const compactJson = JSON.stringify(compactStep);
+
+		assert.equal(compactStep.output, "compact failure tail only");
+		assert.doesNotMatch(compactJson, /stdout\.log|stderr\.log|error-context\.md|retained artifact marker/);
+		assert.equal(compactStep.diagnostics?.logs, undefined, "default status snapshots must not expose retained log paths");
+		assert.equal(compactStep.diagnostics?.artifacts?.files, undefined, "default status snapshots must not expose retained artifact file lists");
+
+		const explicit = makeDiagnosticsSnapshot({ mode: "full" });
+		const explicitStep = explicit.steps[0];
+		const explicitJson = JSON.stringify(explicitStep);
+
+		assert.match(explicitStep.output ?? "", /retained stdout marker/);
+		assert.match(explicitStep.output ?? "", /retained stderr marker/);
+		assert.match(explicitJson, /stdout\.log/);
+		assert.match(explicitJson, /error-context\.md/);
+		assert.match(explicitJson, /retained artifact marker/);
 	});
 });
 
