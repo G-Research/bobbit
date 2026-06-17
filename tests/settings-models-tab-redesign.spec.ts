@@ -3,6 +3,11 @@ import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
 
+const FIXTURE_TIMEOUT_MS = 60_000;
+const READY_TIMEOUT_MS = 30_000;
+
+test.setTimeout(FIXTURE_TIMEOUT_MS);
+
 async function renameWithRetry(src: string, dest: string): Promise<void> {
 	const deadline = Date.now() + 5_000;
 	let lastErr: unknown;
@@ -27,6 +32,10 @@ const SETTINGS_SRC = path.resolve("src/app/settings-page.ts");
 const DIALOG_SRC = path.resolve("src/ui/dialogs/AigwModelsDialog.ts");
 
 test.beforeAll(async () => {
+	// Full-suite browser fixture runs can be CPU/IO constrained while multiple
+	// esbuild-backed fixtures initialize concurrently. Keep the fixture-level
+	// budget above the global 15s default so a valid cold build is not flaky.
+	test.setTimeout(FIXTURE_TIMEOUT_MS);
 	const entryMtime = Math.max(
 		fs.statSync(ENTRY).mtimeMs,
 		fs.statSync(SETTINGS_SRC).mtimeMs,
@@ -76,8 +85,34 @@ test.beforeAll(async () => {
 const PAGE = `file://${FIXTURE}`;
 
 async function gotoAndWait(page: any) {
-	await page.goto(PAGE);
-	await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 15_000 });
+	const pageErrors: string[] = [];
+	page.on("pageerror", (err: Error) => pageErrors.push(err.stack || err.message));
+	const startedAt = Date.now();
+	try {
+		await page.goto(PAGE, { timeout: READY_TIMEOUT_MS });
+		await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: READY_TIMEOUT_MS });
+	} catch (err) {
+		const diagnostics = await page.evaluate(() => ({
+			ready: (window as any).__ready,
+			bodyText: document.body?.innerText ?? "",
+			scripts: Array.from(document.scripts).map((script) => script.src),
+		})).catch((evalErr: Error) => ({ evalError: evalErr.message }));
+		const bundleStat = (() => {
+			try {
+				const stat = fs.statSync(BUNDLE);
+				return { exists: true, size: stat.size, mtimeMs: stat.mtimeMs };
+			} catch (statErr) {
+				return { exists: false, error: (statErr as Error).message };
+			}
+		})();
+		throw new Error([
+			`Settings models fixture did not become ready after ${Date.now() - startedAt}ms: ${(err as Error).message}`,
+			`page=${PAGE}`,
+			`bundle=${JSON.stringify(bundleStat)}`,
+			`pageErrors=${JSON.stringify(pageErrors)}`,
+			`diagnostics=${JSON.stringify(diagnostics)}`,
+		].join("\n"));
+	}
 }
 
 const AIGW_MODELS = [
