@@ -11,6 +11,15 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Confirm a kill**: poll `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`, so ~5s on timeout, ~1s on cancel). `ps -o pid= -g <pgid>` (POSIX) or `tasklist /FI "PID eq <pid>"` (Windows) should return empty in the same window. The failed step's `output` ends with `— killed subprocess tree`.
 - **Pinning tests**: `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E).
 
+## Failed gate has missing or compact logs
+
+- **Symptom**: a failed command verification shows only a short tail in `gate_status`, a notification, or default `gate_inspect`, and the original `test-results` / `playwright-report` directory is gone.
+- **Expected behavior**: compact surfaces intentionally stay small. Before rerunning the suite, call `gate_inspect(section="verification", step="<failed step>", mode="grep"|"slice"|"tail"|"full")` so the snapshot can read retained stdout/stderr and Playwright-style artifacts from Bobbit state.
+- **Where to look**: `steps[].diagnostics.outputSource`, `diagnostics.logs.*.{bytes,truncated,truncationReason}`, and `diagnostics.artifacts.files` in an explicit verification inspect response. Retained files live under the state `gate-diagnostics` tree and are removed when the owning goal is archived or deleted.
+- **Limits/security**: stdout and stderr are capped independently at 20 MiB; `mode="full"` still has response/tool-result caps. Artifact copying rejects symlinked roots and descendants, so missing artifacts may mean Playwright did not write them or the path was unsafe to copy.
+- **Reference**: [Retained gate diagnostics](gate-diagnostics.md).
+- **Pinning tests**: `tests/e2e/gate-inspect-slicing.spec.ts`, `tests/gate-verification-snapshot.test.ts`, `tests/gate-diagnostics.test.ts`, `tests/gate-diagnostics-cleanup.test.ts`, `tests/e2e/gate-diagnostics-cleanup.spec.ts`.
+
 ## Gate verification stuck on a `human-signoff` step
 
 - **Symptom**: a gate's verification stays in `running` indefinitely; one of its steps is `type: human-signoff`. The chat-header `<goal-status-widget>` should be pulsing its primary-colour exclamation icon between the goal icon and gate counter, and its **View content** action should open a sign-off review document with Approve / Reject controls. Or: the review pane submits but never resolves the step.

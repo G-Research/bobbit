@@ -7,8 +7,7 @@
  *   Bug 1 — TeamManager.resubscribeTeamEvents() must NOT attach the
  *           agent_end → notifyTeamLead listener to reviewer sessions.
  *           After restart, firing agent_end on a reviewer must NOT
- *           steer/enqueue a "Agent ... has finished" message to the
- *           team lead.
+ *           steer/enqueue a worker-completion nudge to the team lead.
  *
  *   Bug 2 — VerificationHarness._tryResumeFromSession must give a resumed
  *           reviewer the full reminder window before declaring failure
