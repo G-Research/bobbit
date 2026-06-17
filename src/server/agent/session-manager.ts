@@ -46,6 +46,7 @@ import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
+import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { getProjectRoot } from "../bobbit-dir.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
@@ -1738,6 +1739,7 @@ export class SessionManager {
 		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
+		projectId?: string,
 	): { args: string[]; env: Record<string, string> } {
 		const flatNames = allowedTools?.map(e => e.name);
 
@@ -1764,6 +1766,20 @@ export class SessionManager {
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
+		}
+
+		// Provider-bridge extension (per-turn beforePrompt / beforeCompact hooks).
+		// Mirrors session-setup.ts::resolveToolActivation so respawn/restore paths
+		// (restore, role reassignment, force-abort respawn) keep the bridge that
+		// initial setup added. Without this, provider-enabled sessions lose the
+		// bridge after a gateway restart/respawn and per-turn hooks stop firing.
+		// Zero overhead when no enabled provider declares those hooks — the bridge
+		// is neither written nor pushed onto the spawn args.
+		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId)) {
+			const bridgePath = writeProviderBridgeExtension(sessionId);
+			if (bridgePath) {
+				args.push("--extension", bridgePath);
+			}
 		}
 
 		return { args, env: activation.env };
@@ -3872,7 +3888,7 @@ export class SessionManager {
 				: this.resolveEffectiveAllowedTools(restoredRole);
 		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
@@ -5560,7 +5576,7 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
+		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd, session.projectId);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
@@ -6848,7 +6864,7 @@ export class SessionManager {
 			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
 			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
 			const effective = this.resolveEffectiveAllowedTools(role);
-			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
+			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd, session.projectId);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 
