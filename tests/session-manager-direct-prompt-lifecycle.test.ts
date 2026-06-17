@@ -183,6 +183,38 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 0);
 	});
 
+	it("recovers a queued prompt when local abort status changes before prompt rejection", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const prompt = mock.fn(() => pending.promise);
+		const abort = mock.fn(async () => ({ success: true }));
+		const { session, client } = putSession(manager, { rpcClient: { prompt, abort } });
+
+		session.promptQueue.enqueue("recover after abort-before-acceptance");
+		manager.drainQueue(session);
+
+		assert.equal(prompt.mock.callCount(), 1);
+		assert.equal(session.status, "streaming");
+		assert.equal(session.promptQueue.length, 0);
+
+		await manager.abortSessionTurn(session.id);
+		assert.equal(abort.mock.callCount(), 1);
+		assert.equal(session.status, "aborting");
+
+		pending.resolve({ success: false, error: "preflight failed after abort" });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.text, "recover after abort-before-acceptance");
+		assert.deepEqual(
+			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			["streaming", "aborting", "idle"],
+		);
+	});
+
 	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const manager = makeManager();

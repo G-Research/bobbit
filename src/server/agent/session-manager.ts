@@ -295,6 +295,10 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
+	/** Monotonic counter bumped only by inbound agent events that prove the
+	 * agent observed/advanced a turn. Local status changes such as aborting do
+	 * not affect it, so prompt-dispatch recovery can distinguish those cases. */
+	agentObservedTurnVersion?: number;
 	/** Last user prompt text, for retry on fresh-response errors */
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
@@ -2480,7 +2484,7 @@ export class SessionManager {
 
 		// Optimistic status update to prevent double-dispatch race
 		this.markPromptDispatchStreaming(session);
-		const dispatchStatusVersion = session.statusVersion;
+		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -2490,13 +2494,13 @@ export class SessionManager {
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
 
 		const recoverDispatchedRows = (reason: string) => {
-			// If any lifecycle/status transition happened after this prompt dispatch
-			// started, the agent has observed the turn (or the session moved on). A
-			// late prompt() failure then refers to bridge bookkeeping, not an
-			// undelivered row. Re-enqueueing here duplicates steered prompts such as
-			// task-completion notifications on the next agent_end drain.
-			if (session.statusVersion !== dispatchStatusVersion) {
-				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${reason} after session advanced (statusVersion ${dispatchStatusVersion} → ${session.statusVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+			// Suppress recovery only after an inbound agent event proves the dequeued
+			// turn was accepted/observed. Local status changes such as Stop →
+			// "aborting" can happen before prompt() is accepted; those rows must be
+			// recovered or the queued prompt is lost.
+			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
+			if (observedTurnVersion !== dispatchObservedTurnVersion) {
+				console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${reason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
 				return;
 			}
 			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
@@ -2561,6 +2565,22 @@ export class SessionManager {
 					);
 				}
 			}
+		}
+
+		// Inbound agent events that carry turn progress prove a just-dispatched
+		// prompt was accepted. Keep this separate from statusVersion: local Stop /
+		// abort status broadcasts must not suppress recovery for a prompt that was
+		// dequeued but rejected before acceptance.
+		if (
+			event.type === "agent_start" ||
+			event.type === "tool_execution_start" ||
+			(event.type === "message_end" && (
+				event.message?.role === "user" ||
+				event.message?.role === "user-with-attachments" ||
+				event.message?.role === "assistant"
+			))
+		) {
+			session.agentObservedTurnVersion = (session.agentObservedTurnVersion ?? 0) + 1;
 		}
 
 		// Splice this echoed user message off the shadow ledger if it was a
