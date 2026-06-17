@@ -1,0 +1,83 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { finalizeGateStepDiagnostics, prepareGateStepDiagnosticsPaths } from "../src/server/gate-diagnostics.ts";
+
+function makeTempDir(prefix: string): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function tryCreateDirectorySymlink(target: string, linkPath: string): boolean {
+	try {
+		fs.symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function makeDiagnosticsPaths(stateDir: string) {
+	return prepareGateStepDiagnosticsPaths({
+		stateDir,
+		goalId: "goal-symlink-test",
+		gateId: "gate-a",
+		signalId: `signal-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+		stepIndex: 0,
+		stepName: "playwright artifacts",
+	});
+}
+
+test("retained artifact copy rejects a symlinked artifact root", (t) => {
+	const tmp = makeTempDir("bobbit-gate-diagnostics-symlink-root-");
+	try {
+		const cwd = path.join(tmp, "cwd");
+		const outsideResults = path.join(tmp, "outside", "test-results", "case");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(outsideResults, { recursive: true });
+		fs.writeFileSync(path.join(outsideResults, "error-context.md"), "LEAKED_SYMLINK_ROOT_MARKER", "utf8");
+		if (!tryCreateDirectorySymlink(path.join(tmp, "outside", "test-results"), path.join(cwd, "test-results"))) {
+			t.skip("directory symlinks are unavailable on this platform");
+			return;
+		}
+
+		const paths = makeDiagnosticsPaths(path.join(tmp, "state"));
+		const diagnostics = finalizeGateStepDiagnostics({ paths, commandCwd: cwd });
+
+		assert.equal(diagnostics.artifacts, undefined, "symlinked artifact roots must not be retained");
+		assert.equal(fs.existsSync(path.join(paths.artifactsDir, "test-results", "case", "error-context.md")), false);
+	} finally {
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("retained artifact copy skips symlinked descendants without losing normal Playwright artifacts", (t) => {
+	const tmp = makeTempDir("bobbit-gate-diagnostics-symlink-descendant-");
+	try {
+		const cwd = path.join(tmp, "cwd");
+		const legitCase = path.join(cwd, "test-results", "legit-case");
+		const outsideCase = path.join(tmp, "outside-case");
+		fs.mkdirSync(legitCase, { recursive: true });
+		fs.mkdirSync(outsideCase, { recursive: true });
+		fs.writeFileSync(path.join(legitCase, "error-context.md"), "LEGIT_ERROR_CONTEXT_MARKER", "utf8");
+		fs.writeFileSync(path.join(outsideCase, "error-context.md"), "LEAKED_SYMLINK_DESCENDANT_MARKER", "utf8");
+		if (!tryCreateDirectorySymlink(outsideCase, path.join(cwd, "test-results", "linked-case"))) {
+			t.skip("directory symlinks are unavailable on this platform");
+			return;
+		}
+
+		const paths = makeDiagnosticsPaths(path.join(tmp, "state"));
+		const diagnostics = finalizeGateStepDiagnostics({ paths, commandCwd: cwd });
+		const artifacts = diagnostics.artifacts ?? [];
+		const artifactJson = JSON.stringify(artifacts);
+
+		assert.match(artifactJson, /LEGIT_ERROR_CONTEXT_MARKER/, "normal Playwright artifacts should still be retained");
+		assert.doesNotMatch(artifactJson, /LEAKED_SYMLINK_DESCENDANT_MARKER/, "symlink descendants must not be traversed");
+		assert.equal(fs.existsSync(path.join(paths.artifactsDir, "test-results", "linked-case", "error-context.md")), false);
+		assert.equal(fs.existsSync(path.join(paths.artifactsDir, "test-results", "legit-case", "error-context.md")), true);
+	} finally {
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});
