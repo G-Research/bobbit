@@ -1074,6 +1074,54 @@ describe("TeamManager", () => {
 			assert.ok(String(message).includes("coder-xyz"), "nudge message should reference the worker");
 			assert.equal(opts?.isSteered, true);
 		});
+
+		it("formats worker completion nudges as compact markdown with task_list next step", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const enqueuePrompt = mock.fn((_id: string, _msg: string, _opts?: any) => {});
+			sm.enqueuePrompt = enqueuePrompt;
+			sm.deliverLiveSteer = mock.fn(async (_id: string, _msg: string) => {});
+
+			const taskManager = {
+				getTasksForSession: (_sessionId: string) => [{
+					id: "task-1",
+					goalId: "goal-1",
+					title: "Milestone 1 E2E inventory by feature and layer",
+					type: "test",
+					state: "complete",
+					assignedSessionId: "worker-1",
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+					resultSummary: "Updated `docs/testing-metrics/e2e-inventory.md`; checks passed.",
+				}],
+			};
+			const team = createTeamManager(sm, { ...DEFAULT_CONFIG, taskManager });
+			const teamLead = await team.startTeam("goal-1");
+			(teamLead as any).status = "idle";
+
+			const entry = (team as any).teams.get("goal-1")!;
+			sm._sessions.set("worker-1", {
+				id: "worker-1",
+				status: "idle",
+				cwd: "/tmp/worker",
+				rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+				clients: new Set(),
+			});
+			entry.agents.push({ sessionId: "worker-1", role: "test-engineer", task: "work", createdAt: Date.now() });
+
+			await (team as any).notifyTeamLead("goal-1", "worker-1", "test-engineer", "test-engineer-5dac");
+
+			const [, message, opts] = enqueuePrompt.mock.calls[0].arguments as any[];
+			assert.equal(opts?.source, "auto-nudge");
+			assert.equal(
+				message,
+				"### Task Complete\n" +
+					"**Done:** `test-engineer-5dac` (`test-engineer`) — **Milestone 1 E2E inventory by feature and layer** (`complete`) — Updated `docs/testing-metrics/e2e-inventory.md`; checks passed.\n" +
+					"**Next:** `task_list` → review task; decide next step.",
+			);
+		});
 	});
 
 	// ---------------------------------------------------------------------------

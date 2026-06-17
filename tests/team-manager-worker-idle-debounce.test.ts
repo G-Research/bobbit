@@ -4,7 +4,7 @@
 // Bug: when a worker (team member) session emits a transient `agent_end` event
 // (e.g. a flaky tool call) and then resumes with `agent_start` a moment later,
 // TeamManager fires `notifyTeamLead(...)` SYNCHRONOUSLY on the `agent_end`,
-// steering the team lead with a "...has finished..." message. The worker was
+// steering the team lead with a worker-completion message. The worker was
 // never actually done — just momentarily idle — so the lead is nudged for
 // nothing. Both worker-event subscription sites (`spawnRole` ~line 1771 and the
 // boot re-subscribe path in `resubscribeTeamEvents` ~line 886) only listen for
@@ -272,15 +272,15 @@ async function setupTeamWithWorker() {
 		for (const cb of workerCallbacks) cb({ type });
 	}
 
-	// Count of team-lead nudges that say a worker "has finished".
+	// Count of team-lead worker-completion nudges.
 	function workerIdleNudgeCount(): number {
 		return enqueuePrompt.mock.calls.filter((c: any) => {
 			const msg = String(c.arguments?.[1] ?? "");
-			return msg.includes("has finished");
+			return msg.includes("### Task Complete") || msg.includes("### Agent Finished");
 		}).length
 			+ deliverLiveSteer.mock.calls.filter((c: any) => {
 				const msg = String(c.arguments?.[1] ?? "");
-				return msg.includes("has finished");
+				return msg.includes("### Task Complete") || msg.includes("### Agent Finished");
 			}).length;
 	}
 
@@ -309,7 +309,7 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 			workerIdleNudgeCount(),
 			0,
 			"WORKER_IDLE_BLIP_NUDGED_LEAD: a transient worker agent_end→agent_start blip " +
-				"(resumed within 5s) must NOT steer the team lead with a 'has finished' nudge, " +
+				"(resumed within 5s) must NOT steer the team lead with a worker-completion nudge, " +
 				"but notifyTeamLead fired anyway — the worker-idle notification is not debounced/cancelled",
 		);
 
@@ -328,7 +328,7 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 		assert.equal(
 			workerIdleNudgeCount(),
 			1,
-			"a worker that stays idle for >=5s must produce exactly one 'has finished' nudge " +
+			"a worker that stays idle for >=5s must produce exactly one worker-completion nudge " +
 				"(subject to the existing 30s repeat-debounce)",
 		);
 
@@ -353,7 +353,7 @@ describe("TeamManager — transient worker idle blip debounce (regression)", () 
 			workerIdleNudgeCount(),
 			0,
 			"a worker removed before the 5s debounce window elapses must not produce a " +
-				"'has finished' nudge — the pending idle-notify timer must be cleared on removal",
+				"worker-completion nudge — the pending idle-notify timer must be cleared on removal",
 		);
 
 		t.mock.timers.reset();

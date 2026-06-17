@@ -1963,13 +1963,14 @@ export class TeamManager {
 		let message: string;
 		if (tasks.length > 0) {
 			const taskSummaries = tasks.map(t => {
-				let s = `"${t.title}" (state: ${t.state})`;
+				let s = `**${t.title}** (\`${t.state}\`)`;
 				if (t.resultSummary) s += ` — ${t.resultSummary}`;
 				return s;
 			}).join("; ");
-			message = `Agent ${agentId} (${role}) has finished. Tasks: ${taskSummaries}. Check task details and decide next steps.`;
+			const heading = tasks.every(t => t.state === "complete") ? "Task Complete" : "Agent Finished";
+			message = `### ${heading}\n**Done:** \`${agentId}\` (\`${role}\`) — ${taskSummaries}\n**Next:** \`task_list\` → review task; decide next step.`;
 		} else {
-			message = `Agent ${agentId} (${role}) has finished with no assigned tasks. Check tasks and decide next steps.`;
+			message = `### Agent Finished\n**Done:** \`${agentId}\` (\`${role}\`) — no assigned tasks\n**Next:** \`task_list\` → review tasks; decide next step.`;
 		}
 
 		try {
