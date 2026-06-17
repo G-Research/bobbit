@@ -97,6 +97,83 @@ function verificationSummary(data: any, steps: any[]): string {
 	return formatCountSummary(derivedCounts);
 }
 
+function hasArg(value: unknown): boolean {
+	return value !== undefined && value !== null && String(value) !== "";
+}
+
+function primarySelection(data: any): any {
+	if (data?.selection?.mode) return data.selection;
+	const steps = Array.isArray(data?.steps) ? data.steps : [];
+	return steps.find((step: any) => step?.selection)?.selection ?? data?.selection;
+}
+
+function formatRange(from: unknown, to: unknown): string | undefined {
+	if (!hasArg(from) && !hasArg(to)) return undefined;
+	return `${hasArg(from) ? from : "?"}–${hasArg(to) ? to : "?"}`;
+}
+
+function ellipsize(value: unknown, max = 40): string {
+	const text = String(value);
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function formatInspectArgSummary(params: any, data?: any, opts?: { truncatePattern?: boolean }): string {
+	const selection = primarySelection(data);
+	const range = selection?.range;
+	const parts: string[] = [];
+
+	if (hasArg(params?.step)) parts.push(`step ${params.step}`);
+	if (hasArg(params?.signal_index) && params?.section !== "signals") parts.push(`signal ${params.signal_index}`);
+
+	const mode = typeof params?.mode === "string"
+		? params.mode
+		: typeof selection?.mode === "string"
+			? selection.mode
+			: undefined;
+
+	if (mode === "grep" || (!mode && hasArg(params?.pattern))) {
+		const patternValue = opts?.truncatePattern ? ellipsize(params.pattern) : String(params.pattern);
+		const pattern = hasArg(params?.pattern) ? ` ${JSON.stringify(patternValue)}` : "";
+		parts.push(`grep${pattern}`);
+		if (hasArg(params?.context)) parts.push(`ctx ${params.context}`);
+		const maxResults = params?.max_results ?? params?.maxResults;
+		if (hasArg(maxResults)) parts.push(`max ${maxResults}`);
+	} else if (mode === "slice") {
+		parts.push(`slice ${formatRange(params?.from ?? range?.from, params?.to ?? range?.to) ?? "range"}`);
+	} else if (mode === "head" || mode === "tail") {
+		const selectedRange = formatRange(range?.from, range?.to);
+		if (selectedRange) parts.push(`${mode} ${selectedRange}`);
+		else if (hasArg(params?.lines)) parts.push(`${mode} ${params.lines} lines`);
+		else parts.push(mode);
+	} else if (mode === "full") {
+		parts.push("full");
+	} else if (hasArg(params?.lines)) {
+		parts.push(`tail ${params.lines} lines`);
+	}
+
+	return parts.join(" · ");
+}
+
+function renderArgSummary(summary: string, tooltip = summary): TemplateResult | typeof nothing {
+	if (!summary) return nothing;
+	return html`<span
+		class="block max-w-full truncate rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] leading-none text-muted-foreground sm:max-w-[45vw]"
+		title=${tooltip}
+	>${summary}</span>`;
+}
+
+function renderInspectHeader(
+	state: any,
+	text: string | TemplateResult,
+	argSummary: string,
+	argTooltip = argSummary,
+): TemplateResult {
+	return html`<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+		<div class="min-w-0 flex-1 basis-full xl:basis-auto">${renderHeader(state, ShieldCheck, text)}</div>
+		${argSummary ? html`<div class="min-w-0 max-w-full shrink basis-full xl:ml-auto xl:basis-auto xl:max-w-[45vw]">${renderArgSummary(argSummary, argTooltip)}</div>` : nothing}
+	</div>`;
+}
+
 // ── Renderer ─────────────────────────────────────────────────────────
 
 export class GateInspectRenderer implements ToolRenderer {
@@ -104,11 +181,13 @@ export class GateInspectRenderer implements ToolRenderer {
 		ensureMarkdownBlock();
 		const state = getToolState(result, isStreaming);
 		const gateId = params?.gate_id || "gate";
+		const initialArgSummary = formatInspectArgSummary(params, undefined, { truncatePattern: true });
+		const initialArgTooltip = formatInspectArgSummary(params);
 
 		// Loading state
 		if (!result) {
 			return {
-				content: html`<div>${renderHeader(state, ShieldCheck, html`Inspecting gate <span class="font-mono">${gateId}</span>…`)}</div>`,
+				content: html`<div>${renderInspectHeader(state, html`Inspecting gate <span class="font-mono">${gateId}</span>…`, initialArgSummary, initialArgTooltip)}</div>`,
 				isCustom: false,
 			};
 		}
@@ -117,11 +196,12 @@ export class GateInspectRenderer implements ToolRenderer {
 		const { data, text } = getResult(result);
 		if (result.isError) {
 			const skipped = isSkippedToolResult(result);
+			const headerText = skipped
+				? html`Aborted inspect of gate <span class="font-mono">${gateId}</span>`
+				: html`Failed to inspect gate <span class="font-mono">${gateId}</span>`;
 			return {
 				content: html`<div>
-					${renderHeader(state, ShieldCheck, skipped
-						? html`Aborted inspect of gate <span class="font-mono">${gateId}</span>`
-						: html`Failed to inspect gate <span class="font-mono">${gateId}</span>`)}
+					${renderInspectHeader(state, headerText, initialArgSummary, initialArgTooltip)}
 					<div class="mt-1 text-xs ${skipped ? "text-amber-600 dark:text-amber-400" : "text-destructive"}">${text}</div>
 				</div>`,
 				isCustom: false,
@@ -129,25 +209,27 @@ export class GateInspectRenderer implements ToolRenderer {
 		}
 
 		const section = data?.section || params?.section || "content";
+		const argSummary = formatInspectArgSummary(params, data, { truncatePattern: true });
+		const argTooltip = formatInspectArgSummary(params, data);
 
 		switch (section) {
-			case "content": return this._renderContent(state, gateId, data);
-			case "verification": return this._renderVerification(state, gateId, data, result);
-			case "signals": return this._renderSignals(state, gateId, data);
-			default: return this._renderContent(state, gateId, data);
+			case "content": return this._renderContent(state, gateId, data, argSummary, argTooltip);
+			case "verification": return this._renderVerification(state, gateId, data, result, argSummary, argTooltip);
+			case "signals": return this._renderSignals(state, gateId, data, argSummary, argTooltip);
+			default: return this._renderContent(state, gateId, data, argSummary, argTooltip);
 		}
 	}
 
 	// ── section="content" ────────────────────────────────────────────
 
-	private _renderContent(state: any, gateId: string, data: any): ToolRenderResult {
+	private _renderContent(state: any, gateId: string, data: any, argSummary: string, argTooltip: string): ToolRenderResult {
 		const signalIndex = data?.signalIndex ?? "?";
 		const signalId = data?.signalId || "";
 		const content = data?.text;
 
 		return {
 			content: html`<div>
-				${renderHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — content`)}
+				${renderInspectHeader(state, html`Inspect gate <span class="font-mono">${gateId}</span> — content`, argSummary, argTooltip)}
 				<div class="text-xs text-muted-foreground mt-1">Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}</div>
 				${content
 					? html`<div class="mt-2 text-xs bg-muted/50 rounded p-3 border border-border max-h-[400px] overflow-y-auto"><markdown-block .content=${content}></markdown-block></div>`
@@ -160,7 +242,7 @@ export class GateInspectRenderer implements ToolRenderer {
 
 	// ── section="verification" ───────────────────────────────────────
 
-	private _renderVerification(state: any, gateId: string, data: any, _result: ToolResultMessage): ToolRenderResult {
+	private _renderVerification(state: any, gateId: string, data: any, _result: ToolResultMessage, argSummary: string, argTooltip: string): ToolRenderResult {
 		const signalIndex = data?.signalIndex ?? "?";
 		const signalId = data?.signalId || "";
 		const steps: any[] = data?.steps || [];
@@ -178,7 +260,7 @@ export class GateInspectRenderer implements ToolRenderer {
 
 		return {
 			content: html`<div>
-				${renderHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — verification`)}
+				${renderInspectHeader(state, html`Inspect gate <span class="font-mono">${gateId}</span> — verification`, argSummary, argTooltip)}
 				<div class="text-xs text-muted-foreground mt-1">Signal #${signalIndex}${signalId ? html` · ${signalId}` : nothing}${summary ? html` · ${summary}` : nothing}</div>
 				<div class="mt-2 space-y-1">
 					${steps.map((step: any, _i: number) => {
@@ -219,7 +301,7 @@ export class GateInspectRenderer implements ToolRenderer {
 
 	// ── section="signals" ────────────────────────────────────────────
 
-	private _renderSignals(state: any, gateId: string, data: any): ToolRenderResult {
+	private _renderSignals(state: any, gateId: string, data: any, argSummary: string, argTooltip: string): ToolRenderResult {
 		const signals: any[] = data?.signals || [];
 		const count = signals.length;
 
@@ -246,7 +328,12 @@ export class GateInspectRenderer implements ToolRenderer {
 			const chevronRef = createRef<HTMLSpanElement>();
 			return {
 				content: html`<div>
-					${renderCollapsibleHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — ${count} signal${count !== 1 ? "s" : ""}`, contentRef, chevronRef, false)}
+					<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+						<div class="min-w-0 flex-1 basis-full xl:basis-auto">
+							${renderCollapsibleHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — ${count} signal${count !== 1 ? "s" : ""}`, contentRef, chevronRef, false)}
+						</div>
+						${argSummary ? html`<div class="min-w-0 max-w-full shrink basis-full xl:ml-auto xl:basis-auto xl:max-w-[45vw]">${renderArgSummary(argSummary, argTooltip)}</div>` : nothing}
+					</div>
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 						${rows}
 					</div>
@@ -257,7 +344,7 @@ export class GateInspectRenderer implements ToolRenderer {
 
 		return {
 			content: html`<div>
-				${renderHeader(state, ShieldCheck, html`Inspect gate <span class="font-mono">${gateId}</span> — ${count} signal${count !== 1 ? "s" : ""}`)}
+				${renderInspectHeader(state, html`Inspect gate <span class="font-mono">${gateId}</span> — ${count} signal${count !== 1 ? "s" : ""}`, argSummary, argTooltip)}
 				${rows}
 			</div>`,
 			isCustom: false,

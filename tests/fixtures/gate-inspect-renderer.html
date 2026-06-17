@@ -92,6 +92,66 @@ function verificationSummary(data, steps) {
 	return formatCountSummary(derived);
 }
 
+function hasArg(value) {
+	return value !== undefined && value !== null && String(value) !== "";
+}
+
+function primarySelection(data) {
+	if (data && data.selection && data.selection.mode) return data.selection;
+	const steps = Array.isArray(data && data.steps) ? data.steps : [];
+	const step = steps.find(function(s) { return s && s.selection; });
+	return (step && step.selection) || (data && data.selection);
+}
+
+function formatRange(from, to) {
+	if (!hasArg(from) && !hasArg(to)) return undefined;
+	return (hasArg(from) ? from : "?") + "–" + (hasArg(to) ? to : "?");
+}
+
+function ellipsize(value, max) {
+	max = max || 40;
+	const text = String(value);
+	return text.length > max ? text.slice(0, max - 1) + "…" : text;
+}
+
+function formatInspectArgSummary(params, data, opts) {
+	params = params || {};
+	const selection = primarySelection(data);
+	const range = selection && selection.range;
+	const parts = [];
+
+	if (hasArg(params.step)) parts.push("step " + params.step);
+	if (hasArg(params.signal_index) && params.section !== "signals") parts.push("signal " + params.signal_index);
+
+	const mode = typeof params.mode === "string"
+		? params.mode
+		: selection && typeof selection.mode === "string"
+			? selection.mode
+			: undefined;
+
+	if (mode === "grep" || (!mode && hasArg(params.pattern))) {
+		const patternValue = opts && opts.truncatePattern ? ellipsize(params.pattern) : String(params.pattern);
+		const pattern = hasArg(params.pattern) ? " " + JSON.stringify(patternValue) : "";
+		parts.push("grep" + pattern);
+		if (hasArg(params.context)) parts.push("ctx " + params.context);
+		const maxResults = params.max_results !== undefined ? params.max_results : params.maxResults;
+		if (hasArg(maxResults)) parts.push("max " + maxResults);
+	} else if (mode === "slice") {
+		parts.push("slice " + (formatRange(params.from !== undefined ? params.from : range && range.from, params.to !== undefined ? params.to : range && range.to) || "range"));
+	} else if (mode === "head" || mode === "tail") {
+		const selectedRange = formatRange(range && range.from, range && range.to);
+		if (selectedRange) parts.push(mode + " " + selectedRange);
+		else if (hasArg(params.lines)) parts.push(mode + " " + params.lines + " lines");
+		else parts.push(mode);
+	} else if (mode === "full") {
+		parts.push("full");
+	} else if (hasArg(params.lines)) {
+		parts.push("tail " + params.lines + " lines");
+	}
+
+	return parts.join(" · ");
+}
+
 /**
  * Mirrors GateInspectRenderer.render() — returns rendering decision metadata.
  */
@@ -101,37 +161,39 @@ function renderInspect(params, result, isStreaming) {
 
 	// Loading state
 	if (!result) {
-		return { branch: "loading", state, gateId };
+		return { branch: "loading", state, gateId, argSummary: formatInspectArgSummary(params) };
 	}
 
 	// Error/skipped state
 	const { data, text } = getResult(result);
 	if (result.isError) {
 		const skipped = isSkippedToolResult(result);
-		return { branch: skipped ? "skipped" : "error", state, gateId, text };
+		return { branch: skipped ? "skipped" : "error", state, gateId, text, argSummary: formatInspectArgSummary(params) };
 	}
 
 	const section = (data && data.section) || (params && params.section) || "content";
-	if (section === "content") return renderContent(state, gateId, data);
-	if (section === "verification") return renderVerification(state, gateId, data);
-	if (section === "signals") return renderSignals(state, gateId, data);
-	return renderContent(state, gateId, data);
+	const argSummary = formatInspectArgSummary(params, data);
+	if (section === "content") return renderContent(state, gateId, data, argSummary);
+	if (section === "verification") return renderVerification(state, gateId, data, argSummary);
+	if (section === "signals") return renderSignals(state, gateId, data, argSummary);
+	return renderContent(state, gateId, data, argSummary);
 }
 
-function renderContent(state, gateId, data) {
+function renderContent(state, gateId, data, argSummary) {
 	const signalIndex = (data && data.signalIndex != null) ? data.signalIndex : "?";
 	const signalId = (data && data.signalId) || "";
 	const content = data && data.text;
 	return {
 		branch: "content",
 		state, gateId,
+		argSummary: argSummary,
 		signalIndex, signalId,
 		hasContent: !!content,
 		contentText: content || null,
 	};
 }
 
-function renderVerification(state, gateId, data) {
+function renderVerification(state, gateId, data, argSummary) {
 	const signalIndex = (data && data.signalIndex != null) ? data.signalIndex : "?";
 	const signalId = (data && data.signalId) || "";
 	const steps = (data && data.steps) || [];
@@ -155,6 +217,7 @@ function renderVerification(state, gateId, data) {
 	return {
 		branch: "verification",
 		state, gateId,
+		argSummary: argSummary,
 		signalIndex, signalId,
 		stepCount: steps.length,
 		summary: summary,
@@ -162,7 +225,7 @@ function renderVerification(state, gateId, data) {
 	};
 }
 
-function renderSignals(state, gateId, data) {
+function renderSignals(state, gateId, data, argSummary) {
 	const signals = (data && data.signals) || [];
 	const count = signals.length;
 	const pluralized = count + " signal" + (count !== 1 ? "s" : "");
@@ -183,6 +246,7 @@ function renderSignals(state, gateId, data) {
 	return {
 		branch: "signals",
 		state, gateId,
+		argSummary: argSummary,
 		count: count,
 		pluralized: pluralized,
 		isCollapsible: isCollapsible,
@@ -250,6 +314,7 @@ function buildVerificationDOM(steps) {
 
 // Expose
 window.renderInspect = renderInspect;
+window.formatInspectArgSummary = formatInspectArgSummary;
 window.buildVerificationDOM = buildVerificationDOM;
 window._testReady = true;
 </script>
