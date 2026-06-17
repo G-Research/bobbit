@@ -125,6 +125,156 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(client.sent.at(-2).status, "idle");
 	});
 
+	it("dispatches a promoted queued steer immediately like a fresh live steer", async () => {
+		const manager = makeManager();
+		const steer = mock.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: mock.fn(async () => ({ success: true })), steer },
+		});
+
+		await manager.deliverLiveSteer(session.id, "fresh live steer");
+		assert.equal(steer.mock.callCount(), 1, "fresh live steer dispatches immediately");
+		assert.equal(steer.mock.calls[0].arguments[0], "fresh live steer");
+
+		const queued = session.promptQueue.enqueue("promoted queued steer");
+		manager.steerQueued(session.id, queued.id);
+
+		assert.equal(
+			steer.mock.callCount(),
+			2,
+			"promoting a queued message to steer should dispatch immediately, not wait for a later tool boundary/agent_end",
+		);
+		assert.equal(steer.mock.calls[1].arguments[0], "promoted queued steer");
+	});
+
+	it("persists in-flight steer ledger until the user echo arrives", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const steer = mock.fn(() => pending.promise);
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: mock.fn(async () => ({ success: true })), steer },
+		});
+
+		const steerPromise = manager.deliverLiveSteer(session.id, "durable steer");
+
+		assert.equal(steer.mock.callCount(), 1);
+		const ledgerUpdate = manager._testStore.update.mock.calls
+			.map((call: any) => call.arguments[1])
+			.find((update: any) => Array.isArray(update?.inFlightSteerTexts));
+		assert.deepEqual(ledgerUpdate, {
+			messageQueue: [],
+			inFlightSteerTexts: ["durable steer"],
+		});
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "user", content: [{ type: "text", text: "durable steer" }] },
+		});
+		const clearUpdate = manager._testStore.update.mock.calls.at(-1)?.arguments[1];
+		assert.deepEqual(clearUpdate, { inFlightSteerTexts: undefined });
+
+		pending.resolve({ success: true });
+		await steerPromise;
+	});
+
+	it("does not duplicate a pending steer when abort reconciliation wins the rejection race", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const steer = mock.fn(() => pending.promise);
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: mock.fn(async () => ({ success: true })), steer },
+		});
+
+		const steerPromise = manager.deliverLiveSteer(session.id, "recover steer exactly once");
+
+		assert.equal(steer.mock.callCount(), 1);
+		assert.equal(session.promptQueue.length, 0);
+		assert.deepEqual(session.inFlightSteerTexts, ["recover steer exactly once"]);
+
+		manager._reconcileAfterAbort(session);
+		assert.deepEqual(session.inFlightSteerTexts, []);
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.text, "recover steer exactly once");
+		assert.equal(session.promptQueue.peek()?.isSteered, true);
+
+		pending.resolve({ success: false, error: "steer rejected after abort" });
+		await assert.rejects(steerPromise, /steer rejected after abort/);
+
+		const recovered = session.promptQueue.toArray().filter((row: any) => row.text === "recover steer exactly once");
+		assert.equal(recovered.length, 1, "late steer rejection must not duplicate a row already recovered by abort reconciliation");
+		assert.equal(session.promptQueue.length, 1);
+	});
+
+	it("does not replay a queued steered task notification after its prompt has started", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const prompt = mock.fn(() => pending.promise);
+		const steer = mock.fn(async () => ({ success: true }));
+		const taskNotice = "Task \"Stabilize at-mention menu close E2E\" transitioned to complete. Use task_list for result summaries and gate_status for verification details.";
+		const { session } = putSession(manager, { rpcClient: { prompt, steer } });
+
+		session.promptQueue.enqueue(taskNotice, { isSteered: true });
+		manager.drainQueue(session);
+
+		assert.equal(prompt.mock.callCount(), 1);
+		assert.equal(prompt.mock.calls[0].arguments[0], taskNotice);
+		assert.equal(session.promptQueue.length, 0);
+
+		// The agent has accepted the prompt and begun processing it. A late bridge
+		// failure from that same dispatch must not recover the row back into the
+		// queue, otherwise agent_end will inject the same task notification again.
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		pending.resolve({ success: false, error: "Agent is already processing." });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		manager.handleAgentLifecycle(session, { type: "message_end", message: { role: "assistant", stopReason: "stop" } });
+		manager.handleAgentLifecycle(session, { type: "agent_end" });
+
+		assert.equal(
+			steer.mock.callCount(),
+			0,
+			"accepted task notification must not be re-enqueued and steered a second time",
+		);
+		assert.equal(session.promptQueue.length, 0);
+	});
+
+	it("recovers a queued prompt when local abort status changes before prompt rejection", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const prompt = mock.fn(() => pending.promise);
+		const abort = mock.fn(async () => ({ success: true }));
+		const { session, client } = putSession(manager, { rpcClient: { prompt, abort } });
+
+		session.promptQueue.enqueue("recover after abort-before-acceptance");
+		manager.drainQueue(session);
+
+		assert.equal(prompt.mock.callCount(), 1);
+		assert.equal(session.status, "streaming");
+		assert.equal(session.promptQueue.length, 0);
+
+		await manager.abortSessionTurn(session.id);
+		assert.equal(abort.mock.callCount(), 1);
+		assert.equal(session.status, "aborting");
+
+		pending.resolve({ success: false, error: "preflight failed after abort" });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.equal(session.status, "idle");
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.text, "recover after abort-before-acceptance");
+		assert.deepEqual(
+			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			["streaming", "aborting", "idle"],
+		);
+	});
+
 	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const manager = makeManager();

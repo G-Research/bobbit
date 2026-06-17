@@ -60,18 +60,33 @@ Because those legacy files are superseded by pack artifact panels, they are excl
 
 `preview_open` still writes the per-session preview mount and streams updates via preview SSE. Workspace tab creation is separate:
 
-- explicit preview mount/tool events open or focus the current preview tab;
+- explicit preview open/tool actions open or focus the current preview tab;
 - historical card Open buttons explicitly open a versioned preview tab or focus an equivalent current tab when hashes match;
-- `GET /api/preview/mount` bootstrap and `preview-changed` SSE events patch metadata only for already-open tabs when they are not explicitly opening a tab;
-- closing a preview tab removes only the workspace tab, not the mount or immutable artifacts.
+- `GET /api/preview/mount` bootstrap, `preview-changed` SSE events, and mount metadata refreshes patch metadata only for already-open tabs;
+- closing a preview tab removes only the workspace tab, not the live mount or immutable artifacts.
 
-This split prevents a browser refresh from resurrecting a preview tab just because a preview mount still exists.
+This split prevents navigation, reload, or reconnect from resurrecting a preview tab just because a preview mount still exists. A later explicit preview Open action can reopen it.
 
-### Proposal and review lifecycle
+### Proposal lifecycle
 
-Proposal events and explicit proposal reopen affordances call the workspace open API. Current proposal tabs are keyed by proposal type (`proposal:goal`, `proposal:project`, etc.); a new current revision updates/focuses the same tab. Historical proposal revisions use `proposal:<type>:rev:<N>` and are created only by explicit historical/reopen UI.
+Proposal content and proposal tab presence are separate. The proposal slot/cache is the source of truth for editable content; the server workspace is the source of truth for whether the side-panel tab is open.
 
-Review tabs are keyed by stable document id, not title. `openMarkdownReviewDocument()` creates or preserves the document id, caches the content, and opens `review:<documentId>`. Restoring cached review documents restores content state only; it does not open tabs unless the server workspace already contains those tabs.
+Current proposal tabs are keyed by proposal type (`proposal:goal`, `proposal:project`, etc.); an allowed explicit reveal updates/focuses that same tab. Historical proposal revisions use `proposal:<type>:rev:<N>` and are created only by explicit historical/reopen UI.
+
+Source rules:
+
+- non-explicit `rehydrate` events and ordinary `edit` events update proposal content only; they must not create or focus a workspace tab;
+- fresh explicit sources (`tool`, `seed`, `restore`, and legacy proposal discovery) may create or focus the current proposal tab;
+- explicit Open Proposal / Resubmit Proposal chat-renderer actions may reopen a closed proposal tab;
+- opening a historical revision is always an explicit reopen action and uses the revisioned tab id.
+
+Proposal close paths are durable workspace deletes. The tab close button, Dismiss, Create/Accept, and registered-project Apply Changes all remove the current proposal tab from the server workspace. Draft files, accepted/saved-state caches, form mirrors, and subsequent content-only rehydrates must not recreate that closed tab.
+
+### Review lifecycle
+
+Review tabs are keyed by stable document id, not title. `openMarkdownReviewDocument()` creates or preserves the document id, caches the content, and explicitly opens `review:<documentId>`.
+
+Restoring cached or persisted review documents restores content only for review tabs that already exist in the server workspace. If a review tab was closed, the cached document and annotations may remain available for an explicit review reopen, but hydration must not recreate the tab from cache alone.
 
 ### Pack panel lifecycle
 

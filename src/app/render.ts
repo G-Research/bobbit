@@ -6,7 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
-import Sortable from "sortablejs";
+import type Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
 import { AlertTriangle, Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Store, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
@@ -215,8 +215,19 @@ window.addEventListener("bobbit-open-review-document", (e: Event) => {
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
 import { lookupPackRoute } from "./pack-entrypoints.js";
-import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import "./config-scope.css";
+
+function bobbitLoadingAnimation() {
+	return html`
+		<div class="flex items-center justify-center w-full h-full" style="background: var(--background);">
+			<div
+				class="rounded-full animate-spin"
+				style="width: 2rem; height: 2rem; border: 2px solid color-mix(in oklch, var(--muted-foreground) 22%, transparent); border-top-color: var(--primary);"
+				aria-label="Loading"
+			></div>
+		</div>
+	`;
+}
 
 // ---------------------------------------------------------------------------
 // Lazy route page loader — see docs/design/ui-bundle-size-reduction.md (Task A)
@@ -780,10 +791,14 @@ let mobileSelectedSideTabId = "";
 // lit-html doesn't fight Sortable's DOM mutations; on drop we read the new
 // DOM order and commit it back to state.
 //
-// SortableJS itself is split into its own vendor chunk (see vite.config.ts
-// manualChunks) so the ~46 kB / ~13 kB gz body lands outside the entry chunk.
+// SortableJS itself is loaded on first tab-bar render so the ~70 kB raw drag
+// library stays out of the eager app-shell SCC pinned by tests/bundle-size.test.ts.
+type SortableConstructor = typeof Sortable;
+let SortableCtor: SortableConstructor | null = null;
+let sortableLoadStarted = false;
 let panelSortable: Sortable | null = null;
 let panelSortableContainer: HTMLElement | null = null;
+let panelSortablePendingContainer: HTMLElement | null = null;
 let draggingPanelTabId = "";
 // When true, the current drag at any point tried to land on/before a pinned
 // tab. SortableJS's onMove returns false for that single candidate target, but
@@ -810,7 +825,7 @@ let panelDragLockRaf = 0;
 function startPanelDragYLock(): void {
 	cancelAnimationFrame(panelDragLockRaf);
 	const tick = () => {
-		const ghost = (Sortable as unknown as { ghost: HTMLElement | null }).ghost;
+		const ghost = (SortableCtor as unknown as { ghost: HTMLElement | null } | null)?.ghost;
 		if (ghost && ghost.style.transform) {
 			const t = ghost.style.transform;
 			const m = /matrix\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/.exec(t);
@@ -1421,6 +1436,22 @@ function revertPanelTabDomOrder(host: HTMLElement, expectedIds: string[]): void 
 	}
 }
 
+function loadPanelSortable(): void {
+	if (SortableCtor || sortableLoadStarted) return;
+	sortableLoadStarted = true;
+	void import("sortablejs")
+		.then((mod) => {
+			SortableCtor = (mod as unknown as { default?: SortableConstructor }).default ?? (mod as unknown as SortableConstructor);
+			const pending = panelSortablePendingContainer;
+			panelSortablePendingContainer = null;
+			if (pending?.isConnected) ensurePanelSortable(pending);
+		})
+		.catch((err) => {
+			sortableLoadStarted = false;
+			console.warn("[render] failed to load SortableJS", err);
+		});
+}
+
 // Attach a SortableJS instance to the unified tab bar's inner container. Idempotent:
 // if the container DOM node is the same as last time, we keep the existing instance.
 // If the container was replaced (e.g. workspace switched sessions), we destroy the
@@ -1435,11 +1466,17 @@ function revertPanelTabDomOrder(host: HTMLElement, expectedIds: string[]): void 
 //   - onEnd: read the new DOM order, commit to state, resume renders
 function ensurePanelSortable(container: HTMLElement | null): void {
 	if (!container) {
+		panelSortablePendingContainer = null;
 		if (panelSortable) {
 			panelSortable.destroy();
 			panelSortable = null;
 			panelSortableContainer = null;
 		}
+		return;
+	}
+	if (!SortableCtor) {
+		panelSortablePendingContainer = container;
+		loadPanelSortable();
 		return;
 	}
 	if (panelSortableContainer === container && panelSortable) return;
@@ -1449,7 +1486,7 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 	}
 	panelSortableContainer = container;
 
-	panelSortable = Sortable.create(container, {
+	panelSortable = SortableCtor.create(container, {
 		animation: 180,
 		easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
 		draggable: ".goal-tab-pill",
@@ -1496,7 +1533,7 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 			// opacity: 0.8 (we want it to look like a real tab, not a ghost),
 			// while the source tab (.goal-tab-pill--ghost) becomes invisible —
 			// the user should perceive the tab itself moving, not a clone.
-			const ghost = (Sortable as unknown as { ghost: HTMLElement | null }).ghost;
+			const ghost = (SortableCtor as unknown as { ghost: HTMLElement | null } | null)?.ghost;
 			if (ghost) ghost.classList.add("goal-tab-pill--floating");
 		},
 		onEnd: (evt) => {

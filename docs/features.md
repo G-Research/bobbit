@@ -90,8 +90,8 @@ Server-side queuing of user messages when the agent is busy.
 - Steered messages sort before non-steered (priority interrupt).
 - Queue auto-drains when the agent finishes a turn (suppressed on error — user must retry first).
 - Client can promote queued messages to steered (`steer_queued`), remove them (`remove_queued`), edit them (remove + populate textarea), or drag-reorder them (`reorder_queue`).
-- Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills show a "Sent" badge instead.
-- Steered messages are batched — they reorder to the front of the queue and are delivered as a single combined prompt when the agent next becomes idle (on normal turn completion or after abort+restart).
+- Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills that remain queued show a "Sent" badge; rows promoted while streaming are removed from the queue as they dispatch.
+- Steered messages are batched — they reorder to the front of the queue and are delivered as a single combined prompt. Streaming `steer_queued` promotions dispatch immediately through `_dispatchSteer()`; idle or recovered steered rows drain first when the agent becomes idle.
 - `follow_up` flag is preserved through the queue: messages enqueued with `isFollowUp: true` dispatch via `followUp()` RPC on drain.
 - Queue state broadcast to clients via `queue_update` events.
 

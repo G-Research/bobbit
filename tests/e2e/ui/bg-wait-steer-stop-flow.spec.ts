@@ -9,6 +9,12 @@ import { test, expect } from "./fixtures.js";
 import { createSession, deleteSession, waitForHealth, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
+async function clickStopIfPresent(page: any): Promise<void> {
+	const stop = page.locator("button[title='Stop streaming']").first();
+	if (await stop.count() === 0) return;
+	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
+}
+
 test.describe("Steer + Stop exactly-once (AC §1)", () => {
 	test.beforeAll(async () => {
 		await waitForHealth();
@@ -31,10 +37,10 @@ test.describe("Steer + Stop exactly-once (AC §1)", () => {
 			await textarea.press("Enter");
 			await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
 
-			await page.locator(".steer-btn").first().click();
+			await page.locator(".steer-btn").first().evaluate((el: HTMLElement) => el.click());
 			await rec.capture("Steer clicked");
-			await page.locator("button[title='Stop streaming']").click();
-			await rec.capture("Stop clicked");
+			await clickStopIfPresent(page);
+			await rec.capture("Stop clicked if still streaming");
 
 			await waitForSessionStatus(sessionId, "idle", 30_000);
 

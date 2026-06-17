@@ -22,7 +22,7 @@ import { GoalPausedError } from "./goal-paused-guard.js";
 import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import { detectPrimaryBranch } from "../skills/git.js";
+import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import { type WorkflowGate, type VerifyStep } from "./workflow-store.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { resolveSpawnedBySessionId } from "./spawn-child-spawnedby.js";
@@ -49,6 +49,7 @@ import {
 	groupStepsByPhase,
 	getSortedPhases,
 	isCommandStepSkippable,
+	readyToMergeUnresolvedBuiltinFailure,
 	partitionOptionalSteps,
 	buildStepCache,
 	computeAllPassed,
@@ -230,6 +231,59 @@ export function resolveStep(
 	}
 	// Free-form pure { run } at the per-branch container root.
 	return { cwd: branchContainer, runString: step.run };
+}
+
+const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
+const DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC = 1200;
+
+/**
+ * Frozen workflows may omit `timeout:` for component command steps. The full
+ * unit suite is resource-sensitive on developer machines/CI and can exceed the
+ * generic 5-minute shell default under contention, so give `command: unit` a
+ * durable default while preserving explicit workflow timeouts.
+ */
+export function resolveCommandStepTimeoutSec(step: Pick<VerifyStep, "type" | "component" | "command" | "timeout">): number {
+	if (typeof step.timeout === "number" && Number.isFinite(step.timeout) && step.timeout > 0) return step.timeout;
+	const isComponentUnitCommand = step.type === "command"
+		&& typeof step.component === "string"
+		&& step.component.length > 0
+		&& typeof step.command === "string"
+		&& step.command.toLowerCase() === "unit";
+	return isComponentUnitCommand ? DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC : DEFAULT_COMMAND_STEP_TIMEOUT_SEC;
+}
+
+/** Command steps are the expensive OS-level work; keep them serialized within
+ * a phase so frozen workflows don't run full unit/E2E suites concurrently.
+ * Non-command steps keep the legacy parallel behavior.
+ */
+export function shouldSerializeVerificationStepWithinPhase(step: Pick<VerifyStep, "type">): boolean {
+	return step.type === "command";
+}
+
+export async function runVerificationPhaseSteps<T, R>(
+	phaseSteps: readonly T[],
+	runStep: (phaseStep: T) => Promise<R>,
+	options: { shouldSerialize?: (phaseStep: T) => boolean } = {},
+): Promise<R[]> {
+	const shouldSerialize = options.shouldSerialize ?? (() => false);
+	const parallelSteps: Array<{ phaseStep: T; order: number }> = [];
+	const serializedSteps: Array<{ phaseStep: T; order: number }> = [];
+	phaseSteps.forEach((phaseStep, order) => {
+		if (shouldSerialize(phaseStep)) serializedSteps.push({ phaseStep, order });
+		else parallelSteps.push({ phaseStep, order });
+	});
+
+	const results = new Array<R>(phaseSteps.length);
+	const parallelPromise = Promise.all(parallelSteps.map(async ({ phaseStep, order }) => {
+		results[order] = await runStep(phaseStep);
+	}));
+	const serializedPromise = (async () => {
+		for (const { phaseStep, order } of serializedSteps) {
+			results[order] = await runStep(phaseStep);
+		}
+	})();
+	await Promise.all([parallelPromise, serializedPromise]);
+	return results;
 }
 
 export interface VerificationPushSafetyVars {
@@ -667,7 +721,7 @@ export interface ActiveVerification {
  * Branches on `isPreImplementationGate(gate)`:
  * - Pre-implementation (content gate with no upstream): no git diff/log
  *   instructions; `Baseline: none (design gate — no implementation expected)`.
- * - Implementation and later: `git diff origin/<primary>...HEAD` forms; the
+ * - Implementation and later: `git diff origin/<base>...HEAD` forms; the
  *   `Baseline` line records the resolved origin SHA so failures are trivial
  *   to diagnose.
  */
@@ -683,7 +737,7 @@ export async function buildReviewPrompt(
 	gate?: { content?: boolean; depends_on?: string[]; dependsOn?: string[] },
 ): Promise<string> {
 	const isDesignGate = gate ? isPreImplementationGate(gate) : false;
-	const master = builtinVars.master || "master";
+	const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master || "master";
 	const branch = builtinVars.branch || "HEAD";
 	const commit = builtinVars.commit || "HEAD";
 
@@ -702,9 +756,9 @@ export async function buildReviewPrompt(
 			"`git pull`** — the directory is already in the right state.",
 			"",
 			"To see what changed:",
-			`- \`git diff --stat origin/${master}...HEAD -- . ':!package-lock.json'\` — summary`,
-			`- \`git diff origin/${master}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
-			`- \`git log --oneline origin/${master}..HEAD\` — commits on this branch`,
+			`- \`git diff --stat origin/${reviewBaselineBranch}...HEAD -- . ':!package-lock.json'\` — summary`,
+			`- \`git diff origin/${reviewBaselineBranch}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
+			`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch`,
 			"- Read files directly with `read` — they are already at the correct version",
 		].join("\n");
 
@@ -760,14 +814,14 @@ export async function buildReviewPrompt(
 			const { execFile: execFileCb } = await import("node:child_process");
 			const { promisify } = await import("node:util");
 			const execFileAsync = promisify(execFileCb);
-			const { stdout } = await execFileAsync("git", ["rev-parse", `origin/${master}`], { cwd, timeout: 5_000 });
+			const { stdout } = await execFileAsync("git", ["rev-parse", `origin/${reviewBaselineBranch}`], { cwd, timeout: 5_000 });
 			baselineSha = stdout.toString().trim().slice(0, 12);
 		} catch {
 			baselineSha = null;
 		}
 		baselineLine = baselineSha
-			? `- Baseline: diffed against origin/${master}@${baselineSha}`
-			: `- Baseline: origin/${master} (sha unresolved)`;
+			? `- Baseline: diffed against origin/${reviewBaselineBranch}@${baselineSha}`
+			: `- Baseline: origin/${reviewBaselineBranch} (sha unresolved)`;
 	}
 
 	const contextLines: string[] = [];
@@ -798,16 +852,16 @@ export async function buildReviewPrompt(
 			"Other reviewers may be reading from this directory concurrently. Mutating it causes stale reads.",
 			"",
 			"To see what changed (read-only, safe for concurrent use):",
-			`- \`git diff --stat origin/${master}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
-			`- \`git diff origin/${master}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
+			`- \`git diff --stat origin/${reviewBaselineBranch}...HEAD -- . ':!package-lock.json'\` — summary of which files changed`,
+			`- \`git diff origin/${reviewBaselineBranch}...HEAD -M -- . ':!package-lock.json'\` — branch diff with rename detection (collapses pure renames)`,
 			`- For large diffs, review individual files with \`read\` instead of loading the full diff into context`,
-			`- \`git log --oneline origin/${master}..HEAD\` — commits on this branch`,
+			`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch`,
 			"- Use `read` to view files directly — they are already at the correct version",
 			"",
 			"## Signal Context",
 			`- Branch: ${branch}`,
 			`- Commit: ${commit}`,
-			`- Primary branch: ${master}`,
+			`- Base branch: ${reviewBaselineBranch}`,
 			baselineLine,
 			`- Working directory: ${cwd}`,
 		);
@@ -1234,10 +1288,14 @@ export class VerificationHarness {
 		if (!signal) return null;
 
 		const cwd = goal.worktreePath || goal.cwd;
-		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
+		const [baseBranch, legacyMasterBranch] = await Promise.all([
+			this.resolveVerificationBaseBranch(goalId, cwd),
+			this.resolveLegacyMasterBranch(cwd),
+		]);
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
-			master: primary,
+			baseBranch,
+			master: legacyMasterBranch,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
@@ -1789,6 +1847,22 @@ export class VerificationHarness {
 		return this.projectConfigStore;
 	}
 
+	private resolveConfiguredBaseBranch(goalId: string): string | undefined {
+		const configured = this.resolveProjectConfigStore(goalId)?.get("base_ref") ?? "";
+		const parsed = parseBaseRef(configured);
+		return parsed.branch || undefined;
+	}
+
+	private async resolveVerificationBaseBranch(goalId: string, cwd: string, fallback?: string): Promise<string> {
+		return this.resolveConfiguredBaseBranch(goalId)
+			|| fallback
+			|| (await detectPrimaryBranch(cwd).catch(() => "master"));
+	}
+
+	private async resolveLegacyMasterBranch(cwd: string): Promise<string> {
+		return detectPrimaryBranch(cwd).catch(() => "master");
+	}
+
 	private resolveToolActivationDeps(cwd: string): VerificationToolActivationDeps {
 		let toolManager: ToolManager | undefined;
 		let groupPolicyStore: GroupPolicyProvider | undefined;
@@ -2021,8 +2095,7 @@ export class VerificationHarness {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
 		} else {
 			const steps = failureContext?.steps ?? [];
-			const goalBranch = failureContext?.goalBranch;
-			const message = buildVerificationFailureMessage(gateId, steps, goalBranch);
+			const message = buildVerificationFailureMessage(gateId, steps);
 			this.notifyTeamLeadFn(goalId, message);
 		}
 		// Cross-team propagation: when a CHILD goal's ready-to-merge gate
@@ -2130,9 +2203,14 @@ export class VerificationHarness {
 		}
 
 		try {
+			const [baseBranch, legacyMasterBranch] = await Promise.all([
+				this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master"),
+				this.resolveLegacyMasterBranch(cwd),
+			]);
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
-				master: primaryBranch || "master",
+				baseBranch,
+				master: legacyMasterBranch,
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
@@ -2231,8 +2309,10 @@ export class VerificationHarness {
 			}
 
 			// --- Phased execution ---
-			// Group active steps by phase (default 0), execute phases sequentially,
-			// steps within each phase run in parallel. Skipped optional steps are excluded.
+			// Group active steps by phase (default 0), execute phases sequentially.
+			// Within a phase, command steps are serialized to avoid test-suite
+			// contention; non-command steps still run in parallel. Skipped optional
+			// steps are excluded.
 			const phaseGroups = groupStepsByPhase(activeSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
@@ -2251,16 +2331,17 @@ export class VerificationHarness {
 					console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
 				}
 
-				// Also fetch the primary branch so origin/<primary> is up-to-date for
+				// Also fetch the review baseline branch so origin/<base> is up-to-date for
 				// implementation-gate diff baselines. Non-fatal on failure (offline / no remote).
-				if (builtinVars.master) {
+				const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
+				if (reviewBaselineBranch) {
 					try {
 						const { execFile: execFileCb } = await import("node:child_process");
 						const { promisify } = await import("node:util");
 						const execFileAsync = promisify(execFileCb);
-						await execFileAsync("git", ["fetch", "origin", builtinVars.master], { cwd, timeout: 30_000 });
+						await execFileAsync("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
 					} catch (err) {
-						console.warn(`[verification] Failed to fetch origin/${builtinVars.master} (non-fatal):`, err);
+						console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
 					}
 				}
 			}
@@ -2319,9 +2400,11 @@ export class VerificationHarness {
 					phase, stepIndices,
 				});
 
-				// Run steps in this phase in parallel
-				const phaseResults = await Promise.all(
-					phaseSteps.map(async ({ step, index }) => {
+				// Run safe work in parallel, but serialize command steps in this
+				// phase to avoid harness-induced full-suite contention.
+				const phaseResults = await runVerificationPhaseSteps(
+					phaseSteps,
+					async ({ step, index }) => {
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
 							const cachedResult: GateSignalStep = { ...cached, output: `[cached from prior signal] ${cached.output}` };
@@ -2402,8 +2485,11 @@ export class VerificationHarness {
 							// project has no build_command configured). Skipped-as-passed so
 							// optional infrastructure steps (build, custom commands) don't fail
 							// the gate for projects that don't define them.
-							const skipReason = isCommandStepSkippable(cmd);
-							if (skipReason) {
+							const requiredBuiltinFailure = readyToMergeUnresolvedBuiltinFailure(signal.gateId, cmd);
+							const skipReason = requiredBuiltinFailure ? null : isCommandStepSkippable(cmd);
+							if (requiredBuiltinFailure) {
+								result = { passed: false, output: requiredBuiltinFailure };
+							} else if (skipReason) {
 								result = { passed: true, output: skipReason };
 							} else {
 								const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
@@ -2477,7 +2563,7 @@ export class VerificationHarness {
 									}
 									await this.commandSemaphore.acquire();
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
+										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -2662,7 +2748,8 @@ export class VerificationHarness {
 						};
 						if (artifact) stepResult.artifact = artifact;
 						return { index, stepResult };
-					})
+					},
+					{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
 				);
 
 				// Store phase results

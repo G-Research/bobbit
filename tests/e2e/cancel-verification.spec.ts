@@ -117,6 +117,11 @@ async function pollUntil<T>(
 	return captured!;
 }
 
+// These tests intentionally start cancellable verification commands. Keep them
+// serial so a broad E2E run does not stack multiple slow child processes and
+// verification-harness state transitions in the same hot window.
+test.describe.configure({ mode: "serial" });
+
 test.describe("Cancel Verification API", () => {
 	test.setTimeout(60_000);
 

@@ -29,6 +29,7 @@ let stateDir: string;
 let previousAgentDir: string | undefined;
 let previousSkip: string | undefined;
 let previousBedrockEndpoint: string | undefined;
+let previousNoExternal: string | undefined;
 
 before(() => {
 	tmp = mkdtempSync(path.join(tmpdir(), "bobbit-aigw-startup-"));
@@ -37,6 +38,7 @@ before(() => {
 	previousAgentDir = process.env.BOBBIT_AGENT_DIR;
 	previousSkip = process.env.BOBBIT_SKIP_AIGW_DISCOVERY;
 	previousBedrockEndpoint = process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
+	previousNoExternal = process.env.BOBBIT_TEST_NO_EXTERNAL;
 	process.env.BOBBIT_AGENT_DIR = tmp;
 });
 
@@ -47,6 +49,8 @@ after(() => {
 	else process.env.BOBBIT_SKIP_AIGW_DISCOVERY = previousSkip;
 	if (previousBedrockEndpoint === undefined) delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
 	else process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME = previousBedrockEndpoint;
+	if (previousNoExternal === undefined) delete process.env.BOBBIT_TEST_NO_EXTERNAL;
+	else process.env.BOBBIT_TEST_NO_EXTERNAL = previousNoExternal;
 	rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -59,7 +63,7 @@ beforeEach(() => {
 	delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
 });
 
-const { startupAigwCheck } = await import("../src/server/agent/aigw-manager.js");
+const { startupAigwCheck, discoverAigwModels } = await import("../src/server/agent/aigw-manager.js");
 const { PreferencesStore } = await import("../src/server/agent/preferences-store.js");
 
 function readModels(): any {
@@ -198,6 +202,23 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 				process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME,
 				"AWS_ENDPOINT_URL_BEDROCK_RUNTIME must be set even under skip flag",
 			);
+		} finally {
+			await mock.close();
+		}
+	});
+
+	it("BOBBIT_TEST_NO_EXTERNAL blocks external AIGW discovery but permits local mocks", async () => {
+		const mock = await startMockGateway(["openai/local-only"]);
+		try {
+			process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
+			await assert.rejects(
+				() => discoverAigwModels("https://api.example.invalid/v1"),
+				/External AI Gateway discovery is disabled in tests/,
+			);
+
+			const models = await discoverAigwModels(mock.url);
+			assert.equal(models.length, 1);
+			assert.equal(mock.requestCount(), 1, "local mock gateway should still be reachable under the external-network guard");
 		} finally {
 			await mock.close();
 		}

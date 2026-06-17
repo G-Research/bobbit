@@ -29,6 +29,8 @@ export interface BuildBundleOptions {
 	deps?: string[];
 	/** esbuild flags appended after the entry. Default IIFE/ES2022/web tsconfig. */
 	extraFlags?: string[];
+	/** Preserve esbuild's CSS sidecar when a fixture explicitly links it. */
+	keepCss?: boolean;
 }
 
 const DEFAULT_FLAGS = [
@@ -60,12 +62,25 @@ function sleep(ms: number): void {
 	Atomics.wait(sab, 0, 0, ms);
 }
 
+function cssSidecarFor(outfile: string): string {
+	return outfile.replace(/\.js$/i, ".css");
+}
+
+function cleanupCssSidecar(outfile: string, existedBeforeBuild: boolean): void {
+	if (existedBeforeBuild) return;
+	try { fs.rmSync(cssSidecarFor(outfile), { force: true }); } catch { /* ignore */ }
+}
+
 export function buildBundle(opts: BuildBundleOptions): void {
 	const { entry, outfile } = opts;
 	const deps = opts.deps ?? [entry];
 	const depMtime = deps.reduce((m, p) => Math.max(m, fs.statSync(p).mtimeMs), 0);
+	const cssSidecarExisted = fs.existsSync(cssSidecarFor(outfile));
 
-	if (isFresh(outfile, depMtime)) return;
+	if (isFresh(outfile, depMtime)) {
+		if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
+		return;
+	}
 
 	fs.mkdirSync(path.dirname(outfile), { recursive: true });
 
@@ -94,15 +109,24 @@ export function buildBundle(opts: BuildBundleOptions): void {
 			sleep(POLL_INTERVAL_MS);
 
 			// Another worker may have finished the rebuild while we slept.
-			if (isFresh(outfile, depMtime)) return;
+			if (isFresh(outfile, depMtime)) {
+				if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
+				return;
+			}
 		}
 	}
 
 	try {
 		// Re-check after acquiring the lock — earlier worker may have built it.
-		if (isFresh(outfile, depMtime)) return;
+		if (isFresh(outfile, depMtime)) {
+			if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
+			return;
+		}
 		const flags = opts.extraFlags ?? DEFAULT_FLAGS;
 		execSync(`npx esbuild ${entry} ${flags.join(" ")} --outfile=${outfile}`, { stdio: "pipe" });
+		// Most file:// fixtures don't link esbuild's CSS sidecar; leaving it behind
+		// creates untracked repo artifacts when a bundled component imports CSS.
+		if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
 	} finally {
 		try { fs.rmdirSync(lockDir); } catch { /* ignore */ }
 	}

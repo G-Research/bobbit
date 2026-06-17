@@ -24,9 +24,9 @@
  * goal-assistant flow where the user has clicked "Open proposal" on a
  * tool card → proposal panel renders alongside the assistant → user
  * dismisses → reload restores the dismissed proposal. We simulate the
- * dismiss step by writing the fingerprint + clearing the slot exactly
- * the way `markProposalDismissed` + `delete state.activeProposals.goal`
- * does in handleDismiss (render.ts:1918).
+ * dismiss step by writing the same fingerprint + clearing the slot, then
+ * explicitly plant the stale slot-less draft shape observed under broad-suite
+ * load so the reload assertion is deterministic.
  *
  * Currently fails on master at the post-reload "panel must stay hidden"
  * assertion. Will pass once `goalDraft.restore` consults
@@ -34,6 +34,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
+import { waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 
 async function activeSessionId(page: Page): Promise<string> {
@@ -69,12 +70,24 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 
 		const sid = await activeSessionId(page);
 
-		// 4. Plant the goal-proposal draft on the server explicitly. The
-		//    debounced `saveGoalDraft` triggered by `onGoalProposal` is racy in
-		//    the test (the slot may not yet be live when the debounce fires),
-		//    so we PUT the draft body directly. This is the exact shape that
-		//    `goalDraft.serialize()` produces when a propose_goal has just
-		//    arrived (src/app/session-manager.ts:271-282).
+		// Let the assistant turn and its debounced draft save settle before we
+		// simulate dismissal. Otherwise a late `saveGoalDraft` can overwrite the
+		// planted draft after the simulated dismiss with a slot-less draft that
+		// still carries the stale previewTitle, making this test fail for the
+		// race instead of the reload contract.
+		await waitForSessionStatus(sid, "idle", 30_000);
+		await page.waitForFunction(async (sidArg: string) => {
+			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
+			const token = localStorage.getItem("gateway.token") ?? "";
+			const res = await fetch(`${url}/api/sessions/${sidArg}/draft?type=goal`, { headers: { Authorization: `Bearer ${token}` } });
+			if (!res.ok) return false;
+			const body = await res.json();
+			return !!body?.data?.activeGoalProposal;
+		}, sid, { timeout: 10_000 });
+
+		// 4. Plant the goal-proposal draft on the server explicitly. This keeps
+		//    the test focused on restore/dismiss behavior even if the client-side
+		//    draft shape changes while the proposal pipeline settles.
 		const plantResult = await page.evaluate(async (sidArg: string) => {
 			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
 			const token = localStorage.getItem("gateway.token") ?? "";
@@ -120,11 +133,10 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 			return !!body?.data?.activeGoalProposal?.title;
 		}, null, { timeout: 5_000 });
 
-		// 5. Simulate Dismiss exactly as `handleDismiss` (render.ts:1918) does:
-		//    write the dismissal fingerprint to localStorage and clear the
-		//    in-memory slot. The goal-assistant panel itself has no Dismiss
-		//    button (renderGoalForm call at render.ts:833 does not pass
-		//    `onDismiss`), so we drive the same state mutation directly.
+		// 5. Simulate Dismiss: write the same dismissal fingerprint to localStorage
+		//    and clear the in-memory slot. The goal-assistant panel itself has no
+		//    Dismiss button (renderGoalForm call at render.ts:833 does not pass
+		//    `onDismiss`), so we drive the state mutation directly.
 		await page.evaluate((sidArg: string) => {
 			const s = (window as any).bobbitState;
 			const fields = { ...(s?.activeProposals?.goal?.fields ?? {}) };
@@ -146,10 +158,52 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 			s.assistantHasProposal = false;
 		}, sid);
 
-		// 6. Reload — `setupSessionSubscription` → `restoreGoalDraft`
-		//    runs. On master it unconditionally re-populates
-		//    `state.activeProposals.goal` from the server-side draft, and
-		//    the assistant preview re-renders the proposal contents.
+		// 6. Simulate the broad-suite race this spec caught: a late debounced
+		//    goal-draft save can land after the dismissal and overwrite the draft
+		//    with no activeGoalProposal but stale form-mirror fields. Restore must
+		//    still honor the dismissal record and keep the form empty.
+		const staleDraftResult = await page.evaluate(async (sidArg: string) => {
+			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
+			const token = localStorage.getItem("gateway.token") ?? "";
+			const res = await fetch(`${url}/api/sessions/${sidArg}/draft`, {
+				method: "PUT",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					type: "goal",
+					data: {
+						sessionId: sidArg,
+						previewTitle: "E2E Test Goal",
+						previewSpec: "This is a test goal proposal from the E2E mock agent.",
+						previewCwd: "",
+						previewProjectId: "",
+						previewTitleEdited: false,
+						previewSpecEdited: false,
+						previewCwdEdited: false,
+						hasReceivedProposal: true,
+						goalAssistantTab: "chat",
+					},
+				}),
+			});
+			return { status: res.status, ok: res.ok };
+		}, sid);
+		expect(staleDraftResult, "stale slot-less draft plant must succeed").toMatchObject({ ok: true });
+
+		await page.waitForFunction(async () => {
+			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
+			const token = localStorage.getItem("gateway.token") ?? "";
+			const sid = (window as any).bobbitState?.selectedSessionId;
+			const res = await fetch(`${url}/api/sessions/${sid}/draft?type=goal`, { headers: { Authorization: `Bearer ${token}` } });
+			if (!res.ok) return false;
+			const body = await res.json();
+			return body?.data?.previewTitle === "E2E Test Goal" && !body?.data?.activeGoalProposal;
+		}, null, { timeout: 5_000 });
+
+		// 7. Reload — `setupSessionSubscription` → `restoreGoalDraft`
+		//    runs. The dismissed proposal must stay hidden even when the server
+		//    draft only contains stale form-mirror fields.
 		await page.reload();
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
@@ -184,9 +238,7 @@ test.describe("Goal proposal dismiss + reload @repro", () => {
 
 
 		// 7. The assistant goal title input must NOT have been re-populated
-		//    from the dismissed proposal. CURRENTLY FAILS — the restore
-		//    path re-fills `state.previewTitle` from the draft so the
-		//    input shows "E2E Test Goal" again.
+		//    from the dismissed proposal.
 		const titleAfterReload = page
 			.locator("input[placeholder='Goal title']")
 			.first();

@@ -14,23 +14,23 @@
  *   3. While the agent is busy and the wait is parked, the user types a
  *      follow-up in the textarea, presses Enter (queued pill appears), and
  *      clicks the Steer button.
- *   4. At the next tool boundary the server batches the steered message and
- *      dispatches it via `rpcClient.steer()`. Just before that dispatch,
- *      `_dispatchSteeredMessages()` calls `bgProcessManager.abortAllWaits()`
+ *   4. Clicking Steer promotes the queued row, immediately dequeues the
+ *      steered front group, and calls `_dispatchSteer()` while the agent is
+ *      streaming. `_dispatchSteer()` owns `bgProcessManager.abortAllWaits()`,
  *      so any in-flight `bash_bg wait` long-poll is unblocked with
  *      `aborted:true` — the bg process itself is left running.
  *   5. The steered text is rendered as a user-message in the chat,
  *      proving the steer text actually reached the agent.
  *
  * Together the assertions guarantee that:
- *   - The UI steer button reaches the server (sent-indicator appears).
+ *   - The UI steer button reaches the server (queue row dispatches).
  *   - The bash_bg-wait abort hook on the steer-dispatch path actually fires
  *     (wait returns aborted:true within the timeout, bg proc still running).
  *   - The steer is delivered to the agent (user-message rendered in chat).
  *
  * If any of those wires regress in isolation — e.g. someone removes the
- * `bg.abortAllWaits` call from `_dispatchSteeredMessages`, or the steer pill
- * stops dispatching at tool boundaries — this single test catches it.
+ * `bg.abortAllWaits` call from `_dispatchSteer`, or queued promotion stops
+ * dispatching immediately while streaming — this single test catches it.
  */
 import { test, expect } from "./fixtures.js";
 import {
@@ -63,9 +63,9 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 
 		// 1. Make the agent busy. STAY_BUSY:<ms> emits tool_execution_start
 		//    ("Bash sleep"), ticks for <ms>, then emits tool_execution_end.
-		//    The steered message is batched and dispatched on that _end event,
-		//    so the busy window has to be long enough for us to (a) start the
-		//    bg wait, (b) queue a message, (c) click Steer — comfortably ~5s.
+		//    The busy window only needs to be long enough for us to (a) start the
+		//    bg wait, (b) queue a message, (c) click Steer — queued-steer
+		//    promotion dispatches immediately while the stream is still active.
 		await sendMessage(page, "STAY_BUSY:5000 working");
 		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
 		await rec.capture("Agent busy — Stop button visible");
@@ -99,22 +99,20 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		await expect(page.locator(".steer-btn")).toHaveCount(1);
 		await rec.capture("Follow-up queued — pill visible, Steer button armed");
 
-		// 4. Click the Steer pill → server marks isSteered, then batches and
-		//    dispatches at the next tool boundary (mock agent's busy
-		//    tool_execution_end ~5s after the initial prompt).
-		await page.locator(".steer-btn").first().click();
-		await expect(page.locator(".sent-indicator")).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator(".sent-indicator")).toContainText("Sent");
-		await rec.capture("Steer clicked — sent-indicator shows Sent");
+		// 4. Click the Steer pill → server marks isSteered, dequeues the
+		//    steered front group, and immediately calls _dispatchSteer while
+		//    the agent is streaming.
+		await page.locator(".steer-btn").first().evaluate((el: HTMLElement) => el.click());
+		await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+		await rec.capture("Steer clicked — queued row dispatched");
 
-		// 5. `steerQueued` calls `bgProcessManager.abortAllWaits(sessionId)`
-		//    synchronously when the session is streaming, so the parked wait
-		//    resolves with `aborted:true` immediately on the click — NOT after
-		//    the busy tool's 5000ms `tool_execution_end` fires. The bg process
-		//    itself keeps running. Without this, a steer-on-queue while the
-		//    agent is parked in bash_bg.wait would be deferred until the wait
-		//    completed naturally (could be minutes). See the `steerQueued`
-		//    method in src/server/agent/session-manager.ts.
+		// 5. Streaming `steerQueued` immediately calls _dispatchSteer, and
+		//    _dispatchSteer owns `bgProcessManager.abortAllWaits(sessionId)`.
+		//    The parked wait resolves with `aborted:true` immediately on the
+		//    click — NOT after the busy tool's 5000ms `tool_execution_end`
+		//    fires. The bg process itself keeps running. Without this, a
+		//    steer-on-queue while the agent is parked in bash_bg.wait would be
+		//    deferred until the wait completed naturally (could be minutes).
 		const result = await waitPromise;
 		const elapsed = Date.now() - waitStart;
 		expect(result.status).toBe(200);
@@ -123,9 +121,9 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		expect(result.body.info.status).toBe("running");
 		// The wait must abort well before the 5000ms busy-tool boundary. 3000ms
 		// is a generous ceiling: slow CI takes ~500ms wall-time end-to-end for
-		// the click → ws → steerQueued → abortAllWaits chain. A regression that
-		// reverts the steerQueued fix would push elapsed past 5000ms (waiting
-		// for the busy tool's _end event) which this assertion catches.
+		// the click → ws → steerQueued → _dispatchSteer → abortAllWaits chain.
+		// A regression that makes queued promotion wait for the busy tool's
+		// _end event would push elapsed past 5000ms, which this assertion catches.
 		expect(elapsed).toBeLessThan(3_000);
 
 		// 6. Steer text actually reached the agent — its handlePrompt round-trip
