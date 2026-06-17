@@ -6727,8 +6727,8 @@ export class SessionManager {
 		await session.rpcClient.stop();
 
 		// Reconcile any in-flight steers that died with the bridge: anything
-		// in the shadow ledger was accepted by the SDK but never echoed (the
-		// process is dead before its message_end could arrive). Re-enqueue
+		// left in the shadow ledger was recorded for dispatch but never echoed
+		// (the process is dead before its message_end could arrive). Re-enqueue
 		// at front so the post-respawn drainQueue redispatches them once.
 		this._reconcileAfterAbort(session);
 

@@ -231,7 +231,7 @@ export interface QueuedMessage {
 	images?: Array<{ type: "image"; data: string; mimeType: string }>;
 	attachments?: unknown[];
 	isSteered: boolean;
-	/** True if already dispatched mid-turn via steer RPC (kept in queue for UI) */
+	/** Legacy optional flag from the pre-ledger queue model; current server rows omit it. */
 	dispatched?: boolean;
 	/** True for a client-side outbox row not yet delivered to the server (S2):
 	 *  issued while the WS was reconnecting; flushed on auth_ok. Lets the pill

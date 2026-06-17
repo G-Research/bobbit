@@ -18,7 +18,8 @@ Browser (RemoteAgent)          Server (SessionManager)         Agent subprocess
                      │  └─ dequeue next ──► rpcClient.prompt()
                      └─ broadcastQueue() ──WS──► queue_update
 
-  steer()  ──WS──►  (streaming?) ──► rpcClient.steer() ──► injected mid-turn
+  steer()  ──WS──►  enqueue steered row ──► _dispatchSteer()
+                                      └─► rpcClient.steer() ──► injected mid-turn
 ```
 
 ## Three dispatch paths
@@ -45,7 +46,7 @@ Standard user message. Always routed through `enqueuePrompt()` — never sent di
 
 A mid-turn redirect. Behavior depends on agent state:
 
-- **Agent streaming**: Dispatched **immediately** via `rpcClient.steer()` — injected between tool calls in real-time. The message is NOT queued. The UI textarea always queues via `prompt` — it never sends `steer` directly.
+- **Agent streaming**: Enqueued as a steered row, then dispatched **immediately** through `_dispatchSteer()` — injected between tool calls in real time. `_dispatchSteer()` records the text in the in-flight ledger, removes the row from the visible queue, persists both changes together, and forwards it via `rpcClient.steer()`. The UI textarea always queues via `prompt` — it never sends `steer` directly.
 - **Agent idle**: Enqueued as a steered message. Steered messages sort before normal messages in the queue.
 
 ### `follow_up` (client → server)
@@ -74,7 +75,7 @@ Sent whenever the queue changes — enqueue, dequeue, steer, remove, reorder. Co
 
 **Ordering**: Steered messages always sort before non-steered. Within each group, insertion order is preserved (stable sort). The client can explicitly reorder via `reorder(messageIds)` — the queue adopts the given ID order, with unlisted items appended at the end.
 
-**Lifetime is queued → dispatched (= removed).** A row is added by `enqueue()` and is removed exactly once: either by `_dispatchSteer()` immediately *before* it awaits `rpcClient.steer()` (steered batch dispatch), by `drainQueue()` when the agent goes idle (regular dispatch), or by an explicit `remove()` from the UI. The queue **does not** carry an in-flight `dispatched` flag — once the SDK has the text, the SDK's `_steeringMessages` mirror (and Bobbit's shadow ledger; see [Abort and force-kill recovery](#abort-and-force-kill-recovery)) own that state. `enqueueAtFront()` is reserved for reconciliation paths that need to put a row back at index 0 after an RPC failure or post-abort drain.
+**Lifetime is queued → dispatched (= removed).** A row is added by `enqueue()` and is removed exactly once: either by `_dispatchSteer()` as it records the in-flight ledger and starts `rpcClient.steer()` (steered batch dispatch), by `drainQueue()` when the agent goes idle (regular dispatch), or by an explicit `remove()` from the UI. The queue **does not** carry an in-flight `dispatched` flag — once Bobbit records the ledger and removes the row, the shadow ledger (and then the SDK's `_steeringMessages` mirror after RPC acceptance) owns that state. `enqueueAtFront()` is reserved for reconciliation paths that need to put a row back at index 0 after an RPC failure or post-abort drain.
 
 Why this matters: the previous design carried a `dispatched: true` flag on rows after dispatch and relied on `removeDispatched()` / `resetDispatched()` to maintain it across normal completion vs force-kill. Three independent caches of "what's pending" — Bobbit's flag, the SDK's `_steeringMessages`, and pi-agent-core's `Agent.steeringQueue` — drifted under abort/restart and produced duplicate-steer-on-Stop. Removing the flag and treating row-removal-on-dispatch as the single source of truth at the Bobbit layer eliminates the drift. See [docs/design/steer-subsystem-rewrite.md](design/steer-subsystem-rewrite.md) for the design rationale.
 
@@ -105,7 +106,7 @@ Live user messages are tracked through the unified message reducer (`src/app/mes
 The client receives `queue_update` events and stores them in `_serverQueue`. The UI renders each queued message as a "pill" above the textarea:
 
 - **Non-steered pills** show four controls: drag handle (for reordering), edit button (pencil — removes pill and populates textarea for editing), steer button, and remove button (X).
-- **Steered pills** show a "Sent" badge and no interactive controls — the message is committed for delivery on abort.
+- **Steered pills** that remain in the queue show a "Sent" badge and no interactive controls. Streaming `steer_queued` promotions normally do not linger as Sent pills: the server removes the promoted front group from the queue in the same dispatch path, so the next `queue_update` drops the row.
 - **Edit flow**: Clicking the pencil icon fires `onEditQueued`, which removes the pill from the queue and places its text back in the textarea. On re-send, the message is added to the end of the queue (or dispatched directly if the agent is idle).
 - **Drag reorder**: Dragging a pill's handle fires `onReorder`, which sends a `reorder_queue` WS message. The server reorders and broadcasts the updated queue to all clients.
 
@@ -148,6 +149,8 @@ On successful retry (turn completes without error), `lastTurnErrored` is cleared
 
 If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order, the optimistic `"streaming"` status is reverted to `"idle"`, and a follow-up drain is scheduled on the next tick.
 
+For `drainQueue()` recovery, Bobbit suppresses re-enqueue only after an inbound agent event advances `agentObservedTurnVersion`, proving the turn was accepted. Local status-only changes such as Stop → `"aborting"` do not count; that distinction prevents duplicate recovered task notifications without dropping a prompt that was rejected during abort/restart reconciliation.
+
 The exception is a child-exit path where the session is already `terminated` or `aborting`. Bobbit does not re-enqueue into a dead bridge; sandbox recovery, force-abort recovery, or explicit Retry owns the next process.
 
 ## Abort and force-kill recovery
@@ -158,24 +161,24 @@ When the user clicks Stop (or presses Escape), the server attempts a graceful ab
 
 **Force-kill recovery flow** (exactly-once at the transcript level):
 
-1. User clicks Stop. `SessionManager.forceAbort()` calls `_reconcileAfterAbort(session)` during abort handling — the shadow ledger (`session.inFlightSteerTexts`) holds every steer text whose `rpcClient.steer()` resolved but whose `message_end(role:user)` echo has not yet arrived.
-2. `_reconcileAfterAbort()` re-enqueues each ledger entry at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger.
-3. The agent process is killed, synthetic `agent_end` emitted, fresh subprocess spawned.
+1. User clicks Stop. `SessionManager.forceAbort()` enters abort handling. The shadow ledger (`session.inFlightSteerTexts`) holds every steer text recorded by `_dispatchSteer()` but not yet echoed as `message_end(role:user)`.
+2. If the graceful abort does not settle, the agent process is stopped and `_reconcileAfterAbort()` re-enqueues each ledger entry at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger.
+3. A synthetic `agent_end` is emitted and a fresh subprocess is spawned.
 4. `drainQueue()` runs. The re-enqueued steered rows are popped via `dequeueAllSteered()`, joined into a single prompt, and dispatched once.
 
 The same reconciliation runs on the graceful path: when `handleAgentLifecycle` sees `agent_end` while `wasAborting`, it calls `_reconcileAfterAbort()` before transitioning to `idle`. Either way the result is the same — every steer the user typed appears as exactly one `<user-message>` in the rendered chat, even if the abort race tore down the agent between dispatch and echo.
 
 ### The shadow ledger
 
-`SessionInfo.inFlightSteerTexts: string[]` is a per-session array of steer texts whose lifecycle is bounded between **dispatch** (after `await rpcClient.steer(text)` resolves in `_dispatchSteer`) and **echo** (`message_end` whose user-role body matches an entry, mirroring the SDK's `_steeringMessages` text-match splice).
+`SessionInfo.inFlightSteerTexts: string[]` is a per-session array of steer texts whose lifecycle is bounded between **dispatch start** (recorded by `_dispatchSteer()` before the row-removal store update) and **echo** (`message_end` whose user-role body matches an entry, mirroring the SDK's `_steeringMessages` text-match splice).
 
-- **Push**: at the bottom of `_dispatchSteer()` once the SDK has definitively accepted the batch text.
+- **Record + persist**: `_dispatchSteer()` appends the batch text before removing queue rows, then persists `messageQueue` and `inFlightSteerTexts` in the same store update. A gateway restart after row removal but before transcript echo can therefore recover the text exactly once.
 - **Splice**: in `_consumeSteerEcho()`, called from `handleAgentLifecycle` for every event. Silent no-op for non-matching messages (regular prompts, follow-ups, skill-expansion echoes whose body has been rewritten).
-- **Drain**: in `_reconcileAfterAbort()`, on `agent_end` while `wasAborting` and inside `forceAbort()` immediately after `rpcClient.stop()` (i.e. after the kill, before the post-respawn `drainQueue`). The ledger is Bobbit-owned in-process state, so its content survives bridge teardown — the timing relative to the kill doesn't affect correctness.
+- **Drain**: in `_reconcileAfterAbort()` and during `restoreSession()` after `switch_session` has replayed durable echoes. Any ledger entry still un-echoed is re-enqueued at the front with `isSteered: true`, then the ledger is cleared.
 
 The ledger exists because pi-coding-agent's RPC bridge surface does not expose `agentSession.clearQueue()` — the natural primitive for "pull undelivered steers back". Mirroring the SDK's text-match removal logic at our layer (mitigation B in the design doc) gives Bobbit a single, bounded reconciliation point without an upstream PR. Bounded growth is enforced by construction: every push has a paired echo or abort-drain; neither path is silently dropped.
 
-Residual at-least-once risk: a hard process kill in the small window between `rpcClient.steer()` resolving and the SDK pushing the text onto its mirror. The window is orders of magnitude smaller than the previous always-on at-least-once contract — see [docs/design/steer-subsystem-rewrite.md §6](design/steer-subsystem-rewrite.md) for the analysis.
+Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer back into the queue if its ledger entry is still present. If abort/restart reconciliation already drained that entry, the catch path persists the cleared ledger and does **not** enqueue a duplicate.
 
 **Why `steer_queued` dispatches through `_dispatchSteer()`**: while streaming, `steerQueued()` only does the queue promotion/dequeue work and then immediately calls the same `_dispatchSteer()` path used by fresh live steers. That keeps wait abort, row removal, batching, shadow-ledger handoff, and RPC-failure recovery in one place. When idle, promotion falls back to normal `drainQueue()` semantics with steered rows first.
 

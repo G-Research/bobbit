@@ -59,10 +59,11 @@ test.describe("Steer mid-turn delivery", () => {
 
 			expect(steerAck.data.message.content[0].text).toContain("STEER_REDIRECT_123");
 
-			// PI-25b fix: live steer is now persisted in promptQueue as
-			// {isSteered:true, dispatched:true} so it survives abort. The
-			// queue_update should reflect that, and any queued steer row
-			// should carry isSteered=true (not a plain user prompt).
+			// PI-25b fix: live steer is first persisted as a steered queue row,
+			// then `_dispatchSteer()` records the in-flight ledger and removes
+			// the row as it dispatches. Any queued steer row visible in an
+			// intermediate queue_update should carry isSteered=true (not a plain
+			// user prompt).
 			const queuedMsgs = conn.messages.filter(
 				(m: WsMsg) => m.type === "queue_update" && m.queue && m.queue.length > 0,
 			);
