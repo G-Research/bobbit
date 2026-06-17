@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
+import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
@@ -18,6 +19,8 @@ export interface GateSignalStep {
 		contentType: string;
 		metadata?: Record<string, string>;
 	};
+	/** Durable diagnostics for completed command steps, stored under Bobbit state. */
+	diagnostics?: GateStepDiagnostics;
 	/**
 	 * Lifecycle status for in-flight rows. Set on initial enumeration by
 	 * `VerificationHarness.beginVerification()` so the gate-store signal

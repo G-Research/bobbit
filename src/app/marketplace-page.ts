@@ -39,6 +39,8 @@ import {
 	syncMarketplaceSource,
 	uninstallMarketplacePack,
 	updateInstalledPack,
+	fetchContributions,
+	fetchTools,
 	type BrowsePackWire,
 	type ConflictWire,
 	type DisabledRefs,
@@ -169,12 +171,10 @@ export function activeSessionProjectId(): string | undefined {
  *  uninstall reconciliation path (§4a). Best-effort; never throws. */
 export async function reconcileRenderersForActiveSession(): Promise<void> {
 	const [
-		{ fetchTools, fetchContributions },
 		{ registerPackRenderers },
 		{ registerPackPanels, panelInfosFromContributions },
 		{ registerPackEntrypoints, entrypointInfosFromContributions },
 	] = await Promise.all([
-		import("./api.js"),
 		import("./pack-renderers.js"),
 		import("./pack-panels.js"),
 		import("./pack-entrypoints.js"),

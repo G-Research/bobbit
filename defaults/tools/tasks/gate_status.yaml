@@ -7,17 +7,18 @@ provider:
   extension: extension.ts
 group: Gates
 docs: >-
-  Returns latest signal with truncated verification output (last 40 lines for
-  failed steps). Shows hasContent/contentLength instead of content body. Use
-  gate_inspect for full content, verification output, or signal history.
+  Returns latest signal with compact failed-step output, failedSteps, and
+  metadata. Use gate_inspect for targeted content, verification logs/artifacts,
+  or signal history.
 detail_docs: >-
   ## Purpose
 
 
   Get the latest signal details for a specific workflow gate — verdict,
-  truncated failed-step output, and metadata. This is the Layer 2 detail view:
-  more than `gate_list` but less than `gate_inspect`. Returns enough to decide
-  next steps without dumping full content or history.
+  failed-step names, compact failed-step output, and metadata. This is the Layer
+  2 detail view: more than `gate_list` but less than `gate_inspect`. Returns
+  enough to decide next steps without dumping full content, retained logs, or
+  history.
 
 
   ## Parameters
@@ -61,22 +62,26 @@ detail_docs: >-
     - `commitSha` — git commit (if provided)
     - `verification` — verification result:
       - `status` — `passed`, `failed`, or `running`
+      - `failedSteps` — failed verification step names, useful as `gate_inspect(step=...)`
       - `steps[]` — array of step results:
         - `name` — step name
         - `passed` — boolean
-        - `output` — last 40 lines of output (failed steps only; omitted for passed steps)
+        - `output` — compact output tail (failed steps only; omitted for passed steps)
 
 
   Does **not** return: content body (use `gate_inspect section=content`), full
-  signal history (use `gate_inspect section=signals`), full verification output
-  (use `gate_inspect section=verification`).
+  signal history (use `gate_inspect section=signals`), or retained verification
+  logs/artifacts (use `gate_inspect section=verification`, scoped by `step`).
 
 
   ## When to Use
 
 
   - **Checking verification results** — after a gate notification, see the
-  latest verdict and truncated error output.
+  latest verdict, failed steps, and compact error output.
+
+  - **Scoping inspection** — copy `failedSteps` into `gate_inspect(step="...")`
+  and drill with `grep`, `slice`, or `tail` before considering a re-run.
 
   - **Seeing latest verdict** — quick check on what failed and why.
 
@@ -90,8 +95,9 @@ detail_docs: >-
   - **Reading gate content** — use `gate_inspect(gate_id="...",
   section="content")` instead.
 
-  - **Reading full verification output** — use `gate_inspect(gate_id="...",
-  section="verification")` if the 40-line tail wasn't enough.
+  - **Reading retained verification output or artifacts** — use
+  `gate_inspect(gate_id="...", section="verification", step="...", mode="grep"|"slice"|"tail")`
+  if the compact tail wasn't enough.
 
   - **Browsing signal history** — use `gate_inspect(gate_id="...",
   section="signals")` to see all past signals.
@@ -130,8 +136,18 @@ detail_docs: >-
   - **Only the latest signal** — historical signals are not returned. Use
   `gate_inspect(section="signals")` for history.
 
-  - **Truncated output** — failed verification steps show only the last 40
-  lines of output. Use `gate_inspect(section="verification")` for full output.
+  - **Compact output** — failed verification steps show only a small tail.
+  Explicit `gate_inspect(section="verification")` may use retained logs/artifacts
+  for failed command steps while this status view stays compact.
 
-  - **Use `gate_list` first** — to discover gate IDs before querying specific
-  gates.
+  - **Bounded diagnostics** — retained logs/artifacts can survive restart and
+  worktree cleanup, but tool-result budgets still cap output. Prefer
+  step-scoped `grep`/`slice` over `full`.
+
+  - **Avoid wasteful re-runs** — after verification has run, consume persisted
+  gate diagnostics first. Re-run tests only to validate new changes or when
+  retained diagnostics are insufficient or stale; do not duplicate successful
+  agent/gate validation just to gather context.
+
+  - **Use `gate_list` first** — to discover gate IDs and `failedSteps` before
+  querying specific gates.

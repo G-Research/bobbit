@@ -1,4 +1,6 @@
 // src/app/boot-timing.ts
+
+import { gatewayFetch } from "./gateway-fetch.js";
 //
 // Opt-in boot/reload performance instrumentation. Records `performance.now()`
 // (ms since navigation start / `performance.timeOrigin`) at named boot
@@ -141,10 +143,12 @@ export function bootTimingReport(reason: string): void {
 	console.log(`[boot-timing] ${reason} — reload=${isReload} total=${total}ms (navigation→last mark). Sample: window.__bobbitBootTimings`);
 	(console as { table?: (data: unknown) => void }).table?.(buildRows());
 
-	// Fire-and-forget POST to the harness-gated sink. Dynamic import avoids a
-	// static dependency cycle (api.ts → state.ts → …) and keeps boot-timing
-	// importable from very early modules.
-	import("./api.js")
-		.then((m) => m.postBootTiming(sample))
+	// Fire-and-forget POST to the harness-gated sink. Use the tiny fetch wrapper
+	// instead of api.ts so early boot instrumentation does not pull the app shell.
+	gatewayFetch("/api/dev/boot-timing", {
+		method: "POST",
+		body: JSON.stringify(sample),
+	})
+		.then(() => { /* posted */ })
 		.catch(() => { /* diagnostics must never break the app */ });
 }

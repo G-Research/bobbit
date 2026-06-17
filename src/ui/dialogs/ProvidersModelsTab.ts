@@ -1,9 +1,9 @@
 import { i18n } from "@mariozechner/mini-lit";
 import { Select } from "@mariozechner/mini-lit/dist/Select.js";
-import { getProviders } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/api.js";
+import { getPiAiProviders } from "../../app/pi-ai-lazy.js";
 import "../components/CustomProviderCard.js";
 import "../components/ProviderKeyInput.js";
 import type {
@@ -16,6 +16,7 @@ import { SettingsTab } from "./SettingsDialog.js";
 @customElement("providers-models-tab")
 export class ProvidersModelsTab extends SettingsTab {
 	@state() private customProviders: CustomProvider[] = [];
+	@state() private knownProviders: string[] | null = null;
 	@state() private providerStatus: Map<
 		string,
 		{ modelCount: number; status: "connected" | "disconnected" | "checking" }
@@ -23,7 +24,16 @@ export class ProvidersModelsTab extends SettingsTab {
 
 	override async connectedCallback() {
 		super.connectedCallback();
-		await this.loadCustomProviders();
+		await Promise.all([this.loadCustomProviders(), this.loadKnownProviders()]);
+	}
+
+	private async loadKnownProviders() {
+		try {
+			this.knownProviders = await getPiAiProviders();
+		} catch (error) {
+			console.error("Failed to load known providers:", error);
+			this.knownProviders = [];
+		}
 	}
 
 	private async loadCustomProviders() {
@@ -73,8 +83,6 @@ export class ProvidersModelsTab extends SettingsTab {
 	}
 
 	private renderKnownProviders(): TemplateResult {
-		const providers = getProviders();
-
 		return html`
 			<div class="flex flex-col gap-6">
 				<div>
@@ -84,7 +92,9 @@ export class ProvidersModelsTab extends SettingsTab {
 					</p>
 				</div>
 				<div class="flex flex-col gap-6">
-					${providers.map((provider) => html` <provider-key-input .provider=${provider}></provider-key-input> `)}
+					${this.knownProviders === null
+						? html`<div class="text-sm text-muted-foreground">Loading providers...</div>`
+						: this.knownProviders.map((provider) => html` <provider-key-input .provider=${provider}></provider-key-input> `)}
 				</div>
 			</div>
 		`;

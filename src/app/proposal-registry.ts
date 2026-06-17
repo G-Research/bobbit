@@ -148,8 +148,8 @@ function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string):
 	}
 	if (s?.panelWorkspaceActiveBySession?.[sessionId] === id) s.panelWorkspaceActiveBySession[sessionId] = "";
 	if (s?.activePanelTabId === id) s.activePanelTabId = "";
-	void import("./side-panel-workspace.js")
-		.then((mod) => mod.closeSidePanelTab(id, { sessionId }))
+	void import("./proposal-workspace-actions.js")
+		.then((mod) => mod.closeProposalWorkspaceTab(id, sessionId))
 		.catch(() => { /* optional browser-only integration */ });
 }
 
@@ -167,8 +167,8 @@ function openCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string):
 		source: { type: "proposal" as const, proposalType: type, sessionId },
 		updatedAt: Date.now(),
 	};
-	void import("./side-panel-workspace.js")
-		.then((mod) => mod.openSidePanelTab(tab, { focus: true }))
+	void import("./proposal-workspace-actions.js")
+		.then((mod) => mod.openProposalWorkspaceTab(tab))
 		.catch(() => { /* optional browser-only integration */ });
 	try {
 		if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {

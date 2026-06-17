@@ -14,7 +14,8 @@ import {
 	GW_SESSION_KEY,
 	type GatewaySession,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision, readProposalSnapshot } from "./api.js";
+import { getPiAiModel } from "./pi-ai-lazy.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
@@ -30,7 +31,7 @@ import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
 import { showHeaderToast } from "./render.js";
-import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./proposal-panels-lazy.js";
+import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount, resetProjectProposalPanel } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { restorePersistedReviewDocuments } from "./review-sources.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
@@ -1255,8 +1256,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const savedModel = loadSessionModel(sessionId);
 			if (!savedModel) return null;
 			try {
-				const { getModel } = await import("@earendil-works/pi-ai");
-				return getModel(savedModel.provider as any, savedModel.modelId);
+				return await getPiAiModel(savedModel.provider, savedModel.modelId) ?? null;
 			} catch {
 				return null; // Model no longer available
 			}
@@ -1854,7 +1854,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				renderApp();
 				if (proposalFields) return;
 				try {
-					const { readProposalSnapshot } = await import("./api.js");
 					const res = await readProposalSnapshot(sessionId, type, numericRev);
 					if (res && (res as any).ok && hasObjectFields((res as any).fields)) {
 						const snapshotFields = (res as any).fields as Record<string, unknown>;
@@ -2750,12 +2749,9 @@ export function backToSessions(): void {
 		delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
 	}
 	delete state.activeProposals.project;
-	void (async () => {
-		try {
-			const { resetProjectProposalPanel } = await import("./proposal-panels-lazy.js");
-			resetProjectProposalPanel();
-		} catch { /* ignore */ }
-	})();
+	try {
+		resetProjectProposalPanel();
+	} catch { /* ignore */ }
 	state.assistantType = null;
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;

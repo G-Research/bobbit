@@ -1,6 +1,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
+import { loadSavedBindings } from "./shortcut-registry.js";
 
 /**
  * Placeholder model used as the initial value of `_state.model` before the
@@ -2389,7 +2390,7 @@ export class RemoteAgent {
 
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {
-			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());
+			void loadSavedBindings();
 		}
 
 	}

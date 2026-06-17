@@ -57,6 +57,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/provider-bridge/",     // src/server/agent/provider-bridge-extension.ts
 	"state/mcp-extensions/",      // src/server/agent/tool-activation.ts, rpc-bridge.ts
 	"state/html-snapshots/",      // server.ts
+	"state/gate-diagnostics/",    // src/server/agent/gate-diagnostics-cleanup.ts
 	"state/proposal-drafts/",     // server.ts / session-manager.ts
 	"state/pr-walkthrough/",      // src/server/pr-walkthrough/routes.ts persisted walkthrough payloads
 	"state/model-name-*",         // src/server/agent/session-manager.ts per-session model-name files

@@ -7,8 +7,7 @@
  *   Bug 1 — TeamManager.resubscribeTeamEvents() must NOT attach the
  *           agent_end → notifyTeamLead listener to reviewer sessions.
  *           After restart, firing agent_end on a reviewer must NOT
- *           steer/enqueue a "Agent ... has finished" message to the
- *           team lead.
+ *           steer/enqueue a worker-completion nudge to the team lead.
  *
  *   Bug 2 — VerificationHarness._tryResumeFromSession must give a resumed
  *           reviewer the full reminder window before declaring failure
@@ -121,7 +120,13 @@ test.describe("gate verification resume after restart", () => {
 			let nudgeCount = 0;
 			let reviewerNudgeCount = 0;
 			let workerNudgeCount = 0;
-			const matchNudge = (msg: string) => /(?:has finished|agent finished|task complete)/i.test(msg);
+			// Match the worker-completion nudge sent by TeamManager.notifyTeamLead
+			// without depending on one exact prose variant. The message currently
+			// uses markdown headings like `Agent finished` or `Task complete`, and
+			// includes the standard `task_list` next step.
+			const matchNudge = (msg: string) =>
+				/(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?(?:Agent finished|Task complete)(?:\*\*)?\s*(?:\n|$)/i.test(msg)
+				&& /\btask_list\b/.test(msg);
 			sm.deliverLiveSteer = async (sid: string, msg: string) => {
 				if (sid === teamLeadId && matchNudge(msg)) {
 					nudgeCount++;

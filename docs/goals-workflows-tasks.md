@@ -383,6 +383,8 @@ Verification log output is bounded by default: `gate_status` and `gate_inspect s
 
 Running command steps can include live stdout/stderr tails. The server reads those log files with bounded byte limits before applying the same selection and aggregate response budgets used for persisted output.
 
+Completed command steps also retain stdout/stderr under Bobbit state. Default status surfaces and implicit inspection stay compact, but any explicit `gate_inspect(section="verification", mode=...)` request can query the retained logs and returns diagnostics metadata when available. Playwright-style `test-results` and `playwright-report` artifacts are copied into the same retained diagnostics tree, including `error-context.md`, traces, screenshots, and reports. Retained log streams are capped at 20 MiB each, artifact copying is symlink-hardened, and diagnostics are cleaned up when the owning goal is archived or deleted. Team leads should inspect these persisted diagnostics before rerunning expensive suites. See [Retained gate diagnostics](gate-diagnostics.md) for the full storage, inspection, and cleanup model.
+
 ##### Targeting a single verification step
 
 A gate often runs several verify steps (e.g. type-check + lint + unit + e2e, or multiple review steps). By default `gate_inspect section=verification` returns *every* step, so a team lead chasing one failing step still receives all the others' output and cannot scope a `grep`/`slice` to the step they care about. The optional `step` parameter fixes that: pass the step **name** and the snapshot is scoped to just that one step.

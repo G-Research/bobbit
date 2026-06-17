@@ -296,8 +296,8 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
-import { testModelPreference } from "./agent/model-completion.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
@@ -307,6 +307,7 @@ import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
+import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
@@ -5358,7 +5359,14 @@ async function handleApiRoute(
 		const mergedManually = url.searchParams.get("mergedManually") === "true";
 
 		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-			if (g.archived) return false;
+			if (g.archived) {
+				try {
+					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
+				} catch (err) {
+					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
+				}
+				return false;
+			}
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 			}
@@ -7171,6 +7179,25 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Browser-safe pi-ai boundary ──
+
+	// GET /api/pi-ai/providers — list built-in pi-ai provider ids without exposing the browser to pi-ai's Node-only index
+	if (url.pathname === "/api/pi-ai/providers" && req.method === "GET") {
+		json({ providers: getBuiltInProviderIds() });
+		return;
+	}
+
+	// POST /api/pi-ai/provider-key-test — test a provider key without persisting it
+	if (url.pathname === "/api/pi-ai/provider-key-test" && req.method === "POST") {
+		const body = await readBody(req);
+		const provider = typeof body?.provider === "string" ? body.provider.trim() : "";
+		const modelId = typeof body?.modelId === "string" ? body.modelId.trim() : "";
+		const key = typeof body?.key === "string" ? body.key.trim() : "";
+		const result = await testProviderApiKey(provider, modelId, key);
+		json(result, result.status || (result.ok ? 200 : 502));
+		return;
+	}
+
 	// ── Provider Keys ──
 
 	// GET /api/provider-keys — list providers that have keys set (no key values)
@@ -7839,7 +7866,7 @@ async function handleApiRoute(
 
 		let selectionOptions: TextSelectionOptions;
 		try {
-			selectionOptions = parseGateInspectSelectionOptions(url.searchParams);
+			selectionOptions = { ...parseGateInspectSelectionOptions(url.searchParams), includeDiagnostics: true };
 			selectText("", selectionOptions);
 		} catch (err) {
 			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }

@@ -3,7 +3,7 @@ import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
-import { type Model, modelsAreEqual } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -13,6 +13,10 @@ import { GPT_55_RECENCY_RANK } from "../../shared/model-ranks.js";
 import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
+
+function modelsAreEqual(a: Model<any> | null | undefined, b: Model<any> | null | undefined): boolean {
+	return !!a && !!b && a.provider === b.provider && a.id === b.id;
+}
 
 function claudeOpus4Minor(id: string): number | undefined {
 	// Keep in lockstep with src/server/agent/model-registry.ts. Limit the minor

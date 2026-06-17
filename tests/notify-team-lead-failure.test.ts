@@ -4,32 +4,36 @@ import assert from "node:assert/strict";
 import { buildVerificationFailureMessage } from "../src/server/agent/notify-team-lead-failure.ts";
 
 describe("buildVerificationFailureMessage", () => {
-	it("formats command failures as compact markdown with fenced output", () => {
+	it("formats command failures as compact markdown with inspect command and no output snippet", () => {
 		const message = buildVerificationFailureMessage("execution", [
 			{ name: "Unit tests", type: "command", passed: false, output: "AssertionError: expected 1 to equal 2" },
 		]);
 
 		assert.match(message, /^\*\*Gate verification FAILED\*\*/);
 		assert.doesNotMatch(message, /^#{1,6}\s+Gate verification FAILED/m);
-		assert.match(message, /\*\*Gate:\*\* `execution`/);
-		assert.match(message, /\*\*Failed:\*\* `Unit tests`/);
-		assert.match(message, /\*\*First output:\*\* `Unit tests` \(`command`\)\n```text\nAssertionError: expected 1 to equal 2\n```/);
+		assert.match(message, /\*\*Failed gate:\*\* `execution` — `Unit tests`/);
+		assert.match(message, /\*\*Failed step:\*\* `Unit tests` \(`command`\)/);
 		assert.match(message, /\*\*Inspect:\*\*\n```text\ngate_inspect\(gate_id="execution", section="verification", step="Unit tests", mode="tail", lines=120\)\n```/);
-		assert.match(message, /\*\*Next:\*\* fix issues; re-signal gate\./);
+		assert.match(message, /\*\*Next:\*\* inspect each failed step, fix issues, then re-signal gate\./);
+		assert.doesNotMatch(message, /AssertionError: expected 1 to equal 2/);
+		assert.doesNotMatch(message, /\*\*First output/);
 		assert.doesNotMatch(message, /Possible merge gap/);
 		assert.doesNotMatch(message, /git for-each-ref/);
 	});
 
-	it("formats reviewer failures as compact markdown with blockquoted output", () => {
+	it("formats reviewer failures without blockquoted output", () => {
 		const message = buildVerificationFailureMessage("review", [
 			{ name: "LLM review", type: "llm-review", passed: false, output: "Found an issue\n- src/app.ts:1" },
 		]);
 
-		assert.match(message, /\*\*First output:\*\* `LLM review` \(`llm-review`\)\n> Found an issue\n> - src\/app\.ts:1/);
+		assert.match(message, /\*\*Failed gate:\*\* `review` — `LLM review`/);
+		assert.match(message, /\*\*Failed step:\*\* `LLM review` \(`llm-review`\)/);
 		assert.match(message, /gate_inspect\(gate_id="review", section="verification", step="LLM review", mode="tail", lines=120\)/);
+		assert.doesNotMatch(message, /Found an issue/);
+		assert.doesNotMatch(message, /^> - src\/app\.ts:1/m);
 	});
 
-	it("summarizes multiple failures and only includes the first output", () => {
+	it("summarizes multiple failures and interleaves each inspect command with its failed step", () => {
 		const message = buildVerificationFailureMessage("ready-to-merge", [
 			{ name: "Unit tests", type: "command", passed: false, output: "unit output" },
 			{ name: "Typecheck", type: "command", passed: false, output: "type output" },
@@ -39,32 +43,39 @@ describe("buildVerificationFailureMessage", () => {
 			{ name: "Signoff", type: "human-signoff", passed: false, output: "signoff output" },
 		]);
 
-		assert.match(message, /\*\*Failed:\*\* `Unit tests`, `Typecheck`, `E2E`, `Review`, `QA` and 1 more/);
-		assert.match(message, /unit output/);
+		assert.match(message, /\*\*Failed gate:\*\* `ready-to-merge` — `Unit tests`, `Typecheck`, `E2E`, `Review`, `QA` and 1 more/);
+		assert.doesNotMatch(message, /unit output/);
 		assert.doesNotMatch(message, /type output/);
 		assert.doesNotMatch(message, /review output/);
-		assert.match(message, /step="Unit tests"/);
-		assert.match(message, /step="Typecheck"/);
+		const unitStepIndex = message.indexOf("**Failed step:** `Unit tests`");
+		const unitInspectIndex = message.indexOf('gate_inspect(gate_id="ready-to-merge", section="verification", step="Unit tests", mode="tail", lines=120)');
+		const typeStepIndex = message.indexOf("**Failed step:** `Typecheck`");
+		const typeInspectIndex = message.indexOf('gate_inspect(gate_id="ready-to-merge", section="verification", step="Typecheck", mode="tail", lines=120)');
+		assert.ok(unitStepIndex >= 0 && unitInspectIndex > unitStepIndex);
+		assert.ok(typeStepIndex > unitInspectIndex && typeInspectIndex > typeStepIndex);
 		assert.match(message, /step="Signoff"/);
 	});
 
-	it("truncates long failed-step output from the tail", () => {
+	it("omits long failed-step output entirely instead of truncating it", () => {
 		const output = `START\n${"x".repeat(610)}\nTAIL`;
 		const message = buildVerificationFailureMessage("execution", [
 			{ name: "Unit tests", type: "command", passed: false, output },
 		]);
 
-		assert.match(message, /\*\*First output \(truncated\):\*\*/);
-		assert.match(message, /… \(truncated, \d+ earlier chars\)/);
+		assert.doesNotMatch(message, /\*\*First output \(truncated\):\*\*/);
+		assert.doesNotMatch(message, /… \(truncated, \d+ earlier chars\)/);
 		assert.doesNotMatch(message, /START/);
-		assert.match(message, /TAIL\n```\n\n\*\*Inspect:/);
+		assert.doesNotMatch(message, /TAIL/);
+		assert.match(message, /gate_inspect\(gate_id="execution", section="verification", step="Unit tests", mode="tail", lines=120\)/);
 	});
 
-	it("uses a longer fence when command output contains backticks", () => {
+	it("does not need longer fences when command output contains backticks", () => {
 		const message = buildVerificationFailureMessage("execution", [
 			{ name: "Unit tests", type: "command", passed: false, output: "before\n```\ninside\n```\nafter" },
 		]);
 
-		assert.match(message, /````text\nbefore\n```\ninside\n```\nafter\n````/);
+		assert.doesNotMatch(message, /````text/);
+		assert.doesNotMatch(message, /inside/);
+		assert.match(message, /```text\ngate_inspect\(gate_id="execution", section="verification", step="Unit tests", mode="tail", lines=120\)\n```/);
 	});
 });

@@ -6,9 +6,9 @@ provider:
   extension: extension.ts
 group: Gates
 docs: >-
-  No parameters. Returns all workflow gates with status
-  (`pending`/`passed`/`failed`), dependencies, and content flags. Call at start
-  of work to understand workflow state.
+  No parameters. Returns all workflow gates with status, dependencies, content
+  flags, and failedSteps for failed gates. Use failedSteps to scope
+  gate_inspect(step=...).
 detail_docs: >-
   ## Purpose
 
@@ -64,6 +64,10 @@ detail_docs: >-
   - **Resuming work** — after a restart, check gate status to resume from the
   right point.
 
+  - **Scoping failure triage** — use `failedSteps` to choose
+  `gate_inspect(section="verification", step="...")` instead of reading every
+  step or re-running tests just to collect logs.
+
 
   ## When NOT to Use
 
@@ -71,8 +75,8 @@ detail_docs: >-
   - **Getting a single gate's detail** — use `gate_status` for latest verdict
   and truncated verification output.
 
-  - **Reading gate content** — use `gate_inspect` to read content, full
-  verification output, or signal history.
+  - **Reading gate content or diagnostics** — use `gate_inspect` to read
+  content, retained verification logs/artifacts, or signal history.
 
 
   ## Examples
@@ -92,6 +96,10 @@ detail_docs: >-
 
   - **Lightweight** — no parameters, fast response. Call frequently to stay
   informed.
+
+  - **Failed steps are hints** — pass a failed step name to
+  `gate_inspect(step="...")`, then use `grep`/`slice`/`tail`; use `full` only
+  as a rare escape hatch because output remains capped.
 
   - **Status values** — `pending` (not yet signaled or reset), `passed`
   (signaled and verified), `failed` (verification failed).
