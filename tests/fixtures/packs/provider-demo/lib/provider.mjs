@@ -20,7 +20,16 @@ export default {
 	},
 	beforePrompt(ctx) {
 		log(ctx, "beforePrompt");
-		return { blocks: [] };
+		return {
+			blocks: [{
+				id: "demo:turn",
+				title: "Demo turn",
+				authority: "generic",
+				priority: 10,
+				reason: "fixture",
+				content: "DEMO_BEFORE_PROMPT " + (ctx.prompt ?? ""),
+			}],
+		};
 	},
 	afterTurn(ctx) {
 		log(ctx, "afterTurn");

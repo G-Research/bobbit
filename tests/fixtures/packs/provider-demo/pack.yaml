@@ -7,7 +7,7 @@ contents:
   tools: []
   skills: []
   entrypoints: []
-  providers: [demo, boom]
+  providers: [demo, boom, slow]
   hooks: []
   mcp: []
   pi-extensions: []
