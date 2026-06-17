@@ -125,12 +125,11 @@ export default function(pi) {
   const gwUrl = readState("gateway-url", "BOBBIT_GATEWAY_URL");
   const token = readState("token", "BOBBIT_TOKEN");
 
-  // Self-signed gateway certs: agents run with NODE_TLS_REJECT_UNAUTHORIZED=0
-  // in the sandbox; mirror that here so fetch() trusts the local gateway over
-  // https without TLS verification failures.
-  if (gwUrl.startsWith("https:") && !process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
+  // TLS for the local gateway is handled entirely by the spawner's inherited
+  // env (the CA cert is pinned via NODE_EXTRA_CA_CERTS when present, with the
+  // spawner's existing fallback only when no CA cert exists). The bridge must
+  // NOT alter TLS verification here — a process-wide downgrade would defeat the
+  // pinned-CA path and disable verification for ALL agent outbound HTTPS.
 
   async function postHook(route, body, timeoutMs) {
     if (!gwUrl) return undefined;

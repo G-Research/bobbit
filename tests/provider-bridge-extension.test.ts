@@ -56,6 +56,19 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(source.includes("5000"), "expected before-compact 5000ms timeout");
 	});
 
+	it("does NOT downgrade TLS verification process-wide", () => {
+		// Security: the bridge must never disable TLS for all agent outbound
+		// HTTPS — that defeats the inherited NODE_EXTRA_CA_CERTS pinning path.
+		assert.ok(
+			!source.includes("NODE_TLS_REJECT_UNAUTHORIZED"),
+			"generated source must not touch NODE_TLS_REJECT_UNAUTHORIZED",
+		);
+		assert.ok(
+			!/process\.env\.NODE_TLS_REJECT_UNAUTHORIZED\s*=/.test(source),
+			"generated source must not assign a process-wide TLS downgrade",
+		);
+	});
+
 	it("subscribes before_agent_start and session_before_compact", () => {
 		assert.ok(source.includes('pi.on("before_agent_start"'), "expected before_agent_start subscription");
 		assert.ok(source.includes('pi.on("session_before_compact"'), "expected session_before_compact subscription");
