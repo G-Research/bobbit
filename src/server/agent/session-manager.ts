@@ -348,21 +348,19 @@ export interface SessionInfo {
 	/** Multi-repo: per-repo worktree paths from the pool claim. Stable for the session's lifetime. */
 	repoWorktrees?: Array<{ repo: string; repoPath: string; worktreePath: string }>;
 	/**
-	 * Shadow ledger of steer texts that have been dispatched to the SDK
-	 * (`rpcClient.steer()` resolved) but have not yet echoed back as a
-	 * user-role `message_end`. This is design §6.1 mitigation B: because
-	 * Bobbit cannot extend the upstream pi-coding-agent RPC bridge to
-	 * proxy `AgentSession.clearQueue()`, we mirror the SDK's text-match
-	 * splice logic at our layer for the abort-reconciliation case only.
+	 * Shadow ledger of steer texts that have been accepted for live-steer
+	 * dispatch but have not yet echoed back as a user-role `message_end`.
+	 * Persisted with promptQueue row removal so a gateway restart in the
+	 * dispatch→echo window can re-enqueue the steer exactly once.
 	 *
 	 * Lifecycle:
-	 *   - push: after `await rpcClient.steer(text)` resolves in `_dispatchSteer`.
+	 *   - push: in `_dispatchSteer`, before queue row removal is persisted.
 	 *   - splice: on `message_end(role:user)` whose body matches the front entry,
 	 *     mirroring `_processAgentEvent`'s `_steeringMessages.indexOf` removal.
-	 *   - drain: in `_reconcileAfterAbort` — re-enqueue at front so the next
+	 *   - drain: in restore/abort reconciliation — re-enqueue at front so the next
 	 *     turn redispatches them as a steered batch.
 	 *
-	 * Bounded growth: every entry has a paired SDK echo or an abort-drain;
+	 * Bounded growth: every entry has a paired SDK echo or a reconcile drain;
 	 * neither path is silently dropped.
 	 */
 	inFlightSteerTexts?: string[];
@@ -1949,13 +1947,27 @@ export class SessionManager {
 		if (session) this.broadcastQueue(session);
 	}
 
-	private broadcastQueue(session: SessionInfo): void {
+	private persistedInFlightSteerTexts(session: SessionInfo): string[] | undefined {
+		const ledger = session.inFlightSteerTexts?.filter(text => typeof text === "string" && text.length > 0) ?? [];
+		return ledger.length > 0 ? [...ledger] : undefined;
+	}
+
+	private persistInFlightSteerLedger(session: SessionInfo): void {
+		this.resolveStoreForSession(session.id).update(session.id, {
+			inFlightSteerTexts: this.persistedInFlightSteerTexts(session),
+		});
+	}
+
+	private broadcastQueue(session: SessionInfo, opts?: { includeInFlightSteers?: boolean }): void {
+		const queue = session.promptQueue.toArray();
 		broadcast(session.clients, {
 			type: "queue_update",
 			sessionId: session.id,
-			queue: session.promptQueue.toArray(),
+			queue,
 		});
-		this.resolveStoreForSession(session.id).update(session.id, { messageQueue: session.promptQueue.toArray() });
+		const updates: { messageQueue: QueuedMessage[]; inFlightSteerTexts?: string[] } = { messageQueue: queue };
+		if (opts?.includeInFlightSteers) updates.inFlightSteerTexts = this.persistedInFlightSteerTexts(session);
+		this.resolveStoreForSession(session.id).update(session.id, updates);
 	}
 
 	/**
@@ -2224,7 +2236,7 @@ export class SessionManager {
 
 		// Happy path: enqueue then dispatch via the single _dispatchSteer site.
 		// _dispatchSteer removes the row from promptQueue *before* awaiting the
-		// RPC, so the SDK becomes the sole authority for in-flight steer text.
+		// RPC and persists an in-flight ledger for restart durability until echo.
 		const queued = session.promptQueue.enqueue(message, { isSteered: true });
 		this.broadcastQueue(session);
 		return this._dispatchSteer(session, [queued]);
@@ -2255,8 +2267,8 @@ export class SessionManager {
 
 	/**
 	 * Single dispatch site for steered prompts. Removes rows from promptQueue
-	 * *before* awaiting rpcClient.steer() so the SDK becomes the sole
-	 * authority for in-flight steer text. On RPC failure, rows are
+	 * *before* awaiting rpcClient.steer() and persists an in-flight ledger so
+	 * restart can recover the dispatch→echo window. On RPC failure, rows are
 	 * re-enqueued at the front in original order (steered group still sorts
 	 * first via PromptQueue.reorder()).
 	 *
@@ -2269,20 +2281,18 @@ export class SessionManager {
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(session.id);
 		const batchText = rows.map(r => r.text).join("\n");
-		for (const r of rows) session.promptQueue.remove(r.id);
-		this.broadcastQueue(session);
 
-		// Record on the shadow ledger BEFORE the RPC resolves so that an
-		// agent_end firing during the await window (e.g. user aborts mid-steer)
-		// still sees the in-flight entry and can re-enqueue it via
-		// _reconcileAfterAbort. Otherwise the steer text is delivered to the
-		// SDK's _steeringMessages but the aborted agent loop never consumes it,
-		// and the bobbit server has no record of it to redispatch.
+		// Record on the shadow ledger BEFORE persisting queue removal. The store
+		// update below writes both the now-empty promptQueue slice and this ledger
+		// entry together, so a restart after dispatch but before the transcript
+		// echo can restore/re-enqueue the steer exactly once.
 		//
 		// On RPC failure we splice this exact entry back out and re-enqueue
 		// the rows at front of promptQueue, so the next drain redispatches.
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
 		session.inFlightSteerTexts.push(batchText);
+		for (const r of rows) session.promptQueue.remove(r.id);
+		this.broadcastQueue(session, { includeInFlightSteers: true });
 		try {
 			const steerResp = await session.rpcClient.steer(batchText);
 			if ((steerResp as any)?.success === false) {
@@ -2296,7 +2306,7 @@ export class SessionManager {
 			for (const r of [...rows].reverse()) {
 				session.promptQueue.enqueueAtFront(r.text, { isSteered: true });
 			}
-			this.broadcastQueue(session);
+			this.broadcastQueue(session, { includeInFlightSteers: true });
 			console.error(`[session-manager] _dispatchSteer failed for ${session.id}:`, err);
 			throw err;
 		}
@@ -2317,25 +2327,31 @@ export class SessionManager {
 		const text = extractUserMessageText(event.message);
 		if (!text) return;
 		const idx = ledger.indexOf(text);
-		if (idx !== -1) ledger.splice(idx, 1);
+		if (idx !== -1) {
+			ledger.splice(idx, 1);
+			this.persistInFlightSteerLedger(session);
+		}
 	}
 
 	/**
 	 * Drain the shadow ledger and re-enqueue any unresolved steers at the
-	 * front of promptQueue as steered rows. Called from agent_end while
-	 * `wasAborting`, and from `forceAbort` after killing the bridge — both
-	 * cases where a steer the SDK accepted may never echo because the turn
-	 * was torn down. The next drainQueue picks the rows up as a steered
-	 * batch via `_dispatchSteer`, redispatching exactly once.
+	 * front of promptQueue as steered rows. Called after restore and from
+	 * abort-reconciliation paths where a steer the SDK accepted may never echo
+	 * because the turn was torn down. The next drainQueue picks the rows up as
+	 * a steered batch via `_dispatchSteer`, redispatching exactly once.
 	 */
-	private _reconcileAfterAbort(session: SessionInfo): void {
+	private _reconcileInFlightSteers(session: SessionInfo): void {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		for (const text of [...ledger].reverse()) {
 			session.promptQueue.enqueueAtFront(text, { isSteered: true });
 		}
 		ledger.length = 0;
-		this.broadcastQueue(session);
+		this.broadcastQueue(session, { includeInFlightSteers: true });
+	}
+
+	private _reconcileAfterAbort(session: SessionInfo): void {
+		this._reconcileInFlightSteers(session);
 	}
 
 	/** Reorder queued messages to match the given ID list. */
@@ -3703,6 +3719,7 @@ export class SessionManager {
 			allowedTools: ps.allowedTools,
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
+			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 		});
 	}
 
@@ -3986,6 +4003,7 @@ export class SessionManager {
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			projectId: ps.projectId,
+			inFlightSteerTexts: Array.isArray(ps.inFlightSteerTexts) ? [...ps.inFlightSteerTexts] : undefined,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			repoWorktrees: ps.repoWorktrees && ps.repoPath
@@ -4068,6 +4086,11 @@ export class SessionManager {
 		}
 
 		this.sessions.set(ps.id, session);
+
+		// `switch_session` replays durable user message echoes and `_consumeSteerEcho`
+		// clears matching ledger entries. Anything left here was accepted for
+		// dispatch but not echoed before the gateway died, so re-enqueue it once.
+		this._reconcileInFlightSteers(session);
 
 		// Restore + re-attach this session's persisted background processes. The
 		// session now exists and (for sandboxed sessions) containerId has been

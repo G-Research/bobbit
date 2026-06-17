@@ -148,6 +148,37 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(steer.mock.calls[1].arguments[0], "promoted queued steer");
 	});
 
+	it("persists in-flight steer ledger until the user echo arrives", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const steer = mock.fn(() => pending.promise);
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: mock.fn(async () => ({ success: true })), steer },
+		});
+
+		const steerPromise = manager.deliverLiveSteer(session.id, "durable steer");
+
+		assert.equal(steer.mock.callCount(), 1);
+		const ledgerUpdate = manager._testStore.update.mock.calls
+			.map((call: any) => call.arguments[1])
+			.find((update: any) => Array.isArray(update?.inFlightSteerTexts));
+		assert.deepEqual(ledgerUpdate, {
+			messageQueue: [],
+			inFlightSteerTexts: ["durable steer"],
+		});
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "user", content: [{ type: "text", text: "durable steer" }] },
+		});
+		const clearUpdate = manager._testStore.update.mock.calls.at(-1)?.arguments[1];
+		assert.deepEqual(clearUpdate, { inFlightSteerTexts: undefined });
+
+		pending.resolve({ success: true });
+		await steerPromise;
+	});
+
 	it("does not replay a queued steered task notification after its prompt has started", async (t) => {
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		const manager = makeManager();

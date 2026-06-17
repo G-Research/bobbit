@@ -3,9 +3,9 @@
  *
  * Sequence: STAY_BUSY → queue a prompt containing two sentinel lines → promote
  * it to steered → while streaming, promotion immediately dequeues it and calls
- * the live steer dispatch path → simulate a gateway restart → assert both
- * sentinel lines remain in the transcript exactly once each, ordering preserved,
- * with no queued rows redrained after restore.
+ * the live steer dispatch path → simulate a gateway restart during the in-flight
+ * dispatch→echo window → assert both sentinel lines remain in the transcript
+ * exactly once each, ordering preserved.
  *
  * "Restart" model: the in-process harness shares Node's module cache, so we
  * simulate a clean restart by:
@@ -18,9 +18,9 @@
  * Current steer-queue behavior: `steer_queued` while streaming does not wait
  * for a later tool boundary. It removes the promoted row(s) from
  * `messageQueue` and immediately calls `_dispatchSteer()`, whose dispatch path
- * owns wait abort, shadow-ledger handoff, and RPC-failure recovery. After the
- * steer echoes into the transcript, a restart should not find steered rows to
- * drain again.
+ * owns wait abort, persisted in-flight ledger handoff, and RPC-failure recovery.
+ * If the gateway restarts before the steer echoes into the transcript, restore
+ * must re-enqueue the ledger entry exactly once.
  *
  * Pattern reference: tests/e2e/pool-claim-restart-resume.spec.ts.
  */
@@ -33,11 +33,14 @@ import {
 	queueLenPredicate,
 	statusPredicate,
 } from "./e2e-setup.js";
+import { pollUntil } from "./test-utils/cleanup.js";
 
 test.setTimeout(60_000);
 
 test.describe("Steer + gateway restart (AC §3)", () => {
-	test("steered queued text survives restart exactly once, ordered", async ({ gateway }) => {
+	test("steered queued text survives in-flight restart exactly once, ordered", async ({ gateway }) => {
+		const priorSteerEchoDelay = process.env.MOCK_STEER_ECHO_DELAY_MS;
+		process.env.MOCK_STEER_ECHO_DELAY_MS = "5000";
 		const sessionId = await createSession();
 		let conn = await connectWs(sessionId);
 		try {
@@ -64,59 +67,81 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			// before restart.
 			await conn.waitFor(queueLenPredicate(0), 10_000);
 
-			await expect.poll(() => {
-				const userMsgs = conn.messages.filter(
-					(m: any) =>
-						m.type === "event" &&
-						m.data?.type === "message_end" &&
-						m.data?.message?.role === "user",
-				);
-				const text = userMsgs
-					.map((m: any) => m.data?.message?.content?.[0]?.text || "")
-					.join("\n");
-				return text.includes("RESTART_M1") && text.includes("RESTART_M2");
-			}, { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
-
-			await conn.waitFor(statusPredicate("idle"), 30_000).catch(() => { /* already idle/no status replay */ });
-
-			// Step 3 — simulate gateway restart.
-			conn.close();
 			const sm = (gateway as any).sessionManager;
+			await expect.poll(() => {
+				const storeState = sm.resolveStoreForSession(sessionId).get(sessionId);
+				return {
+					queueLen: storeState?.messageQueue?.length ?? 0,
+					ledger: storeState?.inFlightSteerTexts ?? [],
+				};
+			}, { timeout: 10_000, intervals: [50, 100, 250] }).toEqual({
+				queueLen: 0,
+				ledger: [steeredText],
+			});
+
+			// Test sanity: restart before the user-message echo is durable. This is
+			// the vulnerable window where queue rows are gone but the transcript does
+			// not yet contain the promoted steer.
+			expect(conn.messages.some(
+				(m: any) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					String(m.data?.message?.content?.[0]?.text || "").includes("RESTART_M1"),
+			)).toBe(false);
+
+			// Step 3 — simulate gateway restart in the in-flight dispatch→echo window.
+			conn.close();
 			const liveSession = sm.sessions.get(sessionId);
 			expect(liveSession, "session live before restart").toBeTruthy();
 			liveSession.unsubscribe();
 			try { await liveSession.rpcClient.stop(); } catch { /* already dead */ }
 			sm.sessions.delete(sessionId);
 
-			// The steered rows were dispatched before restart, so restore should
-			// not read queued steered rows and redrain them.
-			const storeState = sm.resolveStoreForSession(sessionId).get(sessionId);
-			expect(storeState?.messageQueue?.length ?? 0).toBe(0);
-
 			await sm.restoreSessions();
 
-			// Step 4 — reconnect and read the restored transcript.
+			// Step 4 — reconnect and wait for the restored ledger to be re-enqueued
+			// and echoed as a real user message.
 			conn = await connectWs(sessionId);
 			await conn.waitFor((m: any) => m.type === "queue_update", 5_000);
-			const beforeMessages = conn.messageCount();
-			conn.send({ type: "get_messages" });
-			const messagesResponse = await conn.waitForFrom(beforeMessages, (m: any) => m.type === "messages", 10_000);
-			const messages = Array.isArray(messagesResponse.data)
-				? messagesResponse.data
-				: (messagesResponse.data?.messages || []);
+			await conn.waitFor(
+				(m: any) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					String(m.data?.message?.content?.[0]?.text || "").includes("RESTART_M1") &&
+					String(m.data?.message?.content?.[0]?.text || "").includes("RESTART_M2"),
+				30_000,
+			);
+			await conn.waitFor(statusPredicate("idle"), 30_000).catch(() => { /* already idle/no status replay */ });
 
-			// Step 5 — count occurrences of each sentinel. Both must appear
-			// exactly once across all user-message bodies.
-			const userBodies = messages
-				.filter((m: any) => m.role === "user")
-				.map((m: any) => m.content?.[0]?.text || "");
-			const countOccurrences = (needle: string): number =>
-				userBodies.reduce(
+			const readUserBodies = async (): Promise<string[]> => {
+				const beforeMessages = conn.messageCount();
+				conn.send({ type: "get_messages" });
+				const messagesResponse = await conn.waitForFrom(beforeMessages, (m: any) => m.type === "messages", 10_000);
+				const messages = Array.isArray(messagesResponse.data)
+					? messagesResponse.data
+					: (messagesResponse.data?.messages || []);
+				return messages
+					.filter((m: any) => m.role === "user")
+					.map((m: any) => m.content?.[0]?.text || "");
+			};
+			const countOccurrences = (bodies: string[], needle: string): number =>
+				bodies.reduce(
 					(n: number, body: string) => n + (body.split(needle).length - 1),
 					0,
 				);
-			expect(countOccurrences("RESTART_M1")).toBe(1);
-			expect(countOccurrences("RESTART_M2")).toBe(1);
+
+			// Step 5 — final count after the restored turn has settled. Both sentinels
+			// must appear exactly once across all user-message bodies.
+			const userBodies = await pollUntil(async () => {
+				const bodies = await readUserBodies();
+				return countOccurrences(bodies, "RESTART_M1") === 1 && countOccurrences(bodies, "RESTART_M2") === 1
+					? bodies
+					: null;
+			}, { timeoutMs: 10_000, intervalMs: 250, label: "restored in-flight steer persisted exactly once" });
+			expect(countOccurrences(userBodies, "RESTART_M1")).toBe(1);
+			expect(countOccurrences(userBodies, "RESTART_M2")).toBe(1);
 
 			// Ordering: M1 must appear at-or-before M2 in the joined transcript.
 			const joined = userBodies.join("\n");
@@ -126,6 +151,8 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			const stillThere = await apiFetch(`/api/sessions/${sessionId}`);
 			expect(stillThere.status).toBe(200);
 		} finally {
+			if (priorSteerEchoDelay === undefined) delete process.env.MOCK_STEER_ECHO_DELAY_MS;
+			else process.env.MOCK_STEER_ECHO_DELAY_MS = priorSteerEchoDelay;
 			conn.close();
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
 		}
