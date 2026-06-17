@@ -14,7 +14,7 @@ import {
 	GW_SESSION_KEY,
 	type GatewaySession,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision, readProposalSnapshot } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, promoteProject, fetchProjects, notifyProposalDecision, readProposalSnapshot, type GitStatusData } from "./api.js";
 import { getPiAiModel } from "./pi-ai-lazy.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
@@ -2948,6 +2948,79 @@ if (typeof document !== "undefined") {
 	});
 }
 
+type GitStatusFile = { file: string; status: string };
+type GitStatusRepoEntry = {
+	status?: GitStatusFile[];
+	statusFiles?: GitStatusFile[];
+	clean?: boolean;
+	untrackedIncluded?: boolean;
+	[key: string]: unknown;
+};
+type ClientGitStatus = GitStatusData & {
+	partial?: boolean;
+	untrackedIncluded?: boolean;
+	repos?: Record<string, GitStatusRepoEntry>;
+};
+
+function isUntrackedStatusFile(file: GitStatusFile): boolean {
+	return file.status.includes("?");
+}
+
+function mergeStatusFilesPreservingUntracked(summaryFiles: GitStatusFile[] | undefined, fullFiles: GitStatusFile[] | undefined): GitStatusFile[] | undefined {
+	if (!fullFiles?.length) return summaryFiles;
+	const merged = [...(summaryFiles ?? [])];
+	const seen = new Set(merged.map((file) => file.file));
+	for (const file of fullFiles) {
+		if (!isUntrackedStatusFile(file) || seen.has(file.file)) continue;
+		merged.push(file);
+		seen.add(file.file);
+	}
+	return merged.length > 0 ? merged : summaryFiles;
+}
+
+function repoFiles(repo: GitStatusRepoEntry | undefined): GitStatusFile[] | undefined {
+	return repo?.statusFiles ?? repo?.status;
+}
+
+function withUntrackedStatusPreserved(current: ClientGitStatus | undefined, incoming: ClientGitStatus, requestedUntracked: boolean): ClientGitStatus {
+	const incomingIncludesUntracked = requestedUntracked || incoming.untrackedIncluded === true;
+	if (incomingIncludesUntracked) {
+		return { ...incoming, untrackedIncluded: true };
+	}
+	if (current?.untrackedIncluded !== true) return incoming;
+
+	const mergedStatus = mergeStatusFilesPreservingUntracked(incoming.status, current.status) ?? incoming.status;
+	const merged: ClientGitStatus = {
+		...incoming,
+		status: mergedStatus,
+		clean: incoming.clean && mergedStatus.length === 0,
+		untrackedIncluded: true,
+	};
+
+	if (incoming.repos || current.repos) {
+		const repos: Record<string, GitStatusRepoEntry> = { ...(incoming.repos ?? {}) };
+		for (const [repoName, currentRepo] of Object.entries(current.repos ?? {})) {
+			const incomingRepo = repos[repoName];
+			if (!incomingRepo) {
+				repos[repoName] = currentRepo;
+				continue;
+			}
+			const mergedRepoFiles = mergeStatusFilesPreservingUntracked(repoFiles(incomingRepo), repoFiles(currentRepo));
+			const files = mergedRepoFiles ?? repoFiles(incomingRepo) ?? [];
+			repos[repoName] = {
+				...incomingRepo,
+				...(mergedRepoFiles ? { status: mergedRepoFiles, statusFiles: mergedRepoFiles } : {}),
+				clean: incomingRepo.clean === true ? files.length === 0 : incomingRepo.clean,
+				untrackedIncluded: true,
+			};
+		}
+		merged.repos = repos;
+		merged.clean = merged.clean && !Object.values(repos).some((repo) => (repoFiles(repo)?.length ?? 0) > 0);
+	}
+
+	return merged;
+}
+
 async function refreshGitStatusForSession(
 	sessionId: string,
 	opts?: { fetch?: boolean; untracked?: boolean; source?: "event" | "poll" | "user" },
@@ -2978,10 +3051,11 @@ async function refreshGitStatusForSession(
 		isStale: () => activeSessionId() !== sessionId,
 		onOk: (data) => {
 			if (activeSessionId() !== sessionId) return;
-			ai.gitStatus = data as any;
-			ai.partial = !!(data as any).partial;
+			const next = withUntrackedStatusPreserved(ai.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
+			ai.gitStatus = next as any;
+			ai.partial = !!next.partial;
 			(ai as any).gitRepoKnown = "yes";
-			if ((data as any).branch) ai.branch = (data as any).branch;
+			if (next.branch) ai.branch = next.branch;
 		},
 		onNotARepo: () => {
 			if (activeSessionId() !== sessionId) return;
