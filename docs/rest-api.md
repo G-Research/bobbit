@@ -631,10 +631,34 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 |---|---|---|
 | `GET` | `/api/models` | List currently available models (`ApiModel[]`) |
 | `POST` | `/api/models/test` | Probe a model pref with a minimal "Reply with OK" call (body: `{ pref: "<provider>/<modelId>" }`). 10s timeout. |
+| `GET` | `/api/pi-ai/providers` | List built-in pi-ai provider IDs through a browser-safe server boundary |
+| `POST` | `/api/pi-ai/provider-key-test` | Test a built-in provider API key without persisting it |
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
 `GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`. For AI Gateway models, Bobbit derives this from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+
+`GET /api/pi-ai/providers` and `POST /api/pi-ai/provider-key-test` are an internal browser-safe pi-ai boundary. Browser UI uses them instead of runtime bare value imports from `@earendil-works/pi-ai`, because the package index traverses Node-only exports such as environment API-key probing and causes browser builds to externalize `node:fs`. Keep provider catalog reads and key tests behind these server endpoints unless pi-ai exposes a browser-safe package export.
+
+`GET /api/pi-ai/providers` responses:
+
+- `200 { providers: string[] }` — built-in pi-ai provider IDs, e.g. `"anthropic"` or `"openai"`. The response is not wrapped in a broader status envelope.
+- Endpoint-specific validation errors are not expected; normal API auth and body-size failures still apply.
+
+`POST /api/pi-ai/provider-key-test` body:
+
+```json
+{ "provider": "anthropic", "modelId": "claude-sonnet-...", "key": "sk-..." }
+```
+
+The key is used only for a one-off minimal completion probe (`"Reply with: OK"`) and is not stored. The server trims string fields before testing.
+
+`POST /api/pi-ai/provider-key-test` responses:
+
+- `200 { ok: true, modelResolved, latencyMs }` — the provider key completed a minimal request successfully.
+- `400 { ok: false, status: 400, error: "Missing provider, modelId, or key" }` — any required body field is absent, non-string, or empty after trimming.
+- `404 { ok: false, status: 404, error: "Model \"<provider>/<modelId>\" is not in the built-in pi-ai catalog." }` — the requested built-in model cannot be resolved.
+- `502 { ok: false, modelResolved, latencyMs, error }` — pi-ai resolved the model but the provider request failed or timed out. The body has no `status` field in this path.
 
 `POST /api/models/test` responses:
 
