@@ -304,6 +304,7 @@ import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
+import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
@@ -5179,7 +5180,14 @@ async function handleApiRoute(
 		const mergedManually = url.searchParams.get("mergedManually") === "true";
 
 		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-			if (g.archived) return false;
+			if (g.archived) {
+				try {
+					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
+				} catch (err) {
+					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
+				}
+				return false;
+			}
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 			}
