@@ -1,4 +1,5 @@
 import { refreshGateStatusForGoal } from "./api.js";
+import { dispatchHumanSignoffResolved } from "./gate-status-events.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { legacyReviewDocumentIdFromTitle, rememberReviewDocumentIdentity, reviewDocumentIdFromPanelTab, reviewPanelTabId, reviewTitleFromPanelTab } from "./panel-workspace.js";
 import { selectReviewWorkspaceTab } from "./preview-panel.js";
@@ -458,7 +459,6 @@ async function postSignoffDecision(source: Extract<ReviewSource, { kind: "verifi
 		} catch { /* keep status message */ }
 		throw new Error(message);
 	}
-	const { dispatchHumanSignoffResolved } = await import("./gate-status-events.js");
 	dispatchHumanSignoffResolved({
 		goalId: source.goalId,
 		gateId: source.gateId,
