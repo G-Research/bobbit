@@ -15,6 +15,7 @@
 
 import type { IndexSource, IndexSourceContext, Indexable } from "../types.js";
 import { contentHashOf } from "./hash.js";
+import { formatSessionSearchTitle } from "./session-title.js";
 
 export class SessionIndexSource implements IndexSource {
 	readonly sourceId = "sessions" as const;
@@ -37,6 +38,7 @@ export class SessionIndexSource implements IndexSource {
 			const goalTitle = session.goalId
 				? goalTitleMap.get(session.goalId) ?? ""
 				: "";
+			const displayTitle = formatSessionSearchTitle(title, goalTitle);
 			const metadata: Record<string, string | number | boolean> = {
 				sessionId: session.id,
 			};
@@ -50,15 +52,15 @@ export class SessionIndexSource implements IndexSource {
 				sourceId: "sessions",
 				text,
 				metadata,
-				contentHash: contentHashOf(text, weight, role, timestamp),
+				contentHash: contentHashOf(`${text}\n${displayTitle}`, weight, role, timestamp),
 				timestamp,
 				projectId: session.projectId ?? ctx.projectId,
 				archived: session.archived === true,
 				weight,
 				role,
 				display: {
-					title,
-					snippet: title,
+					title: displayTitle,
+					snippet: displayTitle,
 				},
 			};
 			yield indexable;

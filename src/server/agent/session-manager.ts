@@ -2798,6 +2798,7 @@ export class SessionManager {
 		// emits one row per text / tool_use / tool_result block.
 		if (event.type === "message_end" && event.message) {
 			try {
+				const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 				this.resolveSearchIndex(session).indexMessage({
 					sessionId: session.id,
 					sessionTitle: session.title,
@@ -2805,6 +2806,7 @@ export class SessionManager {
 					timestamp: Date.now(),
 					projectId: session.projectId || undefined,
 					goalId: session.goalId,
+					goalTitle,
 				});
 			} catch {
 				// Non-critical — don't break message flow
@@ -3424,12 +3426,20 @@ export class SessionManager {
 				testSearchIndex.open({ goalStore, sessionStore: this._testStore });
 				// Wire index update callbacks
 				goalStore.onIndexUpdate = (goal) => {
-					try { testSearchIndex.indexGoal(goal, goal.projectId || ""); } catch (err) { console.error("[search] Failed to index goal:", err); }
+					try {
+						testSearchIndex.indexGoal(goal, goal.projectId || "");
+						for (const session of this._testStore?.getAll() ?? []) {
+							if (session.goalId !== goal.id) continue;
+							testSearchIndex.indexSession(session, goal.title, session.projectId || "");
+							testSearchIndex.reindexMessagesForSession(session, goal.title, session.projectId || "");
+						}
+					} catch (err) { console.error("[search] Failed to index goal:", err); }
 				};
 				this._testStore.onIndexUpdate = (session) => {
 					try {
 						const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 						testSearchIndex.indexSession(session, goalTitle, session.projectId || "");
+						testSearchIndex.reindexMessagesForSession(session, goalTitle, session.projectId || "");
 					} catch (err) { console.error("[search] Failed to index session:", err); }
 				};
 			} catch (err) {

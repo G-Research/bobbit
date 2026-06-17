@@ -20,7 +20,7 @@ import type { Role } from "./types.js";
  * text gets indexed or how it is weighted. A version mismatch in
  * `search_meta` triggers a full rebuild on next open (see §10).
  */
-export const CONTENT_POLICY_VERSION = 1;
+export const CONTENT_POLICY_VERSION = 3;
 
 // ── Constants ────────────────────────────────────────────────────────
 
