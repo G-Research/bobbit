@@ -16,7 +16,22 @@ import {
 	type Goal,
 	type GoalState,
 } from "./state.js";
-import { gatewayFetch, updateGoal, SymlinkRootError, fetchRoles, patchSession, type DetectedRepo, type MonorepoScanResult } from "./api.js";
+import {
+	gatewayFetch,
+	updateGoal,
+	SymlinkRootError,
+	fetchRoles,
+	patchSession,
+	browseDirectory,
+	detectProject,
+	fetchProjects,
+	registerProject,
+	scanProject,
+	updateLocalSessionTitle,
+	refreshSessions,
+	type DetectedRepo,
+	type MonorepoScanResult,
+} from "./api.js";
 import "../ui/components/DirectoryPicker.js";
 import type {
 	DirectoryPicker as DirectoryPickerEl,
@@ -29,8 +44,6 @@ import type {
 } from "./project-assistant-autoprompt.js";
 import { errorDetails } from "./error-helpers.js";
 import "../ui/components/ErrorDetails.js";
-import { updateLocalSessionTitle } from "./api.js";
-import { refreshSessions } from "./api.js";
 // Static import of session-manager creates a cycle (session-manager imports
 // dialogs.ts statically), but neither module references the other at
 // module-init time — ESM live bindings resolve at call time.
@@ -1539,8 +1552,6 @@ export async function createProjectAssistantSession(
 		// Refresh projects so the sidebar sees the newly-created provisional project
 		// before connectToSession renders. Without this, the session falls into the
 		// default project bucket because state.projects doesn't contain the new ID yet.
-		const { fetchProjects } = await import("./api.js");
-		const { setProjects } = await import("./state.js");
 		setProjects(await fetchProjects());
 		const { connectToSession } = await import("./session-manager.js");
 		const actualType = scaffolding ? "project-scaffolding" : "project";
@@ -1699,7 +1710,6 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 			errorMessage = "";
 			renderDialog();
 			try {
-				const { browseDirectory } = await import("./api.js");
 				const result = await browseDirectory(dirPath) as DirectoryBrowseResult & { truncated?: boolean };
 				current = result.current;
 				parent = result.parent;
@@ -1906,7 +1916,6 @@ export function showProjectDialog(): void {
 		}
 		const token = ++detectionToken;
 		try {
-			const { detectProject } = await import("./api.js");
 			const result = await detectProject(trimmed);
 			if (token !== detectionToken) return;
 			detectionResult = result;
@@ -2074,7 +2083,6 @@ export function showProjectDialog(): void {
 		errorMessage = null;
 		renderDialog();
 		try {
-			const { detectProject, registerProject, fetchProjects, scanProject } = await import("./api.js");
 			const detection = await detectProject(trimmed);
 
 			if (detection.hasBobbit) {
@@ -2359,14 +2367,10 @@ export function showProjectDialog(): void {
 		// as a stable DOM node, not via Lit's property bindings.
 		pickerEl.value = pathValue;
 		pickerEl.recentPaths = recentPaths();
-		// Lazily wire the browseDirectory callback (avoids importing the API
-		// module before the dialog is opened).
 		const pickerAny = pickerEl as unknown as { __browseWired?: boolean };
 		if (!pickerAny.__browseWired) {
-			void import("./api.js").then((m) => {
-				pickerEl.browseDirectory = m.browseDirectory;
-				pickerAny.__browseWired = true;
-			});
+			pickerEl.browseDirectory = browseDirectory;
+			pickerAny.__browseWired = true;
 		}
 		pickerEl.disabled = busy;
 

@@ -22,6 +22,7 @@ import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
+import { showHeaderToast } from "./render.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -114,7 +115,6 @@ function legacyCopyText(text: string): boolean {
  *  `data-testid="header-toast"` element on the landing view). */
 async function flashSidebarToast(text: string): Promise<void> {
 	try {
-		const { showHeaderToast } = await import("./render.js");
 		showHeaderToast(text);
 	} catch {
 		// best-effort toast

@@ -408,7 +408,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 			try {
 				// Lazy-load helpers to avoid an import cycle at module init time.
 				const [{ gatewayFetch }, { fetchToolContent }, { state: appState, renderApp }, workspace, previewPanel] = await Promise.all([
-					import("../../../app/api.js"),
+					import("../../../app/gateway-fetch.js"),
 					import("../../utils/fetch-tool-content.js"),
 					import("../../../app/state.js"),
 					import("../../../app/panel-workspace.js"),
