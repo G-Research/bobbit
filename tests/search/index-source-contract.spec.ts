@@ -24,6 +24,8 @@ import { SessionIndexSource } from "../../src/server/search/sources/session-sour
 import { StaffIndexSource } from "../../src/server/search/sources/staff-source.ts";
 import { MessageIndexSource } from "../../src/server/search/sources/message-source.ts";
 import { FilesIndexSourceStub } from "../../src/server/search/sources/files-source.stub.ts";
+import { indexableToDoc } from "../../src/server/search/indexer.ts";
+import { toSearchResult } from "../../src/server/search/flex-store.ts";
 import type { IndexSource, IndexSourceContext, Indexable } from "../../src/server/search/types.ts";
 import type { PersistedGoal, GoalStore } from "../../src/server/agent/goal-store.ts";
 import type { PersistedSession, SessionStore } from "../../src/server/agent/session-store.ts";
@@ -209,6 +211,20 @@ test.describe("SessionIndexSource", () => {
 		expect(s1.projectId).toBe("proj-a");
 	});
 
+	test("formats goal-owned session display titles once", async () => {
+		const ctx = makeCtx({ goals, sessions });
+		const [s1] = await collect(new SessionIndexSource(), ctx);
+		expect(s1.text).toBe("Working on the thing");
+		expect(s1.display?.title, "direct session result title should include its goal context").toBe("First goal: Working on the thing");
+		expect(s1.display?.snippet, "direct session result snippet should use the same formatted title").toBe("First goal: Working on the thing");
+
+		const alreadyPrefixed = await collect(new SessionIndexSource(), makeCtx({
+			goals,
+			sessions: [{ ...sessions[0], title: "First goal: Working on the thing" }],
+		}));
+		expect(alreadyPrefixed[0].display?.title, "goal prefix should not be duplicated").toBe("First goal: Working on the thing");
+	});
+
 	test("contentHash stable under unchanged input", async () => {
 		const ctx = makeCtx({ goals, sessions });
 		const a = await collect(new SessionIndexSource(), ctx);
@@ -302,6 +318,7 @@ test.describe("MessageIndexSource", () => {
 		expect(user.text).toBe("Hello there");
 		expect(user.weight).toBe(2.0);
 		expect(user.id).toBe("message:s1:0:text:0");
+		expect(user.metadata.sessionTitle, "message rows should carry parent session title metadata").toBe("Chat");
 
 		const assistant = out.find((o) => o.role === "assistant")!;
 		expect(assistant.weight).toBe(1.0);
@@ -312,6 +329,59 @@ test.describe("MessageIndexSource", () => {
 		expect(toolCall.text.startsWith("write ")).toBe(true);
 
 		// Cleanup
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("denormalizes goal-prefixed session title metadata for message result round-trip", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-title-source-"));
+		const file = path.join(dir, "session.jsonl");
+		fs.writeFileSync(file, JSON.stringify({ message: { role: "user", content: "QuackerTitleRegression" } }) + "\n", "utf-8");
+
+		const ctx = makeCtx({
+			goals: [{ ...goals[0], id: "goal-title", title: "Fix Search Titles" }],
+			sessions: [{
+				id: "session-title",
+				title: "Grouped Session",
+				cwd: "/tmp",
+				agentSessionFile: file,
+				createdAt: 1_700_000_000_000,
+				lastActivity: 1_700_000_200_000,
+				goalId: "goal-title",
+				projectId: "proj-a",
+			}],
+		});
+		const [msg] = await collect(new MessageIndexSource(), ctx);
+		expect(msg.metadata.goalTitle, "message rows should carry goal title metadata").toBe("Fix Search Titles");
+		expect(msg.metadata.sessionTitle, "message rows should carry resolved parent session title metadata").toBe("Fix Search Titles: Grouped Session");
+
+		const doc = indexableToDoc(msg, msg.text, "session-title");
+		const result = toSearchResult(doc, "QuackerTitleRegression", 1);
+		expect(result.sessionTitle, "resolved message session title should round-trip through stored search docs").toBe("Fix Search Titles: Grouped Session");
+
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("does not duplicate goal prefix in message session title metadata", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-prefixed-title-source-"));
+		const file = path.join(dir, "session.jsonl");
+		fs.writeFileSync(file, JSON.stringify({ message: { role: "user", content: "QuackerAlreadyPrefixed" } }) + "\n", "utf-8");
+
+		const ctx = makeCtx({
+			goals: [{ ...goals[0], id: "goal-title", title: "Fix Search Titles" }],
+			sessions: [{
+				id: "session-prefixed-title",
+				title: "Fix Search Titles: Grouped Session",
+				cwd: "/tmp",
+				agentSessionFile: file,
+				createdAt: 1_700_000_000_000,
+				lastActivity: 1_700_000_200_000,
+				goalId: "goal-title",
+				projectId: "proj-a",
+			}],
+		});
+		const [msg] = await collect(new MessageIndexSource(), ctx);
+		expect(msg.metadata.sessionTitle, "goal prefix should not be duplicated for message-derived session context").toBe("Fix Search Titles: Grouped Session");
+
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 });
