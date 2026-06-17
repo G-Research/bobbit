@@ -6015,6 +6015,26 @@ export class SessionManager {
 		// resolveStoreForSession can look up the session's projectId.
 		const terminateStore = this.resolveStoreForSession(id);
 		this.sessions.delete(id);
+		// Extension Platform G1.4: notify lifecycle providers the session is
+		// shutting down on the live DELETE/stop path too. terminateSession
+		// archives directly (bypassing archiveWithCascade), so the dispatch
+		// must also fire here. Best-effort and bounded by the hub's per-provider
+		// timeouts; wrapped in try/catch so termination always completes. Uses
+		// the live `session` context captured at the top of this method.
+		if (this.lifecycleHub) {
+			try {
+				await this.lifecycleHub.dispatch("sessionShutdown", {
+					sessionId: id,
+					projectId: session.projectId,
+					scope: session.projectId ? "project" : "global",
+					cwd: session.cwd,
+					goalId: session.goalId,
+					roleName: session.role,
+				});
+			} catch (err) {
+				console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
+			}
+		}
 		// Always archive — even without an agentSessionFile the metadata
 		// (title, goal association, timestamps) is valuable and the search
 		// index may reference this session.  Purge will clean it up later.
