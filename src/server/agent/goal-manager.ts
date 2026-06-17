@@ -13,6 +13,7 @@ import type { GateStore } from "./gate-store.js";
 import type { TeamStore } from "./team-store.js";
 import type { SessionStore } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 
 const pExecFile = promisify(execFileCb);
 
@@ -111,6 +112,7 @@ export class GoalManager {
 	 * branch. Set by server.ts on startup. */
 	private baseRefResolver?: (projectId: string) => string | undefined;
 	private liveSessionResolver?: () => WorktreeReferenceRecord[];
+	private readonly diagnosticsStateDir?: string;
 	setBaseRefResolver(resolver: (projectId: string) => string | undefined): void {
 		this.baseRefResolver = resolver;
 	}
@@ -140,9 +142,10 @@ export class GoalManager {
 		return [];
 	}
 
-	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
+	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore, stateDir?: string) {
 		this.store = goalStore;
 		this.workflowStore = workflowStore;
+		this.diagnosticsStateDir = stateDir ?? (goalStore as unknown as { storeDir?: string }).storeDir;
 		// Lazy-migrate legacy paused=true + unresolved-deps goals to state='blocked'
 		// BEFORE recovering stuck setups, so that newly-blocked goals don't get
 		// their setupStatus incorrectly marked 'error'. See docs/design/pause-cascade.md.
@@ -784,6 +787,13 @@ export class GoalManager {
 		const goal = this.store.get(id);
 		if (!goal) return false;
 		const archived = this.store.archive(id);
+		if (archived) {
+			try {
+				await cleanupGateDiagnosticsForGoal(id, this.diagnosticsStateDir);
+			} catch (err) {
+				console.warn(`[goal-manager] Failed to clean gate diagnostics for archived goal ${id}:`, err);
+			}
+		}
 		// Multi-repo cleanup: best-effort per-repo worktree + remote-branch
 		// removal. Single-repo cleanup remains owned by session purge.
 		if (archived && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
@@ -905,6 +915,12 @@ export class GoalManager {
 		// Worktrees preserved for 7-day archive (cleaned by periodic purge).
 		if (goal?.team) {
 			console.log(`[goal-manager] Deleting team goal "${goal.title}" — worktrees preserved for archived session review`);
+		}
+
+		try {
+			await cleanupGateDiagnosticsForGoal(id, this.diagnosticsStateDir);
+		} catch (err) {
+			console.warn(`[goal-manager] Failed to clean gate diagnostics for deleted goal ${id}:`, err);
 		}
 
 		this.store.remove(id);
