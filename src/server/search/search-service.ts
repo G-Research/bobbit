@@ -93,6 +93,13 @@ export class SearchService {
 	 */
 	private _backgroundRebuildPromise: Promise<void> | null = null;
 
+	/**
+	 * Fire-and-forget index mutations currently using the store. `close()` marks
+	 * the service closed to block new work, then waits for this set before closing
+	 * the underlying store so teardown cannot race into `FlexSearchStore: already closed`.
+	 */
+	private readonly _mutationTasks = new Set<Promise<void>>();
+
 	private readonly _goalSource = new GoalIndexSource();
 	private readonly _sessionSource = new SessionIndexSource();
 	private readonly _messageSource = new MessageIndexSource();
@@ -197,6 +204,7 @@ export class SearchService {
 		if (this._backgroundRebuildPromise) {
 			try { await this._backgroundRebuildPromise; } catch { /* handled by owner */ }
 		}
+		await this._waitForMutationTasks();
 		// Re-read _store after the await — _doOpen() may have just assigned it.
 		if (this._store) {
 			try { await this._store.close(); }
@@ -219,30 +227,27 @@ export class SearchService {
 		const weight = 2.5;
 		const role = "spec" as const;
 		const timestamp = goal.updatedAt ?? goal.createdAt ?? 0;
-		indexer
-			.upsertEntries([
-				{
-					id: `goal:${goal.id}`,
-					sourceId: "goals",
-					text,
-					metadata: { goalId: goal.id, state: goal.state ?? "" },
-					contentHash: contentHashOf(text, weight, role, timestamp),
-					timestamp,
-					projectId: pid,
-					archived: goal.archived === true,
-					weight,
-					role,
-					display: { title, snippet: spec.slice(0, 300) },
-				},
-			])
-			.catch((err) => console.error("[search] indexGoal failed:", err));
+		this._scheduleMutation("indexGoal", indexer, () => indexer.upsertEntries([
+			{
+				id: `goal:${goal.id}`,
+				sourceId: "goals",
+				text,
+				metadata: { goalId: goal.id, state: goal.state ?? "" },
+				contentHash: contentHashOf(text, weight, role, timestamp),
+				timestamp,
+				projectId: pid,
+				archived: goal.archived === true,
+				weight,
+				role,
+				display: { title, snippet: spec.slice(0, 300) },
+			},
+		]));
 	}
 
 	removeGoal(goalId: string): void {
 		if (!this._indexer) return;
-		this._indexer
-			.removeEntries([`goal:${goalId}`])
-			.catch((err) => console.error("[search] removeGoal failed:", err));
+		const indexer = this._indexer;
+		this._scheduleMutation("removeGoal", indexer, () => indexer.removeEntries([`goal:${goalId}`]));
 	}
 
 	indexSession(session: PersistedSession, goalTitle?: string, projectId?: string): void {
@@ -259,47 +264,46 @@ export class SearchService {
 		if (session.goalId) metadata.goalId = session.goalId;
 		if (goalTitle) metadata.goalTitle = goalTitle;
 		if (session.role) metadata.agentRole = session.role;
-		indexer
-			.upsertEntries([
-				{
-					id: `session:${session.id}`,
-					sourceId: "sessions",
-					text: title,
-					metadata,
-					contentHash: contentHashOf(`${title}\n${displayTitle}`, weight, role, timestamp),
-					timestamp,
-					projectId: pid,
-					archived: session.archived === true,
-					weight,
-					role,
-					display: { title: displayTitle, snippet: displayTitle },
-				},
-			])
-			.catch((err) => console.error("[search] indexSession failed:", err));
+		this._scheduleMutation("indexSession", indexer, () => indexer.upsertEntries([
+			{
+				id: `session:${session.id}`,
+				sourceId: "sessions",
+				text: title,
+				metadata,
+				contentHash: contentHashOf(`${title}\n${displayTitle}`, weight, role, timestamp),
+				timestamp,
+				projectId: pid,
+				archived: session.archived === true,
+				weight,
+				role,
+				display: { title: displayTitle, snippet: displayTitle },
+			},
+		]));
 	}
 
 	removeSession(sessionId: string): void {
 		if (!this._indexer) return;
 		const indexer = this._indexer;
-		indexer.removeEntries([`session:${sessionId}`]).catch((err) =>
-			console.error("[search] removeSession failed:", err),
-		);
+		this._scheduleMutation("removeSession", indexer, () => indexer.removeEntries([`session:${sessionId}`]));
 		this.removeMessagesForSession(sessionId);
 	}
 
 	removeMessagesForSession(sessionId: string): void {
 		if (!this._indexer) return;
-		this._indexer
-			.removeByFilter({ session_id: sessionId, source_id: "messages" })
-			.catch((err) => console.error("[search] removeMessagesForSession failed:", err));
+		const indexer = this._indexer;
+		this._scheduleMutation("removeMessagesForSession", indexer, () =>
+			indexer.removeByFilter({ session_id: sessionId, source_id: "messages" }),
+		);
 	}
 
 	reindexMessagesForSession(session: PersistedSession, goalTitle?: string, projectId?: string): void {
 		if (!this._indexer) return;
 		const indexer = this._indexer;
 		const pid = projectId ?? session.projectId ?? this.projectId;
-		const task = async () => {
+		this._scheduleMutation("reindexMessagesForSession", indexer, async () => {
+			if ((this._state as SearchServiceState) === "closed" || this._indexer !== indexer) return;
 			await indexer.removeByFilter({ session_id: session.id, source_id: "messages" });
+			if ((this._state as SearchServiceState) === "closed" || this._indexer !== indexer) return;
 			const goalStore = {
 				getAll: () => session.goalId ? [{ id: session.goalId, title: goalTitle ?? "" }] : [],
 			} as unknown as GoalStore;
@@ -312,9 +316,9 @@ export class SearchService {
 			};
 			const entries: Indexable[] = [];
 			for await (const entry of this._messageSource.iterate(ctx)) entries.push(entry);
+			if ((this._state as SearchServiceState) === "closed" || this._indexer !== indexer) return;
 			await indexer.upsertEntries(entries);
-		};
-		task().catch((err) => console.error("[search] reindexMessagesForSession failed:", err));
+		});
 	}
 
 	indexMessage(arg: {
@@ -366,27 +370,25 @@ export class SearchService {
 			if (!body) return;
 			const weight = 1.0;
 			const role = "assistant" as const;
-			indexer
-				.upsertEntries([
-					{
-						id: `message:${sessionId}:legacy:${ts}`,
-						sourceId: "messages",
-						text: body,
-						metadata: {
-							sessionId,
-							blockKey: "legacy:0",
-							...(title ? { sessionTitle: title } : {}),
-						},
-						contentHash: contentHashOf(`${body}\n${title}`, weight, role, ts),
-						timestamp: ts,
-						projectId: pid,
-						archived: false,
-						weight,
-						role,
-						display: { title },
+			this._scheduleMutation("indexMessage", indexer, () => indexer.upsertEntries([
+				{
+					id: `message:${sessionId}:legacy:${ts}`,
+					sourceId: "messages",
+					text: body,
+					metadata: {
+						sessionId,
+						blockKey: "legacy:0",
+						...(title ? { sessionTitle: title } : {}),
 					},
-				])
-				.catch((err) => console.error("[search] indexMessage failed:", err));
+					contentHash: contentHashOf(`${body}\n${title}`, weight, role, ts),
+					timestamp: ts,
+					projectId: pid,
+					archived: false,
+					weight,
+					role,
+					display: { title },
+				},
+			]));
 			return;
 		}
 
@@ -416,9 +418,7 @@ export class SearchService {
 			role: entry.role,
 			display: { title: displayTitle },
 		}));
-		indexer
-			.upsertEntries(indexables)
-			.catch((err) => console.error("[search] indexMessage failed:", err));
+		this._scheduleMutation("indexMessage", indexer, () => indexer.upsertEntries(indexables));
 	}
 
 	indexStaff(staff: PersistedStaff, projectId?: string): void {
@@ -437,30 +437,27 @@ export class SearchService {
 			state: staff.state ?? "",
 		};
 		if (staff.roleId) metadata.roleId = staff.roleId;
-		indexer
-			.upsertEntries([
-				{
-					id: `staff:${staff.id}`,
-					sourceId: "staff",
-					text,
-					metadata,
-					contentHash: contentHashOf(text, weight, role, timestamp),
-					timestamp,
-					projectId: pid,
-					archived: false,
-					weight,
-					role,
-					display: { title: name, snippet: description.slice(0, 300) },
-				},
-			])
-			.catch((err) => console.error("[search] indexStaff failed:", err));
+		this._scheduleMutation("indexStaff", indexer, () => indexer.upsertEntries([
+			{
+				id: `staff:${staff.id}`,
+				sourceId: "staff",
+				text,
+				metadata,
+				contentHash: contentHashOf(text, weight, role, timestamp),
+				timestamp,
+				projectId: pid,
+				archived: false,
+				weight,
+				role,
+				display: { title: name, snippet: description.slice(0, 300) },
+			},
+		]));
 	}
 
 	removeStaff(staffId: string): void {
 		if (!this._indexer) return;
-		this._indexer
-			.removeEntries([`staff:${staffId}`])
-			.catch((err) => console.error("[search] removeStaff failed:", err));
+		const indexer = this._indexer;
+		this._scheduleMutation("removeStaff", indexer, () => indexer.removeEntries([`staff:${staffId}`]));
 	}
 
 	// ── Public API — search ──────────────────────────────────────────
@@ -546,6 +543,29 @@ export class SearchService {
 			if (this._state === "closed" || this._indexer !== indexer) return Promise.resolve();
 			return indexer.rebuildFromSources(srcs, ctx);
 		});
+	}
+
+	private _scheduleMutation(label: string, indexer: Indexer, task: () => Promise<void>): void {
+		if (this._state === "closed" || this._indexer !== indexer) return;
+		let tracked: Promise<void>;
+		tracked = (async () => {
+			if (this._state === "closed" || this._indexer !== indexer) return;
+			await task();
+		})()
+			.catch((err) => {
+				if (this._state === "closed" && isStoreAlreadyClosedError(err)) return;
+				console.error(`[search] ${label} failed:`, err);
+			})
+			.finally(() => {
+				this._mutationTasks.delete(tracked);
+			});
+		this._mutationTasks.add(tracked);
+	}
+
+	private async _waitForMutationTasks(): Promise<void> {
+		while (this._mutationTasks.size > 0) {
+			await Promise.allSettled([...this._mutationTasks]);
+		}
 	}
 
 	// ── Internals ────────────────────────────────────────────────────

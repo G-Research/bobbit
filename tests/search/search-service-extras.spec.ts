@@ -241,3 +241,79 @@ test("session goal ownership updates refresh dependent message title prefixes", 
 		fs.rmSync(rootPath, { recursive: true, force: true });
 	}
 });
+
+test("close waits for an in-flight message reindex before closing the store", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-close-"));
+	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-session-"));
+	const messageFile = path.join(rootPath, "session.jsonl");
+	fs.writeFileSync(
+		messageFile,
+		JSON.stringify({ message: { role: "user", content: "ReindexCloseRaceToken" } }) + "\n",
+		"utf-8",
+	);
+
+	const svc = new SearchService({
+		stateDir,
+		projectId: "project-reindex-close",
+		progressBus: new ProgressBus(),
+	});
+	const errors: string[] = [];
+	const originalError = console.error;
+	let releaseUpsert!: () => void;
+	const releaseUpsertPromise = new Promise<void>((resolve) => { releaseUpsert = resolve; });
+	let markUpsertStarted!: () => void;
+	const upsertStarted = new Promise<void>((resolve) => { markUpsertStarted = resolve; });
+	let storeCloseStarted = false;
+	let storeClosedBeforeUpsertFinished = false;
+	let closeSettled = false;
+
+	console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+	try {
+		svc.open();
+		await svc.whenReady();
+
+		const internals = svc as unknown as {
+			_indexer: { upsertEntries: (entries: unknown[]) => Promise<void> };
+			_store: { close: () => Promise<void> };
+		};
+		const originalUpsert = internals._indexer.upsertEntries.bind(internals._indexer);
+		const originalClose = internals._store.close.bind(internals._store);
+		internals._indexer.upsertEntries = async (entries: unknown[]) => {
+			markUpsertStarted();
+			await releaseUpsertPromise;
+			storeClosedBeforeUpsertFinished = storeCloseStarted;
+			return originalUpsert(entries);
+		};
+		internals._store.close = async () => {
+			storeCloseStarted = true;
+			return originalClose();
+		};
+
+		svc.reindexMessagesForSession({
+			id: "session-reindex-close",
+			title: "Race Session",
+			cwd: rootPath,
+			agentSessionFile: messageFile,
+			createdAt: 1,
+			lastActivity: 2,
+			projectId: "project-reindex-close",
+		}, undefined, "project-reindex-close");
+		await upsertStarted;
+
+		const closePromise = svc.close().then(() => { closeSettled = true; });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		const settledBeforeRelease = closeSettled;
+		releaseUpsert();
+		await closePromise;
+
+		expect(settledBeforeRelease).toBe(false);
+		expect(storeClosedBeforeUpsertFinished).toBe(false);
+		expect(errors.filter((err) => err.includes("already closed"))).toEqual([]);
+	} finally {
+		console.error = originalError;
+		releaseUpsert?.();
+		if (svc.getState() !== "closed") await svc.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
+		fs.rmSync(rootPath, { recursive: true, force: true });
+	}
+});
