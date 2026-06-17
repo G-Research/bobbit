@@ -176,49 +176,103 @@ function isProbablyPlaywrightFile(relativePath: string): boolean {
 		|| normalized.includes("/trace/");
 }
 
+function isWithinDirectory(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function safeRealpath(filePath: string): string | undefined {
+	try { return fs.realpathSync(filePath); } catch { return undefined; }
+}
+
+function prepareArtifactCopyRoot(sourceDir: string, destRoot: string): { sourceRealRoot: string; destRealRoot: string } | undefined {
+	try {
+		const sourceStat = fs.lstatSync(sourceDir);
+		if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) return undefined;
+		const sourceRealRoot = safeRealpath(sourceDir);
+		if (!sourceRealRoot) return undefined;
+		fs.mkdirSync(destRoot, { recursive: true });
+		const destStat = fs.lstatSync(destRoot);
+		if (destStat.isSymbolicLink() || !destStat.isDirectory()) return undefined;
+		const destRealRoot = safeRealpath(destRoot);
+		if (!destRealRoot) return undefined;
+		return { sourceRealRoot, destRealRoot };
+	} catch {
+		return undefined;
+	}
+}
+
+function safeSourceRelativePath(rootSourceDir: string, sourcePath: string): string | undefined {
+	const relative = path.relative(rootSourceDir, sourcePath);
+	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	return relative.replace(/\\/g, "/");
+}
+
 function copyArtifactTree(
 	rootSourceDir: string,
 	currentSourceDir: string,
 	destRoot: string,
 	kind: GateStepDiagnosticArtifactMetadata["kind"],
 	state: { files: number; bytes: number; artifacts: GateStepDiagnosticArtifactMetadata[] },
+	bounds: { sourceRealRoot: string; destRealRoot: string },
 	sourcePathForArtifact?: (sourceRelativePath: string, sourcePath: string) => string,
 ): void {
 	let entries: fs.Dirent[];
 	try {
+		const currentStat = fs.lstatSync(currentSourceDir);
+		if (currentStat.isSymbolicLink() || !currentStat.isDirectory()) return;
+		const currentReal = fs.realpathSync(currentSourceDir);
+		if (!isWithinDirectory(bounds.sourceRealRoot, currentReal)) return;
 		entries = fs.readdirSync(currentSourceDir, { withFileTypes: true });
 	} catch {
 		return;
 	}
 	for (const entry of entries) {
 		if (state.files >= MAX_ARTIFACT_FILES || state.bytes >= MAX_ARTIFACT_BYTES) return;
+		if (entry.isSymbolicLink()) continue;
 		const sourcePath = path.join(currentSourceDir, entry.name);
-		const sourceRelativePath = path.relative(rootSourceDir, sourcePath).replace(/\\/g, "/");
-		if (entry.isDirectory()) {
-			copyArtifactTree(rootSourceDir, sourcePath, destRoot, kind, state, sourcePathForArtifact);
+		const sourceRelativePath = safeSourceRelativePath(rootSourceDir, sourcePath);
+		if (!sourceRelativePath) continue;
+		let sourceStat: fs.Stats;
+		try { sourceStat = fs.lstatSync(sourcePath); } catch { continue; }
+		if (sourceStat.isSymbolicLink()) continue;
+		const sourceReal = safeRealpath(sourcePath);
+		if (!sourceReal || !isWithinDirectory(bounds.sourceRealRoot, sourceReal)) continue;
+		if (sourceStat.isDirectory()) {
+			copyArtifactTree(rootSourceDir, sourcePath, destRoot, kind, state, bounds, sourcePathForArtifact);
 			continue;
 		}
-		if (!entry.isFile()) continue;
+		if (!sourceStat.isFile()) continue;
 		if (kind === "test-results" && !isProbablyPlaywrightFile(sourceRelativePath)) continue;
-		let stat: fs.Stats;
-		try { stat = fs.statSync(sourcePath); } catch { continue; }
-		if (!stat.isFile()) continue;
-		if (state.bytes + stat.size > MAX_ARTIFACT_BYTES) return;
-		const retainedPath = path.join(destRoot, sourceRelativePath);
+		if (state.bytes + sourceStat.size > MAX_ARTIFACT_BYTES) return;
+		const retainedPath = path.resolve(destRoot, sourceRelativePath);
+		if (!isWithinDirectory(path.resolve(destRoot), retainedPath)) continue;
 		try {
-			if (fs.existsSync(retainedPath)) continue;
+			try {
+				fs.lstatSync(retainedPath);
+				continue;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ENOENT") continue;
+			}
 			fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
+			const retainedParentReal = fs.realpathSync(path.dirname(retainedPath));
+			if (!isWithinDirectory(bounds.destRealRoot, retainedParentReal)) continue;
 			fs.copyFileSync(sourcePath, retainedPath);
+			const retainedReal = safeRealpath(retainedPath);
+			if (!retainedReal || !isWithinDirectory(bounds.destRealRoot, retainedReal)) {
+				try { fs.rmSync(retainedPath, { force: true }); } catch { /* ignore */ }
+				continue;
+			}
 			state.files += 1;
-			state.bytes += stat.size;
+			state.bytes += sourceStat.size;
 			const artifact: GateStepDiagnosticArtifactMetadata = {
 				path: retainedPath,
 				relativePath: `${kind}/${sourceRelativePath}`.replace(/\\/g, "/"),
 				sourcePath: sourcePathForArtifact ? sourcePathForArtifact(sourceRelativePath, sourcePath) : sourcePath,
-				bytes: stat.size,
+				bytes: sourceStat.size,
 				kind,
 			};
-			if (sourceRelativePath.toLowerCase().endsWith("error-context.md") && stat.size <= MAX_INLINE_ARTIFACT_CONTENT_BYTES) {
+			if (sourceRelativePath.toLowerCase().endsWith("error-context.md") && sourceStat.size <= MAX_INLINE_ARTIFACT_CONTENT_BYTES) {
 				artifact.content = fs.readFileSync(retainedPath, "utf8");
 				artifact.contentType = "text/markdown";
 			}
@@ -241,7 +295,7 @@ function copyContainerArtifactDir(input: {
 	state: { files: number; bytes: number; artifacts: GateStepDiagnosticArtifactMetadata[] };
 }): void {
 	const containerDir = path.posix.join(input.containerCwd.replace(/\\/g, "/"), input.candidate.name);
-	const test = spawnSync("docker", ["exec", input.containerId, "sh", "-c", `test -d ${shellSingleQuote(containerDir)}`], {
+	const test = spawnSync("docker", ["exec", input.containerId, "sh", "-c", `test -d ${shellSingleQuote(containerDir)} && ! test -L ${shellSingleQuote(containerDir)}`], {
 		stdio: "ignore",
 		env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 	});
@@ -257,14 +311,16 @@ function copyContainerArtifactDir(input: {
 		});
 		if (copied.status !== 0) return;
 		const sourceDir = path.join(tmpParent, input.candidate.name);
-		if (!fs.existsSync(sourceDir)) return;
 		const destRoot = path.join(input.paths.artifactsDir, input.candidate.name);
+		const bounds = prepareArtifactCopyRoot(sourceDir, destRoot);
+		if (!bounds) return;
 		copyArtifactTree(
 			sourceDir,
 			sourceDir,
 			destRoot,
 			input.candidate.kind,
 			input.state,
+			bounds,
 			(relativePath) => `${input.containerId}:${path.posix.join(containerDir, relativePath.replace(/\\/g, "/"))}`,
 		);
 	} catch {
@@ -289,9 +345,10 @@ export function finalizeGateStepDiagnostics(input: {
 		if (fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
 			for (const candidate of PLAYWRIGHT_ARTIFACT_DIRS) {
 				const sourceDir = path.join(cwd, candidate.name);
-				if (!fs.existsSync(sourceDir)) continue;
 				const destRoot = path.join(input.paths.artifactsDir, candidate.name);
-				copyArtifactTree(sourceDir, sourceDir, destRoot, candidate.kind, artifactsState);
+				const bounds = prepareArtifactCopyRoot(sourceDir, destRoot);
+				if (!bounds) continue;
+				copyArtifactTree(sourceDir, sourceDir, destRoot, candidate.kind, artifactsState, bounds);
 			}
 		}
 	} catch {
