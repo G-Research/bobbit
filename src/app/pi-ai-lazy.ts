@@ -17,8 +17,25 @@
  * See `docs/design/shrink-initial-bundle.md` (Task A) for the full design.
  */
 
+import type { Context, Model } from "@earendil-works/pi-ai";
+
 let _pi: Promise<typeof import("@earendil-works/pi-ai")> | null = null;
 
 export function loadPiAi(): Promise<typeof import("@earendil-works/pi-ai")> {
 	return (_pi ??= import("@earendil-works/pi-ai"));
+}
+
+export async function getPiAiProviders(): Promise<string[]> {
+	const { getProviders } = await loadPiAi();
+	return [...getProviders()];
+}
+
+export async function getPiAiModel(provider: string, modelId: string): Promise<Model<any> | undefined> {
+	const { getModel } = await loadPiAi();
+	return getModel(provider as any, modelId) as Model<any> | undefined;
+}
+
+export async function completePiAi(model: Model<any>, context: Context, options?: unknown): Promise<any> {
+	const { complete } = await loadPiAi();
+	return complete(model as any, context, options as any);
 }
