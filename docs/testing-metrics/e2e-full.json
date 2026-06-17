@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "metricName": "e2e-full",
+  "kind": "e2e-full",
+  "createdAt": "2026-06-17T22:34:13.968Z",
+  "startedAt": "2026-06-17T22:23:53.793Z",
+  "status": "passed",
+  "exitCode": 0,
+  "signal": null,
+  "command": {
+    "command": "C:\\Program Files\\nodejs\\node.exe",
+    "args": [
+      "scripts/run-playwright-e2e.mjs",
+      "--reporter=json"
+    ],
+    "cwd": "."
+  },
+  "durationMs": 620166,
+  "cpu": {
+    "estimatedCpuMs": 4956281,
+    "averageCpuPercent": 936.22,
+    "peakCpuPercent": 153780.45,
+    "sampleMs": 1000
+  },
+  "memory": {
+    "peakRssBytes": 5470355456
+  },
+  "tests": {
+    "total": 1390,
+    "passed": 1384,
+    "failed": 0,
+    "skipped": 6,
+    "flaky": 3,
+    "durationMs": 1771743,
+    "projects": {
+      "api": {
+        "total": 914,
+        "passed": 912,
+        "failed": 0,
+        "skipped": 2,
+        "flaky": 0,
+        "durationMs": 433831
+      },
+      "api-realpush": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "flaky": 0,
+        "durationMs": 5298
+      },
+      "browser": {
+        "total": 475,
+        "passed": 471,
+        "failed": 0,
+        "skipped": 4,
+        "flaky": 3,
+        "durationMs": 1332614
+      }
+    }
+  }
+}
