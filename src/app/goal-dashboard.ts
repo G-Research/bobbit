@@ -80,6 +80,8 @@ let loading = true;
 let error = "";
 
 /** Git merge status for goal branch */
+type GitStatusFile = { file: string; status: string };
+
 interface GoalRepoEntry {
 	branch?: string;
 	primaryBranch?: string;
@@ -91,9 +93,10 @@ interface GoalRepoEntry {
 	mergedIntoPrimary?: boolean;
 	insertionsVsPrimary?: number;
 	deletionsVsPrimary?: number;
-	status?: Array<{ file: string; status: string }>;
-	statusFiles?: Array<{ file: string; status: string }>;
+	status?: GitStatusFile[];
+	statusFiles?: GitStatusFile[];
 	summary?: string;
+	untrackedIncluded?: boolean;
 }
 interface GoalGitStatus {
 	branch: string;
@@ -110,8 +113,9 @@ interface GoalGitStatus {
 	ahead?: number;
 	behind?: number;
 	unpushed?: boolean;
-	status?: Array<{ file: string; status: string }>;
+	status?: GitStatusFile[];
 	summary?: string;
+	untrackedIncluded?: boolean;
 	/** Multi-repo per-repo envelope. Single-repo: { ".": <self> }. */
 	repos?: Record<string, GoalRepoEntry>;
 }
@@ -122,6 +126,65 @@ let gitRepoKnown: 'yes' | 'no' | 'unknown' = 'unknown';
 let gitStatusLastRefreshAt = 0;
 /** In-flight refresh abort handle (one per dashboard). */
 let gitStatusAbort: AbortController | null = null;
+
+function isUntrackedStatusFile(file: GitStatusFile): boolean {
+	return file.status.includes("?");
+}
+
+function mergeStatusFilesPreservingUntracked(summaryFiles: GitStatusFile[] | undefined, fullFiles: GitStatusFile[] | undefined): GitStatusFile[] | undefined {
+	if (!fullFiles?.length) return summaryFiles;
+	const merged = [...(summaryFiles ?? [])];
+	const seen = new Set(merged.map((file) => file.file));
+	for (const file of fullFiles) {
+		if (!isUntrackedStatusFile(file) || seen.has(file.file)) continue;
+		merged.push(file);
+		seen.add(file.file);
+	}
+	return merged.length > 0 ? merged : summaryFiles;
+}
+
+function repoFiles(repo: GoalRepoEntry | undefined): GitStatusFile[] | undefined {
+	return repo?.statusFiles ?? repo?.status;
+}
+
+function withUntrackedStatusPreserved(current: GoalGitStatus | null, incoming: GoalGitStatus, requestedUntracked: boolean): GoalGitStatus {
+	const incomingIncludesUntracked = requestedUntracked || incoming.untrackedIncluded === true;
+	if (incomingIncludesUntracked) {
+		return { ...incoming, untrackedIncluded: true };
+	}
+	if (current?.untrackedIncluded !== true) return incoming;
+
+	const mergedStatus = mergeStatusFilesPreservingUntracked(incoming.status, current.status) ?? incoming.status ?? [];
+	const merged: GoalGitStatus = {
+		...incoming,
+		status: mergedStatus,
+		clean: incoming.clean && mergedStatus.length === 0,
+		untrackedIncluded: true,
+	};
+
+	if (incoming.repos || current.repos) {
+		const repos: Record<string, GoalRepoEntry> = { ...(incoming.repos ?? {}) };
+		for (const [repoName, currentRepo] of Object.entries(current.repos ?? {})) {
+			const incomingRepo = repos[repoName];
+			if (!incomingRepo) {
+				repos[repoName] = currentRepo;
+				continue;
+			}
+			const mergedRepoFiles = mergeStatusFilesPreservingUntracked(repoFiles(incomingRepo), repoFiles(currentRepo));
+			const files = mergedRepoFiles ?? repoFiles(incomingRepo) ?? [];
+			repos[repoName] = {
+				...incomingRepo,
+				...(mergedRepoFiles ? { status: mergedRepoFiles, statusFiles: mergedRepoFiles } : {}),
+				clean: incomingRepo.clean === true ? files.length === 0 : incomingRepo.clean,
+				untrackedIncluded: true,
+			};
+		}
+		merged.repos = repos;
+		merged.clean = merged.clean && !Object.values(repos).some((repo) => (repoFiles(repo)?.length ?? 0) > 0);
+	}
+
+	return merged;
+}
 
 /** PR status for goal branch */
 interface PrStatus {
@@ -1149,8 +1212,9 @@ async function refreshGoalGitStatus(
 		isStale: () => currentGoalId !== goalId,
 		onOk: (data) => {
 			if (currentGoalId !== goalId) return;
-			if (JSON.stringify(data) !== JSON.stringify(gitStatus)) {
-				gitStatus = data as GoalGitStatus;
+			const next = withUntrackedStatusPreserved(gitStatus, data as GoalGitStatus, !!opts?.untracked);
+			if (JSON.stringify(next) !== JSON.stringify(gitStatus)) {
+				gitStatus = next;
 				changed = true;
 			}
 			gitRepoKnown = 'yes';
@@ -1617,6 +1681,11 @@ async function handleGitFetch(): Promise<void> {
 	await refreshGoalGitStatus(currentGoalId, { fetch: true });
 }
 
+async function handleGitStatusDropdownOpen(): Promise<void> {
+	if (!currentGoalId) return;
+	await refreshGoalGitStatus(currentGoalId, { untracked: true });
+}
+
 // ============================================================================
 // SVG ICON HELPERS
 // ============================================================================
@@ -2038,6 +2107,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.headRefName=${prStatus?.headRefName}
 						@pr-merge=${handlePrMerge}
 						@git-fetch=${handleGitFetch}
+						@git-status-dropdown-open=${handleGitStatusDropdownOpen}
 					></git-status-widget>
 					${goal.worktreePath ? html`
 						<span class="meta-sep">\u00B7</span>
