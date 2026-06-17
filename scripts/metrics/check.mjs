@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
-import { baselineMetricsDir, currentMetricsDir, listJsonFiles, projectRoot, readJson } from "./lib.mjs";
+import { baselineMetricsDir, currentMetricsDir, listJsonFiles, projectRoot, readJson, requiredMetricNames } from "./lib.mjs";
 
 const baselineDir = resolve(process.env.BOBBIT_METRICS_BASELINE_DIR || baselineMetricsDir);
 const currentDir = resolve(process.env.BOBBIT_METRICS_CURRENT_DIR || currentMetricsDir);
@@ -28,6 +28,14 @@ const defaultThresholds = {
 const thresholds = existsSync(thresholdFile)
 	? { ...defaultThresholds, ...readJson(thresholdFile) }
 	: defaultThresholds;
+
+function requiredFiles() {
+	const raw = process.env.BOBBIT_METRICS_REQUIRED;
+	const names = raw == null
+		? requiredMetricNames
+		: raw.split(",").map((name) => name.trim()).filter(Boolean);
+	return names.map((name) => name.endsWith(".json") ? name : `${name}.json`);
+}
 
 function fmtMs(ms) {
 	return `${(ms / 1000).toFixed(1)}s`;
@@ -99,12 +107,16 @@ function compareMetric(file) {
 }
 
 const baselineFiles = listJsonFiles(baselineDir).filter((file) => basename(file) !== "thresholds.json");
+const requiredMetricFiles = requiredFiles();
+const failures = [];
+for (const file of requiredMetricFiles) {
+	if (!existsSync(join(baselineDir, file))) failures.push(`${file}: missing required baseline metric in ${relative(projectRoot, baselineDir)}`);
+	if (!existsSync(join(currentDir, file))) failures.push(`${file}: missing required current metric in ${relative(projectRoot, currentDir)}`);
+}
 if (baselineFiles.length === 0) {
-	console.error(`[metrics:check] no baseline JSON files found in ${baselineDir}`);
-	process.exit(1);
+	failures.push(`no baseline JSON files found in ${baselineDir}`);
 }
 
-const failures = [];
 for (const file of baselineFiles) failures.push(...compareMetric(file));
 
 if (thresholds.browserImprovement?.enabled) {
