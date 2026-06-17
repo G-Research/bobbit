@@ -132,6 +132,7 @@ export class ProjectContext {
     this.sessionStore.onIndexUpdate = (session) => {
       const goalTitle = session.goalId ? this.goalStore.get(session.goalId)?.title : undefined;
       this.searchIndex.indexSession(session, goalTitle, this.project.id);
+      this.searchIndex.reindexMessagesForSession(session, goalTitle, this.project.id);
     };
     // Re-apply any dispatcher wiring in case `setGoalTriggerDispatcher`
     // was called before `open()` (current call order is reverse, but the

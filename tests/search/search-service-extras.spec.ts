@@ -135,3 +135,109 @@ test("goal title updates refresh dependent session and message titles", async ()
 		fs.rmSync(rootPath, { recursive: true, force: true });
 	}
 });
+
+test("session title updates refresh dependent message titles", async () => {
+	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-search-session-title-"));
+	const messageFile = path.join(rootPath, "session.jsonl");
+	fs.writeFileSync(
+		messageFile,
+		JSON.stringify({ message: { role: "user", content: "RenameSessionTitleToken" } }) + "\n",
+		"utf-8",
+	);
+
+	const ctx = new ProjectContext({
+		id: "project-session-title",
+		name: "Session Title Project",
+		rootPath,
+		createdAt: Date.now(),
+		colorLight: "#2563eb",
+		colorDark: "#60a5fa",
+	});
+
+	try {
+		ctx.open();
+		await ctx.searchIndex.whenReady();
+		ctx.sessionStore.put({
+			id: "session-title-refresh",
+			title: "",
+			cwd: rootPath,
+			agentSessionFile: messageFile,
+			createdAt: 2,
+			lastActivity: 3,
+			projectId: "project-session-title",
+		});
+
+		await expect.poll(async () => {
+			const results = await ctx.searchIndex.search("RenameSessionTitleToken", { type: "messages", limit: 5 });
+			return results.results.length;
+		}, { timeout: 5_000 }).toBe(1);
+
+		ctx.sessionStore.update("session-title-refresh", { title: "Generated Session Title" });
+
+		await expect.poll(async () => {
+			const results = await ctx.searchIndex.search("RenameSessionTitleToken", { type: "messages", limit: 5 });
+			return results.results[0]?.sessionTitle ?? "";
+		}, { timeout: 5_000 }).toBe("Generated Session Title");
+	} finally {
+		await ctx.searchIndex.close();
+		fs.rmSync(rootPath, { recursive: true, force: true });
+	}
+});
+
+test("session goal ownership updates refresh dependent message title prefixes", async () => {
+	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-search-session-goal-"));
+	const messageFile = path.join(rootPath, "session.jsonl");
+	fs.writeFileSync(
+		messageFile,
+		JSON.stringify({ message: { role: "user", content: "SessionGoalPrefixToken" } }) + "\n",
+		"utf-8",
+	);
+
+	const ctx = new ProjectContext({
+		id: "project-session-goal",
+		name: "Session Goal Project",
+		rootPath,
+		createdAt: Date.now(),
+		colorLight: "#2563eb",
+		colorDark: "#60a5fa",
+	});
+
+	try {
+		ctx.open();
+		await ctx.searchIndex.whenReady();
+		ctx.goalStore.put({
+			id: "goal-prefix",
+			title: "Goal Prefix",
+			cwd: rootPath,
+			state: "in-progress",
+			spec: "",
+			createdAt: 1,
+			updatedAt: 1,
+			projectId: "project-session-goal",
+		});
+		ctx.sessionStore.put({
+			id: "session-goal-refresh",
+			title: "Grouped Session",
+			cwd: rootPath,
+			agentSessionFile: messageFile,
+			createdAt: 2,
+			lastActivity: 3,
+			projectId: "project-session-goal",
+		});
+
+		await expect.poll(async () => {
+			const results = await ctx.searchIndex.search("SessionGoalPrefixToken", { type: "messages", limit: 5 });
+			return results.results[0]?.sessionTitle ?? "";
+		}, { timeout: 5_000 }).toBe("Grouped Session");
+
+		ctx.sessionStore.update("session-goal-refresh", { goalId: "goal-prefix" });
+
+		await expect.poll(async () => {
+			const results = await ctx.searchIndex.search("SessionGoalPrefixToken", { type: "messages", limit: 5 });
+			return results.results[0]?.sessionTitle ?? "";
+		}, { timeout: 5_000 }).toBe("Goal Prefix: Grouped Session");
+	} finally {
+		await ctx.searchIndex.close();
+		fs.rmSync(rootPath, { recursive: true, force: true });
+	}
+});

@@ -3439,6 +3439,7 @@ export class SessionManager {
 					try {
 						const goalTitle = session.goalId ? this.resolveGoal(session.goalId)?.title : undefined;
 						testSearchIndex.indexSession(session, goalTitle, session.projectId || "");
+						testSearchIndex.reindexMessagesForSession(session, goalTitle, session.projectId || "");
 					} catch (err) { console.error("[search] Failed to index session:", err); }
 				};
 			} catch (err) {
