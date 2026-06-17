@@ -78,9 +78,9 @@ cause apiece so the audit doesn't fix the same bug five times.
    - idle + empty queue → `dispatchDirectPrompt` (2061) → `rpcClient.prompt(text, images)` (2075);
    - else `promptQueue.enqueue` (`prompt-queue.ts:19`) + `broadcastQueue` (1688, **re-serializes
      and persists full base64 image data on every queue mutation**).
-   A `steer` while streaming bypasses the queue → `deliverLiveSteer` (1834) → `_dispatchSteer`
-   (1919): push `batchText` onto the `inFlightSteerTexts` shadow ledger (1937) **before** awaiting
-   `rpcClient.steer(batchText)` (no images), rollback on RPC failure (1946-1951).
+   A `steer` while streaming enqueues a steered row, removes that row from the queue, records and
+   persists its text in the `inFlightSteerTexts` shadow ledger, then dispatches through
+   `_dispatchSteer()`; rollback requeues the row if the RPC fails.
 
 ### 1.4 Server → agent subprocess → LLM (RPC bridge)
 
