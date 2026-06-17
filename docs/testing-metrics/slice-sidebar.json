@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "metricName": "slice-sidebar",
+  "kind": "e2e-browser-slice",
+  "createdAt": "2026-06-17T22:39:26.884Z",
+  "startedAt": "2026-06-17T22:38:33.841Z",
+  "status": "passed",
+  "exitCode": 0,
+  "signal": null,
+  "command": {
+    "command": "C:\\Program Files\\nodejs\\node.exe",
+    "args": [
+      "scripts/run-playwright-e2e.mjs",
+      "--project",
+      "browser",
+      "--reporter=json",
+      "tests/e2e/ui/mobile-staff-sidebar.spec.ts",
+      "tests/e2e/ui/sidebar-actions-menu.spec.ts",
+      "tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts",
+      "tests/e2e/ui/sidebar-archived-layout.spec.ts",
+      "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
+      "tests/e2e/ui/sidebar-child-loading.spec.ts",
+      "tests/e2e/ui/sidebar-filters.spec.ts",
+      "tests/e2e/ui/sidebar-font-scale.spec.ts",
+      "tests/e2e/ui/sidebar-goal-group-filters.spec.ts",
+      "tests/e2e/ui/sidebar-goal-staff.spec.ts",
+      "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
+      "tests/e2e/ui/sidebar-mobile-archived-per-project.spec.ts",
+      "tests/e2e/ui/sidebar-mobile-archived-search.spec.ts",
+      "tests/e2e/ui/sidebar-navigation.spec.ts",
+      "tests/e2e/ui/sidebar-refresh-agent.spec.ts",
+      "tests/e2e/ui/sidebar-resize.spec.ts",
+      "tests/e2e/ui/sidebar-search-filter.spec.ts",
+      "tests/e2e/ui/sidebar-session-actions.spec.ts",
+      "tests/e2e/ui/sidebar-spawned-children-dedupe.spec.ts",
+      "tests/e2e/ui/sidebar-staff-loading.spec.ts",
+      "tests/e2e/ui/single-project-sidebar.spec.ts",
+      "tests/e2e/ui/stories-sidebar.spec.ts"
+    ],
+    "cwd": "."
+  },
+  "durationMs": 53041,
+  "cpu": {
+    "estimatedCpuMs": 144500,
+    "averageCpuPercent": 310.95,
+    "peakCpuPercent": 590.04,
+    "sampleMs": 1000
+  },
+  "memory": {
+    "peakRssBytes": 3279585280
+  },
+  "slice": "sidebar",
+  "files": [
+    "tests/e2e/ui/mobile-staff-sidebar.spec.ts",
+    "tests/e2e/ui/sidebar-actions-menu.spec.ts",
+    "tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts",
+    "tests/e2e/ui/sidebar-archived-layout.spec.ts",
+    "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
+    "tests/e2e/ui/sidebar-child-loading.spec.ts",
+    "tests/e2e/ui/sidebar-filters.spec.ts",
+    "tests/e2e/ui/sidebar-font-scale.spec.ts",
+    "tests/e2e/ui/sidebar-goal-group-filters.spec.ts",
+    "tests/e2e/ui/sidebar-goal-staff.spec.ts",
+    "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
+    "tests/e2e/ui/sidebar-mobile-archived-per-project.spec.ts",
+    "tests/e2e/ui/sidebar-mobile-archived-search.spec.ts",
+    "tests/e2e/ui/sidebar-navigation.spec.ts",
+    "tests/e2e/ui/sidebar-refresh-agent.spec.ts",
+    "tests/e2e/ui/sidebar-resize.spec.ts",
+    "tests/e2e/ui/sidebar-search-filter.spec.ts",
+    "tests/e2e/ui/sidebar-session-actions.spec.ts",
+    "tests/e2e/ui/sidebar-spawned-children-dedupe.spec.ts",
+    "tests/e2e/ui/sidebar-staff-loading.spec.ts",
+    "tests/e2e/ui/single-project-sidebar.spec.ts",
+    "tests/e2e/ui/stories-sidebar.spec.ts"
+  ],
+  "tests": {
+    "total": 66,
+    "passed": 65,
+    "failed": 0,
+    "skipped": 1,
+    "flaky": 0,
+    "durationMs": 96883,
+    "projects": {
+      "browser": {
+        "total": 66,
+        "passed": 65,
+        "failed": 0,
+        "skipped": 1,
+        "flaky": 0,
+        "durationMs": 96883
+      }
+    }
+  }
+}

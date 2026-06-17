@@ -1,0 +1,14 @@
+{
+  "coverageMinDeltaPct": -0.1,
+  "runtimeMaxIncreaseRatio": 1.5,
+  "runtimeMaxIncreaseMs": 60000,
+  "cpuMaxIncreaseRatio": 1.75,
+  "cpuMaxIncreaseMs": 120000,
+  "memoryMaxIncreaseRatio": 1.75,
+  "memoryMaxIncreaseBytes": 536870912,
+  "browserImprovement": {
+    "enabled": false,
+    "targetRuntimeDropPct": 40,
+    "targetCpuDropPct": 40
+  }
+}
