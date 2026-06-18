@@ -4148,7 +4148,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4199,7 +4199,7 @@ export class SessionManager {
 			// inside the container via ProjectSandbox.createWorktree, and the
 			// host-side worktree pool isn't reachable from the container.
 			const targetBranch = `session/${uuid8}`;
-			const poolForCreate = (!opts?.sandboxed && projectId) ? this.worktreePools.get(projectId) : undefined;
+			const poolForCreate = (!opts?.sandboxed && !opts?.bypassWorktreePool && projectId) ? this.worktreePools.get(projectId) : undefined;
 			const claimed = poolForCreate ? await poolForCreate.claim(targetBranch).catch((err) => {
 				console.warn(`[session-manager] pool.claim failed for ${id}, falling back to createWorktree: ${err instanceof Error ? err.message : err}`);
 				return null;
@@ -4225,7 +4225,7 @@ export class SessionManager {
 				isCompacting: false,
 				titleGenerated: false,
 				goalId,
-				assistantType: undefined,
+				assistantType,
 				taskId: opts?.taskId,
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
@@ -4264,6 +4264,7 @@ export class SessionManager {
 				title: opts?.title || "New session",
 				cwd,
 				goalId,
+				assistantType,
 				taskId: opts?.taskId,
 				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
 				// lands in PersistedSession on disk. Pinned by `tests/staff-session-staffid-persistence.test.ts`;
@@ -4306,9 +4307,11 @@ export class SessionManager {
 			}
 			this.notifySessionCreated(session);
 
-			// Fire-and-forget: finish pipeline. If we got a pool worktree above,
-			// pass its path so executeWorktreeAsync skips createWorktree.
-			executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
+			// Finish the pipeline. Most callers keep the historical preparing-session UX
+			// and let setup complete in the background. Continue-Archived opts in to
+			// awaiting setup so fresh worktree/base-ref failures are returned by the POST
+			// instead of surfacing later as an asynchronously archived session.
+			const setupPromise = executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
 				// here is redundant but kept as a safety net for re-attempts where the
@@ -4316,9 +4319,22 @@ export class SessionManager {
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
-			}).catch((err) => {
-				handleSetupFailure(session, plan, err, ctx);
 			});
+
+			if (opts?.awaitWorktreeSetup) {
+				try {
+					await setupPromise;
+				} catch (err) {
+					const setupError = err instanceof Error ? err : new Error(String(err));
+					handleSetupFailure(session, plan, setupError, ctx);
+					throw setupError;
+				}
+			} else {
+				setupPromise.catch((err) => {
+					const setupError = err instanceof Error ? err : new Error(String(err));
+					handleSetupFailure(session, plan, setupError, ctx);
+				});
+			}
 
 			return session;
 		}

@@ -9906,6 +9906,10 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			// Continue must surface fresh worktree/base-ref setup failures synchronously;
+			// the archived source worktree/branch remain provenance only.
+			awaitWorktreeSetup: !!worktreeOpts,
+			bypassWorktreePool: !!worktreeOpts,
 			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
 			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
@@ -9936,7 +9940,11 @@ async function handleApiRoute(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
 		} catch (err) {
-			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			const failedRecord = sessionManager.getPersistedSession(newSessionId);
+			cleanupFailedContinue(failedRecord?.agentSessionFile || destJsonl, newSessionId, bobbitStateDir());
+			if (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl) {
+				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
+			}
 			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
