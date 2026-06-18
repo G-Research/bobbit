@@ -21,6 +21,7 @@ import {
 	type PanelContribution,
 	type EntrypointContribution,
 	type ProviderContribution,
+	type RuntimeContribution,
 	type ChannelContribution,
 	type HookContribution,
 } from "../agent/pack-contributions.js";
@@ -38,6 +39,8 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
+	/** Resolve a managed runtime descriptor within a pack. */
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined;
 	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
 	/** Resolve a channel handler within a pack. */
@@ -134,6 +137,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	listProviders(projectId: string | undefined): ProviderContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.providers);
+	}
+
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
+		return this.getPack(projectId, packId)?.runtimes.find((runtime) => runtime.id === runtimeId);
 	}
 
 	listHooks(projectId: string | undefined): HookContribution[] {

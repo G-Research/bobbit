@@ -85,7 +85,7 @@ export interface PackManifest {
 		hooks?: string[]; // schema-2 inert hook metadata basenames (loaded by pack contributions)
 		mcp?: string[]; // MCP contribution basenames (schema 2+, loader later)
 		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
-		runtimes?: string[]; // runtime contribution basenames (accepted, loader later)
+		runtimes?: string[]; // runtimes/<name>.yaml basenames; managed-runtime descriptors
 		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,

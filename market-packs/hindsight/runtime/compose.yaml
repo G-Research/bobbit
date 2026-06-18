@@ -1,0 +1,43 @@
+# Hindsight runtime compose template (P1 — static, digest-pinned).
+#
+# This is a STATIC template consumed by the runtime manifest layer. It is NEVER
+# executed at this phase. All images are digest-pinned (image@sha256:<64 hex>)
+# for reproducibility. The `db` service is defined here so helpers can SELECT
+# services per mode: `managed-postgres` includes `db`; `external-postgres` omits
+# it and supplies HINDSIGHT_API_DATABASE_URL instead.
+name: hindsight
+
+services:
+  api:
+    image: ghcr.io/hindsight/api@sha256:fc49bf69e5364d0a527afd38b2a7a94bb8a4f7f138855182a876791b523fb011
+    restart: unless-stopped
+    environment:
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY}
+      HINDSIGHT_API_SECRET: ${HINDSIGHT_API_SECRET}
+      HINDSIGHT_API_DATABASE_URL: ${HINDSIGHT_API_DATABASE_URL}
+      HINDSIGHT_API_PORT: ${HINDSIGHT_API_PORT:-8080}
+    ports:
+      - "127.0.0.1:${HINDSIGHT_API_PORT:-8080}:8080"
+
+  web:
+    image: ghcr.io/hindsight/web@sha256:25584622a6b41957a4903748f4fcf6743a6b2d424c8629f96639d48d8c715a77
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      HINDSIGHT_WEB_PORT: ${HINDSIGHT_WEB_PORT:-3000}
+      HINDSIGHT_API_PORT: ${HINDSIGHT_API_PORT:-8080}
+    ports:
+      - "127.0.0.1:${HINDSIGHT_WEB_PORT:-3000}:3000"
+
+  # Managed Postgres. Selected only in `managed-postgres` mode. The data
+  # directory is bind-mounted from the host, defaulting to ${dataDir:-~/.hindsight}.
+  db:
+    image: docker.io/library/postgres@sha256:3b2c8f6c262a2aa333b3b750e5a821aeb6b1a14dd57189b9f172d903ecdaec27
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hindsight
+      POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD}
+      POSTGRES_DB: hindsight
+    volumes:
+      - "${dataDir:-~/.hindsight}/postgres:/var/lib/postgresql/data"
