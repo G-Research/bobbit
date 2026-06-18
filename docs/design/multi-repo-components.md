@@ -393,7 +393,7 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 | 12 | Step `role:` (architect, code-reviewer, security-reviewer, spec-auditor, qa-tester) | many | Unchanged | covered by 10/11/11a |
 | 13 | Step `expect: failure` | bug-fix `reproducing-test` (and TDD) | Unchanged on all `command` shapes | `step-expect-failure.spec.ts` |
 | 14 | Step `timeout:` (seconds) | build/E2E steps | Explicit `timeout:` remains unchanged; component-linked `command: unit` steps default to 1200s when omitted, while other command steps keep the generic default. | `step-timeout.spec.ts`, `verification-harness-command-scheduling.test.ts` |
-| 15 | Step `phase:` (ordered scheduling group) | many | Phases remain sequential. Within a phase, command steps serialize; non-command steps still run in parallel. | `phased-verification.spec.ts` (existing), `verification-harness-command-scheduling.test.ts` |
+| 15 | Step `phase:` (ordered scheduling group) | many | Phases remain sequential. Same-phase steps run concurrently by default, including command steps; explicit ordering belongs in later phases. | `phased-verification.spec.ts` (existing), `verification-harness-command-scheduling.test.ts` |
 | 16 | Step `optional: true` + `optionalLabel` + `description` | feature/bug-fix QA testing | `optionalLabel` is canonical for goal-creation toggles; legacy non-human `label` is migrated on load/save. `label` is reserved for human-signoff card titles. | `optional-step-toggle.spec.ts` (existing) |
 | 17 | `{{branch}}` / `{{baseBranch}}` runtime tokens (`{{master}}` still valid as legacy alias) | many | Unchanged in `run:` and `prompt:` | `template-vars.spec.ts` (existing) |
 | 18 | `{{goal_spec}}` injection | many | Unchanged | existing |
