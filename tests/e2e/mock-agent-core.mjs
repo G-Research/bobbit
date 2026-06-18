@@ -2326,8 +2326,8 @@ export class MockAgentCore {
 				// forked/continued sessions would open empty in the E2E tier (the
 				// real CLI loads it; the mock previously no-op'd here). The file is
 				// written by `get_state` as newline-delimited {type:"message",message}.
-				// The real CLI also validates runtime system-init cwd metadata before
-				// accepting the transcript; stale archived worktree paths must fail here.
+				// The real CLI also validates runtime cwd metadata before accepting the
+				// transcript; stale archived worktree paths must fail here.
 				try {
 					const sp = msg.sessionPath;
 					if (sp && fs.existsSync(sp)) {
@@ -2337,7 +2337,7 @@ export class MockAgentCore {
 							if (!trimmed) continue;
 							try {
 								const parsed = JSON.parse(trimmed);
-								if (parsed && parsed.type === "system" && typeof parsed.cwd === "string" && !fs.existsSync(parsed.cwd)) {
+								if (parsed && (parsed.type === "system" || parsed.type === "session") && typeof parsed.cwd === "string" && !fs.existsSync(parsed.cwd)) {
 									return { success: false, error: `Stored session working directory does not exist: ${parsed.cwd}` };
 								}
 								if (parsed && parsed.type === "message" && parsed.message) loaded.push(parsed.message);

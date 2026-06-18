@@ -119,10 +119,10 @@ files relative to its actual cwd. A clone left under the project-root slug would
 be invisible after the CLI starts inside the fresh worktree.
 
 After that file move, Continue may rebase runtime-only Pi cwd/session metadata
-in the cloned JSONL. Today that means top-level `cwd` on `system`/`init` records
-(or legacy `system` records with no subtype) is rewritten from the archived
-cwd/worktree value to the fresh cwd. Message content and user-visible text are
-never inspected or rewritten.
+in the cloned JSONL. Today that means top-level `cwd` on Pi `session` records,
+`system`/`init` records, or legacy `system` records with no subtype is rewritten
+from the archived cwd/worktree value to the fresh cwd. Message content and
+user-visible text are never inspected or rewritten.
 
 ## Worktree behavior
 
