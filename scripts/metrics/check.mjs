@@ -82,11 +82,13 @@ const defaultThresholds = {
 	cpuMaxIncreaseMs: 120_000,
 	memoryMaxIncreaseRatio: 1.75,
 	memoryMaxIncreaseBytes: 512 * 1024 * 1024,
+	retainedSmokeFiles: [],
 	browserE2eBudget: {
 		// Disabled by default so ad-hoc scoped checks keep their historical behavior.
 		// Branch baselines can enable this from docs/testing-metrics/thresholds.json.
 		enabled: false,
 		metrics: ["e2e-browser", "slice-renderer", "slice-scroll", "slice-sidebar"],
+		metricBudgets: {},
 		maxTestCountIncrease: 0,
 		maxTestCountIncreaseRatio: 0,
 		runtimeMaxIncreaseRatio: 1.50,
@@ -151,6 +153,12 @@ function compareNumeric({ label, baseline, current, ratio, additive, format = (v
 	return [`${label} increased ${pctChange(baseline, current).toFixed(1)}% (${format(baseline)} → ${format(current)}), max ${format(allowed)}`];
 }
 
+function compareAbsoluteMax({ label, current, max, format = (v) => String(v) }) {
+	if (!Number.isFinite(current) || !Number.isFinite(max)) return [];
+	if (current <= max) return [];
+	return [`${label} ${format(current)} exceeds max ${format(max)}`];
+}
+
 function compareMinDecrease({ label, baseline, current, minDecrease, format = (v) => String(v) }) {
 	if (minDecrease == null || !Number.isFinite(baseline) || !Number.isFinite(current)) return [];
 	const allowed = baseline * (1 - minDecrease);
@@ -179,39 +187,74 @@ function testCount(metric) {
 	return Number.isFinite(total) ? total : null;
 }
 
+function metricBudgetFor(metricName, budget) {
+	const perMetric = budget?.metricBudgets?.[metricName] ?? budget?.budgets?.[metricName] ?? budget?.perMetric?.[metricName];
+	return perMetric && typeof perMetric === "object" && !Array.isArray(perMetric)
+		? { ...budget, ...perMetric }
+		: budget;
+}
+
+function compareLegacyBrowserTestCount(label, baselineCount, currentCount, budget) {
+	if (baselineCount == null || currentCount == null) return [];
+	const additive = Number.isFinite(budget.maxTestCountIncrease) ? budget.maxTestCountIncrease : 0;
+	const ratio = Number.isFinite(budget.maxTestCountIncreaseRatio) ? budget.maxTestCountIncreaseRatio : 0;
+	const allowed = Math.floor(Math.max(baselineCount + additive, baselineCount * (1 + ratio)));
+	return currentCount > allowed
+		? [`${label}: browser E2E test count increased ${baselineCount} → ${currentCount}, max ${allowed}`]
+		: [];
+}
+
 function compareBrowserBudget(label, metricName, baseline, current) {
 	const budget = thresholds.browserE2eBudget;
 	if (!budget?.enabled) return [];
 	const metricNames = Array.isArray(budget.metrics) ? budget.metrics.map((name) => normalizeMetricName(name)) : [];
 	if (metricNames.length > 0 && !metricNames.includes(metricName)) return [];
+	const metricBudget = metricBudgetFor(metricName, budget);
 	const failures = [];
 	const baselineCount = testCount(baseline);
 	const currentCount = testCount(current);
-	if (baselineCount != null && currentCount != null) {
-		const additive = Number.isFinite(budget.maxTestCountIncrease) ? budget.maxTestCountIncrease : 0;
-		const ratio = Number.isFinite(budget.maxTestCountIncreaseRatio) ? budget.maxTestCountIncreaseRatio : 0;
-		const allowed = Math.floor(Math.max(baselineCount + additive, baselineCount * (1 + ratio)));
-		if (currentCount > allowed) {
-			failures.push(`${label}: browser E2E test count increased ${baselineCount} → ${currentCount}, max ${allowed}`);
+	if (scopedComparison) return compareLegacyBrowserTestCount(label, baselineCount, currentCount, metricBudget);
+	if (Number.isFinite(metricBudget.maxTestCount)) {
+		if (currentCount != null && currentCount > metricBudget.maxTestCount) {
+			failures.push(`${label}: browser E2E test count ${currentCount} exceeds max ${metricBudget.maxTestCount}`);
 		}
+	} else {
+		failures.push(...compareLegacyBrowserTestCount(label, baselineCount, currentCount, metricBudget));
 	}
-	if (scopedComparison) return failures;
-	failures.push(...compareNumeric({
-		label: `${label}: browser E2E budget runtime`,
-		baseline: baseline.durationMs,
-		current: current.durationMs,
-		ratio: budget.runtimeMaxIncreaseRatio,
-		additive: budget.runtimeMaxIncreaseMs,
-		format: fmtMs,
-	}));
-	failures.push(...compareNumeric({
-		label: `${label}: browser E2E budget estimated CPU`,
-		baseline: baseline.cpu?.estimatedCpuMs,
-		current: current.cpu?.estimatedCpuMs,
-		ratio: budget.cpuMaxIncreaseRatio,
-		additive: budget.cpuMaxIncreaseMs,
-		format: fmtMs,
-	}));
+	if (Number.isFinite(metricBudget.maxDurationMs)) {
+		failures.push(...compareAbsoluteMax({
+			label: `${label}: browser E2E budget runtime`,
+			current: current.durationMs,
+			max: metricBudget.maxDurationMs,
+			format: fmtMs,
+		}));
+	} else {
+		failures.push(...compareNumeric({
+			label: `${label}: browser E2E budget runtime`,
+			baseline: baseline.durationMs,
+			current: current.durationMs,
+			ratio: metricBudget.runtimeMaxIncreaseRatio,
+			additive: metricBudget.runtimeMaxIncreaseMs,
+			format: fmtMs,
+		}));
+	}
+	if (Number.isFinite(metricBudget.maxEstimatedCpuMs)) {
+		failures.push(...compareAbsoluteMax({
+			label: `${label}: browser E2E budget estimated CPU`,
+			current: current.cpu?.estimatedCpuMs,
+			max: metricBudget.maxEstimatedCpuMs,
+			format: fmtMs,
+		}));
+	} else {
+		failures.push(...compareNumeric({
+			label: `${label}: browser E2E budget estimated CPU`,
+			baseline: baseline.cpu?.estimatedCpuMs,
+			current: current.cpu?.estimatedCpuMs,
+			ratio: metricBudget.cpuMaxIncreaseRatio,
+			additive: metricBudget.cpuMaxIncreaseMs,
+			format: fmtMs,
+		}));
+	}
 	return failures;
 }
 
@@ -223,6 +266,24 @@ function currentPathForMetric(metricName) {
 function baselinePathForMetric(metricName) {
 	if (baselineInputKind === "file") return baselineInput;
 	return baselineMetricFile(metricName, baselineDir);
+}
+
+function checkRetainedSmokeFiles() {
+	const configured = [
+		...(Array.isArray(thresholds.retainedSmokeFiles) ? thresholds.retainedSmokeFiles : []),
+		...(Array.isArray(thresholds.browserE2eBudget?.retainedSmokeFiles) ? thresholds.browserE2eBudget.retainedSmokeFiles : []),
+	];
+	const seen = new Set();
+	const failures = [];
+	for (const entry of configured) {
+		if (typeof entry !== "string" || entry.trim() === "") continue;
+		const normalized = entry.replace(/\\/g, "/");
+		if (seen.has(normalized)) continue;
+		seen.add(normalized);
+		const filePath = resolve(projectRoot, normalized);
+		if (!existsSync(filePath)) failures.push(`retained smoke file missing: ${normalized}`);
+	}
+	return failures;
 }
 
 function comparisonPairs() {
@@ -323,6 +384,7 @@ if (pairs.length === 0) {
 }
 
 for (const pair of pairs) failures.push(...compareMetric(pair));
+if (!scopedComparison) failures.push(...checkRetainedSmokeFiles());
 
 if (!scopedComparison && thresholds.browserImprovement?.enabled) {
 	for (const name of ["e2e-browser", "slice-renderer", "slice-scroll", "slice-sidebar"]) {

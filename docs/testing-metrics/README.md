@@ -19,7 +19,7 @@ The split-suite metrics make browser E2E cost visible while preserving coverage 
 | `npm run metrics:baseline` | Captures branch-local baselines and refreshes the coverage map. | `docs/testing-metrics/baseline-*.json` |
 | `npm run metrics:check` | Compares committed baselines with current artifacts. | comparison output only |
 
-Committed baselines live in `docs/testing-metrics/baseline-*.json`. Current run artifacts live in `.profiles/metrics/*.json` and are not committed. Threshold defaults live in `docs/testing-metrics/thresholds.json`.
+Committed baselines live in `docs/testing-metrics/baseline-*.json`. Current run artifacts live in `.profiles/metrics/*.json` and are not committed. Threshold defaults live in `docs/testing-metrics/thresholds.json`, including accepted post-migration browser budgets and the retained-smoke file list.
 
 ## E2E single-run rule
 
@@ -31,7 +31,7 @@ For gate validation, prefer `npm run metrics:e2e:all`. It runs the existing E2E 
 npm run metrics:check
 ```
 
-Compares every committed baseline under `docs/testing-metrics/` with current artifacts under `.profiles/metrics/` and applies the default regression thresholds.
+Compares every committed baseline under `docs/testing-metrics/` with current artifacts under `.profiles/metrics/`, applies regression thresholds, enforces absolute browser E2E/slice budgets, and verifies retained smoke files listed in `thresholds.json` still exist.
 
 ```bash
 node scripts/metrics/check.mjs \
@@ -59,6 +59,8 @@ Checks a focused migration slice against an explicit runtime/CPU decrease target
 - Browser-project metrics show spawned-gateway cost after all browser rows in the project interact with each other.
 - Full-suite metrics are intentionally conservative because API and unrelated browser work can mask an area-specific change.
 - CPU/runtime improvements should be read with the slice and browser-project metrics first, then full-suite metrics. Re-run in the same branch/environment when a single sample is noisy.
+- Browser E2E and slice budgets are anchored to accepted post-migration current-state limits (`maxTestCount`, `maxDurationMs`, and `maxEstimatedCpuMs`) rather than stale pre-migration baselines.
+- Retained full-stack smoke files are machine-checked via `retainedSmokeFiles` in `thresholds.json`; deleting or renaming one requires updating the coverage map and thresholds in the same reviewed change.
 - Update baselines only after the coverage migration is intentional, replacement coverage exists, retained smokes are documented, and the new metrics are accepted. Never update baselines just to hide a regression.
 
 ## Coverage-map update rules

@@ -122,7 +122,18 @@ try {
 	const baselineBrowserPath = baselineMetricFile("e2e-browser", baselineDir);
 	const scopedCurrentPath = metricFile("coverage", scopedCurrentDir);
 	writeJson(join(baselineDir, "thresholds.json"), {
-		browserE2eBudget: { enabled: true, maxTestCountIncrease: 0 },
+		retainedSmokeFiles: ["scripts/metrics/check.mjs"],
+		browserE2eBudget: {
+			enabled: true,
+			maxTestCountIncrease: 0,
+			metricBudgets: {
+				"e2e-browser": {
+					maxTestCount: 100,
+					maxDurationMs: 100_000,
+					maxEstimatedCpuMs: 200_000,
+				},
+			},
+		},
 	});
 	writeJson(baselineCoveragePath, sampleMetric());
 	writeJson(baselineBrowserPath, sampleBrowserMetric());
@@ -138,7 +149,8 @@ try {
 	writeJson(metricFile("e2e-browser", badCurrentDir), sampleBrowserMetric());
 	writeJson(metricFile("coverage", badBudgetCurrentDir), sampleMetric());
 	writeJson(metricFile("e2e-browser", badBudgetCurrentDir), sampleBrowserMetric({
-		tests: { total: 101, passed: 101, failed: 0, skipped: 0, flaky: 0, durationMs: 100_000 },
+		durationMs: 110_000,
+		cpu: { estimatedCpuMs: 220_000, averageCpuPercent: 200, peakCpuPercent: 300 },
 	}));
 	writeJson(scopedCurrentPath, sampleMetric({
 		durationMs: 300_000,
@@ -159,7 +171,13 @@ try {
 	if ((fail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for coverage regression");
 
 	const budgetFail = runCheck(badBudgetCurrentDir);
-	if ((budgetFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for browser E2E test-count growth");
+	if ((budgetFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for browser E2E absolute budget growth");
+
+	writeJson(join(baselineDir, "thresholds.json"), {
+		retainedSmokeFiles: ["tests/e2e/ui/does-not-exist-retained-smoke.spec.ts"],
+	});
+	const missingSmokeFail = runCheck(currentDir);
+	if ((missingSmokeFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for a missing retained smoke file");
 
 	assertCoverageMapSmoke();
 
