@@ -53,6 +53,9 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions } from "./agent/pack-contributions.js";
+import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { ContextTraceStore } from "./agent/context-trace-store.js";
+import { fenceBlock } from "./agent/context-blocks.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
@@ -64,7 +67,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
+import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
@@ -1214,7 +1217,22 @@ export function createGateway(config: GatewayConfig) {
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
 	);
+	sessionManager.lifecycleHub = new LifecycleHub({
+		registry: packContributionRegistry,
+		moduleHost,
+		trace: new ContextTraceStore(bobbitStateDir()),
+		gatewayInfo: () => {
+			try {
+				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				const token = fs.readFileSync(path.join(bobbitStateDir(), "token"), "utf-8").trim();
+				return { baseUrl, token };
+			} catch {
+				return { baseUrl: "", token: "" };
+			}
+		},
+	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
@@ -4216,6 +4234,128 @@ async function handleApiRoute(
 		return;
 	}
 
+	// ── Provider per-turn lifecycle hooks (EP G1.4) ──
+	// These endpoints are called only by the Bobbit-generated provider-bridge pi
+	// extension (before-prompt / before-compact) and the context-trace inspector.
+	// They inherit the admin-bearer gate enforced before handleApiRoute, exactly
+	// like POST /api/sessions/:id/tool-grant-request above. afterTurn /
+	// sessionShutdown are gateway-internal dispatches and intentionally have NO
+	// public endpoint.
+	//
+	// Delimiters MUST stay byte-identical to provider-bridge-extension.ts's
+	// stripDelimitedTail() so the system-prompt tail is idempotent turn-over-turn.
+	const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
+	const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
+
+	// Resolve a session's lifecycle dispatch context from live or persisted state.
+	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
+	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
+		const live = sessionManager.getSession(id);
+		const persisted = sessionManager.getPersistedSession(id);
+		if (!live && !persisted) return undefined;
+		const projectId = live?.projectId ?? persisted?.projectId;
+		return {
+			sessionId: id,
+			projectId,
+			scope: projectId ? "project" : "global",
+			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
+			goalId: live?.goalId ?? persisted?.goalId,
+			roleName: live?.role ?? persisted?.role,
+		};
+	};
+
+	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
+	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
+	if (beforePromptMatch && req.method === "POST") {
+		const sessionId = beforePromptMatch[1];
+		const body = await readBody(req).catch(() => ({} as any));
+		if (body && body.prompt !== undefined && typeof body.prompt !== "string") {
+			json({ error: "prompt must be a string" }, 400);
+			return;
+		}
+		const base = resolveHookCtx(sessionId);
+		if (!base) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const hub = sessionManager.lifecycleHub;
+		if (!hub) {
+			json({ tail: "", blocks: [] });
+			return;
+		}
+		try {
+			const turnIndex = body?.turn?.index;
+			const { blocks } = await hub.dispatch("beforePrompt", {
+				...base,
+				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
+				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
+			});
+			const tail = blocks.length
+				? `\n${DYNAMIC_CONTEXT_START}\n${blocks.map(fenceBlock).join("\n\n")}\n${DYNAMIC_CONTEXT_END}`
+				: "";
+			// Best-effort: refresh the persisted prompt-sections snapshot so the
+			// inspector reflects this turn's dynamic-context tail. Non-fatal.
+			try {
+				const parts = sessionManager.getPromptParts(sessionId);
+				if (parts) {
+					parts.dynamicContext = blocks;
+					persistPromptSections(sessionId, parts);
+				}
+			} catch (err) {
+				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
+			}
+			json({
+				tail,
+				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
+			});
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// POST /api/sessions/:id/provider-hooks/before-compact — notify providers before compaction.
+	const beforeCompactMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-compact$/);
+	if (beforeCompactMatch && req.method === "POST") {
+		const sessionId = beforeCompactMatch[1];
+		const base = resolveHookCtx(sessionId);
+		if (!base) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const hub = sessionManager.lifecycleHub;
+		if (!hub) {
+			json({});
+			return;
+		}
+		try {
+			await hub.dispatch("beforeCompact", base);
+			json({});
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/context-trace?limit=N — per-turn provider dispatch trace.
+	const contextTraceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-trace$/);
+	if (contextTraceMatch && req.method === "GET") {
+		const sessionId = contextTraceMatch[1];
+		let limit: number | undefined;
+		const rawLimit = url.searchParams.get("limit");
+		if (rawLimit !== null) {
+			const n = Number.parseInt(rawLimit, 10);
+			if (Number.isFinite(n) && n > 0) limit = Math.min(n, 1000);
+		}
+		try {
+			const entries = new ContextTraceStore(bobbitStateDir()).readTrace(sessionId, limit);
+			json({ entries });
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// POST /api/sessions/:id/restart — restart a live session's agent process by id.
 	const restartMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/restart$/);
 	if (restartMatch && req.method === "POST") {
@@ -6684,7 +6824,7 @@ async function handleApiRoute(
 			projectBase: string | undefined,
 			store: PackOrderStore,
 			packName: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "git-widget-button" | "command-palette" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: string[]; piExtensions?: string[]; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? getProjectRoot() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -6712,7 +6852,7 @@ async function handleApiRoute(
 					entrypointByListName.set(ep.listName, { label: ep.label, kind: ep.kind, routeId: ep.routeId });
 				}
 			} catch { /* metadata is optional; listName is the stable key */ }
-			return {
+			const baseCatalogue = {
 				roles: [...c.roles],
 				tools: concreteTools.tools,
 				skills: [...c.skills],
@@ -6723,6 +6863,20 @@ async function handleApiRoute(
 				// One-line per-entity descriptions for the activation disclosure (R3).
 				// Read from the SAME installed pack dir as the catalogue above — never
 				// from the runtime-filtered /api/tools or /api/ext/contributions.
+				descriptions,
+			};
+			if ((entry.manifest.schema ?? 1) < 2) return baseCatalogue;
+			return {
+				roles: baseCatalogue.roles,
+				tools: baseCatalogue.tools,
+				skills: baseCatalogue.skills,
+				entrypoints: baseCatalogue.entrypoints,
+				providers: [...(c.providers ?? [])],
+				hooks: [...(c.hooks ?? [])],
+				mcp: [...(c.mcp ?? [])],
+				piExtensions: [...(c.piExtensions ?? [])],
+				runtimes: [...(c.runtimes ?? [])],
+				workflows: [...(c.workflows ?? [])],
 				descriptions,
 			};
 		};
@@ -6755,7 +6909,7 @@ async function handleApiRoute(
 			// catalogue (drop refs for entities the pack does not declare).
 			const reqDisabled = (body?.disabled ?? {}) as Record<string, unknown>;
 			const catalogueEntrypointNames = new Set(catalogue.entrypoints.map((e) => e.listName));
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -6765,6 +6919,12 @@ async function handleApiRoute(
 				tools: normaliseKind("tools", new Set(catalogue.tools)),
 				skills: normaliseKind("skills", new Set(catalogue.skills)),
 				entrypoints: normaliseKind("entrypoints", catalogueEntrypointNames),
+				providers: normaliseKind("providers", new Set(catalogue.providers ?? [])),
+				hooks: normaliseKind("hooks", new Set(catalogue.hooks ?? [])),
+				mcp: normaliseKind("mcp", new Set(catalogue.mcp ?? [])),
+				piExtensions: normaliseKind("piExtensions", new Set(catalogue.piExtensions ?? [])),
+				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
+				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 			};
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			cfgStore.setPackActivation(scope as PackOrderScope, packName, normalized);

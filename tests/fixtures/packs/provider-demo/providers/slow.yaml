@@ -1,0 +1,6 @@
+id: slow
+kind: generic
+module: ../lib/provider-slow.mjs
+hooks: [beforePrompt]
+budget: { maxTokens: 512, timeoutMs: 300 }
+defaultEnabled: true
