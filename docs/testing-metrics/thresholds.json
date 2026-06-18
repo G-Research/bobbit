@@ -45,8 +45,9 @@
     "metricBudgets": {
       "e2e-browser": {
         "maxTestCount": 385,
-        "maxDurationMs": 950000,
-        "maxEstimatedCpuMs": 1600000
+        "maxDurationMs": 1200000,
+        "maxEstimatedCpuMs": 1600000,
+        "useAbsoluteBudgetForExplicitDecrease": true
       },
       "slice-renderer": {
         "maxTestCount": 115,

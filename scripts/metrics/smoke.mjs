@@ -156,6 +156,7 @@ try {
 					maxTestCount: 100,
 					maxDurationMs: 100_000,
 					maxEstimatedCpuMs: 200_000,
+					useAbsoluteBudgetForExplicitDecrease: true,
 				},
 			},
 		},
@@ -213,6 +214,12 @@ try {
 
 	const scopedDecreaseFail = runScopedCheck(baselineCoveragePath, scopedCurrentPath, ["--no-coverage", "--min-runtime-decrease", "0.30", "--min-cpu-decrease", "0.30"]);
 	if ((scopedDecreaseFail.status ?? 0) === 0) throw new Error("expected scoped check with explicit runtime/CPU decreases to fail");
+
+	const scopedBrowserAbsoluteBudgetPass = runScopedCheck(baselineBrowserPath, metricFile("e2e-browser", currentDir), ["--no-coverage", "--min-runtime-decrease", "0.40", "--min-cpu-decrease", "0.40"]);
+	if ((scopedBrowserAbsoluteBudgetPass.status ?? 1) !== 0) throw new Error("expected e2e-browser explicit decrease check to pass under absolute budgets");
+
+	const scopedBrowserAbsoluteBudgetFail = runScopedCheck(baselineBrowserPath, metricFile("e2e-browser", badBudgetCurrentDir), ["--no-coverage", "--min-runtime-decrease", "0.40", "--min-cpu-decrease", "0.40"]);
+	if ((scopedBrowserAbsoluteBudgetFail.status ?? 0) === 0) throw new Error("expected e2e-browser explicit decrease check to fail when absolute budgets are exceeded");
 
 	const fail = runCheck(badCurrentDir);
 	if ((fail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for coverage regression");
