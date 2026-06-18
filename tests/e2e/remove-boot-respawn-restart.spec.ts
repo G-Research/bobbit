@@ -54,23 +54,30 @@ async function waitForNoActiveTeam(goalId: string, label: string): Promise<void>
 
 async function assertNoTeamRecreated(goalId: string, previousLeadId: string, durationMs = 2_000): Promise<void> {
 	const deadline = Date.now() + durationMs;
-	while (Date.now() < deadline) {
+	let violation: string | undefined;
+	await expect.poll(async () => {
+		if (violation) return violation;
+
 		const team = await readActiveTeam(goalId);
 		if (team?.teamLeadSessionId) {
-			throw new Error(
+			violation =
 				`BOOT_RESPAWN_E2E_TEAM_RECREATED: restart created team lead ${team.teamLeadSessionId} ` +
-				`for torn-down goal ${goalId}; previous torn-down lead was ${previousLeadId}`,
-			);
+				`for torn-down goal ${goalId}; previous torn-down lead was ${previousLeadId}`;
+			return violation;
 		}
 		const agents = await readActiveAgents(goalId);
 		if (agents.length > 0) {
-			throw new Error(
+			violation =
 				`BOOT_RESPAWN_E2E_AGENTS_RECREATED: restart created active agents for torn-down goal ${goalId}: ` +
-				JSON.stringify(agents),
-			);
+				JSON.stringify(agents);
+			return violation;
 		}
-		await new Promise((resolve) => setTimeout(resolve, 100));
-	}
+		return Date.now() >= deadline ? "stable" : "pending";
+	}, {
+		timeout: durationMs + 1_000,
+		intervals: [100],
+		message: `no team respawn for torn-down goal ${goalId}`,
+	}).toBe("stable");
 }
 
 async function restartCrashedGateway(gateway: GatewayInfo): Promise<void> {
