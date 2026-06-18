@@ -4,6 +4,7 @@ import {
 	INBOX_PANEL_TAB_ID,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
+	isLivePreviewTab,
 	panelWorkspaceSessionKey,
 	previewContentHashFromTab,
 	previewEntryLabel,
@@ -308,6 +309,40 @@ function toLegacyPanelTab(tab: SidePanelWorkspaceTab): PanelWorkspaceTab {
 	};
 }
 
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function hydrateActivePreviewMirror(workspace: SidePanelWorkspace, legacyTabs: PanelWorkspaceTab[]): void {
+	const activeTab = legacyTabs.find((tab) => tab.id === workspace.activeTabId && tab.kind === "preview");
+	if (!activeTab) return;
+	const source = asRecord(activeTab.source) || {};
+	const tabState = asRecord(activeTab.state) || {};
+	const entry = previewEntryLabel(
+		stringValue(tabState.entry)
+		|| stringValue(source.entry)
+		|| previewTabEntryFromId(activeTab.id)
+		|| activeTab.title
+		|| activeTab.label
+		|| undefined,
+	);
+	if (!entry) return;
+	const contentHash = previewContentHashFromTab(activeTab);
+	const artifactId = stringValue(tabState.artifactId) || stringValue(source.artifactId);
+	const mtime = finiteNumber(tabState.mtime) ?? finiteNumber(source.mtime);
+	const isLiveTab = isLivePreviewTab(activeTab);
+
+	state.isPreviewSession = true;
+	state.previewPanelEntry = entry;
+	state.previewPanelActiveTab = "preview";
+	state.previewPanelTab = "preview";
+	if (mtime != null) state.previewPanelMtime = mtime;
+	else if (!state.previewPanelMtime) state.previewPanelMtime = now();
+	if (contentHash) (state as any).previewPanelContentHash = contentHash;
+	state.previewPanelArtifactId = !isLiveTab && artifactId ? artifactId : "";
+	(state as any).previewPanelMountedTabId = activeTab.id;
+}
+
 function syncCompatibilityMirrors(workspace: SidePanelWorkspace): void {
 	const sid = panelWorkspaceSessionKey(workspace.sessionId);
 	const legacyTabs = workspace.tabs.map(toLegacyPanelTab);
@@ -318,6 +353,7 @@ function syncCompatibilityMirrors(workspace: SidePanelWorkspace): void {
 		state.activePanelTabId = workspace.activeTabId;
 		state.previewPanelFullscreen = workspace.sizeMode === "fullscreen";
 		state.inboxPanelOpen = workspace.tabs.some((tab) => tab.id === INBOX_PANEL_TAB_ID && tab.kind === "inbox");
+		hydrateActivePreviewMirror(workspace, legacyTabs);
 	}
 	(state as unknown as { panelWorkspace?: SidePanelWorkspace }).panelWorkspace = workspace;
 }
