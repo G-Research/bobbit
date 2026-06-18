@@ -20,11 +20,11 @@
   }
   .mock-popover.open { display: block; }
   .mock-popover[data-mode="bottom-sheet"] {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    top: auto;
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    top: auto !important;
   }
 </style>
 </head>
@@ -101,6 +101,8 @@ window._mobileState = {
   annotations: [],
   toastTimer: null,
 };
+window._mockSelectionRect = null;
+window.flushMobileSelection = () => handleMobileSelection();
 
 function initMobile() {
   window._mobileState.isMobile = true;
@@ -134,11 +136,15 @@ function handleMobileSelection() {
 
   // Position floating button below selection
   const range = sel.getRangeAt(0);
-  const rangeRect = range.getBoundingClientRect();
+  const rangeRect = window._mockSelectionRect || range.getBoundingClientRect();
   const containerRect = document.getElementById('review-doc').getBoundingClientRect();
 
   const btn = document.getElementById('floating-btn');
-  btn.style.left = (rangeRect.left - containerRect.left + rangeRect.width / 2 - 50) + 'px';
+  let left = rangeRect.left - containerRect.left + rangeRect.width / 2 - 50;
+  if (left < 4) left = 4;
+  const maxX = containerRect.width - 120;
+  if (left > maxX) left = maxX;
+  btn.style.left = left + 'px';
   btn.style.top = (rangeRect.bottom - containerRect.top + 8) + 'px';
   btn.style.display = '';
   window._mobileState.showFloatingBtn = true;

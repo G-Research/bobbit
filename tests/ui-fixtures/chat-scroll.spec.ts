@@ -272,4 +272,106 @@ test.describe("AgentInterface chat scroll fixture", () => {
 		const final = await scrollMetrics(page);
 		expect(final.scrollHeight, "image-bearing message should grow the scroll container").toBeGreaterThan(pre.scrollHeight + 800);
 	});
+
+	test("prompt jump buttons are pure DOM geometry and clicks target nearest prompt", async ({ page }) => {
+		await page.evaluate(() => (window as any).__chatScrollFixture.setPromptTranscript({ prompts: 3, scrollTop: "bottom" }));
+		let cls = await page.evaluate(() => (window as any).__chatScrollFixture.classifyPrompts());
+		let state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(cls.userCount).toBe(3);
+		expect(cls.above).toBeGreaterThan(0);
+		expect(cls.below).toBe(0);
+		expect(state.upVisible).toBe(true);
+		expect(state.splitPresent).toBe(false);
+		expect(state.bottomVisible).toBe(false);
+
+		await page.evaluate(() => (window as any).__chatScrollFixture.setScrollerTop(0));
+		cls = await page.evaluate(() => (window as any).__chatScrollFixture.classifyPrompts());
+		state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(cls.above).toBe(0);
+		expect(cls.below).toBeGreaterThan(0);
+		expect(state.upVisible).toBe(false);
+		expect(state.splitPresent).toBe(true);
+		expect(state.bottomVisible).toBe(true);
+
+		await page.locator('[data-testid="jump-to-next-prompt"]').click();
+		await expect.poll(() => page.evaluate(() => {
+			const offset = (window as any).__chatScrollFixture.promptOffset(1);
+			return offset >= 0 && offset <= 40;
+		}), {
+			timeout: 5_000,
+			message: "next prompt click should land prompt[1] near the top margin",
+		}).toBe(true);
+		cls = await page.evaluate(() => (window as any).__chatScrollFixture.classifyPrompts());
+		state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(cls.above).toBeGreaterThan(0);
+		expect(state.upVisible).toBe(true);
+		expect(state.bottomVisible).toBe(true);
+		expect(state.splitPresent).toBe(cls.below > 0);
+
+		await page.locator('[data-testid="jump-to-previous-prompt"]').click();
+		await expect.poll(() => page.evaluate(() => {
+			const offset = (window as any).__chatScrollFixture.promptOffset(0);
+			return offset >= 0 && offset <= 40;
+		}), {
+			timeout: 5_000,
+			message: "previous prompt click should land prompt[0] near the top margin",
+		}).toBe(true);
+		state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(state.upVisible).toBe(false);
+		expect(state.splitPresent).toBe(true);
+	});
+
+	test("mobile prompt jump geometry clears the fixed app header", async ({ page }) => {
+		await page.setViewportSize({ width: 375, height: 667 });
+		await loadFixture(page);
+		await page.evaluate(() => {
+			(window as any).__chatScrollFixture.installMobileHeader(64);
+			return (window as any).__chatScrollFixture.setPromptTranscript({ prompts: 2, fillerBefore: 160, fillerAfter: 760, scrollTop: "bottom" });
+		});
+		const state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(state.upVisible).toBe(true);
+		expect(state.upTop).toContain("--mobile-header-height");
+
+		await page.locator('[data-testid="jump-to-previous-prompt"]').click();
+		await expect.poll(async () => page.evaluate(() => {
+			const header = document.getElementById("app-header") as HTMLElement;
+			const prompt = document.querySelector('user-message[data-fixture-prompt="1"]') as HTMLElement;
+			return Math.round(prompt.getBoundingClientRect().top - header.getBoundingClientRect().bottom);
+		}), {
+			timeout: 5_000,
+			message: "jump target should land below fixed mobile header",
+		}).toBeGreaterThan(8);
+	});
+
+	test("pill overflow fixture covers narrow wrap, wide nowrap, label, and promotion", async ({ page }) => {
+		await page.setViewportSize({ width: 540, height: 800 });
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__chatScrollFixture.seedPills(15));
+		let metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.contentFlexWrap).toBe("wrap");
+		expect(metrics.hidden).toBeGreaterThan(0);
+		expect(metrics.stripHeight).toBeLessThanOrEqual(2 * 22 + 6 + 8);
+		expect(metrics.moreButtonHeight).toBeLessThanOrEqual(28);
+		await expect(page.locator("[data-more-btn] button").first()).toHaveCSS("white-space", "nowrap");
+		const visibleBefore = metrics.visible;
+		const visibleIds = await page.locator("[data-pill-content] > div > bg-process-pill[data-id]").evaluateAll((els) =>
+			els.map((el) => el.getAttribute("data-id") || "").filter(Boolean),
+		);
+		await page.locator("[data-more-btn] button").first().click();
+		metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.popoverAlignItems).toBe("flex-start");
+		await page.locator("[data-more-btn] button").first().click();
+		await page.evaluate((ids) => (window as any).__chatScrollFixture.dismissPills(ids), visibleIds);
+		metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.visible).toBeGreaterThanOrEqual(visibleBefore);
+
+		await page.setViewportSize({ width: 1400, height: 800 });
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__chatScrollFixture.seedPills(12));
+		metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.contentFlexWrap).toBe("nowrap");
+		expect(metrics.hidden).toBeGreaterThan(0);
+		expect(metrics.stripHeight).toBeLessThanOrEqual(22 + 6);
+	});
+
 });
