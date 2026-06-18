@@ -6,10 +6,11 @@
 > [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
 > `beforeCompact` hooks fire from a generated **provider-bridge** pi extension, and `afterTurn` /
 > `sessionShutdown` fire from the gateway's own agent-event stream — see
-> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). **No built-in production
-> provider ships yet** (G1.6), so an out-of-the-box install produces no Dynamic Context section;
-> the behaviour is proven by a fixture pack. This page documents the Hub core and its session
-> wiring.
+> [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). The first built-in
+> production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
+> built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
+> install still produces no Dynamic Context section. This page documents the Hub core and its
+> session wiring.
 
 ## What it is, and why
 
@@ -329,9 +330,11 @@ The section is added in **both** prompt builders, mirroring the skills-catalog d
 **Empty / absent `dynamicContext` adds zero sections**, so a session with no contributing provider
 produces a byte-identical prompt to before this wiring — the invariant a unit test pins.
 
-### What does NOT ship yet
+### What ships out of the box
 
-No built-in production provider is installed (that is G1.6). The wiring is therefore exercised by a
+The [Hindsight memory pack](hindsight-memory.md) ships in the built-in band as the first production
+provider, but it is **dormant until a Hindsight URL is configured** — so a fresh install contributes
+no Dynamic Context until you opt in. The wiring itself is also exercised by a
 deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
 `DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
 E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
@@ -542,9 +545,10 @@ ambient context a session received and why blocks were dropped.
   server-side `afterTurn` / `sessionShutdown` from the gateway's agent-event stream; plus the
   REST surface (`/provider-hooks/*`, `/context-trace`) — see
   [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14).
-- **G1.6** ships the first built-in production provider; until then only fixture / installed
-  packs contribute blocks. Production behaviour is unchanged until then — with no enabled
-  provider, no Dynamic Context section is added and the per-turn bridge is never spawned.
+- **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
+  It is dormant until a Hindsight URL is configured, so out of the box behaviour is unchanged —
+  with no active provider, no Dynamic Context section is added and the per-turn bridge is never
+  spawned.
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also

@@ -2,16 +2,16 @@
 
 Bobbit ships a built-in [first-party pack](marketplace.md#built-in-first-party-packs) named
 **`hindsight`** that gives agents persistent, cross-session **memory** backed by a running
-[Hindsight](https://github.com/hindsight) instance. It is the first production
+Hindsight instance (an external memory/recall service you host yourself). It is the first production
 [lifecycle provider](lifecycle-hub.md): instead of every session starting cold, the provider
 **recalls** relevant past memories into the prompt and **retains** a compact summary of each turn,
 so knowledge accrues across goals, sessions, and (optionally) projects.
 
 This page documents how the pack behaves and how to turn it on. The implementation blueprint —
 exact request/response body mapping, the test plan, and the host-side seams it depends on — lives
-in [docs/design/hindsight-pack-external.md](design/hindsight-pack-external.md); the topology
-rationale (one shared bank, tag-scoped) is in
-[docs/design/agent-memory.md](design/agent-memory.md).
+in [docs/design/hindsight-pack-external.md](design/hindsight-pack-external.md), whose §7 also
+covers the topology rationale (one shared bank, tag-scoped) summarised under
+[Bank & tag taxonomy](#bank--tag-taxonomy) below.
 
 > **Scope of this release (Extension Platform G2.1 + G2.2).** Only **external mode** ships — you
 > point the pack at a Hindsight URL you already run. The managed Docker/Postgres runtime, the
@@ -86,7 +86,7 @@ them only by configuring a different bank id.
 is unsupported — you can only recall within a single bank. A per-project bank fan-out would make
 the headline value prop ("have we solved this anywhere before?") impossible as one native query.
 So Bobbit uses **one bank + tags**: scope is expressed as recall-time tag filters, not as separate
-banks. Full rationale: [docs/design/agent-memory.md §3](design/agent-memory.md).
+banks. Full rationale: [docs/design/hindsight-pack-external.md §7](design/hindsight-pack-external.md).
 
 **Auto-tags on retain.** The agent never hand-tags; the provider derives tags from the hook
 context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>"`:
@@ -243,5 +243,4 @@ Tracked in later Extension Platform goals, **not** in this release:
 - [Marketplace → built-in first-party packs](marketplace.md#built-in-first-party-packs) and
   [provider contributions](marketplace.md#provider-contributions-providersidyaml).
 - [docs/design/hindsight-pack-external.md](design/hindsight-pack-external.md) — implementation
-  blueprint (REST body mapping, host seams, full test plan).
-- [docs/design/agent-memory.md](design/agent-memory.md) — bank-topology rationale.
+  blueprint (REST body mapping, host seams, full test plan, and the bank-topology rationale in §7).
