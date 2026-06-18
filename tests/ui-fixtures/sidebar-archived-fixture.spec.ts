@@ -1,0 +1,192 @@
+import { test, expect, type Page } from "@playwright/test";
+import fs from "node:fs";
+import path from "node:path";
+import { buildBundle } from "../fixtures/build-bundle.js";
+
+const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
+const ENTRY = path.resolve("tests/ui-fixtures/sidebar-archived-fixture-entry.ts");
+const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
+const BUNDLE = path.join(BUNDLE_DIR, "sidebar-archived-fixture-bundle.js");
+
+const SIDEBAR_SRC = path.resolve("src/app/sidebar.ts");
+const RENDER_HELPERS_SRC = path.resolve("src/app/render-helpers.ts");
+const STATE_SRC = path.resolve("src/app/state.ts");
+const API_SRC = path.resolve("src/app/api.ts");
+const SIDEBAR_FILTERS_SRC = path.resolve("src/ui/components/sidebar-filters.ts");
+const SEARCH_BOX_SRC = path.resolve("src/ui/components/SearchBox.ts");
+const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot.ts");
+const SIDEBAR_NESTING_SRC = path.resolve("src/app/sidebar-nesting.ts");
+const SIDEBAR_SPAWNED_SRC = path.resolve("src/app/sidebar-spawned-children.ts");
+const TEAM_ARCHIVED_BUCKET_SRC = path.resolve("src/app/team-archived-bucket.ts");
+
+const MARK = "SIDEBAR_ARCHIVED_FIXTURE";
+
+test.beforeAll(() => {
+	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
+	buildBundle({
+		entry: ENTRY,
+		outfile: BUNDLE,
+		deps: [
+			ENTRY,
+			SIDEBAR_SRC,
+			RENDER_HELPERS_SRC,
+			STATE_SRC,
+			API_SRC,
+			SIDEBAR_FILTERS_SRC,
+			SEARCH_BOX_SRC,
+			SEARCH_STATUS_DOT_SRC,
+			SIDEBAR_NESTING_SRC,
+			SIDEBAR_SPAWNED_SRC,
+			TEAM_ARCHIVED_BUCKET_SRC,
+		],
+	});
+});
+
+async function loadFixture(
+	page: Page,
+	options: { mode?: "desktop" | "mobile"; showArchived?: boolean; collapsed?: boolean } = {},
+): Promise<void> {
+	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.addScriptTag({ path: BUNDLE });
+	await page.waitForFunction(() => (window as any).__sidebarArchivedReady === true, null, { timeout: 10_000 });
+	await page.evaluate((opts) => (window as any).__resetSidebarArchivedFixture(opts), options);
+	await expect(page.locator("#app")).toBeVisible({ timeout: 10_000 });
+}
+
+async function fixtureIds(page: Page): Promise<Record<string, string>> {
+	return page.evaluate(() => (window as any).__sidebarArchivedFixtureIds);
+}
+
+async function domIndexes(page: Page, selectors: string[]): Promise<number[]> {
+	return page.evaluate((sels) => {
+		const all = Array.from(document.querySelectorAll("*"));
+		return sels.map((sel) => all.indexOf(document.querySelector(sel) as Element));
+	}, selectors);
+}
+
+function expectIncreasing(indexes: number[], label: string): void {
+	for (let i = 0; i < indexes.length; i++) {
+		expect(indexes[i], `${MARK}: ${label} selector ${i} missing`).toBeGreaterThanOrEqual(0);
+		if (i > 0) expect(indexes[i], `${MARK}: ${label} order ${i}`).toBeGreaterThan(indexes[i - 1]);
+	}
+}
+
+async function setShowArchived(page: Page, checked: boolean): Promise<void> {
+	await page.getByTestId("sidebar-filters-button").click();
+	await page.getByTestId("sidebar-filter-archived").locator("input").evaluate((input, value) => {
+		const checkbox = input as HTMLInputElement;
+		if (checkbox.checked !== value) checkbox.click();
+	}, checked);
+	await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(checked);
+}
+
+test.describe("Sidebar archived deterministic fixture", () => {
+	test("Show Archived toggles archived rows on/off and writes the persisted preference", async ({ page }) => {
+		test.setTimeout(30_000);
+		await loadFixture(page, { showArchived: false });
+		const ids = await fixtureIds(page);
+
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header hidden initially`).toHaveCount(0);
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: archived goal hidden initially`).toHaveCount(0);
+
+		await setShowArchived(page, true);
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header appears`).toHaveCount(1, { timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: archived goal appears`).toHaveCount(1, { timeout: 10_000 });
+		await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived"))).toBe("true");
+
+		await setShowArchived(page, false);
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: archived header removed`).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: archived goal removed`).toHaveCount(0);
+		await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived"))).toBe("false");
+	});
+
+	test("desktop per-project archived sections preserve ordering, collapse state, and nested archived goals", async ({ page }) => {
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`)).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`)).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedChildGoal}"]`), `${MARK}: archived child of live goal remains in live hierarchy`).toHaveCount(1);
+
+		expectIncreasing(await domIndexes(page, [
+			`[data-testid="project-header"][data-project-id="${ids.projectA}"]`,
+			`[data-nav-id="goal:${ids.liveGoalA}"]`,
+			`[data-nav-id="goal:${ids.archivedChildGoal}"]`,
+			`[data-nav-id="archived-header:${ids.projectA}"]`,
+			`[data-nav-id="goal:${ids.archivedGoalA1}"]`,
+			`[data-nav-id="goal:${ids.archivedGoalA2}"]`,
+			`[data-session-id="${ids.archivedStandaloneA}"]`,
+			`[data-testid="project-header"][data-project-id="${ids.projectB}"]`,
+			`[data-nav-id="archived-header:${ids.projectB}"]`,
+			`[data-nav-id="goal:${ids.archivedGoalB}"]`,
+		]), "desktop archived rows");
+
+		await page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`).click();
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`), `${MARK}: collapsed project B hides archived goal`).toHaveCount(0, { timeout: 5_000 });
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: project A archived section stays expanded`).toHaveCount(1);
+		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
+	});
+
+	test("archived team leads, members, and delegates nest under their live owners", async ({ page }) => {
+		test.setTimeout(30_000);
+		await loadFixture(page, { showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expect(page.locator(`[data-session-id="${ids.archivedTeamLead}"]`), `${MARK}: archived team lead renders under live goal`).toBeVisible({ timeout: 10_000 });
+		await page.locator(`[data-session-id="${ids.archivedTeamLead}"] span[title="Expand"]`).click();
+		await expect(page.locator(`[data-session-id="${ids.archivedTeamWorker}"]`), `${MARK}: archived worker expands under archived team lead`).toBeVisible({ timeout: 5_000 });
+
+		const parent = page.locator(`[data-session-id="${ids.liveSessionParent}"]`).first();
+		await expect(parent, `${MARK}: live parent session renders`).toBeVisible({ timeout: 10_000 });
+		await parent.locator("span").first().click();
+		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate expands under live parent`).toBeVisible({ timeout: 5_000 });
+		await page.locator(`[data-session-id="${ids.archivedDelegate}"] span[title="Expand"]`).click();
+		await expect(page.locator(`[data-session-id="${ids.archivedNestedDelegate}"]`), `${MARK}: nested archived delegate expands recursively`).toBeVisible({ timeout: 5_000 });
+
+		await setShowArchived(page, false);
+		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate hidden when Show Archived is off`).toHaveCount(0, { timeout: 5_000 });
+		await setShowArchived(page, true);
+		await expect(page.locator(`[data-session-id="${ids.archivedDelegate}"]`), `${MARK}: archived delegate survives Show Archived cycle`).toBeVisible({ timeout: 10_000 });
+	});
+
+	test("collapsed sidebar exposes archived goal rows only when Show Archived is on", async ({ page }) => {
+		await loadFixture(page, { showArchived: true, collapsed: true });
+		await expect(page.getByTestId("sidebar-collapsed")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("button[title='Alpha Archived Goal One']"), `${MARK}: collapsed archived goal button visible`).toHaveCount(1);
+
+		await loadFixture(page, { showArchived: false, collapsed: true });
+		await expect(page.getByTestId("sidebar-collapsed")).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("button[title='Alpha Archived Goal One']"), `${MARK}: collapsed archived goal button hidden`).toHaveCount(0);
+	});
+
+	test("mobile archived sections share bucketing, collapse persistence, and search highlighting", async ({ page }) => {
+		await loadFixture(page, { mode: "mobile", showArchived: true });
+		const ids = await fixtureIds(page);
+
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: mobile project A archived header`).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`), `${MARK}: mobile project B archived header`).toBeVisible({ timeout: 10_000 });
+		expectIncreasing(await domIndexes(page, [
+			`section[data-project-id="${ids.projectA}"]`,
+			`[data-nav-id="archived-header:${ids.projectA}"]`,
+			`[data-nav-id="goal:${ids.archivedGoalA1}"]`,
+			`section[data-project-id="${ids.projectB}"]`,
+			`[data-nav-id="archived-header:${ids.projectB}"]`,
+			`[data-nav-id="goal:${ids.archivedGoalB}"]`,
+		]), "mobile archived rows");
+
+		await page.locator(`[data-nav-id="archived-header:${ids.projectB}"]`).click();
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`)).toHaveCount(0, { timeout: 5_000 });
+		await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-archived-collapsed-projects") || "[]"))).toContain(ids.projectB);
+
+		await loadFixture(page, { mode: "mobile", showArchived: true });
+		const search = page.locator("input[data-search]");
+		await search.fill("Goal One");
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA1}"]`), `${MARK}: mobile search keeps matching archived goal`).toHaveCount(1, { timeout: 5_000 });
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalA2}"]`), `${MARK}: mobile search filters non-matching archived goal`).toHaveCount(0);
+		await expect(page.locator(`[data-nav-id="goal:${ids.archivedGoalB}"]`), `${MARK}: mobile search filters other project archived goal`).toHaveCount(0);
+		await expect(page.locator("strong.font-semibold"), `${MARK}: mobile archived search highlights match`).toContainText("Goal One", { timeout: 5_000 });
+
+		await loadFixture(page, { mode: "mobile", showArchived: false });
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: mobile Show Archived off hides archived sections`).toHaveCount(0);
+	});
+});
