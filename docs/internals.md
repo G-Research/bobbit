@@ -164,6 +164,18 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).
 
+### Team restart restoration
+
+Team state is restored from each project's `team-state.json` so live teams survive gateway restarts without losing their lead/worker wiring. The restart path is restorative only:
+
+- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state.
+- After `SessionManager.restoreSessions()`, `TeamManager.resubscribeTeamEvents()` re-attaches lead/worker event listeners for those restored entries and may nudge an already-restored idle lead that has concrete outstanding work.
+- Restart does **not** scan team-mode goals and call `startTeam()` for goals that lack a restored team entry. A teamless existing goal stays teamless even if its persisted `autoStartTeam` flag is `true`.
+
+This distinction matters because `autoStartTeam` is a creation/setup affordance, not a supervisor. Goals created with `autoStartTeam: false` and goals explicitly stopped through `teardownTeam()` have no active team-store entry after setup/teardown, so they remain manual-start goals across restart. The UI should show "Start Team" rather than a silently recreated lead.
+
+Regression coverage: `tests/team-manager-boot-respawn.test.ts` pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and `tests/e2e/remove-boot-respawn-restart.spec.ts` covers start → teardown → restart → still teamless → manual start.
+
 ### Verification architecture
 
 The verification system is split into two modules:
