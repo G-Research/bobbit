@@ -389,7 +389,7 @@ children.
 | "An agent can attach a custom workflow … and a child may override its parent's workflow." | spawn-child-workflow, workflow-store, nested-goal-routes | proposal-panels (Workflow/Roles tabs) | spawn-child-workflow-resolution, runSubgoalStep-inline-roles-inheritance |
 | "Completed child work merges locally into the parent branch with no per-child PR; only the root goal raises a PR; merge conflicts preserve the child." | skills/git (`mergeChildBranchLocal`, `shouldSkipRemotePush`), verification-harness (`runSubgoalStep`), child-ready-to-merge | GoalMergeChildRenderer | child-ready-to-merge-helper, runSubgoalStep-merge-then-archive |
 | "Plan changes after freeze are classified and gated by the divergence policy; criteria-drops are always rejected; excessive replans auto-pause the goal." | plan-mutation, plan-mutation-store, parent-workflow-freeze | GoalPlanProposeRenderer, GoalDecideMutationRenderer, children-mutation-approval | plan-mutation, plan-mutation-store, api-goals-plan-mutation |
-| "An operator can pause/resume a goal's entire subtree, and pause actually stops the work and survives supervisor respawn." | goal-paused-guard, TeamManager boot-resume skip predicates | GoalPauseResumeRenderer | any-in-flight-child-excludes-paused, runSubgoalStep-paused-child-keeps-waiting |
+| "An operator can pause/resume a goal's entire subtree, and pause remains durable across gateway restart." | goal-paused-guard, TeamManager restored-lead boot-resume skip predicates | GoalPauseResumeRenderer | any-in-flight-child-excludes-paused, runSubgoalStep-paused-child-keeps-waiting |
 
 ## Edge cases and recovery
 
@@ -404,7 +404,7 @@ children.
 | `replanCount > 5` | plan PATCH | auto-pause the goal | plan-mutation, api-goals-plan-mutation |
 | Pending mutation TTL / restart | `plan-mutation-store` | 24h TTL, restart-safe persistence | plan-mutation-store |
 | Archived descendants in DAG vs live-only sidebar | `GET /descendants` (inclusive) vs `plan-live-only-toggle` | DAG includes archived (dimmed); sidebar filters | plan-archived-children |
-| Boot respawn over paused goal | `goal-manager` supervisor | skips paused goals (whack-a-mole fix); `backfillCompleteState` | any-in-flight-child-excludes-paused, cost-backfill-on-boot |
+| Restart with paused restored team | `TeamManager` restore/resubscribe | restores persisted active teams; boot-resume nudges skip paused restored leads; teamless existing goals are not started; `backfillCompleteState` | any-in-flight-child-excludes-paused, cost-backfill-on-boot |
 
 ## Execution plan (parallel, file-disjoint)
 

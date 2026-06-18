@@ -174,7 +174,7 @@ Team state is restored from each project's `team-state.json` so live teams survi
 
 This distinction matters because `autoStartTeam` is a creation/setup affordance, not a supervisor. Goals created with `autoStartTeam: false` and goals explicitly stopped through `teardownTeam()` have no active team-store entry after setup/teardown, so they remain manual-start goals across restart. The UI should show "Start Team" rather than a silently recreated lead.
 
-Regression coverage: `tests/team-manager-boot-respawn.test.ts` pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and `tests/e2e/remove-boot-respawn-restart.spec.ts` covers start → teardown → restart → still teamless → manual start.
+Regression coverage pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and that start → teardown → restart leaves the goal teamless until manual start.
 
 ### Verification architecture
 
