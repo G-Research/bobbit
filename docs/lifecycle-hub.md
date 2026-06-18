@@ -549,6 +549,8 @@ ambient context a session received and why blocks were dropped.
 
 ## See also
 
+- [Hindsight memory pack](hindsight-memory.md) — the first production provider, a built-in
+  (dormant-by-default) memory provider that recalls/retains across sessions.
 - [Extension Host authoring guide](extension-host-authoring.md) — how to write a provider pack.
 - [Marketplace → Provider contributions](marketplace.md#provider-contributions-providersidyaml) —
   the provider YAML schema, defaults, and clamps.

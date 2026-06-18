@@ -325,9 +325,10 @@ absent (or `1`) keeps the exact v1 semantics.
 live: G1.3 wires the `sessionSetup` hook and G1.4 wires the per-turn `beforePrompt` /
 `beforeCompact` (via a generated provider-bridge pi extension) plus the server-side `afterTurn`
 / `sessionShutdown` hooks. An installed + active + enabled provider that declares a hook
-contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). No
-built-in production provider ships yet (G1.6), so an out-of-the-box install contributes nothing
-until you add a provider pack.
+contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). The
+first built-in production provider is the [Hindsight memory pack](hindsight-memory.md) (G2); it
+ships in the built-in band but stays **dormant until a Hindsight URL is configured**, so an
+out-of-the-box install still contributes nothing until you opt in or add another provider pack.
 
 Why ship the schema ahead of the runtime? The Extension Platform landed as a sequence of
 independently-mergeable PRs. Defining the manifest surface and the per-entity activation
@@ -448,9 +449,10 @@ indexes them, and the `LifecycleHub` runs a provider's `hook` on the worker tier
 `budget` ([docs/lifecycle-hub.md](lifecycle-hub.md)). A provider that declares `sessionSetup` and
 is installed + active + enabled for the session's scope contributes a **Dynamic Context** prompt
 section; the per-turn `beforePrompt` / `beforeCompact` fire via a generated provider-bridge pi
-extension and `afterTurn` / `sessionShutdown` fire server-side. **No built-in production provider
-ships yet** (G1.6) — so an out-of-the-box install contributes nothing until you add a provider
-pack.
+extension and `afterTurn` / `sessionShutdown` fire server-side. The first built-in
+production provider is the **[Hindsight memory pack](hindsight-memory.md)** — shipped in the
+built-in band but **dormant until a Hindsight URL is configured**, so a fresh install still
+contributes nothing until you opt in.
 
 #### Why providers are pack-scoped, *not* name-merged
 
