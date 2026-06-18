@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
 	resolveCommandStepTimeoutSec,
 	runVerificationPhaseSteps,
-	shouldSerializeVerificationStepWithinPhase,
 } from "../src/server/agent/verification-harness.js";
 import { groupStepsByPhase, getSortedPhases } from "../src/server/agent/verification-logic.js";
 import type { VerifyStep } from "../src/server/agent/workflow-store.js";
@@ -61,7 +60,6 @@ test("runVerificationPhaseSteps runs same-phase command steps concurrently", asy
 			finishes.push(step.name);
 			return { index, name: step.name };
 		},
-		{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
 	);
 
 	assert.equal(maxActiveCommands, 2, "same-phase command steps should run concurrently");
@@ -98,7 +96,6 @@ test("verification phases run sequentially in ascending phase order", async () =
 				activeSteps -= 1;
 				return index;
 			},
-			{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
 		);
 		events.push(`phase:${phase}:finish`);
 	}
