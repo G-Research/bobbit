@@ -2332,29 +2332,35 @@ export class VerificationHarness {
 			// Sync the goal worktree with the latest commits before running verification.
 			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
 			if (goalBranch) {
+				const { execFile: execFileCb } = await import("node:child_process");
+				const { promisify } = await import("node:util");
+				const execFileAsync = promisify(execFileCb);
+				let hasOriginRemote = false;
 				try {
-					const { execFile: execFileCb } = await import("node:child_process");
-					const { promisify } = await import("node:util");
-					const execFileAsync = promisify(execFileCb);
-					await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-					await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
-					console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
-				} catch (err) {
-					// Non-fatal — local-only repos without a remote will fail fetch
-					console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+					await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
+					hasOriginRemote = true;
+				} catch {
+					// Local-only repositories are valid verification targets; skip remote sync quietly.
 				}
 
-				// Also fetch the review baseline branch so origin/<base> is up-to-date for
-				// implementation-gate diff baselines. Non-fatal on failure (offline / no remote).
-				const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
-				if (reviewBaselineBranch) {
+				if (hasOriginRemote) {
 					try {
-						const { execFile: execFileCb } = await import("node:child_process");
-						const { promisify } = await import("node:util");
-						const execFileAsync = promisify(execFileCb);
-						await execFileAsync("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
+						await execFileAsync("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+						await execFileAsync("git", ["reset", "--hard", `origin/${goalBranch}`], { cwd, timeout: 15_000 });
+						console.log(`[verification] Synced goal worktree to origin/${goalBranch}`);
 					} catch (err) {
-						console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
+						console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+					}
+
+					// Also fetch the review baseline branch so origin/<base> is up-to-date for
+					// implementation-gate diff baselines. Non-fatal on failure (offline / remote issue).
+					const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
+					if (reviewBaselineBranch) {
+						try {
+							await execFileAsync("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
+						} catch (err) {
+							console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
+						}
 					}
 				}
 			}
