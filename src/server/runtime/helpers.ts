@@ -203,12 +203,35 @@ export interface RuntimeResolveContext {
 	vars?: Record<string, string>;
 }
 
-function resolveEnvValue(value: RuntimeEnvValue, ctx: RuntimeResolveContext): string {
+/**
+ * Build the variable map used for `${name}` / `${name:-default}` substitution in
+ * literal `value` refs and plain strings. In addition to the explicit `vars`,
+ * this exposes resolved GENERATED secrets, USER-CONFIGURED secrets, and
+ * ALLOCATED ports under their own keys, so a literal can interpolate e.g. a
+ * generated DB password — `postgres://u:${HINDSIGHT_DB_PASSWORD}@db/...` — by its
+ * secret key. Explicit `vars` win on a key collision.
+ */
+export function buildPlaceholderVars(ctx: RuntimeResolveContext): Record<string, string> {
+	const out: Record<string, string> = {};
+	if (ctx.ports) {
+		for (const [k, v] of Object.entries(ctx.ports)) out[k] = String(v);
+	}
+	if (ctx.secrets) Object.assign(out, ctx.secrets);
+	if (ctx.generated) Object.assign(out, ctx.generated);
+	if (ctx.vars) Object.assign(out, ctx.vars);
+	return out;
+}
+
+function resolveEnvValue(
+	value: RuntimeEnvValue,
+	ctx: RuntimeResolveContext,
+	vars: Record<string, string>,
+): string {
 	if (typeof value === "string") {
-		return substitutePlaceholders(value, ctx.vars ?? {});
+		return substitutePlaceholders(value, vars);
 	}
 	const ref = value as RuntimeEnvRef;
-	if (ref.value !== undefined) return substitutePlaceholders(ref.value, ctx.vars ?? {});
+	if (ref.value !== undefined) return substitutePlaceholders(ref.value, vars);
 	if (ref.secret !== undefined) {
 		const v = ctx.secrets?.[ref.secret];
 		if (v === undefined) throw new Error(`runtime env: missing configured secret '${ref.secret}'`);
@@ -238,9 +261,10 @@ export function resolveRuntimeEnv(
 	ctx: RuntimeResolveContext,
 ): Record<string, string> {
 	const merged: Record<string, RuntimeEnvValue> = { ...(manifest.env ?? {}), ...(mode?.env ?? {}) };
+	const vars = buildPlaceholderVars(ctx);
 	const out: Record<string, string> = {};
 	for (const name of Object.keys(merged).sort()) {
-		out[name] = resolveEnvValue(merged[name], ctx);
+		out[name] = resolveEnvValue(merged[name], ctx, vars);
 	}
 	return out;
 }
@@ -278,10 +302,11 @@ export interface RuntimeInvocation {
  * path is re-validated for containment (defense-in-depth); env refs/placeholders
  * are resolved; the mode's `omitServices` are removed from `services`.
  *
- * The managed-postgres mode keeps the `db` service + managed DB env, while the
- * external-postgres mode omits `db` and is expected to inject
- * HINDSIGHT_API_DATABASE_URL via its mode `env` (a `${databaseUrl}` placeholder
- * or a literal) — both expressed declaratively in the manifest.
+ * The managed-postgres mode keeps the `db` service + managed DB env (its
+ * HINDSIGHT_API_DATABASE_URL is a `value` ref interpolating the GENERATED
+ * password via `${HINDSIGHT_DB_PASSWORD}`), while the external-postgres mode
+ * omits `db` and injects HINDSIGHT_API_DATABASE_URL from a configured `secret`
+ * ref — both expressed declaratively in the manifest.
  */
 export function buildRuntimeInvocation(
 	manifest: RuntimeManifest,

@@ -17,6 +17,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	getOrCreateRuntimeSecret,
 	generateSecretValue,
@@ -26,12 +27,13 @@ import {
 	revalidateHostPort,
 	isPortAvailable,
 	substitutePlaceholders,
+	buildPlaceholderVars,
 	resolveRuntimeEnv,
 	buildRuntimeInvocation,
 	type SecretLike,
 	type PortStore,
 } from "../src/server/runtime/helpers.ts";
-import type { RuntimeManifest } from "../src/server/runtime/manifest.ts";
+import { parseRuntimeManifest, type RuntimeManifest } from "../src/server/runtime/manifest.ts";
 
 let tmp: string;
 before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-helpers-")); });
@@ -215,6 +217,46 @@ describe("resolveRuntimeEnv", () => {
 	});
 });
 
+describe("buildPlaceholderVars + value-ref interpolation", () => {
+	it("exposes generated/secret/port values under their keys for ${...} value refs", () => {
+		const vars = buildPlaceholderVars({
+			secrets: { API_KEY: "sk" },
+			generated: { DB_PW: "gen-pw" },
+			ports: { WEB: 31000 },
+			vars: { dataDir: "/data" },
+		});
+		assert.equal(vars.DB_PW, "gen-pw");
+		assert.equal(vars.API_KEY, "sk");
+		assert.equal(vars.WEB, "31000");
+		assert.equal(vars.dataDir, "/data");
+	});
+
+	it("explicit vars win over generated/secret on key collision", () => {
+		const vars = buildPlaceholderVars({ generated: { X: "gen" }, vars: { X: "explicit" } });
+		assert.equal(vars.X, "explicit");
+	});
+
+	it("resolves a value ref that interpolates a generated secret by its key", () => {
+		const manifest: RuntimeManifest = {
+			id: "r",
+			composeFile: "../runtime/compose.yaml",
+			modes: {
+				m: {
+					env: {
+						DB_PASSWORD: { generate: "DB_PASSWORD" },
+						DATABASE_URL: { value: "postgres://u:${DB_PASSWORD}@db:5432/app" },
+					},
+				},
+			},
+		};
+		const env = resolveRuntimeEnv(manifest, manifest.modes!.m, {
+			generated: { DB_PASSWORD: "s3cr3t" },
+		});
+		assert.equal(env.DB_PASSWORD, "s3cr3t");
+		assert.equal(env.DATABASE_URL, "postgres://u:s3cr3t@db:5432/app");
+	});
+});
+
 describe("buildRuntimeInvocation", () => {
 	const envFile = path.join(tmp, "hindsight.env");
 
@@ -267,6 +309,113 @@ describe("buildRuntimeInvocation", () => {
 		assert.throws(
 			() => buildRuntimeInvocation(MANIFEST, "nope", { sourceFile: SRC, packRoot: PACK_ROOT, envFile }),
 			/no mode 'nope'/,
+		);
+	});
+});
+
+// ── Real Hindsight pack manifest (regression) ─────────────────────────────────
+//
+// Guards against the manifest/parser-helper schema mismatch: the SHIPPED
+// market-packs/hindsight/runtimes/hindsight.yaml must parse and build coherent
+// managed + external invocations.
+
+describe("real market-packs/hindsight runtime manifest", () => {
+	const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+	const packRoot = path.join(repoRoot, "market-packs", "hindsight");
+	const sourceFile = path.join(packRoot, "runtimes", "hindsight.yaml");
+	const envFile = path.join(tmp, "real-hindsight.env");
+
+	function loadManifest(): RuntimeManifest {
+		const problems: string[] = [];
+		const m = parseRuntimeManifest(fs.readFileSync(sourceFile, "utf-8"), sourceFile, packRoot, problems);
+		assert.ok(m, `manifest must parse; problems: ${JSON.stringify(problems)}`);
+		assert.deepEqual(problems, []);
+		return m as RuntimeManifest;
+	}
+
+	it("parses the shipped descriptor", () => {
+		const m = loadManifest();
+		assert.equal(m.id, "hindsight");
+		assert.equal(m.composeFile, "../runtime/compose.yaml");
+		assert.ok(m.modes?.["managed-postgres"]);
+		assert.ok(m.modes?.["external-postgres"]);
+		// Generated secrets are declared with `generate: true`, not env `secret:` refs.
+		const keys = (m.secrets ?? []).map((s) => s.key).sort();
+		assert.deepEqual(keys, ["HINDSIGHT_API_SECRET", "HINDSIGHT_DB_PASSWORD"]);
+		assert.ok((m.secrets ?? []).every((s) => s.generate === true));
+		// Port specs use `container`, not `target`.
+		const ports = (m.ports ?? []).map((p) => p.key).sort();
+		assert.deepEqual(ports, ["HINDSIGHT_API_PORT", "HINDSIGHT_WEB_PORT"]);
+		assert.ok((m.ports ?? []).every((p) => typeof p.container === "number"));
+	});
+
+	it("builds managed-postgres: includes db, LLM key from configured secret, DB URL has generated password", () => {
+		const m = loadManifest();
+		const inv = buildRuntimeInvocation(m, "managed-postgres", {
+			sourceFile,
+			packRoot,
+			envFile,
+			ctx: {
+				secrets: { HINDSIGHT_API_LLM_API_KEY: "sk-configured" },
+				generated: { HINDSIGHT_API_SECRET: "api-secret", HINDSIGHT_DB_PASSWORD: "gen-db-pw" },
+				ports: { HINDSIGHT_WEB_PORT: 31000, HINDSIGHT_API_PORT: 31001 },
+				vars: { dataDir: "/var/lib/hindsight" },
+			},
+		});
+		assert.deepEqual(inv.services, ["api", "web", "db"], "managed services include db");
+		assert.equal(inv.composeFile, path.join(packRoot, "runtime", "compose.yaml"));
+		assert.equal(inv.env.HINDSIGHT_API_LLM_API_KEY, "sk-configured", "LLM key from configured secret");
+		assert.equal(inv.env.HINDSIGHT_API_SECRET, "api-secret");
+		assert.equal(inv.env.HINDSIGHT_DATA_DIR, "/var/lib/hindsight");
+		// Managed DB URL is assembled from the GENERATED password.
+		assert.equal(
+			inv.env.HINDSIGHT_API_DATABASE_URL,
+			"postgres://hindsight:gen-db-pw@db:5432/hindsight",
+			"managed DB URL contains the generated password",
+		);
+		assert.ok(inv.env.HINDSIGHT_API_DATABASE_URL.includes("gen-db-pw"));
+	});
+
+	it("builds external-postgres: omits db, DB URL from configured secret", () => {
+		const m = loadManifest();
+		const inv = buildRuntimeInvocation(m, "external-postgres", {
+			sourceFile,
+			packRoot,
+			envFile,
+			ctx: {
+				secrets: {
+					HINDSIGHT_API_LLM_API_KEY: "sk-configured",
+					HINDSIGHT_API_DATABASE_URL: "postgres://operator@ext-host:5432/hindsight",
+				},
+				generated: { HINDSIGHT_API_SECRET: "api-secret" },
+				ports: { HINDSIGHT_WEB_PORT: 31000, HINDSIGHT_API_PORT: 31001 },
+			},
+		});
+		assert.deepEqual(inv.services, ["api", "web"], "external omits db");
+		assert.ok(!inv.services.includes("db"));
+		assert.equal(inv.env.HINDSIGHT_API_LLM_API_KEY, "sk-configured", "LLM key from configured secret");
+		assert.equal(
+			inv.env.HINDSIGHT_API_DATABASE_URL,
+			"postgres://operator@ext-host:5432/hindsight",
+			"external DB URL from configured secret",
+		);
+	});
+
+	it("external-postgres requires HINDSIGHT_API_DATABASE_URL", () => {
+		const m = loadManifest();
+		assert.throws(
+			() =>
+				buildRuntimeInvocation(m, "external-postgres", {
+					sourceFile,
+					packRoot,
+					envFile,
+					ctx: {
+						secrets: { HINDSIGHT_API_LLM_API_KEY: "sk", HINDSIGHT_API_DATABASE_URL: "" },
+						generated: { HINDSIGHT_API_SECRET: "x" },
+						ports: { HINDSIGHT_WEB_PORT: 1, HINDSIGHT_API_PORT: 2 },
+					},
+				}),
+			/requires env 'HINDSIGHT_API_DATABASE_URL'/,
 		);
 	});
 });

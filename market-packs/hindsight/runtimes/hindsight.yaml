@@ -2,7 +2,10 @@
 #
 # Consumed by the runtime manifest parser/validator (src/server/runtime/manifest.ts)
 # and the pure helper utilities (src/server/runtime/helpers.ts). This file only
-# DECLARES the runtime; it never runs anything.
+# DECLARES the runtime; it never runs anything. Every field below maps directly
+# onto the parser schema (RuntimeManifest): env refs are exactly one of
+# secret|generate|port|value, port specs use `container`, and generated secrets
+# are declared with `generate: true`.
 id: hindsight
 title: Hindsight
 description: >-
@@ -15,14 +18,9 @@ description: >-
 # the pack root.
 composeFile: ../runtime/compose.yaml
 
-# Default managed data directory for the bind-mounted Postgres volume. The
-# `${dataDir:-~/.hindsight}` form is a declarative default: callers may override
-# `dataDir`, otherwise it falls back to `~/.hindsight`.
-dataDir: ${dataDir:-~/.hindsight}
-
-# Secrets are generated-and-persisted by the runtime helpers (idempotent), EXCEPT
-# where `fromUserSecret` is set — those are wired from a configured user secret
-# and never generated.
+# Secrets that are generated-and-persisted (idempotently) by the runtime helpers
+# via SecretsStore. These are NOT user-supplied; the LLM API key (below) is the
+# only user-configured secret and is wired through an env `secret:` ref instead.
 secrets:
   # Managed Postgres password — generated once and persisted via SecretsStore.
   - key: HINDSIGHT_DB_PASSWORD
@@ -32,61 +30,69 @@ secrets:
     generate: true
 
 # Host ports allocated via bind :0, persisted, and re-validated on boot by the
-# runtime helpers.
+# runtime helpers. `container` is the informational container-side port.
 ports:
   - key: HINDSIGHT_WEB_PORT
-    target: 3000
+    container: 3000
   - key: HINDSIGHT_API_PORT
-    target: 8080
+    container: 8080
 
-# Base environment shared by all modes. `secret` refs resolve to persisted/
-# generated secret values; `userSecret` refs resolve from a configured user
-# secret and are required (never generated).
+# Base environment shared by all modes. Each value is exactly one ref kind:
+#   secret:   resolve from a USER-CONFIGURED secret (never generated)
+#   generate: resolve from a GENERATED+persisted secret (idempotent)
+#   port:     resolve from an allocated host port
+#   value:    literal, with ${var} / ${var:-default} placeholder substitution
 env:
   # LLM API key MUST come from a configured user secret — not generated.
   HINDSIGHT_API_LLM_API_KEY:
-    userSecret: HINDSIGHT_API_LLM_API_KEY
-    required: true
+    secret: HINDSIGHT_API_LLM_API_KEY
+  # API session/encryption secret — generated + persisted.
   HINDSIGHT_API_SECRET:
-    secret: HINDSIGHT_API_SECRET
+    generate: HINDSIGHT_API_SECRET
   HINDSIGHT_WEB_PORT:
     port: HINDSIGHT_WEB_PORT
   HINDSIGHT_API_PORT:
     port: HINDSIGHT_API_PORT
 
-# Mode-specific argument construction. `managed-postgres` is the default and
-# includes the `db` service. `external-postgres` omits `db` and injects a
-# caller-supplied connection URL.
+# Mode-specific argument construction. `managed-postgres` includes the `db`
+# service. `external-postgres` omits `db` and injects a configured connection URL.
 modes:
   managed-postgres:
-    default: true
-    description: >-
-      Fully managed Postgres. Includes the `db` service with a bind-mounted data
-      directory; the API connects to it over the compose network.
+    title: Managed Postgres
+    # Fully managed Postgres. Includes the `db` service with a bind-mounted data
+    # directory; the API connects to it over the compose network.
     services:
       - api
       - web
       - db
     env:
+      # Generated + persisted managed Postgres password.
       HINDSIGHT_DB_PASSWORD:
-        secret: HINDSIGHT_DB_PASSWORD
+        generate: HINDSIGHT_DB_PASSWORD
+      # Managed data directory for the bind-mounted Postgres volume. Defaults to
+      # ~/.hindsight when `dataDir` is not supplied.
       HINDSIGHT_DATA_DIR:
         value: ${dataDir:-~/.hindsight}
-      # Managed DB connection string assembled from the generated password and
-      # the in-compose `db` service hostname.
+      # Managed DB connection string assembled from the GENERATED password and
+      # the in-compose `db` service hostname. The ${HINDSIGHT_DB_PASSWORD}
+      # placeholder is resolved from the generated secret of the same key.
       HINDSIGHT_API_DATABASE_URL:
         value: postgres://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight
 
   external-postgres:
-    description: >-
-      Operator-supplied Postgres. Omits the managed `db` service; the API uses
-      the externally provided HINDSIGHT_API_DATABASE_URL.
+    title: External Postgres
+    # Operator-supplied Postgres. Omits the managed `db` service; the API uses
+    # the externally provided HINDSIGHT_API_DATABASE_URL.
     services:
       - api
       - web
+      - db
+    omitServices:
+      - db
+    requireEnv:
+      - HINDSIGHT_API_DATABASE_URL
     env:
-      # Required external connection URL. Injected into the API service; no `db`
+      # Required external connection URL, configured as a user secret. No `db`
       # service is started in this mode.
       HINDSIGHT_API_DATABASE_URL:
-        userSecret: HINDSIGHT_API_DATABASE_URL
-        required: true
+        secret: HINDSIGHT_API_DATABASE_URL
