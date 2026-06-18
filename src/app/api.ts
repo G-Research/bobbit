@@ -709,6 +709,10 @@ function mergeArchivedGoalsIntoState(goals: Goal[]): void {
 	}
 }
 
+function isArchivedSessionRecord(session: GatewaySession): boolean {
+	return session.archived === true || session.status === "archived";
+}
+
 function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
 	if (sessions.length === 0) return;
 	const incoming = new Map(sessions.map((s) => [s.id, s]));
@@ -782,7 +786,7 @@ async function fetchArchivedSearchGoalsPage(limit: number, afterCursor: number |
 		if (!archivedSearchStillCurrent(query, runId)) return;
 		const goals: Goal[] = (data.goals || []).filter((g: Goal) => g.archived === true);
 		mergeArchivedGoalsIntoState(goals);
-		const affiliatedSessions: GatewaySession[] = (data.archivedSessions || []).filter((s: GatewaySession) => s.archived === true);
+		const affiliatedSessions: GatewaySession[] = (data.archivedSessions || []).filter(isArchivedSessionRecord);
 		mergeArchivedSessionsIntoState(affiliatedSessions);
 		state.archivedSearchGoalsTotal = data.total ?? goals.length;
 		state.archivedSearchGoalsHasMore = data.hasMore ?? false;
@@ -807,8 +811,8 @@ async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: numbe
 		if (!res.ok || !archivedSearchStillCurrent(query, runId)) return;
 		const data = await res.json();
 		if (!archivedSearchStillCurrent(query, runId)) return;
-		const sessions: GatewaySession[] = (data.sessions || []).filter((s: GatewaySession) => s.archived === true);
-		const archivedDelegates: GatewaySession[] = (data.archivedDelegates || []).filter((s: GatewaySession) => s.archived === true);
+		const sessions: GatewaySession[] = (data.sessions || []).filter(isArchivedSessionRecord);
+		const archivedDelegates: GatewaySession[] = (data.archivedDelegates || []).filter(isArchivedSessionRecord);
 		mergeArchivedSessionsIntoState([...sessions, ...archivedDelegates]);
 		state.archivedSearchSessionsTotal = data.total ?? sessions.length;
 		state.archivedSearchSessionsHasMore = data.hasMore ?? false;
