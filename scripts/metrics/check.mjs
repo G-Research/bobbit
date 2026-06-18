@@ -156,7 +156,8 @@ function compareNumeric({ label, baseline, current, ratio, additive, format = (v
 }
 
 function compareAbsoluteMax({ label, current, max, format = (v) => String(v) }) {
-	if (!Number.isFinite(current) || !Number.isFinite(max)) return [];
+	if (!Number.isFinite(max)) return [];
+	if (!Number.isFinite(current)) return [`${label} is missing or non-finite; required max is ${format(max)}`];
 	if (current <= max) return [];
 	return [`${label} ${format(current)} exceeds max ${format(max)}`];
 }
@@ -230,8 +231,12 @@ function compareGenericMetricBudget(label, metricName, current) {
 	if (!metricBudget) return [];
 	const failures = [];
 	const currentCount = testCount(current);
-	if (Number.isFinite(metricBudget.maxTestCount) && currentCount != null && currentCount > metricBudget.maxTestCount) {
-		failures.push(`${label}: metric budget test count ${currentCount} exceeds max ${metricBudget.maxTestCount}`);
+	if (Number.isFinite(metricBudget.maxTestCount)) {
+		if (currentCount == null) {
+			failures.push(`${label}: metric budget test count is missing or non-finite; required max is ${metricBudget.maxTestCount}`);
+		} else if (currentCount > metricBudget.maxTestCount) {
+			failures.push(`${label}: metric budget test count ${currentCount} exceeds max ${metricBudget.maxTestCount}`);
+		}
 	}
 	if (Number.isFinite(metricBudget.maxDurationMs)) {
 		failures.push(...compareAbsoluteMax({
@@ -279,7 +284,9 @@ function compareBrowserBudget(label, metricName, baseline, current) {
 	const useAbsoluteBudgetForExplicitDecrease = metricBudget.useAbsoluteBudgetForExplicitDecrease === true && (cli.minRuntimeDecrease != null || cli.minCpuDecrease != null);
 	if (scopedComparison && !useAbsoluteBudgetForExplicitDecrease) return compareLegacyBrowserTestCount(label, baselineCount, currentCount, metricBudget);
 	if (Number.isFinite(metricBudget.maxTestCount)) {
-		if (currentCount != null && currentCount > metricBudget.maxTestCount) {
+		if (currentCount == null) {
+			failures.push(`${label}: browser E2E test count is missing or non-finite; required max is ${metricBudget.maxTestCount}`);
+		} else if (currentCount > metricBudget.maxTestCount) {
 			failures.push(`${label}: browser E2E test count ${currentCount} exceeds max ${metricBudget.maxTestCount}`);
 		}
 	} else {
