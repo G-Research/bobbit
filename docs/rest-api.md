@@ -44,7 +44,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
+| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
@@ -70,6 +70,35 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
+
+### Archived session list and query search
+
+`GET /api/sessions?include=archived` keeps the live session list in the same response and adds archived sessions from visible project contexts. This powers Show Archived and the sidebar's server-backed archived filter; see [Sidebar Archived Search](sidebar-archived-search.md).
+
+Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `include=archived` | Enables archived session rows. Without it, only live sessions are returned, plus `archivedDelegates` needed for live nesting. |
+| `q` | Optional archived-only search query. The server trims and lowercases it, then applies case-insensitive substring matching to archived session `title` and `role`. Live sessions are not filtered by this parameter. |
+| `limit` | Optional archived page size, clamped to `1..200`. When present, pagination metadata is returned for the matching archived corpus. |
+| `after` | Optional `archivedAt` cursor from the previous response's `nextCursor`; returns older matching archived rows. |
+| `projectId` | Optional project filter applied to live and archived rows. |
+
+With `limit`, the response shape is:
+
+```ts
+{
+  generation: number,
+  sessions: GatewaySession[],
+  total: number,
+  hasMore: boolean,
+  nextCursor?: number,
+  archivedDelegates: GatewaySession[]
+}
+```
+
+`total`, `hasMore`, and `nextCursor` describe only the filtered archived corpus. `sessions` contains the current live sessions followed by the requested archived page, so clients that need only archived results should filter for `archived === true` or `status === "archived"`. `q` is applied before pagination so older matching archived sessions can be found without loading non-matching pages.
 
 ### Side-panel workspace
 
@@ -265,7 +294,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/goals` | List all goals. `?archived=true` returns archived goals with an `archivedSessions` field. Supports `?since=N` generation counter for conditional fetch |
+| `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, team?, worktree?, reattemptOf? }`) |
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
@@ -277,6 +306,34 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+### Archived goal list and query search
+
+`GET /api/goals?archived=true` aggregates archived goals across visible project contexts. It is used by Show Archived and by the sidebar's server-backed archived filter; see [Sidebar Archived Search](sidebar-archived-search.md).
+
+Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `archived=true` | Selects archived goals instead of live goals. |
+| `q` | Optional archived-goal query. The server trims and lowercases it, then applies case-insensitive substring matching to goal `title`, or to `title` / `role` on an affiliated non-child session. |
+| `limit` | Archived page size, default `50`, clamped to `1..200`. |
+| `after` | Optional `archivedAt` cursor from the previous response's `nextCursor`; returns older matching archived goals. |
+| `projectId` | Optional project filter for archived goals and affiliated sessions considered during matching. |
+
+Response shape:
+
+```ts
+{
+  goals: Goal[],
+  total: number,
+  hasMore: boolean,
+  nextCursor?: number,
+  archivedSessions: GatewaySession[]
+}
+```
+
+`q` is applied before pagination across the full archived goal corpus. `total`, `hasMore`, and `nextCursor` describe the filtered goal corpus, not the `archivedSessions` side payload. `archivedSessions` contains archived sessions affiliated with goals in the returned page, plus related archived child/delegate rows needed for sidebar nesting.
 
 ### Goal GitHub link endpoint
 
