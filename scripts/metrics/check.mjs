@@ -1,10 +1,75 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { baselineMetricFile, baselineMetricsDir, currentMetricsDir, listJsonFiles, metricFile, normalizeMetricName, projectRoot, readJson, requiredMetricNames } from "./lib.mjs";
 
-const baselineDir = resolve(process.env.BOBBIT_METRICS_BASELINE_DIR || baselineMetricsDir);
-const currentDir = resolve(process.env.BOBBIT_METRICS_CURRENT_DIR || currentMetricsDir);
+function parseCliArgs(argv) {
+	const options = {
+		baseline: null,
+		current: null,
+		noCoverage: false,
+		minRuntimeDecrease: null,
+		minCpuDecrease: null,
+		required: null,
+	};
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		const readValue = () => {
+			const value = argv[++i];
+			if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+			return value;
+		};
+		switch (arg) {
+			case "--baseline":
+				options.baseline = readValue();
+				break;
+			case "--current":
+				options.current = readValue();
+				break;
+			case "--no-coverage":
+				options.noCoverage = true;
+				break;
+			case "--min-runtime-decrease":
+				options.minRuntimeDecrease = parseFraction(readValue(), arg);
+				break;
+			case "--min-cpu-decrease":
+				options.minCpuDecrease = parseFraction(readValue(), arg);
+				break;
+			case "--required":
+				options.required = readValue();
+				break;
+			default:
+				throw new Error(`unknown argument ${arg}`);
+		}
+	}
+	return options;
+}
+
+function parseFraction(raw, flag) {
+	const value = Number(raw);
+	if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error(`${flag} must be a fraction from 0 to 1`);
+	return value;
+}
+
+function classifyInput(path) {
+	if (existsSync(path)) return statSync(path).isDirectory() ? "dir" : "file";
+	return basename(path).endsWith(".json") ? "file" : "dir";
+}
+
+let cli;
+try {
+	cli = parseCliArgs(process.argv.slice(2));
+} catch (error) {
+	console.error(`[metrics:check] ${error.message}`);
+	process.exit(2);
+}
+
+const baselineInput = resolve(cli.baseline || process.env.BOBBIT_METRICS_BASELINE_DIR || baselineMetricsDir);
+const currentInput = resolve(cli.current || process.env.BOBBIT_METRICS_CURRENT_DIR || currentMetricsDir);
+const baselineInputKind = classifyInput(baselineInput);
+const currentInputKind = classifyInput(currentInput);
+const baselineDir = baselineInputKind === "dir" ? baselineInput : dirname(baselineInput);
+const currentDir = currentInputKind === "dir" ? currentInput : dirname(currentInput);
 const thresholdFile = process.env.BOBBIT_METRICS_THRESHOLDS
 	? resolve(process.env.BOBBIT_METRICS_THRESHOLDS)
 	: join(baselineDir, "thresholds.json");
@@ -30,11 +95,15 @@ const thresholds = existsSync(thresholdFile)
 	: defaultThresholds;
 
 function requiredMetrics() {
-	const raw = process.env.BOBBIT_METRICS_REQUIRED;
+	const raw = cli.required ?? process.env.BOBBIT_METRICS_REQUIRED;
 	const names = raw == null
 		? requiredMetricNames
 		: raw.split(",").map((name) => name.trim()).filter(Boolean);
 	return names.map((name) => normalizeMetricName(name));
+}
+
+function rel(path) {
+	return relative(projectRoot, path) || ".";
 }
 
 function fmtMs(ms) {
@@ -57,7 +126,16 @@ function compareNumeric({ label, baseline, current, ratio, additive, format = (v
 	return [`${label} increased ${pctChange(baseline, current).toFixed(1)}% (${format(baseline)} → ${format(current)}), max ${format(allowed)}`];
 }
 
-function compareCoverage(file, baseline, current) {
+function compareMinDecrease({ label, baseline, current, minDecrease, format = (v) => String(v) }) {
+	if (minDecrease == null || !Number.isFinite(baseline) || !Number.isFinite(current)) return [];
+	const allowed = baseline * (1 - minDecrease);
+	if (current <= allowed) return [];
+	const dropPct = -pctChange(baseline, current);
+	return [`${label} decreased ${dropPct.toFixed(1)}%, below required ${(minDecrease * 100).toFixed(1)}% (${format(baseline)} → ${format(current)}), max ${format(allowed)}`];
+}
+
+function compareCoverage(label, baseline, current) {
+	if (cli.noCoverage) return [];
 	const failures = [];
 	for (const key of ["lines", "functions", "branches"]) {
 		const before = baseline.coverage?.[key]?.pct;
@@ -65,40 +143,86 @@ function compareCoverage(file, baseline, current) {
 		if (!Number.isFinite(before) || !Number.isFinite(after)) continue;
 		const delta = Number((after - before).toFixed(2));
 		if (delta < thresholds.coverageMinDeltaPct) {
-			failures.push(`${file}: coverage ${key} regressed ${delta.toFixed(2)}pp (${before}% → ${after}%)`);
+			failures.push(`${label}: coverage ${key} regressed ${delta.toFixed(2)}pp (${before}% → ${after}%)`);
 		}
 	}
 	return failures;
 }
 
-function compareMetric(baselineFile) {
-	const metricName = normalizeMetricName(baselineFile);
-	const currentFile = `${metricName}.json`;
-	const baseline = readJson(join(baselineDir, baselineFile));
-	const currentPath = metricFile(metricName, currentDir);
-	if (!existsSync(currentPath)) return [`${baselineFile}: missing current metric ${currentFile} in ${relative(projectRoot, currentDir)}`];
+function currentPathForMetric(metricName) {
+	if (currentInputKind === "file") return currentInput;
+	return metricFile(metricName, currentDir);
+}
+
+function baselinePathForMetric(metricName) {
+	if (baselineInputKind === "file") return baselineInput;
+	return baselineMetricFile(metricName, baselineDir);
+}
+
+function comparisonPairs() {
+	if (baselineInputKind === "file") {
+		const metricName = normalizeMetricName(baselineInput);
+		return [{ baselinePath: baselineInput, currentPath: currentPathForMetric(metricName), label: basename(baselineInput) }];
+	}
+	if (currentInputKind === "file") {
+		const metricName = normalizeMetricName(currentInput);
+		const baselinePath = baselinePathForMetric(metricName);
+		return [{ baselinePath, currentPath: currentInput, label: basename(baselinePath) }];
+	}
+	return listJsonFiles(baselineDir)
+		.filter((file) => basename(file) !== "thresholds.json" && basename(file).startsWith("baseline-"))
+		.map((file) => {
+			const metricName = normalizeMetricName(file);
+			return {
+				baselinePath: join(baselineDir, file),
+				currentPath: metricFile(metricName, currentDir),
+				label: file,
+			};
+		});
+}
+
+function compareMetric({ baselinePath, currentPath, label }) {
+	if (!existsSync(baselinePath)) return [`${label}: missing baseline metric ${rel(baselinePath)}`];
+	if (!existsSync(currentPath)) return [`${label}: missing current metric ${basename(currentPath)} in ${rel(dirname(currentPath))}`];
+	const baseline = readJson(baselinePath);
 	const current = readJson(currentPath);
 	const failures = [];
-	if (current.status && current.status !== "passed") failures.push(`${baselineFile}: current status is ${current.status}`);
-	failures.push(...compareCoverage(baselineFile, baseline, current));
+	if (current.status && current.status !== "passed") failures.push(`${label}: current status is ${current.status}`);
+	failures.push(...compareCoverage(label, baseline, current));
+	failures.push(...(cli.minRuntimeDecrease == null
+		? compareNumeric({
+			label: `${label}: runtime`,
+			baseline: baseline.durationMs,
+			current: current.durationMs,
+			ratio: thresholds.runtimeMaxIncreaseRatio,
+			additive: thresholds.runtimeMaxIncreaseMs,
+			format: fmtMs,
+		})
+		: compareMinDecrease({
+			label: `${label}: runtime`,
+			baseline: baseline.durationMs,
+			current: current.durationMs,
+			minDecrease: cli.minRuntimeDecrease,
+			format: fmtMs,
+		})));
+	failures.push(...(cli.minCpuDecrease == null
+		? compareNumeric({
+			label: `${label}: estimated CPU`,
+			baseline: baseline.cpu?.estimatedCpuMs,
+			current: current.cpu?.estimatedCpuMs,
+			ratio: thresholds.cpuMaxIncreaseRatio,
+			additive: thresholds.cpuMaxIncreaseMs,
+			format: fmtMs,
+		})
+		: compareMinDecrease({
+			label: `${label}: estimated CPU`,
+			baseline: baseline.cpu?.estimatedCpuMs,
+			current: current.cpu?.estimatedCpuMs,
+			minDecrease: cli.minCpuDecrease,
+			format: fmtMs,
+		})));
 	failures.push(...compareNumeric({
-		label: `${baselineFile}: runtime`,
-		baseline: baseline.durationMs,
-		current: current.durationMs,
-		ratio: thresholds.runtimeMaxIncreaseRatio,
-		additive: thresholds.runtimeMaxIncreaseMs,
-		format: fmtMs,
-	}));
-	failures.push(...compareNumeric({
-		label: `${baselineFile}: estimated CPU`,
-		baseline: baseline.cpu?.estimatedCpuMs,
-		current: current.cpu?.estimatedCpuMs,
-		ratio: thresholds.cpuMaxIncreaseRatio,
-		additive: thresholds.cpuMaxIncreaseMs,
-		format: fmtMs,
-	}));
-	failures.push(...compareNumeric({
-		label: `${baselineFile}: peak RSS`,
+		label: `${label}: peak RSS`,
 		baseline: baseline.memory?.peakRssBytes,
 		current: current.memory?.peakRssBytes,
 		ratio: thresholds.memoryMaxIncreaseRatio,
@@ -108,22 +232,25 @@ function compareMetric(baselineFile) {
 	return failures;
 }
 
-const baselineFiles = listJsonFiles(baselineDir).filter((file) => basename(file) !== "thresholds.json" && basename(file).startsWith("baseline-"));
+const scopedComparison = baselineInputKind === "file" || currentInputKind === "file";
+const pairs = comparisonPairs();
 const requiredMetricNamesForCheck = requiredMetrics();
 const failures = [];
-for (const name of requiredMetricNamesForCheck) {
-	const baselinePath = baselineMetricFile(name, baselineDir);
-	const currentPath = metricFile(name, currentDir);
-	if (!existsSync(baselinePath)) failures.push(`baseline-${name}.json: missing required baseline metric in ${relative(projectRoot, baselineDir)}`);
-	if (!existsSync(currentPath)) failures.push(`${name}.json: missing required current metric in ${relative(projectRoot, currentDir)}`);
+if (!scopedComparison || cli.required != null || process.env.BOBBIT_METRICS_REQUIRED != null) {
+	for (const name of requiredMetricNamesForCheck) {
+		const baselinePath = baselinePathForMetric(name);
+		const currentPath = currentPathForMetric(name);
+		if (!existsSync(baselinePath)) failures.push(`baseline-${name}.json: missing required baseline metric in ${rel(dirname(baselinePath))}`);
+		if (!existsSync(currentPath)) failures.push(`${name}.json: missing required current metric in ${rel(dirname(currentPath))}`);
+	}
 }
-if (baselineFiles.length === 0) {
+if (pairs.length === 0) {
 	failures.push(`no baseline JSON files found in ${baselineDir}`);
 }
 
-for (const file of baselineFiles) failures.push(...compareMetric(file));
+for (const pair of pairs) failures.push(...compareMetric(pair));
 
-if (thresholds.browserImprovement?.enabled) {
+if (!scopedComparison && thresholds.browserImprovement?.enabled) {
 	for (const name of ["e2e-browser", "slice-renderer", "slice-scroll", "slice-sidebar"]) {
 		const b = baselineMetricFile(name, baselineDir);
 		const c = metricFile(name, currentDir);
@@ -144,4 +271,6 @@ if (failures.length > 0) {
 	process.exit(1);
 }
 
-console.log(`[metrics:check] passed ${baselineFiles.length} metric comparison(s) (${relative(projectRoot, baselineDir)} → ${relative(projectRoot, currentDir)})`);
+const sourceLabel = scopedComparison ? pairs.map((pair) => rel(pair.baselinePath)).join(", ") : rel(baselineDir);
+const currentLabel = scopedComparison ? pairs.map((pair) => rel(pair.currentPath)).join(", ") : rel(currentDir);
+console.log(`[metrics:check] passed ${pairs.length} metric comparison(s) (${sourceLabel} → ${currentLabel})`);
