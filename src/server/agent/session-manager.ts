@@ -320,7 +320,9 @@ export interface SessionInfo {
 		seq: number;
 		ts: number;
 	};
-	/** Tools granted via "one-time" mode — revoked on agent_end */
+	/** Tools granted via "session-only" mode — re-applied across Refresh agent, not persisted to disk. */
+	sessionOnlyGrantedTools?: string[];
+	/** Tools granted via "one-time" mode — re-applied across Refresh agent and revoked on agent_end. */
 	oneTimeGrantedTools?: string[];
 	/** Whether post-start setup (model, thinking, metadata) has completed */
 	setupComplete?: boolean;
@@ -1730,6 +1732,18 @@ export class SessionManager {
 		return [];
 	}
 
+	private mergeToolNames(existing: string[] | undefined, additions: string[] | undefined): string[] | undefined {
+		const merged: string[] = [];
+		const seen = new Set<string>();
+		for (const name of [...(existing ?? []), ...(additions ?? [])]) {
+			const key = name.toLowerCase();
+			if (seen.has(key)) continue;
+			seen.add(key);
+			merged.push(name);
+		}
+		return merged.length > 0 ? merged : undefined;
+	}
+
 	private buildToolActivationArgs(
 		sessionId: string,
 		allowedTools: EffectiveTool[] | undefined,
@@ -3054,7 +3068,7 @@ export class SessionManager {
 	 *
 	 * @param mode - Grant persistence mode:
 	 *   - "persistent" (default): updates role YAML permanently
-	 *   - "session-only": adds to session.allowedTools in memory only (survives until session ends/restarts)
+	 *   - "session-only": adds to session.allowedTools in memory only (survives Refresh agent, not gateway restart)
 	 *   - "one-time": adds to session.allowedTools + tracks for revocation on agent_end
 	 */
 	async grantToolPermission(sessionId: string, toolName: string, scope: "tool" | "group", group?: string, mode?: "persistent" | "session-only" | "one-time"): Promise<string[]> {
@@ -3112,13 +3126,14 @@ export class SessionManager {
 		if (mode === "one-time") {
 			// Temporary grant: add to session.allowedTools, track for revocation on agent_end
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
-			session.oneTimeGrantedTools = [...(session.oneTimeGrantedTools || []), ...newTools];
+			session.oneTimeGrantedTools = this.mergeToolNames(session.oneTimeGrantedTools, newTools);
 			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
 		} else if (mode === "session-only") {
 			// Session-scoped grant: add to session.allowedTools only, don't write role YAML
 			session.allowedTools = [...(session.allowedTools || []), ...newTools];
+			session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, newTools);
 			await this._restartSessionWithUpdatedRole(session);
 			resultTools = session.allowedTools;
 
@@ -3215,6 +3230,28 @@ export class SessionManager {
 		pending.resolve({ granted: false });
 	}
 
+	private recomputeAllowedToolsForRestart(session: SessionInfo, ps: PersistedSession): string[] | undefined {
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0
+			? ps.allowedTools
+			: undefined;
+		const sessionGrants = this.mergeToolNames(session.sessionOnlyGrantedTools, session.oneTimeGrantedTools);
+
+		// Persisted allow-lists are true session-scoped constraints (delegate/read-only
+		// children, explicit createSession overrides). Preserve them exactly, with any
+		// live grants layered on top.
+		if (persistedAllowedTools) {
+			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
+		}
+
+		// Normal sessions derive their tool surface from the current role/group/MCP
+		// policy cascade. Only one-time/session-only grants are carried across the
+		// respawn; the old live session.allowedTools is just a stale cache.
+		if (!sessionGrants) return undefined;
+		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
+		const recomputedAllowed = this.resolveEffectiveAllowedTools(restoredRole).map(t => t.name);
+		return this.mergeToolNames(recomputedAllowed, sessionGrants);
+	}
+
 	/**
 	 * Restart a session's agent process so it picks up updated role/tools.
 	 * Stops the current agent, then restores from the persisted session file
@@ -3225,19 +3262,18 @@ export class SessionManager {
 		if (!ps) return;
 
 		// Save in-memory grant state that restoreSession doesn't persist.
-		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
 			mutatePs: p => {
-				// restoreSession normally derives allowedTools from role YAML; session-only
-				// and one-time grants need the augmented list to round-trip.
-				(p as any)._overrideAllowedTools = savedAllowedTools;
+				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
 			},
 		});
 
 		if (restored) {
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 		}
 	}
@@ -3346,15 +3382,18 @@ export class SessionManager {
 			throw zombieErr;
 		}
 
-		const savedAllowedTools = session.allowedTools ? [...session.allowedTools] : undefined;
+		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
+		const overrideAllowedTools = this.recomputeAllowedToolsForRestart(session, ps);
 
 		const restored = await this._respawnAgentInPlace(session, ps, {
-			mutatePs: p => { (p as any)._overrideAllowedTools = savedAllowedTools; },
+			mutatePs: p => {
+				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
+			},
 		});
 
 		if (restored) {
-			if (savedAllowedTools) restored.allowedTools = savedAllowedTools;
+			if (savedSessionOnlyGrantedTools) restored.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 			if (savedOneTimeGrantedTools) restored.oneTimeGrantedTools = savedOneTimeGrantedTools;
 		} else {
 			throw new Error("Failed to restore session after restart");

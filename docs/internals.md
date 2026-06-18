@@ -1324,6 +1324,24 @@ Why no MCP-specific builtin denials: MCP servers should have the same baseline a
 
 Disruptive servers (e.g. headed Chromium from `@playwright/mcp`) are opted out at the **role** layer instead — see `defaults/roles/qa-tester.yaml`, which sets `toolPolicies: { mcp__playwright: never }`. Roles that need the tool inherit the `allow` default; roles that shouldn't have it block it locally.
 
+### Refresh agent and MCP policy changes
+
+`Refresh agent` respawns the agent through the same restore path used for session recovery, but normal role-derived sessions do **not** reuse the previous live `session.allowedTools` as the authority. That array is a runtime cache of whatever was active when the agent was first spawned. On refresh, Bobbit recomputes the role-derived tool surface from the current role, tool default, group policy, and MCP server policy cascade.
+
+This matters for MCP policy edits made in the Tools page:
+
+- Changing an MCP group from `never` to `ask` makes the refreshed session register the relevant `mcp_<server>` meta-tool. Calls then hit the guard extension and broadcast the normal `tool_permission_needed` card.
+- Changing an MCP group from `never` to `allow` makes the refreshed session register the meta-tool and execute it without a permission card.
+- An explicit role-level `never` still wins over group defaults. For example, a role with `toolPolicies: { mcp__mock: never }` still blocks `mcp_mock` after the group default changes to `ask` or `allow`.
+
+Only genuinely session-scoped tool state is carried across the respawn:
+
+- persisted session allow-lists, such as delegate/read-only constraints or explicit creation-time overrides, remain authoritative and are preserved exactly;
+- `session-only` grants are re-applied in memory so they survive refresh without becoming durable role policy;
+- `one-time` grants are re-applied only for the interrupted turn and are still revoked on `agent_end`.
+
+Regression coverage lives in `tests/e2e/mcp-tool-permission.spec.ts`: the refresh scenario pins `never` → `ask` registration plus the permission-card broadcast, and the role-deny scenario pins role-level `mcp__mock: never` precedence over group `allow`.
+
 ### REST API
 
 - `PUT /api/roles/:name` - accepts `toolPolicies` (Record of tool/group name → `allow` | `ask` | `never`)
