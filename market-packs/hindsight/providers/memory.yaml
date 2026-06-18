@@ -1,0 +1,25 @@
+id: memory
+kind: memory
+# Lifecycle provider module (bundled, REST client inlined) — resolves to
+# market-packs/hindsight/lib/provider.mjs, contained in the pack root.
+module: ../lib/provider.mjs
+hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
+budget: { maxTokens: 1200, timeoutMs: 1500 }
+# Activation is additionally gated on `externalUrl` (see `activation` below); the
+# provider also enforces the same dormancy gate defensively at runtime.
+defaultEnabled: true
+config:
+  mode: { type: enum, values: [external, managed], default: external } # managed reserved for G3
+  externalUrl: { type: string, optional: true }
+  apiKey: { type: secret, optional: true }
+  bank: { type: string, default: bobbit }
+  namespace: { type: string, default: default }
+  recallScope: { type: enum, values: [project, all], default: all }
+  autoRecall: { type: boolean, default: true }
+  autoRetain: { type: boolean, default: true }
+  recallBudget: { type: number, default: 1200 }
+  timeoutMs: { type: number, default: 1500 }
+activation:
+  # Host omits the provider entirely (no bridge injection, no per-turn hook calls)
+  # until the effective config has a non-empty externalUrl.
+  requiresConfig: [externalUrl]

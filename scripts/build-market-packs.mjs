@@ -112,6 +112,20 @@ const PACKS = [
 			{ in: "yaml-to-cards.js", out: "lib/yaml-to-cards.mjs", platform: "node" },
 		],
 	},
+	{
+		pack: "hindsight",
+		entries: [
+			// SERVER-side modules for the confined NODE worker (provider hooks + pack
+			// routes), each authored in TS and bundled to lib/*.mjs with the REST client
+			// inlined (provider.ts / routes.ts dynamic-import ./hindsight-client.js, which
+			// esbuild inlines into each single self-contained file). platform:"node" so
+			// Buffer + node:* stay node globals/builtins. No CLIENT contributions yet
+			// (panel + tools land in G2.3).
+			{ in: "hindsight-client.ts", out: "lib/hindsight-client.mjs", platform: "node" },
+			{ in: "provider.ts", out: "lib/provider.mjs", platform: "node" },
+			{ in: "routes.ts", out: "lib/routes.mjs", platform: "node" },
+		],
+	},
 ];
 
 async function main() {
