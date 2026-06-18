@@ -59,12 +59,20 @@ export interface PackManifest {
 	 * files — the user-facing activation catalogue the Market UI toggles and the
 	 * pack-contribution registry keys by (default-enabled). Panels are NOT listed
 	 * here: they are auto-discovered support surfaces (pack-schema-v1 §1.2).
+	 *
+	 * `runtimes` lists the basenames (no extension) of `runtimes/<name>.yaml`
+	 * files — pack-authored managed-runtime descriptors loaded by the runtime
+	 * contribution loader (P1 runtime manifest). Optional on the authored
+	 * manifest; {@link validateManifest} normalizes it to `[]` when absent.
 	 */
 	contents: {
 		roles: string[];
 		tools: string[]; // tool group dir names
 		skills: string[];
 		entrypoints: string[]; // entrypoints/<name>.yaml basenames; toggleable
+		/** runtimes/<name>.yaml basenames. Optional (normalized to [] by the
+		 *  validator); each entry must be a safe basename. */
+		runtimes?: string[];
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,
 	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */

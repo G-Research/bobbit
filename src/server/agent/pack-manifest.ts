@@ -121,12 +121,30 @@ export function validateManifest(
 		}
 		entrypoints = parsed;
 	}
+	// NEW (P1 runtime manifest): contents.runtimes — basenames of runtimes/<name>.yaml
+	// descriptors. Optional + defaults to [] (a pack with no runtimes stays valid);
+	// when present it MUST be a string array of safe basenames (same path-traversal
+	// guard as contents.entrypoints).
+	let runtimes: string[] = [];
+	if (c.runtimes !== undefined) {
+		const parsed = asStringArray(c.runtimes);
+		if (parsed === null) return fail("pack.yaml: contents.runtimes must be an array of strings");
+		for (const r of parsed) {
+			if (!isSafeBasename(r)) {
+				return fail(
+					`pack.yaml: contents.runtimes entry ${JSON.stringify(r)} is not a safe basename ` +
+						`(must match /^[A-Za-z0-9._-]+$/ with no path separators or ".." segments)`,
+				);
+			}
+		}
+		runtimes = parsed;
+	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints },
+		contents: { roles, tools, skills, entrypoints, runtimes },
 	};
 	// NEW (pack-schema-v1 §1.2): optional top-level `routes: { module?, names? }`.
 	// Tolerant — a malformed routes block is dropped (no routes), never fatal.

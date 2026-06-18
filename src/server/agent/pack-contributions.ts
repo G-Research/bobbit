@@ -33,6 +33,8 @@ import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+// Runtime ids share the panel id shape (P1 runtime manifest design).
+const RUNTIME_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -75,6 +77,27 @@ export interface EntrypointContribution {
 	packRoot: string;
 }
 
+/** A pack-scoped managed-runtime descriptor (runtimes/<file>.yaml) loaded ONLY
+ *  for basenames listed in contents.runtimes[] (P1 runtime manifest design).
+ *
+ *  The loader is intentionally shallow: it enforces a valid `id` and intra-pack
+ *  id uniqueness, then carries the raw parsed YAML as {@link manifest}. Deep
+ *  manifest validation (compose-path containment, env/secrets/ports/modes) is
+ *  the runtime manifest parser's responsibility (`src/server/runtime/manifest.ts`),
+ *  applied by later orchestration phases — NOT here, keeping this phase pure. */
+export interface RuntimeContribution {
+	id: string; // unique within the pack (dotted allowed)
+	title?: string;
+	description?: string;
+	/** Raw parsed runtime manifest YAML (validated downstream by the runtime
+	 *  manifest parser). */
+	manifest: Record<string, unknown>;
+	/** The contents.runtimes[] basename that lists this file (activation key). */
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 /** The pack-level routes ref (pack.yaml `routes`). */
 export interface RouteContribution {
 	module: string; // path relative to pack.yaml, contained in packRoot
@@ -90,6 +113,7 @@ export interface PackContributions {
 	packRoot: string;
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
+	runtimes: RuntimeContribution[];
 	routes?: RouteContribution;
 }
 
@@ -120,6 +144,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		packRoot,
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
+		runtimes: loadRuntimes(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
 	if (routes) out.routes = routes;
@@ -225,6 +250,68 @@ function loadEntrypoints(packRoot: string, manifest: PackManifest): EntrypointCo
 		}
 		seenId.add(base.id);
 		out.push({ ...base, listName, sourceFile, packRoot });
+	}
+	return out;
+}
+
+/** Load `runtimes/<name>.yaml` ONLY for names listed in contents.runtimes[].
+ *  Mirrors {@link loadEntrypoints} (G1.1 contribution loader pattern): safe-basename
+ *  + realpath containment before read, tolerant warn+drop of missing/malformed
+ *  files, and a hard {@link PackContributionError} on a duplicate runtime id
+ *  within the pack. Accepts either `.yaml` or `.yml`. */
+function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribution[] {
+	const listNames = manifest.contents.runtimes ?? [];
+	const dir = path.join(packRoot, "runtimes");
+	const out: RuntimeContribution[] = [];
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		// Defense-in-depth (validateManifest is the primary guard): a listName must
+		// be a safe file basename — never path structure — before it is joined into
+		// the runtimes/ dir. Drop-with-warning keeps the tolerant-loader contract.
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		// Resolve the file; tolerate either .yaml or .yml.
+		let sourceFile = path.join(dir, `${listName}.yaml`);
+		if (!fs.existsSync(sourceFile)) {
+			const alt = path.join(dir, `${listName}.yml`);
+			if (fs.existsSync(alt)) sourceFile = alt;
+		}
+		// Assert the resolved file stays within runtimes/ (realpath-aware) — no read
+		// outside the dir even if the basename guard were ever bypassed.
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed runtime '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!data || typeof data !== "object" || Array.isArray(data)) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const obj = data as Record<string, unknown>;
+		const id = obj.id;
+		if (typeof id !== "string" || !RUNTIME_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid/missing id; dropping`);
+			continue;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares runtime id "${id}" more than once; runtime ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		const contribution: RuntimeContribution = { id, manifest: obj, listName, sourceFile, packRoot };
+		if (typeof obj.title === "string" && obj.title.length > 0) contribution.title = obj.title;
+		if (typeof obj.description === "string" && obj.description.length > 0) contribution.description = obj.description;
+		out.push(contribution);
 	}
 	return out;
 }
