@@ -96,11 +96,64 @@ export interface ProviderContribution {
 	hooks: string[];
 	runtime?: string;
 	budget: { maxTokens: number; timeoutMs: number };
-	// Activation is governed solely by DisabledRefs for now; default-on/off semantics are deferred to provider dispatch/activation work.
+	/** FLAT, resolved config values handed to the provider as `ctx.config` — each
+	 *  `providers/<id>.yaml` `config` schema entry collapsed to its `default` (or
+	 *  omitted when optional with no default). The registry overlays persisted
+	 *  store config ON TOP of these before constructing the effective config; a
+	 *  provider therefore reads `ctx.config.mode === "external"`, NOT a raw
+	 *  `{ type, default }` schema descriptor. */
 	config?: Record<string, unknown>;
+	/** The RAW config schema descriptors (the verbatim `config` mapping) preserved
+	 *  for route-side validation; never handed to the provider as `ctx.config`. */
+	configSchema?: Record<string, unknown>;
+	/** Config-gated activation: the provider is omitted from the active provider
+	 *  listing until the EFFECTIVE flat config has a non-empty value for every
+	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
+	 *  truly dormant install — no provider bridge, no per-turn hook routes, no
+	 *  network — until configured. */
+	activation?: { requiresConfig: string[] };
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
+}
+
+/** Pack-store key under which a provider's persisted flat config overrides live
+ *  (server-derived packId scopes the store; this names the per-provider record).
+ *  The provider's `config` route writes the same key so the loader/registry can
+ *  overlay the override on top of the schema defaults. Single source of truth for
+ *  the key convention shared between the host loader and the pack route. */
+export function providerConfigStoreKey(providerId: string): string {
+	return `provider-config:${providerId}`;
+}
+
+/** Collapse a provider `config` SCHEMA mapping to FLAT default values: a
+ *  descriptor object contributes its `.default` (omitted when it has none — an
+ *  optional field with no default stays `undefined`); a bare scalar is treated as
+ *  the literal default. Never recurses — provider config is a flat key→descriptor
+ *  surface. */
+export function resolveProviderConfigDefaults(schema: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [key, descriptor] of Object.entries(schema)) {
+		if (isPlainObject(descriptor)) {
+			if ("default" in descriptor) out[key] = descriptor.default;
+			// optional with no default → omitted (effective value is `undefined`).
+		} else {
+			out[key] = descriptor; // bare-scalar shorthand = the literal default
+		}
+	}
+	return out;
+}
+
+/** Parse a provider `activation` block. Only `requiresConfig: string[]` is
+ *  recognised; anything else is dropped (tolerant). Returns `undefined` when no
+ *  usable gating keys are present so the provider stays unconditionally active. */
+function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | undefined {
+	if (!isPlainObject(raw)) return undefined;
+	const rc = raw.requiresConfig;
+	if (!Array.isArray(rc)) return undefined;
+	const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
+	if (keys.length === 0) return undefined;
+	return { requiresConfig: keys };
 }
 
 /** All pack-scoped contributions for ONE installed pack. */
@@ -346,7 +399,12 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			packRoot,
 		};
 		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
-		if (isPlainObject(data.config)) provider.config = data.config;
+		if (isPlainObject(data.config)) {
+			provider.configSchema = data.config;
+			provider.config = resolveProviderConfigDefaults(data.config);
+		}
+		const activation = parseProviderActivation(data.activation);
+		if (activation) provider.activation = activation;
 		out.push(provider);
 	}
 	return out;

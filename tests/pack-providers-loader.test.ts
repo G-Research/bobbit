@@ -78,6 +78,54 @@ describe("loadProviders (schema v2)", () => {
 		});
 	});
 
+	it("resolves config schema entries to FLAT defaults and preserves the raw schema", () => {
+		const root = packRoot("flat-config");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"kind: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  mode:        { type: enum, values: [external, managed], default: external }",
+			"  externalUrl: { type: string, optional: true }",
+			"  bank:        { type: string, default: bobbit }",
+			"  namespace:   { type: string, default: default }",
+			"  autoRecall:  { type: boolean, default: true }",
+			"  timeoutMs:   { type: number, default: 1500 }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const [p] = loadProviders(root, manifest(["memory"]));
+		// FLAT effective defaults — providers read `ctx.config.mode === "external"`,
+		// NOT a `{ type, default }` descriptor. Optional field with no default omitted.
+		assert.deepEqual(p.config, {
+			mode: "external",
+			bank: "bobbit",
+			namespace: "default",
+			autoRecall: true,
+			timeoutMs: 1500,
+		});
+		assert.equal("externalUrl" in (p.config ?? {}), false, "optional field with no default is omitted");
+		// Raw schema preserved for route-side validation.
+		assert.ok(p.configSchema);
+		assert.deepEqual((p.configSchema as Record<string, any>).mode, { type: "enum", values: ["external", "managed"], default: "external" });
+		// Activation gating parsed.
+		assert.deepEqual(p.activation, { requiresConfig: ["externalUrl"] });
+	});
+
+	it("omits config/configSchema/activation when the provider declares none", () => {
+		const root = packRoot("no-config");
+		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const [p] = loadProviders(root, manifest(["memory"]));
+		assert.equal("config" in p, false);
+		assert.equal("configSchema" in p, false);
+		assert.equal("activation" in p, false);
+	});
+
 	it("drops only the provider with an unknown hook name", () => {
 		const root = packRoot("bad-hook");
 		w(path.join(root, "providers", "good.yaml"), validProviderYaml("good"));

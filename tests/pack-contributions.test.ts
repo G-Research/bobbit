@@ -352,6 +352,94 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.equal(restored.getPack(undefined, "memory-pack")!.entrypoints.length, 0, "entrypoint filtering remains unchanged");
 	});
 
+	it("config-gated activation: a provider with requiresConfig is omitted until the override supplies the key", () => {
+		const root = packRoot("act-config", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  externalUrl: { type: string, optional: true }",
+			"  bank: { type: string, default: bobbit }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		// No override → externalUrl absent → provider dormant (omitted): no bridge.
+		const dormant = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(dormant.listProviders(undefined).map((p) => p.id), []);
+
+		// Empty-string override does NOT satisfy the gate.
+		const blank = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ externalUrl: "   " }),
+		);
+		assert.deepEqual(blank.listProviders(undefined).map((p) => p.id), []);
+
+		// Non-empty externalUrl override → provider becomes active with EFFECTIVE
+		// flat config = schema defaults overlaid with the override.
+		const configured = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			(_s, _pid, packId, providerId) => (packId === "memory-pack" && providerId === "memory" ? { externalUrl: "http://localhost:8888" } : undefined),
+		);
+		const active = configured.listProviders(undefined);
+		assert.deepEqual(active.map((p) => p.id), ["memory"]);
+		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
+	});
+
+	it("config overlay: store override wins over the schema default for an unconditional provider", () => {
+		const root = packRoot("cfg-overlay", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  bank: { type: string, default: bobbit }",
+			"  autoRecall: { type: boolean, default: true }",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		const reg = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => ({ bank: "custom", autoRecall: false }),
+		);
+		const [p] = reg.listProviders(undefined);
+		assert.deepEqual(p.config, { bank: "custom", autoRecall: false });
+	});
+
+	it("DisabledRefs still wins over config-gated activation (kill switch first)", () => {
+		const root = packRoot("act-disabled-wins", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  externalUrl: { type: string, optional: true }",
+			"activation:",
+			"  requiresConfig: [externalUrl]",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+
+		// Configured AND disabled → still omitted (DisabledRefs is the kill switch).
+		const reg = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined,
+			(_s, _p, packName) => (packName === "memory-pack" ? ["memory"] : []),
+			() => ({ externalUrl: "http://localhost:8888" }),
+		);
+		assert.deepEqual(reg.listProviders(undefined).map((p) => p.id), []);
+	});
+
 	it("always-emit: an installed pack with no panels/entrypoints/routes still produces a list row", () => {
 		const root = packRoot("empty", "bare");
 		w(path.join(root, "pack.yaml"), "name: bare\n");
