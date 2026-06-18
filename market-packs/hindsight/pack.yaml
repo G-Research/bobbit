@@ -1,0 +1,14 @@
+name: hindsight
+description: >-
+  Hindsight managed-runtime pack (P1). Contributes the `hindsight` runtime
+  descriptor and a static, digest-pinned compose template for the Hindsight
+  API + web + managed Postgres stack. Pure manifest layer only — no Docker
+  execution happens at this phase; later phases consume these descriptors.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  runtimes:
+    - hindsight
