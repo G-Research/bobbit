@@ -309,9 +309,12 @@ place.
 
 - soft-aborts the subtree's sessions and cancels in-flight verifications,
 - makes every spawn path return `409 GOAL_PAUSED`,
-- and — critically — the **boot-respawn supervisor skips paused goals**, so a
-  paused goal stays paused across a gateway restart instead of being
-  resurrected (the "whack-a-mole" fix).
+- and keeps the pause durable across gateway restart.
+
+Restart restores persisted active teams and re-subscribes their existing leads.
+Boot-resume/nudge skip predicates apply only to those restored leads, so a
+paused restored lead is not nudged. Restart does not create a new Team Lead for
+an existing goal that is teamless.
 
 Resume re-enables spawns but does not auto-restart sessions. Pause/resume is an
 **operator** action and is distinct from the scheduler's dependency `blocked`

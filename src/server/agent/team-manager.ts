@@ -950,9 +950,6 @@ export class TeamManager {
 				);
 			}
 		}
-		// boot-respawn for sessionless in-progress goals — Boot-respawn for sessionless in-progress goals.
-		this._bootRespawnSessionlessGoals();
-
 		// boot-resume idle team-leads with outstanding work. The stuck-sweep
 		// would catch these after STUCK_QUIET_THRESHOLD_MS (5 min) but that
 		// leaves a gap where the operator sees a freshly-restored team-lead
@@ -1055,60 +1052,6 @@ export class TeamManager {
 		if (failedGates > 0) parts.push(`${failedGates} failed gate(s)`);
 		if (openTasks > 0) parts.push(`${openTasks} open task(s)`);
 		return parts.join(", ");
-	}
-
-	/**
-	 * boot-respawn for sessionless in-progress goals — Walk every non-archived goal that is in-progress, has
-	 * setupStatus=ready, and is a team goal but has no live team entry. Spin
-	 * up a fresh team-lead for each so the goal is not stranded.
-	 *
-	 * Symptom on PR #409: after several gateway restarts, three Phase-2 leaves
-	 * all sat in `state: in-progress, setupStatus: ready, archived: null`
-	 * with ZERO team agents and ZERO team-lead session. The harness's
-	 * existing recovery only fired when there was an active verification with
-	 * the child's planId — but the parent's verification record was itself
-	 * lost in the restart, so nothing rescued the orphan.
-	 *
-	 * Wraps each respawn in try/catch — one bad goal must not block the rest.
-	 */
-	private _bootRespawnSessionlessGoals(): void {
-		if (!this.config.projectContextManager) return;
-
-		for (const ctx of this.config.projectContextManager.all()) {
-			for (const goal of ctx.goalStore.getAll()) {
-				if (goal.archived) continue;
-				// Pause-cascade: a paused goal must never trigger a fresh
-				// team-lead spawn on boot/respawn. Without this guard, an
-				// operator who pauses a goal then aborts its team-lead would
-				// see a new team-lead reappear within seconds (whack-a-mole).
-				// See docs/design/pause-cascade.md §Call-site 7 (CRITICAL).
-				if (goal.paused) continue;
-				if (goal.state !== "in-progress") continue;
-				if (goal.setupStatus !== "ready") continue;
-				if (!goal.team) continue;
-				if (this.teams.has(goal.id)) continue;
-
-				try {
-					console.log(
-						`[team-manager] Boot recovery: respawning team-lead for sessionless in-progress goal "${goal.title}" (id=${goal.id})`,
-					);
-					// Fire and forget — startTeam returns a promise but boot can't
-					// block on it. Errors are logged inside the catch so they
-					// don't propagate as unhandled rejections.
-					this.startTeam(goal.id).catch((err) => {
-						console.error(
-							`[team-manager] Boot recovery startTeam failed for goal=${goal.id} ("${goal.title}"):`,
-							err,
-						);
-					});
-				} catch (err) {
-					console.error(
-						`[team-manager] Boot recovery failed synchronously for goal=${goal.id} ("${goal.title}"):`,
-						err,
-					);
-				}
-			}
-		}
 	}
 
 	/** Clear and remove all idle-nudge timers for a goal. */
