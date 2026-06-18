@@ -140,10 +140,10 @@ user-facing entities are toggleable:** roles, tools, skills, and entrypoints. Su
 > kinds — `providers` plus the reserved siblings `hooks` / `mcp` / `piExtensions` / `runtimes`
 > / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
 > `pack-activation` catalogue includes their arrays only for schema-2 packs, so the toggles round-trip through the same
-> REST without changing schema-1 catalogue shapes. Of these, only **providers** currently has a loader, so disabling a provider actually
-> removes it from `PackContributionRegistry.listProviders(...)`; the other five toggle purely as
-> catalogue metadata until their loaders land. See
-> [pack.yaml schema 2 → Per-provider activation](#per-provider-activation).
+> REST without changing schema-1 catalogue shapes. Of these, **providers** and **runtimes** currently have loaders: disabling a provider
+> removes it from `PackContributionRegistry.listProviders(...)`, and disabling a runtime removes its descriptor from
+> `PackContributionRegistry.getRuntime(...)`. The other four toggle purely as catalogue metadata until their loaders land. See
+> [pack.yaml schema 2 → Per-provider activation](#per-provider-activation) and [managed runtimes](managed-runtimes.md).
 
 What disabling does:
 
@@ -372,15 +372,10 @@ each defaults to `[]` when absent:
 | `hooks` | `hooks` | No (reserved) | Hook contribution basenames. |
 | `mcp` | `mcp` | No (reserved) | MCP contribution basenames (accepted at schema 2 only). |
 | `piExtensions` | `pi-extensions` | No (reserved) | PI-extension basenames. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
-| `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
+| `runtimes` | `runtimes` | **Yes** | Runtime contribution basenames; see [managed runtimes](managed-runtimes.md). |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**Only `providers` has a loader in this PR.** The other five keys are **accepted** in the
-manifest, **normalised** onto `contents`, and **surfaced in the activation catalogue** (so the
-Market UI and the `pack-activation` REST already see and toggle them), but there is no loader
-that reads their files — that is owned by the later goals that implement each contribution
-type. Declaring them today is harmless: they validate as basenames and round-trip, nothing
-more.
+**Providers and runtimes have loaders.** `providers/<name>.yaml` files activate lifecycle hooks, while `runtimes/<name>.yaml` files declare pure managed-runtime descriptors (see [managed runtimes](managed-runtimes.md)). The other four keys are **accepted** in the manifest, **normalised** onto `contents`, and **surfaced in the activation catalogue** (so the Market UI and the `pack-activation` REST already see and toggle them), but there is no loader that reads their files — that is owned by the later goals that implement each contribution type. Declaring them today is harmless: they validate as basenames and round-trip, nothing more.
 
 #### Minimal schema-2 example
 
@@ -397,8 +392,9 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
-  # hooks / mcp / pi-extensions / runtimes / workflows are accepted here at
-  # schema 2 but have no loader in this PR — reserved for later goals.
+  runtimes: [node]            # loads runtimes/node.yaml (see managed-runtimes.md)
+  # hooks / mcp / pi-extensions / workflows are accepted here at
+  # schema 2 but have no loader yet — reserved for later goals.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)

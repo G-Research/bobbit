@@ -247,6 +247,69 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	});
 });
 
+// ── Runtime contributions (P1 runtime manifest) ────────────────────
+
+describe("loadRuntimes (P1 runtime manifest)", () => {
+	it("loads runtimes/<name>.yaml + .yml ONLY for names listed in contents.runtimes, carrying listName/sourceFile/packRoot", () => {
+		const root = packRoot("rt1", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ntitle: Hindsight\ndescription: Managed runtime\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "alt.yml"), "id: alt\ncomposeFile: ../runtime/alt.yaml\n");
+		w(path.join(root, "runtimes", "unlisted.yaml"), "id: unlisted\ncomposeFile: ../runtime/unlisted.yaml\n");
+		const c = loadPackContributions(root, { ...manifest("runtime-pack", { runtimes: ["hindsight", "alt"] }), schema: 2 });
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["hindsight", "alt"]);
+		assert.equal(c.runtimes[0].title, "Hindsight");
+		assert.equal(c.runtimes[0].description, "Managed runtime");
+		assert.equal(c.runtimes[0].listName, "hindsight");
+		assert.equal(c.runtimes[0].sourceFile, path.join(root, "runtimes", "hindsight.yaml"));
+		assert.equal(c.runtimes[0].packRoot, root);
+		assert.deepEqual(c.runtimes[0].manifest, { id: "hindsight", title: "Hindsight", description: "Managed runtime", composeFile: "../runtime/compose.yaml" });
+	});
+
+	it("defaults to no runtimes when contents.runtimes is absent/empty", () => {
+		const root = packRoot("rt2", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		assert.deepEqual(loadPackContributions(root, manifest("p")).runtimes, []);
+	});
+
+	it("drops missing / malformed / invalid-id runtime files without crashing the scan", () => {
+		const root = packRoot("rt3", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "runtimes", "ok.yaml"), "id: ok\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "badid.yaml"), "id: '1 bad'\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "notmap.yaml"), "['not', 'a', 'mapping']\n");
+		const c = loadPackContributions(root, { ...manifest("p", { runtimes: ["ok", "badid", "notmap", "missing"] }), schema: 2 });
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["ok"]);
+	});
+
+	it("an unsafe runtime listName does not read/register a file outside runtimes/", () => {
+		const root = packRoot("rt4", "evil");
+		w(path.join(root, "pack.yaml"), "name: evil\n");
+		w(path.join(root, "outside.yaml"), "id: evil.escaped\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "ok.yaml"), "id: evil.ok\ncomposeFile: ../runtime/compose.yaml\n");
+		const c = loadPackContributions(root, { ...manifest("evil", { runtimes: ["../outside", "ok"] }), schema: 2 });
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["evil.ok"]);
+	});
+
+	it("duplicate runtime id within a pack → PackContributionError", () => {
+		const root = packRoot("rt5", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "runtimes", "a.yaml"), "id: dup\ncomposeFile: a\n");
+		w(path.join(root, "runtimes", "b.yaml"), "id: dup\ncomposeFile: b\n");
+		assert.throws(() => loadPackContributions(root, { ...manifest("p", { runtimes: ["a", "b"] }), schema: 2 }), (e) => e instanceof PackContributionError && /runtime id "dup"/.test(e.message));
+	});
+
+	it("registry exposes runtimes via getRuntime / getPack", () => {
+		const root = packRoot("rt6", "runtime-pack");
+		w(path.join(root, "pack.yaml"), "name: runtime-pack\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		const m = { ...manifest("runtime-pack", { runtimes: ["hindsight"] }), schema: 2 };
+		const reg = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.equal(reg.getPack(undefined, "runtime-pack")!.runtimes.length, 1);
+		assert.equal(reg.getRuntime(undefined, "runtime-pack", "hindsight")!.listName, "hindsight");
+	});
+});
+
 // ── Hard conflicts (§5.4) ──────────────────────────────────────────
 
 describe("hard conflicts (§5.4)", () => {

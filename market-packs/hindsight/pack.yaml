@@ -14,7 +14,7 @@ contents:
   hooks: []
   mcp: []
   pi-extensions: []
-  runtimes: [] # managed runtime lands in G3
+  runtimes: [hindsight] # P1 managed runtime descriptor → runtimes/hindsight.yaml
   workflows: []
 provides: []
 requires: []
