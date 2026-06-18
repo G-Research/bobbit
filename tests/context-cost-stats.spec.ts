@@ -4,8 +4,30 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = `file://${path.resolve("tests/context-cost-stats.html").replace(/\\/g, "/")}`;
+const COST_POPOVER_FIXTURE = path.resolve("tests/fixtures/cost-popover.html");
+const COST_POPOVER_BUNDLE = path.resolve("tests/fixtures/cost-popover-bundle.js");
+const COST_POPOVER_ENTRY = path.resolve("tests/fixtures/cost-popover-entry.ts");
+const COST_POPOVER_SRC = path.resolve("src/ui/components/CostPopover.ts");
+
+const COST_BASE = {
+	inputTokens: 100,
+	outputTokens: 50,
+	cacheReadTokens: 300,
+	cacheWriteTokens: 0,
+	totalCost: 0.01,
+	cacheHitRate: 0.75,
+};
+
+test.beforeAll(() => {
+	buildBundle({
+		entry: COST_POPOVER_ENTRY,
+		outfile: COST_POPOVER_BUNDLE,
+		deps: [COST_POPOVER_ENTRY, COST_POPOVER_SRC],
+	});
+});
 
 test.describe("PI-17: Context usage bar", () => {
 	test.beforeEach(async ({ page }) => {
@@ -187,6 +209,48 @@ test.describe("PI-18: Cost display", () => {
 		);
 		expect(popoverText).toContain("Cost Breakdown");
 		expect(popoverText).toContain("$3"); // formatCost(2.5) = $3
+	});
+});
+
+test.describe("CostPopover production component cache-hit display", () => {
+	test.beforeEach(async ({ page }) => {
+		await page.goto(`file://${COST_POPOVER_FIXTURE.replace(/\\/g, "/")}`);
+		await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 10_000 });
+	});
+
+	for (const [name, rate, expected] of [
+		["formats 75%", 0.75, "75%"],
+		["formats 0%", 0, "0%"],
+		["formats 100%", 1, "100%"],
+		["uses em dash for null", null, "—"],
+		["uses em dash for missing", undefined, "—"],
+		["uses em dash for non-finite", Number.POSITIVE_INFINITY, "—"],
+	] as const) {
+		test(`goal breakdown ${name}`, async ({ page }) => {
+			await page.evaluate(({ aggregate }) => {
+				(window as any).__mountCostPopover("goal", { aggregate });
+			}, { aggregate: { ...COST_BASE, cacheHitRate: rate } });
+
+			const row = page.locator('[data-testid="cost-cache-hit"]');
+			await expect(row).toBeVisible({ timeout: 5_000 });
+			await expect(row).toContainText("Cache hit");
+			await expect(row).toContainText(expected);
+			if (expected === "—") await expect(row).not.toContainText("0%");
+		}	);
+	}
+
+	test("session breakdown fetches session endpoint, shows delegates, and formats cache hit", async ({ page }) => {
+		await page.evaluate(({ session, delegates }) => {
+			(window as any).__mountCostPopover("session", { session, delegates });
+		}, {
+			session: { ...COST_BASE, totalCost: 0.2, cacheHitRate: 0.75 },
+			delegates: [{ sessionId: "child-1", title: "Child agent", role: "coder", inputTokens: 10, outputTokens: 5, cacheReadTokens: 15, cacheWriteTokens: 0, totalCost: 0.05 }],
+		});
+
+		await expect(page.locator('[data-testid="cost-cache-hit"]')).toContainText("75%", { timeout: 5_000 });
+		await expect(page.locator("cost-popover")).toContainText("Delegates");
+		await expect(page.locator("cost-popover")).toContainText("Child agent");
+		await expect.poll(() => page.evaluate(() => (window as any).__getCostPopoverCalls())).toEqual(["/api/sessions/session-cost/cost/breakdown"]);
 	});
 });
 
