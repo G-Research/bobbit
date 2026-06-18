@@ -84,6 +84,7 @@ const defaultThresholds = {
 	memoryMaxIncreaseBytes: 512 * 1024 * 1024,
 	retainedSmokeFiles: [],
 	retainedSmokeCoverage: [],
+	metricBudgets: {},
 	browserE2eBudget: {
 		// Disabled by default so ad-hoc scoped checks keep their historical behavior.
 		// Branch baselines can enable this from docs/testing-metrics/thresholds.json.
@@ -195,6 +196,14 @@ function metricBudgetFor(metricName, budget) {
 		: budget;
 }
 
+function genericBudgetForMetric(metricName) {
+	const budgets = thresholds.metricBudgets;
+	if (!budgets || typeof budgets !== "object" || Array.isArray(budgets)) return null;
+	const normalizedMetricName = normalizeMetricName(metricName);
+	const budget = budgets[normalizedMetricName];
+	return budget && typeof budget === "object" && !Array.isArray(budget) ? budget : null;
+}
+
 function browserBudgetForMetric(metricName) {
 	const budget = thresholds.browserE2eBudget;
 	if (!budget?.enabled) return null;
@@ -204,12 +213,51 @@ function browserBudgetForMetric(metricName) {
 	return metricBudgetFor(normalizedMetricName, budget);
 }
 
+function explicitDecreaseBudgetForMetric(metricName) {
+	return genericBudgetForMetric(metricName) ?? browserBudgetForMetric(metricName);
+}
+
 function usesAbsoluteBudgetForExplicitDecrease(metricName, kind) {
-	const metricBudget = browserBudgetForMetric(metricName);
+	const metricBudget = explicitDecreaseBudgetForMetric(metricName);
 	if (metricBudget?.useAbsoluteBudgetForExplicitDecrease !== true) return false;
 	if (kind === "runtime") return Number.isFinite(metricBudget.maxDurationMs);
 	if (kind === "cpu") return Number.isFinite(metricBudget.maxEstimatedCpuMs);
 	return false;
+}
+
+function compareGenericMetricBudget(label, metricName, current) {
+	const metricBudget = genericBudgetForMetric(metricName);
+	if (!metricBudget) return [];
+	const failures = [];
+	const currentCount = testCount(current);
+	if (Number.isFinite(metricBudget.maxTestCount) && currentCount != null && currentCount > metricBudget.maxTestCount) {
+		failures.push(`${label}: metric budget test count ${currentCount} exceeds max ${metricBudget.maxTestCount}`);
+	}
+	if (Number.isFinite(metricBudget.maxDurationMs)) {
+		failures.push(...compareAbsoluteMax({
+			label: `${label}: metric budget runtime`,
+			current: current.durationMs,
+			max: metricBudget.maxDurationMs,
+			format: fmtMs,
+		}));
+	}
+	if (Number.isFinite(metricBudget.maxEstimatedCpuMs)) {
+		failures.push(...compareAbsoluteMax({
+			label: `${label}: metric budget estimated CPU`,
+			current: current.cpu?.estimatedCpuMs,
+			max: metricBudget.maxEstimatedCpuMs,
+			format: fmtMs,
+		}));
+	}
+	if (Number.isFinite(metricBudget.maxPeakRssBytes)) {
+		failures.push(...compareAbsoluteMax({
+			label: `${label}: metric budget peak RSS`,
+			current: current.memory?.peakRssBytes,
+			max: metricBudget.maxPeakRssBytes,
+			format: (bytes) => `${(bytes / 1024 / 1024).toFixed(0)}MiB`,
+		}));
+	}
+	return failures;
 }
 
 function compareLegacyBrowserTestCount(label, baselineCount, currentCount, budget) {
@@ -394,6 +442,7 @@ function compareMetric({ baselinePath, currentPath, label }) {
 	if (current.status && current.status !== "passed") failures.push(`${label}: current status is ${current.status}`);
 	failures.push(...checkRetainedSmokeCoverageForMetric(metricName, current));
 	failures.push(...compareCoverage(label, baseline, current));
+	failures.push(...compareGenericMetricBudget(label, metricName, current));
 	failures.push(...compareBrowserBudget(label, metricName, baseline, current));
 	if (cli.minRuntimeDecrease != null) {
 		if (!usesAbsoluteBudgetForExplicitDecrease(metricName, "runtime")) {

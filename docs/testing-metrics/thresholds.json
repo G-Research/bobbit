@@ -77,6 +77,13 @@
     "targetRuntimeDropPct": 40,
     "targetCpuDropPct": 40
   },
+  "metricBudgets": {
+    "e2e-full": {
+      "maxDurationMs": 700000,
+      "maxEstimatedCpuMs": 2500000,
+      "useAbsoluteBudgetForExplicitDecrease": true
+    }
+  },
   "retainedSmokeCoverage": [
     {
       "file": "tests/e2e/ui/children-tool-renderers.spec.ts",
