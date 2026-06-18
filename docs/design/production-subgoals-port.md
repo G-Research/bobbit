@@ -198,8 +198,8 @@ Port all `tests/**` named in #497 except `*lsp*`/`tests/lsp/**`/
   `criteria-drop`); criteria-drop always rejected; divergence policy matrix
   (`strict`/`balanced`/`autonomous`); `replanCount > 5` auto-pauses.
 - Pause/resume cascade requires `{cascade}` (`422 CASCADE_REQUIRED`); every
-  spawn path returns `409 GOAL_PAUSED`; boot respawn supervisor skips paused
-  goals.
+  spawn path returns `409 GOAL_PAUSED`; restart boot-resume nudges skip paused
+  restored teams.
 
 ## Production deviation from #497 (reverted)
 
@@ -389,7 +389,7 @@ children.
 | "An agent can attach a custom workflow … and a child may override its parent's workflow." | spawn-child-workflow, workflow-store, nested-goal-routes | proposal-panels (Workflow/Roles tabs) | spawn-child-workflow-resolution, runSubgoalStep-inline-roles-inheritance |
 | "Completed child work merges locally into the parent branch with no per-child PR; only the root goal raises a PR; merge conflicts preserve the child." | skills/git (`mergeChildBranchLocal`, `shouldSkipRemotePush`), verification-harness (`runSubgoalStep`), child-ready-to-merge | GoalMergeChildRenderer | child-ready-to-merge-helper, runSubgoalStep-merge-then-archive |
 | "Plan changes after freeze are classified and gated by the divergence policy; criteria-drops are always rejected; excessive replans auto-pause the goal." | plan-mutation, plan-mutation-store, parent-workflow-freeze | GoalPlanProposeRenderer, GoalDecideMutationRenderer, children-mutation-approval | plan-mutation, plan-mutation-store, api-goals-plan-mutation |
-| "An operator can pause/resume a goal's entire subtree, and pause actually stops the work and survives supervisor respawn." | goal-paused-guard, goal-manager (`_bootRespawnSessionlessGoals` skip) | GoalPauseResumeRenderer | any-in-flight-child-excludes-paused, runSubgoalStep-paused-child-keeps-waiting |
+| "An operator can pause/resume a goal's entire subtree, and pause actually stops the work and survives supervisor respawn." | goal-paused-guard, TeamManager boot-resume skip predicates | GoalPauseResumeRenderer | any-in-flight-child-excludes-paused, runSubgoalStep-paused-child-keeps-waiting |
 
 ## Edge cases and recovery
 
