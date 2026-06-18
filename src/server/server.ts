@@ -436,10 +436,6 @@ export function buildMarketToolRootsForProject(options: {
 }
 
 /**
- * Delete remote branches associated with a goal (integration + agent worktree branches).
- * Fire-and-forget — errors are logged but never block the archive flow.
- */
-/**
  * Clamp a thinking-level token against a role's pinned model (if any).
  * - Validates that the token is in the canonical set; returns undefined otherwise.
  * - When `modelStr` is set in canonical `provider/modelId` form, clamps the
@@ -459,6 +455,28 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
 }
 
+export function isMissingRemoteRefDeleteError(err: unknown): boolean {
+	const texts: string[] = [];
+	const addText = (value: unknown) => {
+		if (typeof value === "string") texts.push(value);
+		else if (Buffer.isBuffer(value)) texts.push(value.toString("utf-8"));
+	};
+
+	addText(err);
+	if (err instanceof Error) addText(err.message);
+	if (err && typeof err === "object") {
+		const record = err as Record<string, unknown>;
+		addText(record.stderr);
+		addText(record.message);
+	}
+
+	return texts.some(text => /\bremote\s+ref\s+does\s+not\s+exist\b/i.test(text));
+}
+
+/**
+ * Delete remote branches associated with a goal (integration + agent worktree branches).
+ * Fire-and-forget — errors are logged but never block the archive flow.
+ */
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
 	extraBranches: readonly string[],
@@ -487,6 +505,7 @@ async function deleteRemoteGoalBranches(
 			});
 			console.log(`[api] Deleted remote branch: ${branch} (repo: ${rp})`);
 		} catch (err) {
+			if (isMissingRemoteRefDeleteError(err)) return;
 			console.warn(`[api] Failed to delete remote branch ${branch} in ${rp}:`, err);
 		}
 	})));
