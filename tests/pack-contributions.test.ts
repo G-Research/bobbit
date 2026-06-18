@@ -81,6 +81,29 @@ describe("validateManifest (§1.2)", () => {
 		const m = validateManifest(ok)! as unknown as Record<string, unknown>;
 		assert.equal((m.contents as Record<string, unknown>).stores, undefined);
 	});
+
+	// ── contents.runtimes (P1 runtime manifest) ──
+	it("accepts contents.runtimes (string[]) and defaults it to [] when absent", () => {
+		assert.deepEqual(validateManifest(ok)!.contents.runtimes, []);
+		const m = validateManifest({ ...ok, contents: { ...ok.contents, runtimes: ["hindsight", "other"] } });
+		assert.deepEqual(m!.contents.runtimes, ["hindsight", "other"]);
+	});
+	it("rejects a non-string-array contents.runtimes", () => {
+		assert.equal(validateManifest({ ...ok, contents: { ...ok.contents, runtimes: [1, 2] } }), null);
+	});
+	it("rejects unsafe (path-traversal) contents.runtimes basenames", () => {
+		for (const bad of ["../outside", "..", "a/b", "a\\b", "/abs", "C:\\drive", "with\0null", ""]) {
+			const problems: string[] = [];
+			assert.equal(
+				validateManifest({ ...ok, contents: { ...ok.contents, runtimes: [bad] } }, problems),
+				null,
+				`expected ${JSON.stringify(bad)} to be rejected`,
+			);
+			assert.match(problems.join("; "), /runtimes entry/);
+		}
+		const good = validateManifest({ ...ok, contents: { ...ok.contents, runtimes: ["hindsight"] } });
+		assert.deepEqual(good!.contents.runtimes, ["hindsight"]);
+	});
 });
 
 // ── loadPackContributions + path containment (§5.1, §2) ────────────
@@ -88,7 +111,7 @@ describe("validateManifest (§1.2)", () => {
 function manifest(name: string, opts: Partial<PackManifest["contents"]> & { routes?: PackManifest["routes"] } = {}): PackManifest {
 	return {
 		name, description: "d", version: "1",
-		contents: { roles: [], tools: [], skills: [], entrypoints: opts.entrypoints ?? [] },
+		contents: { roles: [], tools: [], skills: [], entrypoints: opts.entrypoints ?? [], runtimes: opts.runtimes ?? [] },
 		...(opts.routes ? { routes: opts.routes } : {}),
 	};
 }
@@ -165,6 +188,81 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 		assert.equal(c.panels.length, 1);
 		assert.equal(c.entrypoints.length, 1);
 		assert.deepEqual(c.routes?.names, ["bundle"]);
+	});
+});
+
+// ── Runtime contribution loader (P1 runtime manifest) ──────────────
+
+describe("loadRuntimes (P1 runtime manifest)", () => {
+	it("loads runtimes/<name>.yaml + .yml ONLY for names listed in contents.runtimes, carrying listName/sourceFile/packRoot", () => {
+		const root = packRoot("rt1", "hindsight");
+		w(path.join(root, "pack.yaml"), "name: hindsight\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ntitle: Hindsight\ndescription: managed runtime\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "yml-variant.yml"), "id: yml.variant\ncomposeFile: ../runtime/compose.yaml\n");
+		// A runtime file NOT listed in contents.runtimes must be ignored.
+		w(path.join(root, "runtimes", "unlisted.yaml"), "id: unlisted\ncomposeFile: ../runtime/compose.yaml\n");
+		const c = loadPackContributions(root, manifest("hindsight", { runtimes: ["hindsight", "yml-variant"] }));
+		assert.deepEqual(c.runtimes.map((r) => r.id).sort(), ["hindsight", "yml.variant"]);
+		const hs = c.runtimes.find((r) => r.id === "hindsight")!;
+		assert.equal(hs.title, "Hindsight");
+		assert.equal(hs.description, "managed runtime");
+		assert.equal(hs.listName, "hindsight");
+		assert.equal(hs.sourceFile, path.join(root, "runtimes", "hindsight.yaml"));
+		assert.equal(hs.packRoot, root);
+		// Raw manifest YAML is carried through for downstream validation.
+		assert.equal((hs.manifest as Record<string, unknown>).composeFile, "../runtime/compose.yaml");
+	});
+
+	it("defaults to no runtimes when contents.runtimes is absent/empty", () => {
+		const root = packRoot("rt2", "bare");
+		w(path.join(root, "pack.yaml"), "name: bare\n");
+		w(path.join(root, "runtimes", "present.yaml"), "id: present\ncomposeFile: ../runtime/compose.yaml\n");
+		const c = loadPackContributions(root, manifest("bare"));
+		assert.deepEqual(c.runtimes, []);
+	});
+
+	it("drops missing / malformed / invalid-id runtime files without crashing the scan", () => {
+		const root = packRoot("rt3", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "runtimes", "good.yaml"), "id: good\ncomposeFile: ../runtime/compose.yaml\n");
+		w(path.join(root, "runtimes", "badid.yaml"), "id: '1 bad'\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "notmap.yaml"), "- just\n- a\n- list\n");
+		// 'missing' is listed but no file on disk.
+		const c = loadPackContributions(root, manifest("p", { runtimes: ["good", "badid", "notmap", "missing"] }));
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["good"]);
+	});
+
+	it("an unsafe runtime listName does not read/register a file outside runtimes/", () => {
+		const root = packRoot("rt4", "evil");
+		w(path.join(root, "pack.yaml"), "name: evil\n");
+		// A well-formed runtime YAML planted OUTSIDE runtimes/ that a `../outside`-style
+		// listName would otherwise reach.
+		w(path.join(root, "outside.yaml"), "id: escaped\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "ok.yaml"), "id: ok\ncomposeFile: ../runtime/compose.yaml\n");
+		// Bypass validateManifest to exercise the loader's defense-in-depth directly.
+		const c = loadPackContributions(root, manifest("evil", { runtimes: ["../outside", "ok"] }));
+		assert.deepEqual(c.runtimes.map((r) => r.id), ["ok"]);
+	});
+
+	it("duplicate runtime id within a pack → PackContributionError", () => {
+		const root = packRoot("rt5", "p");
+		w(path.join(root, "pack.yaml"), "name: p\n");
+		w(path.join(root, "runtimes", "a.yaml"), "id: dup\ncomposeFile: x\n");
+		w(path.join(root, "runtimes", "b.yaml"), "id: dup\ncomposeFile: y\n");
+		assert.throws(
+			() => loadPackContributions(root, manifest("p", { runtimes: ["a", "b"] })),
+			(e) => e instanceof PackContributionError && /runtime id "dup"/.test(e.message),
+		);
+	});
+
+	it("registry exposes runtimes via getRuntime / getPack", () => {
+		const root = packRoot("rt6", "hindsight");
+		w(path.join(root, "pack.yaml"), "name: hindsight\n");
+		w(path.join(root, "runtimes", "hindsight.yaml"), "id: hindsight\ncomposeFile: ../runtime/compose.yaml\n");
+		const reg = new PackContributionRegistry(() => [entry(root, "server", manifest("hindsight", { runtimes: ["hindsight"] }))]);
+		assert.equal(reg.getPack(undefined, "hindsight")!.runtimes.length, 1);
+		assert.equal(reg.getRuntime(undefined, "hindsight", "hindsight")!.id, "hindsight");
+		assert.equal(reg.getRuntime(undefined, "hindsight", "nope"), undefined);
 	});
 });
 
