@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { inspect } from "node:util";
 
 const { VerificationHarness } = await import("../src/server/agent/verification-harness.js");
 
@@ -11,6 +13,17 @@ function makeTempStateDir(): string {
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
 	return stateDir;
+}
+
+function makeLocalGitRepoWithoutOrigin(): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-no-origin-regression-"));
+	execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+	execFileSync("git", ["checkout", "-B", "master"], { cwd: root, stdio: "ignore" });
+	fs.writeFileSync(path.join(root, "README.md"), "local-only verification repo\n");
+	execFileSync("git", ["add", "README.md"], { cwd: root, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.name=Bobbit Test", "-c", "user.email=bobbit@example.test", "commit", "-m", "Initial commit"], { cwd: root, stdio: "ignore" });
+	assert.throws(() => execFileSync("git", ["remote", "get-url", "origin"], { cwd: root, stdio: "pipe" }));
+	return root;
 }
 
 function makeProjectConfigStore(baseRef: string) {
@@ -93,6 +106,50 @@ function makeHarnessFixture(baseRef = "origin/master") {
 	);
 	return { harness, signal, gateStore, goal };
 }
+
+test("local-only verification does not warn when origin remote is absent", async () => {
+	const repoDir = makeLocalGitRepoWithoutOrigin();
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/master");
+	const warnings: string[] = [];
+	const originalWarn = console.warn;
+	(harness as any).runCommandStep = async (command: string) => ({ passed: true, output: `executed ${command}` });
+	console.warn = (...args: any[]) => {
+		warnings.push(args.map(arg => typeof arg === "string" ? arg : inspect(arg)).join(" "));
+	};
+
+	try {
+		await harness.verifyGateSignal(
+			signal as any,
+			{
+				id: "ready-to-merge",
+				name: "Ready to Merge",
+				dependsOn: [],
+				verify: [{
+					name: "Local command still runs",
+					type: "command",
+					run: "echo local-only-verification",
+				}],
+			} as any,
+			repoDir,
+			"goal/no-origin-regression",
+			"master",
+			new Map(),
+			"Reproduce no-origin verification warning regression",
+		);
+	} finally {
+		console.warn = originalWarn;
+		fs.rmSync(repoDir, { recursive: true, force: true });
+	}
+
+	const verification = gateStore._gateState.signals[0].verification;
+	const warningOutput = warnings.join("\n");
+	assert.equal(verification?.status, "passed");
+	assert.doesNotMatch(
+		warningOutput,
+		/Failed to sync worktree from origin\/|Failed to fetch origin\/|fatal: 'origin' does not appear to be a git repository|does not appear to be a git repository/i,
+		`NO_ORIGIN_VERIFICATION_REPRO: local-only verification without origin emitted noisy git remote sync warnings:\n${warningOutput}`,
+	);
+});
 
 test("ready-to-merge command templates resolve {{baseBranch}} from configured origin/master and execute", async () => {
 	const { harness, signal, gateStore } = makeHarnessFixture("origin/master");
