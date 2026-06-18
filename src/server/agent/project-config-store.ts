@@ -221,12 +221,18 @@ export interface DisabledRefs {
 	tools?: string[];
 	skills?: string[];
 	entrypoints?: string[];
+	providers?: string[];
+	hooks?: string[];
+	mcp?: string[];
+	piExtensions?: string[];
+	runtimes?: string[];
+	workflows?: string[];
 }
 
 /** scope → packName → disabled entity refs by kind. Default (absent) = all enabled. */
 export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
 
-const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints"] as const;
+const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows"] as const;
 
 function normalizePackOrder(raw: unknown): { value: PackOrderMap; ok: boolean } {
 	if (!isPlainObject(raw)) return { value: {}, ok: false };

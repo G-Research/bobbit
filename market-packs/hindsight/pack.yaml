@@ -1,14 +1,28 @@
+schema: 2
 name: hindsight
 description: >-
-  Hindsight managed-runtime pack (P1). Contributes the `hindsight` runtime
-  descriptor and a static, digest-pinned compose template for the Hindsight
-  API + web + managed Postgres stack. Pure manifest layer only — no Docker
-  execution happens at this phase; later phases consume these descriptors.
+  Persistent agent memory backed by Hindsight (recall/retain/reflect over a shared,
+  tag-scoped bank). Dormant until a Hindsight URL is configured. See
+  docs/design/hindsight-pack-external.md and docs/design/agent-memory.md.
 version: 1.0.0
 contents:
   roles: []
-  tools: []
+  tools: [] # explicit hindsight_* tools land in G2.3
   skills: []
-  entrypoints: []
-  runtimes:
-    - hindsight
+  entrypoints: [] # panel + deep link land in G2.3
+  providers: [memory] # → providers/memory.yaml
+  hooks: []
+  mcp: []
+  pi-extensions: []
+  runtimes: [hindsight] # P1 managed runtime descriptor → runtimes/hindsight.yaml
+  workflows: []
+provides: []
+requires: []
+# Pack routes re-express the memory surface for diagnostics + config persistence.
+# Reached via host.callRoute(<name>); executed in the confined worker. The route
+# module is bundled (with the REST client inlined) to lib/routes.mjs by
+# scripts/build-market-packs.mjs. `module` resolves relative to THIS pack.yaml and
+# stays inside the pack root.
+routes:
+  module: lib/routes.mjs
+  names: [status, recall, retain, reflect, banks, config]

@@ -42,37 +42,41 @@ export interface PackRoutesRef {
 	names?: string[];
 }
 
-/** Parsed `pack.yaml`. `contents` is REQUIRED with all entity-list keys. */
+/** Parsed `pack.yaml`. `contents` is REQUIRED with all v1 entity-list keys. */
 export interface PackManifest {
 	name: string;
 	description: string;
 	version: string;
+	/** Manifest schema version. Absent manifests are schema 1. */
+	schema?: number;
 	author?: string;
 	homepage?: string;
+	/** Capability names this pack contributes (schema 2+ metadata). */
+	provides?: string[];
+	/** Capability names this pack depends on (schema 2+ metadata). */
+	requires?: string[];
 	/**
-	 * Authoritative advertised contents. All keys REQUIRED but each MAY be
-	 * empty. NO `mcp` key in a publishable manifest (MVP boundary — packs may
-	 * not ship/install MCP configs). `mcp` exists only as a reserved code-level
-	 * {@link EntityType} for the future loader seam.
+	 * Authoritative advertised contents. v1 keys are REQUIRED but each MAY be
+	 * empty. Schema 2 adds optional pack-scoped catalogues; only `providers` has
+	 * a loader in G1.1, the other keys are activation/catalogue metadata for later
+	 * extension-platform goals.
 	 *
 	 * `entrypoints` lists the basenames (no extension) of `entrypoints/<name>.yaml`
 	 * files — the user-facing activation catalogue the Market UI toggles and the
 	 * pack-contribution registry keys by (default-enabled). Panels are NOT listed
 	 * here: they are auto-discovered support surfaces (pack-schema-v1 §1.2).
-	 *
-	 * `runtimes` lists the basenames (no extension) of `runtimes/<name>.yaml`
-	 * files — pack-authored managed-runtime descriptors loaded by the runtime
-	 * contribution loader (P1 runtime manifest). Optional on the authored
-	 * manifest; {@link validateManifest} normalizes it to `[]` when absent.
 	 */
 	contents: {
 		roles: string[];
 		tools: string[]; // tool group dir names
 		skills: string[];
 		entrypoints: string[]; // entrypoints/<name>.yaml basenames; toggleable
-		/** runtimes/<name>.yaml basenames. Optional (normalized to [] by the
-		 *  validator); each entry must be a safe basename. */
-		runtimes?: string[];
+		providers?: string[]; // providers/<name>.yaml basenames; toggleable
+		hooks?: string[]; // hook contribution basenames (accepted, loader later)
+		mcp?: string[]; // MCP contribution basenames (schema 2+, loader later)
+		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
+		runtimes?: string[]; // runtimes/<name>.yaml basenames; managed-runtime descriptors
+		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,
 	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */
