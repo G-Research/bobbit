@@ -932,6 +932,97 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Pack managed-runtime supervisor seam (P2 — see docs design "P2
+// PackRuntimeSupervisor + REST"). The concrete supervisor plus its encode/decode
+// helpers live in ./runtimes/pack-runtime-supervisor.ts (built in parallel under
+// the same design doc). To keep this REST wiring independently compilable and
+// testable, the routes depend ONLY on the structural seam below: production loads
+// the real supervisor via a dynamic import in start(); tests inject a fake via
+// registerPackRuntimeSupervisorFactory(). At merge, the local types + the
+// encode/decode helpers should be reconciled with the supervisor module's
+// exported symbols (single source of truth).
+export type PackRuntimeStatusState =
+	| "docker-unavailable"
+	| "stopped"
+	| "starting"
+	| "running"
+	| "unhealthy";
+
+export interface PackRuntimeStatus {
+	id: string;
+	packId: string;
+	packName?: string;
+	runtimeId: string;
+	title?: string;
+	description?: string;
+	status: PackRuntimeStatusState;
+	mode?: string;
+	composeProject: string;
+	services?: Array<{ name: string; state?: string; health?: string }>;
+	message?: string;
+}
+
+/** The structural contract the REST routes depend on. The concrete
+ *  PackRuntimeSupervisor implements a superset of this (see design §"Public API").
+ *  Unknown-runtime resolution failures MUST surface as an Error whose
+ *  `.code === "PACK_RUNTIME_NOT_FOUND"` (→ 404); malformed mode/tail/etc. as
+ *  `.code === "PACK_RUNTIME_BAD_REQUEST"` (→ 400). Anything else → 500. */
+export interface PackRuntimeSupervisorLike {
+	list(projectId?: string): Promise<PackRuntimeStatus[]>;
+	status(packId: string, runtimeId: string, projectId?: string): Promise<PackRuntimeStatus>;
+	start(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string }): Promise<PackRuntimeStatus>;
+	stop(packId: string, runtimeId: string, opts?: { projectId?: string }): Promise<PackRuntimeStatus>;
+	restart(packId: string, runtimeId: string, opts?: { projectId?: string; mode?: string }): Promise<PackRuntimeStatus>;
+	logs(packId: string, runtimeId: string, opts?: { projectId?: string; tail?: number }): Promise<string>;
+}
+
+export interface PackRuntimeSupervisorDeps {
+	packContributionRegistry: PackContributionRegistry;
+	stateDir: string;
+	defaultCwd: string;
+}
+
+export type PackRuntimeSupervisorFactory = (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike | undefined;
+
+let _packRuntimeSupervisorFactory: PackRuntimeSupervisorFactory | null = null;
+
+/**
+ * Register an alternative pack-runtime-supervisor factory. Called by test
+ * harnesses to inject a fully-mocked supervisor (no Docker daemon) so the
+ * /api/pack-runtimes/* routes can be exercised end-to-end. Pass `null` to clear.
+ * When unset, production loads the real PackRuntimeSupervisor in start().
+ */
+export function registerPackRuntimeSupervisorFactory(factory: PackRuntimeSupervisorFactory | null): void {
+	_packRuntimeSupervisorFactory = factory;
+}
+
+/** URL-safe, reversible encoding of a `{packId, runtimeId}` pair into one path
+ *  segment (base64url → no `/`, `+`, or `=`). Mirror of the supervisor's intended
+ *  helper; kept local so the REST layer compiles + round-trips independently.
+ *  Reconcile with the supervisor's exported helper at merge. */
+export function encodePackRuntimeId(packId: string, runtimeId: string): string {
+	return Buffer.from(`${packId}\n${runtimeId}`, "utf8").toString("base64url");
+}
+
+/** Inverse of {@link encodePackRuntimeId}. Returns null for malformed ids
+ *  (not base64url, or missing the packId/runtimeId separator) → caller maps to 400. */
+export function decodePackRuntimeId(id: string): { packId: string; runtimeId: string } | null {
+	if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) return null;
+	let decoded: string;
+	try {
+		decoded = Buffer.from(id, "base64url").toString("utf8");
+	} catch {
+		return null;
+	}
+	const idx = decoded.indexOf("\n");
+	if (idx < 0) return null;
+	const packId = decoded.slice(0, idx);
+	const runtimeId = decoded.slice(idx + 1);
+	if (!packId || !runtimeId) return null;
+	return { packId, runtimeId };
+}
+
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -1256,6 +1347,15 @@ export function createGateway(config: GatewayConfig) {
 	});
 	routeRegistry = new RouteRegistry(packContributionRegistry);
 
+	// P2: pack managed-runtime supervisor (Docker-backed). Built from the same
+	// pack-contribution registry. Tests inject a fully-mocked supervisor via
+	// registerPackRuntimeSupervisorFactory(); otherwise the real supervisor is
+	// loaded lazily in start() (dynamic import keeps this wiring compilable even
+	// before the supervisor module is merged — routes then return 503).
+	let packRuntimeSupervisor: PackRuntimeSupervisorLike | undefined = _packRuntimeSupervisorFactory
+		? _packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd })
+		: undefined;
+
 	// pack-schema-v1 §7: feed pack_activation into the roles/tools cascade so a
 	// disabled entity is dropped BEFORE precedence merge (a shadow may reappear).
 	configCascade.setPackActivationProvider({
@@ -1529,7 +1629,12 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry);
+			// P2: lazily honour a pack-runtime-supervisor factory registered AFTER
+			// gateway start (in-process test harnesses register one per spec).
+			if (!packRuntimeSupervisor && _packRuntimeSupervisorFactory) {
+				packRuntimeSupervisor = _packRuntimeSupervisorFactory({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd });
+			}
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packRuntimeSupervisor);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1953,6 +2058,25 @@ export function createGateway(config: GatewayConfig) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await startupAigwCheck(preferencesStore);
+			// P2: load the real pack-runtime supervisor unless a test factory already
+			// supplied one. Dynamic import so this branch compiles before the
+			// supervisor module is merged; on failure the routes return 503.
+			if (!packRuntimeSupervisor && !_packRuntimeSupervisorFactory) {
+				try {
+					// Variable specifier: deferred to runtime so this branch compiles
+					// before the supervisor module is merged. At merge, replace with a
+					// static `import { PackRuntimeSupervisor } from "./runtimes/..."`.
+					const supervisorModulePath = "./runtimes/pack-runtime-supervisor.js";
+					const mod = await import(supervisorModulePath) as {
+						PackRuntimeSupervisor?: new (deps: PackRuntimeSupervisorDeps) => PackRuntimeSupervisorLike;
+					};
+					if (mod.PackRuntimeSupervisor) {
+						packRuntimeSupervisor = new mod.PackRuntimeSupervisor({ packContributionRegistry, stateDir, defaultCwd: config.defaultCwd });
+					}
+				} catch (err) {
+					console.warn(`[pack-runtimes] supervisor unavailable: ${(err as Error)?.message ?? err}`);
+				}
+			}
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
 
@@ -2555,6 +2679,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	packRuntimeSupervisor?: PackRuntimeSupervisorLike,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5837,6 +5962,88 @@ async function handleApiRoute(
 			routeNames: p.routes?.names ?? [],
 		}));
 		json({ packs });
+		return;
+	}
+
+	// ── P2: pack managed-runtime (Docker-backed) supervisor REST surface ──────
+	// GET  /api/pack-runtimes?projectId=          → { runtimes: PackRuntimeStatus[] }
+	// POST /api/pack-runtimes/:id/start           → status (after ensure/start)
+	// POST /api/pack-runtimes/:id/stop            → status (after stop)
+	// POST /api/pack-runtimes/:id/restart         → status (after restart)
+	// GET  /api/pack-runtimes/:id/logs?tail=      → { logs, status? }
+	// The `:id` is the URL-safe encodePackRuntimeId(packId, runtimeId). Admin-bearer
+	// only (gated before handleApiRoute). All Docker execution lives in the
+	// supervisor; tests inject a fully-mocked supervisor (no daemon).
+	if (url.pathname === "/api/pack-runtimes" && req.method === "GET") {
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		const projectId = url.searchParams.get("projectId") || undefined;
+		try {
+			const statuses = await packRuntimeSupervisor.list(projectId);
+			// Re-derive the API id from {packId, runtimeId} so it always round-trips
+			// through decodePackRuntimeId regardless of the supervisor's internal id.
+			const runtimes = statuses.map((s) => ({ ...s, id: encodePackRuntimeId(s.packId, s.runtimeId) }));
+			json({ runtimes });
+		} catch (err) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	const packRuntimeMatch = url.pathname.match(/^\/api\/pack-runtimes\/([^/]+)\/(start|stop|restart|logs)$/);
+	if (packRuntimeMatch) {
+		const action = packRuntimeMatch[2] as "start" | "stop" | "restart" | "logs";
+		const wantsGet = action === "logs";
+		if (wantsGet ? req.method !== "GET" : req.method !== "POST") {
+			json({ error: "method not allowed" }, 405);
+			return;
+		}
+		if (!packRuntimeSupervisor) { json({ error: "pack runtime supervisor unavailable" }, 503); return; }
+		const decoded = decodePackRuntimeId(decodeURIComponent(packRuntimeMatch[1]));
+		if (!decoded) { json({ error: "malformed runtime id" }, 400); return; }
+		const { packId, runtimeId } = decoded;
+		const projectId = url.searchParams.get("projectId") || undefined;
+
+		// Map supervisor failures to status codes: NOT_FOUND → 404, BAD_REQUEST → 400.
+		const handleErr = (err: unknown): void => {
+			const code = (err as { code?: unknown })?.code;
+			if (code === "PACK_RUNTIME_NOT_FOUND") { jsonError(404, err); return; }
+			if (code === "PACK_RUNTIME_BAD_REQUEST") { jsonError(400, err); return; }
+			jsonError(500, err);
+		};
+
+		if (action === "logs") {
+			let tail: number | undefined;
+			const rawTail = url.searchParams.get("tail");
+			if (rawTail !== null && rawTail !== "") {
+				const n = Number(rawTail);
+				if (!Number.isInteger(n) || n <= 0) { json({ error: "malformed tail" }, 400); return; }
+				tail = n;
+			}
+			try {
+				const logs = await packRuntimeSupervisor.logs(packId, runtimeId, { projectId, tail });
+				json({ logs });
+			} catch (err) { handleErr(err); }
+			return;
+		}
+
+		// start | stop | restart — optional `mode` from the POST body.
+		const body = (await readBody(req).catch(() => ({}))) ?? {};
+		let mode: string | undefined;
+		if (action !== "stop") {
+			const rawMode = (body as { mode?: unknown }).mode;
+			if (rawMode !== undefined && rawMode !== null) {
+				if (typeof rawMode !== "string" || rawMode.trim().length === 0) { json({ error: "malformed mode" }, 400); return; }
+				mode = rawMode;
+			}
+		}
+		try {
+			const status = action === "stop"
+				? await packRuntimeSupervisor.stop(packId, runtimeId, { projectId })
+				: action === "start"
+					? await packRuntimeSupervisor.start(packId, runtimeId, { projectId, mode })
+					: await packRuntimeSupervisor.restart(packId, runtimeId, { projectId, mode });
+			json({ ...status, id: encodePackRuntimeId(status.packId, status.runtimeId) });
+		} catch (err) { handleErr(err); }
 		return;
 	}
 
