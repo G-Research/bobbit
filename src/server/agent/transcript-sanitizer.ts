@@ -325,7 +325,7 @@ export async function sanitizeAgentTranscriptFile(
  * `.jsonl` transcript file using the same safe read/write boundary as the blank
  * user-message sanitizer. Best-effort and non-fatal.
  *
- * @returns the number of system cwd metadata records rewritten.
+ * @returns the number of runtime cwd metadata records rewritten.
  */
 export async function rebaseAgentTranscriptCwdMetadataFile(
 	ctx: SessionFsContext,
