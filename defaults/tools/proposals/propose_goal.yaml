@@ -13,8 +13,9 @@ docs: >-
 
   Optional parameters: cwd (project path the goal runs against — defaults to
   the registered project for this session), workflow (workflow id to use; see
-  GET /api/workflows?projectId=... for available workflows; if omitted, the
-  user picks one in the proposal panel), options (comma-separated optional
+  GET /api/workflows?projectId=... for available workflows; REQUIRED when this
+  session's project has workflows; if omitted/blank, propose_goal returns
+  MISSING_WORKFLOW with valid IDs), options (comma-separated optional
   step names), parentGoalId (parent goal ID for creating a subgoal — must be
   in the same project; when called from inside a team-lead session with a
   current goal that can spawn children, the server auto-fills from that goal;

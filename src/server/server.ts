@@ -13347,11 +13347,11 @@ async function handleApiRoute(
  * null if valid. Pure — caller resolves the workflow list (see seed handler).
  *
  * Rules (see docs/design — Validate goal workflow):
- * - Zero workflows ⇒ no validation (UI supplies a default; empty-state preserved).
- * - Empty/omitted `workflow` is NOT an error (UI dropdown supplies the default).
+ * - Zero workflows ⇒ no validation (nothing available to validate against).
+ * - Empty/omitted `workflow` ⇒ MISSING_WORKFLOW when workflows are available.
  * - An explicit `workflow` not among the configured ids ⇒ UNKNOWN_WORKFLOW.
  * - `options` (comma-separated optional-step names) validated against the chosen
- *   workflow (named, else first) — matched ONLY by the canonical step.name of
+ *   explicit workflow — matched ONLY by the canonical step.name of
  *   `verify` steps with `optional: true`. The runtime (verification-logic.ts) and
  *   the UI both key on step.name, so accepting optionalLabel/label here would be a
  *   false-success path that later fails to enable the step.
@@ -13364,19 +13364,30 @@ function validateGoalProposalWorkflow(
 
 	const wfArg = typeof args.workflow === "string" ? args.workflow.trim() : "";
 	const available = workflows.map(w => ({ id: w.id, name: w.name }));
+	const availableIds = available.map(w => w.id).join(", ");
 
-	// 1. Unknown explicit workflow id.
-	if (wfArg && !workflows.some(w => w.id === wfArg)) {
+	// 1. Workflow id is required when this session has resolvable workflows.
+	if (!wfArg) {
 		return {
 			ok: false,
-			code: "UNKNOWN_WORKFLOW",
-			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${available.map(w => w.id).join(", ")}. Re-call propose_goal with one of these IDs (or omit workflow to use the default).`,
+			code: "MISSING_WORKFLOW",
+			message: `Workflow is required for this project. Re-call propose_goal with one of these workflow IDs: ${availableIds}.`,
 			availableWorkflows: available,
 		};
 	}
 
-	// 2. Validate optional-step names against the chosen workflow (or default = first).
-	const chosen = wfArg ? workflows.find(w => w.id === wfArg)! : workflows[0];
+	// 2. Unknown explicit workflow id.
+	if (!workflows.some(w => w.id === wfArg)) {
+		return {
+			ok: false,
+			code: "UNKNOWN_WORKFLOW",
+			message: `Unknown workflow "${wfArg}". Available workflows for this project: ${availableIds}. Re-call propose_goal with one of these IDs.`,
+			availableWorkflows: available,
+		};
+	}
+
+	// 3. Validate optional-step names against the chosen explicit workflow.
+	const chosen = workflows.find(w => w.id === wfArg)!;
 	const optsArg = typeof args.options === "string" ? args.options : "";
 	const requested = optsArg.split(",").map(s => s.trim()).filter(Boolean);
 	if (requested.length > 0) {

@@ -1036,6 +1036,12 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 `GET /api/mcp-servers` returns the structured list (`{name,status,toolCount,tools[]}`). `src/app/tool-manager-page.ts::renderMcpSection()` filters them out of normal group rendering and shows one row per server in a dedicated MCP section. Empty section means `getMcpManager()` returned no configs — check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`.
 
+## MCP group changed from `never`, but refreshed agent still cannot use it
+
+`Refresh agent` should recompute normal role-derived allowed tools from the current role/group/MCP policy cascade. If the `mcp_<server>` meta-tool is still absent after changing `mcp__<server>` from `never` to `ask` or `allow`, check `SessionManager.recomputeAllowedToolsForRestart()` and `restoreSession()` in `src/server/agent/session-manager.ts`: normal sessions must not carry the stale live `session.allowedTools` cache as `_overrideAllowedTools`. Persisted session allow-lists, `session-only` grants, and unconsumed `one-time` grants are the exceptions. Regression coverage: `tests/e2e/mcp-tool-permission.spec.ts`.
+
+If the meta-tool remains blocked only for one role, inspect that role's `toolPolicies`. Role-level `mcp__<server>: never` intentionally wins over group defaults.
+
 ## Auto-nudge flooding
 
 Symptom: team-lead receives many `team_agent_finished` steers in quick succession. Cause: missing dedup. The `nudgePending` guard in `TeamManager` coalesces concurrent nudges into one delivery; if a regression removes it, a flood returns. Reviewer / QA sub-sessions are additionally filtered by `kind: "reviewer"` in `resubscribeTeamEvents()` and `notifyTeamLead()` — they must never nudge the team lead.
