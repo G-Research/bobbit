@@ -103,7 +103,7 @@ export interface SanitizeResult {
 }
 
 export interface RebaseTranscriptCwdMetadataOptions {
-	/** Archived/provenance cwd values that may appear in runtime-only system metadata. */
+	/** Archived/provenance cwd values that may appear in runtime-only metadata. */
 	oldCwds: string[];
 	/** Fresh runtime cwd for the newly-created session. */
 	newCwd: string;
@@ -134,8 +134,9 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 
 /**
  * Rebase runtime-only Pi cwd metadata in raw transcript JSONL. Only top-level
- * `cwd` on system init records (or legacy system records with no subtype) is
- * rewritten. Message content and user-visible text are never inspected.
+ * `cwd` on Pi session records and system init records (or legacy system records
+ * with no subtype) is rewritten. Message content and user-visible text are
+ * never inspected.
  */
 export function rebaseTranscriptCwdMetadataContent(
 	content: string,
@@ -147,13 +148,19 @@ export function rebaseTranscriptCwdMetadataContent(
 	}
 
 	return transformTranscriptJsonl(content, (entry) => {
-		if (!entry || entry.type !== "system" || typeof entry.cwd !== "string") return false;
-		const hasSubtype = Object.prototype.hasOwnProperty.call(entry, "subtype");
-		if (!(entry.subtype === "init" || !hasSubtype)) return false;
+		if (!isRebasableRuntimeCwdMetadataRecord(entry)) return false;
 		if (!oldCwds.has(entry.cwd) || entry.cwd === options.newCwd) return false;
 		entry.cwd = options.newCwd;
 		return true;
 	});
+}
+
+function isRebasableRuntimeCwdMetadataRecord(entry: any): entry is { type: "session" | "system"; cwd: string } {
+	if (!entry || typeof entry.cwd !== "string") return false;
+	if (entry.type === "session") return true;
+	if (entry.type !== "system") return false;
+	const hasSubtype = Object.prototype.hasOwnProperty.call(entry, "subtype");
+	return entry.subtype === "init" || !hasSubtype;
 }
 
 function transformTranscriptJsonl(
