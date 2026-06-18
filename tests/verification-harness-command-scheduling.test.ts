@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import {
 	resolveCommandStepTimeoutSec,
 	runVerificationPhaseSteps,
-	shouldSerializeVerificationStepWithinPhase,
 } from "../src/server/agent/verification-harness.js";
+import { groupStepsByPhase, getSortedPhases } from "../src/server/agent/verification-logic.js";
 import type { VerifyStep } from "../src/server/agent/workflow-store.js";
 
 test("resolveCommandStepTimeoutSec gives component unit commands a longer default", () => {
@@ -35,46 +35,94 @@ test("resolveCommandStepTimeoutSec gives component unit commands a longer defaul
 	assert.equal(resolveCommandStepTimeoutSec(freeformCommandStep), 300);
 });
 
-test("runVerificationPhaseSteps serializes command steps while non-command steps remain parallel", async () => {
+test("runVerificationPhaseSteps ignores legacy same-phase command serialization options", async () => {
 	type PhaseStep = { step: Pick<VerifyStep, "name" | "type">; index: number };
+	type LegacyRunVerificationPhaseSteps = <T extends PhaseStep, R>(
+		phaseSteps: readonly T[],
+		runStep: (phaseStep: T) => Promise<R>,
+		options: {
+			shouldSerialize: (args: { step: T["step"]; phaseStep: T }) => boolean;
+		},
+	) => Promise<R[]>;
+	const runWithLegacyOptions = runVerificationPhaseSteps as unknown as LegacyRunVerificationPhaseSteps;
 	const phaseSteps: PhaseStep[] = [
 		{ step: { name: "check", type: "command" }, index: 0 },
 		{ step: { name: "unit", type: "command" }, index: 1 },
-		{ step: { name: "review", type: "llm-review" }, index: 2 },
-		{ step: { name: "qa", type: "agent-qa" }, index: 3 },
 	];
 
 	let activeCommands = 0;
 	let maxActiveCommands = 0;
-	let activeNonCommands = 0;
-	let maxActiveNonCommands = 0;
 	const starts: string[] = [];
 	const finishes: string[] = [];
 
-	const results = await runVerificationPhaseSteps(
+	const results = await runWithLegacyOptions(
 		phaseSteps,
 		async ({ step, index }) => {
 			starts.push(step.name);
-			if (step.type === "command") {
-				activeCommands += 1;
-				maxActiveCommands = Math.max(maxActiveCommands, activeCommands);
-			} else {
-				activeNonCommands += 1;
-				maxActiveNonCommands = Math.max(maxActiveNonCommands, activeNonCommands);
-			}
+			activeCommands += 1;
+			maxActiveCommands = Math.max(maxActiveCommands, activeCommands);
 
-			await new Promise(resolve => setTimeout(resolve, step.type === "command" ? 25 : 40));
+			await new Promise(resolve => setTimeout(resolve, 25));
 
-			if (step.type === "command") activeCommands -= 1;
-			else activeNonCommands -= 1;
+			activeCommands -= 1;
 			finishes.push(step.name);
 			return { index, name: step.name };
 		},
-		{ shouldSerialize: ({ step }) => shouldSerializeVerificationStepWithinPhase(step) },
+		{ shouldSerialize: ({ step }) => step.type === "command" },
 	);
 
-	assert.equal(maxActiveCommands, 1, "command steps must not overlap within a phase");
-	assert.ok(maxActiveNonCommands > 1, "non-command steps should still be able to run in parallel");
-	assert.ok(finishes.indexOf("check") < starts.indexOf("unit"), "second command should start only after first command finishes");
-	assert.deepEqual(results.map(r => r.index), [0, 1, 2, 3]);
+	assert.equal(maxActiveCommands, 2, "legacy command serialization options should not serialize same-phase commands");
+	assert.deepEqual(starts, ["check", "unit"]);
+	assert.deepEqual(finishes.sort(), ["check", "unit"]);
+	assert.deepEqual(results.map(r => r.index), [0, 1]);
+});
+
+test("verification phases run sequentially in ascending phase order", async () => {
+	const steps: VerifyStep[] = [
+		{ name: "phase two", type: "command", phase: 2 },
+		{ name: "phase zero", type: "command", phase: 0 },
+		{ name: "phase one", type: "command", phase: 1 },
+	];
+	const phaseGroups = groupStepsByPhase(steps, steps);
+	const sortedPhases = getSortedPhases(phaseGroups);
+	const events: string[] = [];
+	let activeSteps = 0;
+	let maxActiveSteps = 0;
+
+	for (const phase of sortedPhases) {
+		events.push(`phase:${phase}:start`);
+		const phaseSteps = phaseGroups.get(phase) ?? [];
+		await runVerificationPhaseSteps(
+			phaseSteps,
+			async ({ step, index }) => {
+				activeSteps += 1;
+				maxActiveSteps = Math.max(maxActiveSteps, activeSteps);
+				events.push(`step:${step.name}:start`);
+
+				await new Promise(resolve => setTimeout(resolve, 5));
+
+				events.push(`step:${step.name}:finish`);
+				activeSteps -= 1;
+				return index;
+			},
+		);
+		events.push(`phase:${phase}:finish`);
+	}
+
+	assert.deepEqual(sortedPhases, [0, 1, 2]);
+	assert.equal(maxActiveSteps, 1, "different phases should not overlap");
+	assert.deepEqual(events, [
+		"phase:0:start",
+		"step:phase zero:start",
+		"step:phase zero:finish",
+		"phase:0:finish",
+		"phase:1:start",
+		"step:phase one:start",
+		"step:phase one:finish",
+		"phase:1:finish",
+		"phase:2:start",
+		"step:phase two:start",
+		"step:phase two:finish",
+		"phase:2:finish",
+	]);
 });

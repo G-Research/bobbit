@@ -813,8 +813,9 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 
 ## Phased verification
 
-- Steps are grouped by `phase` (integer, default 0) and phases execute sequentially
-- Within each phase, command steps serialize; non-command steps still run in parallel
+- Steps are grouped by `phase` (integer, default 0) and phases execute sequentially in ascending order
+- Within each phase, steps run concurrently by default, including command steps
+- Use different `phase` values when command checks require explicit ordering
 - Component-linked `command: unit` steps default to a 1200s timeout when `timeout` is omitted; other command steps default to 300s
 - If any step in a phase fails, remaining phases are skipped (status: `"skipped"`)
 - Skipped steps carry `skipped: true` on `GateSignalStep`, persisted in `gates.json` — this lets the UI show the correct dash icon after reload (without it, skipped steps would appear as passed or failed based on the `passed` field alone)

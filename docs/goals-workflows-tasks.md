@@ -448,11 +448,11 @@ Do not use bare forms such as `git push origin {{branch}}` in verification. Bare
 
 #### Phased verification
 
-Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within a phase, command steps are **serialized** while non-command steps still run in parallel. This prevents the harness from launching multiple full build/test commands against the same worktree at once, which is especially expensive on Windows under concurrent verification load.
+Verification steps have an optional `phase` field (integer, default 0). Steps are grouped by phase and phases execute **sequentially** in ascending order. Within a phase, steps run concurrently by default, including `type: command` steps. If two command checks must not overlap, put them in different phases instead of relying on step type for ordering.
 
 If any step in a phase fails, all subsequent phases are skipped immediately and the gate fails. Skipped steps are recorded with `skipped: true` on `GateSignalStep` and output `"Skipped — earlier phase failed"`. The `skipped` flag persists to disk so the UI can distinguish skipped steps from passed/failed ones after page reload.
 
-This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed, while also avoiding command-suite contention inside phase 0. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
+This avoids wasting expensive LLM reviews (phase 1) when cheap command checks (phase 0) have already failed, while keeping the `phase` field as the sole source of verification ordering. In the built-in `feature` and `bug-fix` workflows, type-checking and tests run at phase 0, while code quality and security reviews run at phase 1.
 
 ```yaml
 verify:
@@ -473,7 +473,7 @@ verify:
       Review for correctness, completeness, and code quality.
 ```
 
-**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work without migration. Non-command steps keep the legacy parallel behavior; command steps in the same phase now serialize as a contention-control measure.
+**Backward compatibility:** Steps without a `phase` field default to phase 0. Existing workflows and snapshotted goal workflows continue to work without migration. Same-phase steps run concurrently by default; explicit ordering between command checks should be represented with different `phase` values.
 
 **WebSocket events:** The server broadcasts `gate_verification_phase_started` before each phase begins, including the phase number and which step indices belong to it. Step-level events (`gate_verification_step_started`, `gate_verification_step_complete`) include an optional `phase` field. The goal dashboard uses these to show phase progression in real time.
 
