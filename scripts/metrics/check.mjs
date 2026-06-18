@@ -189,46 +189,52 @@ function compareMetric({ baselinePath, currentPath, label }) {
 	const failures = [];
 	if (current.status && current.status !== "passed") failures.push(`${label}: current status is ${current.status}`);
 	failures.push(...compareCoverage(label, baseline, current));
-	failures.push(...(cli.minRuntimeDecrease == null
-		? compareNumeric({
+	if (cli.minRuntimeDecrease != null) {
+		failures.push(...compareMinDecrease({
+			label: `${label}: runtime`,
+			baseline: baseline.durationMs,
+			current: current.durationMs,
+			minDecrease: cli.minRuntimeDecrease,
+			format: fmtMs,
+		}));
+	} else if (!scopedComparison) {
+		failures.push(...compareNumeric({
 			label: `${label}: runtime`,
 			baseline: baseline.durationMs,
 			current: current.durationMs,
 			ratio: thresholds.runtimeMaxIncreaseRatio,
 			additive: thresholds.runtimeMaxIncreaseMs,
 			format: fmtMs,
-		})
-		: compareMinDecrease({
-			label: `${label}: runtime`,
-			baseline: baseline.durationMs,
-			current: current.durationMs,
-			minDecrease: cli.minRuntimeDecrease,
+		}));
+	}
+	if (cli.minCpuDecrease != null) {
+		failures.push(...compareMinDecrease({
+			label: `${label}: estimated CPU`,
+			baseline: baseline.cpu?.estimatedCpuMs,
+			current: current.cpu?.estimatedCpuMs,
+			minDecrease: cli.minCpuDecrease,
 			format: fmtMs,
-		})));
-	failures.push(...(cli.minCpuDecrease == null
-		? compareNumeric({
+		}));
+	} else if (!scopedComparison) {
+		failures.push(...compareNumeric({
 			label: `${label}: estimated CPU`,
 			baseline: baseline.cpu?.estimatedCpuMs,
 			current: current.cpu?.estimatedCpuMs,
 			ratio: thresholds.cpuMaxIncreaseRatio,
 			additive: thresholds.cpuMaxIncreaseMs,
 			format: fmtMs,
-		})
-		: compareMinDecrease({
-			label: `${label}: estimated CPU`,
-			baseline: baseline.cpu?.estimatedCpuMs,
-			current: current.cpu?.estimatedCpuMs,
-			minDecrease: cli.minCpuDecrease,
-			format: fmtMs,
-		})));
-	failures.push(...compareNumeric({
-		label: `${label}: peak RSS`,
-		baseline: baseline.memory?.peakRssBytes,
-		current: current.memory?.peakRssBytes,
-		ratio: thresholds.memoryMaxIncreaseRatio,
-		additive: thresholds.memoryMaxIncreaseBytes,
-		format: (bytes) => `${(bytes / 1024 / 1024).toFixed(0)}MiB`,
-	}));
+		}));
+	}
+	if (!scopedComparison) {
+		failures.push(...compareNumeric({
+			label: `${label}: peak RSS`,
+			baseline: baseline.memory?.peakRssBytes,
+			current: current.memory?.peakRssBytes,
+			ratio: thresholds.memoryMaxIncreaseRatio,
+			additive: thresholds.memoryMaxIncreaseBytes,
+			format: (bytes) => `${(bytes / 1024 / 1024).toFixed(0)}MiB`,
+		}));
+	}
 	return failures;
 }
 
