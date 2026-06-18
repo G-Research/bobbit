@@ -169,6 +169,32 @@ describe("rebaseTranscriptCwdMetadataContent", () => {
 		assert.deepEqual(JSON.parse(content), { type: "system", subtype: "init", cwd: newCwd, session_id: "old123" });
 	});
 
+	it("rewrites Pi-style session cwd metadata and is idempotent", () => {
+		const line = JSON.stringify({
+			type: "session",
+			version: 3,
+			id: "019ed586-a59a-7d8a-a518-3d4d5e4c6e54",
+			timestamp: "2026-06-17T12:20:31.770Z",
+			cwd: oldCwd,
+		});
+
+		const once = rebase(line);
+		assert.equal(once.changed, true);
+		assert.equal(once.rewritten, 1);
+		assert.deepEqual(JSON.parse(once.content), {
+			type: "session",
+			version: 3,
+			id: "019ed586-a59a-7d8a-a518-3d4d5e4c6e54",
+			timestamp: "2026-06-17T12:20:31.770Z",
+			cwd: newCwd,
+		});
+
+		const twice = rebase(once.content);
+		assert.equal(twice.changed, false);
+		assert.equal(twice.rewritten, 0);
+		assert.equal(twice.content, once.content);
+	});
+
 	it("rewrites legacy system cwd metadata with no subtype", () => {
 		const line = JSON.stringify({ type: "system", cwd: oldCwd, note: "legacy init shape" });
 		const { content, changed, rewritten } = rebase(line);
