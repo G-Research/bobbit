@@ -2,13 +2,46 @@ import "../../src/ui/components/AgentInterface.js";
 import { streamSimple } from "@earendil-works/pi-ai";
 
 type Listener = (event: any) => void | Promise<void>;
+type FixtureMessage = Record<string, any>;
+
+let activeSession: FixtureSession | null = null;
+let logicalClock = 0;
+
+function nextClock(): number {
+	logicalClock += 1;
+	return logicalClock;
+}
+
+function textChunk(text: string): Array<{ type: "text"; text: string }> {
+	return [{ type: "text", text }];
+}
+
+function makeTurn(prefix: string, index: number): FixtureMessage[] {
+	const t = nextClock();
+	return [
+		{ id: `${prefix}-u-${index}`, role: "user", content: `Prompt ${prefix} ${index}`, timestamp: t, _order: t },
+		{
+			id: `${prefix}-a-${index}`,
+			role: "assistant",
+			content: textChunk(`Assistant ${prefix} ${index}\n\n${"tail-follow fixture line\n".repeat(4)}`),
+			timestamp: t + 0.1,
+			_order: t + 0.1,
+		},
+	];
+}
+
+function buildTranscript(prefix: string, turns: number): FixtureMessage[] {
+	const messages: FixtureMessage[] = [];
+	for (let i = 0; i < turns; i++) messages.push(...makeTurn(prefix, i + 1));
+	return messages;
+}
 
 class FixtureSession {
 	sessionId = "chat-scroll-fixture";
 	streamFn = streamSimple;
 	getApiKey = async () => "fixture-key";
 	private listeners = new Set<Listener>();
-	state = {
+	state: any = {
 		messages: [],
 		isStreaming: false,
 		status: "idle",
@@ -28,6 +61,51 @@ class FixtureSession {
 
 	emit(event: any): void {
 		for (const listener of this.listeners) void listener(event);
+	}
+
+	replaceTranscript(prefix: string, turns: number): void {
+		this.state.messages = buildTranscript(prefix, turns);
+		this.state.streamingMessage = null;
+		this.state.isStreaming = false;
+		this.state.status = "idle";
+		this.emit({ type: "state_update" });
+	}
+
+	appendTurn(prefix: string, index = Math.floor(nextClock())): void {
+		this.state.messages = [...this.state.messages, ...makeTurn(prefix, index)];
+		this.emit({ type: "state_update" });
+	}
+
+	updateStreaming(prefix: string, lineCount: number): void {
+		const id = `${prefix}-streaming`;
+		const t = nextClock();
+		const message = {
+			id,
+			role: "assistant",
+			content: textChunk(`Streaming ${prefix}\n\n${Array.from({ length: lineCount }, (_, i) => `stream line ${i + 1}`).join("\n")}`),
+			timestamp: t,
+			_order: t,
+		};
+		this.state.isStreaming = true;
+		this.state.status = "running";
+		this.state.streamingMessage = message;
+		this.emit({ type: "message_update", message });
+	}
+
+	finishStreaming(prefix: string): void {
+		const msg = this.state.streamingMessage ?? {
+			id: `${prefix}-streaming`,
+			role: "assistant",
+			content: textChunk(`Streaming ${prefix} complete`),
+			timestamp: nextClock(),
+			_order: nextClock(),
+		};
+		this.state.messages = [...this.state.messages, msg];
+		this.state.streamingMessage = null;
+		this.state.isStreaming = false;
+		this.state.status = "idle";
+		this.emit({ type: "message_end", message: msg });
+		this.emit({ type: "state_update" });
 	}
 
 	async prompt(_input: string): Promise<void> {}
@@ -67,7 +145,7 @@ function installCss(): void {
 	document.head.appendChild(style);
 }
 
-async function mount(): Promise<void> {
+async function mount(opts: { prefix?: string; turns?: number } = {}): Promise<void> {
 	installCss();
 	(window as any).fetch = async () => new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } });
 	(window as any).WebSocket = class FixtureWebSocket {
@@ -83,8 +161,10 @@ async function mount(): Promise<void> {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("#app missing");
 	app.replaceChildren();
+	activeSession = new FixtureSession();
+	if (opts.turns) activeSession.replaceTranscript(opts.prefix ?? "mount", opts.turns);
 	const ai = document.createElement("agent-interface") as any;
-	ai.session = new FixtureSession();
+	ai.session = activeSession;
 	ai.readOnly = true;
 	ai.nonInteractive = false;
 	ai.gitRepoKnown = "no";
@@ -99,5 +179,17 @@ async function mount(): Promise<void> {
 	if (!scroll) throw new Error("scroll container not mounted");
 }
 
+function session(): FixtureSession {
+	if (!activeSession) throw new Error("chat scroll fixture is not mounted");
+	return activeSession;
+}
+
 (window as any).__mountChatScrollFixture = mount;
+(window as any).__chatScrollFixture = {
+	replaceTranscript: (prefix: string, turns: number) => session().replaceTranscript(prefix, turns),
+	appendTurn: (prefix: string, index?: number) => session().appendTurn(prefix, index),
+	updateStreaming: (prefix: string, lineCount: number) => session().updateStreaming(prefix, lineCount),
+	finishStreaming: (prefix: string) => session().finishStreaming(prefix),
+	messageCount: () => session().state.messages.length,
+};
 (window as any).__chatScrollReady = true;
