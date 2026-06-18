@@ -196,6 +196,24 @@ carry sub-namespaces. Per-op policies on `mcp__<server>__<op>` /
 `mcp__<server>__<sub>__<op>` continue to be matched at Layer B (per-call)
 before meta-aggregation.
 
+### Applying policy changes to existing agents
+
+Changing an MCP group policy updates the stored cascade immediately, but an
+already-running agent must be refreshed before its model-facing tool surface
+changes. `Refresh agent` recomputes role-derived allowed tools from the current
+cascade, so a server that moved from `never` to `ask` or `allow` registers its
+`mcp_<server>` meta-tool after the refresh.
+
+`ask` and `allow` differ only at execution time: `ask` registers the meta-tool
+and routes calls through the permission guard, while `allow` registers it for
+direct execution. A role-level `never` on the MCP key still wins over group
+policy and keeps the meta-tool unavailable.
+
+Session-scoped grants are not lost during this respawn. `session-only` grants
+and any unconsumed `one-time` grants are re-applied in memory; persisted
+session allow-list constraints, such as delegate/read-only restrictions, remain
+authoritative.
+
 ## Tools page UI
 
 The Tools page surfaces one row per MCP **server** under a dedicated "MCP"
