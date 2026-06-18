@@ -727,9 +727,9 @@ previously-named specs are now hardened and de-labelled.
 Recent stabilization work addressed contention at the scheduler, fixture, and
 suite-layout layers:
 
-- **Verification command scheduling.** Command verification steps serialize
-  within a phase while non-command steps remain parallel. This prevents one gate
-  from starting multiple full suites against the same worktree at the same time.
+- **Verification command scheduling.** Verification phases are the sole ordering
+  mechanism: same-phase steps run concurrently by default, including command
+  steps, and explicit sequencing should use different `phase` values.
   Component-linked `command: unit` steps also default to 1200s when no explicit
   timeout is set; other command steps keep the generic 300s default. Pinned by
   `tests/verification-harness-command-scheduling.test.ts`.
