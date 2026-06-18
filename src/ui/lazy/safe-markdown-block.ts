@@ -131,7 +131,10 @@ function createRenderer(shouldEscapeHtml: boolean): Renderer {
 	const originalTable = renderer.table.bind(renderer);
 
 	renderer.link = function (token: Tokens.Link) {
-		const link = originalLink(token) as string;
+		const href = sanitizeLinkHref(token.href);
+		if (href === null) return escapeHtml(token.text);
+
+		const link = originalLink({ ...token, href }) as string;
 		return link.replace("<a ", '<a target="_blank" rel="noopener noreferrer" ');
 	};
 
@@ -178,6 +181,24 @@ function encodeCode(code: string): string {
 
 function escapeAttribute(value: string): string {
 	return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function sanitizeLinkHref(href: string): string | null {
+	const trimmed = href.trim();
+	if (!trimmed) return "";
+
+	// Browsers ignore embedded ASCII controls/whitespace while resolving URL
+	// schemes, so match schemes against the same collapsed form. This prevents
+	// variants such as `java\nscript:` from bypassing the allow-list.
+	const schemeCandidate = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, "");
+	if (schemeCandidate.startsWith("#")) return trimmed;
+	if (schemeCandidate.startsWith("//")) return null;
+
+	const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(schemeCandidate);
+	if (!schemeMatch) return trimmed;
+
+	const scheme = schemeMatch[1].toLowerCase();
+	return scheme === "http" || scheme === "https" || scheme === "mailto" ? trimmed : null;
 }
 
 function escapeHtml(value: string): string {

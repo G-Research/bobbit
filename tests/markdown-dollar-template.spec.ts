@@ -28,11 +28,19 @@ test.beforeAll(() => {
 	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, MARKDOWN_SRC, SAFE_MARKDOWN_SRC] });
 });
 
+type LinkSnapshot = {
+	text: string;
+	href: string | null;
+	target: string | null;
+	rel: string | null;
+};
+
 type MarkdownSnapshot = {
 	headings: string[];
 	paragraphs: string[];
 	codeSource: string;
 	inlineCode: string;
+	links: LinkSnapshot[];
 	text: string;
 	codeIndex: number;
 	tailIndex: number;
@@ -110,6 +118,12 @@ async function renderMarkdown(page: Page, markdown: string): Promise<MarkdownSna
 			paragraphs: allDeep(root, "p").map((el) => deepText(el).replace(/\s+/g, " ").trim()),
 			codeSource,
 			inlineCode: allDeep(root, "p code").map((el) => deepText(el).replace(/\s+/g, " ").trim()).join("\n"),
+			links: allDeep(root, "a").map((el) => ({
+				text: deepText(el).replace(/\s+/g, " ").trim(),
+				href: el.getAttribute("href"),
+				target: el.getAttribute("target"),
+				rel: el.getAttribute("rel"),
+			})),
 			text,
 			codeIndex: Math.max(text.indexOf("const x"), text.indexOf("^${foo}$")),
 			tailIndex: text.lastIndexOf("tail"),
@@ -133,5 +147,29 @@ test.describe("markdown-block dollar template literal regression", () => {
 		const rendered = await renderMarkdown(page, INLINE_CODE_MARKDOWN);
 
 		expect(rendered.inlineCode, "markdown inline code should preserve literal ^${foo}$").toContain("^${foo}$");
+	});
+
+	test("sanitizes unsafe link schemes", async ({ page }) => {
+		const rendered = await renderMarkdown(page, [
+			"[https](https://example.com/path)",
+			"[mailto](mailto:test@example.com)",
+			"[relative](docs/page.md)",
+			"[anchor](#section)",
+			"[js](javascript:alert(1))",
+			"[data](data:text/html,<b>x</b>)",
+			"[vbscript](vbscript:msgbox(1))",
+			"[custom](file:///etc/passwd)",
+		].join("\n\n"));
+
+		expect(rendered.links.map((link) => link.text)).toEqual(["https", "mailto", "relative", "anchor"]);
+		for (const link of rendered.links) {
+			expect(link.target).toBe("_blank");
+			expect(link.rel).toBe("noopener noreferrer");
+		}
+		expect(rendered.links.map((link) => link.href)).toEqual(["https://example.com/path", "mailto:test@example.com", "docs/page.md", "#section"]);
+		expect(rendered.text).toContain("js");
+		expect(rendered.text).toContain("data");
+		expect(rendered.text).toContain("vbscript");
+		expect(rendered.text).toContain("custom");
 	});
 });
