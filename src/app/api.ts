@@ -640,10 +640,7 @@ export function archivedSessionsLoaded(): boolean {
 /** Check whether archived goals have been loaded via the dedicated paginated
  *  fetch. NOT the same as `state.goals.some(g => g.archived)` — archived goal
  *  entries can also arrive piggy-backed on `refreshSessions`' `archivedDelegates`
- *  field, which leaves the dedicated archived-goals page unfetched. The search
- *  auto-fetch path uses this flag to decide whether to kick the dedicated
- *  endpoint, so a search inside the sidebar reliably surfaces archived goals
- *  even if some archived sessions were already merged in via the live poll. */
+ *  field, which leaves the dedicated archived-goals page unfetched. */
 export function archivedGoalsLoaded(): boolean {
 	return _archivedGoalsLoaded;
 }
@@ -653,11 +650,16 @@ export function clearArchivedSessionsState(): void {
 	_archivedSessionsLoaded = false;
 	_archivedGoalsLoaded = false;
 	state.archivedSessions = [];
+	clearArchivedSearchState();
 	clearGoalChildrenFetchedCache();
 }
 
 /** Fetch archived sessions from the API (paginated). */
 export async function fetchArchivedSessions(): Promise<void> {
+	if (state.showArchived && state.searchQuery.trim()) {
+		scheduleArchivedRemoteSearch(state.searchQuery);
+		return;
+	}
 	_archivedSessionsLoaded = true;
 	// Reset pagination state and load first page — but don't clear archivedSessions
 	// to preserve BFS-enriched delegates from the live poll
@@ -665,6 +667,160 @@ export async function fetchArchivedSessions(): Promise<void> {
 	state.archivedSessionsHasMore = false;
 	state.archivedSessionsTotal = 0;
 	await fetchArchivedSessionsPaginated();
+}
+
+const ARCHIVED_SEARCH_DEBOUNCE_MS = 250;
+let _archivedSearchTimer: ReturnType<typeof setTimeout> | null = null;
+let _archivedSearchRunId = 0;
+
+function resetArchivedSearchPagination(query = ""): void {
+	state.archivedSearchQuery = query;
+	state.archivedSearchGoalsCursor = null;
+	state.archivedSearchGoalsHasMore = false;
+	state.archivedSearchGoalsTotal = 0;
+	state.archivedSearchGoalsLoading = false;
+	state.archivedSearchSessionsCursor = null;
+	state.archivedSearchSessionsHasMore = false;
+	state.archivedSearchSessionsTotal = 0;
+	state.archivedSearchSessionsLoading = false;
+}
+
+export function clearArchivedSearchState(): void {
+	if (_archivedSearchTimer) {
+		clearTimeout(_archivedSearchTimer);
+		_archivedSearchTimer = null;
+	}
+	_archivedSearchRunId++;
+	resetArchivedSearchPagination();
+}
+
+function mergeArchivedGoalsIntoState(goals: Goal[]): void {
+	if (goals.length === 0) return;
+	const incoming = new Map(goals.map((g) => [g.id, g]));
+	const seen = new Set<string>();
+	state.goals = state.goals.map((g) => {
+		const next = incoming.get(g.id);
+		if (!next) return g;
+		seen.add(g.id);
+		return next;
+	});
+	for (const goal of goals) {
+		if (!seen.has(goal.id)) state.goals.push(goal);
+	}
+}
+
+function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
+	if (sessions.length === 0) return;
+	const incoming = new Map(sessions.map((s) => [s.id, s]));
+	const seen = new Set<string>();
+	state.archivedSessions = state.archivedSessions.map((s) => {
+		const next = incoming.get(s.id);
+		if (!next) return s;
+		seen.add(s.id);
+		return next;
+	});
+	for (const session of sessions) {
+		if (!seen.has(session.id)) state.archivedSessions.push(session);
+	}
+}
+
+function archivedSearchStillCurrent(query: string, runId: number): boolean {
+	return runId === _archivedSearchRunId
+		&& state.showArchived
+		&& state.searchQuery.trim() === query;
+}
+
+export function scheduleArchivedRemoteSearch(query: string, delay = ARCHIVED_SEARCH_DEBOUNCE_MS): void {
+	const trimmed = query.trim();
+	if (_archivedSearchTimer) {
+		clearTimeout(_archivedSearchTimer);
+		_archivedSearchTimer = null;
+	}
+	if (!trimmed || !state.showArchived) {
+		clearArchivedSearchState();
+		return;
+	}
+	const runId = ++_archivedSearchRunId;
+	if (state.archivedSearchQuery !== trimmed) {
+		resetArchivedSearchPagination(trimmed);
+	}
+	state.archivedSearchQuery = trimmed;
+	state.archivedSearchGoalsLoading = true;
+	state.archivedSearchSessionsLoading = true;
+	_archivedSearchTimer = setTimeout(() => {
+		_archivedSearchTimer = null;
+		void Promise.all([
+			fetchArchivedSearchGoalsPage(50, undefined, trimmed, runId),
+			fetchArchivedSearchSessionsPage(50, undefined, trimmed, runId),
+		]);
+	}, delay);
+}
+
+export async function fetchArchivedSearchGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	const query = state.searchQuery.trim();
+	if (!query || !state.showArchived) return;
+	state.archivedSearchQuery = query;
+	await fetchArchivedSearchGoalsPage(limit, afterCursor, query, _archivedSearchRunId);
+}
+
+export async function fetchArchivedSearchSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	const query = state.searchQuery.trim();
+	if (!query || !state.showArchived) return;
+	state.archivedSearchQuery = query;
+	await fetchArchivedSearchSessionsPage(limit, afterCursor, query, _archivedSearchRunId);
+}
+
+async function fetchArchivedSearchGoalsPage(limit: number, afterCursor: number | undefined, query: string, runId: number): Promise<void> {
+	state.archivedSearchGoalsLoading = true;
+	renderApp();
+	try {
+		const params = new URLSearchParams({ archived: "true", limit: String(limit), q: query });
+		if (afterCursor !== undefined) params.set("after", String(afterCursor));
+		const res = await gatewayFetch(`/api/goals?${params}`);
+		if (!res.ok || !archivedSearchStillCurrent(query, runId)) return;
+		const data = await res.json();
+		if (!archivedSearchStillCurrent(query, runId)) return;
+		const goals: Goal[] = (data.goals || []).filter((g: Goal) => g.archived === true);
+		mergeArchivedGoalsIntoState(goals);
+		const affiliatedSessions: GatewaySession[] = (data.archivedSessions || []).filter((s: GatewaySession) => s.archived === true);
+		mergeArchivedSessionsIntoState(affiliatedSessions);
+		state.archivedSearchGoalsTotal = data.total ?? goals.length;
+		state.archivedSearchGoalsHasMore = data.hasMore ?? false;
+		state.archivedSearchGoalsCursor = data.nextCursor ?? null;
+	} catch {
+		// Silently fail; local already-loaded archive filtering still works.
+	} finally {
+		if (archivedSearchStillCurrent(query, runId)) {
+			state.archivedSearchGoalsLoading = false;
+			renderApp();
+		}
+	}
+}
+
+async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: number | undefined, query: string, runId: number): Promise<void> {
+	state.archivedSearchSessionsLoading = true;
+	renderApp();
+	try {
+		const params = new URLSearchParams({ include: "archived", limit: String(limit), q: query });
+		if (afterCursor !== undefined) params.set("after", String(afterCursor));
+		const res = await gatewayFetch(`/api/sessions?${params}`);
+		if (!res.ok || !archivedSearchStillCurrent(query, runId)) return;
+		const data = await res.json();
+		if (!archivedSearchStillCurrent(query, runId)) return;
+		const sessions: GatewaySession[] = (data.sessions || []).filter((s: GatewaySession) => s.archived === true);
+		const archivedDelegates: GatewaySession[] = (data.archivedDelegates || []).filter((s: GatewaySession) => s.archived === true);
+		mergeArchivedSessionsIntoState([...sessions, ...archivedDelegates]);
+		state.archivedSearchSessionsTotal = data.total ?? sessions.length;
+		state.archivedSearchSessionsHasMore = data.hasMore ?? false;
+		state.archivedSearchSessionsCursor = data.nextCursor ?? null;
+	} catch {
+		// Silently fail; local already-loaded archive filtering still works.
+	} finally {
+		if (archivedSearchStillCurrent(query, runId)) {
+			state.archivedSearchSessionsLoading = false;
+			renderApp();
+		}
+	}
 }
 
 // ============================================================================
@@ -1000,13 +1156,16 @@ export async function promoteProject(id: string, name?: string): Promise<Project
 // ============================================================================
 
 export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+		scheduleArchivedRemoteSearch(state.searchQuery);
+		return;
+	}
 	try {
 		const params = new URLSearchParams({ archived: "true", limit: String(limit) });
 		if (afterCursor !== undefined) params.set("after", String(afterCursor));
 		const res = await gatewayFetch(`/api/goals?${params}`);
 		if (!res.ok) return;
-		// Mark the dedicated archived-goals page as fetched. Used by the sidebar
-		// search auto-fetch gate (see archivedGoalsLoaded() above).
+		// Mark the dedicated archived-goals page as fetched for non-search archive pagination.
 		_archivedGoalsLoaded = true;
 		const data = await res.json();
 		const goals: Goal[] = data.goals || [];
@@ -1043,6 +1202,10 @@ export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: numb
 }
 
 export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
+	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+		scheduleArchivedRemoteSearch(state.searchQuery);
+		return;
+	}
 	try {
 		const params = new URLSearchParams({ include: "archived", limit: String(limit) });
 		if (afterCursor !== undefined) params.set("after", String(afterCursor));

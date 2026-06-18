@@ -46,7 +46,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 // chunk is shared across all UI surfaces that open dialogs.
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls } from "./sidebar.js";
 import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
@@ -345,17 +345,6 @@ function renderClientDebugButton() {
 
 /** Compact session row for mobile — mirrors sidebar row with always-visible buttons */
 
-// Mobile search handlers (shared logic with sidebar but separate scope)
-function _handleMobileSearchInput(query: string): void {
-	state.searchQuery = query;
-	renderApp();
-}
-
-function _handleMobileSearchClear(): void {
-	state.searchQuery = "";
-	renderApp();
-}
-
 function renderMobileLanding() {
 	const sidebarData = getSidebarData();
 	let { ungroupedSessions, liveGoals } = sidebarData;
@@ -446,8 +435,8 @@ function renderMobileLanding() {
 				<search-box
 					.query=${state.searchQuery}
 					.showControls=${!!state.searchQuery}
-					@search-input=${(e: CustomEvent) => { _handleMobileSearchInput(e.detail.query); }}
-					@search-clear=${() => { _handleMobileSearchClear(); }}
+					@search-input=${(e: CustomEvent) => { handleSidebarSearchInput(e.detail.query); }}
+					@search-clear=${() => { handleSidebarSearchClear(); }}
 					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
 				${state.sessionsLoading
@@ -612,6 +601,7 @@ function renderMobileLanding() {
 												</div>
 											`;
 										})}
+										${renderArchivedSearchControls()}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
 											<div class="border-t border-border/30 my-1 mx-2"></div>
 											<div class="flex flex-col gap-0.5 px-2">
