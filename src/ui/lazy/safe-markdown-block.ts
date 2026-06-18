@@ -187,10 +187,14 @@ function sanitizeLinkHref(href: string): string | null {
 	const trimmed = href.trim();
 	if (!trimmed) return "";
 
-	// Browsers ignore embedded ASCII controls/whitespace while resolving URL
-	// schemes, so match schemes against the same collapsed form. This prevents
-	// variants such as `java\nscript:` from bypassing the allow-list.
-	const schemeCandidate = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, "");
+	// The browser decodes HTML character references in attributes before URL
+	// resolution and ignores ASCII controls/whitespace while matching schemes.
+	// Apply the same normalization before allow-listing so values such as
+	// `&#106;avascript:`, `jav&#x61;script:`, and `java&#10;script:` cannot be
+	// treated as relative links by the sanitizer and dangerous schemes by the
+	// browser.
+	const schemeCandidate = decodeHtmlCharacterReferences(trimmed)
+		.replace(/[\u0000-\u001F\u007F\s]+/g, "");
 	if (schemeCandidate.startsWith("#")) return trimmed;
 	if (schemeCandidate.startsWith("//")) return null;
 
@@ -199,6 +203,12 @@ function sanitizeLinkHref(href: string): string | null {
 
 	const scheme = schemeMatch[1].toLowerCase();
 	return scheme === "http" || scheme === "https" || scheme === "mailto" ? trimmed : null;
+}
+
+function decodeHtmlCharacterReferences(value: string): string {
+	const textarea = document.createElement("textarea");
+	textarea.innerHTML = value;
+	return textarea.value;
 }
 
 function escapeHtml(value: string): string {

@@ -11,6 +11,7 @@ import { DefaultRenderer } from "./DefaultRenderer.js";
 import { isSubgoalsEnabled } from "../../../app/subgoals-flag.js";
 import { setHashRoute } from "../../../app/routing.js";
 import { getResult, truncate, goalIdChip, parseParams } from "./children-renderer-helpers.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import "../../../ui/components/ExpandableSection.js";
 
 const fallback = new DefaultRenderer("goal_spawn_child");
@@ -25,6 +26,7 @@ function ensureLazyPill(): void {
 export class GoalSpawnChildRenderer implements ToolRenderer {
 	render(params: any, result: ToolResultMessage | undefined, isStreaming?: boolean, _ctx?: ToolRenderContext): ToolRenderResult {
 		if (!isSubgoalsEnabled()) return fallback.render(params, result, isStreaming);
+		ensureMarkdownBlock();
 		ensureLazyPill();
 
 		const state = getToolState(result, isStreaming);

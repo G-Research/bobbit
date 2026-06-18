@@ -23,6 +23,19 @@ const REPRO_MARKDOWN = [
 ].join("\n");
 
 const INLINE_CODE_MARKDOWN = "inline code: `^${foo}$`";
+const MATH_MARKDOWN = [
+	"inline dollar $x$ math",
+	"",
+	"$$",
+	"x^2",
+	"$$",
+	"",
+	"inline latex \\(y\\) math",
+	"",
+	"\\[",
+	"z^2",
+	"\\]",
+].join("\n");
 
 test.beforeAll(() => {
 	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, MARKDOWN_SRC, SAFE_MARKDOWN_SRC] });
@@ -41,6 +54,8 @@ type MarkdownSnapshot = {
 	codeSource: string;
 	inlineCode: string;
 	links: LinkSnapshot[];
+	mathCount: number;
+	displayMathCount: number;
 	text: string;
 	codeIndex: number;
 	tailIndex: number;
@@ -124,6 +139,8 @@ async function renderMarkdown(page: Page, markdown: string): Promise<MarkdownSna
 				target: el.getAttribute("target"),
 				rel: el.getAttribute("rel"),
 			})),
+			mathCount: allDeep(root, ".katex").length,
+			displayMathCount: allDeep(root, ".katex-display").length,
 			text,
 			codeIndex: Math.max(text.indexOf("const x"), text.indexOf("^${foo}$")),
 			tailIndex: text.lastIndexOf("tail"),
@@ -149,6 +166,14 @@ test.describe("markdown-block dollar template literal regression", () => {
 		expect(rendered.inlineCode, "markdown inline code should preserve literal ^${foo}$").toContain("^${foo}$");
 	});
 
+	test("renders math outside code for supported delimiters", async ({ page }) => {
+		const rendered = await renderMarkdown(page, MATH_MARKDOWN);
+
+		expect(rendered.mathCount, "inline and display math should render through KaTeX").toBeGreaterThanOrEqual(4);
+		expect(rendered.displayMathCount, "$$...$$ and \\[...\\] should render as display math").toBeGreaterThanOrEqual(2);
+		expect(rendered.inlineCode).toBe("");
+	});
+
 	test("sanitizes unsafe link schemes", async ({ page }) => {
 		const rendered = await renderMarkdown(page, [
 			"[https](https://example.com/path)",
@@ -159,6 +184,9 @@ test.describe("markdown-block dollar template literal regression", () => {
 			"[data](data:text/html,<b>x</b>)",
 			"[vbscript](vbscript:msgbox(1))",
 			"[custom](file:///etc/passwd)",
+			"[entity-decimal](&#106;avascript:alert(1))",
+			"[entity-hex](jav&#x61;script:alert(1))",
+			"[entity-control](java&#10;script:alert(1))",
 		].join("\n\n"));
 
 		expect(rendered.links.map((link) => link.text)).toEqual(["https", "mailto", "relative", "anchor"]);
@@ -171,5 +199,8 @@ test.describe("markdown-block dollar template literal regression", () => {
 		expect(rendered.text).toContain("data");
 		expect(rendered.text).toContain("vbscript");
 		expect(rendered.text).toContain("custom");
+		expect(rendered.text).toContain("entity-decimal");
+		expect(rendered.text).toContain("entity-hex");
+		expect(rendered.text).toContain("entity-control");
 	});
 });
