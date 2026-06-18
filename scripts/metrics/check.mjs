@@ -82,6 +82,18 @@ const defaultThresholds = {
 	cpuMaxIncreaseMs: 120_000,
 	memoryMaxIncreaseRatio: 1.75,
 	memoryMaxIncreaseBytes: 512 * 1024 * 1024,
+	browserE2eBudget: {
+		// Disabled by default so ad-hoc scoped checks keep their historical behavior.
+		// Branch baselines can enable this from docs/testing-metrics/thresholds.json.
+		enabled: false,
+		metrics: ["e2e-browser", "slice-renderer", "slice-scroll", "slice-sidebar"],
+		maxTestCountIncrease: 0,
+		maxTestCountIncreaseRatio: 0,
+		runtimeMaxIncreaseRatio: 1.50,
+		runtimeMaxIncreaseMs: 120_000,
+		cpuMaxIncreaseRatio: 1.75,
+		cpuMaxIncreaseMs: 240_000,
+	},
 	browserImprovement: {
 		// Disabled until migration gates set branch-local baselines. Downstream can
 		// turn this on via docs/testing-metrics/thresholds.json without code changes.
@@ -90,8 +102,21 @@ const defaultThresholds = {
 		targetCpuDropPct: 40,
 	},
 };
+
+function mergeThresholds(base, override) {
+	if (!override || typeof override !== "object" || Array.isArray(override)) return base;
+	const merged = { ...base };
+	for (const [key, value] of Object.entries(override)) {
+		const baseValue = base?.[key];
+		merged[key] = baseValue && typeof baseValue === "object" && !Array.isArray(baseValue) && value && typeof value === "object" && !Array.isArray(value)
+			? mergeThresholds(baseValue, value)
+			: value;
+	}
+	return merged;
+}
+
 const thresholds = existsSync(thresholdFile)
-	? { ...defaultThresholds, ...readJson(thresholdFile) }
+	? mergeThresholds(defaultThresholds, readJson(thresholdFile))
 	: defaultThresholds;
 
 function requiredMetrics() {
@@ -149,6 +174,47 @@ function compareCoverage(label, baseline, current) {
 	return failures;
 }
 
+function testCount(metric) {
+	const total = metric.tests?.total ?? metric.attribution?.projectTestCount;
+	return Number.isFinite(total) ? total : null;
+}
+
+function compareBrowserBudget(label, metricName, baseline, current) {
+	const budget = thresholds.browserE2eBudget;
+	if (!budget?.enabled) return [];
+	const metricNames = Array.isArray(budget.metrics) ? budget.metrics.map((name) => normalizeMetricName(name)) : [];
+	if (metricNames.length > 0 && !metricNames.includes(metricName)) return [];
+	const failures = [];
+	const baselineCount = testCount(baseline);
+	const currentCount = testCount(current);
+	if (baselineCount != null && currentCount != null) {
+		const additive = Number.isFinite(budget.maxTestCountIncrease) ? budget.maxTestCountIncrease : 0;
+		const ratio = Number.isFinite(budget.maxTestCountIncreaseRatio) ? budget.maxTestCountIncreaseRatio : 0;
+		const allowed = Math.floor(Math.max(baselineCount + additive, baselineCount * (1 + ratio)));
+		if (currentCount > allowed) {
+			failures.push(`${label}: browser E2E test count increased ${baselineCount} → ${currentCount}, max ${allowed}`);
+		}
+	}
+	if (scopedComparison) return failures;
+	failures.push(...compareNumeric({
+		label: `${label}: browser E2E budget runtime`,
+		baseline: baseline.durationMs,
+		current: current.durationMs,
+		ratio: budget.runtimeMaxIncreaseRatio,
+		additive: budget.runtimeMaxIncreaseMs,
+		format: fmtMs,
+	}));
+	failures.push(...compareNumeric({
+		label: `${label}: browser E2E budget estimated CPU`,
+		baseline: baseline.cpu?.estimatedCpuMs,
+		current: current.cpu?.estimatedCpuMs,
+		ratio: budget.cpuMaxIncreaseRatio,
+		additive: budget.cpuMaxIncreaseMs,
+		format: fmtMs,
+	}));
+	return failures;
+}
+
 function currentPathForMetric(metricName) {
 	if (currentInputKind === "file") return currentInput;
 	return metricFile(metricName, currentDir);
@@ -184,11 +250,13 @@ function comparisonPairs() {
 function compareMetric({ baselinePath, currentPath, label }) {
 	if (!existsSync(baselinePath)) return [`${label}: missing baseline metric ${rel(baselinePath)}`];
 	if (!existsSync(currentPath)) return [`${label}: missing current metric ${basename(currentPath)} in ${rel(dirname(currentPath))}`];
+	const metricName = normalizeMetricName(baselinePath);
 	const baseline = readJson(baselinePath);
 	const current = readJson(currentPath);
 	const failures = [];
 	if (current.status && current.status !== "passed") failures.push(`${label}: current status is ${current.status}`);
 	failures.push(...compareCoverage(label, baseline, current));
+	failures.push(...compareBrowserBudget(label, metricName, baseline, current));
 	if (cli.minRuntimeDecrease != null) {
 		failures.push(...compareMinDecrease({
 			label: `${label}: runtime`,

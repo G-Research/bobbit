@@ -6,6 +6,21 @@
   "cpuMaxIncreaseMs": 120000,
   "memoryMaxIncreaseRatio": 1.75,
   "memoryMaxIncreaseBytes": 536870912,
+  "browserE2eBudget": {
+    "enabled": true,
+    "metrics": [
+      "e2e-browser",
+      "slice-renderer",
+      "slice-scroll",
+      "slice-sidebar"
+    ],
+    "maxTestCountIncrease": 0,
+    "maxTestCountIncreaseRatio": 0,
+    "runtimeMaxIncreaseRatio": 1.5,
+    "runtimeMaxIncreaseMs": 120000,
+    "cpuMaxIncreaseRatio": 1.75,
+    "cpuMaxIncreaseMs": 240000
+  },
   "browserImprovement": {
     "enabled": false,
     "targetRuntimeDropPct": 40,
