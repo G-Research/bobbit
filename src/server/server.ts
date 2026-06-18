@@ -52,7 +52,7 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions } from "./agent/pack-contributions.js";
+import { loadPackContributions, providerConfigStoreKey } from "./agent/pack-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -1218,11 +1218,32 @@ export function createGateway(config: GatewayConfig) {
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
+		// Config-gated provider activation + effective-config overlay: read the
+		// provider's PERSISTED flat config (written by the pack's `config` route to
+		// the pack-scoped store under providerConfigStoreKey) synchronously, so a
+		// provider declaring `activation.requiresConfig` stays dormant until it is
+		// configured. packId scopes the store; scope/project are accepted for parity
+		// with the activation lookups (provider config is pack-global in external mode).
+		(_scope, _projectId, packId, providerId) => {
+			if (!packId) return undefined;
+			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
+			return persisted && typeof persisted === "object" ? persisted : undefined;
+		},
 	);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
 		trace: new ContextTraceStore(bobbitStateDir()),
+		// Least-privilege, store-only host for provider hooks (capabilities.store ===
+		// true; session/agents denied) — gives a provider its own pack-scoped durable
+		// store via the same parent-authorized path routes use.
+		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+			sessionId,
+			packId,
+			contributionId: "",
+			packStore: getPackStore(),
+			capabilityMask: { store: true, session: false, agents: false },
+		}),
 		gatewayInfo: () => {
 			try {
 				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
