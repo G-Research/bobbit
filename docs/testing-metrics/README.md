@@ -19,7 +19,7 @@ The split-suite metrics make browser E2E cost visible while preserving coverage 
 | `npm run metrics:baseline` | Captures branch-local baselines and refreshes the coverage map. | `docs/testing-metrics/baseline-*.json` |
 | `npm run metrics:check` | Compares committed baselines with current artifacts. | comparison output only |
 
-Committed baselines live in `docs/testing-metrics/baseline-*.json`. Current run artifacts live in `.profiles/metrics/*.json` and are not committed. Threshold defaults live in `docs/testing-metrics/thresholds.json`, including accepted post-migration browser budgets, the retained-smoke file list, and retained-smoke runnable coverage requirements.
+Committed baselines live in `docs/testing-metrics/baseline-*.json`. Current run artifacts live in `.profiles/metrics/*.json` and are not committed. Threshold defaults live in `docs/testing-metrics/thresholds.json`, including accepted post-migration browser budgets, the retained-smoke file list, retained-smoke runnable coverage requirements, and required title regexes for documented retained behaviors.
 
 ## E2E single-run rule
 
@@ -61,7 +61,7 @@ Checks a focused migration slice against an explicit runtime/CPU decrease target
 - CPU/runtime improvements should be read with the slice and browser-project metrics first, then full-suite metrics. Re-run in the same branch/environment when a single sample is noisy.
 - Browser E2E, slice, and approved aggregate budgets are anchored to accepted post-migration current-state limits (`maxTestCount`, `maxDurationMs`, and `maxEstimatedCpuMs`) rather than stale pre-migration baselines.
 - For metrics that set `useAbsoluteBudgetForExplicitDecrease`, explicit `--min-runtime-decrease` / `--min-cpu-decrease` checks use those absolute post-migration budgets instead of legacy percentage drops; keep this scoped to metrics where slice/project metrics carry the migrated-area improvement signal and aggregate wall time includes unrelated work or contention.
-- Retained full-stack smoke files are machine-checked via `retainedSmokeFiles` and `retainedSmokeCoverage` in `thresholds.json`; deleting, renaming, or skipping one requires updating the coverage map and thresholds in the same reviewed change.
+- Retained full-stack smoke files are machine-checked via `retainedSmokeFiles` and `retainedSmokeCoverage` in `thresholds.json`; deleting, renaming, skipping one, or removing a required retained behavior title requires updating the coverage map and thresholds in the same reviewed change.
 - Update baselines only after the coverage migration is intentional, replacement coverage exists, retained smokes are documented, and the new metrics are accepted. Never update baselines just to hide a regression.
 
 ## Coverage-map update rules
@@ -71,6 +71,6 @@ When moving browser E2E rows to cheaper layers:
 1. Add or identify fixture/API/unit coverage before deleting or skipping spawned-gateway browser rows.
 2. Update `coverage-map.md` in the same change: list the retired browser matrix, the replacement coverage, and the retained full-stack smoke.
 3. Keep retained browser E2E to integration journeys: real routing, persistence, WebSocket/server wiring, cross-client behavior, or real browser layout that fixtures cannot represent.
-4. Update `retainedSmokeCoverage` in `thresholds.json` with each retained smoke file and its minimum non-skipped browser-report test count.
+4. Update `retainedSmokeCoverage` in `thresholds.json` with each retained smoke file, its minimum non-skipped browser-report test count, and `requiredTitleRegexes` for the retained behaviors documented in the coverage map.
 5. Measure the relevant slice before the full E2E validation step.
 6. Use `metrics:e2e:all` for final split-suite validation instead of rerunning full E2E through multiple commands.
