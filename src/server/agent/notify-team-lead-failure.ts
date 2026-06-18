@@ -15,6 +15,7 @@ export interface FailureStepLike {
 	name: string;
 	type: string;
 	passed: boolean;
+	skipped?: boolean;
 	output?: string;
 }
 
@@ -45,6 +46,8 @@ function describeFailedStep(step: FailureStepLike): string {
  *
  * @param gateId The gate that failed (for the leading line).
  * @param steps All step results from this verification (failed + passed).
+ *              Skipped steps are intentionally not listed as failures: later
+ *              phases skipped after an earlier failure have no logs to inspect.
  *              Pass an empty array if step detail is unavailable — the
  *              builder degrades to a generic inspect/status prompt.
  */
@@ -52,7 +55,7 @@ export function buildVerificationFailureMessage(
 	gateId: string,
 	steps: ReadonlyArray<FailureStepLike>,
 ): string {
-	const failed = steps.filter((s) => !s.passed);
+	const failed = steps.filter((s) => !s.passed && !s.skipped);
 
 	const lines: string[] = [];
 	lines.push("**Gate verification FAILED**");
