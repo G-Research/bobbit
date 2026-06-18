@@ -9,6 +9,7 @@ const root = mkdtempSync(join(tmpdir(), "bobbit-metrics-smoke-"));
 const baselineDir = join(root, "baseline");
 const currentDir = join(root, "current");
 const badCurrentDir = join(root, "bad-current");
+const badBudgetCurrentDir = join(root, "bad-budget-current");
 const scopedCurrentDir = join(root, "scoped-current");
 
 function sampleMetric(overrides = {}) {
@@ -27,6 +28,22 @@ function sampleMetric(overrides = {}) {
 			functions: { covered: 90, total: 100, pct: 90 },
 			branches: { covered: 80, total: 100, pct: 80 },
 		},
+		...overrides,
+	};
+}
+
+function sampleBrowserMetric(overrides = {}) {
+	return {
+		schemaVersion: 1,
+		metricName: "e2e-browser",
+		kind: "e2e-project-split-from-full",
+		createdAt: new Date().toISOString(),
+		status: "passed",
+		exitCode: 0,
+		durationMs: 100_000,
+		cpu: { estimatedCpuMs: 200_000, averageCpuPercent: 200, peakCpuPercent: 300 },
+		memory: { peakRssBytes: 512 * 1024 * 1024 },
+		tests: { total: 100, passed: 100, failed: 0, skipped: 0, flaky: 0, durationMs: 100_000 },
 		...overrides,
 	};
 }
@@ -56,15 +73,26 @@ function runScopedCheck(baselinePath, currentPath, extraArgs = []) {
 
 try {
 	const baselineCoveragePath = baselineMetricFile("coverage", baselineDir);
+	const baselineBrowserPath = baselineMetricFile("e2e-browser", baselineDir);
 	const scopedCurrentPath = metricFile("coverage", scopedCurrentDir);
+	writeJson(join(baselineDir, "thresholds.json"), {
+		browserE2eBudget: { enabled: true, maxTestCountIncrease: 0 },
+	});
 	writeJson(baselineCoveragePath, sampleMetric());
+	writeJson(baselineBrowserPath, sampleBrowserMetric());
 	writeJson(metricFile("coverage", currentDir), sampleMetric({ durationMs: 10_500, cpu: { estimatedCpuMs: 8_200, averageCpuPercent: 78, peakCpuPercent: 140 } }));
+	writeJson(metricFile("e2e-browser", currentDir), sampleBrowserMetric({ durationMs: 95_000, cpu: { estimatedCpuMs: 180_000, averageCpuPercent: 190, peakCpuPercent: 290 } }));
 	writeJson(metricFile("coverage", badCurrentDir), sampleMetric({
 		coverage: {
 			lines: { covered: 850, total: 1000, pct: 85 },
 			functions: { covered: 85, total: 100, pct: 85 },
 			branches: { covered: 75, total: 100, pct: 75 },
 		},
+	}));
+	writeJson(metricFile("e2e-browser", badCurrentDir), sampleBrowserMetric());
+	writeJson(metricFile("coverage", badBudgetCurrentDir), sampleMetric());
+	writeJson(metricFile("e2e-browser", badBudgetCurrentDir), sampleBrowserMetric({
+		tests: { total: 101, passed: 101, failed: 0, skipped: 0, flaky: 0, durationMs: 100_000 },
 	}));
 	writeJson(scopedCurrentPath, sampleMetric({
 		durationMs: 300_000,
@@ -83,6 +111,9 @@ try {
 
 	const fail = runCheck(badCurrentDir);
 	if ((fail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for coverage regression");
+
+	const budgetFail = runCheck(badBudgetCurrentDir);
+	if ((budgetFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for browser E2E test-count growth");
 
 	console.log("[metrics:smoke] passed");
 } finally {
