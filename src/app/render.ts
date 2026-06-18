@@ -2149,28 +2149,27 @@ export function doRenderApp(): void {
 	// which forces the iframe to reload via the `#mtime=<n>` hash.
 	const htmlPreviewContent = () => {
 		const sid = activeSessionId() || "";
-		const v = state.previewPanelMtime || 0;
-		// Derive artifactId and entry from the active panel tab rather than
-		// mirroring them in global state. Many code paths (SSE preview-changed,
-		// bootstrap fetch, PreviewRenderer, session-manager) update
-		// `previewPanelEntry` without knowing about artifactId; reading directly
-		// from the active tab keeps entry+artifactId always paired.
+		// Derive artifactId, entry, and mtime from the active panel tab rather than
+		// requiring global preview mirrors to be populated. After a gateway restart,
+		// the server-persisted workspace tab can be restored before the session's
+		// transient previewPanelEntry mirror is repopulated.
 		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 		const panelTabs = unifiedPanelContentTabs();
 		const activeTab = panelTabs.find((t) => t.id === activeId);
 		let artifactId = "";
-		let entry = state.previewPanelEntry || "inline.html";
+		let entry = state.previewPanelEntry || "";
+		let tabMtime = 0;
 		if (activeTab && activeTab.kind === "preview") {
 			const tabState = (activeTab.state || {}) as Record<string, unknown>;
 			const source = activeTab.source as Record<string, unknown>;
+			const tabEntry = previewEntryFromTab(activeTab);
+			if (tabEntry) entry = tabEntry;
+			if (typeof tabState.mtime === "number" && Number.isFinite(tabState.mtime)) tabMtime = tabState.mtime;
 			const isLiveTab = isLivePreviewTab(activeTab);
-			if (!isLiveTab) {
-				artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
-				const tabEntry = previewEntryFromTab(activeTab);
-				if (tabEntry) entry = tabEntry;
-			}
+			if (!isLiveTab) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 		}
-		if (!sid || !state.previewPanelEntry) {
+		const v = state.previewPanelMtime || tabMtime || 0;
+		if (!sid || !entry) {
 			// Empty-state until the first SSE `preview-changed` event lands.
 			return html`
 				<div class="flex-1 min-h-0 flex items-center justify-center text-muted-foreground text-sm">
