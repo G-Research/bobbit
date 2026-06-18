@@ -158,6 +158,12 @@ export interface CreateServerHostApiOptions {
 	/** Slice B1 — the process-singleton pack store. When present, `ctx.host.store`
 	 *  delegates to it scoped to the closure `packId`. */
 	packStore?: PackStore;
+	/** Host-owned notification fired AFTER a successful `host.store.put`, with the
+	 *  written key. The gateway uses it to drop activation-derived caches when a
+	 *  pack persists provider config (key `provider-config:*`), so a dormant
+	 *  provider activates without a restart. Pure side-channel: it never alters the
+	 *  store result and a throw is swallowed by the caller. */
+	onStoreWrite?: (key: string) => void;
 	/** Read the BOUND (own) session's raw transcript JSONL (Slice B2). Injected by
 	 *  the gateway so `session.read*` can map rows through the contract adapter.
 	 *  Own-session by construction — there is no parameter for another session. When
@@ -237,9 +243,16 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		if (!packStore) throw new Error("host.store backend unavailable");
 		return packStore;
 	};
+	const onStoreWrite = opts.onStoreWrite;
 	const store: ServerHostStoreApi = {
 		get: (key) => requireStore().get(packId, key),
-		put: (key, value) => requireStore().put(packId, key, value),
+		put: async (key, value) => {
+			await requireStore().put(packId, key, value);
+			// Host-owned side-channel: notify the gateway of the write so it can drop
+			// activation caches (e.g. provider-config writes). Never let it affect the
+			// put result.
+			try { onStoreWrite?.(key); } catch { /* non-fatal */ }
+		},
 		list: (prefix) => requireStore().list(packId, prefix),
 	};
 

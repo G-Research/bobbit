@@ -283,6 +283,32 @@ test("routes: dormant store ⇒ clean configured:false signals, no client constr
 	}
 });
 
+test("routes recall: project scope uses the REAL ctx.projectId; absent ⇒ no project filter", async () => {
+	// Regression: the recall route used to send a fabricated { project: "current" }
+	// tag. It must use the actual project id from the route ctx, and apply NO
+	// project filter when the ctx carries none.
+	const { client, calls, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		state.memories = [{ text: "m" }];
+		const store = makeStore();
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallScope: "project" });
+
+		// With a real project id in the route ctx, the filter uses it (NOT "current").
+		await routes.recall({ host: { store }, projectId: "proj-7" } as never, { body: { query: "q" } } as never);
+		const o1 = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(o1.tags, { project: "proj-7" });
+		assert.equal(o1.tagsMatch, "any");
+
+		// No project id in ctx ⇒ no project filter (no fabricated placeholder tag).
+		await routes.recall({ host: { store } } as never, { body: { query: "q2" } } as never);
+		const o2 = calls.recall[1].opts as { tags?: unknown };
+		assert.equal(o2.tags, undefined);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("routes config SET validates, persists, and redacts the secret", async () => {
 	__setClientFactory(() => makeClient().client);
 	try {

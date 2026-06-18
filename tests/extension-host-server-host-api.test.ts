@@ -89,6 +89,48 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 	});
 });
 
+describe("createServerHostApi — onStoreWrite (host-owned activation-cache invalidation)", () => {
+	// Regression: a pack persisting provider config (e.g. Hindsight gaining an
+	// externalUrl) must let the host drop its activation-filtered provider cache so
+	// a dormant provider activates without a gateway restart. The host fires
+	// onStoreWrite AFTER a successful put, with the written key.
+	const noopStore = { get: async () => null, put: async () => {}, list: async () => [], getSync: () => null };
+
+	it("fires onStoreWrite with the written key AFTER the put resolves", async () => {
+		const order: string[] = [];
+		const written: string[] = [];
+		const host = createServerHostApi({
+			sessionId: "s", packId: "hindsight", contributionId: "g/t",
+			packStore: { ...noopStore, put: async () => { order.push("put"); } },
+			onStoreWrite: (key) => { order.push("notify"); written.push(key); },
+		});
+		await host.store.put("provider-config:memory", { externalUrl: "http://x" });
+		assert.deepEqual(order, ["put", "notify"], "notify must run after the put resolves");
+		assert.deepEqual(written, ["provider-config:memory"]);
+	});
+
+	it("does not fire onStoreWrite for get/list", async () => {
+		let fired = 0;
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "g/t",
+			packStore: noopStore,
+			onStoreWrite: () => { fired++; },
+		});
+		await host.store.get("k");
+		await host.store.list();
+		assert.equal(fired, 0);
+	});
+
+	it("a throwing onStoreWrite is swallowed (never breaks the put)", async () => {
+		const host = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "g/t",
+			packStore: noopStore,
+			onStoreWrite: () => { throw new Error("boom"); },
+		});
+		await host.store.put("provider-config:memory", { a: 1 }); // must not throw
+	});
+});
+
 describe("createServerHostApi — capabilityMask (least-privilege provider hosts)", () => {
 	it("a store-only provider host reports store true, session/agents false", () => {
 		const host = createServerHostApi({

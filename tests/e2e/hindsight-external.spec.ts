@@ -205,6 +205,16 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	};
 }
 
+interface BeforeCompactResult { status: number; body: Record<string, unknown> }
+async function callBeforeCompact(sessionId: string, payload: Record<string, unknown>): Promise<BeforeCompactResult> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-compact`, {
+		method: "POST",
+		body: JSON.stringify(payload),
+	});
+	const body = resp.status === 200 ? await resp.json() : {};
+	return { status: resp.status, body };
+}
+
 /** Drive a full turn and return the echoed user text (to pin the no-mutation
  *  invariant). afterTurn is dispatched server-side on agent_end. */
 async function driveTurn(sessionId: string, prompt: string): Promise<string> {
@@ -344,6 +354,40 @@ describe("hindsight pack — external mode (stub)", () => {
 		stub.seedMemories("bobbit", [{ text: "Recovered recall works.", id: "r1" }]);
 		const up = await callBeforePrompt(id, "memory after recovery");
 		expect(up.tail).toContain("Recovered recall works.");
+	});
+
+	test("beforeCompact retains the about-to-be-lost span (not an empty no-op)", async () => {
+		// Regression: the bridge posted `{}` and the route dispatched only the base
+		// session context, so provider.beforeCompact retained nothing. The route now
+		// forwards the span; the provider retains it sync with kind:compaction.
+		seedConfig(bobbitDir, defaultConfig(stub.url));
+		await setProviderDisabled([]);
+		const { id } = await newSession("compact");
+
+		const span = "User: migrate billing to the new queue\n\nAssistant: done, queue cut over";
+		const before = stub.retained("bobbit").length;
+		const res = await callBeforeCompact(id, { span });
+		expect(res.status).toBe(200);
+
+		await waitForCondition(async () => stub.retained("bobbit").length > before, {
+			timeoutMs: 10_000,
+			message: "beforeCompact span retained on the stub",
+		});
+		const retained = stub.retained("bobbit");
+		const item = retained.find((r) => r.content === span);
+		expect(item, "retained item carries the forwarded span content").toBeTruthy();
+		expect(item!.tags).toContain("kind:compaction");
+	});
+
+	test("beforeCompact rejects a non-string span body", async () => {
+		seedConfig(bobbitDir, defaultConfig(stub.url));
+		await setProviderDisabled([]);
+		const { id } = await newSession("compact-bad");
+		const resp = await apiFetch(`/api/sessions/${id}/provider-hooks/before-compact`, {
+			method: "POST",
+			body: JSON.stringify({ span: 123 }),
+		});
+		expect(resp.status).toBe(400);
 	});
 
 	test("per-project pack disable prevents injection", async () => {

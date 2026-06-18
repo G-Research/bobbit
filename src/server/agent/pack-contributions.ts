@@ -122,8 +122,9 @@ export interface ProviderContribution {
  *  The provider's `config` route writes the same key so the loader/registry can
  *  overlay the override on top of the schema defaults. Single source of truth for
  *  the key convention shared between the host loader and the pack route. */
+export const PROVIDER_CONFIG_KEY_PREFIX = "provider-config:";
 export function providerConfigStoreKey(providerId: string): string {
-	return `provider-config:${providerId}`;
+	return `${PROVIDER_CONFIG_KEY_PREFIX}${providerId}`;
 }
 
 /** Collapse a provider `config` SCHEMA mapping to FLAT default values: a

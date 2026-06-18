@@ -21,6 +21,13 @@ export interface HookCtx {
 	prompt?: string;
 	userText?: string;
 	assistantText?: string;
+	/** The about-to-be-lost conversation span (beforeCompact): the concatenated
+	 *  text of the messages compaction is about to summarize away. Providers retain
+	 *  it before the context is dropped. */
+	span?: string;
+	/** A pre-computed summary of the compacted span, when the runtime supplies one
+	 *  (beforeCompact). Providers prefer it over `span` when present. */
+	summary?: string;
 	turn?: { index: number };
 	budget: { maxTokens: number };
 	config: Record<string, unknown>;

@@ -34,6 +34,9 @@ export { __setClientFactory } from "./shared.js";
 interface RouteCtx {
 	host: { store: StoreLike };
 	sessionId?: string;
+	/** The calling session's project id, supplied by the host route ctx. Used to
+	 *  scope a `project` recall to the REAL project; absent ⇒ no project filter. */
+	projectId?: string;
 }
 interface RouteReq {
 	method?: string;
@@ -135,7 +138,11 @@ export const routes = {
 		const query = strOf(body.query) ?? strOf(req?.query?.query);
 		if (!query) return { configured: true, memories: [] };
 		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const tags: Tags | undefined = scope === "project" ? { project: "current" } : undefined;
+		// Scope a `project` recall to the REAL project id from the host route ctx. When
+		// the ctx carries no project (global/server-scope session), apply NO project
+		// filter rather than a fabricated placeholder tag.
+		const projectId = strOf(ctx.projectId);
+		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
 		try {
 			const client = await makeClient(clientConfig(cfg));
 			const res = await client.recall(cfg.bank, query, {
