@@ -46,7 +46,7 @@ When moving browser E2E rows to cheaper layers:
 1. Add or identify fixture/API/unit coverage before deleting or skipping spawned-gateway browser rows.
 2. Update this map in the same change: list the retired browser matrix, replacement coverage, and retained full-stack smoke.
 3. Keep retained browser E2E to integration journeys: real routing, persistence, WebSocket/server wiring, cross-client behavior, or real browser layout that fixtures cannot represent.
-4. Update `retainedSmokeFiles` in `thresholds.json` whenever a retained smoke file is intentionally renamed or removed; `metrics:check` fails if a listed file is missing.
+4. Update `retainedSmokeFiles` and `retainedSmokeCoverage` in `thresholds.json` whenever a retained smoke file is intentionally renamed, removed, or split; `metrics:check` fails if a listed file is missing from disk, absent from the browser report, or has too few non-skipped tests.
 5. Measure the relevant slice before the full E2E validation step.
 6. Use `metrics:e2e:all` for final split-suite validation instead of rerunning full E2E through multiple commands.
 

@@ -75,5 +75,137 @@
     "enabled": false,
     "targetRuntimeDropPct": 40,
     "targetCpuDropPct": 40
-  }
+  },
+  "retainedSmokeCoverage": [
+    {
+      "file": "tests/e2e/ui/children-tool-renderers.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/ask-user-choices-ui.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/proposal-open-all-types.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/proposal-tools.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/review-pane.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/preview-happy-path.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/side-panel-tabs.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/dynamic-chat-tabs.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/goal-status-widget.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/cost-popover-cache-hit.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/prompt-stats-e2e.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/tail-chat-real-stream.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/jump-to-last-prompt.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/pill-overflow-promotion.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/mobile-review-commenting.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/stories-sidebar.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-filters.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-archived-layout.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-navigation.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-staff-loading.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/search-e2e.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/search-result-navigation.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    },
+    {
+      "file": "tests/e2e/ui/sidebar-actions-menu.spec.ts",
+      "metric": "e2e-browser",
+      "minNonSkippedTests": 1
+    }
+  ]
 }

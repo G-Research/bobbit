@@ -10,6 +10,8 @@ const baselineDir = join(root, "baseline");
 const currentDir = join(root, "current");
 const badCurrentDir = join(root, "bad-current");
 const badBudgetCurrentDir = join(root, "bad-budget-current");
+const missingSmokeCurrentDir = join(root, "missing-smoke-current");
+const skippedSmokeCurrentDir = join(root, "skipped-smoke-current");
 const scopedCurrentDir = join(root, "scoped-current");
 
 function sampleMetric(overrides = {}) {
@@ -43,7 +45,27 @@ function sampleBrowserMetric(overrides = {}) {
 		durationMs: 100_000,
 		cpu: { estimatedCpuMs: 200_000, averageCpuPercent: 200, peakCpuPercent: 300 },
 		memory: { peakRssBytes: 512 * 1024 * 1024 },
-		tests: { total: 100, passed: 100, failed: 0, skipped: 0, flaky: 0, durationMs: 100_000 },
+		tests: {
+			total: 100,
+			passed: 100,
+			failed: 0,
+			skipped: 0,
+			flaky: 0,
+			nonSkipped: 100,
+			durationMs: 100_000,
+			files: {
+				"scripts/metrics/check.mjs": {
+					total: 1,
+					passed: 1,
+					failed: 0,
+					skipped: 0,
+					flaky: 0,
+					nonSkipped: 1,
+					durationMs: 1000,
+					titles: [{ title: "retained smoke sentinel", status: "passed", project: "browser" }],
+				},
+			},
+		},
 		...overrides,
 	};
 }
@@ -123,6 +145,9 @@ try {
 	const scopedCurrentPath = metricFile("coverage", scopedCurrentDir);
 	writeJson(join(baselineDir, "thresholds.json"), {
 		retainedSmokeFiles: ["scripts/metrics/check.mjs"],
+		retainedSmokeCoverage: [
+			{ file: "scripts/metrics/check.mjs", metric: "e2e-browser", minNonSkippedTests: 1, requiredTitleRegexes: ["retained smoke sentinel"] },
+		],
 		browserE2eBudget: {
 			enabled: true,
 			maxTestCountIncrease: 0,
@@ -152,6 +177,28 @@ try {
 		durationMs: 110_000,
 		cpu: { estimatedCpuMs: 220_000, averageCpuPercent: 200, peakCpuPercent: 300 },
 	}));
+	writeJson(metricFile("coverage", missingSmokeCurrentDir), sampleMetric());
+	writeJson(metricFile("e2e-browser", missingSmokeCurrentDir), sampleBrowserMetric({
+		tests: { ...sampleBrowserMetric().tests, files: {} },
+	}));
+	writeJson(metricFile("coverage", skippedSmokeCurrentDir), sampleMetric());
+	writeJson(metricFile("e2e-browser", skippedSmokeCurrentDir), sampleBrowserMetric({
+		tests: {
+			...sampleBrowserMetric().tests,
+			files: {
+				"scripts/metrics/check.mjs": {
+					total: 1,
+					passed: 0,
+					failed: 0,
+					skipped: 1,
+					flaky: 0,
+					nonSkipped: 0,
+					durationMs: 0,
+					titles: [{ title: "retained smoke sentinel", status: "skipped", project: "browser" }],
+				},
+			},
+		},
+	}));
 	writeJson(scopedCurrentPath, sampleMetric({
 		durationMs: 300_000,
 		cpu: { estimatedCpuMs: 300_000, averageCpuPercent: 100, peakCpuPercent: 200 },
@@ -172,6 +219,12 @@ try {
 
 	const budgetFail = runCheck(badBudgetCurrentDir);
 	if ((budgetFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for browser E2E absolute budget growth");
+
+	const missingSmokeReportFail = runCheck(missingSmokeCurrentDir);
+	if ((missingSmokeReportFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail when retained smoke file is absent from browser report");
+
+	const skippedSmokeFail = runCheck(skippedSmokeCurrentDir);
+	if ((skippedSmokeFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail when retained smoke coverage has zero non-skipped tests");
 
 	writeJson(join(baselineDir, "thresholds.json"), {
 		retainedSmokeFiles: ["tests/e2e/ui/does-not-exist-retained-smoke.spec.ts"],

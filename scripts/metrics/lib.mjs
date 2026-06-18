@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
@@ -297,14 +297,67 @@ export function parseLcovTotals(file = pathFromRoot("coverage", "lcov.info")) {
 	return totals;
 }
 
-function walkPlaywrightSuites(suites, tests = []) {
-	for (const suite of suites || []) {
-		for (const spec of suite.specs || []) {
-			for (const test of spec.tests || []) tests.push(test);
-		}
-		walkPlaywrightSuites(suite.suites, tests);
+function normalizeReportPath(file) {
+	if (!file || typeof file !== "string") return "<unknown>";
+	const resolved = isAbsolute(file) ? file : resolve(projectRoot, file);
+	let normalized = relative(projectRoot, resolved) || file;
+	if (normalized.startsWith("..")) normalized = file;
+	return normalized.replace(/\\/g, "/");
+}
+
+function summarizeTestStatus(test) {
+	const expected = test.expectedStatus;
+	const actual = test.status;
+	if (actual === "skipped" || expected === "skipped") return "skipped";
+	if (actual === "expected") return "passed";
+	if (actual === "flaky") return "flaky";
+	return "failed";
+}
+
+function emptyTestBucket() {
+	return {
+		total: 0,
+		passed: 0,
+		failed: 0,
+		skipped: 0,
+		flaky: 0,
+		nonSkipped: 0,
+		durationMs: 0,
+	};
+}
+
+function addTestToBucket(bucket, status, duration) {
+	bucket.total += 1;
+	bucket.durationMs += duration;
+	if (status === "skipped") bucket.skipped += 1;
+	else {
+		bucket.nonSkipped += 1;
+		if (status === "passed") bucket.passed += 1;
+		else if (status === "flaky") { bucket.passed += 1; bucket.flaky += 1; }
+		else bucket.failed += 1;
 	}
-	return tests;
+}
+
+function ensureFileBucket(files, file) {
+	if (!files[file]) files[file] = { ...emptyTestBucket(), titles: [] };
+	return files[file];
+}
+
+function walkPlaywrightSuites(suites, entries = [], context = {}) {
+	for (const suite of suites || []) {
+		const file = suite.file || context.file;
+		const suiteTitle = typeof suite.title === "string" ? suite.title : "";
+		const fileLikeTitle = suite.file && normalizeReportPath(suiteTitle) === normalizeReportPath(suite.file);
+		const titles = suiteTitle && !fileLikeTitle ? [...(context.titles || []), suiteTitle] : (context.titles || []);
+		for (const spec of suite.specs || []) {
+			const specFile = spec.file || file;
+			const specTitle = typeof spec.title === "string" ? spec.title : "";
+			const title = [...titles, specTitle].filter(Boolean).join(" >> ");
+			for (const test of spec.tests || []) entries.push({ test, file: normalizeReportPath(specFile), title });
+		}
+		walkPlaywrightSuites(suite.suites, entries, { file, titles });
+	}
+	return entries;
 }
 
 export function parsePlaywrightJson(file) {
@@ -315,35 +368,26 @@ export function parsePlaywrightJson(file) {
 	if (!report || typeof report !== "object" || !Array.isArray(report.suites)) {
 		throw new Error(`Invalid Playwright JSON report (missing suites): ${file}`);
 	}
-	const tests = walkPlaywrightSuites(report.suites || []);
-	if (tests.length === 0) throw new Error(`Playwright JSON report contains no tests: ${file}`);
+	const testEntries = walkPlaywrightSuites(report.suites || []);
+	if (testEntries.length === 0) throw new Error(`Playwright JSON report contains no tests: ${file}`);
 	const summary = {
-		total: tests.length,
-		passed: 0,
-		failed: 0,
-		skipped: 0,
-		flaky: 0,
-		durationMs: 0,
+		...emptyTestBucket(),
+		files: {},
 		projects: {},
 	};
-	for (const test of tests) {
+	for (const { test, file: testFile, title } of testEntries) {
 		const project = test.projectName || "unknown";
-		if (!summary.projects[project]) summary.projects[project] = { total: 0, passed: 0, failed: 0, skipped: 0, flaky: 0, durationMs: 0 };
+		if (!summary.projects[project]) summary.projects[project] = { ...emptyTestBucket(), files: {} };
 		const target = summary.projects[project];
-		const expected = test.expectedStatus;
-		const actual = test.status;
+		const status = summarizeTestStatus(test);
 		const duration = (test.results || []).reduce((sum, result) => sum + (result.duration || 0), 0);
-		for (const bucket of [summary, target]) {
-			bucket.total += bucket === target ? 1 : 0;
-			bucket.durationMs += duration;
-			if (actual === "skipped" || expected === "skipped") bucket.skipped += 1;
-			else if (actual === "expected") bucket.passed += 1;
-			else if (actual === "flaky") { bucket.passed += 1; bucket.flaky += 1; }
-			else bucket.failed += 1;
+		addTestToBucket(summary, status, duration);
+		addTestToBucket(target, status, duration);
+		for (const fileBucket of [ensureFileBucket(summary.files, testFile), ensureFileBucket(target.files, testFile)]) {
+			addTestToBucket(fileBucket, status, duration);
+			fileBucket.titles.push({ title, status, project });
 		}
 	}
-	// The loop increments summary.total directly from tests.length; avoid double count.
-	summary.total = tests.length;
 	return summary;
 }
 
