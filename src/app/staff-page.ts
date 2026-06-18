@@ -8,6 +8,7 @@ import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
+import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 
 // ============================================================================
 // STATE
@@ -787,6 +788,7 @@ function renderEditView(): TemplateResult {
 // ============================================================================
 
 export function renderStaffPage(): TemplateResult {
+	ensureMarkdownBlock();
 	if (currentView === "edit") return renderEditView();
 	return renderListView();
 }

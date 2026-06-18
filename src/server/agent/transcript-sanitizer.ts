@@ -92,14 +92,21 @@ function rewriteBlankUserContent(content: unknown): unknown {
 	return [{ type: "text", text: ATTACHMENT_ONLY_TEXT }, ...content];
 }
 
-/** Result of a content-string sanitize pass. */
+/** Result of a content-string sanitize/rebase pass. */
 export interface SanitizeResult {
 	/** The (possibly unchanged) JSONL content. */
 	content: string;
 	/** Whether any line was rewritten. */
 	changed: boolean;
-	/** Number of user messages rewritten. */
+	/** Number of transcript records rewritten. */
 	rewritten: number;
+}
+
+export interface RebaseTranscriptCwdMetadataOptions {
+	/** Archived/provenance cwd values that may appear in runtime-only system metadata. */
+	oldCwds: string[];
+	/** Fresh runtime cwd for the newly-created session. */
+	newCwd: string;
 }
 
 /**
@@ -109,6 +116,50 @@ export interface SanitizeResult {
  * yields `changed:false`.
  */
 export function sanitizeTranscriptContent(content: string): SanitizeResult {
+	return transformTranscriptJsonl(content, (entry) => {
+		if (!entry || entry.type !== "message" || !entry.message) return false;
+		if (entry.message.role !== "user") return false;
+
+		// Tool-result user messages are valid history (no text by design) —
+		// never touch them, or tool-call history/ordering is corrupted.
+		if (hasToolResultBlock(entry.message.content)) return false;
+
+		const text = effectiveText(entry.message.content);
+		if (text.trim() !== "") return false; // already valid — leave byte-identical
+
+		entry.message.content = rewriteBlankUserContent(entry.message.content);
+		return true;
+	});
+}
+
+/**
+ * Rebase runtime-only Pi cwd metadata in raw transcript JSONL. Only top-level
+ * `cwd` on system init records (or legacy system records with no subtype) is
+ * rewritten. Message content and user-visible text are never inspected.
+ */
+export function rebaseTranscriptCwdMetadataContent(
+	content: string,
+	options: RebaseTranscriptCwdMetadataOptions,
+): SanitizeResult {
+	const oldCwds = new Set(options.oldCwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0));
+	if (!content || !options.newCwd || oldCwds.size === 0) {
+		return { content, changed: false, rewritten: 0 };
+	}
+
+	return transformTranscriptJsonl(content, (entry) => {
+		if (!entry || entry.type !== "system" || typeof entry.cwd !== "string") return false;
+		const hasSubtype = Object.prototype.hasOwnProperty.call(entry, "subtype");
+		if (!(entry.subtype === "init" || !hasSubtype)) return false;
+		if (!oldCwds.has(entry.cwd) || entry.cwd === options.newCwd) return false;
+		entry.cwd = options.newCwd;
+		return true;
+	});
+}
+
+function transformTranscriptJsonl(
+	content: string,
+	mutateEntry: (entry: any) => boolean,
+): SanitizeResult {
 	if (!content) return { content, changed: false, rewritten: 0 };
 
 	// Preserve the exact line structure: split on \n, keep empty segments, and
@@ -128,17 +179,8 @@ export function sanitizeTranscriptContent(content: string): SanitizeResult {
 		} catch {
 			continue; // non-JSON line — leave untouched
 		}
-		if (!entry || entry.type !== "message" || !entry.message) continue;
-		if (entry.message.role !== "user") continue;
 
-		// Tool-result user messages are valid history (no text by design) —
-		// never touch them, or tool-call history/ordering is corrupted.
-		if (hasToolResultBlock(entry.message.content)) continue;
-
-		const text = effectiveText(entry.message.content);
-		if (text.trim() !== "") continue; // already valid — leave byte-identical
-
-		entry.message.content = rewriteBlankUserContent(entry.message.content);
+		if (!mutateEntry(entry)) continue;
 		lines[i] = JSON.stringify(entry);
 		changed = true;
 		rewritten++;
@@ -261,6 +303,47 @@ export async function sanitizeAgentTranscriptFile(
 	filePath: string,
 	sandboxManager: SandboxManager | null,
 ): Promise<number> {
+	return transformAgentTranscriptFile(
+		ctx,
+		filePath,
+		sandboxManager,
+		sanitizeTranscriptContent,
+		"sanitize",
+		(file, rewritten) => `Un-poisoned ${rewritten} blank-text user message(s) in ${file}`,
+	);
+}
+
+/**
+ * Read, rebase runtime-only cwd metadata, and (if changed) write back an agent
+ * `.jsonl` transcript file using the same safe read/write boundary as the blank
+ * user-message sanitizer. Best-effort and non-fatal.
+ *
+ * @returns the number of system cwd metadata records rewritten.
+ */
+export async function rebaseAgentTranscriptCwdMetadataFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	options: RebaseTranscriptCwdMetadataOptions,
+): Promise<number> {
+	return transformAgentTranscriptFile(
+		ctx,
+		filePath,
+		sandboxManager,
+		(content) => rebaseTranscriptCwdMetadataContent(content, options),
+		"cwd metadata rebase",
+		(file, rewritten) => `Rebased ${rewritten} runtime cwd metadata record(s) in ${file}`,
+	);
+}
+
+async function transformAgentTranscriptFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	transform: (content: string) => SanitizeResult,
+	operation: string,
+	logMessage: (filePath: string, rewritten: number) => string,
+): Promise<number> {
 	try {
 		// Resolve the host-side path. Non-sandboxed: filePath is already a host
 		// path and is what the read+write both touch. Sandboxed: the read runs
@@ -280,7 +363,7 @@ export async function sanitizeAgentTranscriptFile(
 		const content = await sessionFileRead(ctx, filePath, sandboxManager);
 		if (content === null || content === undefined || content === "") return 0;
 
-		const result = sanitizeTranscriptContent(content);
+		const result = transform(content);
 		if (!result.changed) return 0;
 
 		// Re-resolve + re-validate the real path immediately before writing
@@ -294,12 +377,10 @@ export async function sanitizeAgentTranscriptFile(
 		}
 
 		writeFileNoFollow(realPath, result.content);
-		console.log(
-			`[transcript-sanitizer] Un-poisoned ${result.rewritten} blank-text user message(s) in ${filePath}`,
-		);
+		console.log(`[transcript-sanitizer] ${logMessage(filePath, result.rewritten)}`);
 		return result.rewritten;
 	} catch (err) {
-		console.warn(`[transcript-sanitizer] Failed to sanitize ${filePath} (non-fatal):`, err);
+		console.warn(`[transcript-sanitizer] Failed to ${operation} ${filePath} (non-fatal):`, err);
 		return 0;
 	}
 }

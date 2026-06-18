@@ -12,6 +12,7 @@ const APP_RENDER_SRC = path.resolve("src/app/render.ts");
 const APP_STATE_SRC = path.resolve("src/app/state.ts");
 const PROPOSAL_REGISTRY_SRC = path.resolve("src/app/proposal-registry.ts");
 const PROPOSAL_HELPERS_SRC = path.resolve("src/app/proposal-helpers.ts");
+const PROPOSAL_PANELS_SRC = path.resolve("src/app/proposal-panels.ts");
 const REVIEW_PANE_SRC = path.resolve("src/ui/components/review/ReviewPane.ts");
 const REVIEW_DOCUMENT_SRC = path.resolve("src/ui/components/review/ReviewDocument.ts");
 const ANNOTATION_STORE_SRC = path.resolve("src/ui/components/review/AnnotationStore.ts");
@@ -50,6 +51,7 @@ test.beforeAll(() => {
 			APP_STATE_SRC,
 			PROPOSAL_REGISTRY_SRC,
 			PROPOSAL_HELPERS_SRC,
+			PROPOSAL_PANELS_SRC,
 			REVIEW_PANE_SRC,
 			REVIEW_DOCUMENT_SRC,
 			ANNOTATION_STORE_SRC,
@@ -229,6 +231,141 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await page.locator('review-pane button.review-tab[title="Document B"] .review-tab-close').click();
 		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 5_000 });
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document B", "Document C"]);
+	});
+
+	test("project proposal fixture renders component config rows and preserves them through partial updates", async ({ page }) => {
+		const fixture = (await fixtures(page)).find((f) => f.type === "project")!;
+		await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+			type: fixture.type,
+			fields: fixture.initial,
+		});
+		await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+			type: fixture.type,
+			fields: fixture.partial,
+		});
+
+		const slot = await readSlot(page, "project");
+		expect(slot?.build_command).toBe("echo parity-edited");
+		expect(slot?.components).toEqual((fixture.initial as any).components);
+
+		await proposalTab(page, "Project").click();
+		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 10_000 });
+
+		const webCard = panel.locator('[data-testid="component-card-web"]');
+		const apiCard = panel.locator('[data-testid="component-card-api"]');
+		await expect(webCard).toBeVisible({ timeout: 10_000 });
+		await expect(apiCard).toBeVisible();
+		await webCard.locator("summary").first().click();
+		await expect(panel.locator('[data-testid="component-config-web"]')).toBeVisible({ timeout: 5_000 });
+		await expect(panel.locator('[data-testid="component-config-row-web-qa_start_command"]'))
+			.toContainText("PORT=$PORT NODE_ENV=test npm start", { timeout: 5_000 });
+		await expect(panel.locator('[data-testid="component-config-row-web-qa_health_check"]'))
+			.toContainText("http://127.0.0.1:$PORT/health");
+		await expect(panel.locator('[data-testid="component-config-row-web-qa_max_duration_minutes"]'))
+			.toContainText("10");
+		await apiCard.locator("summary").first().click();
+		await expect(panel.locator('[data-testid="component-config-empty-api"]'))
+			.toContainText("No config entries", { timeout: 5_000 });
+	});
+
+	test("staff proposal fixture covers role, cwd/worktree payload, success clear, and failed-submit retry", async ({ page }) => {
+		const fixture = (await fixtures(page)).find((f) => f.type === "staff")!;
+		await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+			type: fixture.type,
+			fields: fixture.initial,
+		});
+		await proposalTab(page, "Staff").click();
+		let panel = page.locator('[data-panel="staff-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 10_000 });
+
+		const roleSelect = panel.locator('[data-testid="staff-proposal-role-select"]');
+		await expect(roleSelect).toHaveValue("coder", { timeout: 10_000 });
+		await roleSelect.selectOption("architect");
+		await expect(roleSelect).toHaveValue("architect");
+		await expect(panel.locator('[data-testid="staff-proposal-cwd-input"]')).toHaveValue("/tmp/proposal-review-fixture", { timeout: 5_000 });
+		const worktreeToggle = panel.locator('[data-testid="staff-proposal-worktree-checkbox"]');
+		await expect(worktreeToggle).toBeChecked();
+		await worktreeToggle.uncheck();
+		await expect(panel.locator('[data-testid="staff-proposal-worktree-mode"]')).toContainText("project directory", { timeout: 5_000 });
+
+		const createButton = panel.locator('[data-testid="proposal-primary-submit"] button');
+		await expect(createButton).toBeEnabled({ timeout: 5_000 });
+		await createButton.click();
+		await expect(proposalTab(page, "Staff")).toHaveCount(0, { timeout: 5_000 });
+		const createPayload = await page.evaluate(() => (window as any).__getProposalReviewFetchLog()
+			.filter((entry: any) => entry.url === "/api/staff" && entry.method === "POST")
+			.at(-1)?.body);
+		expect(createPayload).toMatchObject({
+			name: "parity-staff",
+			cwd: "/tmp/proposal-review-fixture",
+			worktree: false,
+			projectId: "proposal-review-fixture-project",
+			roleId: "architect",
+		});
+
+		await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+			type: fixture.type,
+			fields: { ...fixture.initial, name: "parity-staff-retry" },
+		});
+		await proposalTab(page, "Staff").click();
+		panel = page.locator('[data-panel="staff-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 10_000 });
+		await page.evaluate(() => (window as any).__holdNextStaffCreate(404));
+		const retryButton = panel.locator('[data-testid="proposal-primary-submit"] button');
+		await retryButton.click();
+		await expect(panel.locator('[data-testid="staff-creating-label"]')).toBeVisible({ timeout: 5_000 });
+		await expect(retryButton).toBeDisabled();
+		await page.evaluate(() => (window as any).__releaseStaffCreate());
+		await expect(page.getByText("Failed to create staff agent")).toBeVisible({ timeout: 10_000 });
+		await expect(panel).toBeVisible();
+		await expect(retryButton).toBeEnabled({ timeout: 5_000 });
+		await expect(panel.locator('[data-testid="staff-creating-label"]')).toHaveCount(0);
+	});
+
+	test("review decisions validate reject comments, submit approve/reject feedback, persist reload annotations, and suppress submitted reviews", async ({ page }) => {
+		const doc = { title: "Decision Doc", markdown: "# Decision Doc\n\nSome important text for review." };
+		await page.evaluate((d) => (window as any).__setReviewFixture([d], {}, { persist: true }), doc);
+		await reviewPanelTab(page, "Decision Doc").click();
+		const pane = page.locator("review-pane");
+		await expect(pane).toBeVisible({ timeout: 10_000 });
+
+		await pane.getByRole("button", { name: "Reject" }).click();
+		await expect(pane.getByRole("alert")).toContainText("Add a final comment", { timeout: 5_000 });
+		expect(await page.evaluate(() => (window as any).__getProposalReviewPromptLog())).toEqual([]);
+
+		await pane.getByRole("textbox", { name: /final comment/i }).fill("Needs one more pass.");
+		await pane.getByRole("button", { name: "Reject" }).click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getProposalReviewPromptLog().at(-1) || ""), { timeout: 10_000 })
+			.toContain("Review Rejected");
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual([]);
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().submitted)).toBe(true);
+
+		await reloadAndRehydrateFixture(page);
+		await expect(reviewPanelTab(page, "Decision Doc"), "submitted reviews should not rehydrate after reload").toHaveCount(0, { timeout: 5_000 });
+
+		await page.evaluate(() => (window as any).__resetProposalReviewFixture());
+		await page.evaluate(() => (window as any).__setReviewFixture([
+			{ title: "Annotated Doc", markdown: "# Annotated Doc\n\nSome important text for review." },
+		], {
+			"Annotated Doc": [{ id: "ann-1", quote: "Some important text", comment: "Inline fixture comment", start: 17, end: 36 }],
+		}, { persist: true }));
+		await reviewPanelTab(page, "Annotated Doc").click();
+		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await reloadAndRehydrateFixture(page);
+		await reviewPanelTab(page, "Annotated Doc").click();
+		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await pane.getByRole("button", { name: "Reject" }).click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getProposalReviewPromptLog().at(-1) || ""), { timeout: 10_000 })
+			.toContain("Inline fixture comment");
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewAnnotationCount("Annotated Doc"))).toBe(0);
+
+		await page.evaluate(() => (window as any).__resetProposalReviewFixture());
+		await page.evaluate(() => (window as any).__setReviewFixture([{ title: "Approve Doc", markdown: "# Approve Doc\n\nLooks good." }]));
+		await reviewPanelTab(page, "Approve Doc").click();
+		await pane.getByRole("button", { name: "Approve", exact: true }).click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getProposalReviewPromptLog().at(-1) || ""), { timeout: 10_000 })
+			.toContain("Review Approved");
 	});
 
 	test("proposal pane styles stay eagerly imported and apply their discriminating rules", async ({ page }) => {

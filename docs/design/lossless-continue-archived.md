@@ -10,8 +10,11 @@ the restart/resume model used for live sessions.
 
 This matters because archived sessions can be large and can contain structured
 message content that is not faithfully represented by a prompt string. The
-continue flow preserves the original transcript bytes so tool results, long
-messages, proposal context, and model history survive unchanged.
+continue flow preserves conversation and user-visible transcript content
+losslessly, so tool results, long messages, proposal context, and model history
+survive unchanged. Runtime-only Pi metadata inside the JSONL, such as
+system/init cwd or session-path records, may still be rewritten when it points
+at the archived runtime; those fields are not part of the visible conversation.
 
 ## Scope and invariants
 
@@ -37,7 +40,8 @@ The archived `worktreePath` and `branch` are provenance only. Continue never
 stats, repairs, revives, reuses, or checks out the archived worktree path or
 branch. If those stale values point at deleted filesystem paths or pruned git
 refs, continue still succeeds as long as the current project repo can create a
-fresh worktree.
+fresh worktree. The archived cwd/worktree may be used only as an old value to
+replace in runtime-only transcript metadata.
 
 ## Endpoint flow
 
@@ -81,8 +85,10 @@ The continue endpoint lives in the server REST route for
 8. Rehydrate the agent from the cloned `.jsonl`.
    - Non-worktree sessions switch directly to the cloned file.
    - Worktree-backed sessions first create a fresh worktree, then rebase the
-     cloned file into the final worktree-cwd slug directory before
-     `switch_session`.
+     cloned file into the final worktree-cwd slug directory.
+   - After the file is in that final slug path and before `switch_session`, the
+     setup pipeline rebases runtime-only Pi cwd metadata from archived
+     cwd/worktree values to the fresh session cwd.
 9. Persist title and model metadata, then return `201` with the new session id,
    cwd, status, title, and assistant type.
 
@@ -112,11 +118,19 @@ This worktree-cwd rebase is required because the agent CLI discovers session
 files relative to its actual cwd. A clone left under the project-root slug would
 be invisible after the CLI starts inside the fresh worktree.
 
+After that file move, Continue may rebase runtime-only Pi cwd/session metadata
+in the cloned JSONL. Today that means top-level `cwd` on `system`/`init` records
+(or legacy `system` records with no subtype) is rewritten from the archived
+cwd/worktree value to the fresh cwd. Message content and user-visible text are
+never inspected or rewritten.
+
 ## Worktree behavior
 
 Worktree-backed continue uses the current project repo and creates a fresh
 `session/<new-id8>` branch/worktree. The archived branch name is never used as a
-base ref and the archived worktree path is never inspected.
+base ref and the archived worktree path is never inspected. Archived cwd values
+are provenance only and may be used only to identify runtime metadata that must
+point at the fresh cwd before rehydration.
 
 This keeps continue robust after normal cleanup operations:
 
@@ -230,6 +244,8 @@ implementation details:
   creation error
 - worktree-backed continues rebase the cloned JSONL to the final worktree-cwd
   slug path before `switch_session`
-- non-worktree continues clone transcript bytes and preserve messages without
-  summary mode or prompt seeding
+- worktree-backed continues rebase stale runtime-only Pi cwd metadata to the
+  fresh worktree cwd before `switch_session`
+- non-worktree continues preserve conversation content without summary mode or
+  prompt seeding
 - proposal/tool-content helper behavior is covered by unit tests

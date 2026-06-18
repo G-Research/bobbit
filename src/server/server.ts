@@ -9918,12 +9918,15 @@ async function handleApiRoute(
 		}
 
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath]
+			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
 			sessionId: newSessionId,
 			projectId: ps.projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
+			preExistingAgentSessionOldCwds: oldTranscriptCwds,
 			// Continue must surface fresh worktree/base-ref setup failures synchronously;
 			// the archived source worktree/branch remain provenance only.
 			awaitWorktreeSetup: !!worktreeOpts,

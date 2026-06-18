@@ -9,6 +9,7 @@ import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import "../../../ui/components/ExpandableSection.js";
 import { parseRevFromResult } from "./proposal-rev-marker.js";
+import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 export { parseRevFromResult } from "./proposal-rev-marker.js";
 
 /** Map tool name → display label and proposal type key */
@@ -68,6 +69,7 @@ export class ProposalRenderer implements ToolRenderer {
 	}
 
 	render(params: any | undefined, result: ToolResultMessage | undefined, isStreaming?: boolean, ctx?: ToolRenderContext): ToolRenderResult {
+		ensureMarkdownBlock();
 		const state = getToolState(result, isStreaming);
 		const meta = PROPOSAL_LABELS[this._toolName] || PROPOSAL_LABELS.propose_goal;
 		const fields = mergeParamFields(parseParams(params), parseParams(ctx?.toolCallInput));

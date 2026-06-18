@@ -1,19 +1,15 @@
 /**
- * Sidebar navigation E2E tests — SB-01, SB-02/SB-03, SB-04, SB-21.
+ * Sidebar navigation E2E smoke — the row-selection/team/dashboard matrix now lives in
+ * tests/ui-fixtures/sidebar-navigation-fixture.spec.ts.
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import {
 	createSession,
 	deleteSession,
-	createGoal,
-	startTeam,
-	teardownTeam,
-	deleteGoal,
-	nonGitCwd,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp } from "./ui-helpers.js";
 
 async function waitForActiveSessionReady(page: Page, sessionId: string): Promise<void> {
 	await expect.poll(
@@ -69,13 +65,8 @@ async function rapidlyClickSessionRows(page: Page, sessionIdsToClick: string[]):
 
 test.describe("Sidebar navigation", () => {
 	const sessionIds: string[] = [];
-	const goalIds: string[] = [];
 
 	test.afterAll(async () => {
-		for (const gid of goalIds) {
-			await teardownTeam(gid).catch(() => {});
-			await deleteGoal(gid).catch(() => {});
-		}
 		for (const sid of sessionIds) await deleteSession(sid).catch(() => {});
 	});
 
@@ -98,59 +89,5 @@ test.describe("Sidebar navigation", () => {
 
 		await rapidlyClickSessionRows(page, [idA, idB, idC]);
 		await waitForActiveSessionReady(page, idC);
-	});
-
-	test("SB-02/SB-03: team goal expands and navigating to team lead highlights it", async ({ page }) => {
-		const goal = await createGoal({
-			title: "Nav Team Test",
-			worktree: false,
-			team: true,
-		});
-		goalIds.push(goal.id);
-		const teamLeadId = await startTeam(goal.id);
-
-		await openApp(page);
-		const goalHeader = page.getByText("Nav Team Test", { exact: false }).first();
-		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
-		await expect(goalHeader.locator("xpath=ancestor-or-self::*[contains(@class, 'uppercase')]").first()).toBeVisible();
-
-		const collapseChevron = page.locator("[title='Collapse goal']").first();
-		if (!(await collapseChevron.isVisible().catch(() => false))) {
-			await page.locator("[title='Expand goal']").first().click();
-		}
-
-		await waitForSessionStatus(teamLeadId, "idle");
-		await navigateToHash(page, `#/session/${teamLeadId}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-		expect(await page.evaluate(() => window.location.hash)).toContain(teamLeadId);
-		await expect(page.locator(".sidebar-session-active")).toBeVisible({ timeout: 10_000 });
-	});
-
-	test("SB-21: dashboard button navigates to goal dashboard", async ({ page }) => {
-		test.setTimeout(60_000);
-		const goal = await createGoal({
-			title: "DashNav Test",
-			worktree: false,
-			team: true,
-		});
-		goalIds.push(goal.id);
-
-		await openApp(page);
-		const goalHeader = page.getByText("DASHNAV TEST", { exact: false }).first();
-		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
-
-		const goalRow = goalHeader.locator("xpath=ancestor::div[contains(@class, 'group')]").first();
-		await goalRow.hover();
-		const dashboardButton = goalRow.getByRole("button", { name: "Goal dashboard", exact: true }).first();
-		await expect(dashboardButton).toBeVisible({ timeout: 10_000 });
-		await expect(async () => {
-			await dashboardButton.click();
-			const h = await page.evaluate(() => window.location.hash);
-			expect(h).toContain(goal.id);
-			expect(h).toMatch(/goal/i);
-		}).toPass({ timeout: 15_000 });
-
-		await expect(page.locator(".dashboard-container").first()).toBeVisible({ timeout: 20_000 });
-		await expect(page.locator(".tab").first()).toBeVisible({ timeout: 25_000 });
 	});
 });

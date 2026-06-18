@@ -1189,7 +1189,7 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
 
 ## Markdown not rendering in chat / proposal panel
 
-`<markdown-block>` is lazy-loaded via `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts`. The consumer must call it in its `connectedCallback()` or first `render()`. Symptom of forgetting: markdown shows as raw text until something else triggers the load. Lit upgrades the custom element asynchronously when the chunk lands.
+`<markdown-block>` is lazy-loaded via `ensureMarkdownBlock()` from `src/ui/lazy/markdown-block.ts`. Any consumer that emits `<markdown-block>` must call it in `connectedCallback()`, the constructor, or first `render()`. Symptom of forgetting: markdown shows as raw text until something else triggers the load. Lit upgrades the custom element asynchronously when the chunk lands. Do not import upstream MarkdownBlock directly; the helper loads Bobbit's safe renderer. See [internals.md — Markdown rendering invariant](internals.md#markdown-rendering-invariant).
 
 ## Page chunk fails to load on first navigation
 

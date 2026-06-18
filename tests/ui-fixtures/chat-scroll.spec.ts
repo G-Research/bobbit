@@ -12,6 +12,7 @@ const AGENT_INTERFACE_SRC = path.resolve("src/ui/components/AgentInterface.ts");
 const SCROLL_SEL = "agent-interface .overflow-y-auto";
 const JUMP_SEL = '[data-testid="jump-to-bottom"]';
 const MSG_SEL = "[data-message-probe]";
+const CHAT_MSG_SEL = "user-message, assistant-message, tool-message";
 const TAIL_PX = 8;
 
 const TALL_IMAGE_DATA_URI = (() => {
@@ -89,23 +90,52 @@ async function scrollMetrics(page: Page): Promise<{ distance: number; overflow: 
 	}, SCROLL_SEL);
 }
 
-async function expectLatestProbePinned(page: Page, label: string): Promise<void> {
-	const probe = await page.evaluate(({ scrollSel, msgSel }) => {
+async function latestPinProbe(page: Page, selector: string): Promise<
+	| { ok: false; error: string }
+	| {
+		ok: boolean;
+		distance: number;
+		belowFold: number;
+		scrollTop: number;
+		scrollHeight: number;
+		clientHeight: number;
+		lastHeight: number;
+	}
+> {
+	return await page.evaluate(({ scrollSel, msgSel, tailPx }) => {
 		const el = document.querySelector(scrollSel) as HTMLElement | null;
 		const msgs = Array.from(document.querySelectorAll(msgSel)) as HTMLElement[];
-		if (!el || msgs.length === 0) return { error: "missing scroll container or probe message" } as const;
+		if (!el || msgs.length === 0) return { ok: false, error: "missing scroll container or message" } as const;
 		const last = msgs[msgs.length - 1];
 		const er = el.getBoundingClientRect();
 		const lr = last.getBoundingClientRect();
+		const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+		const belowFold = lr.bottom - er.bottom;
 		return {
-			distance: el.scrollHeight - el.scrollTop - el.clientHeight,
-			belowFold: lr.bottom - er.bottom,
+			ok: distance <= tailPx && belowFold <= tailPx,
+			distance,
+			belowFold,
 			scrollTop: el.scrollTop,
 			scrollHeight: el.scrollHeight,
 			clientHeight: el.clientHeight,
 			lastHeight: lr.height,
 		} as const;
-	}, { scrollSel: SCROLL_SEL, msgSel: MSG_SEL });
+	}, { scrollSel: SCROLL_SEL, msgSel: selector, tailPx: TAIL_PX });
+}
+
+async function expectLatestSelectorPinned(page: Page, selector: string, label: string): Promise<void> {
+	await expect.poll(async () => {
+		const probe = await latestPinProbe(page, selector);
+		if ("error" in probe) return probe.error;
+		if (probe.ok) return "pinned";
+		return `dist=${Math.round(probe.distance)} below=${Math.round(probe.belowFold)} ` +
+			`scrollTop=${Math.round(probe.scrollTop)} scrollHeight=${probe.scrollHeight}`;
+	}, {
+		message: `${label}: latest message should settle pinned to the scroll viewport`,
+		timeout: 5_000,
+	}).toBe("pinned");
+
+	const probe = await latestPinProbe(page, selector);
 	if ("error" in probe) throw new Error(probe.error);
 	expect(
 		probe.distance,
@@ -114,9 +144,27 @@ async function expectLatestProbePinned(page: Page, label: string): Promise<void>
 	).toBeLessThanOrEqual(TAIL_PX);
 	expect(
 		probe.belowFold,
-		`${label}: latest probe bottom ${Math.round(probe.belowFold)} px below viewport; ` +
+		`${label}: latest message bottom ${Math.round(probe.belowFold)} px below viewport; ` +
 		`lastHeight=${Math.round(probe.lastHeight)} clientHeight=${probe.clientHeight}`,
 	).toBeLessThanOrEqual(TAIL_PX);
+}
+
+async function expectLatestProbePinned(page: Page, label: string): Promise<void> {
+	await expectLatestSelectorPinned(page, MSG_SEL, label);
+}
+
+async function expectLatestChatMessagePinned(page: Page, label: string): Promise<void> {
+	await expectLatestSelectorPinned(page, CHAT_MSG_SEL, label);
+}
+
+async function releaseToHistory(page: Page, distanceRatio = 0.65): Promise<void> {
+	await page.evaluate(({ scrollSel, ratio }) => {
+		const el = document.querySelector(scrollSel) as HTMLElement;
+		el.dispatchEvent(new WheelEvent("wheel", { deltaY: -800, bubbles: true }));
+		el.scrollTop = el.scrollHeight - el.clientHeight - Math.floor(el.clientHeight * ratio);
+		el.dispatchEvent(new Event("scroll", { bubbles: true }));
+	}, { scrollSel: SCROLL_SEL, ratio: distanceRatio });
+	await settleFrames(page, 2);
 }
 
 async function jumpOpacity(page: Page): Promise<{ opacity: string; pointerEvents: string }> {
@@ -132,7 +180,7 @@ test.describe("AgentInterface chat scroll fixture", () => {
 		await loadFixture(page);
 	});
 
-	test("Jump-to-bottom appears after trusted scroll-up, hides near bottom, clicks back to tail, and unmounts cleanly", async ({ page }) => {
+	test("Jump-to-bottom appears after explicit scroll-up, hides near bottom, clicks back to tail, and unmounts cleanly", async ({ page }) => {
 		const consoleErrors: string[] = [];
 		page.on("console", (msg) => {
 			if (msg.type() === "error") consoleErrors.push(msg.text());
@@ -144,16 +192,7 @@ test.describe("AgentInterface chat scroll fixture", () => {
 		expect(pre.distance).toBeLessThanOrEqual(TAIL_PX);
 		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "0", pointerEvents: "none" });
 
-		const box = await page.locator(SCROLL_SEL).boundingBox();
-		if (!box) throw new Error("scroll container has no box");
-		await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-		await page.mouse.wheel(0, -Math.floor(pre.clientHeight * 0.7));
-		await page.evaluate((sel) => {
-			const el = document.querySelector(sel) as HTMLElement;
-			const ch = el.clientHeight;
-			el.scrollTop = el.scrollHeight - ch - Math.floor(ch * 0.6);
-			el.dispatchEvent(new Event("scroll"));
-		}, SCROLL_SEL);
+		await releaseToHistory(page, 0.6);
 		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "1", pointerEvents: "auto" });
 		await page.locator(JUMP_SEL).click({ force: true });
 		await page.waitForFunction((sel) => {
@@ -167,19 +206,74 @@ test.describe("AgentInterface chat scroll fixture", () => {
 		expect(real, `unexpected console errors after unmount: ${real.join(" | ")}`).toHaveLength(0);
 	});
 
+	test("state_update replay/remount paths render logical-clock transcripts pinned to the latest message", async ({ page }) => {
+		await page.evaluate(() => (window as any).__chatScrollFixture.replaceTranscript("replay-a", 36));
+		await page.getByText("Assistant replay-a 36").waitFor({ timeout: 10_000 });
+		await settleFrames(page, 4);
+		await expectLatestChatMessagePinned(page, "initial replay");
+
+		const firstTail = await page.evaluate(() =>
+			Array.from(document.querySelectorAll("user-message, assistant-message")).at(-1)?.textContent?.trim() ?? "",
+		);
+		expect(firstTail).toContain("Assistant replay-a 36");
+
+		await page.evaluate(() => (window as any).__mountChatScrollFixture({ prefix: "replay-b", turns: 24 }));
+		await page.getByText("Assistant replay-b 24").waitFor({ timeout: 10_000 });
+		await settleFrames(page, 4);
+		await expectLatestChatMessagePinned(page, "remount replay");
+
+		const remountTail = await page.evaluate(() =>
+			Array.from(document.querySelectorAll("user-message, assistant-message")).at(-1)?.textContent?.trim() ?? "",
+		);
+		expect(remountTail).toContain("Assistant replay-b 24");
+	});
+
+	test("explicit user intent releases tail lock; jump-to-bottom recovery tracks deterministic streaming growth", async ({ page }) => {
+		await page.evaluate(() => (window as any).__chatScrollFixture.replaceTranscript("release", 34));
+		await page.getByText("Assistant release 34").waitFor({ timeout: 10_000 });
+		await settleFrames(page, 4);
+		await expectLatestChatMessagePinned(page, "pre-release");
+
+		await releaseToHistory(page, 0.7);
+		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "1", pointerEvents: "auto" });
+		const released = await scrollMetrics(page);
+		expect(released.distance, "wheel-up should move viewport far enough from the bottom").toBeGreaterThan(released.clientHeight * 0.5);
+
+		await page.evaluate(() => (window as any).__chatScrollFixture.updateStreaming("release", 80));
+		await settleFrames(page, 4);
+		const duringStream = await scrollMetrics(page);
+		expect(
+			duringStream.distance,
+			"streaming growth after user release must not pull the viewport back to tail",
+		).toBeGreaterThan(duringStream.clientHeight * 0.5);
+
+		await page.locator(JUMP_SEL).click({ force: true });
+		await page.waitForFunction((sel) => {
+			const el = document.querySelector(sel) as HTMLElement | null;
+			return !!el && el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
+		}, SCROLL_SEL, { timeout: 5_000 });
+		await settleFrames(page, 2);
+		await expectLatestChatMessagePinned(page, "after jump recovery");
+
+		await page.evaluate(() => (window as any).__chatScrollFixture.updateStreaming("release", 140));
+		await settleFrames(page, 4);
+		await expectLatestChatMessagePinned(page, "post-recovery streaming growth");
+		await page.evaluate(() => (window as any).__chatScrollFixture.finishStreaming("release"));
+		await settleFrames(page, 4);
+		await expectLatestChatMessagePinned(page, "finished stream");
+		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "0", pointerEvents: "none" });
+	});
+
 	test("near-bottom relock and tool-result details reflow keep latest probe pinned", async ({ page }) => {
 		await installSpacer(page, { probe: true });
 		const pre = await scrollMetrics(page);
 		expect(pre.overflow).toBeGreaterThan(2000);
 
-		const box = await page.locator(SCROLL_SEL).boundingBox();
-		if (!box) throw new Error("scroll container has no box");
-		await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-		await page.mouse.wheel(0, -30);
 		await page.evaluate((sel) => {
 			const el = document.querySelector(sel) as HTMLElement;
+			el.dispatchEvent(new WheelEvent("wheel", { deltaY: -30, bubbles: true }));
 			el.scrollTop = el.scrollHeight - el.clientHeight - 30;
-			el.dispatchEvent(new Event("scroll"));
+			el.dispatchEvent(new Event("scroll", { bubbles: true }));
 		}, SCROLL_SEL);
 		await settleFrames(page);
 		const afterWheel = await scrollMetrics(page);
@@ -272,4 +366,106 @@ test.describe("AgentInterface chat scroll fixture", () => {
 		const final = await scrollMetrics(page);
 		expect(final.scrollHeight, "image-bearing message should grow the scroll container").toBeGreaterThan(pre.scrollHeight + 800);
 	});
+
+	test("prompt jump buttons are pure DOM geometry and clicks target nearest prompt", async ({ page }) => {
+		await page.evaluate(() => (window as any).__chatScrollFixture.setPromptTranscript({ prompts: 3, scrollTop: "bottom" }));
+		let cls = await page.evaluate(() => (window as any).__chatScrollFixture.classifyPrompts());
+		let state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(cls.userCount).toBe(3);
+		expect(cls.above).toBeGreaterThan(0);
+		expect(cls.below).toBe(0);
+		expect(state.upVisible).toBe(true);
+		expect(state.splitPresent).toBe(false);
+		expect(state.bottomVisible).toBe(false);
+
+		await page.evaluate(() => (window as any).__chatScrollFixture.setScrollerTop(0));
+		cls = await page.evaluate(() => (window as any).__chatScrollFixture.classifyPrompts());
+		state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(cls.above).toBe(0);
+		expect(cls.below).toBeGreaterThan(0);
+		expect(state.upVisible).toBe(false);
+		expect(state.splitPresent).toBe(true);
+		expect(state.bottomVisible).toBe(true);
+
+		await page.locator('[data-testid="jump-to-next-prompt"]').click();
+		await expect.poll(() => page.evaluate(() => {
+			const offset = (window as any).__chatScrollFixture.promptOffset(1);
+			return offset >= 0 && offset <= 40;
+		}), {
+			timeout: 5_000,
+			message: "next prompt click should land prompt[1] near the top margin",
+		}).toBe(true);
+		cls = await page.evaluate(() => (window as any).__chatScrollFixture.classifyPrompts());
+		state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(cls.above).toBeGreaterThan(0);
+		expect(state.upVisible).toBe(true);
+		expect(state.bottomVisible).toBe(true);
+		expect(state.splitPresent).toBe(cls.below > 0);
+
+		await page.locator('[data-testid="jump-to-previous-prompt"]').click();
+		await expect.poll(() => page.evaluate(() => {
+			const offset = (window as any).__chatScrollFixture.promptOffset(0);
+			return offset >= 0 && offset <= 40;
+		}), {
+			timeout: 5_000,
+			message: "previous prompt click should land prompt[0] near the top margin",
+		}).toBe(true);
+		state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(state.upVisible).toBe(false);
+		expect(state.splitPresent).toBe(true);
+	});
+
+	test("mobile prompt jump geometry clears the fixed app header", async ({ page }) => {
+		await page.setViewportSize({ width: 375, height: 667 });
+		await loadFixture(page);
+		await page.evaluate(() => {
+			(window as any).__chatScrollFixture.installMobileHeader(64);
+			return (window as any).__chatScrollFixture.setPromptTranscript({ prompts: 2, fillerBefore: 160, fillerAfter: 760, scrollTop: "bottom" });
+		});
+		const state = await page.evaluate(() => (window as any).__chatScrollFixture.readJumpState());
+		expect(state.upVisible).toBe(true);
+		expect(state.upTop).toContain("--mobile-header-height");
+
+		await page.locator('[data-testid="jump-to-previous-prompt"]').click();
+		await expect.poll(async () => page.evaluate(() => {
+			const header = document.getElementById("app-header") as HTMLElement;
+			const prompt = document.querySelector('user-message[data-fixture-prompt="1"]') as HTMLElement;
+			return Math.round(prompt.getBoundingClientRect().top - header.getBoundingClientRect().bottom);
+		}), {
+			timeout: 5_000,
+			message: "jump target should land below fixed mobile header",
+		}).toBeGreaterThan(8);
+	});
+
+	test("pill overflow fixture covers narrow wrap, wide nowrap, label, and promotion", async ({ page }) => {
+		await page.setViewportSize({ width: 540, height: 800 });
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__chatScrollFixture.seedPills(15));
+		let metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.contentFlexWrap).toBe("wrap");
+		expect(metrics.hidden).toBeGreaterThan(0);
+		expect(metrics.stripHeight).toBeLessThanOrEqual(2 * 22 + 6 + 8);
+		expect(metrics.moreButtonHeight).toBeLessThanOrEqual(28);
+		await expect(page.locator("[data-more-btn] button").first()).toHaveCSS("white-space", "nowrap");
+		const visibleBefore = metrics.visible;
+		const visibleIds = await page.locator("[data-pill-content] > div > bg-process-pill[data-id]").evaluateAll((els) =>
+			els.map((el) => el.getAttribute("data-id") || "").filter(Boolean),
+		);
+		await page.locator("[data-more-btn] button").first().click();
+		metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.popoverAlignItems).toBe("flex-start");
+		await page.locator("[data-more-btn] button").first().click();
+		await page.evaluate((ids) => (window as any).__chatScrollFixture.dismissPills(ids), visibleIds);
+		metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.visible).toBeGreaterThanOrEqual(visibleBefore);
+
+		await page.setViewportSize({ width: 1400, height: 800 });
+		await loadFixture(page);
+		await page.evaluate(() => (window as any).__chatScrollFixture.seedPills(12));
+		metrics = await page.evaluate(() => (window as any).__chatScrollFixture.pillMetrics());
+		expect(metrics.contentFlexWrap).toBe("nowrap");
+		expect(metrics.hidden).toBeGreaterThan(0);
+		expect(metrics.stripHeight).toBeLessThanOrEqual(22 + 6);
+	});
+
 });

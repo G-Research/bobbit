@@ -4148,7 +4148,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -4295,6 +4295,7 @@ export class SessionManager {
 				initialModel: opts?.initialModel,
 				initialThinkingLevel: opts?.initialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
+				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
 			};
 
@@ -4315,7 +4316,10 @@ export class SessionManager {
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
 				// here is redundant but kept as a safety net for re-attempts where the
-				// agent may rotate its session file mid-run.
+				// agent may rotate its session file mid-run. Continue/Fork rehydration
+				// already adopted a cloned transcript and may have sanitized runtime-only
+				// metadata in that file; avoid a redundant get_state that can drop it.
+				if (plan.preExistingAgentSessionFile) return;
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
@@ -4374,6 +4378,7 @@ export class SessionManager {
 			initialModel: opts?.initialModel,
 			initialThinkingLevel: opts?.initialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
+			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
 		};
 
@@ -4381,10 +4386,14 @@ export class SessionManager {
 		if (projectId) session.projectId = projectId;
 		this.notifySessionCreated(session);
 
-		// Persist session metadata (fire-and-forget, but tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-			console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
+		// Persist session metadata (fire-and-forget, but tracked for terminate).
+		// Rehydrated sessions already have a cloned/adopted transcript path recorded;
+		// avoid a redundant get_state that can rewrite runtime-only metadata.
+		if (!plan.preExistingAgentSessionFile) {
+			session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+			}).finally(() => { session.pendingMetadataPersist = undefined; });
+		}
 
 		return session;
 	}
